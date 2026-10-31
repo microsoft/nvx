@@ -52,7 +52,6 @@ use super::artifacts::{Located, locate};
 use super::sandbox::HYPERVISORS;
 use super::{Exit, Result, check_interrupt, io_error, output};
 use crate::ErrorCode;
-use crate::contract::CONTROL_CONTRACT_REVISION;
 use crate::host::artifacts::{ArtifactDir, Guest, Layout, MANIFEST_NAME, REPO_BUILD_DIR};
 
 /// The usage and help of the parser.
@@ -439,10 +438,11 @@ fn install_release(
     let plan = install::plan(&package, dir)?;
     if !plan.compatible() {
         output::print_stderr(&format!(
-            "warning: the artifacts of {} declare another microVM ABI or control contract than \
-             the {CONTROL_CONTRACT_REVISION} of this nvx-rs, so its sandboxes may fail on them: \
-             check out {0}, or build the artifacts",
-            asset.tag
+            "warning: the artifacts of {} declare other OpenVMM contracts than this nvx-rs \
+             speaks ({}), so its sandboxes may fail on them: check out {0}, or build the \
+             artifacts",
+            asset.tag,
+            plan.mismatches().join("; ")
         ));
     }
     let installed = install::commit(&plan, staging.token(), mode)?;

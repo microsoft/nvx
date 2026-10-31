@@ -13,10 +13,10 @@ use super::decoders;
 use super::events::{CheckId, EventSource, ViolationCode};
 use super::state::{Discontinuity, SampleRejection, TimeState};
 use super::system::{
-    self, DAEMON_NAME, DAEMON_PID_PATH, DAEMON_PID_TEMP_PATH, DEFAULT_STALL_TIMEOUT_S,
-    PowerOffStatus, RCU_SYNC_PATH, RESTORE_PATH, Runtime, SNAPSHOT_ACKNOWLEDGE, SampleError,
-    SampleResult, SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process,
-    set_frequency, state_apply, state_load, suppression_restore,
+    self, BestSample, DAEMON_NAME, DAEMON_PID_PATH, DAEMON_PID_TEMP_PATH, DEFAULT_STALL_TIMEOUT_S,
+    PowerOffStatus, RCU_SYNC_PATH, RESTORE_PATH, Runtime, SAMPLE_ATTEMPTS, SAMPLE_BOUND_NS,
+    SNAPSHOT_ACKNOWLEDGE, SampleError, SampleResult, SpawnError, clock_ns, cpu_time_ns,
+    fork_process, state_apply, state_load, suppression_restore,
 };
 use super::{DEFERRED_START_NS, IDLE_BOUND_NS, NSEC_PER_MSEC, NSEC_PER_SEC, NSEC_PER_USEC, Phase};
 use crate::guest::kernel_text::KmsgRecord;
@@ -25,10 +25,6 @@ use crate::guest::sys::{
     PortAccess, PortError, ProcessId, Signal, SignalDescriptor, Timer, kernel,
 };
 
-/// Maximum accepted polling bracket width.
-const POLL_BOUND_NS: i64 = 50_000;
-/// Samples attempted by each discipline poll.
-const SAMPLE_ATTEMPTS: usize = 3;
 /// Maximum age of the latest accepted sample while synchronized.
 const SYNCHRONIZED_AGE_NS: i64 = 128 * NSEC_PER_SEC;
 /// Poll interval during initial convergence.
@@ -134,48 +130,45 @@ fn kmsg_drain(log: &FileDescriptor, mut consume: impl FnMut(&[u8])) -> Result<()
 
 /// What one discipline poll did with its time sample.
 enum PollOutcome {
-    /// It rejected the sample, or could not take or apply one.
-    Rejected,
+    /// It rejected the sample, or could not take or apply one, for this reason.
+    Rejected(SampleRejection),
     /// It accepted the sample and corrected the wall clock.
     Accepted {
-        /// Accepted clock offset in nanoseconds.
-        theta: i64,
-        /// Accepted uncertainty in nanoseconds.
-        epsilon: i64,
-        /// The frequency correction afterwards, in scaled parts per million.
-        frequency: i64,
+        /// The accepted sample, with the frequency correction that the discipline holds.
+        sample: BestSample,
         /// The wall clock right after a step, or `None` for a slew.
         step_realtime_ns: Option<i64>,
     },
 }
 
-/// Applies one poll's outcome, and whether the discipline is synchronized, to the time state.
-fn apply_poll(state: &mut TimeState, outcome: &PollOutcome, synchronized: bool) {
+/// Applies one poll's outcome, and whether the discipline is synchronized, to the time state,
+/// and returns whether the accepted sample's disruption counter differs from the last accepted
+/// sample's: host UTC stepped, the host resumed from a suspension, or the guest TSC's offset
+/// from the host's changed.
+fn apply_poll(state: &mut TimeState, outcome: &PollOutcome, synchronized: bool) -> bool {
+    let mut disrupted = false;
     match *outcome {
         PollOutcome::Accepted {
-            theta,
-            epsilon,
-            frequency,
+            sample,
             step_realtime_ns,
         } => {
-            state.samples += 1;
-            state.offset_ns = theta;
-            state.uncertainty_ns = epsilon;
-            state.frequency_ppb = decoders::frequency_to_ppb(frequency);
-            state.last_sample_error = SampleRejection::None;
+            disrupted =
+                state.samples != 0 && state.host_disruption != u64::from(sample.host.disruption);
+            state.record_sample(&sample);
             if let Some(realtime_ns) = step_realtime_ns {
                 state.discontinuities += 1;
                 state.last_discontinuity = Discontinuity::Step;
-                state.last_step_ns = theta;
+                state.last_step_ns = sample.theta;
                 state.last_step_realtime_ns = realtime_ns;
             }
         }
-        PollOutcome::Rejected => {
+        PollOutcome::Rejected(reason) => {
             state.rejected_samples += 1;
-            state.last_sample_error = SampleRejection::Uncertain;
+            state.last_sample_error = reason;
         }
     }
     state.synchronized = synchronized;
+    disrupted
 }
 
 /// Repair step 7 work that a queued signal scheduled, which starts once it is due.
@@ -266,48 +259,65 @@ fn discipline_poll(runtime: &Runtime<'_>, daemon: &mut Daemon) {
     // The port-B lock serializes the sample with the other port transactions, and the state
     // update with the sample.
     let lock = system::lock_portb().ok();
-    let mut outcome = PollOutcome::Rejected;
+    let mut outcome = PollOutcome::Rejected(SampleRejection::Invalid);
     if lock.is_some() {
         let sample = system::best_sample(
             runtime,
             SAMPLE_ATTEMPTS,
-            POLL_BOUND_NS,
+            SAMPLE_BOUND_NS,
             runtime.generation(),
         );
-        match sample {
-            Ok((SampleResult::Accepted, sample)) => {
-                let frequency = current_frequency(runtime);
-                let correction = decoders::plan_correction(sample.theta, sample.epsilon, fast);
-                let stepped = matches!(correction, sys::ClockAdjustment::Step { .. });
-                let applied = runtime.ops.adjust_clock(correction).is_ok()
-                    && (!stepped || set_frequency(runtime, frequency).is_ok());
-                let step_realtime_ns = clock_ns(sys::Clock::Realtime);
-                let frequency = current_frequency(runtime);
-                if applied {
-                    daemon.last_accepted_ns = Some(clock_ns(sys::Clock::Monotonic));
-                    outcome = PollOutcome::Accepted {
-                        theta: sample.theta,
-                        epsilon: sample.epsilon,
-                        frequency,
-                        step_realtime_ns: stepped.then_some(step_realtime_ns),
-                    };
-                }
-            }
+        outcome = match sample {
+            Ok((SampleResult::Accepted, sample)) => correct_clock(runtime, sample, fast),
+            Ok((SampleResult::Wide, _)) => PollOutcome::Rejected(SampleRejection::Uncertain),
             Err(SampleError::Generation { .. }) => return,
-            // Nothing else would report it, and the daemon goes on without the sample.
-            Err(SampleError::Ports(error @ PortError::Revoke(_))) => {
-                runtime.log_release_failure(error);
+            Err(error) => {
+                // Nothing else would report it, and the daemon goes on without the sample.
+                if let SampleError::Ports(error @ PortError::Revoke(_)) = error {
+                    runtime.log_release_failure(error);
+                }
+                PollOutcome::Rejected(error.rejection())
             }
-            Ok((SampleResult::Wide, _))
-            | Err(SampleError::Ports(_) | SampleError::NoTimeWindow(_) | SampleError::Invalid(_)) =>
-                {}
-        }
+        };
+    }
+    if matches!(outcome, PollOutcome::Accepted { .. }) {
+        daemon.last_accepted_ns = Some(clock_ns(sys::Clock::Monotonic));
     }
     let synchronized = daemon.last_accepted_ns.is_some_and(|accepted_ns| {
         clock_ns(sys::Clock::Monotonic).wrapping_sub(accepted_ns) <= SYNCHRONIZED_AGE_NS
     });
-    let _ = state_apply(|state| apply_poll(state, &outcome, synchronized));
+    let mut disrupted = false;
+    let _ = state_apply(|state| disrupted = apply_poll(state, &outcome, synchronized));
+    // A disruption restarts the discipline at the fast cadence, as a restore does.
+    if disrupted {
+        daemon.polls = 0;
+    }
     drop(lock);
+}
+
+/// Corrects the wall clock to the accepted `sample`, which the discipline took at the fast or
+/// slow cadence: steps it to host UTC and then holds the frequency correction that the host's
+/// clock correction asks for, or slews it while holding that frequency.
+fn correct_clock(runtime: &Runtime<'_>, sample: BestSample, fast: bool) -> PollOutcome {
+    let host_error_us = sample.host.error_us();
+    let correction = decoders::plan_correction(
+        sample.theta,
+        sample.epsilon,
+        fast,
+        sample.frequency,
+        host_error_us,
+    );
+    let stepped = matches!(correction, sys::ClockAdjustment::Step { .. });
+    let hold = decoders::frequency_hold(0, sample.epsilon, sample.frequency, host_error_us);
+    let applied = runtime.ops.adjust_clock(correction).is_ok()
+        && (!stepped || system::hold_frequency(runtime, hold).is_ok());
+    if !applied {
+        return PollOutcome::Rejected(SampleRejection::Invalid);
+    }
+    PollOutcome::Accepted {
+        sample,
+        step_realtime_ns: stepped.then(|| clock_ns(sys::Clock::Realtime)),
+    }
 }
 
 /// A kernel setting forced to a value while the owner lives. Dropping the owner restores the
@@ -676,7 +686,7 @@ fn handle_signals(runtime: &Runtime<'_>, daemon: &mut Daemon) {
         match event.signal {
             Some(Signal::SIGTERM) => sys::exit_immediately(0),
             // `sigqueue` carries the readiness path's wall time. Step 7 is due
-            // `DEFERRED_START_NS` later; the repair paired the clock with the packet's UTC now.
+            // `DEFERRED_START_NS` later; the repair stepped the clock to a time sample now.
             Some(Signal::SIGUSR1) => {
                 let now = clock_ns(sys::Clock::Monotonic);
                 daemon.last_accepted_ns = Some(now);
@@ -1005,15 +1015,121 @@ pub(crate) fn empty_restore_timing() -> RestoreTiming {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guest::sys::{ClockAdjustment, FrequencyHold};
     use crate::guest::time::system::tests::FakeOps;
 
     #[test]
     fn daemon_timing_constants_match_the_abi() {
-        assert_eq!(POLL_BOUND_NS, 50_000);
+        assert_eq!((SAMPLE_BOUND_NS, SAMPLE_ATTEMPTS), (100_000, 3));
         assert_eq!(SYNCHRONIZED_AGE_NS, 128_000_000_000);
         assert_eq!(
             (FAST_PERIOD.as_secs(), SLOW_PERIOD.as_secs(), FAST_POLLS),
             (16, 64, 4)
+        );
+    }
+
+    /// A sample of the host clock whose disruption counter is `disruption`, 1.5 µs ahead of the
+    /// wall clock, and whose host correction asks for 100 ppm.
+    fn polled(disruption: u32) -> BestSample {
+        BestSample {
+            theta: 1_500,
+            epsilon: 900,
+            host: decoders::HostClock {
+                disruption,
+                correction: 6_553_600,
+                ..decoders::HostClock::default()
+            },
+            frequency: 6_553_600,
+            limited: false,
+        }
+    }
+
+    #[test]
+    fn a_poll_records_its_sample_and_reports_a_disruption() {
+        let mut state = TimeState::default();
+        let accepted = |disruption, step_realtime_ns| PollOutcome::Accepted {
+            sample: polled(disruption),
+            step_realtime_ns,
+        };
+        // The first accepted sample sets the disruption counter, and is no disruption.
+        assert!(!apply_poll(&mut state, &accepted(5, None), true));
+        assert_eq!((state.samples, state.host_disruption), (1, 5));
+        assert_eq!((state.offset_ns, state.frequency_ppb), (1_500, 100_000));
+        assert!(!apply_poll(&mut state, &accepted(5, None), true));
+        assert_eq!(state.discontinuities, 0);
+        // A changed counter is a disruption, and a step a discontinuity.
+        assert!(apply_poll(&mut state, &accepted(6, Some(42)), true));
+        assert_eq!((state.host_disruption, state.discontinuities), (6, 1));
+        assert_eq!(state.last_discontinuity, Discontinuity::Step);
+        assert_eq!(
+            (state.last_step_ns, state.last_step_realtime_ns),
+            (1_500, 42)
+        );
+        // A rejection keeps the counter, and records its reason.
+        for reason in [
+            SampleRejection::Uncertain,
+            SampleRejection::Tsc,
+            SampleRejection::Invalid,
+        ] {
+            assert!(!apply_poll(
+                &mut state,
+                &PollOutcome::Rejected(reason),
+                false
+            ));
+            assert_eq!(state.last_sample_error, reason);
+        }
+        assert_eq!(
+            (state.samples, state.rejected_samples, state.synchronized),
+            (3, 3, false)
+        );
+        assert!(!apply_poll(&mut state, &accepted(6, None), true));
+        assert_eq!(state.last_sample_error, SampleRejection::None);
+    }
+
+    #[test]
+    fn a_correction_slews_or_steps_while_holding_the_host_frequency() {
+        let ops = FakeOps::new([]);
+        let runtime = Runtime::new(&ops, false);
+        let PollOutcome::Accepted {
+            step_realtime_ns: None,
+            ..
+        } = correct_clock(&runtime, polled(0), true)
+        else {
+            panic!("the slew was not accepted");
+        };
+        let far = BestSample {
+            theta: -1_128_000_000,
+            ..polled(0)
+        };
+        let PollOutcome::Accepted {
+            step_realtime_ns: Some(_),
+            ..
+        } = correct_clock(&runtime, far, false)
+        else {
+            panic!("the step was not accepted");
+        };
+        let hold = FrequencyHold {
+            scaled_ppm: 6_553_600,
+            maximum_error_us: 1,
+            estimated_error_us: 1,
+        };
+        assert_eq!(
+            ops.adjustments.lock().unwrap().as_slice(),
+            [
+                ClockAdjustment::Slew {
+                    offset_ns: 1_500,
+                    time_constant: 4,
+                    hold: FrequencyHold {
+                        maximum_error_us: 3,
+                        ..hold
+                    },
+                },
+                ClockAdjustment::Step {
+                    seconds: -2,
+                    nanoseconds: 872_000_000,
+                },
+                ClockAdjustment::Frequency(hold),
+            ]
         );
     }
 

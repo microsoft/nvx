@@ -873,7 +873,7 @@ class MonitorTests(unittest.TestCase):
         with self.assertRaisesRegex(
             TimeAbiFailure,
             "did not report the NVX-TIME-ABI boot marker before nvx-time status "
-            "exited; the guest image or OpenVMM does not implement time ABI v1",
+            "exited; the guest image or OpenVMM does not implement time ABI v2",
         ):
             quiet.feed(b"NVX-TIME-STATUS-EXIT status=0\r\n")
 
@@ -2560,6 +2560,13 @@ class DoctorTests(unittest.TestCase):
                 result.append(("sample", sample))
             return result
 
+        synchronized = doctor.HostClockDiscipline(
+            "synchronized",
+            12.5,
+            1000,
+            "adjtimex status=0x2001 freq=819200 tick=10000 maxerror=1000",
+        )
+
         def check(
             context: doctor.DoctorContext,
             probe_records: list[tuple[str, dict[str, str]]],
@@ -2571,6 +2578,7 @@ class DoctorTests(unittest.TestCase):
             clock: FakeClock | None = None,
             kernel: doctor.KernelFrequency | str = PLL_OFF,
             boot: doctor.BootCorrection | None = None,
+            discipline: doctor.HostClockDiscipline = synchronized,
         ) -> doctor.CheckResult:
             """Run H4; a list of chronyd readings answers its re-reads too."""
             clock = clock or FakeClock()
@@ -2587,6 +2595,9 @@ class DoctorTests(unittest.TestCase):
                 ) as frequency,
                 patch.object(doctor, "kernel_frequency", return_value=kernel) as pll,
                 patch.object(doctor, "boot_correction", return_value=boot) as average,
+                patch.object(
+                    doctor, "host_clock_discipline", return_value=discipline
+                ) as published,
                 patch.object(doctor.time, "monotonic", clock.monotonic),
                 patch.object(doctor.time, "sleep", clock.sleep),
             ):
@@ -2597,6 +2608,8 @@ class DoctorTests(unittest.TestCase):
             # H4 reads the kernel's PLL only without chronyd's estimate.
             first = readings[0] if readings else chrony
             self.assertEqual(pll.called, not windows and isinstance(first, str))
+            # Every backend reads the correction that OpenVMM publishes.
+            self.assertTrue(published.called)
             self.assertEqual(
                 run.call_args.args[1:],
                 (
@@ -2642,6 +2655,14 @@ class DoctorTests(unittest.TestCase):
             f"no kernel PLL frequency: {PLL_OFF} (evidence)",
             result.detail,
         )
+        self.assertIn(
+            "host UTC is synchronized, correction +12.500 ppm, maximum error "
+            "1000 us (adjtimex status=0x2001 freq=819200 tick=10000 "
+            "maxerror=1000)",
+            result.detail,
+        )
+        self.assertEqual(context.facts["host_clock_status"], "synchronized")
+        self.assertEqual(context.facts["host_correction_ppm"], "+12.500")
         self.assertEqual(context.facts["rate_agreement_ppm"], "0.125")
         self.assertEqual(context.facts["rate_deviation_ppm"], "0.013")
         self.assertEqual(context.facts["rate_reference"], "CLOCK_MONOTONIC")
@@ -2667,8 +2688,19 @@ class DoctorTests(unittest.TestCase):
             resolution_ns=100.0,
             names=("QueryPerformanceCounter", "QueryPerformanceCounter"),
         )
-        windows = check(ci_context("whp"), qpc, windows=True)
+        adjusted = doctor.HostClockDiscipline(
+            "synchronized",
+            -17.2,
+            None,
+            "GetSystemTimeAdjustmentPrecise adjustment=10000172 "
+            "increment=10000000 disabled=0",
+        )
+        windows = check(ci_context("whp"), qpc, windows=True, discipline=adjusted)
         self.assertTrue(windows.passed, windows.detail)
+        self.assertIn(
+            "host UTC is synchronized, correction -17.200 ppm (",
+            windows.detail,
+        )
         self.assertIn(
             "against QueryPerformanceCounter from 3 samples 1 s apart", windows.detail
         )
@@ -2733,6 +2765,32 @@ class DoctorTests(unittest.TestCase):
         standalone = check(ci_context(), records([2300000100.0] * 2, interval_s=1.0))
         self.assertTrue(standalone.passed, standalone.detail)
         self.assertIn("not compared with the backend's rate", standalone.detail)
+        # The correction's status is a gate, while its directly published size
+        # is evidence: the rate budget above independently qualifies the rate
+        # against the backend when H3 runs.
+        steady = records([2300000000.0] * 2, interval_s=1.0)
+        for status in ("free-running", "unreliable", "unknown"):
+            with self.subTest(status=status):
+                context = ci_context("mshv")
+                context.facts["native_tsc_hz"] = "2300000000"
+                discipline = doctor.HostClockDiscipline(status, 0.0, None, "evidence")
+                result = check(context, steady, discipline=discipline)
+                self.assertFalse(result.passed)
+                self.assertTrue(
+                    result.detail.startswith(
+                        "the host publishes no synchronized clock correction: host "
+                        f"UTC is {status}; "
+                    ),
+                    result.detail,
+                )
+                self.assertEqual(result.warning, "")
+                self.assertEqual(context.facts["host_clock_status"], status)
+        large = doctor.HostClockDiscipline(
+            "synchronized", 10_000.0, None, "adjtimex tick=10100"
+        )
+        without_h3 = check(ci_context("mshv"), steady, discipline=large)
+        self.assertTrue(without_h3.passed, without_h3.detail)
+        self.assertIn("correction +10000.000 ppm", without_h3.detail)
         # #768: on azure-mshv-1, whose host clock jumps, chronyd slewed
         # CLOCK_MONOTONIC so that a 2 s window read 946.1 ppm, while the
         # TSC ran at its usual rate, 44 ppm from the declared one, against
@@ -3052,6 +3110,116 @@ class DoctorTests(unittest.TestCase):
         with patch.object(doctor.shutil, "which", return_value=None):
             self.assertEqual(doctor.chrony_frequency(), "chronyc is not installed")
 
+    def test_host_clock_discipline_maps_the_host_state_as_openvmm_does(self):
+        def linux(**changes: int) -> doctor.HostClockDiscipline:
+            fields = {
+                "status": 0x2001,
+                "freq": -552_308,
+                "tick": 10_000,
+                "maxerror": 1564,
+            }
+            fields.update(changes)
+            timex = types.SimpleNamespace(**fields)
+            with (
+                patch.object(doctor, "_adjtimex", return_value=(0, timex)),
+                patch.object(doctor, "host_is_windows", return_value=False),
+            ):
+                return doctor.host_clock_discipline()
+
+        self.assertEqual(
+            linux(),
+            doctor.HostClockDiscipline(
+                "synchronized",
+                -552_308 / 65_536,
+                1564,
+                "adjtimex status=0x2001 freq=-552308 tick=10000 maxerror=1564",
+            ),
+        )
+        # A tick of 10,001 us adds 100 ppm to the published correction.
+        self.assertAlmostEqual(linux(freq=0, tick=10_001).correction_ppm, 100.0)
+        self.assertEqual(linux(status=0x2041).status, "free-running")
+        self.assertEqual(linux(status=0x3001).status, "unreliable")
+        self.assertEqual(linux(status=0x1041).status, "unreliable")
+        self.assertIsNone(linux(maxerror=-1).max_error_us)
+        with (
+            patch.object(
+                doctor, "_adjtimex", side_effect=doctor.ScriptError("no adjtimex")
+            ),
+            patch.object(doctor, "host_is_windows", return_value=False),
+        ):
+            unknown = doctor.host_clock_discipline()
+        self.assertEqual((unknown.status, unknown.correction_ppm), ("unknown", 0.0))
+        self.assertIn("no adjtimex", unknown.detail)
+
+        adjustment_ppm = doctor.windows_adjustment_ppm
+        self.assertEqual(adjustment_ppm(10_000_000, 10_000_000), 0.0)
+        self.assertAlmostEqual(adjustment_ppm(10_000_000, 10_000_100), 10.0)
+        self.assertAlmostEqual(adjustment_ppm(10_000_000, 9_999_900), -10.0)
+        # A larger precise adjustment slows host UTC, as measured on the
+        # Windows runners that motivated the OpenVMM correction.
+        self.assertAlmostEqual(adjustment_ppm(10_000_501, 10_000_000), -50.0975, 4)
+        self.assertAlmostEqual(adjustment_ppm(10_000_172, 10_000_000), -17.1997, 4)
+
+    def test_windows_clock_discipline_maps_the_precise_adjustment(self):
+        class PreciseAdjustment:
+            argtypes: object = None
+            restype: object = None
+
+            def __init__(
+                self, read: int, adjustment: int, increment: int, disabled: int
+            ) -> None:
+                self.read = read
+                self.adjustment = adjustment
+                self.increment = increment
+                self.disabled = disabled
+
+            def __call__(
+                self, adjustment: object, increment: object, disabled: object
+            ) -> int:
+                adjustment._obj.value = self.adjustment  # type: ignore[attr-defined]
+                increment._obj.value = self.increment  # type: ignore[attr-defined]
+                disabled._obj.value = self.disabled  # type: ignore[attr-defined]
+                return self.read
+
+        def windows(
+            read: int, adjustment: int, increment: int, disabled: int
+        ) -> doctor.HostClockDiscipline:
+            precise = PreciseAdjustment(read, adjustment, increment, disabled)
+            library = types.SimpleNamespace(GetSystemTimeAdjustmentPrecise=precise)
+            with (
+                patch.object(doctor.sys, "platform", "win32"),
+                patch.object(
+                    doctor.ctypes, "WinDLL", return_value=library, create=True
+                ),
+                patch.object(doctor, "host_is_windows", return_value=True),
+            ):
+                return doctor.host_clock_discipline()
+
+        for reading in (
+            windows(0, 10_000_000, 10_000_000, 0),
+            windows(1, 10_000_000, 0, 0),
+            windows(1, 0, 10_000_000, 0),
+        ):
+            self.assertEqual((reading.status, reading.correction_ppm), ("unknown", 0.0))
+        free = windows(1, 10_000_000, 10_000_000, 1)
+        self.assertEqual((free.status, free.correction_ppm), ("free-running", 0.0))
+        synchronized = windows(1, 10_000_172, 10_000_000, 0)
+        self.assertEqual(synchronized.status, "synchronized")
+        self.assertAlmostEqual(synchronized.correction_ppm, -17.1997, 4)
+        with (
+            patch.object(doctor.sys, "platform", "win32"),
+            patch.object(
+                doctor.ctypes,
+                "WinDLL",
+                side_effect=OSError("no precise adjustment"),
+                create=True,
+            ),
+            patch.object(doctor, "host_is_windows", return_value=True),
+        ):
+            unknown = doctor.host_clock_discipline()
+        self.assertEqual(unknown.status, "unknown")
+        self.assertIn("no precise adjustment", unknown.detail)
+
     def test_kernel_frequency_reads_a_synchronized_kernel_pll(self):
         # adjtimex's state and the status, freq, and tick of its struct timex.
         def kernel(state: int, status: int, freq: int, tick: int = 10_000):
@@ -3167,6 +3335,13 @@ class DoctorTests(unittest.TestCase):
                         return_value="chronyc is not installed",
                     ),
                     patch.object(doctor, "kernel_frequency", return_value=PLL_OFF),
+                    patch.object(
+                        doctor,
+                        "host_clock_discipline",
+                        return_value=doctor.HostClockDiscipline(
+                            "synchronized", 0.0, None, "evidence"
+                        ),
+                    ),
                 ):
                     result = doctor.check_rate(context)
                 self.assertTrue(run.called)
@@ -3478,7 +3653,8 @@ class DoctorTests(unittest.TestCase):
                 # In GitHub Actions, an annotation repeats it, escaped.
                 annotation = (
                     "::warning title=Time ABI host qualification (mshv)::H4 host TSC "
-                    "rate stability: the host's clock correction uses 60%25 of the "
+                    "rate and clock correction: the host's clock correction uses "
+                    "60%25 of the "
                     "guest's 250 ppm budget"
                 )
                 self.assertEqual(lines[1:], [annotation] if annotated else [])

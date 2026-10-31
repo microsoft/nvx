@@ -442,7 +442,7 @@ pub fn kernel_parameters_problem(extra: &str, hostname: &str) -> Option<String> 
 }
 
 /// Returns whether extra kernel parameters may not hold `parameter`: the workload hostname's,
-/// which the launch sets; `tsc`, which time ABI v1 governs; and those that configure the guest,
+/// which the launch sets; `tsc`, which the time ABI governs; and those that configure the guest,
 /// whose names start with `nvx_` or, since the kernel matches them alike, `nvx-`.
 fn is_reserved(parameter: Parameter<'_>) -> bool {
     parameter.name.starts_with(b"nvx_")

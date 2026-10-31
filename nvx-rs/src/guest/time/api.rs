@@ -11,14 +11,13 @@ use super::cpu_mask::CpuMask;
 use super::daemon;
 use super::decoders::{self, PACKET_HEADER_SIZE, PacketError, PacketHeader, RestorePacket};
 use super::events::{CheckId, ViolationCode};
-use super::state::{
-    CheckState, CheckStatus, Discontinuity, DowntimeSource, SampleRejection, TimeState,
-};
+use super::state::{CheckState, CheckStatus, Discontinuity, DowntimeSource, TimeState};
 use super::system::{
-    self, PORTB_GENERATION_ID_AVAILABLE, PORTB_PACKET_AVAILABLE, PRIVATE_FILE_MODE, PowerOffStatus,
-    RESTORE_PATH, RESTORE_TEMP_PATH, RealOps, Runtime, SELECT_GENERATION_ID, SELECT_PACKET,
-    SampleError, SaveError, SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process,
-    initial_sample, portb_read, set_frequency, state_apply, state_load, state_store, step_clock,
+    self, BestSample, PORTB_GENERATION_ID_AVAILABLE, PORTB_PACKET_AVAILABLE, PRIVATE_FILE_MODE,
+    PowerOffStatus, RESTORE_PATH, RESTORE_TEMP_PATH, RealOps, Runtime, SAMPLE_ATTEMPTS,
+    SAMPLE_BOUND_NS, SELECT_GENERATION_ID, SELECT_PACKET, SampleError, SampleResult, SaveError,
+    SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process, initial_sample, portb_read,
+    state_apply, state_load, state_store,
 };
 use super::{NSEC_PER_USEC, Phase};
 use crate::guest::GenerationId;
@@ -28,17 +27,13 @@ use crate::guest::sys::{
 };
 use crate::protocol::cmdline::{self, Token};
 
-/// Maximum accepted restore pairing uncertainty.
-const REPAIR_BOUND_NS: i64 = 1_000_000;
-/// Samples that repair takes when the packet's pairing is too uncertain.
-const REPAIR_SAMPLE_ATTEMPTS: usize = 2;
 /// The kernel command-line token that makes the time ABI report-only, `nvx_time_abi=report-only`.
 const REPORT_ONLY_TOKEN: Token<'static> = Token {
     name: b"nvx_time_abi",
     value: Some(b"report-only"),
 };
 
-/// The guest side of NVX time ABI version one: its cold-boot time step and the start of its time
+/// The guest side of NVX time ABI version two: its cold-boot time step and the start of its time
 /// daemon, its VM generation ID, the capture request with the repair of a restore, and the
 /// restore's finish, which run in the calling process.
 ///
@@ -127,13 +122,15 @@ impl TimeAbi {
     }
 
     /// Runs the cold-boot time step synchronously: takes the initial host time sample, steps
-    /// the wall clock to it, and publishes the time state, which starts at generation zero.
+    /// the wall clock to it, holds the frequency correction that the host's clock correction
+    /// asks for, and publishes the time state, which starts at generation zero.
     ///
-    /// A sample that cannot be taken is a violation of check C12, which does not fail the call
-    /// in report-only mode: the step then leaves the wall clock unsynchronized, which
-    /// [`ColdBoot::synchronized`] tells. The step starts no process:
-    /// [`start_daemon`](Self::start_daemon) starts the time daemon from its outcome,
-    /// separately, which `nvx-time boot` does next.
+    /// The sample pairs the frequency MSR's declared TSC rate, which it reads through
+    /// `/dev/cpu/0/msr`, so devtmpfs must be mounted first. A sample that cannot be taken within
+    /// its bound is a violation of check C12, which does not fail the call in report-only mode:
+    /// the step then leaves the wall clock unsynchronized, which [`ColdBoot::synchronized`]
+    /// tells. The step starts no process: [`start_daemon`](Self::start_daemon) starts the time
+    /// daemon from its outcome, separately, which `nvx-time boot` does next.
     pub fn cold_boot(&self) -> Result<ColdBoot, TimeError> {
         let runtime = self.runtime();
         settled(&runtime, cold_boot(&runtime))
@@ -341,12 +338,10 @@ fn cold_boot(runtime: &Runtime<'_>) -> Result<ColdBoot, TimeError> {
     };
     let mut state = TimeState::default();
     state.synchronized = initial.is_some();
-    state.samples = u64::from(initial.is_some());
-    if let Some((sample, _)) = initial {
-        state.offset_ns = sample.theta;
-        state.uncertainty_ns = sample.epsilon;
+    match &initial {
+        Some((sample, _)) => state.record_sample(sample),
+        None => state.frequency_ppb = decoders::frequency_to_ppb(current_frequency(runtime)),
     }
-    state.frequency_ppb = decoders::frequency_to_ppb(current_frequency(runtime));
     if let Err(error) = state_store(&state) {
         return Err(check_failed(
             runtime,
@@ -789,7 +784,7 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
     ports.write_u8(Port::Snapshot, scratch.request());
     let start = clock_ns(sys::Clock::Monotonic);
     let read = (ports.read_u8(Port::PortbStatus) & PORTB_PACKET_AVAILABLE != 0)
-        .then(|| read_packet(&ports, runtime.generation()));
+        .then(|| read_packet(runtime, &ports, runtime.generation()));
     drop(ports);
     let Some(read) = read else {
         entropy.discard();
@@ -804,10 +799,12 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
     repair_restore(runtime, read, target, start)
 }
 
-/// Loads the persisted generation into the runtime.
+/// Loads the persisted generation, and the declared TSC rate that the boot checks recorded, with
+/// which repair pairs its time sample without reading the frequency MSR, into the runtime.
 pub(crate) fn load_generation(runtime: &Runtime<'_>) {
     if let Ok(state) = state_load() {
         runtime.set_generation(state.generation as u32);
+        runtime.set_tsc_hz(state.tsc_hz);
     }
 }
 
@@ -855,24 +852,21 @@ enum PacketRead {
     Stale,
     /// The packet's generation, which does not follow the recorded generation.
     Generation(u32),
-    /// The packet, or why its body is invalid, and the realtime clock around its selection.
-    Packet {
-        /// Realtime before the selection.
-        t0: i64,
-        /// Realtime after the selection.
-        t1: i64,
-        /// The packet, or why its body is invalid.
-        packet: Result<RestorePacket, PacketError>,
-    },
+    /// The packet, with the time sample of its generation that repair took right after it, in
+    /// the same transaction, or why it could take none within the bound; or why the packet's
+    /// body is invalid.
+    Packet(Result<(RestorePacket, SampleRead), PacketError>),
 }
+
+/// The time sample that repair selected, or why it could select none.
+type SampleRead = Result<(SampleResult, BestSample), SampleError>;
 
 /// Repair step 2's port reads, after the capture read the status, step 1: selects the restore
 /// packet, and reads its header and, when the header is valid and follows the `recorded`
-/// generation, its body, with four-byte reads.
-fn read_packet(ports: &PortAccess<'_>, recorded: u32) -> PacketRead {
-    let t0 = clock_ns(sys::Clock::Realtime);
+/// generation, its body, with four-byte reads, and then, for a valid packet, takes the time
+/// sample of the packet's generation, to which repair steps the wall clock.
+fn read_packet(runtime: &Runtime<'_>, ports: &PortAccess<'_>, recorded: u32) -> PacketRead {
     ports.write_u8(Port::PortbStatus, SELECT_PACKET);
-    let t1 = clock_ns(sys::Clock::Realtime);
     let mut header = [0_u8; PACKET_HEADER_SIZE];
     portb_read(ports, Port::PortbData, &mut header);
     let header = match PacketHeader::parse(&header) {
@@ -890,7 +884,19 @@ fn read_packet(ports: &PortAccess<'_>, recorded: u32) -> PacketRead {
     let packet = RestorePacket::parse(header, &body);
     // The packet owns its entropy now, in the seed's allocation.
     sys::zeroize(&mut body);
-    PacketRead::Packet { t0, t1, packet }
+    PacketRead::Packet(packet.map(|packet| {
+        let sample = system::clock_rates(runtime).and_then(|rates| {
+            system::select_sample(
+                ports,
+                runtime.ops,
+                SAMPLE_ATTEMPTS,
+                SAMPLE_BOUND_NS,
+                header.generation,
+                rates,
+            )
+        });
+        (packet, sample)
+    }))
 }
 
 /// What a restore transaction writes, and where.
@@ -905,15 +911,16 @@ struct RepairTarget {
     daemon_pid: Option<sys::ProcessId>,
 }
 
-/// Repair steps 2 and 3, once the port transaction that read the packet ended: validates it,
-/// steps and slews the clock, hands over its entropy, and records the restore.
+/// Repair steps 2 and 3, once the port transaction that read the packet and its time sample
+/// ended: validates them, steps the clock to the sample and holds the frequency correction that
+/// its host clock correction asks for, hands over the packet's entropy, and records the restore.
 fn repair_restore(
     runtime: &Runtime<'_>,
     read: PacketRead,
     target: RepairTarget,
     start_ns: i64,
 ) -> Result<CaptureOutcome, TimeError> {
-    let (t0, t1, packet) = match read {
+    let packet = match read {
         PacketRead::InvalidHeader(error) => {
             return Err(repair_failed(
                 runtime,
@@ -936,9 +943,9 @@ fn repair_restore(
                 ),
             ));
         }
-        PacketRead::Packet { t0, t1, packet } => (t0, t1, packet),
+        PacketRead::Packet(packet) => packet,
     };
-    let packet = packet
+    let (packet, sample) = packet
         .map_err(|error| repair_failed(runtime, ViolationCode::RepairPacket, error.to_string()))?;
     let RestorePacket {
         header,
@@ -954,38 +961,31 @@ fn repair_restore(
         ));
     }
     runtime.set_generation(header.generation);
-    let (mut theta, mut epsilon) = decoders::pair_clocks(t0, t1, header.utc_ns);
-    if epsilon > REPAIR_BOUND_NS {
-        match system::best_sample(
-            runtime,
-            REPAIR_SAMPLE_ATTEMPTS,
-            REPAIR_BOUND_NS,
-            header.generation,
-        ) {
-            Err(error @ SampleError::Generation { .. }) => {
-                return Err(repair_failed(
-                    runtime,
-                    ViolationCode::RepairGeneration,
-                    error.to_string(),
-                ));
-            }
-            Ok((_, sample)) if sample.epsilon < epsilon => {
-                theta = sample.theta;
-                epsilon = sample.epsilon;
-            }
-            _ => {}
-        }
-        if epsilon > REPAIR_BOUND_NS {
+    let sample = match sample {
+        Ok((SampleResult::Accepted, sample)) => sample,
+        Ok((SampleResult::Wide, sample)) => {
             return Err(repair_failed(
                 runtime,
                 ViolationCode::RepairSample,
-                format!("UTC pairing uncertainty {epsilon} ns exceeds 1 ms"),
+                system::wide_sample(sample.epsilon),
             ));
         }
-    }
-    let frequency = decoders::restore_frequency(header.rate_deviation);
-    if let Err(error) = step_clock(runtime, theta).and_then(|()| set_frequency(runtime, frequency))
-    {
+        Err(error @ SampleError::Generation { .. }) => {
+            return Err(repair_failed(
+                runtime,
+                ViolationCode::RepairGeneration,
+                error.to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(repair_failed(
+                runtime,
+                ViolationCode::RepairSample,
+                error.to_string(),
+            ));
+        }
+    };
+    if let Err(error) = system::synchronize(runtime, &sample) {
         return Err(repair_failed(
             runtime,
             ViolationCode::RepairClock,
@@ -1004,15 +1004,7 @@ fn repair_restore(
         Err(detail) => return Err(repair_failed(runtime, ViolationCode::RepairPacket, detail)),
     };
     if let Err(error) = state_apply(|state| {
-        apply_repair(
-            state,
-            &header,
-            theta,
-            epsilon,
-            step_realtime_ns,
-            frequency,
-            elapsed_us,
-        );
+        apply_repair(state, &header, &sample, step_realtime_ns, elapsed_us);
     }) {
         return Err(repair_failed(
             runtime,
@@ -1044,20 +1036,19 @@ fn repair_restore(
     }))
 }
 
-/// Applies one successful restore packet to persistent state.
+/// Applies one successful restore packet, and the time sample to which repair stepped the wall
+/// clock, to persistent state.
 fn apply_repair(
     state: &mut TimeState,
     packet: &PacketHeader,
-    theta: i64,
-    epsilon: i64,
+    sample: &BestSample,
     step_realtime_ns: i64,
-    frequency: i64,
     elapsed_us: i64,
 ) {
     state.generation = u64::from(packet.generation);
     state.discontinuities += 1;
     state.last_discontinuity = Discontinuity::Restore;
-    state.last_step_ns = theta;
+    state.last_step_ns = sample.theta;
     state.last_step_realtime_ns = step_realtime_ns;
     state.last_downtime_ns = packet.downtime_ns;
     state.last_downtime_source = if packet.downtime_from_utc() {
@@ -1066,11 +1057,7 @@ fn apply_repair(
         DowntimeSource::Monotonic
     };
     state.synchronized = true;
-    state.offset_ns = theta;
-    state.uncertainty_ns = epsilon;
-    state.frequency_ppb = decoders::frequency_to_ppb(frequency);
-    state.samples += 1;
-    state.last_sample_error = SampleRejection::None;
+    state.record_sample(sample);
     // Repair step 3 marks this restore's check pending, so `nvx-time status` waits for the
     // daemon's step 7. Until then, `restore_elapsed_us` is the readiness path up to the clock
     // step, at `last_step_realtime_ns`; `restore_cpu_us` counts only step 7, which records it.
@@ -1085,7 +1072,7 @@ fn apply_repair(
     }
 }
 
-/// A set of the CPUs that time ABI version one covers: CPUs 0 to 63.
+/// A set of the CPUs that the time ABI covers: CPUs 0 to 63.
 ///
 /// Its `Display` form is a CPU list in the kernel's syntax, such as `1-3,6`, or `none` for the
 /// empty set.
@@ -1428,7 +1415,11 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
-    use crate::guest::time::system::tests::FakeOps;
+    use crate::guest::sys::{ClockAdjustment, FrequencyHold};
+    use crate::guest::time::decoders::HostClock;
+    use crate::guest::time::state::HostClockStatus;
+    use crate::guest::time::system::PORTB_TIME_WINDOW;
+    use crate::guest::time::system::tests::{FakeOps, sample_input, sample_tsc};
     use crate::protocol::status;
 
     /// Returns whether `error` holds the error number `errno`.
@@ -1847,19 +1838,27 @@ mod tests {
 
     /// Returns the port input with which a restore answers a capture: port B's status, then a
     /// packet of `generation`, which carries `entropy` and nothing to activate, in four-byte
-    /// reads.
+    /// reads, and then port B's status, with the time window, and a time sample of the
+    /// generation, within the bound.
     fn restore_input(generation: u32, entropy: &[u8; Seed::LENGTH]) -> Vec<u32> {
         let mut packet = [0_u8; PACKET_HEADER_SIZE + Seed::LENGTH];
-        packet[..4].copy_from_slice(b"OVR\x04");
+        packet[..4].copy_from_slice(b"OVR\x05");
         packet[8..12].copy_from_slice(&generation.to_le_bytes());
-        let utc_ns = clock_ns(sys::Clock::Realtime).unsigned_abs();
-        packet[24..32].copy_from_slice(&utc_ns.to_le_bytes());
         packet[PACKET_HEADER_SIZE..].copy_from_slice(entropy);
         let words = packet
             .chunks(size_of::<u32>())
             .map(|word| u32::from_ne_bytes(word.try_into().unwrap()));
+        let sample = sample_input(
+            generation,
+            FakeOps::REALTIME_NS as u64,
+            sample_tsc(0),
+            400,
+            HostClock::default(),
+        );
         std::iter::once(u32::from(PORTB_PACKET_AVAILABLE))
             .chain(words)
+            .chain(std::iter::once(u32::from(PORTB_TIME_WINDOW)))
+            .chain(sample)
             .collect()
     }
 
@@ -1995,6 +1994,73 @@ mod tests {
         assert!(!boot.synchronized());
         assert_eq!(boot.failures, 1);
         assert!(!state_load().unwrap().synchronized);
+        // A sample beyond the bound fails check C12 too.
+        let host = HostClock {
+            status: HostClockStatus::FreeRunning,
+            disruption: 0,
+            correction: 13_107_200,
+            correction_bound: None,
+            max_error_us: Some(16_000_000),
+        };
+        let utc_ns = FakeOps::REALTIME_NS as u64 + 1_000;
+        let window = |pairing_ns| {
+            std::iter::once(u32::from(PORTB_TIME_WINDOW))
+                .chain(sample_input(0, utc_ns, sample_tsc(0), pairing_ns, host))
+                .collect::<Vec<_>>()
+        };
+        let ops = FakeOps::new(window(150_000));
+        let boot = super::cold_boot(&Runtime::new(&ops, true)).unwrap();
+        assert_eq!((boot.synchronized(), boot.failures), (false, 1));
+        let console = String::from_utf8(ops.console.lock().unwrap().clone()).unwrap();
+        assert!(
+            console.contains("time sample uncertainty 151026 ns exceeds 100000 ns"),
+            "{console}"
+        );
+        // A sample within the bound steps the wall clock to host UTC, holds the frequency that
+        // the host's correction asks for, and publishes the host's discipline. A free-running
+        // host's error does not count.
+        let ops = FakeOps::new(window(400));
+        let boot = super::cold_boot(&Runtime::new(&ops, false).strict()).unwrap();
+        assert_eq!((boot.synchronized(), boot.failures), (true, 0));
+        assert_eq!(
+            ops.adjustments.lock().unwrap().as_slice(),
+            [
+                ClockAdjustment::Query,
+                ClockAdjustment::Step {
+                    seconds: 0,
+                    nanoseconds: 1_050,
+                },
+                ClockAdjustment::Frequency(FrequencyHold {
+                    scaled_ppm: 13_107_200,
+                    maximum_error_us: 2,
+                    estimated_error_us: 2,
+                }),
+            ]
+        );
+        let state = state_load().unwrap();
+        assert!(state.synchronized);
+        assert_eq!(
+            (state.samples, state.offset_ns, state.uncertainty_ns),
+            (1, 1_050, 1_426)
+        );
+        assert_eq!(
+            (state.frequency_ppb, state.frequency_limited),
+            (200_000, false)
+        );
+        assert_eq!(
+            (
+                state.host_status,
+                state.host_correction_ppb,
+                state.host_correction_bound_ppb,
+                state.host_max_error_us
+            ),
+            (
+                HostClockStatus::FreeRunning,
+                200_000,
+                None,
+                Some(16_000_000)
+            )
+        );
     }
 
     #[test]

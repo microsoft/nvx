@@ -1,4 +1,4 @@
-//! `nvx-time`, the guest side of NVX time ABI v1, and the typed calls through which any guest
+//! `nvx-time`, the guest side of NVX time ABI v2, and the typed calls through which any guest
 //! init or agent runs the ABI's steps in its own process.
 //!
 //! [`TimeAbi`] runs the cold-boot time step and, separately, starts the time daemon, a process

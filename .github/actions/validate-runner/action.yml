@@ -236,13 +236,13 @@ runs:
 
     # Host time. The time ABI host qualification (doc/ci.md,
     # "Host qualification") checks the backend, the CPU fingerprint and
-    # generation, and the TSC rate stability on its short CI schedule, and,
-    # in jobs that downloaded OpenVMM, its CPU profile check (H2) and
-    # preflight (H3); other jobs qualify without OpenVMM. Jobs whose guests
-    # run without the microVM scenarios' warp probes add the guest warp probe
-    # (H6). The host's invariant-TSC flags are evidence only: the guest warp
-    # probe measures the cross-vCPU skew that a host without one can cause
-    # (#265).
+    # generation, and the TSC rate stability and the host's synchronized clock
+    # correction on its short CI schedule, and, in jobs that downloaded
+    # OpenVMM, its CPU profile check (H2) and preflight (H3); other jobs
+    # qualify without OpenVMM. Jobs whose guests run without the microVM
+    # scenarios' warp probes add the guest warp probe (H6). The host's
+    # invariant-TSC flags are evidence only: the guest warp probe measures the
+    # cross-vCPU skew that a host without one can cause (#265).
     - name: Report host TSC
       if: runner.os != 'Windows'
       shell: bash

@@ -301,11 +301,15 @@ fn other_versions_of_the_format_are_unsupported() {
         unsupported,
         "boot layout version 1",
     );
-    assert_refused(
-        |spec| spec.time().abi_version = 2,
-        unsupported,
-        "has a time contract of time ABI version 2",
-    );
+    // A time contract of another time ABI version, such as a snapshot of time ABI version 1,
+    // whose guest estimated the host's clock correction, is refused.
+    for version in [1, 3] {
+        assert_refused(
+            |spec| spec.time().abi_version = version,
+            unsupported,
+            &format!("has a time contract of time ABI version {version}"),
+        );
+    }
     // A manifest of another version is reported as such, even with fields that this build does
     // not know, such as a field that version 6 retired.
     let mut spec = ManifestSpec::template();

@@ -773,7 +773,7 @@ impl ManifestSpec {
             memory_block_size: 128 * MIB,
             expansion_ranges: vec![(512 * MIB, 1536 * MIB)],
             time: Some(TimeSpec {
-                abi_version: 1,
+                abi_version: crate::contract::TIME_ABI_VERSION as u32,
                 tsc_hz: 2_100_000_000,
                 tolerance_ppm: 250,
                 apic_hz: 200_000_000,

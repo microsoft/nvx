@@ -6854,7 +6854,7 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(script.count("|| fail 55"), 1)
 
     def test_snapshot_core_reads_the_entropy_that_nvx_time_kept(self):
-        # Restore packet v4 is consumed by nvx-time capture, which leaves the
+        # The restore packet is consumed by nvx-time capture, which leaves the
         # entropy of an untiered restore in /run/nvx/restore-entropy.
         shell = _posix_shell()
         if shell is None:
@@ -13291,6 +13291,45 @@ class MicrovmTests(unittest.TestCase):
         )
         self.assertEqual(run_guest_boot.call_args.kwargs["memory_mib"], 512)
 
+    def test_runner_runs_time_host_correction_on_both_guest_images(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
+        for guest in ("alpine", "ubuntu"):
+            descriptor = microvm_tests.guest_descriptor(guest)
+            with self.subTest(guest=guest), tempfile.TemporaryDirectory() as temporary:
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "whp",
+                        "--guest",
+                        guest,
+                        "--scenario",
+                        "time-host-correction",
+                        "--output-dir",
+                        temporary,
+                    ]
+                )
+                with (
+                    patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                    patch.object(microvm_tests, "require_file", side_effect=require),
+                    patch.object(
+                        microvm_tests, "run_time_host_correction"
+                    ) as run_time_host_correction,
+                ):
+                    self.assertEqual(microvm_tests.run(args), 0)
+
+                run_time_host_correction.assert_called_once()
+                self.assertEqual(
+                    run_time_host_correction.call_args.args[2],
+                    BuildConstants.BUILD_DIR / descriptor.initramfs_name,
+                )
+                self.assertEqual(
+                    run_time_host_correction.call_args.kwargs["memory_mib"],
+                    descriptor.default_memory_mib,
+                )
+
     def test_runner_omits_console_snapshot_from_ubuntu_defaults(self):
         def require(path: Path, _description: str) -> Path:
             return path
@@ -13804,6 +13843,729 @@ class MicrovmTests(unittest.TestCase):
                     )
 
             self.assertEqual(log_path.read_bytes(), b"complete raw output\n")
+
+
+class TimeHostCorrectionTests(unittest.TestCase):
+    """The time-host-correction scenario and its guest report."""
+
+    # Host UTC of the first sample, and the declared TSC rate; the samples are
+    # 5 s of the guest TSC apart.
+    UTC_NS = 1_790_841_600_000_000_000
+    TSC_HZ = 2_000_000_000
+
+    def report(
+        self,
+        *,
+        frequency_ppb: int = 199_500,
+        correction_ppb: int = 200_000,
+        limited: int = 0,
+        samples: Sequence[tuple[int, int]] = ((1_000, 13_107_200), (1_500, 13_107_200)),
+        host_ppm: float = 200.0,
+        flags: str = "0x08",
+        tsc_hz: int | None = None,
+        disruptions: Sequence[int] | None = None,
+        epsilons: Sequence[int] | None = None,
+        failures: Collection[int] = (),
+        state_windows: Sequence[
+            tuple[
+                dict[str, str | int],
+                dict[str, str | int],
+                dict[str, str | int],
+            ]
+        ]
+        | None = None,
+    ) -> str:
+        """Return the console output of a guest report whose state holds
+        ``frequency_ppb`` for the host's ``correction_ppb``, and whose samples,
+        5 s of the guest TSC apart, read ``(theta_ns, correction)`` each, with
+        the uncertainties ``epsilons``, 700 ns by default, while host UTC runs
+        ``host_ppm`` against the TSC. The samples whose indices ``failures``
+        holds failed to pair, as ``nvx-time sample`` then reports them."""
+        tsc_hz = self.TSC_HZ if tsc_hz is None else tsc_hz
+        state: dict[str, str | int] = {
+            "version": 1,
+            "generation": 0,
+            "tsc_hz": tsc_hz,
+            "frequency_ppb": frequency_ppb,
+            "frequency_limited": limited,
+            "host_status": "synchronized",
+            "host_correction_ppb": correction_ppb,
+            "host_correction_bound_ppb": 2,
+            "discontinuities": 0,
+            "last_step_realtime_ns": 0,
+            "samples": 17,
+        }
+        disruptions = disruptions or (0,) * len(samples)
+        epsilons = epsilons or (700,) * len(samples)
+        sample_lines: list[str] = []
+        for index, ((theta, correction), disruption, epsilon) in enumerate(
+            zip(samples, disruptions, epsilons, strict=True)
+        ):
+            elapsed_ns = index * 5_000_000_000
+            utc = self.UTC_NS + round(elapsed_ns * (1 + host_ppm / 1e6))
+            tsc = 1_000_000 + index * 5 * tsc_hz
+            line = (
+                f"{microvm_tests.TIME_HOST_CORRECTION_SAMPLE_PREFIX}index={index + 1} "
+                f"flags={flags} generation=0 status=synchronized "
+                f"utc_ns={utc} tsc={tsc} pairing_ns=640 "
+                f"disruption={disruption} correction={correction} correction_bound=66 "
+                f"max_error_us=unknown before={tsc - 100} after={tsc + 100} "
+                f"realtime_ns={utc - theta}"
+            )
+            if index not in failures:
+                line += (
+                    f" theta_ns={theta} epsilon_ns={epsilon} "
+                    f"frequency=13103527 frequency_limited={limited}"
+                )
+            sample_lines.append(line)
+        windows = max(1, (len(samples) + 1) // 2)
+        if state_windows is None:
+            state_windows = tuple(({}, {}, {}) for _ in range(windows))
+        if len(state_windows) != windows:
+            raise ValueError(
+                f"{len(state_windows)} state windows for {windows} windows"
+            )
+
+        def format_state(values: dict[str, str | int]) -> str:
+            return " ".join(f"{name}={value}" for name, value in values.items())
+
+        lines: list[str] = []
+        for window, (initial_changes, before_changes, after_changes) in enumerate(
+            state_windows, start=1
+        ):
+            initial = state.copy()
+            initial.update(initial_changes)
+            before = state.copy()
+            before.update(before_changes)
+            after = state.copy()
+            after.update(after_changes)
+            lines.append(
+                f"{microvm_tests.TIME_HOST_CORRECTION_STATE_PREFIX}attempt={window} "
+                f"point=initial {format_state(initial)}"
+            )
+            lines.append(
+                f"{microvm_tests.TIME_HOST_CORRECTION_STATE_PREFIX}attempt={window} "
+                f"point=before {format_state(before)}"
+            )
+            lines.extend(sample_lines[2 * (window - 1) : 2 * window])
+            lines.append(
+                f"{microvm_tests.TIME_HOST_CORRECTION_STATE_PREFIX}attempt={window} "
+                f"point=after {format_state(after)}"
+            )
+        return "\r\n".join(lines) + "\r\n"
+
+    def check(self, output: str, *, limit: bool = False) -> str:
+        return microvm_tests.check_time_host_correction(
+            output, context="phase", limit=limit
+        )
+
+    def test_a_guest_that_holds_the_published_correction_passes(self):
+        # The guest's clock lost 500 ns on host UTC in 5 s, so it ran at
+        # 199.9 ppm against its TSC, within 1 ppm and the 120 ns of its two
+        # realtime pairings.
+        summary = self.check(self.report())
+        self.assertEqual(
+            summary,
+            "phase: host_correction_ppb=200000 frequency_ppb=199500 "
+            "guest_ppm=+199.900 host_ppm=+200.000 published_ppm=+200.000 in 5.0 s",
+        )
+        script = microvm_tests.time_host_correction_script()
+        self.assertNotIn("@", script)
+        self.assertIn("sleep 5\n", script)
+        self.assertIn(
+            "sleep 0\n", microvm_tests.time_host_correction_script(spacing_seconds=0)
+        )
+        self.assertIn('while [ "$attempt" -le 3 ]', script)
+        self.assertNotIn("/sbin/adjtimex", script)
+        self.assertLess(script.index("initial_state="), script.index("clear-phase"))
+        self.assertLess(script.index("clear-phase"), script.index("sleep 2"))
+        self.assertLess(script.index("sleep 2"), script.index("before_state="))
+        self.assertIn(
+            "sleep 0\n", microvm_tests.time_host_correction_script(settle_seconds=0)
+        )
+        self.assertIn("last_step_realtime_ns samples", script)
+        self.assertIn("first_disruption=", script)
+        # The script retries a window whose samples the discipline would reject.
+        self.assertIn('[ "$epsilon" -le 100000 ]', script)
+        self.assertIn('within_bound "$first" && within_bound "$second"', script)
+        # A discarded sample precedes the report's samples.
+        self.assertLess(
+            script.index("nvx-time sample >/dev/null 2>&1 || true\n"),
+            script.index("first=$(nvx-time sample 2>&1)"),
+        )
+
+    def test_a_sub_ghz_tsc_gets_its_full_khz_rounding_allowance(self):
+        # The ABI admits 500 MHz. At 500,000,999 Hz, a +200 ppm host
+        # correction becomes +198,002 ppb after Linux rounds the TSC rate down
+        # to the kHz: 1,998 ppb away, which the old 1,001 ppb allowance rejected.
+        tsc_hz = 500_000_999
+        report = self.report(
+            frequency_ppb=198_002,
+            correction_ppb=200_000,
+            tsc_hz=tsc_hz,
+        )
+        self.assertIn("frequency_ppb=198002", self.check(report))
+        self.assertGreaterEqual(
+            microvm_tests.time_host_correction_frequency_allowance_ppb(tsc_hz, 200_000),
+            1_998,
+        )
+
+    def test_a_guest_that_does_not_run_at_the_published_rate_fails(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "holds a frequency correction of 0 ppb, not the host's correction of "
+            "200000 ppb",
+        ):
+            self.check(self.report(frequency_ppb=0))
+        # A guest whose clock doesn't run at the frequency correction that it
+        # holds drifts from host UTC by the hook's rate: 200 ppm over 5 s is
+        # 1 ms.
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"the guest's clock ran at -0\.200 ppm against its TSC in 5\.0 s, not at "
+            r"the host's correction of \+200\.000 ppm that it holds, within 1\.024 ppm",
+        ):
+            self.check(self.report(samples=((0, 13_107_200), (1_001_000, 13_107_200))))
+        # The limit is 1 ppm plus the uncertainty of the two realtime pairings,
+        # 0.024 ppm, so a guest that ran 1.2 ppm off fails.
+        with self.assertRaisesRegex(RuntimeError, r"ran at \+198\.800 ppm"):
+            self.check(self.report(samples=((0, 13_107_200), (6_000, 13_107_200))))
+
+    def test_host_utc_must_run_at_its_published_correction(self):
+        # A hook that skewed the correction but not host UTC leaves the guest,
+        # which holds the correction, 1 ms behind host UTC in 5 s.
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"host UTC ran at \+0\.000 ppm against the guest TSC in 5\.0 s, not at its "
+            r"published correction of \+200\.000 ppm, within 75\.256 ppm",
+        ):
+            self.check(
+                self.report(
+                    samples=((0, 13_107_200), (-1_000_000, 13_107_200)), host_ppm=0.0
+                )
+            )
+        # The time service may slew host UTC between the samples, as the guest's
+        # discipline absorbs.
+        slewed = self.report(
+            samples=((0, 13_107_200), (-350_000, 13_107_200)), host_ppm=130.0
+        )
+        self.assertIn("host_ppm=+130.000 published_ppm=+200.000", self.check(slewed))
+
+    def test_a_host_utc_disruption_retries_the_measurement_window(self):
+        correction = 13_107_200
+        samples = ((1_000, correction),) * 4
+        retried = self.report(
+            samples=samples,
+            disruptions=(0, 1, 1, 1),
+        )
+        self.assertIn(
+            "guest_ppm=+200.000 host_ppm=+200.000",
+            self.check(retried),
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "no measurement window was stable and conclusive: "
+            "window 1: host UTC's disruption counter changed; window 2: host "
+            "UTC's disruption counter changed; window 3: host UTC's disruption "
+            "counter changed",
+        ):
+            self.check(
+                self.report(
+                    samples=((1_000, correction),) * 6,
+                    disruptions=(0, 1, 1, 2, 2, 3),
+                )
+            )
+
+    def test_an_uncertain_sample_retries_the_measurement_window(self):
+        bound = microvm_tests.TIME_HOST_CORRECTION_SAMPLE_BOUND_NS
+        self.assertEqual(bound, 100_000)
+        correction = 13_107_200
+        # A guest that holds +200 ppm but whose clock runs at 0 ppm against its
+        # TSC falls 1 ms behind host UTC in 5 s. Two samples uncertain by
+        # 1,001,640 ns each would allow 401.4 ppm, so the window is retried
+        # rather than passed.
+        ignored = ((0, correction), (1_000_000, correction))
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "no measurement window was stable and conclusive: window 1: a "
+            "sample's uncertainty of 1001640 ns exceeds the 100000 ns bound",
+        ):
+            self.check(self.report(samples=ignored, epsilons=(700, 1_001_640)))
+        # The next window's samples lie within the bound, which then checks the
+        # guest's rate.
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"the guest's clock ran at \+0\.000 ppm against its TSC in 5\.0 s, not "
+            r"at the host's correction of \+200\.000 ppm that it holds, within "
+            r"1\.024 ppm",
+        ):
+            self.check(
+                self.report(
+                    samples=(*ignored, *ignored),
+                    epsilons=(1_001_640, 700, 700, 700),
+                )
+            )
+        retried = self.report(
+            samples=((1_000, correction),) * 4,
+            epsilons=(bound + 1, 700, 700, bound),
+        )
+        self.assertIn("guest_ppm=+200.000 host_ppm=+200.000", self.check(retried))
+        # Every window's reason names what made it unusable.
+        unchanged: dict[str, str | int] = {}
+        polled: dict[str, str | int] = {"samples": 18}
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "window 1: host UTC's disruption counter changed; window 2: a sample's "
+            "uncertainty of 100001 ns exceeds the 100000 ns bound; window 3: the "
+            "discipline changed",
+        ):
+            self.check(
+                self.report(
+                    samples=((1_000, correction),) * 6,
+                    disruptions=(0, 1, 1, 1, 1, 1),
+                    epsilons=(700, 700, 700, bound + 1, 700, 700),
+                    state_windows=(
+                        (unchanged, unchanged, unchanged),
+                        (unchanged, unchanged, unchanged),
+                        (unchanged, unchanged, polled),
+                    ),
+                )
+            )
+
+    def test_a_failed_pairing_retries_the_measurement_window(self):
+        correction = 13_107_200
+        # nvx-time sample reports a sample that its TSC bracket rejects without
+        # theta_ns or epsilon_ns, and the guest script retries that window, so
+        # the checker takes the next one.
+        for failures in ((0,), (1,)):
+            with self.subTest(failures=failures):
+                retried = self.report(
+                    samples=((1_000, correction),) * 4, failures=failures
+                )
+                self.assertIn(
+                    "guest_ppm=+200.000 host_ppm=+200.000", self.check(retried)
+                )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "no measurement window was stable and conclusive: window 1: nvx-time "
+            "sample failed: index=1 flags=0x08 generation=0 .* realtime_ns=[0-9]+; "
+            "window 2: nvx-time sample failed: index=4 ",
+        ):
+            self.check(self.report(samples=((1_000, correction),) * 4, failures=(0, 3)))
+        # The limited phase takes one sample, which the script does not retry.
+        with self.assertRaisesRegex(
+            RuntimeError, "phase: nvx-time sample failed: index=1 "
+        ):
+            self.check(
+                self.report(
+                    frequency_ppb=500_000,
+                    correction_ppb=900_000,
+                    limited=1,
+                    samples=((0, 58_982_400),),
+                    failures=(0,),
+                ),
+                limit=True,
+            )
+
+    def test_an_allowance_beyond_half_the_held_correction_fails(self):
+        # Within the bound, two samples 5 s apart allow at most 41 ppm, below
+        # half of the smallest hook's 150 ppm. A correction near 0, which only a
+        # host near OpenVMM's hook range could leave, can't tell a guest that
+        # ignored it from one that applied it.
+        correction = round(2 * 65_536)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"the allowance of 1\.024 ppm for the guest's clock in 5\.0 s is not "
+            r"below 1\.000 ppm, half the host's correction of \+2\.000 ppm that it "
+            "holds, so its rate check is inconclusive",
+        ):
+            self.check(
+                self.report(
+                    frequency_ppb=1_500,
+                    correction_ppb=2_000,
+                    samples=((1_000, correction), (1_000, correction)),
+                    host_ppm=2.0,
+                )
+            )
+
+    def test_a_discipline_update_retries_with_fresh_state(self):
+        correction = 16_384_000
+        unchanged: dict[str, str | int] = {}
+        held: dict[str, str | int] = {
+            "frequency_ppb": 249_500,
+            "host_correction_ppb": 250_000,
+        }
+        retried = self.report(
+            frequency_ppb=199_500,
+            correction_ppb=200_000,
+            samples=((1_000, correction),) * 4,
+            host_ppm=250.0,
+            state_windows=((unchanged, unchanged, held), (held, held, held)),
+        )
+        self.assertIn(
+            "host_correction_ppb=250000 frequency_ppb=249500 "
+            "guest_ppm=+250.000 host_ppm=+250.000",
+            self.check(retried),
+        )
+
+    def test_a_phase_only_poll_retries_the_measurement_window(self):
+        correction = 13_107_200
+        unchanged: dict[str, str | int] = {}
+        polled: dict[str, str | int] = {"samples": 18}
+        for first_window in (
+            # A poll during the measurement changes only its accepted-sample count.
+            (unchanged, unchanged, polled),
+            # A poll between the initial state and phase cancellation is caught too.
+            (unchanged, polled, polled),
+        ):
+            with self.subTest(first_window=first_window):
+                retried = self.report(
+                    samples=((1_000, correction),) * 4,
+                    state_windows=(first_window, (polled, polled, polled)),
+                )
+                self.assertIn(
+                    "guest_ppm=+200.000 host_ppm=+200.000",
+                    self.check(retried),
+                )
+
+    def test_a_wandering_host_widens_the_allowance(self):
+        # The host's correction moved from 100 to 300 ppm between the samples:
+        # host UTC ran at their average, and half the change widens the limit
+        # by 100 ppm. The guest holds the first sample's 100 ppm.
+        wandering = ((0, 6_553_600), (500_000, 19_660_800))
+        self.assertIn(
+            "guest_ppm=+100.000 host_ppm=+200.000 published_ppm=+200.000",
+            self.check(
+                self.report(
+                    frequency_ppb=99_500, correction_ppb=100_000, samples=wandering
+                )
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, r"within 175\.256 ppm"):
+            self.check(
+                self.report(
+                    frequency_ppb=99_500,
+                    correction_ppb=100_000,
+                    samples=((0, 6_553_600), (1_400_000, 19_660_800)),
+                    host_ppm=380.0,
+                )
+            )
+
+    def test_a_stale_held_correction_fails(self):
+        # A boot step or repair that kept the guest's old correction, here 0,
+        # runs the guest at it while the samples publish, and host UTC runs at,
+        # -150 ppm: both rate checks pass, but the held correction is stale.
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"holds the host's correction of 0 ppb, but its first stable sample publishes "
+            r"-150\.000 ppm, more than 75 ppm away: its boot step or restore repair "
+            "kept a stale correction",
+        ):
+            self.check(
+                self.report(
+                    frequency_ppb=0,
+                    correction_ppb=0,
+                    samples=((0, -9_830_400), (-750_000, -9_830_400)),
+                    host_ppm=-150.0,
+                )
+            )
+        # The host's own correction may have moved since the boot step or the
+        # repair: here by 60 ppm, which the guest's discipline follows later.
+        moved = self.report(
+            samples=((0, 17_039_360), (300_000, 17_039_360)), host_ppm=260.0
+        )
+        self.assertIn("guest_ppm=+200.000 host_ppm=+260.000", self.check(moved))
+
+    def test_the_limit_holds_and_is_reported(self):
+        limit = self.report(
+            frequency_ppb=500_000,
+            correction_ppb=900_000,
+            limited=1,
+            samples=((0, 58_982_400),),
+        )
+        self.assertEqual(
+            self.check(limit, limit=True),
+            "phase: host_correction_ppb=900000 frequency_ppb=500000 frequency_limited=1",
+        )
+        for frequency_ppb, limited in ((500_000, 0), (499_000, 1)):
+            with (
+                self.subTest(frequency_ppb=frequency_ppb, limited=limited),
+                self.assertRaisesRegex(RuntimeError, "exceeds its limit"),
+            ):
+                self.check(
+                    self.report(
+                        frequency_ppb=frequency_ppb,
+                        correction_ppb=900_000,
+                        limited=limited,
+                        samples=((0, 58_982_400),),
+                    ),
+                    limit=True,
+                )
+        negative = self.report(
+            frequency_ppb=-500_000,
+            correction_ppb=-650_000,
+            limited=1,
+            samples=((0, -42_598_400),),
+        )
+        self.assertIn("frequency_limited=1", self.check(negative, limit=True))
+        # The limit phase must exercise the limit: a host correction of
+        # -450 ppm and a +900 ppm hook would leave +450 ppm, unclamped.
+        unclamped = self.report(
+            frequency_ppb=449_500,
+            correction_ppb=450_000,
+            samples=((0, 29_491_200), (0, 29_491_200)),
+            host_ppm=450.0,
+        )
+        self.assertIn("guest_ppm=+450.000", self.check(unclamped))
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Linux's required correction of \+450\.000 ppm is within its limit, "
+            "so this phase does not exercise it",
+        ):
+            self.check(
+                self.report(
+                    frequency_ppb=449_500,
+                    correction_ppb=450_000,
+                    samples=((0, 29_491_200),),
+                    host_ppm=450.0,
+                ),
+                limit=True,
+            )
+        # And the other phases must not reach it, which leaves no rate to check.
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"reaches its limit \(frequency_limited=1\), so this phase cannot "
+            "check the guest's rate",
+        ):
+            self.check(limit)
+
+    def test_a_report_without_the_hook_or_a_sample_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "lack the test-hook flag"):
+            self.check(self.report(flags="0x00"))
+        with self.assertRaisesRegex(
+            RuntimeError, "reported 1 time samples for 1 measurement windows, not 2"
+        ):
+            self.check(self.report(samples=((0, 13_107_200),)))
+        with self.assertRaisesRegex(RuntimeError, "malformed guest report: KeyError"):
+            self.check(self.report().replace(f"tsc_hz={self.TSC_HZ} ", ""))
+        with self.assertRaisesRegex(RuntimeError, "no time state or sample"):
+            self.check("NVX-TIME-HOST-CORRECTION-SAMPLE: index=1 theta_ns=0\n")
+        failed = (
+            f"{microvm_tests.TIME_HOST_CORRECTION_STATE_PREFIX}frequency_ppb=0\n"
+            f"{microvm_tests.TIME_HOST_CORRECTION_SAMPLE_PREFIX}index=1 "
+            "nvx-time: portb\n"
+        )
+        with self.assertRaisesRegex(RuntimeError, "phase: "):
+            self.check(failed)
+
+    def test_the_probe_reads_the_hosts_own_correction(self):
+        probe = self.phase_report(-12.5, flags="0x00")
+        self.assertEqual(
+            microvm_tests.time_host_correction_host_ppm(probe, context="probe"), -12.5
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "probe: time sample flags 0x08 carry the test-hook flag, so a hook "
+            "altered the host's own correction",
+        ):
+            microvm_tests.time_host_correction_host_ppm(self.report(), context="probe")
+        failed = self.report(flags="0x00", failures=(0, 1))
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "probe: no measurement window was stable and conclusive: window 1: "
+            "nvx-time sample failed: index=1 flags=0x00 ",
+        ):
+            microvm_tests.time_host_correction_host_ppm(failed, context="probe")
+
+    def test_the_hooks_keep_the_ordinary_corrections_within_the_limit(self):
+        def hooks(host_ppm: float, tsc_hz: int = self.TSC_HZ) -> tuple[int, int, int]:
+            return microvm_tests.time_host_correction_hooks(host_ppm, tsc_hz)
+
+        self.assertEqual(hooks(0.0), (-200, -150, 900))
+        self.assertEqual(hooks(-12.4), (212, 162, -900))
+        self.assertEqual(hooks(400.0), (-600, -550, 900))
+        self.assertEqual(hooks(-400.0), (600, 550, -900))
+        # At OpenVMM's +/-10,000 ppm hook limit, use the boundary instead of
+        # generating the invalid -10,200 or +10,200 ppm hooks.
+        self.assertEqual(hooks(10_000.0), (-10_000, -10_000, 900))
+        self.assertEqual(hooks(-10_000.0), (10_000, 10_000, -900))
+        for host_ppm in (-499.9, -250.0, -150.0, -0.4, 0.4, 150.0, 250.0, 499.9):
+            boot, restore, limit = hooks(host_ppm)
+            for hook, size in ((boot, 200), (restore, 150)):
+                with self.subTest(host_ppm=host_ppm, hook=hook):
+                    # The published correction has the size, to the hook's
+                    # rounding, against the host's sign, and the hook is at
+                    # least as large.
+                    published = microvm_tests.time_host_correction_composed_ppm(
+                        host_ppm, hook
+                    )
+                    self.assertLessEqual(abs(abs(published) - size), 0.5)
+                    self.assertLess(published * host_ppm, 0)
+                    self.assertGreaterEqual(abs(hook), size)
+            with self.subTest(host_ppm=host_ppm, hook=limit):
+                # The limit phase's hook has the host's sign, and takes the
+                # published correction beyond Linux's limit.
+                self.assertGreater(limit * host_ppm, 0)
+                self.assertGreater(
+                    abs(
+                        microvm_tests.time_host_correction_composed_ppm(host_ppm, limit)
+                    ),
+                    500,
+                )
+                self.assertLessEqual(
+                    abs(limit), microvm_tests.OPENVMM_HOST_RATE_OFFSET_LIMIT_PPM
+                )
+        # Multiplication makes +10,500 with a -10,000 hook publish +395
+        # ppm, so it remains a valid ordinary phase. The negative boundary is
+        # asymmetric: -10,400 composed with +10,000 publishes -504 ppm.
+        self.assertEqual(hooks(10_500.0), (-10_000, -10_000, 900))
+        self.assertAlmostEqual(
+            microvm_tests.time_host_correction_composed_ppm(10_500.0, -10_000),
+            395.0,
+        )
+        self.assertEqual(hooks(-10_396.0), (10_000, 10_000, -900))
+        # At the ABI's minimum TSC rate, Linux's kHz rounding turns the
+        # otherwise valid -499.96 ppm boundary into -501.957 ppm.
+        with self.assertRaisesRegex(RuntimeError, "guest -501.957 ppm at 500000999 Hz"):
+            hooks(-10_396.0, 500_000_999)
+        # The opposite boundary publishes +500.930 ppm but needs only
+        # +498.931 ppm from Linux, so both the solver and checker accept it.
+        tsc_hz = 500_000_999
+        self.assertEqual(hooks(10_607.0, tsc_hz), (-10_000, -10_000, 900))
+        published = microvm_tests.time_host_correction_composed_ppm(10_607.0, -10_000)
+        required = microvm_tests.time_host_correction_guest_ppm(published, tsc_hz)
+        self.assertAlmostEqual(published, 500.93, places=3)
+        self.assertAlmostEqual(required, 498.931, places=3)
+        correction = round(published * 65_536)
+        boundary = self.report(
+            frequency_ppb=round(required * 1000),
+            correction_ppb=round(published * 1000),
+            samples=((1_000, correction), (1_000, correction)),
+            host_ppm=published,
+            tsc_hz=tsc_hz,
+        )
+        self.assertIn("frequency_ppb=498931", self.check(boundary))
+        for host_ppm in (10_607.0, -10_400.0):
+            with (
+                self.subTest(host_ppm=host_ppm),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "cannot be composed with Linux's rounded TSC rate below its "
+                    "500 ppm limit within OpenVMM's",
+                ),
+            ):
+                hooks(host_ppm)
+
+    def test_the_scenario_hooks_its_boot_and_each_restore(self):
+        # An unhooked cold boot's sample gives the host's own correction, against
+        # whose sign the cold boot and the first restore publish 200 and 150 ppm,
+        # within Linux's limit even on a host at 400 ppm, and with whose sign the
+        # limit phase's hook extends it past that limit.
+        for host_ppm, hooks in (
+            (0.0, (-200, -150, 900)),
+            (-100.0, (300, 250, -900)),
+            (400.0, (-600, -550, 900)),
+            (-400.0, (600, 550, -900)),
+            (10_000.0, (-10_000, -10_000, 900)),
+            (-10_000.0, (10_000, 10_000, -900)),
+            (10_500.0, (-10_000, -10_000, 900)),
+        ):
+            with self.subTest(host_ppm=host_ppm):
+                self.run_scenario(host_ppm, hooks)
+
+    def phase_report(self, ppm: float, *, flags: str = "0x08") -> str:
+        """Return the report of a guest that holds the published correction of
+        ``ppm``, within Linux's limit, and whose clock and host UTC run at it."""
+        correction = round(ppm * 65_536)
+        return self.report(
+            frequency_ppb=round(ppm * 1000) - 500,
+            correction_ppb=round(ppm * 1000),
+            samples=((1_000, correction), (1_000, correction)),
+            host_ppm=ppm,
+            flags=flags,
+        )
+
+    def run_scenario(self, host_ppm: float, hooks: tuple[int, int, int]) -> None:
+        commands: list[list[str]] = []
+        scripts: list[str] = []
+        limit_ppm = hooks[2]
+        limit_correction = round(
+            microvm_tests.time_host_correction_composed_ppm(host_ppm, limit_ppm)
+            * 65_536
+        )
+        held = 500_000 if limit_correction > 0 else -500_000
+
+        def published(command: Sequence[str]) -> float:
+            hook = command[command.index("--x-time-abi-test-hook") + 1]
+            return microvm_tests.time_host_correction_composed_ppm(
+                host_ppm, int(hook.removeprefix("host-rate-offset-ppm="))
+            )
+
+        def boot(
+            command: Sequence[str], script: str, *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            commands.append(list(command))
+            scripts.append(script)
+            if "--x-time-abi-test-hook" not in command:
+                return {"output": self.phase_report(host_ppm, flags="0x00")}
+            return {"output": self.phase_report(published(command))}
+
+        def restore(command: Sequence[str], **_kwargs: object) -> bytes:
+            commands.append(list(command))
+            if f"host-rate-offset-ppm={limit_ppm}" in command:
+                return self.report(
+                    frequency_ppb=held,
+                    correction_ppb=round(limit_correction * 1000 / 65_536),
+                    limited=1,
+                    samples=((0, limit_correction),),
+                ).encode()
+            return self.phase_report(published(command)).encode()
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(microvm_tests, "run_guest_script", side_effect=boot),
+            patch.object(microvm_tests, "capture_snapshot") as capture,
+            patch.object(microvm_tests, "_measure_restore", side_effect=restore),
+            patch.object(microvm_tests, "_check_restore_warp") as warp,
+            patch.object(microvm_tests, "_check_restore_status") as status,
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            microvm_tests.run_time_host_correction(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                memory_mib=256,
+                timeout=60,
+                output_dir=Path(temporary),
+            )
+        # The probe boots without the hook and takes its samples at once.
+        self.assertEqual(len(commands), 4)
+        self.assertNotIn("--x-time-abi-test-hook", commands[0])
+        self.assertIn("sleep 0\n", scripts[0])
+        self.assertIn("sleep 5\n", scripts[1])
+        self.assertEqual(
+            [
+                command[command.index("--x-time-abi-test-hook") + 1]
+                for command in commands[1:]
+            ],
+            [f"host-rate-offset-ppm={hook}" for hook in hooks],
+        )
+        # The capture runs without the hook, and its guest reports again after
+        # every restore, then runs the restore checks.
+        captured = capture.call_args.args[0]
+        self.assertNotIn("--x-time-abi-test-hook", captured)
+        self.assertTrue(
+            capture.call_args.kwargs["post_restore_script"].startswith(
+                microvm_tests.time_host_correction_script()
+            )
+        )
+        self.assertIn("--restore-snapshot", commands[2])
+        self.assertEqual((warp.call_count, status.call_count), (2, 2))
+        self.assertIn(
+            f"the host's own correction is {host_ppm:+.3f} ppm", stdout.getvalue()
+        )
+        self.assertIn(f"frequency_ppb={held} frequency_limited=1", stdout.getvalue())
 
 
 class DurationReportTests(unittest.TestCase):

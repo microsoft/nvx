@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::ErrorCode;
-use crate::contract::manifest_is_compatible;
+use crate::contract::manifest_mismatches;
 use crate::host::artifacts::{
     ArtifactDir, CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME,
     KERNEL_PROVENANCE_NAME, MANIFEST_NAME, OPENVMM_PROVENANCE_NAME, openvmm_executable,
@@ -165,15 +165,21 @@ pub(super) struct Plan {
     items: Vec<Item>,
     /// The guest artifacts of the checkout that the package does not declare.
     removals: Vec<PathBuf>,
-    /// Whether the package's manifest declares the contracts that this crate speaks.
-    compatible: bool,
+    /// How the package's manifest departs from the contracts that this crate speaks, one entry for
+    /// each field, as [`manifest_mismatches`] names it; none when it declares them all.
+    mismatches: Vec<String>,
 }
 
 impl Plan {
-    /// Returns whether the package's manifest declares the microVM ABI, control session, and
-    /// control contract that this crate speaks.
+    /// Returns whether the package's manifest declares the microVM ABI, time ABI, restore packet,
+    /// control session, and control contract that this crate speaks.
     pub(super) fn compatible(&self) -> bool {
-        self.compatible
+        self.mismatches.is_empty()
+    }
+
+    /// Returns how the package's manifest departs from the contracts that this crate speaks.
+    pub(super) fn mismatches(&self) -> &[String] {
+        &self.mismatches
     }
 }
 
@@ -235,7 +241,10 @@ pub(super) fn plan(package: &Path, dir: &ArtifactDir) -> Result<Plan> {
     Ok(Plan {
         items,
         removals,
-        compatible: manifest.as_ref().is_some_and(manifest_is_compatible),
+        mismatches: match &manifest {
+            Some(manifest) => manifest_mismatches(manifest),
+            None => vec![format!("no {MANIFEST_NAME}")],
+        },
     })
 }
 

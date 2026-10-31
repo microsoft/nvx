@@ -7,6 +7,7 @@ use serde_json::json;
 use super::*;
 use crate::contract::{
     CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION, MICROVM_ABI_VERSION,
+    RESTORE_PACKET_VERSION, TIME_ABI_VERSION,
 };
 
 /// Returns the manifest of a package that declares the guests of `sections` and, if
@@ -15,6 +16,8 @@ fn manifest(sections: &[&str], compatible: bool) -> Value {
     let mut manifest = json!({
         "openvmm": {
             "microvm_abi_version": MICROVM_ABI_VERSION,
+            "time_abi_version": TIME_ABI_VERSION,
+            "restore_packet_version": RESTORE_PACKET_VERSION,
             "control_session_protocol_version": CONTROL_SESSION_PROTOCOL_VERSION,
             "control_contract_revision": if compatible { CONTROL_CONTRACT_REVISION } else { "other" },
         },
@@ -211,7 +214,14 @@ fn a_package_of_other_contracts_installs_but_is_reported() {
     let directory = tempfile::tempdir().unwrap();
     let package = package(directory.path(), &["linux", "alpine"], false);
     let dir = checkout(directory.path());
-    assert!(!plan(&package, &dir).unwrap().compatible());
+    let plan = plan(&package, &dir).unwrap();
+    assert!(!plan.compatible());
+    assert_eq!(
+        plan.mismatches(),
+        [format!(
+            "control_contract_revision: expected \"{CONTROL_CONTRACT_REVISION}\", found \"other\""
+        )]
+    );
 }
 
 #[test]
@@ -555,6 +565,7 @@ fn a_package_without_a_manifest_ships_every_guest_artifact_but_the_scratch_templ
     let dir = checkout(directory.path());
     let plan = plan(&package, &dir).unwrap();
     assert!(!plan.compatible());
+    assert_eq!(plan.mismatches(), [format!("no {MANIFEST_NAME}")]);
     assert_eq!(plan.removals, [dir.artifact("ubuntu-smoke-scratch.ext4")]);
     assert_eq!(
         plan.items.len(),

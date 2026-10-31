@@ -9,8 +9,9 @@ use nix::libc;
 use super::Errno;
 
 /// The discipline status of the frequency and slew adjustments: the phase-locked loop, with
-/// offsets in nanoseconds rather than microseconds.
-const PLL_NANOSECONDS: i32 = libc::STA_PLL | libc::STA_NANO;
+/// offsets in nanoseconds rather than microseconds, and with its frequency held, so that it slews
+/// only the phase and keeps the frequency correction that the discipline sets from the host's.
+const PLL_NANOSECONDS: i32 = libc::STA_PLL | libc::STA_NANO | libc::STA_FREQHOLD;
 
 /// A change to the wall clock's discipline, or a query of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,48 +25,57 @@ pub(crate) enum ClockAdjustment {
         /// Nonnegative nanoseconds that complete the step.
         nanoseconds: i64,
     },
-    /// Sets the frequency correction and selects the phase-locked loop in nanosecond mode.
-    Frequency {
-        /// Frequency correction in parts per million, scaled by 2^16.
-        scaled_ppm: i64,
-    },
-    /// Slews the wall clock by `offset_ns` through the phase-locked loop in nanosecond mode, and
-    /// sets its time constant and error estimates.
+    /// Sets the frequency correction and the error estimates, and selects the phase-locked loop
+    /// in nanosecond mode with its frequency held.
+    Frequency(FrequencyHold),
+    /// Clears the phase offset through the phase-locked loop in nanosecond mode, without changing
+    /// its status or held frequency correction.
+    ClearPhase,
+    /// Slews the wall clock by `offset_ns` through the phase-locked loop in nanosecond mode, with
+    /// its frequency held, and sets its time constant, the frequency correction, and the error
+    /// estimates.
     Slew {
         /// Phase offset in nanoseconds.
         offset_ns: i64,
         /// Time constant of the phase-locked loop.
         time_constant: i64,
-        /// Maximum error in microseconds.
-        maximum_error_us: i64,
-        /// Estimated error in microseconds.
-        estimated_error_us: i64,
+        /// The frequency correction and the error estimates.
+        hold: FrequencyHold,
     },
+}
+
+/// The frequency correction that the discipline holds, and the error estimates that it sets with
+/// it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrequencyHold {
+    /// Frequency correction in parts per million, scaled by 2^16.
+    pub(crate) scaled_ppm: i64,
+    /// Maximum error in microseconds.
+    pub(crate) maximum_error_us: i64,
+    /// Estimated error in microseconds.
+    pub(crate) estimated_error_us: i64,
 }
 
 impl ClockAdjustment {
     /// Returns the `modes` bits with which `adjtimex` applies the adjustment.
     pub(crate) fn modes(self) -> u32 {
+        /// The modes that set the held frequency and the error estimates.
+        const HOLD: u32 =
+            libc::ADJ_FREQUENCY | libc::ADJ_MAXERROR | libc::ADJ_ESTERROR | libc::ADJ_STATUS;
         match self {
             Self::Query => 0,
             Self::Step { .. } => libc::ADJ_SETOFFSET | libc::ADJ_NANO,
-            Self::Frequency { .. } => libc::ADJ_FREQUENCY | libc::ADJ_STATUS,
-            Self::Slew { .. } => {
-                libc::ADJ_OFFSET
-                    | libc::ADJ_MAXERROR
-                    | libc::ADJ_ESTERROR
-                    | libc::ADJ_STATUS
-                    | libc::ADJ_TIMECONST
-                    | libc::ADJ_NANO
-            }
+            Self::Frequency(_) => HOLD,
+            Self::ClearPhase => libc::ADJ_OFFSET | libc::ADJ_NANO,
+            Self::Slew { .. } => HOLD | libc::ADJ_OFFSET | libc::ADJ_TIMECONST | libc::ADJ_NANO,
         }
     }
 
     /// Returns the discipline status that the adjustment sets, or zero for one that sets none.
     pub(crate) fn status(self) -> i32 {
         match self {
-            Self::Query | Self::Step { .. } => 0,
-            Self::Frequency { .. } | Self::Slew { .. } => PLL_NANOSECONDS,
+            Self::Query | Self::Step { .. } | Self::ClearPhase => 0,
+            Self::Frequency(_) | Self::Slew { .. } => PLL_NANOSECONDS,
         }
     }
 }
@@ -75,6 +85,15 @@ impl ClockAdjustment {
 pub(crate) struct ClockDiscipline {
     /// Frequency correction in parts per million, scaled by 2^16.
     pub(crate) scaled_ppm: i64,
+}
+
+impl FrequencyHold {
+    /// Writes the frequency correction and the error estimates to `value`.
+    fn apply(self, value: &mut libc::timex) {
+        value.freq = self.scaled_ppm;
+        value.maxerror = self.maximum_error_us;
+        value.esterror = self.estimated_error_us;
+    }
 }
 
 /// Applies `adjustment` to the wall clock's discipline, which needs `CAP_SYS_TIME` for any
@@ -96,17 +115,16 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
                 tv_usec: nanoseconds,
             };
         }
-        ClockAdjustment::Frequency { scaled_ppm } => value.freq = scaled_ppm,
+        ClockAdjustment::Frequency(hold) => hold.apply(&mut value),
+        ClockAdjustment::ClearPhase => {}
         ClockAdjustment::Slew {
             offset_ns,
             time_constant,
-            maximum_error_us,
-            estimated_error_us,
+            hold,
         } => {
             value.offset = offset_ns;
             value.constant = time_constant;
-            value.maxerror = maximum_error_us;
-            value.esterror = estimated_error_us;
+            hold.apply(&mut value);
         }
     }
     // SAFETY: `value` is initialized, and writable for the kernel's reply, for the call.
@@ -128,22 +146,46 @@ mod tests {
             seconds: -2,
             nanoseconds: 872_000_000,
         };
-        let frequency = ClockAdjustment::Frequency { scaled_ppm: 65_536 };
+        let hold = FrequencyHold {
+            scaled_ppm: 65_536,
+            maximum_error_us: 2,
+            estimated_error_us: 1,
+        };
+        let frequency = ClockAdjustment::Frequency(hold);
+        let clear_phase = ClockAdjustment::ClearPhase;
         let slew = ClockAdjustment::Slew {
             offset_ns: 5,
             time_constant: 4,
-            maximum_error_us: 1,
-            estimated_error_us: 1,
+            hold,
         };
         assert_eq!((step.modes(), step.status()), (0x2100, 0));
-        assert_eq!((frequency.modes(), frequency.status()), (0x0012, 0x2001));
-        assert_eq!((slew.modes(), slew.status()), (0x203d, 0x2001));
+        // The status holds the frequency, `STA_FREQHOLD`, with the loop and nanoseconds.
+        assert_eq!((frequency.modes(), frequency.status()), (0x001e, 0x2081));
+        // Clearing the nanosecond offset changes neither status nor frequency.
+        assert_eq!((clear_phase.modes(), clear_phase.status()), (0x2001, 0));
+        assert_eq!((slew.modes(), slew.status()), (0x203f, 0x2081));
         assert_eq!(
             (
                 ClockAdjustment::Query.modes(),
                 ClockAdjustment::Query.status()
             ),
             (0, 0)
+        );
+    }
+
+    #[test]
+    fn a_hold_writes_the_frequency_and_the_error_estimates() {
+        // SAFETY: all zeros is the kernel's baseline for every field of `timex`.
+        let mut value: libc::timex = unsafe { std::mem::zeroed() };
+        FrequencyHold {
+            scaled_ppm: -13_107_200,
+            maximum_error_us: 70,
+            estimated_error_us: 3,
+        }
+        .apply(&mut value);
+        assert_eq!(
+            (value.freq, value.maxerror, value.esterror),
+            (-13_107_200, 70, 3)
         );
     }
 

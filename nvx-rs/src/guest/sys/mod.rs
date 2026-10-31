@@ -88,7 +88,7 @@ pub(crate) use nix::sys::time::{TimeSpec, TimeValLike};
 pub(crate) use clock::{Clock, clock_time, monotonic_ms, sleep_once, sleep_until_monotonic};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use clock::{monotonic_ns, syscall_monotonic_nanoseconds};
-pub(crate) use discipline::{ClockAdjustment, ClockDiscipline, adjust_clock};
+pub(crate) use discipline::{ClockAdjustment, ClockDiscipline, FrequencyHold, adjust_clock};
 #[cfg(test)]
 pub(crate) use entry::Simulation;
 pub(crate) use entry::{EntryChild, file_size};

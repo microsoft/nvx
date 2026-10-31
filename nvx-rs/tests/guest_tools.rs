@@ -1208,13 +1208,12 @@ fn time_packet(
     rate_deviation: i32,
     downtime_ns: u64,
 ) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(32 + ranges.len() * 16 + 64);
+    let mut packet = Vec::with_capacity(24 + ranges.len() * 16 + 64);
     packet.extend_from_slice(b"OVR");
-    packet.extend_from_slice(&[4, flags, online, ranges.len() as u8, 0]);
+    packet.extend_from_slice(&[5, flags, online, ranges.len() as u8, 0]);
     packet.extend_from_slice(&generation.to_le_bytes());
     packet.extend_from_slice(&rate_deviation.to_le_bytes());
     packet.extend_from_slice(&downtime_ns.to_le_bytes());
-    packet.extend_from_slice(&TIME_UTC_NS.to_le_bytes());
     for &(start, length) in ranges {
         packet.extend_from_slice(&start.to_le_bytes());
         packet.extend_from_slice(&length.to_le_bytes());
@@ -1222,6 +1221,30 @@ fn time_packet(
     packet.extend(0_u8..64);
     packet
 }
+
+/// Returns a time sample of version 2, as OpenVMM encodes it: of `generation`, at host UTC
+/// `utc_ns`, with the test-hook flag, the version, flags, status, and reserved byte that
+/// `header` gives, guest TSC 123456789 paired within 640 ns, disruption 3, a correction of
+/// -6552945 scaled ppm bounded by 66, and no maximum error.
+#[cfg(target_arch = "x86_64")]
+fn time_sample(header: [u8; 4], generation: u32, utc_ns: u64) -> Vec<u8> {
+    let mut sample = header.to_vec();
+    sample.extend_from_slice(&generation.to_le_bytes());
+    sample.extend_from_slice(&utc_ns.to_le_bytes());
+    sample.extend_from_slice(&123_456_789_u64.to_le_bytes());
+    sample.extend_from_slice(&640_u32.to_le_bytes());
+    sample.extend_from_slice(&3_u32.to_le_bytes());
+    sample.extend_from_slice(&(-6_552_945_i64).to_le_bytes());
+    sample.extend_from_slice(&66_u32.to_le_bytes());
+    sample.extend_from_slice(&u32::MAX.to_le_bytes());
+    sample
+}
+
+/// What the `sample` hook prints for [`time_sample`] of generation 4 at [`TIME_UTC_NS`].
+#[cfg(target_arch = "x86_64")]
+const TIME_SAMPLE_OUTPUT: &[u8] = b"ok flags=8 generation=4 status=synchronized \
+    utc_ns=1790841600123456789 tsc=123456789 pairing_ns=640 disruption=3 correction=-6552945 \
+    correction_bound=66 max_error_us=unknown\n";
 
 #[cfg(target_arch = "x86_64")]
 fn time_fixture(directory: &Path, name: &str, contents: impl AsRef<[u8]>) -> PathBuf {
@@ -1260,8 +1283,7 @@ fn time_test_mode_decodes_packets_samples_and_arithmetic() {
             Some(0),
             concat!(
                 "ok flags=13 online=4 ranges=0 generation=3 ",
-                "rate_deviation=-13107200 frequency=13107200 ",
-                "downtime_ns=30000000000 utc_ns=1790841600123456789 ",
+                "rate_deviation=-13107200 downtime_ns=30000000000 ",
                 "generation_id=000102030405060708090a0b0c0d0e0f\n"
             )
             .as_bytes()
@@ -1311,40 +1333,51 @@ fn time_test_mode_decodes_packets_samples_and_arithmetic() {
             .any(|window| window == b" ranges=0 ")
     );
 
-    let mut sample = Vec::new();
-    sample.extend_from_slice(&[1, 8]);
-    sample.extend_from_slice(&0_u16.to_le_bytes());
-    sample.extend_from_slice(&4_u32.to_le_bytes());
-    sample.extend_from_slice(&TIME_UTC_NS.to_le_bytes());
-    let sample = time_fixture(directory.path(), "sample", sample);
-    assert_eq!(
-        time_hook("sample", &sample, &["4"]),
-        (
-            Some(0),
-            b"ok flags=8 generation=4 utc_ns=1790841600123456789\n".to_vec(),
-            Vec::new(),
-        )
+    let sample = time_fixture(
+        directory.path(),
+        "sample",
+        time_sample([2, 8, 1, 0], 4, TIME_UTC_NS),
     );
     assert_eq!(
-        run("nvx-time", ["test", "pair", "1000", "3000", "5000"]),
+        time_hook("sample", &sample, &["4"]),
+        (Some(0), TIME_SAMPLE_OUTPUT.to_vec(), Vec::new())
+    );
+    assert_eq!(
+        run(
+            "nvx-time",
+            [
+                "test",
+                "pair",
+                "1000000000000000000",
+                "1000000",
+                "500",
+                "999000",
+                "1002000",
+                "999999999999000000",
+                "1004000",
+                "40",
+                "2000000000",
+                "0"
+            ]
+        ),
         (
             Some(0),
-            b"theta_ns=3000 epsilon_ns=1000\n".to_vec(),
+            b"theta_ns=1002000 epsilon_ns=1524\n".to_vec(),
             Vec::new()
         )
     );
     assert_eq!(
-        run("nvx-time", ["test", "frequency", "-40000000"]),
+        run("nvx-time", ["test", "frequency", "39321600", "2100000000"]),
         (
             Some(0),
-            b"frequency=32768000 ppb=500000\n".to_vec(),
+            b"frequency=32768000 ppb=500000 limited=1\n".to_vec(),
             Vec::new()
         )
     );
     assert_eq!(
         run(
             "nvx-time",
-            ["test", "correction", "-1128000000", "10", "slow"]
+            ["test", "correction", "-1128000000", "10", "slow", "0", "0"]
         ),
         (
             Some(0),
@@ -1429,7 +1462,10 @@ fn time_test_mode_checks_logs_timer_state_and_status() {
             "discontinuities=0\nlast_discontinuity=none\nlast_step_ns=0\n",
             "last_step_realtime_ns=0\nlast_downtime_ns=0\n",
             "last_downtime_source=none\nsynchronized=1\noffset_ns=-42\n",
-            "uncertainty_ns=1800\nfrequency_ppb=0\nsamples=0\n",
+            "uncertainty_ns=1800\nfrequency_ppb=0\nfrequency_limited=0\n",
+            "host_status=unknown\nhost_correction_ppb=0\n",
+            "host_correction_bound_ppb=unknown\nhost_max_error_us=unknown\n",
+            "host_disruption=0\nsamples=0\n",
             "rejected_samples=0\nlast_sample_error=none\nviolations=0\n"
         )
         .as_bytes()
@@ -1696,7 +1732,8 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
         16,
         &(2_592_000_u64 * 1_000_000_000 + 1).to_le_bytes(),
     ));
-    rejected.push(mutate(24, &0_u64.to_le_bytes()));
+    // A packet of version 4, which carried host UTC, is refused.
+    rejected.push(mutate(3, &[4]));
     rejected.push(time_packet(0x02, 0, &[(0, 0)], 1, 0, 0));
     rejected.push(time_packet(0x02, 0, &[(u64::MAX - 4095, 8192)], 1, 0, 0));
     for (index, packet) in rejected.iter().enumerate() {
@@ -1761,25 +1798,18 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
         .starts_with(b"error G_REPAIR_GENERATION ")
     );
 
-    let sample_path =
-        |name: &str, version: u8, flags: u8, reserved: u16, generation: u32, utc: u64| {
-            let mut sample = vec![version, flags];
-            sample.extend_from_slice(&reserved.to_le_bytes());
-            sample.extend_from_slice(&generation.to_le_bytes());
-            sample.extend_from_slice(&utc.to_le_bytes());
-            time_fixture(directory.path(), name, sample)
-        };
-    let good = sample_path("sample-good", 1, 8, 0, 4, TIME_UTC_NS);
-    assert_eq!(
-        time_hook("sample", &good, &["4"]).1,
-        b"ok flags=8 generation=4 utc_ns=1790841600123456789\n"
-    );
+    let sample_path = |name: &str, header: [u8; 4], generation: u32, utc: u64| {
+        time_fixture(directory.path(), name, time_sample(header, generation, utc))
+    };
+    let good = sample_path("sample-good", [2, 8, 1, 0], 4, TIME_UTC_NS);
+    assert_eq!(time_hook("sample", &good, &["4"]).1, TIME_SAMPLE_OUTPUT);
     for (index, path) in [
-        sample_path("sample-version", 2, 0, 0, 0, TIME_UTC_NS),
-        sample_path("sample-flags", 1, 1, 0, 0, TIME_UTC_NS),
-        sample_path("sample-reserved", 1, 0, 1, 0, TIME_UTC_NS),
-        sample_path("sample-utc", 1, 0, 0, 0, 0),
-        sample_path("sample-generation", 1, 0, 0, 3, TIME_UTC_NS),
+        sample_path("sample-version", [1, 0, 0, 0], 0, TIME_UTC_NS),
+        sample_path("sample-flags", [2, 1, 0, 0], 0, TIME_UTC_NS),
+        sample_path("sample-status", [2, 0, 4, 0], 0, TIME_UTC_NS),
+        sample_path("sample-reserved", [2, 0, 0, 1], 0, TIME_UTC_NS),
+        sample_path("sample-utc", [2, 0, 0, 0], 0, 0),
+        sample_path("sample-generation", [2, 0, 0, 0], 3, TIME_UTC_NS),
     ]
     .iter()
     .enumerate()
