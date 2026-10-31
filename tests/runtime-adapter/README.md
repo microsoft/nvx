@@ -1184,17 +1184,29 @@ requires, since a binding names it. The VM's kernel command line is
 to NVX's init agent, which the guest agent replaces, then the plan's boot
 tokens of the root alone: the image's, such as
 `nvx_layer=distro,0xd0003000,erofs:UUID`, and the upper's, such as
-`nvx_scratch=0xd0006000,ext4`. OpenVMM's arguments are the plan's, which
-attach the [checked files](#the-checked-handoff) of the image and the scratch
-as block devices, and the VM's [network](#networks), if any, then those of the
-export of the launch's [shares](#shares), if any, then the VM in one process,
-NVX's default memory, the kernel, the initramfs, that command line, no virtio
-console, the control console with the launch capability on standard input,
-and the outcome report. They name no workload identity, and no managed
-lifecycle: OpenVMM only checks the arguments of the managed lifecycle and
-labels its outcome report with it, and only NVX's init agent reads its boot
-token. A VM without a layered root keeps the managed lifecycle, with which
-NVX's `/init` starts the managed agent, which the guest agent replaces.
+`nvx_scratch=0xd0006000,ext4`. OpenVMM's arguments, which NVX's
+`PreparedLaunch::adapter_arguments` renders, are the plan's, which attach the
+[checked files](#the-checked-handoff) of the image and the scratch as block
+devices, and the VM's [network](#networks), if any, then those of the export of
+the launch's [shares](#shares), if any, then those of the launch's
+`nvx::host::launch::VmmLaunch`: the VM in one process, NVX's default memory,
+the kernel, the initramfs, that command line, no virtio console, the control
+console with the launch capability on standard input, and the outcome report.
+They name no workload identity, and no managed lifecycle: OpenVMM only checks
+the arguments of the managed lifecycle and labels its outcome report with it,
+and only NVX's init agent reads its boot token. A VM without a layered root
+keeps the managed lifecycle, with which NVX's `/init` starts the managed agent,
+which the guest agent replaces.
+
+The command line that runs OpenVMM with them must fit the 32,767 UTF-16 code
+units of a Windows process command line, on every host. As it plans, before it
+touches the store, a launch checks with NVX's
+`SandboxPlan::check_adapter_launch`, through `LayeredLaunch::check_command_line`,
+that the plan's arguments, those of the export, and the kernel command line
+leave `VmmLaunch::RESERVE` of them to the rest of the launch, so that it
+refuses a network or shares that leave too little; and
+`PreparedLaunch::adapter_arguments` refuses a complete command line that does
+not fit, before it spawns the VMM.
 
 The boot tokens carry only what NVX's boot contract defines. The launch sends
 the rest in the [root configuration](#root-configurations), once it attaches:
@@ -2528,7 +2540,8 @@ Windows:
 - the checked handoff: OpenVMM's arguments, which name the checked files, on
   Linux by the descriptors that OpenVMM inherits and on Windows by their final
   paths, with no workload identity and no managed lifecycle, and what OpenVMM
-  inherits, over a scratch image and over RAM;
+  inherits, over a scratch image and over RAM, and a command line too long for
+  Windows to start OpenVMM with, which the launch refuses on every host;
 - the launches that the checks refuse: of images that the store does not
   stage, of another format or identity than the staged image's, and of an
   image that changed, a scratch image that another file replaced, and an image
@@ -2542,9 +2555,11 @@ Windows:
   first, hides a denied path, and narrows the writes of a read-only directory
   to the read-write share inside it, and an export that shows an allowed path
   inside a hidden one again; the root configuration that announces the
-  table, OpenVMM's arguments that attach the export, a launch that shares
-  nothing, the export that the launch verifies before it prepares anything,
-  and a table that the guest would refuse;
+  table, OpenVMM's arguments that attach the export, an export whose hidden
+  paths leave the rest of OpenVMM's command line too little, which the launch
+  refuses as it is planned, a launch that shares nothing, the export that the
+  launch verifies before it prepares anything, and a table that the guest would
+  refuse;
 - the shares that a launch refuses: outside the authorized directories, also
   through a link on Linux, without any, with an authorized directory that is
   not one, or a share that is not accessible; reserved trees that are not
@@ -3012,8 +3027,8 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `layered_launch` | `a_launch_refuses_images_that_are_not_staged_or_changed_since` | A launch refuses images that the store does not stage, of another format or identity, and images that changed, were replaced, or are gone since they were staged |
 | `layered_launch` | `a_launch_refuses_shares_that_it_cannot_export` | A launch refuses shares outside the authorized directories, inaccessible ones, reserved targets, a read-only share inside a read-write one, a hidden path that does not exist, and an allowed path inside no hidden one |
 | `layered_launch` | `a_launch_renders_each_element_of_its_network_through_the_plan` | OpenVMM's arguments of each element of a policy, after the plan's block devices, the proxy's URL, and the publication of listeners, as NVX's lowering renders them |
-| `layered_launch` | `a_launch_shares_host_paths_inside_the_authorized_directories` | The export of shares inside an authorized directory maps each at its target, parents first, hides a denied path, shows an allowed path inside a hidden one again, and comes with the root configuration and OpenVMM's arguments that attach it |
-| `layered_launch` | `a_layered_launch_hands_openvmm_the_checked_images` | OpenVMM's arguments name the checked files, by the descriptors that OpenVMM inherits on Linux and by their final paths on Windows, without a workload identity or a managed lifecycle |
+| `layered_launch` | `a_launch_shares_host_paths_inside_the_authorized_directories` | The export of shares inside an authorized directory maps each at its target, parents first, hides a denied path, shows an allowed path inside a hidden one again, and comes with the root configuration and OpenVMM's arguments that attach it; an export whose hidden paths leave the rest of the command line too little is refused as the launch is planned |
+| `layered_launch` | `a_layered_launch_hands_openvmm_the_checked_images` | OpenVMM's arguments name the checked files, by the descriptors that OpenVMM inherits on Linux and by their final paths on Windows, without a workload identity or a managed lifecycle, and a command line too long for Windows is refused |
 | `layered_launch` | `a_layered_launch_passes_what_the_guest_checks_as_it_is` | A launch passes on the options that the guest checks as they are |
 | `layered_launch` | `a_layered_launch_plans_its_blocks_and_boot_tokens_with_the_adapters_plan` | The adapter's plan of a layered launch: its block devices and boot tokens, without the sandbox profile's settings, and the sizes of the images |
 | `layered_launch` | `an_execution_finds_the_url_of_its_network_s_proxy_in_its_environment` | An execution's start carries the URL of its network's proxy after its own entries, keeps its own proxy settings, and is unchanged without a proxy |

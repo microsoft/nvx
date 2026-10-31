@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
 use nvx::host::filesystem::GUEST_EXPORT;
+use nvx::host::launch::{DEFAULT_MEMORY_MIB, PROCESS_COMMAND_LINE_LIMIT, VmmLaunch};
 use nvx::host::network;
 use nvx::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use nvx::host::sandbox::{SandboxNetwork, SandboxPlan};
@@ -74,6 +75,21 @@ fn staged_launch(distro: &Path, scratch: Option<&Path>) -> LayeredLaunch {
     let staged = Staged::stage(distro, ImageFormat::Erofs, identity(), scratch).unwrap();
     launch.bindings = staged.bindings(&launch.plan);
     launch
+}
+
+/// Returns the inputs of a launch on KVM, with NVX's default memory, of the kernel `kernel` and
+/// the initramfs `initramfs`, whose control console listens on `/run/control.sock`, and whose
+/// outcome report goes to `report`.
+fn vmm<'a>(kernel: &'a Path, initramfs: &'a Path, report: &'a Path) -> VmmLaunch<'a> {
+    VmmLaunch {
+        openvmm: Path::new("openvmm"),
+        hypervisor: Hypervisor::Kvm,
+        memory_mib: DEFAULT_MEMORY_MIB,
+        kernel,
+        initrd: initramfs,
+        endpoint: "/run/control.sock",
+        report,
+    }
 }
 
 /// Returns how OpenVMM's arguments name `file`, which a check opened at `path`: on Linux, by the
@@ -291,14 +307,9 @@ fn a_layered_launch_hands_openvmm_the_checked_images() {
     let scratch_file = checked(prepared.scratch().unwrap().file(), &scratch);
     let (kernel, initramfs) = (directory.join("vmlinux"), directory.join("initramfs"));
     let report = directory.join("outcome.json");
-    let arguments = launch.openvmm_arguments(
-        &prepared,
-        Hypervisor::Kvm,
-        &kernel,
-        &initramfs,
-        "/run/control.sock",
-        &report,
-    );
+    let arguments = launch
+        .openvmm_arguments(&prepared, &vmm(&kernel, &initramfs, &report))
+        .unwrap();
     let expected: [OsString; 24] = [
         "--machine".into(),
         "microvm".into(),
@@ -332,20 +343,23 @@ fn a_layered_launch_hands_openvmm_the_checked_images() {
         prepared.inherited().len(),
         if cfg!(windows) { 3 } else { 2 }
     );
+    // A command line with which Windows would not start OpenVMM is refused, on every host.
+    let long = PathBuf::from("o".repeat(PROCESS_COMMAND_LINE_LIMIT));
+    let launching = VmmLaunch {
+        openvmm: &long,
+        ..vmm(&kernel, &initramfs, &report)
+    };
+    let error = launch.openvmm_arguments(&prepared, &launching).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
 
     // An upper in RAM hands OpenVMM the image alone, and claims nothing, while the image's checks
     // exclude no other.
     let ram = staged_launch(&distro, None);
     let prepared = ram.prepare().unwrap();
     assert!(prepared.scratch().is_none());
-    let arguments = ram.openvmm_arguments(
-        &prepared,
-        Hypervisor::Kvm,
-        &kernel,
-        &initramfs,
-        "/run/control.sock",
-        &report,
-    );
+    let arguments = ram
+        .openvmm_arguments(&prepared, &vmm(&kernel, &initramfs, &report))
+        .unwrap();
     let distro_file = checked(prepared.distro().file(), &distro);
     let blocks: [OsString; 4] = [
         "--machine".into(),
@@ -646,14 +660,16 @@ fn a_launch_shares_host_paths_inside_the_authorized_directories() {
     let config = String::from_utf8(launch.config.encode()).unwrap();
     assert!(config.contains("\nmapping-count=4\n"), "{config}");
     let prepared = launch.prepare().unwrap();
-    let arguments = launch.openvmm_arguments(
-        &prepared,
-        Hypervisor::Kvm,
-        &directory.join("vmlinux"),
-        &directory.join("initramfs"),
-        "/run/control.sock",
-        &directory.join("outcome.json"),
-    );
+    let arguments = launch
+        .openvmm_arguments(
+            &prepared,
+            &vmm(
+                &directory.join("vmlinux"),
+                &directory.join("initramfs"),
+                &directory.join("outcome.json"),
+            ),
+        )
+        .unwrap();
     let exported = export
         .openvmm_arguments()
         .into_iter()
@@ -663,6 +679,25 @@ fn a_launch_shares_host_paths_inside_the_authorized_directories() {
     assert_eq!(arguments[4..4 + exported.len()], exported[..]);
     assert_eq!(arguments[4 + exported.len()], "--single-process");
     drop(prepared);
+
+    // The launch leaves the rest of OpenVMM's command line room as it is planned, and refuses an
+    // export whose hidden paths would leave it too little.
+    launch.check_command_line().unwrap();
+    let mut hiding = export.clone();
+    hiding.children[0].denied = (0..128)
+        .map(|index| dir.join(format!("{index:03}-{}", "d".repeat(240))))
+        .collect();
+    hiding.children[0].denied_identities = vec![None; 128];
+    let mut crowded = staged_launch(&distro, None);
+    crowded.share(hiding).unwrap();
+    let error = crowded.check_command_line().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("held in reserve for the rest of the launch"),
+        "{error}"
+    );
 
     // A launch that shares nothing announces no table, and attaches no export.
     let mut nothing = HostFsSharing::default();
@@ -946,14 +981,9 @@ fn a_launch_renders_each_element_of_its_network_through_the_plan() {
     // the checked files and come first.
     let arguments = |launch: &LayeredLaunch| {
         let prepared = launch.prepare().unwrap();
-        let mut arguments = launch.openvmm_arguments(
-            &prepared,
-            Hypervisor::Kvm,
-            &kernel,
-            &initramfs,
-            "/run/control.sock",
-            &report,
-        );
+        let mut arguments = launch
+            .openvmm_arguments(&prepared, &vmm(&kernel, &initramfs, &report))
+            .unwrap();
         let distro_file = checked(prepared.distro().file(), &distro);
         let scratch_file = checked(prepared.scratch().unwrap().file(), &scratch);
         let blocks: [OsString; 6] = [

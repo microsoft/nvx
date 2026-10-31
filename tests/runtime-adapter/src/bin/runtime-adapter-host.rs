@@ -1839,7 +1839,10 @@ fn launch(
             if let Some(export) = layered.sharing.plan()? {
                 launch.share(export)?;
             }
-            Ok(launch.with_network(network))
+            let launch = launch.with_network(network);
+            // And a network or shares that leave the rest of OpenVMM's command line too little.
+            launch.check_command_line()?;
+            Ok(launch)
         })
         .transpose()
         .map_err(|error| describe(&error))?;
@@ -1880,14 +1883,7 @@ fn launch(
         let outcome = store.outcome_path();
         let (arguments, kernel_command_line) = match layered.as_ref().zip(prepared.as_ref()) {
             Some((layered, prepared)) => (
-                layered.openvmm_arguments(
-                    prepared,
-                    hypervisor,
-                    &spec.kernel,
-                    &spec.initrd,
-                    endpoint,
-                    &outcome,
-                ),
+                layered.openvmm_arguments(prepared, &spec.vmm_launch(endpoint, &outcome))?,
                 prepared.kernel_command_line().to_owned(),
             ),
             None => (
