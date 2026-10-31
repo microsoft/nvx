@@ -1528,11 +1528,15 @@ class ReportTests(unittest.TestCase):
 
 
 class _FakeResponse(io.BytesIO):
-    def __init__(self, payload: bytes, link: str | None = None) -> None:
+    def __init__(
+        self, payload: bytes, link: str | None = None, length: int | None = None
+    ) -> None:
         super().__init__(payload)
         self.headers = Message()
         if link is not None:
             self.headers["Link"] = link
+        if length is not None:
+            self.headers["Content-Length"] = str(length)
 
     def __enter__(self) -> _FakeResponse:
         return self
@@ -1733,6 +1737,24 @@ class GitHubClientTests(unittest.TestCase):
             ],
         )
 
+    def test_pages_end_where_the_caller_needs_no_more(self):
+        opener = _FakeOpener(
+            _FakeResponse(
+                b'{"jobs": [1, 2]}',
+                '<https://api.example.test/next?page=2>; rel="next"',
+            )
+        )
+        client, _ = self.client(opener)
+        pages: list[Sequence[object]] = []
+
+        def until(page: Sequence[object]) -> bool:
+            pages.append(page)
+            return True
+
+        self.assertEqual(client.get_all("/jobs", key="jobs", until=until), [1, 2])
+        self.assertEqual(pages, [[1, 2]])
+        self.assertEqual(len(opener.requests), 1)
+
     def test_reads_retry_transient_failures_and_writes_do_not(self):
         opener = _FakeOpener(
             _http_error(502),
@@ -1786,6 +1808,51 @@ class GitHubClientTests(unittest.TestCase):
         opener = _FakeOpener(_FakeResponse(b"\xef\xbb\xbfshort"))
         client, _ = self.client(opener)
         self.assertEqual(client.get_log("/log"), "short")
+
+    def test_downloads_write_the_content_within_their_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "archive.zip"
+            opener = _FakeOpener(_http_error(502), _FakeResponse(b"zip bytes"))
+            client, sleeps = self.client(opener)
+            client.download("/repos/o/r/actions/artifacts/1/zip", destination, limit=9)
+            self.assertEqual(destination.read_bytes(), b"zip bytes")
+            self.assertEqual(sleeps, [2.0])
+            self.assertEqual(
+                opener.requests[-1].full_url,
+                "https://api.example.test/repos/o/r/actions/artifacts/1/zip",
+            )
+
+            # Content beyond the limit is refused, and never retried.
+            opener = _FakeOpener(_FakeResponse(b"0123456789"))
+            client, _ = self.client(opener)
+            with self.assertRaisesRegex(ScriptError, "GET /a sent more than 9 bytes"):
+                client.download("/a", destination, limit=9)
+            self.assertEqual(len(opener.requests), 1)
+
+            # A response that ends before the length that it announced, as when
+            # its connection broke, is retried, and fails once every attempt
+            # did, so that its run can be persisted later.
+            opener = _FakeOpener(
+                _FakeResponse(b"zip", length=9), _FakeResponse(b"zip bytes", length=9)
+            )
+            client, sleeps = self.client(opener)
+            client.download("/a", destination, limit=9)
+            self.assertEqual(destination.read_bytes(), b"zip bytes")
+            self.assertEqual(sleeps, [2.0])
+            opener = _FakeOpener(*(_FakeResponse(b"zip", length=9) for _ in range(3)))
+            client, _ = self.client(opener)
+            with self.assertRaisesRegex(
+                ScriptError,
+                "GitHub GET /a failed: the response ended after 3 of its 9 bytes",
+            ):
+                client.download("/a", destination, limit=9)
+            self.assertEqual(len(opener.requests), 3)
+
+            # A deleted artifact fails with its status.
+            client, _ = self.client(_FakeOpener(_http_error(410, "Gone")))
+            with self.assertRaises(GitHubApiError) as raised:
+                client.download("/a", destination, limit=9)
+            self.assertEqual(raised.exception.status, 410)
 
     def test_the_default_opener_drops_the_token_on_redirects(self):
         with patch.object(nightly_ci, "credential_safe_opener") as opener:

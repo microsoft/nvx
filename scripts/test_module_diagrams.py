@@ -987,11 +987,21 @@ def _step(job: str, name: str) -> dict[str, Any]:
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_merges_and_pull_requests_that_change_the_inputs_draw(self):
+    def test_nights_and_pull_requests_that_change_the_inputs_draw(self):
         workflow = _workflow()
         # YAML 1.1 reads the key `on` as true.
         triggers = cast(dict[str, Any], workflow.get("on", workflow.get(True)))
-        self.assertEqual(set(triggers), {"push", "pull_request", "workflow_dispatch"})
+        # dev takes the diagrams once a night, with the nightly full run of CI,
+        # rather than with each merge, since every push to dev outside the
+        # merge queue rebuilds every queued merge group.
+        self.assertEqual(
+            set(triggers), {"pull_request", "schedule", "workflow_dispatch"}
+        )
+        ci = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        )
+        ci_triggers = cast(dict[str, Any], ci.get("on", ci.get(True)))
+        self.assertEqual(triggers["schedule"], ci_triggers["schedule"])
         constants = sys.modules[diagrams.GuestRustBuildConstants.__module__].__file__
         inputs = [
             f"{diagrams.MANIFEST.parent.relative_to(REPO_ROOT).as_posix()}/**",
@@ -1001,7 +1011,6 @@ class WorkflowTests(unittest.TestCase):
             Path(cast(str, constants)).resolve().relative_to(REPO_ROOT).as_posix(),
             WORKFLOW.relative_to(REPO_ROOT).as_posix(),
         ]
-        self.assertEqual(triggers["push"], {"branches": ["dev"], "paths": inputs})
         self.assertEqual(triggers["pull_request"]["branches"], ["dev"])
         self.assertEqual(triggers["pull_request"]["paths"], inputs)
         self.assertIn("ready_for_review", triggers["pull_request"]["types"])
@@ -1105,15 +1114,14 @@ class WorkflowTests(unittest.TestCase):
         )
 
     def test_the_publication_compares_the_paths_that_start_the_workflow(self):
-        # A change of any other path starts no run that would draw it again.
+        # A change of any other path starts no pull request run that would
+        # draw it.
         workflow = _workflow()
         triggers = cast(dict[str, Any], workflow.get("on", workflow.get(True)))
         commit = _step("publish", "Commit the diagrams to dev")
         inputs = cast(str, commit["env"]["INPUTS"]).split()
-        for event in ("push", "pull_request"):
-            with self.subTest(event=event):
-                paths = cast(list[str], triggers[event]["paths"])
-                self.assertEqual(inputs, [path.removesuffix("/**") for path in paths])
+        paths = cast(list[str], triggers["pull_request"]["paths"])
+        self.assertEqual(inputs, [path.removesuffix("/**") for path in paths])
         self.assertIn(
             'git diff --quiet "${DRAWN}" HEAD -- "${inputs[@]}"', commit["run"]
         )

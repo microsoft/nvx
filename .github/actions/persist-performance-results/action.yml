@@ -1,34 +1,52 @@
 name: Persist performance results
-description: Append benchmark results to tracked performance history
+description: >-
+  Append the performance results that the dev pushes recorded, and the history
+  lacks, to the tracked performance history in one commit
 
 inputs:
   branch:
     description: Branch that stores the performance history
     required: false
     default: dev
+  token:
+    description: >-
+      Token that can list the workflow's runs and download their artifacts
+    required: true
 
 runs:
   using: composite
   steps:
-    - name: Prepare performance results
-      uses: ./.github/actions/prepare-performance-results
-
     - name: Persist results
       shell: bash
       env:
         TARGET_BRANCH: ${{ inputs.branch }}
+        GH_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
+        downloads="${RUNNER_TEMP}/performance-results"
+        summary="${RUNNER_TEMP}/performance-history.md"
+        message="${RUNNER_TEMP}/performance-history-message.txt"
+        trap 'if [[ -f "${summary}" ]]; then cat "${summary}" >> "${GITHUB_STEP_SUMMARY}"; fi' EXIT
 
         for attempt in 1 2 3; do
           git fetch origin "${TARGET_BRANCH}"
           git checkout -B performance-persist "origin/${TARGET_BRANCH}"
-          python3 scripts/nvx.py performance persist \
-            --source-dir data/results \
+          # Each attempt reports and commits only what it persisted.
+          rm -f "${summary}" "${message}"
+          # A refused run fails the job, once the results of the other runs
+          # are committed.
+          status=0
+          python3 scripts/nvx.py persist-recorded-performance \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --branch "${TARGET_BRANCH}" \
             --history-dir data \
-            --require-host
+            --download-dir "${downloads}" \
+            --require-host \
+            --summary "${summary}" \
+            --message "${message}" || status=$?
           git add data/*.csv
 
           unexpected_paths="$(
@@ -43,13 +61,12 @@ runs:
 
           if git diff --cached --quiet; then
             echo "No new performance results to persist"
-            exit 0
+            exit "${status}"
           fi
 
-          git commit --no-verify \
-            -m "data: update performance baselines (${GITHUB_SHA}) [skip ci]"
+          git commit --no-verify -F "${message}"
           if git push origin "HEAD:${TARGET_BRANCH}"; then
-            exit 0
+            exit "${status}"
           fi
           if [ "${attempt}" -eq 3 ]; then
             echo "::error::Failed to persist performance results after ${attempt} attempts"

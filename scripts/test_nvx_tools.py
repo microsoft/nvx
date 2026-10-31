@@ -61,6 +61,7 @@ from nvx_tools import (  # noqa: E402
     openvmm_process,
     openvmm_test_shards,
     performance,
+    performance_history,
     release,
     runtime_adapter_tests,
     shard_plans,
@@ -8837,9 +8838,10 @@ class CiConfigurationTests(unittest.TestCase):
                     re.findall(r"needs\.openvmm-changes\.outputs\.([a-z-]+)", job),
                     [output],
                 )
-        # The release and the performance persistence accept skipped VMM-test
-        # jobs only when the change selected no VMM tests (#690).
-        gates = ("release", "performance-persist")
+        # The release and the recording of the performance results accept
+        # skipped VMM-test jobs only when the change selected no VMM tests
+        # (#690).
+        gates = ("release", "performance-record")
         for job_name in gates:
             with self.subTest(job=job_name):
                 self.assertEqual(
@@ -9075,9 +9077,10 @@ class CiConfigurationTests(unittest.TestCase):
                     )
                     self.assertEqual({job: results[job] for job in expected}, expected)
                     self.assertEqual(results["required-status-check"], "success")
-                    # Only a dev push publishes its release and persists its
-                    # results, and only once its platform jobs ran; only a
-                    # full run publishes the crate.
+                    # Only a dev push publishes its release and records its
+                    # performance results, and only once its platform jobs
+                    # ran; only a full run publishes the crate and persists the
+                    # results that the pushes recorded.
                     published = (
                         "success"
                         if event_name == "push"
@@ -9085,7 +9088,11 @@ class CiConfigurationTests(unittest.TestCase):
                         else "skipped"
                     )
                     self.assertEqual(results["release"], published)
-                    self.assertEqual(results["performance-persist"], published)
+                    self.assertEqual(results["performance-record"], published)
+                    self.assertEqual(
+                        results["performance-persist"],
+                        "success" if event_name in ci.CI_FULL_RUN_EVENTS else "skipped",
+                    )
                     self.assertEqual(
                         results["crate-package"],
                         "success" if event_name in ci.CI_FULL_RUN_EVENTS else "skipped",
@@ -9176,15 +9183,27 @@ class CiConfigurationTests(unittest.TestCase):
                     self.assertIn("github.event_name != 'merge_group' &&", job)
                 self.assertNotIn("github.event_name == 'push'", job)
 
-    def test_ci_full_runs_do_not_publish_persist_or_save_caches(self):
+    def test_ci_full_runs_do_not_publish_record_or_save_caches(self):
         github = BuildConstants.REPO_ROOT / ".github"
         workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
         push_to_dev = (
             "github.event_name == 'push' &&\n        github.ref == 'refs/heads/dev' &&"
         )
-        for job_name in ("release", "performance-persist"):
+        for job_name in ("release", "performance-record"):
             with self.subTest(job=job_name):
                 self.assertIn(push_to_dev, _workflow_job(workflow, job_name))
+        # A full run of dev persists the results that the dev pushes recorded,
+        # whatever its own jobs do, and never its own results.
+        persist = yaml.safe_load(workflow)["jobs"]["performance-persist"]
+        self.assertEqual(
+            _expression_conjuncts(persist["if"]),
+            [
+                "( github.event_name == 'schedule' || "
+                "github.event_name == 'workflow_dispatch' )",
+                "github.ref == 'refs/heads/dev'",
+            ],
+        )
+        self.assertNotIn("needs", persist)
         gate = yaml.safe_load(workflow)["jobs"]["performance-gate"]
         self.assertEqual(
             _expression_conjuncts(gate["if"])[:2],
@@ -9478,8 +9497,8 @@ class CiConfigurationTests(unittest.TestCase):
             (("data/windows-whp-virtual-machine-host.json",), benchmarks_only, None),
             (("VERSION",), benchmarks_only, None),
             (("LICENSE",), benchmarks_only, None),
-            # Inputs of jobs that every change runs, or that only a push runs
-            # and only after the platform and package jobs.
+            # Inputs of jobs that every change runs, or that only a push runs,
+            # after the platform and package jobs, or only a full run.
             ((".github/actions/validate-nvx/action.yml",), select(), benchmarks_only),
             ((".github/actions/check-quality/action.yml",), select(), benchmarks_only),
             (
@@ -9506,6 +9525,9 @@ class CiConfigurationTests(unittest.TestCase):
             # Only the merge groups' GitHub-hosted job that cancels the runs
             # of superseded groups runs the merge queue module.
             (("scripts/nvx_tools/merge_queue.py",), select(), benchmarks_only),
+            # Only the full runs' job that persists the performance results
+            # that the dev pushes recorded runs the performance history module.
+            (("scripts/nvx_tools/performance_history.py",), select(), benchmarks_only),
             (("scripts/nvx_tools/crate_release.py",), select(), benchmarks_only),
             (("scripts/publish_nvx_crate.py",), select(), benchmarks_only),
             (("scripts/test_crate_release.py",), select(), benchmarks_only),
@@ -10044,6 +10066,7 @@ class CiConfigurationTests(unittest.TestCase):
             self.assertNotIn("scripts/nvx_tools/nightly_ci.py", inputs)
             self.assertNotIn("scripts/nvx_tools/crate_release.py", inputs)
             self.assertNotIn("scripts/nvx_tools/merge_queue.py", inputs)
+            self.assertNotIn("scripts/nvx_tools/performance_history.py", inputs)
         # The VMM-test jobs also take the modules of the nvx.py commands that
         # they run, with every file that those read beside them, such as the
         # partition of the WHP tests' shards (#691).
@@ -11154,12 +11177,12 @@ python3() {
 
         release_job = _workflow_job(workflow, "release")
         performance_gate_job = _workflow_job(workflow, "performance-gate")
-        performance_persist_job = _workflow_job(workflow, "performance-persist")
+        performance_record_job = _workflow_job(workflow, "performance-record")
         for job_name in consumers:
             self.assertIn(f"      - {job_name}", release_job)
             self.assertIn(f"needs.{job_name}.result", release_job)
-            self.assertIn(f"      - {job_name}", performance_persist_job)
-            self.assertIn(f"needs.{job_name}.result", performance_persist_job)
+            self.assertIn(f"      - {job_name}", performance_record_job)
+            self.assertIn(f"needs.{job_name}.result", performance_record_job)
         for job_name in ("platform-kvm", "platform-mshv", "platform-whp"):
             self.assertIn(job_name, performance_gate_job)
             self.assertIn(f"needs.{job_name}.result", performance_gate_job)
@@ -11431,8 +11454,10 @@ python3() {
         )
         jobs = workflow["jobs"]
         # Reading runs and downloading their artifacts needs actions: read,
-        # which no other job but the rehearsal and the release gets, and
-        # cancelling the runs of superseded merge groups actions: write.
+        # which no other job but the rehearsal, the release, and the
+        # persistence of the performance results that the dev pushes recorded
+        # gets, and cancelling the runs of superseded merge groups actions:
+        # write.
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(
             {
@@ -11445,6 +11470,7 @@ python3() {
                 "distro-artifacts": "read",
                 "guest-artifact-reuse": "read",
                 "release": "read",
+                "performance-persist": "read",
                 "cancel-superseded-merge-groups": "write",
             },
         )
@@ -11767,7 +11793,7 @@ python3() {
                 self.assertIn("    needs: [openvmm-changes]\n", job)
                 self.assertIn("    runs-on: ubuntu-latest\n", job)
                 self.assertEqual(condition(job), condition(artifacts))
-        for consumer in ("release", "performance-persist"):
+        for consumer in ("release", "performance-record"):
             with self.subTest(consumer=consumer):
                 job = _workflow_job(workflow, consumer)
                 self.assertIn("      - debug-kernel\n", job)
@@ -11813,7 +11839,7 @@ python3() {
                 self.assertIn("debug-kernel: true", job)
                 self.assertIn("needs.debug-kernel.result == 'success' &&", job)
                 self.assertIn(job_name, ci.REQUIRED_CI_RESULT_ENVIRONMENTS)
-                for consumer in ("release", "performance-persist"):
+                for consumer in ("release", "performance-record"):
                     self.assertIn(
                         f"needs.{job_name}.result == 'success' ||\n"
                         f"          needs.{job_name}.result == 'skipped'",
@@ -12212,7 +12238,7 @@ python3() {
         for job_name in ci.REQUIRED_CI_MICROVM_TEST_JOBS:
             with self.subTest(job=job_name):
                 self.assertIn(job_name, ci.REQUIRED_CI_RESULT_ENVIRONMENTS)
-                for consumer in ("release", "performance-persist"):
+                for consumer in ("release", "performance-record"):
                     job = _workflow_job(workflow, consumer)
                     self.assertIn(f"      - {job_name}\n", job)
                     self.assertIn(
@@ -12541,7 +12567,7 @@ python3() {
             + "          )\n"
             "        ) &&\n"
         )
-        for consumer in ("release", "performance-persist"):
+        for consumer in ("release", "performance-record"):
             job = _workflow_job(workflow, consumer)
             with self.subTest(consumer=consumer):
                 self.assertIn("      - openvmm-changes\n", job)
@@ -13029,7 +13055,7 @@ python3() {
         ):
             with self.subTest(job=job_name):
                 self.assertNotIn("nvx-cli", _workflow_job(workflow, job_name))
-        for consumer in ("release", "performance-persist", "required-status-check"):
+        for consumer in ("release", "performance-record", "required-status-check"):
             job = _workflow_job(workflow, consumer)
             for cli in ci.REQUIRED_CI_CLI_JOBS:
                 with self.subTest(consumer=consumer, cli=cli):
@@ -13274,7 +13300,7 @@ python3() {
                 self.assertNotIn("nvx-rs", _workflow_job(workflow, job_name))
         self.assertNotIn("nvx-rs", platform)
         # Only a pushed commit whose builds succeeded is released or recorded.
-        for consumer in ("release", "performance-persist", "required-status-check"):
+        for consumer in ("release", "performance-record", "required-status-check"):
             job = _workflow_job(workflow, consumer)
             for nvx_rs_build in ci.REQUIRED_CI_NVX_RS_BUILD_JOBS:
                 with self.subTest(consumer=consumer, build=nvx_rs_build):
@@ -13464,9 +13490,9 @@ python3() {
         # The package jobs take no hypervisor and no benchmark runner.
         self.assertIn("    runs-on: ${{ fromJSON(inputs.runner) }}\n", packaging)
         self.assertNotIn("validate-runner", packaging)
-        # The release ships the packages, and the performance history records
-        # a commit only when it could be released.
-        for consumer in ("release", "performance-persist", "required-status-check"):
+        # The release ships the packages, and the performance results are
+        # recorded for a commit only when it could be released.
+        for consumer in ("release", "performance-record", "required-status-check"):
             job = _workflow_job(workflow, consumer)
             for package_job in ci.REQUIRED_CI_PACKAGE_JOBS:
                 with self.subTest(consumer=consumer, package=package_job):
@@ -14565,17 +14591,29 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
         )
 
     def test_performance_history_tracks_the_expected_hosts(self):
-        actions = BuildConstants.REPO_ROOT / ".github" / "actions"
+        github = BuildConstants.REPO_ROOT / ".github"
+        actions = github / "actions"
+        workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
         persist = (actions / "persist-performance-results" / "action.yml").read_text(
             encoding="utf-8"
         )
         gate = (actions / "gate-performance" / "action.yml").read_text(encoding="utf-8")
 
-        # dev refuses results whose recorded host differs from data/.
-        self.assertIn(
-            "            --history-dir data \\\n            --require-host\n",
-            _composite_action_step(persist, "Persist results"),
+        # dev refuses results whose recorded host differs from data/: the push
+        # that measures them checks them against its history, and the full run
+        # that persists them against the hosts of their commit.
+        check = _workflow_step(
+            workflow, "performance-record", "Check the results against the history"
         )
+        self.assertIn('cp data/*.csv data/*-host.json "${history}/"', check)
+        self.assertIn(
+            '            --history-dir "${history}" \\\n            --require-host\n',
+            check,
+        )
+        command = _composite_action_step(persist, "Persist results")
+        self.assertIn("persist-recorded-performance", command)
+        self.assertIn("            --history-dir data \\\n", command)
+        self.assertIn("            --require-host \\\n", command)
         # The gate compares the pull request's expected hosts with the base
         # branch's, so that a new host must reset its series.
         load = _composite_action_script(gate, "Load base branch performance history")
@@ -14587,6 +14625,66 @@ Write-Output (Get-ExpectedRunnerLabels -BenchmarkRunner)
         command = _composite_action_step(gate, "Gate on performance regressions")
         self.assertIn("--baseline-dir data/baseline", command)
         self.assertIn("--history-reset-dir data", command)
+
+    def test_dev_pushes_record_the_results_that_full_runs_persist(self):
+        # Every push to dev outside the merge queue rebuilds every queued
+        # merge group, so a dev push uploads its performance results, and a
+        # full run of dev commits those that the history lacks (#1053).
+        github = BuildConstants.REPO_ROOT / ".github"
+        text = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        jobs = yaml.safe_load(text)["jobs"]
+        record = jobs["performance-record"]
+        self.assertEqual(record["permissions"], {"contents": "read"})
+        self.assertNotIn("secrets.", _workflow_job(text, "performance-record"))
+        steps = {step["name"]: step for step in record["steps"]}
+        self.assertEqual(
+            steps["Prepare performance results"]["uses"],
+            "./.github/actions/prepare-performance-results",
+        )
+        self.assertEqual(
+            steps["Upload performance results"]["with"],
+            {
+                "name": performance_history.RESULTS_ARTIFACT_PREFIX
+                + "${{ github.run_id }}",
+                "path": "data/results",
+                "if-no-files-found": "error",
+                "overwrite": True,
+                "retention-days": performance_history.RESULTS_RETENTION_DAYS,
+            },
+        )
+        persist = jobs["performance-persist"]
+        self.assertEqual(
+            persist["permissions"], {"actions": "read", "contents": "read"}
+        )
+        checkout, persistence = persist["steps"]
+        self.assertEqual(checkout["with"]["ref"], "dev")
+        self.assertEqual(
+            checkout["with"]["ssh-key"],
+            "${{ secrets.PERFORMANCE_PERSIST_DEPLOY_KEY }}",
+        )
+        self.assertEqual(
+            persistence["uses"], "./.github/actions/persist-performance-results"
+        )
+        self.assertEqual(
+            persistence["with"], {"branch": "dev", "token": "${{ github.token }}"}
+        )
+        # Only the persistence holds the key that pushes to dev.
+        self.assertEqual(
+            [
+                name
+                for name in jobs
+                if "PERFORMANCE_PERSIST_DEPLOY_KEY" in _workflow_job(text, name)
+            ],
+            ["performance-persist"],
+        )
+        action = github / "actions" / "persist-performance-results" / "action.yml"
+        script = _composite_action_script(
+            action.read_text(encoding="utf-8"), "Persist results"
+        )
+        self.assertIn('--download-dir "${downloads}"', script)
+        self.assertIn('--message "${message}" || status=$?', script)
+        self.assertIn('git commit --no-verify -F "${message}"', script)
+        self.assertNotIn("prepare-performance-results", action.read_text("utf-8"))
 
     def test_ci_remeasures_only_unstable_lifecycle_results(self):
         action = (
@@ -16018,6 +16116,281 @@ function python {
                     self._assert_restore_attempts(
                         root, platform, suite, processor_counts, measured, published
                     )
+
+
+# The nvx.py of the repository that PersistPerformanceResultsActionTests
+# persists to. Its persist-recorded-performance logs its arguments and whether
+# reports of an earlier attempt remain, pushes the commit of the clone
+# STUB_RACE to dev at its first call, adds a row to the history and writes the
+# message of its commit when STUB_PERSIST is set, stages the file STUB_STAGE,
+# writes its summary, and exits with STUB_STATUS.
+_PERSIST_STUB = r"""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+arguments = sys.argv[1:]
+summary = Path(arguments[arguments.index("--summary") + 1])
+message = Path(arguments[arguments.index("--message") + 1])
+log = Path(os.environ["STUB_LOG"])
+attempt = len(log.read_text().splitlines()) + 1 if log.exists() else 1
+with log.open("a") as stream:
+    reports = {"summary": summary.exists(), "message": message.exists()}
+    stream.write(json.dumps({"arguments": arguments, **reports}) + "\n")
+race = os.environ.get("STUB_RACE")
+if race and attempt == 1:
+    subprocess.run(["git", "-C", race, "push", "origin", "HEAD:dev"], check=True)
+if os.environ.get("STUB_PERSIST"):
+    with open("data/linux-kvm.csv", "a") as stream:
+        stream.write(f"row {attempt}\n")
+    message.write_text(
+        f"data: update performance baselines ({attempt}) [skip ci]\n\nRun {attempt}.\n"
+    )
+stage = os.environ.get("STUB_STAGE")
+if stage:
+    Path(stage).parent.mkdir(parents=True, exist_ok=True)
+    Path(stage).write_text("staged\n")
+    subprocess.run(["git", "add", stage], check=True)
+summary.write_text(f"summary {attempt}\n")
+sys.exit(int(os.environ.get("STUB_STATUS", "0")))
+"""
+_BASH = shutil.which("bash")
+_GIT = shutil.which("git")
+_PYTHON3 = shutil.which("python3")
+
+
+@unittest.skipIf(
+    os.name == "nt" or _BASH is None or _GIT is None or _PYTHON3 is None,
+    "runs the action's bash step with Git and python3 on POSIX hosts",
+)
+class PersistPerformanceResultsActionTests(unittest.TestCase):
+    """Runs the step of the persist-performance-results action, which commits
+    the results of the dev pushes that a full run of dev persists, in a clone
+    of a local repository whose nvx.py stubs persist-recorded-performance."""
+
+    WORKFLOW_REF = "microsoft/nvx/.github/workflows/ci.yml@refs/heads/dev"
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        config = self.root / "gitconfig"
+        config.write_text("", encoding="utf-8")
+        # Git reads neither the host's configuration nor an identity from the
+        # environment, as on a runner, where the step sets its own.
+        self.environment = {
+            **{
+                name: value
+                for name, value in os.environ.items()
+                if not name.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_", "STUB_"))
+            },
+            "GIT_CONFIG_GLOBAL": str(config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        self.origin = self.root / "origin.git"
+        self.git("init", "--bare", "--initial-branch=dev", str(self.origin))
+        self.seed = self.root / "seed"
+        self.git("clone", str(self.origin), str(self.seed))
+        for name, text in (
+            ("scripts/nvx.py", _PERSIST_STUB),
+            ("data/linux-kvm.csv", "header\n"),
+            ("data/linux-kvm-host.json", "{}\n"),
+        ):
+            (self.seed / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.seed / name).write_text(text, encoding="utf-8")
+        self.seeded = self.commit("seed")
+        self.git("-C", str(self.seed), "push", "origin", "HEAD:dev")
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "persist-performance-results"
+            / "action.yml"
+        )
+        self.script = _composite_action_script(
+            action.read_text(encoding="utf-8"), "Persist results"
+        )
+
+    def git(self, *arguments: str) -> str:
+        return subprocess.run(
+            [cast(str, _GIT), *arguments],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    def commit(self, subject: str) -> str:
+        """Commits the seed clone's files, and returns the commit."""
+        self.git("-C", str(self.seed), "add", "--all")
+        self.git(
+            "-C",
+            str(self.seed),
+            "-c",
+            "user.name=Seed",
+            "-c",
+            "user.email=seed@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            subject,
+        )
+        return self.git("-C", str(self.seed), "rev-parse", "HEAD").strip()
+
+    def persist(self, **stub: str) -> subprocess.CompletedProcess[str]:
+        """Runs the step in a new clone of dev, as a new job does."""
+        run = Path(tempfile.mkdtemp(dir=self.root))
+        checkout = run / "checkout"
+        self.git("clone", "--branch", "dev", str(self.origin), str(checkout))
+        self.temporary = run / "temp"
+        self.temporary.mkdir()
+        self.summary = run / "summary.md"
+        self.log = run / "calls.jsonl"
+        return subprocess.run(
+            [cast(str, _BASH), "--noprofile", "--norc", "-eo", "pipefail"]
+            + ["-c", self.script],
+            cwd=checkout,
+            env={
+                **self.environment,
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "microsoft/nvx",
+                "GITHUB_STEP_SUMMARY": str(self.summary),
+                "GITHUB_WORKFLOW_REF": self.WORKFLOW_REF,
+                "RUNNER_TEMP": str(self.temporary),
+                "STUB_LOG": str(self.log),
+                "TARGET_BRANCH": "dev",
+                **stub,
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def calls(self) -> list[dict[str, object]]:
+        """The calls of persist-recorded-performance: their arguments, and
+        whether the reports of an earlier attempt remained."""
+        lines = self.log.read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines]
+
+    def call(self) -> dict[str, object]:
+        """A call of a new attempt."""
+        temporary = self.temporary
+        arguments = [
+            "persist-recorded-performance",
+            "--repository",
+            "microsoft/nvx",
+            "--workflow-ref",
+            self.WORKFLOW_REF,
+            "--branch",
+            "dev",
+            "--history-dir",
+            "data",
+            "--download-dir",
+            f"{temporary}/performance-results",
+            "--require-host",
+            "--summary",
+            f"{temporary}/performance-history.md",
+            "--message",
+            f"{temporary}/performance-history-message.txt",
+        ]
+        return {"arguments": arguments, "summary": False, "message": False}
+
+    def dev(self, revision: str = "dev") -> str:
+        return self.git("-C", str(self.origin), "rev-parse", revision).strip()
+
+    def show(self, *arguments: str) -> str:
+        return self.git("-C", str(self.origin), *arguments)
+
+    def assert_persisted(self, attempt: int, parent: str) -> None:
+        """Asserts that dev's newest commit, after `parent`, persists the
+        results of the attempt `attempt` alone, with its message."""
+        self.assertEqual(self.dev("dev~1"), parent)
+        self.assertEqual(
+            self.show("log", "-1", "--format=%an%n%B", "dev").rstrip("\n"),
+            "github-actions[bot]\n"
+            f"data: update performance baselines ({attempt}) [skip ci]\n"
+            f"\nRun {attempt}.",
+        )
+        self.assertEqual(
+            self.show("diff", "--name-only", "dev~1", "dev").split(),
+            ["data/linux-kvm.csv"],
+        )
+        self.assertEqual(
+            self.show("show", "dev:data/linux-kvm.csv"), f"header\nrow {attempt}\n"
+        )
+
+    def test_new_results_are_committed_to_dev_in_one_commit(self):
+        result = self.persist(STUB_PERSIST="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), [self.call()])
+        self.assert_persisted(1, self.seeded)
+        self.assertEqual(self.summary.read_text(encoding="utf-8"), "summary 1\n")
+
+    def test_refused_runs_fail_the_step_once_the_others_are_committed(self):
+        result = self.persist(STUB_PERSIST="1", STUB_STATUS="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assert_persisted(1, self.seeded)
+        self.assertEqual(self.summary.read_text(encoding="utf-8"), "summary 1\n")
+
+    def test_no_new_results_commit_nothing_and_keep_the_status(self):
+        for status in (0, 1):
+            with self.subTest(status=status):
+                result = self.persist(STUB_STATUS=str(status))
+                self.assertEqual(
+                    result.returncode, status, result.stdout + result.stderr
+                )
+                self.assertIn("No new performance results to persist", result.stdout)
+                self.assertEqual(self.dev(), self.seeded)
+                self.assertEqual(
+                    self.summary.read_text(encoding="utf-8"), "summary 1\n"
+                )
+
+    def test_an_attempt_that_dev_outran_is_redone_on_the_newest_dev(self):
+        # Another commit reaches dev while the first attempt persists, so that
+        # dev refuses its push.
+        newer = self.commit("newer")
+        result = self.persist(STUB_PERSIST="1", STUB_RACE=str(self.seed))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The second attempt persists again from the newer commit, without
+        # the reports of the first.
+        self.assertEqual(self.calls(), [self.call(), self.call()])
+        self.assert_persisted(2, newer)
+        self.assertEqual(self.summary.read_text(encoding="utf-8"), "summary 2\n")
+
+    def test_three_refused_pushes_fail_the_step(self):
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        result = self.persist(STUB_PERSIST="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "::error::Failed to persist performance results after 3 attempts",
+            result.stdout,
+        )
+        self.assertEqual(self.calls(), [self.call()] * 3)
+        self.assertEqual(self.dev(), self.seeded)
+        self.assertEqual(self.summary.read_text(encoding="utf-8"), "summary 3\n")
+
+    def test_changes_outside_the_history_are_refused(self):
+        for path in (
+            "README.md",
+            "data/linux-kvm-host.json",
+            "data/nested/linux-kvm.csv",
+        ):
+            with self.subTest(path=path):
+                result = self.persist(STUB_PERSIST="1", STUB_STAGE=path)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(
+                    "::error::Refusing to persist changes outside data/*.csv:\n"
+                    f"{path}\n",
+                    result.stdout,
+                )
+                self.assertEqual(self.dev(), self.seeded)
+                self.assertEqual(
+                    self.summary.read_text(encoding="utf-8"), "summary 1\n"
+                )
 
 
 class BuildConstantsTests(unittest.TestCase):

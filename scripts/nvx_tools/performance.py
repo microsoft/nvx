@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import functools
 import json
 import math
 import os
@@ -2436,15 +2437,38 @@ def _committed_results(top: Path, revision: str, relative: str) -> list[Result]:
         return read_results(path)
 
 
+# A commit ID names the same file forever, so a batch that checks the results of
+# many commits against one history reads each of its versions once.
+@functools.cache
 def _dimension_counts(
     top: Path,
     revision: str,
     relative: str,
 ) -> Counter[tuple[str, int, int, str]]:
+    """Return the rows of each dimension of ``relative`` at the commit ID
+    ``revision``. Callers must not modify the cached counts."""
     return Counter(
         _dimension_key(result, "")
         for result in _committed_results(top, revision, relative)
     )
+
+
+@functools.cache
+def _measurement_line(top: Path, measured: str, head: str) -> frozenset[str]:
+    """Return the commits on the path from the commit ID ``measured`` to the
+    commit ID ``head``: those that descend from ``measured``, itself included,
+    and lead to ``head``."""
+    ancestor = subprocess.run(
+        ["git", "-C", str(top), "merge-base", "--is-ancestor", measured, head],
+        check=False,
+        capture_output=True,
+    )
+    if ancestor.returncode != 0:
+        raise PerformanceError(
+            f"result commit {measured} is not an ancestor of the target history"
+        )
+    later = _git(top, "rev-list", "--ancestry-path", f"{measured}..{head}").split()
+    return frozenset([measured, *later])
 
 
 def _reset_dimensions_since(
@@ -2465,65 +2489,39 @@ def _reset_dimensions_since(
         relative = history_path.resolve().relative_to(top).as_posix()
     except ValueError as error:
         raise PerformanceError(f"{history_path} is outside the git checkout") from error
-    ancestor = subprocess.run(
-        ["git", "-C", str(top), "merge-base", "--is-ancestor", commit, "HEAD"],
-        check=False,
-        capture_output=True,
-    )
-    if ancestor.returncode != 0:
-        raise PerformanceError(
-            f"result commit {commit} is not an ancestor of the target history"
-        )
+    head = _git(top, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    line = _measurement_line(top, commit, head)
     # Compare each commit with its own parents: a side branch forked before
     # ``commit`` can hold fewer rows than ``commit`` without having reset them.
+    # Only a commit whose history differs from a parent's can drop rows, and
+    # --full-history lists each such commit, merges included, however few
+    # of the other commits change the history.
     later = _git(
         top,
         "log",
         "--reverse",
         "--full-history",
-        "--sparse",
         "--format=%H %P",
-        f"{commit}..HEAD",
+        f"{commit}..{head}",
         "--",
         relative,
     ).splitlines()
     resets: set[tuple[str, int, int, str]] = set()
-    for line in later:
-        revision, *parents = line.split()
+    for entry in later:
+        revision, *parents = entry.split()
         # Ignore commits on side branches that are not part of the history
         # leading from the measurement to HEAD, even if later merged/reverted.
-        if not _on_measurement_line(top, revision, commit):
+        if revision not in line:
             continue
         current = _dimension_counts(top, revision, relative)
         for parent in parents:
             # A branch that neither predates nor follows the measurement can drop rows
             # that were already reset before it, so only the measurement's line counts.
-            if not _on_measurement_line(top, parent, commit):
+            if parent not in line:
                 continue
             before = _dimension_counts(top, parent, relative)
             resets.update(key for key, count in before.items() if current[key] < count)
     return resets
-
-
-def _on_measurement_line(top: Path, revision: str, measured: str) -> bool:
-    """Return whether ``revision`` is on the path from ``measured`` to HEAD."""
-    return all(
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(top),
-                "merge-base",
-                "--is-ancestor",
-                ancestor,
-                descendant,
-            ],
-            check=False,
-            capture_output=True,
-        ).returncode
-        == 0
-        for ancestor, descendant in ((measured, revision), (revision, "HEAD"))
-    )
 
 
 def _without_reset_rows(
@@ -2576,7 +2574,11 @@ def persist_results(
     excluded_metrics: Iterable[str] = (),
     require_host: bool = False,
     git_checkout: Path | None = None,
+    host_dir: Path | None = None,
 ) -> None:
+    """Append the results in ``source_dir`` that ``history_dir`` lacks to its
+    history, once their hosts match the expected hosts of ``host_dir``, by
+    default ``history_dir``'s own."""
     source_files = sorted(source_dir.glob("*.csv"))
     if not source_files:
         raise PerformanceError(f"no result CSV files found in {source_dir}")
@@ -2588,7 +2590,7 @@ def persist_results(
     _validate_result_files(source_files, loaded)
     _verify_result_hosts(
         source_dir,
-        history_dir,
+        history_dir if host_dir is None else host_dir,
         {result.platform for results in loaded.values() for result in results},
         require_host,
     )

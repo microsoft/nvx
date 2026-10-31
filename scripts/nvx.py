@@ -104,6 +104,9 @@ from nvx_tools.openvmm_test_shards import (
 )
 from nvx_tools.openvmm_test_shards import select_shard as select_openvmm_test_shard
 from nvx_tools.performance import configure_parser as configure_performance_parser
+from nvx_tools.performance_history import (
+    configure_parser as configure_performance_history_parser,
+)
 from nvx_tools.release import (
     collect_release_sources,
     create_release_archive,
@@ -750,6 +753,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="cancel the CI runs of the merge groups that the merge queue replaced",
     )
     configure_merge_queue_parser(superseded_groups)
+
+    recorded_performance = subparsers.add_parser(
+        "persist-recorded-performance",
+        help="persist the performance results that the CI runs of dev pushes recorded",
+    )
+    configure_performance_history_parser(recorded_performance)
 
     static_elf = subparsers.add_parser(
         "check-static-elf",

@@ -298,7 +298,7 @@ queue the most (see
 groups run it on KVM alone and `dev` pushes and full runs run it on every
 backend. Each job takes about five minutes on its own runner, in parallel with
 the other microVM jobs. The jobs gate the required status check, the
-development release, and performance persistence. The GitHub-hosted `debug-kernel` job
+development release, and the recording of the performance results. The GitHub-hosted `debug-kernel` job
 builds the debug kernel beside the other guest artifact jobs
 (`build-guest-artifacts` with `components: debug-kernel`) and caches it under its
 own key, so a kernel rebuild delays only the debug jobs, and a failed debug
@@ -565,14 +565,14 @@ Once the required artifacts are
 ready, benchmarks run in parallel with the NVX test layer, each on its backend's
 benchmark runner. All three use virtual-machine performance
 series and the constrained eight-CPU affinity policy. Development releases and
-performance baseline updates still require every applicable test and benchmark
-lane to pass.
+the recording of performance results still require every applicable test and
+benchmark lane to pass.
 The microVM correctness jobs gate every use of benchmark results, so the
 benchmark action runs no correctness scenario of its own (#286). `Required
 status check` requires each `nvx-microvm-tests-*` and `nvx-microvm-guests-*`
 job that the change schedules to succeed, and an `nvx-microvm-tests-*` job
 succeeds only when each of its shards does. `Publish development release` and
-`Persist performance baseline` run only on `dev` pushes in which every microVM
+`Record performance results` run only on `dev` pushes in which every microVM
 test job succeeded or was skipped. The pull-request and merge-group
 `Performance regression gate` reads only the platform jobs' results and
 publishes nothing. The
@@ -636,11 +636,14 @@ packages the platform's release once `artifacts`, `distro-artifacts`, the
 platform's OpenVMM producer, and the `nvx-rs` build of its operating system
 end. The microVM guest and sandbox jobs also wait for `distro-artifacts`, and
 the debug-kernel jobs for `debug-kernel`. `Performance regression gate`,
-`Publish development release`, `Persist performance baseline`, and `Required
+`Publish development release`, `Record performance results`, and `Required
 status check` wait for the jobs whose results they check, and in a full run of
 `dev`, `Package nvx crate` waits for `Required status check` and
 `Publish nvx crate` for `Package nvx crate` (see
-[crates.io releases](#cratesio-releases)). Required handoffs
+[crates.io releases](#cratesio-releases)), while `Persist performance
+baselines` waits for no job (see
+[Development releases and performance history](#development-releases-and-performance-history)).
+Required handoffs
 between these jobs use same-run workflow artifacts; caches only skip
 rebuilding their inputs.
 
@@ -679,8 +682,8 @@ submodule's built-in CPU profiles with the copy of their identities from which
 Fork pull requests lack the OpenVMM deploy key, so the CLI jobs run, like the
 hypervisor jobs, only for pushes, merge groups, full runs, and same-repository
 pull requests, and so do the `nvx-rs` builds, which only those jobs use.
-`Required status check`, the development release, and performance persistence
-require both `nvx-rs` builds and both CLI jobs.
+`Required status check`, the development release, and the recording of the
+performance results require both `nvx-rs` builds and both CLI jobs.
 
 No hypervisor job waits for the CLI tests (#982): the microVM jobs of each
 operating system wait for its `nvx-rs` build, and the platform jobs, as the
@@ -880,7 +883,7 @@ shards that failed. For a `dev` run, use that partial rerun only under the
 [procedure below](#run-concurrency). GitHub expands the matrix only once the
 job's condition holds, so a backend's shards run together or not at all. The
 job's result, which `Required status check`, `Publish development release`, and
-`Persist performance baseline` read, succeeds only when every shard succeeds.
+`Record performance results` read, succeeds only when every shard succeeds.
 The guest and sandbox jobs and the debug-kernel jobs are not sharded: the
 debug-kernel jobs take three to five minutes, about as long as a shard, and
 still run on MSHV only for pull requests, on KVM only for merge groups, and on
@@ -1151,14 +1154,13 @@ that latest attempt held no failed job. The only remaining retry is the
 all-jobs `gh run rerun RUN_ID`. It repeats the jobs that the original push and
 its change classification select, not the full matrix of a scheduled or manual
 run. For a non-documentation `dev` push such as run 39788615461, those jobs
-include the platform benchmarks, package jobs, development release, and
-performance persistence. For
-an older commit, the release job uses that run's `GITHUB_SHA` to create or
-verify its
-SHA-specific development release. Performance persistence records that same
-SHA after applying the results to the current `dev` history: it drops rows
-already present for the same platform, ABI, processor count, commit, and
-metric, but otherwise appends them and pushes a baseline update.
+include the platform benchmarks, package jobs, development release, and the
+recording of the performance results. For an older commit, the release job uses
+that run's `GITHUB_SHA` to create or verify its SHA-specific development
+release, and the recording uploads the results of that same SHA again, which
+the next full run of `dev` persists only while the history holds no newer
+commit (see
+[Development releases and performance history](#development-releases-and-performance-history)).
 
 ## Merge queue
 
@@ -1383,17 +1385,20 @@ enables auto-merge before, which queues it then. With a queue, `gh pr merge`
 always queues through auto-merge, which the repository therefore allows.
 `gh pr merge NUMBER --merge --admin` merges a pull request past the queue, as a
 push outside it (see [Pushes outside the queue](#pushes-outside-the-queue)),
-for when the queue itself is broken. Like `gh pr merge` without `--admin`, it
-does nothing for a pull request in the queue, so remove such a pull request
-from the queue first, with **Remove from queue** on its page.
+for when the queue itself is broken. It bypasses `Required status check` too,
+so use it only for a pull request whose `Required status check` passed on its
+current head, and leave any other to a maintainer. Like `gh pr merge` without
+`--admin`, it does nothing for a pull request in the queue, so remove such a
+pull request from the queue first, with **Remove from queue** on its page.
 
 ### Pushes outside the queue
 
 The queue isn't the only way into `dev`: the deploy key with which
-`Persist performance baseline` and the module diagrams workflow push, and two
+`Persist performance baselines` and the module diagrams workflow push, and two
 user accounts, bypass `Default Branch`, whose `merge_queue` rule binds them no
 more than its other rules (see [Reviews and bypasses](#reviews-and-bypasses)).
-From October 16 to 29, 2026, `dev` took 234 baseline commits and 23 diagram
+From October 16 to 29, 2026, when each `dev` push committed its performance
+results and its diagrams itself, `dev` took 234 baseline commits and 23 diagram
 commits beside its 272 merges. Each such push changes the base of every group
 in the queue, which the queue then rebuilds on the new tip (see
 [Superseded merge groups](#superseded-merge-groups)), so it costs every group
@@ -1401,12 +1406,14 @@ the run that it had made so far. A baseline commit landed a median of 29.2
 minutes after the merge whose run it records, 16.1 at the 10th percentile and
 99.9 at the 90th, about as long as a group's run, and the merges came a median
 of 27.6 minutes apart, 148 of 271 within 30 minutes of the one before. On a
-busy day, the baseline commit of nearly every merge would thus rebuild the
-group that the queue builds next, which would then take about two runs to
-merge. The performance history's commits should therefore leave `dev`, for
-instance to a branch of their own from which the gate reads the history, or
-wait for the nightly full run, so that `dev` takes pushes outside the queue
-only rarely ([#1053](https://github.com/microsoft/nvx/issues/1053)).
+busy day, the baseline commit of nearly every merge would thus have rebuilt the
+group that the queue built next, which would then have taken about two runs to
+merge. The performance history and the module diagrams therefore reach `dev`
+once a night, with the nightly full run, in at most a commit each
+([#1053](https://github.com/microsoft/nvx/issues/1053); see
+[Development releases and performance history](#development-releases-and-performance-history)
+and [Module diagrams](#module-diagrams)), so that `dev` takes pushes outside
+the queue only rarely.
 
 ### Cost
 
@@ -1717,7 +1724,7 @@ the shards that failed. For a `dev` run, use that partial rerun only under the
 job's condition holds, so the shards run together or not at all, and the
 job's fork, draft, change, and cancellation conditions are those of the
 single job before. The job's result, which `Required status check`, `Publish
-development release`, and `Persist performance baseline` read, succeeds only
+development release`, and `Record performance results` read, succeeds only
 when every shard succeeds, so a shard that fails or is cancelled blocks them.
 
 The first plan took the medians of the durations that nextest printed in the
@@ -1820,7 +1827,8 @@ other path selects each suite that takes it as an input:
   images of
   `distro-artifacts`, so the three guest artifact jobs share the output. The
   debug kernel is built with the guest artifacts, as before, because the
-  development release and performance persistence require its build too.
+  development release and the recording of the performance results require
+  its build too.
 
 Every CLI module is an input of the microVM tests and of the platform and
 package jobs, unless none of that suite's jobs runs it, so a new module selects
@@ -1838,9 +1846,11 @@ and the partition of its [shards](#microvm-test-shards),
 VMM tests and, as every input of theirs is, of the microVM tests, but not of
 the platform or package jobs. `performance.py` selects the platform and package
 jobs alone. `nightly_ci.py`, which only the nightly report workflow runs,
-`crate_release.py`, which only the crate release jobs run, and `merge_queue.py`,
-which only the job that cancels superseded merge-group runs uses, are inputs of
-neither. Modules that both kinds
+`crate_release.py`, which only the crate release jobs run, `merge_queue.py`,
+which only the job that cancels superseded merge-group runs uses, and
+`performance_history.py`, which only the job that persists the performance
+results that the `dev` pushes recorded runs, are inputs of neither. Modules
+that both kinds
 of job run, such as `benchmark.py`, which `microvm_tests.py` imports,
 `doctor.py`, which every runner validation runs, and `release.py`, whose
 `verify` command the OpenVMM builds run, select both.
@@ -1862,11 +1872,13 @@ The nightly schedule runs at 05:17 UTC, and a manual workflow
 dispatch starts the same full run. Both select the full matrix before the
 detector examines a comparison base. Each full run has a separate concurrency
 key, so it neither cancels nor queues behind a `dev` push. Full runs build,
-test, benchmark, and package, but publish no development release, persist
-nothing, and save no caches, and they build the OpenVMM VMM tests without
-restoring them from the
+test, benchmark, and package, but publish no development release, record no
+performance results, and save no caches, and they build the OpenVMM VMM tests
+without restoring them from the
 [OpenVMM VMM test cache](#openvmm-vmm-test-cache). A full run of `dev`
-publishes the `nvx` crate to crates.io instead, when the crate changed (see
+persists the performance results that the `dev` pushes recorded instead (see
+[Development releases and performance history](#development-releases-and-performance-history)),
+and publishes the `nvx` crate to crates.io when the crate changed (see
 [crates.io releases](#cratesio-releases)). Only `dev` pushes save the
 OpenVMM caches, and only pushes and pull
 requests save the guest artifact and pip caches, through the `save-cache`
@@ -1905,25 +1917,66 @@ NVX microVM tests and the platform and package jobs.
 
 ### Development releases and performance history
 
-A `dev` push publishes its commit's development release and appends the
-platform jobs' results to the performance history. `Publish development
-release` and `Persist performance baseline` require all three platform jobs
-and their package jobs to succeed, so a push that skipped them would publish
-nothing partial or stale: it would publish no release and record no history.
-Its commit would have no release of its own, though, and
-[`nvx-rs download`](usage.md#download) would install an ancestor's, which is
-older still when that ancestor's release failed. A push therefore runs the
-platform and package jobs, and the jobs that build their artifacts, for every
-change but documentation, as every push did before the classifier selected the
-platform jobs apart from the tests. Of the 108 merges to `dev` from October 10
-to 21, 2026 that changed more than documentation, 10 changed no input of the
-platform or package jobs, and each of their pushes spent about 19
+A `dev` push publishes its commit's development release and records the
+platform jobs' results, which a full run of `dev` then adds to the performance
+history. `Publish development release` and `Record performance results` require
+all three platform jobs and their package jobs to succeed, so a push that
+skipped them would publish nothing partial or stale: it would publish no
+release and record no results. Its commit would have no release of its own,
+though, and [`nvx-rs download`](usage.md#download) would install an ancestor's,
+which is older still when that ancestor's release failed. A push therefore runs
+the platform and package jobs, and the jobs that build their artifacts, for
+every change but documentation, as every push did before the classifier
+selected the platform jobs apart from the tests. Of the 108 merges to `dev`
+from October 10 to 21, 2026 that changed more than documentation, 10 changed no
+input of the platform or package jobs, and each of their pushes spent about 19
 benchmark-runner minutes on them: the KVM, MSHV, and WHP platform jobs take a
 median of 5.3, 5.5, and 8.6 minutes. Pull requests and merge groups publish and
-persist nothing, so they run the platform and package jobs only when one of
+record nothing, so they run the platform and package jobs only when one of
 their inputs changed.
 [Development release publication](#development-release-publication) describes
 how the release job publishes.
+
+`Record performance results` collects the p50 values of the platform jobs and
+the hosts that measured them, checks them against a copy of the history in
+`data/` as persisting them would, so that a host or a metric that the history
+refuses fails the push that measured it, and uploads them as
+`performance-results-<run-id>`, which GitHub keeps for seven days. It commits
+nothing to `dev`: every push to `dev` outside the merge queue rebuilds every
+queued group, and `dev` took a baseline commit after nearly every merge while
+each push committed its own (see
+[Pushes outside the queue](#pushes-outside-the-queue)).
+
+`Persist performance baselines` runs in each full run of `dev`, the nightly one
+included, from its start and whatever its other jobs do, and runs
+[`persist-recorded-performance`](usage.md#persist-recorded-performance). The
+command appends to `data/*.csv` the recorded results of each completed `dev`
+push run whose commit is newer than the newest one that the history holds,
+oldest first in `dev`'s first-parent order, so that the history keeps the order
+of the merges. The job commits them as one
+`data: update performance baselines (<sha>) [skip ci]` commit, which lists the
+runs, and pushes it with `PERFORMANCE_PERSIST_DEPLOY_KEY`; when a push fails
+because `dev` moved, it tries again on the newest `dev`, up to three attempts
+in all, without downloading the results again. It checks each run's results
+against their artifact's digest, their run's commit, and the hosts that the
+history expected at that commit, so that a host that `dev` accepted since then
+refuses none of them, while the results of a commit before a reset of their
+series stay out of it. So do a platform's results when `dev` accepted another
+host for the platform after their commit, which resets the series too, even
+when it held no rows to remove yet. A reset of a metric whose series an earlier
+reset emptied removes no rows, though, and leaves no trace for the job to find,
+so [CI collection](benchmarks.md#ci-collection) asks for a full run of `dev`
+before it. The job takes a run's results whole or not at all. A run whose
+results fail a check is skipped, and fails the job once the other runs' results
+are committed; one whose results it can't fetch, as when GitHub fails or a
+download breaks off, stops it there, so that the next full run persists that
+run and every run after it, in order. The command reads the runs a day of their
+creation at a time, since GitHub lists at most 1,000 runs for a search, back as
+far as a rerun can still hold results: GitHub reruns a run up to 30 days after
+it first ran, and a rerun keeps its run's start. It skips a run whose results
+expired, seven days after the run uploaded them, as lost. Until a full run
+persists them, the performance regression gate compares a pull request or a
+merge group with a history that lacks up to a day of merges.
 
 ## Development release publication
 
@@ -2394,51 +2447,54 @@ own uses in place of those that the plain analysis moves to the modules that
 contain them, and stops at a cfg that depends on `test` in another way. Nobody
 edits the diagrams by hand:
 [`module-diagrams.yml`](../.github/workflows/module-diagrams.yml) draws them
-again after every push to `dev` that changes their inputs, `nvx-rs/`, the Rust
-pin, the script, the build constants that name the crate's targets, or the
-workflow, as the merge of such a pull request does, and commits them to `dev`
-when they change.
+again every night, with the nightly full run of CI, and commits them to `dev`
+when they changed, so that `dev` takes at most one push of them a night outside
+the merge queue (see [Pushes outside the queue](#pushes-outside-the-queue)).
+They follow a merge that changes their inputs, `nvx-rs/`, the Rust pin, the
+script, the build constants that name the crate's targets, or the workflow,
+within a day.
 
 Its `draw` job builds cargo-modules, at the release that the workflow pins,
 with the Rust release that `rust-toolchain.toml` pins, and restores the build
-from a cache that only `dev` pushes save. It runs on a fixed Ubuntu release,
-whose Graphviz release lays out the diagrams, and installs Liberation Sans, the
-font that they name first, with which Graphviz measures their labels, so that
-their layouts depend neither on the runner image's other fonts nor on its
-updates. It checks out, without credentials, the newest commit of the branch
-that a push or a dispatch names, rather than the commit that started the run,
-or a pull request's merge commit, draws the diagrams into `doc/modules`,
-summarizes the files that they change, and uploads them as
-`module-diagrams-<run-id>`. For a push to `dev`, or a manual dispatch on it,
+from a cache that only the runs of `dev` save. It runs on a fixed Ubuntu
+release, whose Graphviz release lays out the diagrams, and installs Liberation
+Sans, the font that they name first, with which Graphviz measures their labels,
+so that their layouts depend neither on the runner image's other fonts nor on
+its updates. It checks out, without credentials, the newest commit of the
+branch that a nightly run or a dispatch names, rather than the commit that
+started the run, or a pull request's merge commit, draws the diagrams into
+`doc/modules`, summarizes the files that they change, and uploads them as
+`module-diagrams-<run-id>`. For a nightly run, or a manual dispatch on `dev`,
 the `publish` job then checks out the newest `dev` with
 `PERFORMANCE_PERSIST_DEPLOY_KEY`, the deploy key with which the
 [performance history](#development-releases-and-performance-history) is
 persisted, since deploy keys may push to `dev` past its rules. It replaces
-`doc/modules` with the uploaded diagrams and, if that changes anything,
-commits it as `doc: update module diagrams (<sha>) [skip ci]`, where `<sha>`
-is the commit that the `draw` job drew, and pushes it, retrying up to three
-attempts in all on the newest `dev` when a push fails because `dev` moved. The
-job builds and runs nothing of the commit, refuses an upload that holds
-anything but the page and SVG files, and commits nothing outside
-`doc/modules`. `[skip ci]` keeps its commit, which changes only documentation,
-from starting the workflows of a push.
+`doc/modules` with the uploaded diagrams and, if that changes anything, commits
+it as `doc: update module diagrams (<sha>) [skip ci]`, where `<sha>` is the
+commit that the `draw` job drew, and pushes it, retrying up to three attempts
+in all on the newest `dev` when a push fails because `dev` moved. The job
+builds and runs nothing of the commit, refuses an upload that holds anything
+but the page and SVG files, and commits nothing outside `doc/modules`.
+`[skip ci]` keeps its commit, which changes only documentation, from starting
+the workflows of a push.
 
-Runs on `dev` wait for one another, and a newer push replaces the run that
-waits. Each run draws the newest `dev`, so whichever run commits last commits
-the diagrams of the newest `dev`, in whatever order the runs start. A rerun of
-the `publish` job alone, as of a run's failed jobs, reuses the drawing of its
-run, which a newer run may have replaced. So, on each attempt, the job compares
-the inputs, the paths that start the workflow, at the drawn commit and on the
-newest `dev`, and publishes nothing once `dev` has changed them: the push that
-changed them started a run that publishes their diagrams.
-A ready pull request that changes the inputs runs the `draw` job alone, so that
-a change that breaks the drawing fails before it merges, and its summary and
-artifact show the diagrams that its merge will commit. The workflow is not
-part of `Required status check`. To draw the diagrams locally, install
-cargo-modules and Graphviz, and run `python3 scripts/module_diagrams.py`, which
-writes them to `build/modules`, or with `--output` to another directory that
-holds nothing but an earlier run's diagrams. Leave `doc/modules` to CI: other
-Graphviz releases and fonts lay the diagrams out differently.
+Runs on `dev`, nightly or dispatched, wait for one another, and a newer one
+replaces the run that waits. Each run draws the newest `dev`, so whichever run
+commits last commits the diagrams of the newest `dev`, in whatever order the
+runs start. A rerun of the `publish` job alone, as of a run's failed jobs,
+reuses the drawing of its run, which a newer run may have replaced. So, on each
+attempt, the job compares the inputs, the paths that start the workflow for a
+pull request, at the drawn commit and on the newest `dev`, and publishes
+nothing once `dev` has changed them: the next run of `dev` draws and publishes
+their diagrams. A ready pull request that changes the inputs runs the `draw`
+job alone, so that a change that breaks the drawing fails before it merges, and
+its summary and artifact show the diagrams that `dev` takes the night after it
+merges. The workflow is not part of `Required status check`. To draw the
+diagrams locally, install cargo-modules and Graphviz, and run
+`python3 scripts/module_diagrams.py`, which writes them to `build/modules`, or
+with `--output` to another directory that holds nothing but an earlier run's
+diagrams. Leave `doc/modules` to CI: other Graphviz releases and fonts lay the
+diagrams out differently.
 
 ## Adversarial campaigns
 

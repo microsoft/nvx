@@ -646,10 +646,16 @@ follow the same flow with their own platform jobs:
   the three platform artifacts once all three platform jobs succeeded and gates them against the
   base
   branch's history. It publishes and persists nothing.
-- `Persist performance baseline` (`performance-persist`, `dev` pushes only) consumes them and
-  persists them to `data/*.csv`.
+- `Record performance results` (`performance-record`, `dev` pushes only) consumes them, checks
+  them against the history as persisting them would, and uploads the p50 results with their hosts
+  as the `performance-results-<run-id>` artifact, which GitHub keeps for seven days.
+- `Persist performance baselines` (`performance-persist`, full runs of `dev` only, the nightly one
+  included) persists to `data/*.csv`, in one commit, the recorded results of every completed `dev`
+  push run whose commit is newer than the newest that the history holds, oldest first in `dev`'s
+  first-parent order, so that `dev` takes the history once a night rather than after each merge;
+  see [Development releases and performance history](ci.md#development-releases-and-performance-history).
 - `Publish development release` (`release`, `dev` pushes only) doesn't read them, but it and
-  `performance-persist` run only when both `nvx-rs` builds, both NVX CLI jobs, the three
+  `performance-record` run only when both `nvx-rs` builds, both NVX CLI jobs, the three
   platform jobs, and their three package jobs succeeded and every correctness job,
   `nvx-microvm-tests-kvm` included, succeeded or was skipped.
 - `Required status check` fails unless every job that the change schedules, including
@@ -851,7 +857,13 @@ affected metrics by removing them from the series' history files, such as
 `data/windows-whp-virtual-machine-microvm-v2-1vcpu.csv`, so that the gate restarts
 their ten-point warmup instead of comparing the new storage with the old baseline.
 Results measured before such a reset commit are not persisted into the reset
-series, so a `dev` run that finishes after the reset cannot refill it.
+series, so a `dev` run that finishes after the reset cannot refill it. The
+persistence finds the reset by the rows that it removed, though, and a full run of
+`dev` persists the results of `dev` pushes only once a night: a series that an
+earlier reset emptied can hold no rows yet while results measured since that reset
+wait to be persisted. Before resetting such a series, dispatch a full run of `dev`
+and let its `Persist performance baselines` job finish, so that the reset removes
+the rows that it persisted instead of finding none.
 
 The regression gate compares the target p50 with the median of the latest 10
 p50 values on the pull request's base branch and requires all 10
@@ -928,8 +940,12 @@ host needs no history reset either.
 `<platform>-host.json`. It refuses inputs of which only some record a host, and refuses to
 collect results of two hosts, or results with and without a recorded host, into one directory. `performance persist` refuses to append results
 whose recorded host differs from the history's `<platform>-host.json` in a required field, or
-that record no host for a history that records one. `Persist performance baseline` also passes
-`--require-host`, which requires both host files, as a backstop for `dev` pushes.
+that record no host for a history that records one. `Record performance results` and
+`Persist performance baselines` also pass `--require-host`, which requires both host files, as a
+backstop for `dev` pushes; the persistence compares each run's results with the hosts that the
+history expected at the run's commit, so a host that `dev` accepted since refuses none of them.
+It keeps a platform's results out of the platform's series, though, when `dev` accepted another
+host for it after the run's commit, even when the series held no rows for that reset to remove.
 
 To accept a new host, for example after a redeploy, resize, reimage, or OS update changed a
 required property, or after the `benchmark` label moved to a runner whose host differs, open a

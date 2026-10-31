@@ -432,6 +432,7 @@ is authorized for the organization when it enforces single sign-on.
 | `check-required-ci` | Validate required GitHub Actions job results. |
 | `report-nightly-ci` | Open, update, or close the report of failed nightly CI runs. |
 | `cancel-superseded-merge-groups` | Cancel the CI runs of the merge groups that the merge queue replaced. |
+| `persist-recorded-performance` | Persist the performance results that the CI runs of `dev` pushes recorded, in `dev`'s first-parent order. |
 | `check-static-elf` | Check that executables are static ELF files without an interpreter or an executable stack. |
 | `test-openvmm-unit` | Run the OpenVMM workspace unit and documentation tests. |
 | `build-openvmm-tests` | Build OpenVMM Petri VMM tests without running them. |
@@ -700,6 +701,49 @@ the others. `--summary` appends the same lines to a Markdown file, such as
 `$GITHUB_STEP_SUMMARY`. A failed request warns, as a GitHub warning, but never
 fails the command, which only frees runners; a missing token or a `--ref` that
 names no merge group does.
+
+### `persist-recorded-performance`
+
+```text
+python3 scripts/nvx.py persist-recorded-performance
+    --repository OWNER/REPOSITORY
+    --workflow-ref REF
+    --download-dir DIR
+    [--branch BRANCH]
+    [--history-dir DIR]
+    [--require-host]
+    [--summary PATH]
+    [--message PATH]
+```
+
+Appends to the performance history in `--history-dir`, `data` by default, the
+results that the completed runs of the workflow that `--workflow-ref`, a
+`GITHUB_WORKFLOW_REF` value, names recorded for pushes to `--branch`, `dev` by
+default, in their `performance-results-RUN_ID` artifacts, as
+[Development releases and performance history](ci.md#development-releases-and-performance-history)
+describes. The history must lie in a git checkout of the branch. The command
+takes the runs of the commits of `HEAD`'s first-parent history that are newer
+than the newest commit that the history holds, oldest first, and persists each
+run's results as [`performance persist`](#performance-persist) does, whole or
+not at all, once they match their artifact's digest, come from the run's own
+commit, and, with `--require-host`, come from the host that the history
+expected at that commit. It leaves out the results of a platform whose expected
+host changed in a required field after the run's commit, as a reset of the
+platform's series does, and skips a run whose results expired. It reads the
+runs a day of their creation at a time, back to the oldest that GitHub could
+have rerun with results that remain. It keeps the downloaded results in
+`--download-dir`, so that another attempt, after a push of the history failed,
+downloads nothing again. It refuses the results of a run that fail a check, and
+persists the later runs, but stops at a run whose results it can't fetch, as
+when GitHub fails or a download breaks off, so that a later attempt persists
+that run and the ones after it, in order. It persists nothing when it can't
+list the runs, as when a day holds more runs than GitHub lists for a search. It
+reads a token from `GH_TOKEN` or `GITHUB_TOKEN`, which must be able to read the
+repository's workflow runs and download their artifacts. It prints what it did
+with each run, `--summary` writes the outcome to a Markdown file, and
+`--message` writes the message of the commit of the persisted results to a
+file, when the command persisted any. It exits with status 1 when it refused a
+run's results or stopped, after persisting the others.
 
 ### `check-static-elf`
 
