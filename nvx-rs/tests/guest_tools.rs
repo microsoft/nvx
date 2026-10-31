@@ -1047,13 +1047,16 @@ fn ingress_test_mode_preserves_udp_settling_between_snapshots() {
 
 #[test]
 fn ingress_rejects_bad_invocations_and_test_snapshots() {
-    let usage = b"usage: nvx-ingress [inherit] GATEWAY_IPV4\n".to_vec();
+    let usage = b"usage: nvx-ingress [inherit|start] GATEWAY_IPV4\n".to_vec();
     for arguments in [
         &[][..],
         &["not-an-ipv4-address"],
         &["inherit"],
         &["inherit", "not-an-ipv4-address"],
         &["inherit", "127.0.0.1", "extra"],
+        &["start"],
+        &["start", "not-an-ipv4-address"],
+        &["start", "127.0.0.1", "extra"],
     ] {
         assert_eq!(
             run("nvx-ingress", arguments),
@@ -1145,6 +1148,36 @@ fn ingress_inherits_only_an_ipv4_datagram_socket_bound_to_a_privileged_source_po
             "nvx-ingress: inherited socket: {}\n",
             Errno::ENOTSOCK.desc()
         ),
+    );
+}
+
+#[test]
+fn ingress_start_fails_when_the_announcer_does_not_start() {
+    // `start` exits only once the announcer's socket is bound to a privileged source port and
+    // /sbin/nvx-ingress runs on it, so that a guest agent learns of a failure before it
+    // acknowledges a restore. Off an NVX guest, the announcer cannot start: without root, the
+    // socket cannot be bound to such a port, and with it, the program does not exist.
+    if Path::new("/sbin/nvx-ingress").exists() {
+        return;
+    }
+    let (status, stdout, stderr) = run_within(
+        "nvx-ingress",
+        ["start", "127.0.0.1"],
+        Duration::from_secs(10),
+    );
+    assert_eq!((status, stdout), (Some(1), Vec::new()));
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(
+        [
+            "nvx-ingress: the announcer's socket cannot be bound to a privileged source port: ",
+            "nvx-ingress: no privileged source port, from 1023 down to 512, is free",
+            "nvx-ingress: /sbin/nvx-ingress did not start: the exec launch stage failed: ",
+        ]
+        .iter()
+        .any(|prefix| stderr.starts_with(prefix))
+            && stderr.ends_with('\n')
+            && stderr.lines().count() == 1,
+        "{stderr}"
     );
 }
 

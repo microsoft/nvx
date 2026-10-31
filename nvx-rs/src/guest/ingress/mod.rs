@@ -17,6 +17,15 @@
 //! publishing the listeners that it last announced, and learns of no later
 //! change of them.
 //!
+//! A guest agent that cannot hold the announcer, such as the shell script
+//! that repairs the restore of a snapshot without a tier whose new policy
+//! publishes the guest's listeners, runs `nvx-ingress start GATEWAY_IPV4`
+//! instead. It starts the announcer as [`Announcer::start`] does, and exits
+//! once the announcer's socket is bound and its program runs, which leaves the
+//! announcer to init, or to the nearest subreaper, as at a cold boot; it fails,
+//! with status 1, when the announcer does not start, so that the agent learns
+//! of the failure before the restore is acknowledged.
+//!
 //! Every 100 ms it reads the kernel's socket tables. A TCP socket in the
 //! LISTEN state is a listener, and so is an unconnected UDP socket that
 //! persists for a second, which skips short-lived client sockets, such as
@@ -47,7 +56,7 @@
 //! which the kernel writes them: a row or number that the kernel would not
 //! write is rejected, rather than read with the leniency of C's `scanf`.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -190,19 +199,23 @@ struct UdpSocket {
 /// Runs `nvx-ingress` with the process's arguments: `GATEWAY_IPV4`, the announcer, from a socket
 /// of its own; `inherit GATEWAY_IPV4`, the announcer, from the socket that it inherited as its
 /// standard input, which must be an IPv4 datagram socket bound to a privileged source port from
-/// 512 to 1023; or `test DIRECTORY`. Test mode exits with 0 after the last snapshot, or with 1
-/// when a snapshot fails. The announcer runs until it fails, and exits with 1 when it cannot open
-/// or bind its socket, or take the one that it inherited, or with 2 for a usage error.
+/// 512 to 1023; `start GATEWAY_IPV4`, which starts `inherit GATEWAY_IPV4` as
+/// [`Announcer::start`] does and exits once it runs; or `test DIRECTORY`. Test mode exits with 0
+/// after the last snapshot, or with 1 when a snapshot fails. The announcer runs until it fails,
+/// and exits with 1 when it cannot open or bind its socket, or take the one that it inherited, or
+/// with 2 for a usage error. `start` exits with 0 once the announcer runs, or with 1 when it does
+/// not start.
 pub fn main() -> ExitCode {
     run_main(|args| run(args, &mut sys::Stdout::new(), &mut io::stderr()))
 }
 
-/// Runs test mode or the announcer, as `args` select.
+/// Runs test mode, the announcer, or its start, as `args` select.
 fn run(args: &[CString], out: &mut dyn Write, err: &mut dyn Write) -> Result<(), CommandError> {
     let announced = match args {
         [_, mode, directory] if mode.as_bytes() == b"test" => {
             return test_mode::run(directory, out).map_err(|_| CommandError::Operation);
         }
+        [_, mode, gateway] if mode.as_bytes() == b"start" => return start(gateway, err),
         [_, mode, gateway] if mode.as_bytes() == b"inherit" => sender::run_inherited(gateway),
         [_, gateway] => sender::run(gateway),
         _ => return Err(usage(err)),
@@ -217,9 +230,32 @@ fn run(args: &[CString], out: &mut dyn Write, err: &mut dyn Write) -> Result<(),
     }
 }
 
+/// Starts the announcer of the guest's listeners to `gateway` as [`Announcer::start`] does, and
+/// returns once its socket is bound and its program runs, leaving it to run on its own: the
+/// process exits then, which passes the announcer to init, or to the nearest subreaper.
+fn start(gateway: &CStr, err: &mut dyn Write) -> Result<(), CommandError> {
+    let Some(gateway) = sender::parse_gateway(gateway) else {
+        return Err(usage(err));
+    };
+    match Announcer::start(gateway) {
+        Ok(announcer) => {
+            // Dropping the announcer would stop it, which only its owner may do.
+            std::mem::forget(announcer);
+            Ok(())
+        }
+        Err(error) => {
+            sys::report(
+                err,
+                &[b"nvx-ingress: ", error.to_string().as_bytes(), b"\n"],
+            );
+            Err(CommandError::Operation)
+        }
+    }
+}
+
 /// Prints the usage message and returns the usage error.
 fn usage(err: &mut dyn Write) -> CommandError {
-    sys::report(err, &[b"usage: nvx-ingress [inherit] GATEWAY_IPV4\n"]);
+    sys::report(err, &[b"usage: nvx-ingress [inherit|start] GATEWAY_IPV4\n"]);
     CommandError::Usage
 }
 
