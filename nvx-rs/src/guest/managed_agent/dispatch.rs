@@ -106,7 +106,7 @@ fn handle_data(
             }
         }
         APP_EXEC => {
-            if mappings.applied != mappings.expected {
+            if !mappings.table.is_complete() {
                 session.send_error(
                     request.request_id,
                     Errno::EAGAIN as i32,

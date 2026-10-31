@@ -109,7 +109,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
-| [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec`: the OpenVMM command line of a managed microVM, and the checks that every command line applies |
+| [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
 | [`nvx::host::network::policy`](#nvxhostnetworkpolicy) | Egress policy files and their compilation into OpenVMM's native rules |
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
@@ -125,7 +125,7 @@ changes only when the module's purpose does.
 | [`nvx::testing::fake_openvmm`](#nvxtestingfake_openvmm) | A fake OpenVMM that serves the control console and runs scripted workloads without a VM |
 | [`nvx::host::cli`](#nvxhostcli) | Feature `cli`: the `nvx-rs` executable; see [The nvx-rs CLI](#the-nvx-rs-cli) |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
-| [`nvx::guest::mappings`](#nvxguestmappings) | `Mapper`: applies host mappings beneath the descriptors of their roots, for any guest init or agent |
+| [`nvx::guest::mappings`](#nvxguestmappings) | `Mapper` and `MappingTable`: apply host mappings beneath the descriptors of their roots, and a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
 | [`nvx::guest::spawn`](#nvxguestspawn) | `Command`: starts a program in a new process, for any guest init or agent |
@@ -396,6 +396,28 @@ executable, kernel, and Alpine initramfs from the install metadata, a release's
 the 32,767-character limit of a Windows command line, and `LaunchSpec::check`,
 which every command line applies to the memory size, the non-root identity, the
 hostname, the guest network, and the kernel parameters.
+
+`VmmLaunch` holds the inputs that a cold launch's command line names besides the
+VM's devices and its kernel command line: the OpenVMM executable, the
+hypervisor, the memory, the kernel, the initramfs, the endpoint of the control
+console, and the outcome report. `VmmLaunch::arguments` renders them for a
+`LaunchSpec`'s launch, after its managed lifecycle, and for an adapter's
+prepared launch, after its devices, and `LaunchSpec::vmm_launch` gives a
+specification's.
+
+`process_command_line_units` counts the Windows command line that runs a program
+with its arguments, in UTF-16 code units, as Windows quotes them, and
+`fit_process_command_line` checks it against `PROCESS_COMMAND_LINE_LIMIT`, on
+every host, with the reserve that its caller keeps.
+`LaunchSpec::check_process_command_line`, which a caller runs before it
+provisions an instance, keeps 1024 code units for what may change before the
+instance starts, whose own check keeps none.
+
+`VmmLaunch::RESERVE`, 2048 code units, is what the planning of an adapter's
+launch keeps for the rest of the launch: the executable and the arguments that
+`VmmLaunch::arguments` renders besides the kernel command line, with paths of up
+to 260 code units, Windows' `MAX_PATH`, and the longer names by which a
+prepared launch gives OpenVMM the checked files of the plan's block devices.
 
 `kernel_parameters_problem` checks the extra kernel parameters as the guest's
 kernel reads them, with `nvx::protocol::cmdline`: trimmed, split at every byte
@@ -992,6 +1014,11 @@ renders them as boot tokens.
 
 An adapter's plan renders the caller's tokens before those of its root, and
 refuses tokens that its root or OpenVMM's shares own.
+`SandboxPlan::check_adapter_launch` checks, as an adapter plans its launch, that
+the plan's arguments, those that export the adapter's shares, and the kernel
+command line leave `nvx::host::launch::VmmLaunch::RESERVE` of the limit of a
+Windows command line to the rest of the launch, so that planning refuses a plan
+whose network rules or mapped, hidden, or allowed paths leave it too little.
 
 `mount`: `SandboxMount` requests of live shares of host directories and files,
 their guest targets and the reserved ones, their access policies and owner, and
@@ -1027,6 +1054,10 @@ line, naming the checked files as `/proc/self/fd/N` on Linux and by their final
 paths on Windows, lists the descriptors or handles that the VMM inherits through
 `VmmCommand::inherit`, and releases the checked files, and on Windows the VMM's
 copies of them, at authenticated Ready; see [Checked handoff](#checked-handoff).
+For an adapter's plan, `PreparedLaunch::adapter_arguments` renders the complete
+arguments of the launch: the plan's, those that export the adapter's shares,
+and those of the launch's `VmmLaunch`, and refuses a command line that Windows
+would not start OpenVMM with.
 
 ### `nvx::testing::fake_openvmm`
 
@@ -1074,11 +1105,27 @@ failure.
 
 `bind` applies one runtime bind through the same walk and attach.
 
+`MappingTable` keeps a guest agent's account of a host mapping table: the
+mappings that the host hands the agent in `MAPS` parts once it is ready, after
+it announced how many, with the `nvx_maps=` token of the kernel command line,
+which `MappingTable::announced` reads, or as an adapter's own protocol has it,
+which `MappingTable::new` takes. `MappingTable::apply` checks each part against
+the announcement and the entries applied in order, and refuses one that does not
+decode, holds no entry, does not continue the table, ends past the
+announcement, or maps the export's root, which an empty source names, as a
+`TableError::Refused` at the entry that it expects next, which changes nothing.
+It hands the part's mappings to the caller, which applies them beneath the root
+of its choice, such as through a `Mapper` or a layered `Root`; the first that
+fails latches the table, which reports it as a `TableError::Failed` with its
+entry, and refuses every later part. The table is complete once every announced
+mapping is applied, and none failed, and the root's teardown tears it down.
+
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
-it, beneath `/` in direct mode and beneath the container's assembled root in
-sandbox mode, and refuses an empty source, since its export is an aggregate,
-whose root lists its children; NVX's hosts, whose exports are all aggregates,
-send none; a layered `Root` applies its live shares and mappings through it.
+a `MappingTable` and a mapper, beneath `/` in direct mode and beneath the
+container's assembled root in sandbox mode; the table refuses an empty source,
+since the export is an aggregate, whose root lists its children, and NVX's
+hosts, whose exports are all aggregates, send none. A layered `Root` applies its
+live shares and mappings through a mapper.
 
 ### `nvx::guest::nvxs`
 
@@ -1687,12 +1734,14 @@ Images are raw: OpenVMM attaches a file's bytes as they are, and chooses a
 container format by the file's extension, which `/proc/self/fd/N` lacks, so a
 caller whose images use a container format, such as a fixed VHD, stages a raw
 file. The paths in the arguments hold for the launch alone: the plan, which
-callers persist, keeps the real paths. The caller adds its own arguments,
-starts the VMM, and releases the prepared launch with `PreparedLaunch::release`
-once the guest reports authenticated Ready, or drops it once it has torn down a
-launch that failed; the VMM's own opens then keep the images, and what it
-inherited keeps the scratch image's claim. Staging, the checks, and the
-preparation of a launch read no content of the images.
+callers persist, keeps the real paths. The caller adds its own arguments, or,
+for an adapter's plan, has `PreparedLaunch::adapter_arguments` render the
+complete arguments of its launch, starts the VMM, and releases the prepared
+launch with `PreparedLaunch::release` once the guest reports authenticated
+Ready, or drops it once it has torn down a launch that failed; the VMM's own
+opens then keep the images, and what it inherited keeps the scratch image's
+claim. Staging, the checks, and the preparation of a launch read no content of
+the images.
 
 The clone of a template takes its block devices by path instead, as the
 template's capture does, since OpenVMM opens the files of a restore itself:

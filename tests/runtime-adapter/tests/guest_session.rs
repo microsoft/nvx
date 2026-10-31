@@ -2324,7 +2324,10 @@ fn a_failed_mapping_latches_the_root_and_holds_the_sandbox_back() {
         ready(),
         Message::Mapped,
         map_failed(3, problem),
-        map_failed(3, "the mapping table failed before this part"),
+        map_failed(
+            3,
+            "the mapping table refused a part: an earlier part of the table failed",
+        ),
         Message::Pong,
         Message::Stopped,
     ];
@@ -2367,13 +2370,20 @@ fn the_worker_refuses_parts_that_do_not_continue_the_table() {
     let table = table(4);
     let parts = parts(&table, 2);
     let maps = |index: usize| Message::Maps(parts[index].clone());
+    // The export is an aggregate, whose root, which an empty source names, lists its children.
+    let export_root = HostMap {
+        source: String::new(),
+        target: "/srv/table/root".to_owned(),
+        read_only: true,
+    };
+    let root_part = encode_maps_payloads(&[export_root], OUTER_MAX_PAYLOAD).unwrap();
     let cases = [
         (
             "a part that skips mappings",
             4,
             vec![maps(1)],
             0,
-            "a part of the mapping table starts at its mapping 2, but the worker expects its \
+            "the mapping table refused a part: it starts at mapping 2, but the table expects \
              mapping 0 next",
         ),
         (
@@ -2381,7 +2391,7 @@ fn the_worker_refuses_parts_that_do_not_continue_the_table() {
             4,
             vec![maps(0), maps(0)],
             2,
-            "a part of the mapping table starts at its mapping 0, but the worker expects its \
+            "the mapping table refused a part: it starts at mapping 0, but the table expects \
              mapping 2 next",
         ),
         (
@@ -2389,30 +2399,37 @@ fn the_worker_refuses_parts_that_do_not_continue_the_table() {
             3,
             vec![maps(0), maps(1)],
             2,
-            "a part of the mapping table ends it at 4 mappings, past the 3 that the root \
-             configuration announced",
+            "the mapping table refused a part: it ends the table at 4 mappings, past the 3 that \
+             the host announced",
         ),
         (
             "a part when the configuration announced no mapping",
             0,
             vec![maps(0)],
             0,
-            "a part of the mapping table ends it at 2 mappings, past the 0 that the root \
-             configuration announced",
+            "the mapping table refused a part: it ends the table at 2 mappings, past the 0 that \
+             the host announced",
         ),
         (
             "a part that does not decode",
             4,
             vec![Message::Maps(vec![0; 3])],
             0,
-            "a part of the mapping table does not decode: ",
+            "the mapping table refused a part: it does not decode: ",
         ),
         (
             "a part without a mapping",
             4,
             vec![Message::Maps(vec![0; MAPS_HEADER_LEN])],
             0,
-            "a part of the mapping table holds no mapping",
+            "the mapping table refused a part: it holds no mapping",
+        ),
+        (
+            "a part that maps the export's root",
+            4,
+            vec![Message::Maps(root_part[0].clone())],
+            0,
+            "the mapping table refused a part: its mapping 0 maps the root of the host export",
         ),
     ];
     for (name, announced, messages, applied, problem) in cases {

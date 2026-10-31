@@ -12,9 +12,13 @@
 //! sandbox, and hands OpenVMM the files that the checks opened, through NVX's `PreparedLaunch`,
 //! rather than their paths, which something else could take after the checks; see
 //! [`LayeredLaunch::prepare`]. It launches the VM through NVX's supervisor, as it launches VMs
-//! without a layered root, but without NVX's managed lifecycle; see
-//! [`LayeredLaunch::openvmm_arguments`]. The boot tokens carry only what NVX's boot contract
-//! defines: the image's format and the identity that the guest expects of it, and the upper.
+//! without a layered root, but without NVX's managed lifecycle, with the complete arguments of an
+//! adapter's launch that NVX's `PreparedLaunch::adapter_arguments` renders, which it holds to the
+//! limit of a Windows command line on every host; see [`LayeredLaunch::openvmm_arguments`]. As it
+//! plans the launch, before it touches the store, it checks that the plan leaves the rest of that
+//! command line room; see [`LayeredLaunch::check_command_line`]. The boot tokens carry only what
+//! NVX's boot contract defines: the image's format and the identity that the guest expects of it,
+//! and the upper.
 //! Everything else that the root needs goes in one root configuration, a [`RootConfig`], which the
 //! host sends once it attaches.
 //!
@@ -50,14 +54,14 @@
 //! [`LaunchRecord`], with the bindings that the launch checked, and the plan, which keeps the
 //! network.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
 use nvx::host::artifacts::absolute;
 use nvx::host::filesystem::ExportPlan;
-use nvx::host::launch::DEFAULT_MEMORY_MIB;
+use nvx::host::launch::VmmLaunch;
 use nvx::host::network::{Access, HostLoopback};
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 use nvx::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
@@ -68,7 +72,7 @@ use nvx::host::sandbox::{
 use nvx::protocol::HostMap;
 use nvx::protocol::root::{ImageFormat, RootImage};
 use nvx::uuid::Uuid;
-use nvx::{Error, Hypervisor, Result};
+use nvx::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::exec::Start;
@@ -204,6 +208,22 @@ impl LayeredLaunch {
         self.plan.kernel_command_line(SANDBOX_TOKEN)
     }
 
+    /// Checks, as the host plans the launch, that what its plan renders of OpenVMM's command
+    /// line, with the [export](Self::export) of its shares, if any, and its
+    /// [kernel command line](Self::kernel_command_line), leaves the rest of the launch the reserve
+    /// that NVX's `VmmLaunch::RESERVE` holds of the limit of a Windows command line, with NVX's
+    /// `SandboxPlan::check_adapter_launch`. So a launch refuses a network or shares that leave the
+    /// rest of its command line too little before it touches the sandbox's store, as
+    /// [`openvmm_arguments`](Self::openvmm_arguments) would refuse the complete command line.
+    ///
+    /// Fails as `SandboxPlan::check_adapter_launch` does, with
+    /// [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) for a plan whose part of the
+    /// command line takes more.
+    pub fn check_command_line(&self) -> Result<()> {
+        self.plan
+            .check_adapter_launch(SANDBOX_TOKEN, self.export.as_ref())
+    }
+
     /// Checks the [bindings](Self::bindings) of the plan's images from their metadata alone, and
     /// the [export](Self::export) of the launch's shares, if any, and prepares the launch of the
     /// files that the checks opened, as NVX's `PreparedLaunch`.
@@ -265,16 +285,18 @@ impl LayeredLaunch {
     }
 
     /// Returns OpenVMM's arguments for the VM of `prepared`, the launch that
-    /// [`prepare`](Self::prepare) prepared: its arguments, which attach the checked files as the
-    /// plan's block devices, and the plan's network device, with the policy that NVX's lowering
-    /// renders, if the plan has a network that lets anything through, those of the
-    /// [export](Self::export) of the launch's shares, if any, which `ExportPlan::openvmm_arguments`
-    /// renders, then the VM in one process on `hypervisor`, NVX's default memory, the kernel at
-    /// `kernel`, the initramfs at `initramfs`, its kernel command line, which is the
-    /// [launch's](Self::kernel_command_line), no virtio console, the control console listening on
-    /// `endpoint` with the launch capability on standard input, and the outcome report at `report`.
-    /// OpenVMM appends the boot tokens with which the guest mounts the export to the kernel command
-    /// line.
+    /// [`prepare`](Self::prepare) prepared, with the inputs of `launch`, as NVX's
+    /// `PreparedLaunch::adapter_arguments` renders them: the prepared launch's arguments, which
+    /// attach the checked files as the plan's block devices, and the plan's network device, with
+    /// the policy that NVX's lowering renders, if the plan has a network that lets anything
+    /// through, those of the [export](Self::export) of the launch's shares, if any, which
+    /// `ExportPlan::openvmm_arguments` renders, then those of `launch`, which NVX's
+    /// `VmmLaunch::arguments` renders: the VM in one process on the launch's hypervisor, with its
+    /// memory, kernel, and initramfs, the launch's [kernel command line](Self::kernel_command_line),
+    /// no virtio console, the control console listening on the launch's endpoint with
+    /// authentication on OpenVMM's standard input, and the outcome report at the launch's path.
+    /// OpenVMM appends the boot tokens with which the guest mounts the export to the kernel
+    /// command line.
     ///
     /// Unlike those of NVX's sandbox start, they name no workload identity, which the adapter's
     /// plan does not hold, and no managed lifecycle: OpenVMM only checks the arguments of the
@@ -282,52 +304,18 @@ impl LayeredLaunch {
     /// the guest agent replaces, reads its boot token.
     ///
     /// The arguments name the checked files of this launch alone: never persist them.
+    ///
+    /// Fails as `PreparedLaunch::adapter_arguments` does, with
+    /// [`ErrorKind::Unsupported`](nvx::ErrorKind::Unsupported) for a launch of no memory, and for
+    /// a command line that Windows would not start OpenVMM with: one longer than
+    /// `nvx::host::launch::PROCESS_COMMAND_LINE_LIMIT`, which holds on every host.
     pub fn openvmm_arguments(
         &self,
         prepared: &PreparedLaunch,
-        hypervisor: Hypervisor,
-        kernel: &Path,
-        initramfs: &Path,
-        endpoint: &str,
-        report: &Path,
-    ) -> Vec<OsString> {
+        launch: &VmmLaunch<'_>,
+    ) -> Result<Vec<OsString>> {
         debug_assert_eq!(prepared.plan(), &self.plan, "the launch prepared its plan");
-        let export = self
-            .export
-            .as_ref()
-            .map(ExportPlan::openvmm_arguments)
-            .unwrap_or_default();
-        let mut arguments = prepared
-            .openvmm_arguments()
-            .iter()
-            .chain(&export)
-            .map(OsString::from)
-            .collect::<Vec<_>>();
-        let memory = format!("{DEFAULT_MEMORY_MIB}M");
-        let command_line = prepared.kernel_command_line();
-        let control = format!("listen={endpoint}");
-        let options = [
-            OsStr::new("--single-process"),
-            OsStr::new("--hypervisor"),
-            OsStr::new(hypervisor.as_str()),
-            OsStr::new("--memory"),
-            OsStr::new(&memory),
-            OsStr::new("--kernel"),
-            kernel.as_os_str(),
-            OsStr::new("--initrd"),
-            initramfs.as_os_str(),
-            OsStr::new("--cmdline"),
-            OsStr::new(command_line),
-            OsStr::new("--virtio-console"),
-            OsStr::new("none"),
-            OsStr::new("--microvm-control-console"),
-            OsStr::new(&control),
-            OsStr::new("--microvm-control-auth-stdin"),
-            OsStr::new("--microvm-report"),
-            report.as_os_str(),
-        ];
-        arguments.extend(options.map(OsStr::to_os_string));
-        arguments
+        prepared.adapter_arguments(launch, self.export.as_ref())
     }
 }
 

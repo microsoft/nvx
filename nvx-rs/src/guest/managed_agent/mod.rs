@@ -30,7 +30,9 @@
 //! and recording operations, including failures of mount, environment export, and `exec`, the
 //! root operations' fake kernel for the mapper, and spawn workloads through the real launch with
 //! its credential calls replaced and a stand-in `setpriv`, or with the stages of the sandbox
-//! agent's entry simulated.
+//! agent's entry simulated. The agent keeps the table's account in a
+//! [`MappingTable`](crate::guest::mappings::MappingTable), as any guest agent may, which checks
+//! each part that the host sends and hands its mappings to the agent's mapper.
 //!
 //! The agent launches each workload as one caller of [`spawn`](crate::guest::spawn): it builds
 //! the workload's command, with the complete `argv` and `envp`, its descriptors, in direct mode

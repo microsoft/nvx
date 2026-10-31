@@ -1,4 +1,5 @@
-//! Bind mounts of host mappings beneath the descriptors of their roots.
+//! Bind mounts of host mappings beneath the descriptors of their roots, and the host mapping table
+//! through which a guest agent applies them.
 //!
 //! A [`Mapping`] names a source below a source root, such as the guest's mount of the host's
 //! export; a target below a target root, the tree that the mappings go into; and the target's
@@ -6,7 +7,9 @@
 //! [`SourceRoot`], tracks them, and unmounts them at its [`teardown`](Mapper::teardown). [`bind`]
 //! applies one runtime bind, such as a generated machine ID, a resolver file, or the runtime's time
 //! status, through the same walk and attach, without the checks of a host mapping's target and
-//! without tracking.
+//! without tracking. A [`MappingTable`] checks the parts of a host mapping table, as the
+//! [last section](#host-mapping-table) describes, and hands their mappings to the root of its
+//! caller's choice.
 //!
 //! # Walk
 //!
@@ -98,11 +101,8 @@
 //! procfs at `/proc`. It attempts each, whatever failed before, and reports every failure. A
 //! mapper that is dropped leaves its mappings mounted.
 //!
-//! NVX's managed agent applies its host mapping table through a mapper beneath its own root, `/`,
-//! from its mount of the host's export, an aggregate, whose root, which lists the aggregate's
-//! children, it never maps: it refuses an empty source. A layered [`Root`](super::root::Root)
-//! mounts its live shares, and the mappings that its caller applies, through one, which its
-//! teardown unmounts first.
+//! A layered [`Root`](super::root::Root) mounts its live shares, and the mappings that its caller
+//! applies, through one, which its teardown unmounts first.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -120,10 +120,28 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Host mapping table
+//!
+//! A host that maps host paths into its guest, such as NVX's managed lifecycle, announces how
+//! many mappings its table holds, and once the guest agent is ready, sends the table in parts,
+//! `MAPS` payloads of consecutive entries, each the source of a mapping in the host export, its
+//! target, and its access. A [`MappingTable`] keeps the agent's account of the table: it checks
+//! each part against what the host announced and against the entries that it applied, hands the
+//! part's mappings to the caller, which applies them beneath the root of its choice, such as
+//! through a mapper or a layered root, and latches at the first that fails, which it reports with
+//! its entry in the table, so that the agent starts no workload on a partial table. The root keeps
+//! the mappings until its teardown.
+//!
+//! NVX's managed agent applies its host mapping table through one, and through a mapper beneath
+//! its own root, `/`, in direct mode, or beneath the container's assembled root in sandbox mode,
+//! from its mount of the host's export, an aggregate, whose root, which lists the aggregate's
+//! children, no table maps: a table refuses an empty source.
 
 mod kernel;
 #[cfg(test)]
 mod privileged;
+mod table;
 #[cfg(test)]
 mod tests;
 
@@ -139,6 +157,7 @@ use super::sys::{
 use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
 
 pub(crate) use self::kernel::{Kernel, SystemKernel};
+pub use self::table::{MappingTable, Refusal, TableError};
 
 /// The longest source or target of a [`Mapping`], in bytes: Linux's `PATH_MAX` without its
 /// terminating NUL.
