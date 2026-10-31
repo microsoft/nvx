@@ -26,7 +26,7 @@ esac
 runtime=/run/nvx
 container_cgroup=/sys/fs/cgroup/container
 scratch_mount=$runtime/scratch
-# Restore packet v5 flags (doc/design/5.5-restore-protocol.md).
+# Restore packet v5 and v6 flags (doc/design/5.5-restore-protocol.md).
 PACKET_MEMORY_TARGET=2
 PACKET_ACK_REQUIRED=4
 container_frozen=false
@@ -397,6 +397,35 @@ EOF
     done
 }
 
+# Guest repair step 4 of a restore that replaced the network policy of a
+# snapshot without a tier (doc/design/5.5-restore-protocol.md): applies the
+# network settings of the new policy, which the restore packet carries, as
+# NVX's init applies those of the virtnet_dns= and virtnet_ingress= tokens at
+# a cold boot. It names the DNS server DNS_SERVER, unless it is "-", in
+# /etc/resolv.conf, and, when ANNOUNCE is 1, starts nvx-ingress, which
+# announces the guest's listeners to the IPv4 gateway, which publishes them.
+# A failure of either fails the restore.
+apply_restore_network() {
+    dns_server=$1
+    announce_listeners=$2
+    if [ "$dns_server" != - ]; then
+        printf 'nameserver %s\n' "$dns_server" >/etc/resolv.conf ||
+            fail_closed "failed to name the DNS server in /etc/resolv.conf"
+    fi
+    if [ "$announce_listeners" -eq 1 ]; then
+        gateway=$(cmdline_value virtnet_gw) ||
+            fail_closed "listener announcements need an IPv4 gateway"
+        [ -x /sbin/nvx-ingress ] ||
+            fail_closed "listener announcements need /sbin/nvx-ingress"
+        # start returns once the announcer's socket is bound to a privileged
+        # source port and its program runs, which then passes to init. Their
+        # output goes to the console, as at a cold boot, and not to this
+        # script's caller, which the announcer outlives.
+        /sbin/nvx-ingress start "$gateway" </dev/null >/dev/null 2>/dev/console ||
+            fail_closed "failed to start nvx-ingress"
+    fi
+}
+
 configured_snapshot_tier=$(cmdline_value nvx_snapshot_tier || true)
 if [ -n "$configured_snapshot_tier" ]; then
     case "$configured_snapshot_tier:$scratch_policy" in
@@ -432,17 +461,21 @@ export NVX_VM_GENERATION_ID="$generation_id"
 entropy=$runtime/restore-entropy
 
 # Guest repair steps 4 to 7 (doc/design/5.5-restore-protocol.md). nvx-time
-# capture has already read restore packet v5, checked its generation, set
-# the wall clock from a time sample, and written the entropy. Its metadata is
-# FLAGS, ONLINE_VP_COUNT, RANGE_COUNT, and the new generation ID, followed by
-# START and LENGTH for each memory range.
+# capture has already read the restore packet, version 5 or 6, checked its
+# generation, set the wall clock from a time sample, and written the entropy.
+# Its metadata is FLAGS, ONLINE_VP_COUNT, RANGE_COUNT, the new generation ID,
+# the DNS server of a version 6 packet's network settings, or "-" for none,
+# and 1 if they ask the guest to announce its listeners, or else 0, followed
+# by START and LENGTH for each memory range.
 post_restore() {
     post_restore_pending=true
-    [ "$#" -ge 4 ] || fail_closed "restore packet metadata is invalid"
+    [ "$#" -ge 6 ] || fail_closed "restore packet metadata is invalid"
     packet_flags=$1
     restore_online_count=$2
     restore_memory_range_count=$3
-    shift 4
+    restore_dns_server=$5
+    restore_announce_listeners=$6
+    shift 6
     case "$packet_flags:$restore_online_count:$restore_memory_range_count" in
         *[!0-9:]* | :* | *::* | *:)
             fail_closed "restore packet metadata is invalid"
@@ -452,13 +485,26 @@ post_restore() {
         0 | 1 | 2 | 4 | 8) ;;
         *) fail_closed "restore packet has an invalid online CPU count" ;;
     esac
-    # A plain untiered restore, with no processors or memory to add, prints
-    # nothing, as before: each console byte is a port exit on its latency
-    # path.
+    case "$restore_announce_listeners" in
+        0 | 1) ;;
+        *) fail_closed "restore packet metadata is invalid" ;;
+    esac
+    case "$restore_dns_server" in
+        -) ;;
+        '' | *[!0-9a-f.:]*) fail_closed "restore packet metadata is invalid" ;;
+    esac
+    restore_network=false
+    if [ "$restore_dns_server" != - ] || [ "$restore_announce_listeners" -eq 1 ]; then
+        restore_network=true
+    fi
+    # A plain untiered restore, with no processors or memory to add and no
+    # network settings to apply, prints nothing, as before: each console byte
+    # is a port exit on its latency path.
     if [ "$snapshot_tier" = legacy ] &&
         [ "$restore_online_count" -eq 0 ] &&
         [ "$restore_memory_range_count" -eq 0 ] &&
-        [ $((packet_flags & PACKET_MEMORY_TARGET)) -eq 0 ]; then
+        [ $((packet_flags & PACKET_MEMORY_TARGET)) -eq 0 ] &&
+        [ "$restore_network" = false ]; then
         finish_restore "$packet_flags" quiet
         return
     fi
@@ -470,6 +516,10 @@ post_restore() {
         activate_restore_memory "$restore_memory_range_count" "$@"
     elif [ "$restore_memory_range_count" -ne 0 ]; then
         fail_closed "restore packet has memory ranges without a memory target"
+    fi
+    if [ "$restore_network" = true ]; then
+        console_status "NVX-POST-RESTORE-STAGE: network"
+        apply_restore_network "$restore_dns_server" "$restore_announce_listeners"
     fi
 
     # An untiered restore without processors or memory to add leaves the
@@ -635,9 +685,9 @@ if [ "$scratch_policy" = fresh ]; then
 else
     capture_request=1
 fi
-# An untiered restore with nothing to activate needs no shell work before
-# the acknowledgement, so nvx-time finishes it and reports 2: no second
-# process starts on the restore path.
+# An untiered restore with nothing to activate and no network settings to
+# apply needs no shell work before the acknowledgement, so nvx-time finishes
+# it and reports 2: no second process starts on the restore path.
 finish_option=
 [ "$snapshot_tier" = legacy ] && finish_option=--finish
 capture_metadata=$(

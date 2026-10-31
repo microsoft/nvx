@@ -2720,7 +2720,7 @@ NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
 `tests/openvmm_vectors.rs` is an ignored test that compares the copies of
 OpenVMM's vectors in `tests/vectors/openvmm/` with the files of the OpenVMM
 submodule, which the `nvx-rs` job cannot check out, and the versions of
-OpenVMM's snapshot format, saved-state schema, time ABI, and restore packet in
+OpenVMM's snapshot format, saved-state schema, time ABI, and restore packets in
 `nvx::contract` with the submodule's. The NVX CLI jobs run it once they check
 the submodule out, and so does an OpenVMM pin promotion; see
 [OpenVMM's vectors](tests/vectors/README.md#openvmms-vectors).

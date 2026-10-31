@@ -40,7 +40,10 @@
 //!   restored guest, and that the guest decodes. It changes with the packet's layout or meaning.
 //!
 //! Each of these four must match the pinned OpenVMM's, which the ignored test
-//! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule. The key
+//! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule. So must
+//! [`RESTORE_PACKET_NETWORK_VERSION`], the version of the packet that OpenVMM gives instead at a
+//! restore that replaces the network policy of a snapshot without a tier, which the guest decodes
+//! too. No clone of a template is restored so, so the key does not hold it. The key
 //! also holds the version of the activation contract,
 //! [`activation::VERSION`](crate::activation::VERSION), through which each clone receives the
 //! settings of its own launch.
@@ -80,6 +83,13 @@ pub const TIME_ABI_VERSION: u64 = 2;
 ///
 /// Version 5 carries no host UTC: the guest takes a time sample to set its clock.
 pub const RESTORE_PACKET_VERSION: u64 = 5;
+/// Version of the restore packet that OpenVMM gives a restored guest in place of
+/// [`RESTORE_PACKET_VERSION`]'s at a restore that replaces the network policy of a snapshot
+/// without a tier: that version's packet, with the new policy's DNS server and whether the guest
+/// announces its listeners under it, which a guest that decodes only the other version refuses.
+/// This crate's guest decodes both. It must match `RESTORE_PACKET_NETWORK_VERSION` in OpenVMM's
+/// `vm/devices/chipset_resources/src/microvm_time.rs`.
+pub const RESTORE_PACKET_NETWORK_VERSION: u64 = 6;
 
 /// Returns how the `openvmm` section of an NVX `SOURCE-MANIFEST.json` departs from the contracts
 /// that this crate speaks: one `NAME: expected VALUE, found VALUE` entry, in JSON, for each field

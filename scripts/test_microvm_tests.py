@@ -5922,7 +5922,14 @@ class MicrovmTests(unittest.TestCase):
             snapshot,
         )
         self.assertIn('console_status "NVX-SNAPSHOT-ERROR: $*"', snapshot)
-        for stage in ("packet", "entropy", "identity", "runtime-hook", "acknowledge"):
+        for stage in (
+            "packet",
+            "network",
+            "entropy",
+            "identity",
+            "runtime-hook",
+            "acknowledge",
+        ):
             self.assertIn(
                 f'console_status "NVX-POST-RESTORE-STAGE: {stage}"',
                 snapshot,
@@ -5957,6 +5964,7 @@ class MicrovmTests(unittest.TestCase):
 
         markers = [
             'console_status "NVX-POST-RESTORE-STAGE: packet"',
+            'console_status "NVX-POST-RESTORE-STAGE: network"',
             'console_status "NVX-POST-RESTORE-STAGE: entropy"',
             'console_status "NVX-POST-RESTORE-STAGE: identity"',
             'console_status "NVX-POST-RESTORE-STAGE: runtime-hook"',
@@ -6039,7 +6047,7 @@ class MicrovmTests(unittest.TestCase):
                         'nvx_time() { printf "%s\\n" "$*" >>"$calls"; }\n'
                         'activate_restore_memory() { echo "memory $*"; }\n'
                         f"{functions}\n"
-                        f"post_restore {flags} 0 0 {generation_id}\n"
+                        f"post_restore {flags} 0 0 {generation_id} - 0\n"
                         'echo "pending=$post_restore_pending"\n'
                     ),
                     text=True,
@@ -6108,17 +6116,216 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(dispatch_metadata("0"), (0, "suppressed=true\n"))
         # nvx-time finished the restore and handed it to the daemon.
         self.assertEqual(
-            dispatch_metadata(f"2 4 0 0 {generation_id}"),
+            dispatch_metadata(f"2 4 0 0 {generation_id} - 0"),
             (0, "suppressed=false\n"),
         )
         self.assertEqual(
-            dispatch_metadata(f"1 4 2 0 {generation_id}"),
-            (0, f"post_restore 4 2 0 {generation_id}\nsuppressed=false\n"),
+            dispatch_metadata(f"1 4 2 0 {generation_id} 10.0.0.1 1"),
+            (
+                0,
+                f"post_restore 4 2 0 {generation_id} 10.0.0.1 1\nsuppressed=false\n",
+            ),
         )
         self.assertEqual(
             dispatch_metadata("3"),
             (1, "fail_closed snapshot capture metadata is invalid\n"),
         )
+
+    def test_untiered_restore_applies_its_network_settings_before_the_acknowledgement(
+        self,
+    ):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        snapshot = (
+            Path(__file__).parents[1] / "guest" / "common" / "nvx-snapshot"
+        ).read_text(encoding="utf-8")
+
+        def function(name: str) -> str:
+            start = snapshot.index(f"{name}() {{")
+            return snapshot[start : snapshot.index("\n}\n", start) + 3]
+
+        functions = "".join(
+            function(name)
+            for name in (
+                "console_status",
+                "fail_closed",
+                "cmdline_value",
+                "apply_restore_network",
+                "post_restore",
+                "finish_restore",
+            )
+        )
+        for code, stand_in in (
+            (">/dev/console", '>>"$console_log"'),
+            ("/sbin/nvx-exit", "nvx_exit"),
+            ("/sbin/nvx-time", "nvx_time"),
+            ("</proc/cmdline", '<"$cmdline_file"'),
+            (">/etc/resolv.conf", '>"$resolver"'),
+            ("[ -x /sbin/nvx-ingress ]", '[ -x "$ingress" ]'),
+            ('/sbin/nvx-ingress start "$gateway"', '"$ingress" start "$gateway"'),
+        ):
+            self.assertIn(code, functions)
+            functions = functions.replace(code, stand_in)
+        generation_id = "0123456789abcdef0123456789abcdef"
+
+        def restore(
+            dns_server: str,
+            announce: str,
+            *,
+            command_line: str = "virtnet_ip=10.0.0.2 virtnet_gw=10.0.0.1",
+            ingress: int | None = 0,
+            resolver: str = "resolv.conf",
+        ) -> tuple[int, str, str, str, str, str]:
+            """Run the repair of a restore whose packet names ``dns_server``
+            and asks for the announcement of the guest's listeners when
+            ``announce`` is 1, with a stand-in for nvx-ingress that exits with
+            ``ingress``, or none, and return the shell's status, stdout, and
+            stderr, the console, the calls of nvx-ingress and of nvx-time in
+            order, and the resolver file."""
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "cmdline").write_text(command_line + "\n", encoding="ascii")
+                if ingress is not None:
+                    program = root / "nvx-ingress"
+                    program.write_text(
+                        "#!/bin/sh\n"
+                        f'printf "nvx-ingress %s\\n" "$*" >>"{root}/nvx-time"\n'
+                        f"exit {ingress}\n",
+                        encoding="ascii",
+                    )
+                    program.chmod(0o755)
+                result = subprocess.run(
+                    [shell, "-s", "--", temporary, resolver],
+                    input=(
+                        "set -eu\n"
+                        'console_log="$1/console"\n'
+                        'calls="$1/nvx-time"\n'
+                        'cmdline_file="$1/cmdline"\n'
+                        'resolver="$1/$2"\n'
+                        'ingress="$1/nvx-ingress"\n'
+                        ': >"$console_log"\n'
+                        ': >"$calls"\n'
+                        "snapshot_tier=legacy\n"
+                        "PACKET_MEMORY_TARGET=2\n"
+                        "PACKET_ACK_REQUIRED=4\n"
+                        "restore_new_cpus=none\n"
+                        "post_restore_pending=false\n"
+                        'nvx_exit() { echo "exit $1"; }\n'
+                        # The acknowledgement records what the resolver
+                        # names by then.
+                        "nvx_time() {\n"
+                        '    printf "%s resolver=%s\\n" "$*" \\\n'
+                        '        "$(cat "$resolver" 2>/dev/null)" >>"$calls"\n'
+                        "}\n"
+                        f"{functions}\n"
+                        f"post_restore 4 0 0 {generation_id} {dns_server} {announce}\n"
+                        'echo "pending=$post_restore_pending"\n'
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                return (
+                    result.returncode,
+                    result.stdout,
+                    result.stderr,
+                    (root / "console").read_text(encoding="ascii"),
+                    (root / "nvx-time").read_text(encoding="ascii"),
+                    (
+                        (root / "resolv.conf").read_text(encoding="ascii")
+                        if (root / "resolv.conf").exists()
+                        else ""
+                    ),
+                )
+
+        stages = (
+            "NVX-POST-RESTORE-STAGE: packet\n"
+            "NVX-POST-RESTORE-STAGE: network\n"
+            "NVX-POST-RESTORE-STAGE: acknowledge\n"
+        )
+        # The resolver names the DNS server, and nvx-ingress starts the
+        # announcer to the IPv4 gateway, before the acknowledgement.
+        self.assertEqual(
+            restore("10.0.0.1", "1"),
+            (
+                0,
+                "NVX-POST-RESTORE-OK: tier=legacy\npending=false\n",
+                "",
+                stages,
+                "nvx-ingress start 10.0.0.1\n"
+                "restore-finish --ack --new-cpus none resolver=nameserver 10.0.0.1\n",
+                "nameserver 10.0.0.1\n",
+            ),
+        )
+        # Either setting alone.
+        self.assertEqual(
+            restore("fd00::a00:1", "0")[3:],
+            (
+                stages,
+                "restore-finish --ack --new-cpus none "
+                "resolver=nameserver fd00::a00:1\n",
+                "nameserver fd00::a00:1\n",
+            ),
+        )
+        self.assertEqual(
+            restore("-", "1")[3:],
+            (
+                stages,
+                "nvx-ingress start 10.0.0.1\n"
+                "restore-finish --ack --new-cpus none resolver=\n",
+                "",
+            ),
+        )
+        # Settings that ask for nothing leave a plain restore quiet.
+        self.assertEqual(
+            restore("-", "0"),
+            (
+                0,
+                "pending=false\n",
+                "",
+                "",
+                "restore-finish --ack --new-cpus none resolver=\n",
+                "",
+            ),
+        )
+
+        # A failure fails the restore, which is never acknowledged. An
+        # announcer that does not start, as when no privileged source port is
+        # free for its socket, is one.
+        failures: tuple[tuple[tuple[str, str, dict[str, Any]], str, str], ...] = (
+            (
+                ("-", "1", {"command_line": "virtnet_ip=10.0.0.2"}),
+                "listener announcements need an IPv4 gateway",
+                "",
+            ),
+            (
+                ("-", "1", {"ingress": None}),
+                "listener announcements need /sbin/nvx-ingress",
+                "",
+            ),
+            (
+                ("10.0.0.1", "1", {"ingress": 1}),
+                "failed to start nvx-ingress",
+                "nvx-ingress start 10.0.0.1\n",
+            ),
+            (
+                ("10.0.0.1", "0", {"resolver": "missing/resolv.conf"}),
+                "failed to name the DNS server in /etc/resolv.conf",
+                "",
+            ),
+            (("-", "2", {}), "restore packet metadata is invalid", ""),
+            (("10.0.0.z", "0", {}), "restore packet metadata is invalid", ""),
+        )
+        for (dns_server, announce, options), error, started in failures:
+            status, stdout, stderr, _, calls, _ = restore(
+                dns_server, announce, **options
+            )
+            self.assertEqual(status, 1, (error, stdout, stderr))
+            self.assertIn("exit 1\n", stdout)
+            self.assertIn(f"nvx-snapshot: {error}; terminating the VM\n", stderr)
+            self.assertEqual(calls, started)
 
     def _run_host_share_write_back(
         self,

@@ -1856,6 +1856,108 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
     }
 }
 
+/// Returns `packet`, a version 5 packet of [`time_packet`], as version 6, with the network byte
+/// `network` and, after its entropy, the DNS server record `dns_server`.
+#[cfg(target_arch = "x86_64")]
+fn time_network_packet(mut packet: Vec<u8>, network: u8, dns_server: [u8; 16]) -> Vec<u8> {
+    packet[3] = 6;
+    packet[7] = network;
+    packet.extend_from_slice(&dns_server);
+    packet
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn time_test_mode_decodes_the_network_settings_of_version_6() {
+    let directory = tempfile::tempdir().unwrap();
+    let previous = "ffffffffffffffffffffffffffffffff";
+    let base = time_packet(0x04, 0, &[], 1, 0, 0);
+    let ipv4 = [10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let ipv6 = "fd00::a00:1"
+        .parse::<std::net::Ipv6Addr>()
+        .unwrap()
+        .octets();
+    for (index, (network, dns_server, expected)) in [
+        (0x05, ipv4, " dns=10.0.0.1 announce=1\n"),
+        (0x02, ipv6, " dns=fd00::a00:1 announce=0\n"),
+        (0x04, [0; 16], " dns=- announce=1\n"),
+        (0x00, [0; 16], " dns=- announce=0\n"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let packet = time_network_packet(base.clone(), network, dns_server);
+        let output = run_time_packet(
+            directory.path(),
+            &format!("network-{index}"),
+            &packet,
+            "0",
+            previous,
+        );
+        let text = String::from_utf8_lossy(&output.1);
+        assert_eq!(output.0, Some(0), "case {index}: {text:?}");
+        assert!(
+            text.starts_with("ok flags=4 ") && text.ends_with(expected),
+            "case {index}: {text:?}"
+        );
+    }
+    // A version 5 packet carries no network settings, and prints none.
+    assert!(
+        run_time_packet(directory.path(), "version-5", &base, "0", previous)
+            .1
+            .ends_with(b" generation_id=000102030405060708090a0b0c0d0e0f\n")
+    );
+
+    let mut padded = ipv4;
+    padded[4] = 1;
+    let mut version_7 = time_network_packet(base.clone(), 0x05, ipv4);
+    version_7[3] = 7;
+    for (index, (packet, error)) in [
+        (
+            time_network_packet(base.clone(), 0x08, [0; 16]),
+            "restore packet network byte 0x08 is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x03, ipv4),
+            "restore packet network byte 0x03 is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x01, padded),
+            "restore packet DNS server is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x00, ipv4),
+            "restore packet DNS server is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x01, [0; 16]),
+            "restore packet DNS server is invalid",
+        ),
+        (
+            time_network_packet(base.clone(), 0x02, [0; 16]),
+            "restore packet DNS server is invalid",
+        ),
+        (version_7, "restore packet version is 7"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = run_time_packet(
+            directory.path(),
+            &format!("network-rejected-{index}"),
+            &packet,
+            "0",
+            previous,
+        );
+        assert_eq!(output.0, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.1),
+            format!("error G_REPAIR_PACKET {error}\n"),
+            "case {index}"
+        );
+    }
+}
+
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn time_test_mode_covers_checks_events_records_and_workers() {

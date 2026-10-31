@@ -3,6 +3,7 @@
 use std::ffi::CString;
 use std::fmt::{self, Display};
 use std::io;
+use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
@@ -580,6 +581,8 @@ pub struct Restore {
     generation_id: GenerationId,
     /// The memory ranges to activate.
     memory_ranges: Vec<MemoryRange>,
+    /// The network settings that the restore packet carries, if any.
+    network: Option<RestoreNetwork>,
     /// Whether the call finished the restore.
     finished: bool,
     /// The restore's fresh entropy, in the in-memory mode, until the caller takes it.
@@ -588,8 +591,9 @@ pub struct Restore {
 
 impl Restore {
     /// Returns whether the call finished the restore, as [`CaptureRequest::finish`] asked.
-    /// Otherwise, the caller activates the restore's processors and memory, refreshes its
-    /// entropy and identity, and finishes it with [`TimeAbi::restore_finish`].
+    /// Otherwise, the caller activates the restore's processors and memory, applies its network
+    /// settings, refreshes its entropy and identity, and finishes it with
+    /// [`TimeAbi::restore_finish`].
     ///
     /// A restore whose handoff of step 7 fails after its acknowledgement counts as finished,
     /// since finishing it again would acknowledge it twice, as `nvx-time capture --finish`
@@ -646,6 +650,47 @@ impl Restore {
     pub(crate) fn online_vp_count(&self) -> u8 {
         self.online_vp_count
     }
+
+    /// Returns the network settings that the restore packet carries: those of a restore that
+    /// replaced the network policy of a snapshot without a tier, which the guest applies before it
+    /// finishes the restore, or `None` for a restore that carries none.
+    pub fn network(&self) -> Option<RestoreNetwork> {
+        self.network
+    }
+}
+
+/// The network settings of a restore that replaced the network policy of a snapshot without a
+/// tier, which its restore packet carries: the DNS server of the new policy, and whether the guest
+/// announces its listeners under it, as a cold boot under that policy learns them from the
+/// `virtnet_dns=` and `virtnet_ingress=` tokens of its command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RestoreNetwork {
+    /// The DNS server, one of the gateway's addresses, or `None` when the policy lets the guest
+    /// reach no DNS service of the gateway.
+    dns_server: Option<IpAddr>,
+    /// Whether the guest announces its listeners to the gateway, which publishes them.
+    announce_listeners: bool,
+}
+
+impl RestoreNetwork {
+    /// Returns the network settings with `dns_server` and `announce_listeners`.
+    pub(crate) const fn new(dns_server: Option<IpAddr>, announce_listeners: bool) -> Self {
+        Self {
+            dns_server,
+            announce_listeners,
+        }
+    }
+
+    /// Returns the DNS server that the guest's resolver names, or `None` for none.
+    pub fn dns_server(&self) -> Option<IpAddr> {
+        self.dns_server
+    }
+
+    /// Returns whether the guest announces its listeners to its IPv4 gateway, which publishes
+    /// them.
+    pub fn announces_listeners(&self) -> bool {
+        self.announce_listeners
+    }
 }
 
 #[cfg(test)]
@@ -658,6 +703,7 @@ impl Restore {
             online_vp_count: 0,
             generation_id,
             memory_ranges: Vec::new(),
+            network: None,
             finished: false,
             seed: None,
         }
@@ -951,6 +997,7 @@ fn repair_restore(
         header,
         ranges,
         entropy,
+        network,
     } = packet;
     let generation_id = entropy.generation_id();
     if generation_id == target.previous_id {
@@ -998,7 +1045,8 @@ fn repair_restore(
         && target.daemon_pid.is_some()
         && header.online_vp_count == 0
         && header.range_count == 0
-        && !header.memory_target();
+        && !header.memory_target()
+        && !header.network_repair();
     let seed = match target.entropy.deliver(entropy) {
         Ok(seed) => seed,
         Err(detail) => return Err(repair_failed(runtime, ViolationCode::RepairPacket, detail)),
@@ -1031,6 +1079,7 @@ fn repair_restore(
             .iter()
             .map(|&(start, length)| MemoryRange { start, length })
             .collect(),
+        network,
         finished,
         seed,
     }))
@@ -1718,6 +1767,7 @@ mod tests {
             online_vp_count: 4,
             generation_id: GenerationId::from_bytes([7; GenerationId::LENGTH]),
             memory_ranges: vec![range],
+            network: None,
             finished: false,
             seed: None,
         };
@@ -1725,17 +1775,27 @@ mod tests {
         assert!(!restore.finished());
         assert_eq!(restore.processor_target(), Some(4));
         assert_eq!(restore.memory_ranges(), [range]);
+        assert_eq!(restore.network(), None);
         assert_eq!((range.start(), range.length()), (1 << 32, 128 << 20));
         assert_eq!(
             restore.generation_id(),
             GenerationId::from_bytes([7; GenerationId::LENGTH])
         );
+        let dns_server = IpAddr::from([10, 0, 0, 1]);
+        let networked = Restore {
+            network: Some(RestoreNetwork::new(Some(dns_server), true)),
+            ..restore
+        };
+        let network = networked.network().unwrap();
+        assert_eq!(network.dns_server(), Some(dns_server));
+        assert!(network.announces_listeners());
         let plain = Restore {
             flags: 0,
             online_vp_count: 0,
             memory_ranges: Vec::new(),
+            network: None,
             finished: true,
-            ..restore
+            ..networked
         };
         assert!(!plain.acknowledgement_required() && !plain.memory_target());
         assert!(plain.finished());
@@ -1798,6 +1858,7 @@ mod tests {
             online_vp_count: 0,
             generation_id: seed.generation_id(),
             memory_ranges: Vec::new(),
+            network: None,
             finished: false,
             seed: Some(seed),
         };
