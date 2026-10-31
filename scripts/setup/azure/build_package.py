@@ -6,10 +6,12 @@ import gzip
 import hashlib
 import io
 import json
+import lzma
 import ntpath
 import re
+import tarfile
 import uuid
-import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
@@ -18,6 +20,46 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 SETUP = ROOT.parent
 REPO = SETUP.parent.parent
+# The stdlib-only guest package. Guests run its commands from their bootstrap
+# directory as ``python -I -B <directory> <command>``: isolated mode keeps
+# environment variables and user site-packages out, and this zipapp-style
+# entry point at the directory's root imports the package next to it.
+GUEST_PACKAGE = "nvx_azure"
+GUEST_ENTRY_POINT = (
+    b'"""Run an NVX Azure bootstrap command from this directory."""\n\n'
+    b"import sys\n\nfrom nvx_azure.cli import main\n\nsys.exit(main())\n"
+)
+COMMON_MODULES = ("__init__.py", "cli.py", "common.py")
+LINUX_MODULES = (
+    *COMMON_MODULES,
+    "linux_bootstrap.py",
+    "linux_disk.py",
+    "linux_firewall.py",
+    "linux_mshv.py",
+)
+LINUX_ENTRY_POINT = "/usr/bin/python3 -I -B /opt/nvx-bootstrap"
+WINDOWS_MODULES = (
+    *COMMON_MODULES,
+    "windows_bootstrap.py",
+    "windows_disk.py",
+    "windows_firewall.py",
+    "windows_stage.py",
+    "windows_system.py",
+)
+# Small PowerShell adapters for the cmdlets that the Windows modules call.
+WINDOWS_ADAPTERS = ("firewall.ps1", "openssh.ps1", "storage.ps1", "system.ps1")
+# Windows staging consumes these only from the outer Custom Script payload.
+# Keeping them out of the package avoids duplicating large SSH keys.
+WINDOWS_OUTER_ONLY_FIELDS = frozenset({"publicKeys", "sshDefaultShell"})
+# The interpreter of the Windows bootstrap, which runs before the runner
+# toolchain installs its own Python: python.org's embeddable package for x64,
+# pinned by the SHA-256 that python.org's Windows release manifest publishes
+# (https://www.python.org/ftp/python/3.14.10/windows-3.14.10.json).
+WINDOWS_PYTHON = {
+    "version": "3.14.10",
+    "url": "https://www.python.org/ftp/python/3.14.10/python-3.14.10-embeddable-amd64.zip",
+    "sha256": "b553e7dac884469b40e0740bb527271c3378f700b427e0485835f1bb6424361c",
+}
 
 
 class LinuxDisk(TypedDict):
@@ -111,8 +153,10 @@ WINDOWS_EXTENSION_COMMAND = (
     "else { $payload=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw.Trim())) }; "
     "$cfg=Join-Path $d 'vmss-bootstrap-config.json'; "
     "[IO.File]::WriteAllText($cfg,$payload,[Text.UTF8Encoding]::new($false)); "
-    "$s=Join-Path $d 'vmss-bootstrap.ps1'; "
-    "[IO.File]::WriteAllBytes($s,[Convert]::FromBase64String(($payload|ConvertFrom-Json).script)); "
+    "$s=Join-Path $d 'vmss-bootstrap.ps1'; $p=$payload|ConvertFrom-Json; "
+    "$b=[Convert]::FromBase64String($p.script); $i=[IO.MemoryStream]::new($b); "
+    "$g=[IO.Compression.GZipStream]::new($i,[IO.Compression.CompressionMode]::Decompress); "
+    "$o=[IO.File]::Create($s); try{$g.CopyTo($o)}finally{$o.Dispose();$g.Dispose();$i.Dispose()}; "
     '& $s -ConfigPath $cfg"'
 )
 
@@ -422,13 +466,16 @@ def source(path: str) -> bytes:
         location = SETUP / path
     elif path == "rust-toolchain.toml":
         location = REPO / path
-    elif path.startswith(("linux/", "windows/")) and ".." not in Path(path).parts:
+    elif (
+        path.startswith(("linux/", "windows/", GUEST_PACKAGE + "/"))
+        and ".." not in Path(path).parts
+    ):
         location = ROOT / path
     else:
         raise ValueError(f"Unsupported package source: {path}")
     data = location.read_bytes()
-    if path.endswith(".sh") and b"\r" in data:
-        raise ValueError(f"Shell source must use LF line endings: {path}")
+    if path.endswith((".sh", ".py")) and b"\r" in data:
+        raise ValueError(f"Shell and Python sources must use LF line endings: {path}")
     if path.endswith(".ps1"):
         data = data.replace(b"\r\n", b"\n")
     return data
@@ -448,7 +495,7 @@ def rust_version() -> str:
     return releases[0].decode()
 
 
-def configuration_bytes(config: RunnerConfig) -> bytes:
+def configuration_bytes(config: Mapping[str, object]) -> bytes:
     return (json.dumps(config, sort_keys=True, indent=2) + "\n").encode()
 
 
@@ -461,6 +508,12 @@ def gzip_bytes(data: bytes) -> bytes:
     return stream.getvalue()
 
 
+def guest_modules(names: tuple[str, ...]) -> dict[str, bytes]:
+    return {
+        f"{GUEST_PACKAGE}/{name}": source(f"{GUEST_PACKAGE}/{name}") for name in names
+    }
+
+
 def linux_payload(
     config: LinuxConfig,
 ) -> tuple[bytes, dict[str, bytes], dict[str, bytes]]:
@@ -468,20 +521,16 @@ def linux_payload(
         "config.json": configuration_bytes(config),
         "setup-linux.sh": source("setup-linux.sh"),
         "tool-versions.conf": source("tool-versions.conf"),
-        "setup-data-disk.sh": source("linux/setup-data-disk.sh"),
-        "bootstrap-runner.sh": source("linux/bootstrap-runner.sh"),
-        "block-runner-metadata.sh": source("linux/block-runner-metadata.sh"),
+        "__main__.py": GUEST_ENTRY_POINT,
+        **guest_modules(LINUX_MODULES),
     }
-    if config["kernelMode"] == "azurelinux-mshv":
-        files["setup-mshv.sh"] = source("linux/setup-mshv.sh")
-        files["verify-mshv.sh"] = source("linux/verify-mshv.sh")
     entries = [
         {
             "path": "/opt/nvx-bootstrap/" + name,
             "owner": "root:root",
             "permissions": "0600"
-            if name.endswith(".json")
-            else ("0644" if name.endswith(".conf") else "0755"),
+            if name == "config.json"
+            else ("0755" if name.endswith(".sh") else "0644"),
             "encoding": "gz+b64",
             "content": base64.b64encode(gzip_bytes(data)).decode(),
         }
@@ -491,7 +540,7 @@ def linux_payload(
         "[Unit]\nDescription=Configure the NVX CI runner\nWants=network-online.target\n"
         "After=network-online.target cloud-final.service waagent.service\n\n"
         "[Service]\nType=oneshot\nRemainAfterExit=yes\n"
-        "ExecStart=/opt/nvx-bootstrap/bootstrap-runner.sh\n"
+        f"ExecStart={LINUX_ENTRY_POINT} linux-bootstrap\n"
         "Restart=on-failure\nRestartSec=60\nTimeoutStartSec=4h\n\n"
         "[Install]\nWantedBy=multi-user.target\n"
     )
@@ -511,7 +560,7 @@ def linux_payload(
             "content": (
                 "[Unit]\nDescription=Block Azure metadata for NVX CI runner jobs\n\n"
                 "[Service]\nType=oneshot\nRemainAfterExit=yes\n"
-                "ExecStart=/opt/nvx-bootstrap/block-runner-metadata.sh\n\n"
+                f"ExecStart={LINUX_ENTRY_POINT} linux-block-metadata\n\n"
                 "[Install]\nWantedBy=multi-user.target\n"
             ),
         }
@@ -539,37 +588,51 @@ def linux_payload(
     return data, files, {"cloud-init.yaml": data}
 
 
+def windows_package(files: dict[str, bytes]) -> bytes:
+    """Return a canonical tar.xz of the files: solid compression keeps the
+    payload within Azure's custom-data limit, and fixed metadata and order
+    keep it independent of the builder."""
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name in sorted(files):
+            entry = tarfile.TarInfo(name)
+            entry.size = len(files[name])
+            entry.mode = 0o644
+            entry.mtime = 0
+            archive.addfile(entry, io.BytesIO(files[name]))
+    return lzma.compress(
+        stream.getvalue(),
+        format=lzma.FORMAT_XZ,
+        check=lzma.CHECK_CRC64,
+        preset=9 | lzma.PRESET_EXTREME,
+    )
+
+
 def windows_payload(
     config: WindowsConfig,
 ) -> tuple[bytes, dict[str, bytes], dict[str, bytes]]:
+    guest_config = {
+        key: value
+        for key, value in config.items()
+        if key not in WINDOWS_OUTER_ONLY_FIELDS
+    }
     files = {
-        "config.json": configuration_bytes(config),
+        "config.json": configuration_bytes(guest_config),
         "setup-windows-whp.ps1": source("setup-windows-whp.ps1"),
         "tool-versions.conf": source("tool-versions.conf"),
-        "setup-data-disk.ps1": source("windows/setup-data-disk.ps1"),
-        "bootstrap-runner.ps1": source("windows/bootstrap-runner.ps1"),
+        "__main__.py": GUEST_ENTRY_POINT,
+        **guest_modules(WINDOWS_MODULES),
+        **{name: source(f"windows/{name}") for name in WINDOWS_ADAPTERS},
     }
-    stream = io.BytesIO()
-    with zipfile.ZipFile(stream, "w") as archive:
-        for name, data in files.items():
-            entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            entry.create_system = 3  # Unix, matching the file attributes below.
-            entry.compress_type = zipfile.ZIP_DEFLATED
-            entry.external_attr = 0o100644 << 16
-            archive.writestr(entry, data, compresslevel=9)
-    package = stream.getvalue()
-    installer = base64.b64encode(source("windows/install-package.ps1")).decode()
-    extra = (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{installer}'))\n"
-        "& ([scriptblock]::Create($source)) -ConfigPath 'C:\\AzureData\\vmss-bootstrap-config.json'\n"
-    ).encode()
+    package = windows_package(files)
     payload = {
-        "script": base64.b64encode(source("windows/vmss-bootstrap.ps1")).decode(),
+        "script": base64.b64encode(
+            gzip_bytes(source("windows/vmss-bootstrap.ps1"))
+        ).decode(),
         "adminUsername": config["adminUsername"],
         "publicKeys": config["publicKeys"],
         "defaultShell": config["sshDefaultShell"],
-        "extraScriptBase64": base64.b64encode(extra).decode(),
+        "python": WINDOWS_PYTHON,
         "package": {
             "data": base64.b64encode(package).decode(),
             "sha256": hashlib.sha256(package).hexdigest(),
@@ -578,7 +641,7 @@ def windows_payload(
     data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     outputs = {
         "custom-data.json": data,
-        "sources.zip": package,
+        "sources.tar.xz": package,
         "extension-command.txt": (WINDOWS_EXTENSION_COMMAND + "\n").encode(),
     }
     return data, files, outputs

@@ -936,10 +936,10 @@ pull request that, in one change:
 2. Resets the series by truncating each of its history files, such as
    `data/<platform>-microvm-v2-1vcpu.csv`, to its header line.
 3. For a Linux/MSHV host with another hypervisor build or kernel, moves the pins of the MSHV
-   packages in [`setup-mshv.sh`](../scripts/setup/azure/linux/setup-mshv.sh) to the new host's
-   releases, which a test compares with the host file. Runners install the pinned releases
-   whenever they're provisioned, as after a reimage, so that a reimage alone never moves the
-   series to another hypervisor
+   packages in [`linux_mshv.py`](../scripts/setup/azure/nvx_azure/linux_mshv.py) to the new
+   host's releases, which a test compares with the host file. Runners install the pinned
+   releases whenever they're provisioned, as after a reimage, so that a reimage alone never
+   moves the series to another hypervisor
    ([Azure CI runner provisioning](../scripts/setup/azure/README.md#configuration)).
 
 The pull request's platform job compares the runner with the new file, and the gate treats the

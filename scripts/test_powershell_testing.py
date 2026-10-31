@@ -50,7 +50,8 @@ class PowerShellLaunchTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(command, 0, "launched\n", "")
         with patch.object(subprocess, "run", return_value=completed) as run:
             self.assertIs(
-                run_powershell(command, cwd=SCRIPTS, env={"N": "1"}), completed
+                run_powershell(command, cwd=SCRIPTS, env={"N": "1"}, input="request\n"),
+                completed,
             )
             # A test may give a launch a limit of its own.
             self.assertIs(run_powershell(command, timeout=300), completed)
@@ -62,6 +63,7 @@ class PowerShellLaunchTests(unittest.TestCase):
                     command,
                     cwd=SCRIPTS,
                     env={"N": "1"},
+                    input="request\n",
                     capture_output=True,
                     text=True,
                     timeout=POWERSHELL_TIMEOUT,
@@ -71,6 +73,7 @@ class PowerShellLaunchTests(unittest.TestCase):
                     command,
                     cwd=None,
                     env=None,
+                    input=None,
                     capture_output=True,
                     text=True,
                     timeout=300,
