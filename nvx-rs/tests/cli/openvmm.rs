@@ -350,6 +350,12 @@ pub(crate) type NetworkPolicy = (&'static str, &'static str, u64, u64, &'static 
 /// The network policy of an outcome report of a VM without a network.
 pub(crate) const NO_NETWORK: NetworkPolicy = ("not-requested", "none", 0, 0, "none");
 
+/// The mode with which the fake OpenVMM creates an outcome report, before the umask narrows it:
+/// `OpenOptions`' default, which, unlike the 0600 of OpenVMM's own reports, has bits for the group
+/// and others, so that the tests see how the umask that OpenVMM starts with narrows them.
+#[cfg(target_os = "linux")]
+pub(crate) const FAKE_REPORT_MODE: u32 = 0o666;
+
 /// The steps of the teardown of a VM that an outcome report of OpenVMM's records, as callers
 /// require them, each a member that is `true` once the step succeeded.
 const TEARDOWN: [&str; 7] = [

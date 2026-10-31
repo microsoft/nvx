@@ -1186,6 +1186,13 @@ operations:
   caller's identity, that operation fails with `EPERM` (`Operation not
   permitted`) instead of running as OpenVMM.
 
+On Linux, in either mode, the files and directories that the workload creates
+get the modes that the guest asks for, narrowed by the umask of the process
+that starts OpenVMM, which NVX starts with that umask without the owner's
+bits, so it narrows only the group's and others' permissions. In a host
+directory that has a default POSIX ACL, Linux narrows them by that ACL instead
+of the umask, so the ACL decides every permission, the owner's included.
+
 ```bash
 nvx-rs/target/release/nvx-rs sandbox \
   --layer distro,/var/lib/nvx/distro.erofs,11111111-1111-1111-1111-111111111111 \
@@ -1626,4 +1633,7 @@ the operation, bounded result category, numeric status, and an opaque operation
 ID to its requested report; stdout, stderr, arguments, environment values, and
 credentials remain excluded. `sandbox stop` waits for OpenVMM teardown and
 retains the latest VM-level report as `outcome.json` in the state directory.
-Neither OpenVMM nor NVX uploads these files.
+On Linux, NVX starts OpenVMM with the caller's umask without the owner's bits,
+so OpenVMM's reports keep their owner's read and write permissions whatever
+that umask, unless their directory has a default POSIX ACL, which Linux
+applies instead of the umask. Neither OpenVMM nor NVX uploads these files.

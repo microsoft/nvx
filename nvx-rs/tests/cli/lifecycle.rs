@@ -721,6 +721,55 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
     assert!(!state.exists());
 }
 
+/// Whatever the caller's umask, even one that clears the owner's own permissions, the caller stops
+/// its sandbox, which reads OpenVMM's outcome report, and can read the report itself, whose group's
+/// and others' permissions the umask narrows: OpenVMM starts with the caller's umask without the
+/// owner's bits.
+#[cfg(target_os = "linux")]
+#[test]
+fn stops_keep_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
+    use crate::openvmm::FAKE_REPORT_MODE;
+
+    for umask in [0o022, 0o400, 0o200, 0o777] {
+        let context = format!("umask {umask:03o}");
+        let root = Root::new();
+        let state = root.below("state");
+        let step = |operation: &str, options: &[&str]| {
+            root.nvx_rs_with_umask(&sandbox(operation, "{root/state}", options), umask)
+        };
+        root.nvx_rs_with_umask(&provision("{root/state}", &[]), umask)
+            .assert_silent_success();
+        step("start", &[]).assert_silent_success();
+        let (_, process) =
+            assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
+        let outcome = step("exec", &["--entrypoint", "/bin/echo", "--arg", "hello"]);
+        outcome.assert_success();
+        assert_eq!(outcome.stdout(), "hello\n", "{context}");
+        step("stop", &[]).assert_silent_success();
+        assert!(
+            process
+                .wait(Instant::now() + Duration::from_secs(10))
+                .unwrap(),
+            "{context}: OpenVMM runs on"
+        );
+        assert_eq!(entries(&state), STOPPED, "{context}");
+        let report = state.join("outcome.json");
+        let (permissions, expected) = (mode(&report), FAKE_REPORT_MODE & !(umask & 0o077));
+        assert_eq!(
+            permissions, expected,
+            "{context}: the report has mode {permissions:03o}, not {expected:03o}"
+        );
+        assert_outcome_report(
+            &json(&report),
+            HYPERVISOR,
+            ("managed", "success", 0),
+            NO_NETWORK,
+        );
+        step("deprovision", &[]).assert_silent_success();
+        assert!(!state.exists(), "{context}");
+    }
+}
+
 /// A workload that `exec` runs in a running sandbox, and how it ends.
 struct Execution {
     /// The name of the case.

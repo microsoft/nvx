@@ -129,11 +129,13 @@ pub(crate) fn process_exists(pid: u32) -> io::Result<bool> {
 
 /// Makes `command` start its process in a new session, with every descriptor of the caller
 /// above standard error close-on-exec, except the descriptors `inherit`, which the process
-/// inherits under the same numbers.
+/// inherits under the same numbers, and with the caller's umask without the owner's bits, as
+/// [`clear_owner_bits_of_umask`] describes.
 ///
 /// Only the new process clears the flag of a descriptor in `inherit`, between its fork and its
 /// exec, so the descriptors stay close-on-exec in the caller, and no process that another thread
-/// spawns meanwhile inherits them. The caller keeps them open until the spawn returns.
+/// spawns meanwhile inherits them. The caller keeps them open until the spawn returns. Only the
+/// new process changes its umask too, so the caller keeps its own.
 pub(crate) fn detach(command: &mut Command, inherit: Vec<RawFd>) {
     restrict_inheritance(command, true, inherit);
 }
@@ -146,8 +148,8 @@ pub(crate) fn inherit_only(command: &mut Command, inherit: Vec<RawFd>) {
 }
 
 /// Makes `command` start its process in a new session if `new_session`, with every descriptor of
-/// the caller above standard error close-on-exec, except the descriptors `inherit`, as
-/// [`detach`] describes.
+/// the caller above standard error close-on-exec, except the descriptors `inherit`, and with the
+/// caller's umask without the owner's bits, as [`detach`] describes.
 fn restrict_inheritance(command: &mut Command, new_session: bool, inherit: Vec<RawFd>) {
     // SAFETY: the hook makes only async-signal-safe system calls and allocates nothing, as code
     // that runs between fork and exec must: `inherit` was allocated before the fork.
@@ -156,8 +158,110 @@ fn restrict_inheritance(command: &mut Command, new_session: bool, inherit: Vec<R
             if new_session {
                 setsid()?;
             }
+            clear_owner_bits_of_umask()?;
             mark_descriptors_close_on_exec()?;
             inherit_descriptors(&inherit)
+        });
+    }
+}
+
+/// Clears the owner's bits from the umask that the new process inherited from the caller, and
+/// keeps the group's and others'.
+///
+/// A VMM gives the files that it creates the modes that it intends, and leaves the umask only
+/// the group's and others' permissions to narrow: OpenVMM publishes its outcome report and its
+/// snapshots private to their owner, reopens files that it created, and creates the files of a
+/// share with the modes that the guest asks for. A umask that clears the owner's own
+/// permissions, such as 0400, would keep the caller from reading the report, and OpenVMM from
+/// using its own files. The usual umasks, such as 022 or 077, clear none of the owner's bits, so
+/// this changes nothing for them, and the umask still narrows the group's and others'
+/// permissions as the caller's does. In a directory that has a default POSIX ACL, Linux applies
+/// that ACL instead of the umask, so the ACL decides the permissions of what is created there,
+/// the owner's included.
+///
+/// The process makes the system calls itself, because `nix`'s `umask` panics when a call fails,
+/// as a seccomp policy can make it, and a panic between the fork and the exec would end the
+/// process without the error that fails the spawn.
+fn clear_owner_bits_of_umask() -> io::Result<()> {
+    // Reading the umask replaces it. 077 withholds at least what the final umask withholds, so a
+    // file that a signal handler of the caller creates between the two calls gets no permission
+    // that the final umask would not give, as it could under 0.
+    let inherited = set_umask(0o077)?;
+    set_umask(inherited & !libc::S_IRWXU)?;
+    Ok(())
+}
+
+/// Sets the calling process's umask to `mask`, and returns the umask that it replaces.
+fn set_umask(mask: libc::mode_t) -> io::Result<libc::mode_t> {
+    // SAFETY: `umask` takes an integer and dereferences nothing.
+    let previous = Errno::result(unsafe { libc::syscall(libc::SYS_umask, mask) })?;
+    // A umask fits a `mode_t`.
+    Ok(previous as libc::mode_t)
+}
+
+/// Makes `command` refuse the `umask` system call with the error `errno` in its new process, as
+/// a seccomp policy can, through a seccomp filter that allows every other call, before the hooks
+/// that a later [`detach`] adds run. The filter needs `no_new_privs`, which the process sets
+/// first.
+#[cfg(test)]
+pub(crate) fn refuse_umask_on_spawn(command: &mut Command, errno: i32) {
+    let statement = |code: u32, if_equal: u8, otherwise: u8, k: u32| libc::sock_filter {
+        // Every BPF code fits 16 bits.
+        code: code as u16,
+        jt: if_equal,
+        jf: otherwise,
+        k,
+    };
+    // The filter loads the call's number, the first word of the kernel's `seccomp_data`, and
+    // returns `errno` for `umask`, or allows the call.
+    let mut filter = [
+        statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        // A system call number fits 32 bits.
+        statement(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            1,
+            libc::SYS_umask as u32,
+        ),
+        // An error number fits the 16 bits of the filter's data.
+        statement(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | errno as u32,
+        ),
+        statement(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    // SAFETY: the hook makes only async-signal-safe system calls and allocates nothing, as code
+    // that runs between fork and exec must: the filter was built before the fork, and the kernel
+    // copies it before `prctl` returns.
+    unsafe {
+        command.pre_exec(move || {
+            let program = libc::sock_fprog {
+                len: filter.len() as u16,
+                filter: filter.as_mut_ptr(),
+            };
+            let no_new_privs = libc::prctl(
+                libc::PR_SET_NO_NEW_PRIVS,
+                1 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+            );
+            if no_new_privs != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let installed = libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+                &program as *const libc::sock_fprog,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+            );
+            if installed != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         });
     }
 }

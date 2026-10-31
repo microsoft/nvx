@@ -689,3 +689,34 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
         }
     });
 }
+
+/// A run leaves an outcome report that the caller can read whatever its umask, even one that
+/// clears the owner's own permissions, and whose group's and others' permissions the caller's
+/// umask narrows: OpenVMM starts with the caller's umask without the owner's bits.
+#[cfg(target_os = "linux")]
+#[test]
+fn runs_leave_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
+    use crate::harness::{HYPERVISOR, json, mode};
+    use crate::openvmm::FAKE_REPORT_MODE;
+
+    for umask in [0o022, 0o400, 0o200, 0o777] {
+        let root = Root::new();
+        let outcome = root.nvx_rs_with_umask(
+            &run(&["--outcome-report", "{root/reports/openvmm-run.json}"]),
+            umask,
+        );
+        assert_eq!(outcome.status, Some(0), "{}", outcome.describe());
+        let report = root.below("reports/openvmm-run.json");
+        let (permissions, expected) = (mode(&report), FAKE_REPORT_MODE & !(umask & 0o077));
+        assert_eq!(
+            permissions, expected,
+            "umask {umask:03o}: the report has mode {permissions:03o}, not {expected:03o}"
+        );
+        assert_outcome_report(
+            &json(&report),
+            HYPERVISOR,
+            ("run", "success", 0),
+            NO_NETWORK,
+        );
+    }
+}

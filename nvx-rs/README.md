@@ -543,6 +543,17 @@ inherits nothing else of the caller's: on Linux, they must be close-on-exec, a
 flag that only the VMM's own process clears; on Windows, they join the VMM's
 explicit handle list.
 
+On Linux, the VMM starts with the caller's umask without the owner's bits,
+which only the VMM's own process clears. The umask still narrows the group's
+and others' permissions to the files that OpenVMM creates, such as its outcome
+report, its snapshots, and the files that a guest creates in a share, but never
+the owner's, which a umask such as 0400 would clear, so that the caller could
+not read the report, nor OpenVMM use its own files. The usual umasks, such as
+022 and 077, keep the owner's bits, so they apply unchanged. In a directory
+that has a default POSIX ACL, Linux narrows the permissions of what is created
+there by that ACL instead of the umask, so the ACL decides them, the owner's
+included.
+
 On Windows, the VMM's standard handles and its allowed handles are inheritable
 while it is created, and a process that another thread creates meanwhile
 without a handle list, as `std::process::Command` creates one, inherits them
@@ -2228,6 +2239,11 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   passes none with `close_fds`: on Windows, OpenVMM's handle list holds copies
   of `run`'s standard handles, its checked files, and the scratch image's claim
   alone.
+- On Linux, OpenVMM starts with the caller's umask without the owner's bits,
+  where `nvx.py` passed the umask unchanged, so that a umask that clears the
+  owner's own permissions, such as 0400, no longer keeps the caller, or `start`
+  and `stop`, from reading OpenVMM's outcome report; see
+  [`nvx::host::supervisor`](#nvxhostsupervisor).
 - `start` and `exec` refuse, and `stop` terminates, a VM that another runtime
   identity started; see [Runtime identity](#runtime-identity).
 - `run --restore-snapshot` refuses `--net`, whose addressing a restored NIC

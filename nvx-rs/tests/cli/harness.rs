@@ -144,9 +144,9 @@ pub(crate) fn in_parallel<T: Sync>(cases: &[T], check: impl Fn(&T) + Sync) {
     });
 }
 
-/// A fresh artifact root in a temporary directory, removed on drop after the fake OpenVMM
-/// processes that the runtime records and launch journals below it name end, so that a test
-/// that fails leaves none running.
+/// A fresh artifact root in a temporary directory, without the default POSIX ACL that it could
+/// take from its parent on Linux, removed on drop after the fake OpenVMM processes that the runtime
+/// records and launch journals below it name end, so that a test that fails leaves none running.
 pub(crate) struct Root {
     /// The temporary directory.
     _directory: tempfile::TempDir,
@@ -210,6 +210,8 @@ impl Root {
             .prefix("nvx-cli-")
             .tempdir()
             .unwrap();
+        #[cfg(target_os = "linux")]
+        clear_default_acl(directory.path());
         let path = canonical(directory.path());
         let text = path.to_str().expect("the temporary directory is Unicode");
         // `--layer` and `--mount` separate their fields with commas.
@@ -379,6 +381,32 @@ impl Root {
         Outcome::new(arguments, output)
     }
 
+    /// Runs `nvx-rs --root ROOT ARGUMENTS` in the root, as [`nvx_rs`](Self::nvx_rs) does, but
+    /// with the umask `umask`, rather than this process's, which the tests running in parallel
+    /// share.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn nvx_rs_with_umask<S: AsRef<str>>(&self, arguments: &[S], umask: u32) -> Outcome {
+        use std::os::unix::process::CommandExt;
+
+        use nix::sys::stat::Mode;
+
+        let arguments: Vec<String> = arguments
+            .iter()
+            .map(|argument| self.expand(argument.as_ref()))
+            .collect();
+        let mut command = self.command(&arguments);
+        let umask = Mode::from_bits_truncate(umask);
+        // SAFETY: the hook makes one async-signal-safe system call and allocates nothing, as code
+        // that runs between fork and exec must.
+        unsafe {
+            command.pre_exec(move || {
+                nix::sys::stat::umask(umask);
+                Ok(())
+            });
+        }
+        Outcome::new(arguments, command.output().unwrap())
+    }
+
     /// Returns what the tree below the root holds.
     pub(crate) fn snapshot(&self) -> Snapshot {
         let mut snapshot = Snapshot::new();
@@ -516,6 +544,33 @@ pub(crate) fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
 
     fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+/// Removes the default POSIX ACL that the directory at `path` took from its parent, if any, so
+/// that what is created in it takes its permissions from its mode and the umask alone, as Linux
+/// gives them without a default ACL, and as the tests expect. A file system without POSIX ACLs
+/// has none to remove.
+#[cfg(target_os = "linux")]
+fn clear_default_acl(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `removexattr` reads the NUL-terminated path and attribute name, which outlive the
+    // call.
+    let removed =
+        unsafe { nix::libc::removexattr(name.as_ptr(), c"system.posix_acl_default".as_ptr()) };
+    if removed != 0 {
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(nix::libc::ENODATA | nix::libc::EOPNOTSUPP)
+        ) {
+            panic!(
+                "cannot remove the default ACL of {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 /// Returns whether `text` is `length` lowercase hexadecimal digits.

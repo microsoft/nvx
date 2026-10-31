@@ -5,7 +5,9 @@
 //! unsafe ones behind wrappers that establish their ownership and async-signal-safety invariants.
 //! `nix` has no wrapper for `pidfd_open`, `pidfd_send_signal`, `close_range`, or `getdents64`, and
 //! wraps `renameat2` only for glibc, so those go through `nix`'s re-export of libc, as does the
-//! query of the `SIGINT` disposition that precedes the CLI's handler. The Windows platform module
+//! query of the `SIGINT` disposition that precedes the CLI's handler, and `umask`, whose `nix`
+//! wrapper panics when a seccomp policy makes the call fail. The seccomp filters of the tests go
+//! through libc's `prctl` too, since `nix` does not wrap seccomp. The Windows platform module
 //! still calls `windows-sys` directly.
 
 #[cfg(target_os = "linux")]
@@ -32,7 +34,9 @@ pub(crate) use process::{
     LAST_STANDARD_STREAM, PidFd, detach, move_above_standard_streams, process_exists,
 };
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) use process::{clear_close_on_exec, mark_listed_descriptors_on_spawn};
+pub(crate) use process::{
+    clear_close_on_exec, mark_listed_descriptors_on_spawn, refuse_umask_on_spawn,
+};
 #[cfg(target_os = "linux")]
 pub(crate) use socket::{
     connect_nonblocking, peer_pid, send_nonblocking, wait_readable, wait_writable,
