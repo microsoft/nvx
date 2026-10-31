@@ -94,7 +94,11 @@ systems, so add a new script or test module to those lists.
 
 ## Test ownership
 
-OpenVMM owns control-plane coverage. Run its unit and documentation tests with
+OpenVMM owns control-plane coverage. Its own CI runs its unit,
+documentation, and VMM tests on each pull request into the pinned branch and
+on each push to it, and NVX CI checks that they passed the pinned revision
+instead of running them (see [OpenVMM CI](ci.md#openvmm-ci)). Run its unit and
+documentation tests locally with
 `scripts/nvx.py test-openvmm-unit` and its VMM tests with
 `scripts/nvx.py test-openvmm --backend BACKEND`. The VMM tests boot
 OpenVMM's own test guests, except the management-RPC (TTRPC) lifecycle, SMP,
@@ -131,7 +135,7 @@ session between the host and the guest, belong in the
 [runtime adapter](../tests/runtime-adapter/README.md), whose consolidated
 suite the microVM jobs run on each backend with
 `scripts/nvx.py test-runtime-adapter --backend BACKEND`. [Continuous integration](ci.md)
-describes what the OpenVMM VMM tests and the NVX microVM suite cover.
+describes how CI checks OpenVMM's own CI and what the NVX microVM suite covers.
 
 ## Test expectations
 

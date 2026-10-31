@@ -1,9 +1,7 @@
 """Balanced shards of a suite that CI splits across parallel jobs.
 
 `microvm_shards` plans the shards of the default microVM suite, whose
-scenarios run one after another, and `openvmm_test_shards` those of the
-OpenVMM VMM tests, which nextest runs in parallel; each passes the time that
-a shard takes.
+scenarios run one after another, and passes the time that a shard takes.
 """
 
 from __future__ import annotations

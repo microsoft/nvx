@@ -52,14 +52,10 @@ from nvx_tools.ci import (
     OPENVMM_TEST_BACKENDS,
     REQUIRED_CI_RESULT_ENVIRONMENTS,
     CiChanges,
-    build_openvmm_tests,
-    check_openvmm_tests,
     classify_ci_changes,
     describe_ci_changes,
     kernel_patch_identity,
-    openvmm_test_cache_key,
     required_ci_failures,
-    reuse_openvmm_tests,
     run_openvmm_tests,
     run_openvmm_unit_tests,
     setup_cross_os_cache,
@@ -100,10 +96,6 @@ from nvx_tools.microvm_tests import (
 )
 from nvx_tools.nightly_ci import configure_parser as configure_nightly_ci_parser
 from nvx_tools.openvmm_ci import configure_parser as configure_openvmm_ci_parser
-from nvx_tools.openvmm_test_shards import (
-    configure_parser as configure_openvmm_test_shard_parser,
-)
-from nvx_tools.openvmm_test_shards import select_shard as select_openvmm_test_shard
 from nvx_tools.performance import configure_parser as configure_performance_parser
 from nvx_tools.performance_history import (
     configure_parser as configure_performance_history_parser,
@@ -117,7 +109,6 @@ from nvx_tools.release import (
 from nvx_tools.runtime_adapter_tests import (
     configure_parser as configure_runtime_adapter_test_parser,
 )
-from nvx_tools.shard_plans import parse_shard
 from nvx_tools.time_abi import (
     benchmark_cpu_profile_refusal,
     openvmm_cpu_generations,
@@ -294,8 +285,7 @@ def command_check_required_ci(args: argparse.Namespace) -> None:
         changes=CiChanges(
             run_guest_artifacts=args.run_guest_artifacts == "true",
             run_openvmm_binaries=args.run_openvmm_binaries == "true",
-            run_openvmm_unit_tests=args.run_openvmm_unit_tests == "true",
-            run_openvmm_vmm_tests=args.run_openvmm_vmm_tests == "true",
+            run_openvmm_ci_check=args.run_openvmm_ci_check == "true",
             run_microvm_tests=args.run_microvm_tests == "true",
             run_benchmarks=args.run_benchmarks == "true",
         ),
@@ -311,29 +301,8 @@ def command_check_static_elf(args: argparse.Namespace) -> None:
     check_static_executables(args.paths)
 
 
-def command_build_openvmm_tests(args: argparse.Namespace) -> None:
-    build_openvmm_tests(args.backend, args.output)
-
-
-def command_openvmm_test_cache_key(args: argparse.Namespace) -> None:
-    openvmm_test_cache_key(args.backend, os.environ)
-
-
-def command_check_openvmm_tests(args: argparse.Namespace) -> None:
-    check_openvmm_tests(args.backend, args.content)
-
-
-def command_reuse_openvmm_tests(args: argparse.Namespace) -> None:
-    reuse_openvmm_tests(args.backend, args.content, os.environ)
-
-
 def command_test_openvmm(args: argparse.Namespace) -> None:
-    shard = (
-        None
-        if args.shard is None
-        else select_openvmm_test_shard(args.backend, args.shard)
-    )
-    run_openvmm_tests(args.backend, args.content, shard=shard)
+    run_openvmm_tests(args.backend)
 
 
 def command_test_openvmm_unit(_: argparse.Namespace) -> None:
@@ -730,10 +699,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--run-openvmm-binaries", choices=("false", "true"), required=True
     )
     required_ci.add_argument(
-        "--run-openvmm-unit-tests", choices=("false", "true"), required=True
-    )
-    required_ci.add_argument(
-        "--run-openvmm-vmm-tests", choices=("false", "true"), required=True
+        "--run-openvmm-ci-check", choices=("false", "true"), required=True
     )
     required_ci.add_argument(
         "--run-microvm-tests", choices=("false", "true"), required=True
@@ -783,85 +749,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     openvmm_unit_tests.set_defaults(handler=command_test_openvmm_unit)
 
-    openvmm_test_build = subparsers.add_parser(
-        "build-openvmm-tests",
-        help="build OpenVMM Petri VMM tests without running them",
-    )
-    openvmm_test_build.add_argument(
-        "--backend",
-        choices=OPENVMM_TEST_BACKENDS,
-        action="append",
-        required=True,
-        help="build this backend's tests; repeat for each backend of this host's OS",
-    )
-    openvmm_test_build.add_argument(
-        "--output",
-        type=Path,
-        required=True,
-        help="empty or new directory to build the test content into",
-    )
-    openvmm_test_build.set_defaults(handler=command_build_openvmm_tests)
-
-    openvmm_test_cache_key = subparsers.add_parser(
-        "openvmm-test-cache-key",
-        help=(
-            "print the key under which CI caches the OpenVMM VMM tests that "
-            "build-openvmm-tests builds"
-        ),
-    )
-    openvmm_test_cache_key.add_argument(
-        "--backend",
-        choices=OPENVMM_TEST_BACKENDS,
-        action="append",
-        required=True,
-        help="key this backend's tests; repeat for each backend that the build builds",
-    )
-    openvmm_test_cache_key.set_defaults(handler=command_openvmm_test_cache_key)
-
-    openvmm_test_check = subparsers.add_parser(
-        "check-openvmm-tests",
-        help=(
-            "check that a directory holds the OpenVMM VMM tests that "
-            "build-openvmm-tests builds from this checkout"
-        ),
-    )
-    openvmm_test_check.add_argument(
-        "--backend",
-        choices=OPENVMM_TEST_BACKENDS,
-        action="append",
-        required=True,
-        help="check for this backend's tests; repeat for each backend of the build",
-    )
-    openvmm_test_check.add_argument(
-        "--content",
-        type=Path,
-        required=True,
-        help="directory of the test content to check",
-    )
-    openvmm_test_check.set_defaults(handler=command_check_openvmm_tests)
-
-    openvmm_test_reuse = subparsers.add_parser(
-        "reuse-openvmm-tests",
-        help=(
-            "keep OpenVMM VMM tests that a cache restored if build-openvmm-tests "
-            "builds them from this checkout, and remove them otherwise"
-        ),
-    )
-    openvmm_test_reuse.add_argument(
-        "--backend",
-        choices=OPENVMM_TEST_BACKENDS,
-        action="append",
-        required=True,
-        help="reuse this backend's tests; repeat for each backend of the build",
-    )
-    openvmm_test_reuse.add_argument(
-        "--content",
-        type=Path,
-        required=True,
-        help="directory into which the cache restored the test content",
-    )
-    openvmm_test_reuse.set_defaults(handler=command_reuse_openvmm_tests)
-
     openvmm_tests = subparsers.add_parser(
         "test-openvmm",
         help="run OpenVMM Petri VMM tests",
@@ -871,34 +758,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=OPENVMM_TEST_BACKENDS,
         required=True,
     )
-    openvmm_tests.add_argument(
-        "--content",
-        type=Path,
-        help=(
-            "run the tests from the directory that build-openvmm-tests built, "
-            "instead of building them"
-        ),
-    )
-    openvmm_tests.add_argument(
-        "--shard",
-        type=parse_shard,
-        metavar="INDEX/COUNT",
-        help=(
-            "run shard INDEX of the COUNT shards of the backend's tests, as "
-            "scripts/nvx_tools/openvmm_test_shards.json splits them, such as "
-            "1/2; COUNT must be their number of shards"
-        ),
-    )
     openvmm_tests.set_defaults(handler=command_test_openvmm)
-
-    openvmm_test_shards = subparsers.add_parser(
-        "plan-openvmm-test-shards",
-        help=(
-            "split the OpenVMM VMM tests into shards that nextest runs in "
-            "balanced times for CI"
-        ),
-    )
-    configure_openvmm_test_shard_parser(openvmm_test_shards)
 
     microvm_tests = subparsers.add_parser(
         "test-microvm",

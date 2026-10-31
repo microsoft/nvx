@@ -3,12 +3,13 @@
 NVX pins a revision of `feature/microvm/dev` in microsoft/openvmm, whose
 checkin gates test it: the OpenVMM PR workflow on each pull request into the
 branch that is ready for review, and the OpenVMM CI workflow on each push to
-it. ``nvx.py check-openvmm-ci`` requires the jobs of those gates that cover
+it. NVX therefore runs none of OpenVMM's unit or VMM tests itself.
+``nvx.py check-openvmm-ci`` instead requires the jobs of those gates that cover
 NVX's use of OpenVMM, the x86-64 Linux and Windows unit tests and the VMM tests
 on KVM, MSHV, and Windows, to have passed for the pinned revision in either
 workflow, and waits while they run. The gates' other jobs, such as the VMM tests
 on TDX and SEV-SNP hosts, test OpenHCL and confidential VMs, which NVX does not
-use.
+use. See doc/ci.md, "OpenVMM CI".
 """
 
 from __future__ import annotations
@@ -310,7 +311,7 @@ def command_check_openvmm_ci(args: argparse.Namespace) -> None:
             )
         raise ScriptError(
             f"OpenVMM's CI has not passed {len(failures)} required job(s) for "
-            f"{revision}"
+            f"{revision}; see doc/ci.md, 'OpenVMM CI'"
         )
 
 
@@ -323,7 +324,7 @@ def _minutes(value: str) -> int:
 def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.description = (
         "Check that OpenVMM's checkin gates passed the jobs that cover NVX's use "
-        "of OpenVMM for the pinned OpenVMM revision."
+        "of OpenVMM for the pinned OpenVMM revision (doc/ci.md, 'OpenVMM CI')."
     )
     parser.add_argument(
         "--revision",

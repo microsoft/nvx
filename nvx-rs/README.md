@@ -2555,9 +2555,9 @@ and every file under `src/` but the host side and the test modules. The host
 side is `src/host/`, `src/testing/`, and the `nvx-rs` and `nvx-fake-openvmm`
 binaries; the test modules are the `tests.rs` files, the `tests` directories,
 and the managed agent's `loopback` harness. CI keys the guest images on those
-files and runs the OpenVMM VMM tests, which boot the Alpine image, only when
-one of them changes, while every change to the crate runs the NVX microVM
-tests; see [Continuous integration](../doc/ci.md#change-classification). Keep
+files, so only a change to one of them rebuilds the images, while every change
+to the crate runs the NVX microVM tests; see
+[Continuous integration](../doc/ci.md#change-classification). Keep
 host-only code under `src/host/` and test-only modules in `tests.rs` files or
 `tests` directories. The build fails when Cargo's dep-info lists another file,
 which `GuestRustBuildConstants` in
