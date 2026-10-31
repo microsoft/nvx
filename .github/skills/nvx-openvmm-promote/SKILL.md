@@ -291,6 +291,24 @@ unit-test, and formatting gates required by the nested instructions before relyi
 NVX CI. For a pin-only promotion of an already reviewed source, record existing exact-
 head OpenVMM evidence and do not claim unexecuted local checks.
 
+NVX CI runs none of OpenVMM's tests. Its `openvmm-ci` job requires OpenVMM's checkin
+gates to have passed the x86-64 Linux and Windows unit tests and the KVM, MSHV, and
+Windows VMM tests for the pinned SHA, in an OpenVMM PR or OpenVMM CI run whose head is
+that SHA in `microsoft/openvmm`; see [OpenVMM CI](../../../doc/ci.md#openvmm-ci). The
+OpenVMM pull request gets those runs only once it is ready for review, from a branch
+of `microsoft/openvmm`. Record that evidence with the platform launcher:
+
+```bash
+python3 scripts/nvx.py check-openvmm-ci --revision <revision>
+```
+
+```powershell
+python scripts\nvx.py check-openvmm-ci --revision <revision>
+```
+
+A pending job means that OpenVMM's CI still runs; a failed one needs a rerun or a fix
+in OpenVMM before the promotion can pass.
+
 Choose additional NVX runtime checks from the changed behavior and its dependencies.
 Use `nvx-run` for a smoke test, `nvx-debug` for a failure, and `nvx-benchmark` only
 when performance evidence is required. Report unavailable KVM, MSHV, or WHP coverage
@@ -319,7 +337,10 @@ Ask for Draft or Ready state before creation. Ready pull requests start the comp
 [NVX matrix](../../workflows/ci.yml); changing an already active pull request to Draft
 does not cancel its current run. After each push, follow only the workflow run whose
 head SHA matches the current pull-request head. Treat older runs as superseded and use
-`nvx-ci-investigation` for a failed or unexpectedly cancelled current-head run.
+`nvx-ci-investigation` for a failed or unexpectedly cancelled current-head run. The
+run's `openvmm-ci` job waits up to 300 minutes while OpenVMM's CI of the pin runs; when
+it fails because a required OpenVMM job failed, rerun that job in OpenVMM, then the
+`openvmm-ci` job.
 
 `.gitmodules` tracks `feature/microvm/dev`, so the pinned revision must be on that branch
 before the NVX pull request merges. `microsoft/openvmm` allows only squash merges, which
