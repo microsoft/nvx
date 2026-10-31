@@ -1989,8 +1989,10 @@ jobs:
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
-  # Pull requests and merge groups run the debug kernel on KVM only; dev
-  # pushes and full runs run every backend.
+  # Pull requests run the debug kernel on MSHV only, rather than on KVM, whose
+  # general runners queue the most, or on WHP, where it would lengthen the
+  # longest waits. Merge groups keep it on KVM alone, and dev pushes and full
+  # runs run every backend (doc/ci.md#job-graph-and-runner-capacity).
   nvx-microvm-debug-kvm:
     name: NVX microVM tests / Linux / KVM / Debug kernel
     needs: [artifacts, debug-kernel, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
@@ -1998,14 +2000,7 @@ jobs:
       ${{
         always() &&
         !cancelled() &&
-        (
-          github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
-        ) &&
-        (
-          github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name == github.repository
-        ) &&
+        github.event_name != 'pull_request' &&
         needs.artifacts.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&
@@ -2033,8 +2028,15 @@ jobs:
       ${{
         always() &&
         !cancelled() &&
-        github.event_name != 'pull_request' &&
         github.event_name != 'merge_group' &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
         needs.artifacts.result == 'success' &&
         needs.debug-kernel.result == 'success' &&
         needs.build-openvmm-linux-gnu.result == 'success' &&

@@ -292,9 +292,12 @@ its checks pending. The one exception is `snapshot-tiers`' gate-timeout check,
 whose guest OpenVMM stops at the restore gate on purpose. The harness refuses
 a kernel whose `vmlinux-debug.config` lacks the detectors, because the guest's
 boot check of those detectors passes vacuously. To bound the cost, pull requests
-and merge groups run the debug kernel on KVM only, while `dev` pushes and full
-runs run it on every backend; each job takes about five minutes on its own
-runner, in parallel with the other microVM jobs. The jobs gate the required status check, the
+run the debug kernel on MSHV only, rather than on KVM, whose general runners
+queue the most (see
+[Job graph and runner capacity](#job-graph-and-runner-capacity)), while merge
+groups run it on KVM alone and `dev` pushes and full runs run it on every
+backend. Each job takes about five minutes on its own runner, in parallel with
+the other microVM jobs. The jobs gate the required status check, the
 development release, and performance persistence. The GitHub-hosted `debug-kernel` job
 builds the debug kernel beside the other guest artifact jobs
 (`build-guest-artifacts` with `components: debug-kernel`) and caches it under its
@@ -764,14 +767,19 @@ beside the default suite after a setup of its own, so it holds one more
 general runner per backend for about three to five minutes. The default suite
 waits only for `artifacts`, so a cold build of the Ubuntu or Azure Linux
 images, about 4 minutes, delays only the guest and sandbox job, which takes
-about as long as a shard of the default suite. A full-matrix run then needs
-five of KVM's four general runners at once: one for the Linux VMM-test build
-and then its KVM leg, and four for the two shards, the guest and sandbox job,
-and the debug-kernel job, so the last of them to start waits for the first to
-end, about three minutes later; a run that skips the VMM tests fills the four.
-MSHV's four hold the two shards, the guest and sandbox job, and, on `dev`
-pushes and full runs, the debug-kernel job, and its VMM-test leg starts after
-the Linux build, by when the guest and sandbox job has ended. On WHP, a run
+about as long as a shard of the default suite. A `dev` push, full run, or
+merge group that runs the VMM tests then needs five of KVM's four general
+runners at once: one for the Linux VMM-test build and then its KVM leg, and
+four for the two shards, the guest and sandbox job, and the debug-kernel job,
+so the last of them to start waits for the first to end, about three minutes
+later; one that skips the VMM tests fills the four. A pull request, which runs
+the debug kernel on MSHV, needs at most the four. MSHV's four hold the two
+shards, the guest and sandbox job, and the MSHV VMM-test leg, which starts
+once the Linux VMM-test build ends, before the guest and sandbox job ends in
+nearly every run that restores the VMM tests from the
+[cache](#openvmm-vmm-test-cache). A pull request, `dev` push, or full run that
+runs the VMM tests and the debug kernel on MSHV then needs five of them at
+once too; one that skips the VMM tests fills the four. On WHP, a run
 needs at most seven of the six general runners at once: one for the OpenVMM unit
 tests, up to four for the microVM jobs, and one for the Windows VMM-test build
 and then two for the [shards of the WHP VMM tests](#openvmm-vmm-test-shards).
@@ -786,6 +794,32 @@ at most six. When a pool has fewer
 free general runners than a backend's microVM jobs, the jobs that start last
 wait for the first to end, so the backend's microVM tests take up to about
 twice as long as one of its jobs, still less than the unsharded suite.
+
+KVM's general runners queue the most (#982). Of the 286 runs that used them
+from October 23 to 28, 2026, leaving out an outage on October 28, 195 waited
+2 minutes or more for one, and each run's longest wait for one had a median
+of 3.4 and a p90 of 11.1 minutes, against 110 runs and 0.4 and 4.6 minutes on
+MSHV's four general runners and 34 runs and 0.1 and 2.8 on the nine that WHP
+then had. The waits fell mostly on the jobs that start once OpenVMM and
+`nvx-rs` are ready: the two shards, the guest and sandbox job, and the
+debug-kernel job each waited 2 minutes or more in 86 to 125 of about 275 runs,
+with a p90 of 6.0 to 8.8 minutes, while the OpenVMM and VMM-test builds and the
+VMM-test leg, which start first, did in 41 to 59 runs, with a p90 of 3.3 to
+4.5. Replaying the observed jobs of those runs through first-in, first-out
+pools of those sizes reproduces the KVM waits, 196 runs, a median of 3.1, and
+a p90 of 8.4 minutes; with the six general WHP runners of today, it makes 101
+runs wait 2 minutes or more on WHP, at a p90 of 9.1 minutes. The earlier
+`nvx-rs` handoff and the package jobs alone leave KVM's waits at 192 runs,
+2.9, and 7.6 minutes, and MSHV's and WHP's at 97 and 108 runs, and moving the
+pull requests' debug-kernel jobs, 181 in the window, from KVM to MSHV lowers
+KVM's waits to 135 runs, a median of 1.5, and a p90 of 6.6 minutes, while
+MSHV's go to 149 runs, at a p90 of 5.3 minutes instead of 4.0. On WHP, where
+the jobs take a median 4.2 minutes, against 3.3 on MSHV and 3.0 on KVM, they
+would have raised that pool's waits to 131 runs, at a p90 of 10.5 minutes
+instead of 8.8, and the median of the runs that build the VMM tests and run
+the unit tests to 24.4 minutes, against 23.7 with the jobs on MSHV. A fifth
+general KVM runner would then lower KVM's waits to 79 runs and a p90 of 3.9
+minutes, so it is the next step if KVM queueing still bounds the runs.
 
 ## MicroVM test shards
 
@@ -822,8 +856,8 @@ job's result, which `Required status check`, `Publish development release`, and
 `Persist performance baseline` read, succeeds only when every shard succeeds.
 The guest and sandbox jobs and the debug-kernel jobs are not sharded: the
 debug-kernel jobs take three to five minutes, about as long as a shard, and
-still run on KVM only for pull requests and merge groups and on every backend
-for `dev` pushes and full runs.
+still run on MSHV only for pull requests, on KVM only for merge groups, and on
+every backend for `dev` pushes and full runs.
 
 The first plan took the medians of the reports of 13 runs from October 21 and
 22, 2026. It started each backend from the two shards that
@@ -852,9 +886,9 @@ about as long as the guest and sandbox jobs beside them, which took 3.7 to
 [#695](https://github.com/microsoft/nvx/issues/695) split them off. A third
 shard would take about 3.2, 3.0, and 4.0 minutes. On WHP it would end before
 the guest and sandbox job, so it would not shorten the backend's tests, and on
-KVM, where the two shards, the guest and sandbox job, and the debug-kernel job
-fill the four general runners, and on MSHV, where they fill them for `dev`
-pushes and full runs, it would mostly wait for a runner.
+KVM and MSHV, whose four general runners the two shards, the guest and sandbox
+job, and the VMM-test leg or the debug-kernel job fill, it would mostly wait
+for a runner.
 
 A sharded run fails before it runs a scenario unless the file puts every
 default scenario in exactly one shard of every backend, with its duration,
@@ -1136,10 +1170,11 @@ while a group ahead of it fails.
 
 A group's run then checks what the run of a same-repository pull request
 checks, but the rehearsal of the [guest artifact reuse](#guest-artifact-reuse),
-which the pull request's run made: each suite runs only when one of its inputs
-changed, the platform and package jobs and the performance regression gate
-after them included, the debug kernel runs on KVM alone, and the OpenVMM VMM
-tests are restored from the [cache](#openvmm-vmm-test-cache) that `dev` pushes
+which the pull request's run made, and with the debug kernel on KVM instead of
+MSHV, so that each change runs it on both before it merges: each suite runs
+only when one of its inputs changed, the platform and package jobs and the
+performance regression gate after them included, and the OpenVMM VMM tests
+are restored from the [cache](#openvmm-vmm-test-cache) that `dev` pushes
 save. The two `nvx-rs` build jobs run too: each hands its executable to the
 microVM and package jobs of its operating system and to the CLI job that tests
 it. No hypervisor job waits for the CLI tests, and the platform jobs wait for

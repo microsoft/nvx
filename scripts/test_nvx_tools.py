@@ -8478,7 +8478,8 @@ class CiConfigurationTests(unittest.TestCase):
             ci.REQUIRED_CI_OPENVMM_ARTIFACT_TEST_JOBS
         )
         microvm_tests = set(ci.REQUIRED_CI_MICROVM_TEST_JOBS)
-        debug_kernel = set(ci.REQUIRED_CI_MICROVM_DEBUG_JOBS)
+        debug_kernel_pull_request = set(ci.REQUIRED_CI_MICROVM_DEBUG_JOBS)
+        debug_kernel_merge_group = set(ci.REQUIRED_CI_MICROVM_DEBUG_MERGE_GROUP_JOBS)
         debug_kernel_push = set(ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS)
         artifacts = {
             ci.REQUIRED_CI_ARTIFACT_JOB,
@@ -8490,15 +8491,16 @@ class CiConfigurationTests(unittest.TestCase):
         # A same-repository pull request that builds the guest artifacts also
         # rehearses their reuse.
         rehearsal = {ci.REQUIRED_CI_GUEST_ARTIFACT_REUSE_JOB}
-        microvm = microvm_tests | debug_kernel
+        microvm_pull_request = microvm_tests | debug_kernel_pull_request
+        microvm_merge_group = microvm_tests | debug_kernel_merge_group
+        microvm_full = microvm_tests | debug_kernel_pull_request | debug_kernel_push
         full_matrix = (
             repository
             | artifacts
             | builds
             | openvmm_tests
             | openvmm_artifact_tests
-            | microvm
-            | debug_kernel_push
+            | microvm_full
             | platforms
         )
         gate = {"performance-gate"}
@@ -8523,7 +8525,7 @@ class CiConfigurationTests(unittest.TestCase):
                 "pull_request",
                 True,
                 (True, True, False, False, True, False),
-                repository | artifacts | rehearsal | builds | microvm,
+                repository | artifacts | rehearsal | builds | microvm_pull_request,
             ),
             # Only the OpenVMM suites, which build OpenVMM themselves.
             (
@@ -8548,7 +8550,7 @@ class CiConfigurationTests(unittest.TestCase):
                 | builds
                 | openvmm_tests
                 | openvmm_artifact_tests
-                | microvm
+                | microvm_pull_request
                 | platforms
                 | gate,
             ),
@@ -8561,7 +8563,7 @@ class CiConfigurationTests(unittest.TestCase):
                 | artifacts
                 | rehearsal
                 | builds
-                | microvm
+                | microvm_pull_request
                 | platforms
                 | gate,
             ),
@@ -8575,7 +8577,7 @@ class CiConfigurationTests(unittest.TestCase):
                 | rehearsal
                 | builds
                 | openvmm_artifact_tests
-                | microvm
+                | microvm_pull_request
                 | platforms
                 | gate,
             ),
@@ -8621,7 +8623,7 @@ class CiConfigurationTests(unittest.TestCase):
                 "merge_group",
                 True,
                 (True, True, False, False, True, False),
-                repository | artifacts | builds | microvm,
+                repository | artifacts | builds | microvm_merge_group,
             ),
             (
                 "merge_group",
@@ -8638,7 +8640,7 @@ class CiConfigurationTests(unittest.TestCase):
                 | builds
                 | openvmm_tests
                 | openvmm_artifact_tests
-                | microvm
+                | microvm_merge_group
                 | platforms
                 | gate,
             ),
@@ -8651,7 +8653,7 @@ class CiConfigurationTests(unittest.TestCase):
                 | builds
                 | openvmm_tests
                 | openvmm_artifact_tests
-                | microvm
+                | microvm_merge_group
                 | platforms
                 | gate,
             ),
@@ -8666,12 +8668,7 @@ class CiConfigurationTests(unittest.TestCase):
                 "push",
                 True,
                 (True, True, False, False, True, True),
-                repository
-                | artifacts
-                | builds
-                | microvm
-                | debug_kernel_push
-                | platforms,
+                repository | artifacts | builds | microvm_full | platforms,
             ),
             (
                 "push",
@@ -9154,6 +9151,7 @@ class CiConfigurationTests(unittest.TestCase):
             "== github.repository"
         )
         gated_jobs = (
+            *ci.REQUIRED_CI_NVX_RS_BUILD_JOBS,
             *ci.REQUIRED_CI_CLI_JOBS,
             *ci.REQUIRED_CI_BUILD_JOBS,
             *ci.REQUIRED_CI_OPENVMM_TEST_JOBS,
@@ -9162,6 +9160,7 @@ class CiConfigurationTests(unittest.TestCase):
             *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
             *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
             *ci.REQUIRED_CI_PLATFORM_JOBS,
+            *ci.REQUIRED_CI_PACKAGE_JOBS,
         )
         for job_name in gated_jobs:
             with self.subTest(job=job_name):
@@ -9171,7 +9170,10 @@ class CiConfigurationTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 job = _workflow_job(workflow, job_name)
                 self.assertIn("github.event_name != 'pull_request' &&", job)
-                self.assertIn("github.event_name != 'merge_group' &&", job)
+                if job_name in ci.REQUIRED_CI_MICROVM_DEBUG_MERGE_GROUP_JOBS:
+                    self.assertNotIn("github.event_name != 'merge_group' &&", job)
+                else:
+                    self.assertIn("github.event_name != 'merge_group' &&", job)
                 self.assertNotIn("github.event_name == 'push'", job)
 
     def test_ci_full_runs_do_not_publish_persist_or_save_caches(self):
@@ -11727,7 +11729,7 @@ python3() {
                 )
         self.assertEqual(set(uploads) - handed_over, {"guest-debug-kernel"})
 
-    def test_ci_runs_debug_kernel_on_kvm_for_prs_and_all_for_non_prs(self):
+    def test_ci_runs_debug_kernel_on_mshv_for_prs_and_all_for_non_prs(self):
         workflow = (
             BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
@@ -11770,15 +11772,41 @@ python3() {
                 job = _workflow_job(workflow, consumer)
                 self.assertIn("      - debug-kernel\n", job)
                 self.assertIn("needs.debug-kernel.result == 'success' &&", job)
+        # Pull requests run the debug kernel on MSHV alone, merge groups run it
+        # on KVM alone, and dev pushes and full runs run it on every backend.
+        self.assertEqual(ci.REQUIRED_CI_MICROVM_DEBUG_JOBS, ("nvx-microvm-debug-mshv",))
+        self.assertEqual(
+            ci.REQUIRED_CI_MICROVM_DEBUG_MERGE_GROUP_JOBS,
+            ("nvx-microvm-debug-kvm",),
+        )
+        self.assertEqual(
+            ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
+            ("nvx-microvm-debug-kvm", "nvx-microvm-debug-whp"),
+        )
+        mshv = _workflow_job(workflow, "nvx-microvm-debug-mshv")
+        self.assertIn("github.event.pull_request.head.repo.full_name", mshv)
+        self.assertIn("github.event.pull_request.draft == false", mshv)
+        self.assertIn("github.event_name != 'merge_group' &&", mshv)
+        self.assertNotIn("github.event_name != 'pull_request' &&", mshv)
+        self.assertIn(
+            '      runner: \'["self-hosted", "linux", "mshv", '
+            '"virtual-machine", "general"]\'\n',
+            mshv,
+        )
         kvm = _workflow_job(workflow, "nvx-microvm-debug-kvm")
-        self.assertIn("github.event.pull_request.head.repo.full_name", kvm)
-        for job_name in ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS:
-            with self.subTest(job=job_name):
-                job = _workflow_job(workflow, job_name)
-                self.assertIn("github.event_name != 'pull_request' &&", job)
-        for job_name in (
-            *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
-            *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
+        self.assertIn("github.event_name != 'pull_request' &&", kvm)
+        self.assertNotIn("github.event_name != 'merge_group' &&", kvm)
+        self.assertNotIn("github.event.pull_request", kvm)
+        whp = _workflow_job(workflow, "nvx-microvm-debug-whp")
+        self.assertIn("github.event_name != 'pull_request' &&", whp)
+        self.assertIn("github.event_name != 'merge_group' &&", whp)
+        self.assertNotIn("github.event.pull_request", whp)
+        for job_name in dict.fromkeys(
+            (
+                *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
+                *ci.REQUIRED_CI_MICROVM_DEBUG_MERGE_GROUP_JOBS,
+                *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
+            )
         ):
             with self.subTest(job=job_name):
                 job = _workflow_job(workflow, job_name)

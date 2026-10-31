@@ -640,7 +640,9 @@ enabled only when the flags enable the jobs that build them too. A merge group
 expects the jobs of a same-repository pull request, including the `nvx-rs`
 builds and the platform and package jobs when their suite runs, whatever
 `--same-repository` says, but not the rehearsal of the guest artifact reuse,
-which its pull request's run made; see [Merge queue](ci.md#merge-queue).
+which its pull request's run made. A pull request runs the debug kernel on MSHV,
+a merge group on KVM, and a push or full run on every backend; see
+[Merge queue](ci.md#merge-queue).
 
 ### `report-nightly-ci`
 

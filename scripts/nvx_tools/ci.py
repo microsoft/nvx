@@ -186,11 +186,12 @@ REQUIRED_CI_MICROVM_TEST_JOBS = (
     "nvx-microvm-guests-mshv",
     "nvx-microvm-guests-whp",
 )
-# The CI debug kernel runs on KVM for every pull request and merge group and on
-# every backend for dev pushes and full runs.
-REQUIRED_CI_MICROVM_DEBUG_JOBS = ("nvx-microvm-debug-kvm",)
+# Pull requests run the CI debug kernel on MSHV, merge groups run it on KVM,
+# and dev pushes and full runs run it on every backend.
+REQUIRED_CI_MICROVM_DEBUG_JOBS = ("nvx-microvm-debug-mshv",)
+REQUIRED_CI_MICROVM_DEBUG_MERGE_GROUP_JOBS = ("nvx-microvm-debug-kvm",)
 REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS = (
-    "nvx-microvm-debug-mshv",
+    "nvx-microvm-debug-kvm",
     "nvx-microvm-debug-whp",
 )
 REQUIRED_CI_ARTIFACT_JOB = "artifacts"
@@ -232,9 +233,9 @@ OPENVMM_UNIT_TEST_EXCLUDED_PACKAGES = (
 # The events whose runs check a change before it merges: a pull request, and
 # the merge group in which the merge queue tests it on the latest dev and the
 # pull requests ahead of it (doc/ci.md#merge-queue). Both run the platform and
-# package jobs only when one of their inputs changed, gate on the benchmarks,
-# and run the
-# debug kernel on KVM alone, and neither publishes nor persists anything.
+# package jobs only when one of their inputs changed and gate on the benchmarks;
+# pull requests run the debug kernel on MSHV and merge groups on KVM. Neither
+# publishes nor persists anything.
 CI_PRE_MERGE_EVENTS = ("pull_request", "merge_group")
 # The events whose runs the change detector classifies, and those that run the
 # full matrix instead.
@@ -631,20 +632,34 @@ def required_ci_expected_results(
                 if repository_jobs_enabled and run_microvm_tests
                 else "skipped"
             )
-            for job in (
-                *REQUIRED_CI_MICROVM_TEST_JOBS,
-                *REQUIRED_CI_MICROVM_DEBUG_JOBS,
-            )
+            for job in REQUIRED_CI_MICROVM_TEST_JOBS
         }
+    )
+    if event_name == "pull_request":
+        enabled_debug_jobs = set(REQUIRED_CI_MICROVM_DEBUG_JOBS)
+    elif event_name == "merge_group":
+        enabled_debug_jobs = set(REQUIRED_CI_MICROVM_DEBUG_MERGE_GROUP_JOBS)
+    else:
+        enabled_debug_jobs = set(
+            (*REQUIRED_CI_MICROVM_DEBUG_JOBS, *REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS)
+        )
+    all_debug_jobs = dict.fromkeys(
+        (
+            *REQUIRED_CI_MICROVM_DEBUG_JOBS,
+            *REQUIRED_CI_MICROVM_DEBUG_MERGE_GROUP_JOBS,
+            *REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
+        )
     )
     expected.update(
         {
             job: (
                 "success"
-                if event_name not in CI_PRE_MERGE_EVENTS and run_microvm_tests
+                if repository_jobs_enabled
+                and run_microvm_tests
+                and job in enabled_debug_jobs
                 else "skipped"
             )
-            for job in REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS
+            for job in all_debug_jobs
         }
     )
     expected.update(
