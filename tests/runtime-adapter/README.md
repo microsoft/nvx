@@ -530,15 +530,18 @@ each clone that a restore of the snapshot starts, as
 
 The root configuration announces how many mappings the host's mapping table
 holds, and the host sends the table once the root is ready, in parts, each in
-a `Maps`, in order. The worker applies each part's mappings beneath the root,
-in order, from the host export, with `nvx::guest::root::Root::map`, and
-answers the part with `Mapped`, or with `MapFailed` and how many of the
-table's mappings it applied:
+a `Maps`, in order. The worker keeps its account of the table in
+`nvx::guest::mappings::MappingTable`, which checks each part and hands its
+mappings to the root, which applies them beneath it, in order, from the host
+export, with `nvx::guest::root::Root::map`, and answers the part with `Mapped`,
+or with `MapFailed` and how many of the table's mappings it applied:
 
 - It refuses a part as a whole, at the mapping that it expects next, if the
-  part does not decode, or does not continue the table: if its first mapping
-  is not the one that the worker expects next, or its last is past the count
-  that the configuration announced.
+  part does not decode, holds no mapping, or does not continue the table: if
+  its first mapping is not the one that the worker expects next, or its last is
+  past the count that the configuration announced. It also refuses a part with
+  a mapping of the export's root, which an empty source names: the export is
+  an aggregate, whose root lists its children.
 - A mapping that the root refuses or fails to apply latches the root, which
   keeps the mappings before it, so that the count is that mapping's index in
   the table.
@@ -2241,9 +2244,10 @@ the configuration; a GPT disk, with the configuration's bound of the first
 partition; the host export that it mounts, the mapping table that it applies in
 order, in parts, across a reset of the session, and the start; a table of zero
 mappings, which does no work, with or without an export; the parts that do not
-continue the table, which it refuses as a whole, and a mapping that the root
-refuses, which latches the root, after either of which it refuses the later
-parts and the start; the executions and starts that it refuses out of order,
+continue the table, or map the export's root, which it refuses as a whole, and
+a mapping that the root refuses, which latches the root, after either of which
+it refuses the later parts and the start; the executions and starts that it
+refuses out of order,
 before the start and after it; the failure of each stage, the tokens of a host
 export that break their rules, mappings without an export, an export that fails
 to mount, and a workload identity whose account the root lacks among them, which

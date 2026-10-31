@@ -149,15 +149,18 @@
 //! # The mapping table and the start
 //!
 //! The root configuration announces how many mappings the host's mapping table holds, and the host
-//! sends the table once the root is ready, in parts, each in a `Maps`, in order. The worker
-//! applies each part's mappings beneath the root, in order, from the host export, through
-//! [`RootOperations::map`], which runs `nvx::guest::root::Root::map`, and answers the part with
+//! sends the table once the root is ready, in parts, each in a `Maps`, in order. The worker keeps
+//! its account of the table in NVX's `nvx::guest::mappings::MappingTable`, which checks each part
+//! and hands its mappings to [`RootOperations::map`], which applies them beneath the root, in
+//! order, from the host export, through `nvx::guest::root::Root::map`, and answers the part with
 //! `Mapped`, or with `MapFailed`, whose [`MapFailure`](crate::root::MapFailure) holds how many of
 //! the table's mappings it applied:
 //!
 //! - It refuses a part as a whole, at the mapping that it expects next, if the part does not
-//!   decode, or does not continue the table: if its first mapping is not the one that the worker
-//!   expects next, or its last is past the count that the configuration announced.
+//!   decode, holds no mapping, or does not continue the table: if its first mapping is not the one
+//!   that the worker expects next, or its last is past the count that the configuration
+//!   announced. It also refuses a part with a mapping of the export's root, which an empty source
+//!   names: the export is an aggregate, whose root lists its children.
 //! - A mapping that the root refuses or fails to apply latches the root, which keeps the mappings
 //!   before it, so that the count is that mapping's index in the table.
 //! - Once it answered `MapFailed`, the worker refuses every later part, with `MapFailed`, and the
