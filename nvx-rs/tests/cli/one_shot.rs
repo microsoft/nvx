@@ -498,6 +498,49 @@ fn run_launches() -> Vec<Launch> {
             status: 0,
             network: ("applied", "rules", 1, 0, "deny"),
         }),
+        // A restore that replaces the policy of a NIC template may publish the guest's listeners
+        // and forward host ports, which OpenVMM refuses at every other restore.
+        launch(
+            "run: restore that replaces the network policy",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--restore-network-policy",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "10.0.0.1/32:udp:53",
+                "--network-ingress",
+                "allow",
+                "--host-loopback",
+                "allow",
+                "--host-loopback-forward",
+                "tcp:8080:80",
+                "--outcome-report",
+                "{root/reports/openvmm-run.json}",
+            ]),
+            restore()
+                .flag("--restore-network-policy")
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["deny"])
+                .with("--network-egress-allow", ["10.0.0.1/32:udp:53"])
+                .with("--network-ingress", ["allow"])
+                .with("--host-loopback", ["allow"])
+                .with("--host-loopback-forward", ["tcp:8080:80"])
+                .with("--microvm-report", ["{root/reports/openvmm-run.json}"]),
+            0,
+            restored,
+        )
+        .with_file(SNAPSHOT)
+        .recorded_in(Some("fake-openvmm-reports.json"))
+        .reporting(Report {
+            path: "reports/openvmm-run.json",
+            category: "success",
+            status: 0,
+            network: ("applied", "rules", 1, 0, "allow"),
+        }),
         launch(
             "run: network outcome report",
             run(&[

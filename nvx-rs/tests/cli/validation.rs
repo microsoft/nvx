@@ -786,6 +786,19 @@ fn run_refusals() -> Vec<Refusal> {
             run_dry(&["--restore-ready-path", "{root/ready.sock}"]),
             &["--restore-ready-path requires --restore-snapshot"],
         ),
+        // A cold boot installs the policy of its options anyway.
+        refusal(
+            "run: network policy replacement without snapshot",
+            "unsupported",
+            run_dry(&[
+                "--restore-network-policy",
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+            ]),
+            &["--restore-network-policy requires --restore-snapshot"],
+        ),
         refusal(
             "run: restore processors without snapshot",
             "unsupported",

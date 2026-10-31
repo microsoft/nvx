@@ -670,6 +670,27 @@ fn runs_boot_or_restore_a_microvm_on_the_terminal() {
         text(&output.stderr),
         "nvx-fake-openvmm: restore takes microVM network addressing from saved state\n"
     );
+
+    // Only a restore that replaces the policy of a NIC template may publish the guest's
+    // listeners.
+    let ingress = ["--network-ingress", "allow"];
+    let output = run_microvm(root, &[&networked[..], &ingress].concat());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        text(&output.stderr),
+        "nvx-fake-openvmm: microVM snapshots do not support --network-ingress allow, whose \
+         published guest listeners are live host attachments, except at a restore with \
+         --restore-network-policy\n"
+    );
+    let output = run_microvm(
+        root,
+        &[&networked[..], &ingress, &["--restore-network-policy"]].concat(),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "nvx-fake-openvmm: restored the microVM\n"
+    );
 }
 
 #[test]

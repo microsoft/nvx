@@ -2045,7 +2045,11 @@ status.
   the addressing of its NIC from the snapshot, as OpenVMM does, so it refuses
   `--net`, and passes `--network-profile` alone, which OpenVMM requires, with
   the network policy that the snapshot was captured with, to restore a
-  snapshot that has a NIC.
+  snapshot that has a NIC, or, with `--restore-network-policy`, which needs
+  `--restore-snapshot`, with a policy of its own, which OpenVMM installs on a
+  NIC template in place of the complete deny-all policy that the template was
+  captured with, and whose DNS server and listener announcements the guest
+  then applies; OpenVMM checks the snapshot and the new policy.
 - One directory `--mount` is OpenVMM's `--mount`. Several, or a shared file,
   are the children of an aggregate at `/run/nvx/shares`, whose guest targets
   must be absolute, must not overlap, and must survive the kernel command line,
@@ -2321,6 +2325,10 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   OpenVMM requires to restore a snapshot that has a NIC. `nvx.py run` took the
   two only together, so it could not restore such a snapshot: OpenVMM refused
   its `--net`, or required the `--network-profile` that it omitted.
+- `run --restore-network-policy`, which `nvx.py run` lacked, passes OpenVMM's
+  `--restore-network-policy`, so that a restore of a NIC template installs the
+  policy of its network options; see
+  [Networked snapshots](../doc/run.md#networked-snapshots).
 
 ### Test hooks
 
@@ -2334,7 +2342,9 @@ boot, or the restore of a snapshot directory, prints that it booted or restored
 the microVM, writes an outcome report if asked, and exits with status 0, and a
 restore whose snapshot directory is missing fails with status 1. Like OpenVMM,
 it refuses with status 2 a restore with `--net`, whose NIC keeps the addressing
-that its snapshot saved, and a cold boot with `--network-profile` alone. Kernel
+that its snapshot saved, a cold boot with `--network-profile` alone or with
+`--restore-network-policy`, and a restore with `--network-ingress allow` or
+explicit `--host-loopback allow` without `--restore-network-policy`. Kernel
 command-line tokens make it fail: `fake_exit_on_start=STATUS`,
 `fake_exit_status=STATUS`, `fake_guest_features=MASK`, and
 `fake_legacy_guest=1`, among others; see `nvx::testing::fake_openvmm`. Like

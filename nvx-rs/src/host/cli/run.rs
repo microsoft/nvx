@@ -10,7 +10,11 @@
 //! A cold boot takes `--net` and `--network-profile` together. A restore takes the addressing of
 //! its NIC from the snapshot, as OpenVMM does, so it refuses `--net`, and passes
 //! `--network-profile` alone, which OpenVMM requires, with the network policy that the snapshot
-//! was captured with, to restore a snapshot that has a NIC.
+//! was captured with, to restore a snapshot that has a NIC. With `--restore-network-policy`, which
+//! it passes on, the restore installs the policy of its network options instead, ingress,
+//! explicit host loopback, and forwards included, which OpenVMM admits for a NIC template, a
+//! snapshot whose NIC was captured with the complete deny-all policy, and the guest applies the
+//! new policy's DNS server and listener announcements before the host releases its input.
 //!
 //! Its shares differ from those of `sandbox`. `--mount-deny`, `--mount-allow`, and `--mount-write`
 //! name host paths, which OpenVMM attributes to the share that holds them, and which must be
@@ -111,6 +115,10 @@ options:
   --restore-processors {1,2,4,8}
   --restore-memory-mib RESTORE_MEMORY_MIB
   --restore-ready-path RESTORE_READY_PATH
+  --restore-network-policy
+                        install the network options' policy in place of the
+                        complete deny-all policy of a snapshot's NIC
+                        (doc/run.md)
   --dry-run",
 };
 
@@ -127,7 +135,7 @@ const MACHINES: [&str; 1] = ["microvm"];
 const PROCESSORS: [&str; 4] = ["1", "2", "4", "8"];
 
 /// The options of `nvx-rs run`, which parse with the defaults of the former `nvx.py run`.
-pub(super) const OPTIONS: [Spec; 29] = [
+pub(super) const OPTIONS: [Spec; 30] = [
     Spec::one("--guest"),
     Spec::one("--hypervisor"),
     Spec::one("--machine"),
@@ -156,6 +164,7 @@ pub(super) const OPTIONS: [Spec; 29] = [
     Spec::one("--restore-processors"),
     Spec::one("--restore-memory-mib"),
     Spec::one("--restore-ready-path"),
+    Spec::flag("--restore-network-policy"),
     Spec::flag("--dry-run"),
 ];
 
@@ -196,6 +205,8 @@ pub(crate) struct Options {
     pub(crate) restore_memory_mib: Option<u64>,
     /// `--restore-ready-path`, as given.
     pub(crate) restore_ready_path: Option<String>,
+    /// `--restore-network-policy`.
+    pub(crate) restore_network_policy: bool,
     /// `--dry-run`.
     pub(crate) dry_run: bool,
 }
@@ -220,6 +231,7 @@ impl Default for Options {
             restore_processors: None,
             restore_memory_mib: None,
             restore_ready_path: None,
+            restore_network_policy: false,
             dry_run: false,
         }
     }
@@ -269,6 +281,7 @@ impl Receiver for Options {
             "--restore-processors" => self.restore_processors = Some(processors(&text())?),
             "--restore-memory-mib" => self.restore_memory_mib = Some(memory(&text())?),
             "--restore-ready-path" => self.restore_ready_path = Some(text()),
+            "--restore-network-policy" => self.restore_network_policy = true,
             "--dry-run" => self.dry_run = true,
             _ => return self.network.take(name, &text()),
         }
@@ -311,6 +324,7 @@ fn check(options: &Options) -> Result {
         (options.restore_ready_path.is_some(), "--restore-ready-path"),
         (options.restore_processors.is_some(), "--restore-processors"),
         (options.restore_memory_mib.is_some(), "--restore-memory-mib"),
+        (options.restore_network_policy, "--restore-network-policy"),
     ] {
         if given && !restore {
             return refused(format!("{option} requires --restore-snapshot"));
@@ -382,6 +396,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         }
         if let Some(ready) = &options.restore_ready_path {
             push(&mut command, "--restore-ready-path", path_text(ready));
+        }
+        if options.restore_network_policy {
+            command.push("--restore-network-policy".to_owned());
         }
     } else {
         let kernel = dir.require_kernel()?;

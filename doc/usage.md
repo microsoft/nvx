@@ -150,6 +150,7 @@ nvx-rs/target/release/nvx-rs run
     [--restore-processors {1,2,4,8}]
     [--restore-memory-mib MIB]
     [--restore-ready-path PATH]
+    [--restore-network-policy]
     [--dry-run]
 ```
 
@@ -170,19 +171,20 @@ nvx-rs/target/release/nvx-rs run
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. The guest also gets the IPv6 address that embeds it in `fd00::/96`, such as `fd00::a00:2/120` for `10.0.0.2/24`. A restore takes the addresses from the snapshot and rejects this option. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net` on a fresh boot, and without it to restore a snapshot captured with `--net`. |
 | `--network-egress {allow,deny}` | `allow` | Set the default guest egress policy. |
-| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). Snapshot capture and restore reject `allow`. |
+| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). Snapshot capture rejects `allow`, and so does a restore, unless `--restore-network-policy` installs a new policy. |
 | `--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Allow matching guest egress; repeat to add rules. `CIDR` is an IPv4 or IPv6 address or network, and a rule matches only its own family. `PROTOCOL` is `tcp`, `udp`, or `icmp` and matches every port when `PORT` is omitted; only `tcp` and `udp` take a `PORT` or an inclusive `PORT-PORT` range, such as `8000-8010`. |
 | `--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Deny matching guest egress; repeat to add rules. Deny rules take precedence. `PROTOCOL` and `PORT` select traffic as for `--network-egress-allow`. |
 | `--network-egress-policy-file PATH` | none | Load bounded IPv4 and IPv6 ranges and rule-local CIDR exclusions from JSON. Requires explicit `--network-egress`; cannot be mixed with explicit allow/deny rule flags. |
-| `--host-loopback {allow,deny}` | existing mapping | Control access between the guest and host loopback services. Explicit `allow` is bidirectional: the guest reaches host loopback through its gateway, and every TCP and UDP port on which the guest listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; it needs a `--net` prefix of `/29` or shorter, which OpenVMM checks; see [Host-loopback access](run.md#host-loopback-access). Snapshot capture and restore reject `allow`. |
+| `--host-loopback {allow,deny}` | existing mapping | Control access between the guest and host loopback services. Explicit `allow` is bidirectional: the guest reaches host loopback through its gateway, and every TCP and UDP port on which the guest listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; it needs a `--net` prefix of `/29` or shorter, which OpenVMM checks; see [Host-loopback access](run.md#host-loopback-access). Snapshot capture rejects `allow`, and so does a restore, unless `--restore-network-policy` installs a new policy. |
 | `--network-proxy IPV4:TCP-PORT` | none | Allow one explicit host TCP proxy endpoint. |
-| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Snapshot capture and restore reject forwards. |
+| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Snapshot capture rejects forwards, and so does a restore, unless `--restore-network-policy` installs a new policy. |
 | `--outcome-report PATH` | none | Write a bounded local JSON outcome report. |
 | `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. |
-| `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. A snapshot captured with `--net` needs `--network-profile portable` and the network policy options of its capture, which the restore cannot change; see [Networked snapshots](run.md#networked-snapshots). |
+| `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. A snapshot captured with `--net` needs `--network-profile portable` and the network policy options of its capture, unless `--restore-network-policy` installs a new policy; see [Networked snapshots](run.md#networked-snapshots). |
 | `--restore-processors {1,2,4,8}` | none | Bring this contiguous processor prefix online before restore readiness. Requires an opt-in microVM snapshot and cannot exceed `--processors` capacity. |
 | `--restore-memory-mib MIB` | none | Select the 128 MiB-aligned RAM target for an expansion-capable snapshot restore, in the range of `--memory-mib`. |
 | `--restore-ready-path PATH` | none | Publish one restore-readiness event to an existing Unix socket or Windows named pipe. |
+| `--restore-network-policy` | off | Install the policy of the network options, which may include `--network-ingress allow`, explicit `--host-loopback allow`, and forwards, in place of the complete deny-all policy, `--network-egress deny` and `--host-loopback deny` without egress rules, a proxy, or ingress, that the snapshot's NIC was captured with. The guest applies the new policy's DNS server and listener announcements before the host releases its input; see [Networked snapshots](run.md#networked-snapshots). Requires `--restore-snapshot`. |
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 
 `nvx-rs run` checks its options, prints the OpenVMM command after `>> `, and
