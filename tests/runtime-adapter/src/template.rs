@@ -2,8 +2,9 @@
 //! so that every clone that a restore of the snapshot starts attaches a root of its own. This
 //! module holds what the host program and the guest agent share of it: how the guest agent tells
 //! a template's VM by its kernel command line, the platform tier's allowlist of that command line,
-//! and the statuses with which the guest agent of a template's VM ends. The worker captures the
-//! VM, in `worker::capture`.
+//! the file of a template's VM that delays its clones' repair, for tests, and the statuses with
+//! which the guest agent of a template's VM ends. The worker captures the VM, in
+//! `worker::capture`.
 //!
 //! OpenVMM adds [`PLATFORM_TIER`], `nvx_snapshot_tier=platform`, to the kernel command line of a
 //! VM that captures a platform snapshot. [`boot`] reads the command line as the kernel splits it,
@@ -19,17 +20,25 @@
 //! has one, with `nvx::protocol::cmdline::gateway`, which refuses a gateway that OpenVMM would not
 //! render: the announcer of each clone that publishes its listeners announces them to it.
 //!
+//! For tests, the initramfs of a template's VM may hold [`REPAIR_DELAY_FILE`], which
+//! [`parse_repair_delay`] reads: each clone of the template then waits that long before its repair
+//! acknowledges its restore, so that a test can check that OpenVMM reads none of the host's input
+//! meanwhile. Only the initramfs can carry the delay, since the platform tier's allowlist holds no
+//! parameter for it.
+//!
 //! The worker of a template's VM, and with it the VM, ends with [`COMMAND_LINE_STATUS`] once
-//! `boot` refused its command line, with the bootstrap's status, 13, once the bootstrap of the
-//! guest for the template's root failed, with [`CAPTURE_STATUS_BASE`] plus the number of the stage
-//! of the capture that failed, and with [`CONTINUED_STATUS`] once the capture ended without a
-//! snapshot. In a clone, which it repairs, it ends with the status of the repair's failure, which
-//! `nvx::protocol::status` documents, and once it repaired the clone, as the clone's session ends:
-//! with the status of the class of the clone's activation's failure, which `nvx::protocol::status`
-//! documents too, or, once the clone was ready, as the worker of a VM that boots cold does. A
-//! committed capture ends the template's VM before the worker returns.
+//! `boot` refused its command line, or [`parse_repair_delay`] its delay file, with the bootstrap's
+//! status, 13, once the bootstrap of the guest for the template's root failed, with
+//! [`CAPTURE_STATUS_BASE`] plus the number of the stage of the capture that failed, and with
+//! [`CONTINUED_STATUS`] once the capture ended without a snapshot. In a clone, which it repairs,
+//! it ends with the status of the repair's failure, which `nvx::protocol::status` documents, and
+//! once it repaired the clone, as the clone's session ends: with the status of the class of the
+//! clone's activation's failure, which `nvx::protocol::status` documents too, or, once the clone
+//! was ready, as the worker of a VM that boots cold does. A committed capture ends the template's
+//! VM before the worker returns.
 
 use std::net::Ipv4Addr;
+use std::time::Duration;
 use std::{fmt, str};
 
 use nvx::protocol::ProtocolError;
@@ -81,7 +90,8 @@ mod openvmm {
 pub const PLATFORM_TIER: &str = "nvx_snapshot_tier=platform";
 
 /// The status with which the worker of a template's VM, and with it the VM, ends once [`boot`]
-/// refused its kernel command line, or the worker could not read it.
+/// refused its kernel command line, or the worker could not read it, or [`parse_repair_delay`]
+/// refused its [`REPAIR_DELAY_FILE`], or the worker could not read that.
 pub const COMMAND_LINE_STATUS: u8 = 20;
 
 /// The base of the statuses with which the worker of a template's VM ends once a stage of its
@@ -188,6 +198,39 @@ fn token(parameter: &Parameter<'_>) -> Vec<u8> {
         token.extend_from_slice(value);
     }
     token
+}
+
+/// The file of a template's VM, in the initramfs that the host program writes for its capture,
+/// that sets how long each clone of the template delays its repair, for tests: the
+/// [contents](repair_delay_contents) of the delay. A clone whose repair has not acknowledged its
+/// restore yet must read no host input, so a test captures a template with a delay to hold that
+/// state for as long as it needs. The template's kernel command line cannot set the delay:
+/// OpenVMM's capture of a platform snapshot refuses a parameter that the platform tier's allowlist
+/// does not hold, as [`boot`] does.
+pub const REPAIR_DELAY_FILE: &str = "/etc/runtime-adapter-repair-delay";
+
+/// The longest delay of a clone's repair that a template may set: half of OpenVMM's default
+/// deadline of the acknowledgement of a restore that gates the host's input, and of NVX's default
+/// restore-to-Ready deadline, each 60 seconds, which the delay counts against.
+pub const MAX_REPAIR_DELAY: Duration = Duration::from_secs(30);
+
+/// Returns the contents of [`REPAIR_DELAY_FILE`] that set `delay`: its whole milliseconds, in
+/// decimal, and a newline.
+pub fn repair_delay_contents(delay: Duration) -> String {
+    format!("{}\n", delay.as_millis())
+}
+
+/// Returns the delay that `contents`, those of [`REPAIR_DELAY_FILE`], set: a positive number of
+/// milliseconds, in decimal digits, of at most [`MAX_REPAIR_DELAY`], with or without a newline
+/// after it, or `None` for anything else.
+pub fn parse_repair_delay(contents: &[u8]) -> Option<Duration> {
+    let digits = contents.strip_suffix(b"\n").unwrap_or(contents);
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let milliseconds = str::from_utf8(digits).ok()?.parse::<u64>().ok()?;
+    let delay = Duration::from_millis(milliseconds);
+    (milliseconds > 0 && delay <= MAX_REPAIR_DELAY).then_some(delay)
 }
 
 #[cfg(test)]
@@ -595,5 +638,36 @@ mod tests {
                 "{reserved:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_template_s_repair_delay_is_positive_milliseconds_of_at_most_half_a_minute() {
+        for (delay, contents) in [
+            (Duration::from_millis(1), "1\n"),
+            (Duration::from_millis(8_000), "8000\n"),
+            (MAX_REPAIR_DELAY, "30000\n"),
+        ] {
+            assert_eq!(repair_delay_contents(delay), contents);
+            assert_eq!(parse_repair_delay(contents.as_bytes()), Some(delay));
+            let line = contents.trim_end();
+            assert_eq!(parse_repair_delay(line.as_bytes()), Some(delay));
+        }
+        // The milliseconds are whole.
+        assert_eq!(repair_delay_contents(Duration::from_micros(2_500)), "2\n");
+        for contents in [
+            "", "\n", "0\n", "30001\n", "+5\n", "-5\n", " 5\n", "5 \n", "5\n\n", "5\r\n", "5s\n",
+            "0x10\n", "1.5\n",
+        ] {
+            assert_eq!(
+                parse_repair_delay(contents.as_bytes()),
+                None,
+                "{contents:?}"
+            );
+        }
+        assert_eq!(parse_repair_delay(&[b'9'; 40]), None);
+        assert_eq!(parse_repair_delay(b"5\xff"), None);
+        // A file of the initramfs's `/etc`, which NVX's initramfs holds.
+        assert!(REPAIR_DELAY_FILE.starts_with("/etc/"));
+        assert_eq!(REPAIR_DELAY_FILE.matches('/').count(), 2);
     }
 }

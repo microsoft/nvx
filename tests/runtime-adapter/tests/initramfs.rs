@@ -1,14 +1,17 @@
 //! The initramfs that boots the guest agent is a copy of NVX's initramfs, with an archive after it
 //! that Linux unpacks over NVX's: the guest agent, the scripts that run it, and the links that
-//! replace NVX's managed agent and init agent with the scripts.
+//! replace NVX's managed agent and init agent with the scripts, and for the capture of a template
+//! whose clones delay their repair, for tests, the delay's file.
 #![cfg(feature = "host")]
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use runtime_adapter::initramfs::{
     self, CONTROL_TTY, GUEST_AGENT, INIT_AGENT, LAUNCHER, LAYERED_LAUNCHER, MANAGED_AGENT,
 };
+use runtime_adapter::template::{REPAIR_DELAY_FILE, parse_repair_delay};
 
 /// An entry of a `newc` archive.
 #[derive(Debug, PartialEq, Eq)]
@@ -109,12 +112,32 @@ fn the_archive_replaces_nvx_s_agents_with_links_to_the_guest_agent_launchers() {
     // Guest agents of every length modulo 4 pad their data differently.
     for length in 0..8 {
         let agent = (1..=length).collect::<Vec<u8>>();
-        let archive = initramfs::archive(&agent).unwrap();
+        let archive = initramfs::archive(&agent, None).unwrap();
         assert_eq!(
             parse(&archive),
             expected(&agent),
             "a guest agent of {length} bytes"
         );
+    }
+}
+
+#[test]
+fn a_template_s_archive_holds_the_delay_of_its_clones_repair_after_the_launchers() {
+    // Delays of every length modulo 4 pad their data differently.
+    for milliseconds in [1, 10, 100, 1_000, 30_000] {
+        let delay = Duration::from_millis(milliseconds);
+        let archive = initramfs::archive(b"guest agent", Some(delay)).unwrap();
+        let mut entries = expected(b"guest agent");
+        let contents = format!("{milliseconds}\n");
+        entries.push(Entry {
+            name: REPAIR_DELAY_FILE.trim_start_matches('/').to_owned(),
+            inode: 6,
+            mode: 0o100_644,
+            owner: (0, 0, 1),
+            data: contents.clone().into_bytes(),
+        });
+        assert_eq!(parse(&archive), entries, "{delay:?}");
+        assert_eq!(parse_repair_delay(contents.as_bytes()), Some(delay));
     }
 }
 
@@ -149,13 +172,13 @@ fn the_initramfs_is_a_copy_of_nvx_s_with_the_archive_at_a_multiple_of_4_bytes() 
         directory.join("output.cpio.gz"),
     );
     fs::write(&agent, b"guest agent").unwrap();
-    let archive = initramfs::archive(b"guest agent").unwrap();
+    let archive = initramfs::archive(b"guest agent", None).unwrap();
     // An earlier, longer output is replaced.
     fs::write(&output, vec![0xee; 4096]).unwrap();
     for length in 0..8 {
         let contents = vec![0xab; length];
         fs::write(&base, &contents).unwrap();
-        initramfs::write(&base, &agent, &output).unwrap();
+        initramfs::write(&base, &agent, None, &output).unwrap();
         let written = fs::read(&output).unwrap();
         let start = length.next_multiple_of(4);
         assert_eq!(&written[..length], contents, "a base of {length} bytes");
@@ -164,13 +187,19 @@ fn the_initramfs_is_a_copy_of_nvx_s_with_the_archive_at_a_multiple_of_4_bytes() 
     }
     // NVX's initramfs stays as it is.
     assert_eq!(fs::read(&base).unwrap(), vec![0xab; 7]);
+    // A template's initramfs appends the archive with the delay of its clones' repair.
+    let delay = Some(Duration::from_secs(8));
+    initramfs::write(&base, &agent, delay, &output).unwrap();
+    let written = fs::read(&output).unwrap();
+    let archive = initramfs::archive(b"guest agent", delay).unwrap();
+    assert_eq!(&written[8..], archive);
 
     // A failure names the file.
     for (base, agent) in [
         (&directory.join("missing"), &agent),
         (&base, &directory.join("missing")),
     ] {
-        let error = initramfs::write(base, agent, &output).unwrap_err();
+        let error = initramfs::write(base, agent, None, &output).unwrap_err();
         let missing = directory.join("missing").display().to_string();
         assert!(error.to_string().contains(&missing), "{error}");
     }

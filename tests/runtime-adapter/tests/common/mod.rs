@@ -192,10 +192,21 @@ impl Sandbox {
     /// hypervisor that `NVX_HYPERVISOR` selects, and with `options` too, checks that the creation
     /// exits with `status`, and returns what it printed.
     pub(crate) fn create(&mut self, options: &[&OsStr], status: i32) -> Printed {
+        self.create_with(options, &[], status)
+    }
+
+    /// Creates a template of the guest agent in the sandbox's store, as [`create`](Self::create)
+    /// does, with the variables `environment` too.
+    pub(crate) fn create_with(
+        &mut self,
+        options: &[&OsStr],
+        environment: &[(&str, &OsStr)],
+        status: i32,
+    ) -> Printed {
         let guest = guest_options();
         let mut arguments: Vec<&OsStr> = guest.iter().map(OsString::as_os_str).collect();
         arguments.extend(options);
-        let started = self.start("create", &arguments, &[]);
+        let started = self.start("create", &arguments, environment);
         self.finish(started, status)
     }
 

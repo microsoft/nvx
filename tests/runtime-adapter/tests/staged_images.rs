@@ -267,10 +267,18 @@ fn the_host_program_stages_images_in_the_store() {
         command.output().unwrap()
     };
 
-    // Staging creates the store, records both bindings in it, and prints nothing.
+    // Staging creates the store, records both bindings in it, and prints the bytes that it read.
+    let read_bytes = |output: &std::process::Output| -> u64 {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .strip_prefix("read-bytes=")
+            .and_then(|line| line.strip_suffix('\n'))
+            .and_then(|bytes| bytes.parse().ok())
+            .unwrap_or_else(|| panic!("{output:?}"))
+    };
     let output = stage(&[scratch.as_path()]);
     assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty(), "{output:?}");
+    read_bytes(&output);
     let expected = Staged::stage(&distro, ImageFormat::Erofs, identity(), Some(&scratch)).unwrap();
     assert_eq!(Staged::read(&store).unwrap(), Some(expected.clone()));
 
@@ -278,6 +286,7 @@ fn the_host_program_stages_images_in_the_store() {
     manifest(&distro, "distro.erofs", &"0".repeat(64));
     let output = stage(&[]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("sandbox distro manifest does not match its artifact"),
@@ -286,10 +295,11 @@ fn the_host_program_stages_images_in_the_store() {
     assert_eq!(Staged::read(&store).unwrap(), Some(expected));
 
     // Staging again replaces the staged images: an image whose manifest matches, without a scratch
-    // image.
+    // image. It hashed the image, whose bytes it read.
     manifest(&distro, "distro.erofs", ZERO_KIB_SHA256);
     let output = stage(&[]);
     assert!(output.status.success(), "{output:?}");
+    assert!(read_bytes(&output) >= 1024, "{output:?}");
     let staged = Staged::read(&store).unwrap().unwrap();
     assert!(staged.distro.binding.manifest().is_some());
     assert_eq!(staged.scratch, None);

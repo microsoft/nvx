@@ -25,7 +25,9 @@
 //!   `runtime-adapter-guest init /dev/hvc2 layered`, PID 1 of a VM with a layered root, which
 //!   names the control tty, [`CONTROL_TTY`], itself, since `/init` passes NVX's init agent none;
 //! - and a symbolic link from [`INIT_AGENT`] to that script, so that NVX's init agent never
-//!   assembles the root in the adapter's VMs.
+//!   assembles the root in the adapter's VMs;
+//! - for the capture of a template whose clones delay their repair, for tests, the delay's file,
+//!   [`REPAIR_DELAY_FILE`], in the `/etc` directory of NVX's initramfs.
 //!
 //! Linux removes a file whose type an archive changes before it creates the new one, so each link
 //! replaces NVX's agent without writing to its file, which could have other names.
@@ -37,6 +39,9 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::Duration;
+
+use crate::template::{REPAIR_DELAY_FILE, repair_delay_contents};
 
 /// Path of the guest agent in the VM.
 pub const GUEST_AGENT: &str = "/sbin/runtime-adapter-guest";
@@ -84,13 +89,19 @@ const SYMLINK: u32 = 0o120_000;
 
 /// Writes to `output` a copy of NVX's initramfs `base` with the guest agent `guest_agent`, a
 /// static `x86_64-unknown-linux-musl` build of `runtime-adapter-guest`, in place of NVX's managed
-/// agent and init agent, as the [module documentation](self) describes.
+/// agent and init agent, and the file that delays the repair of each clone of a template by
+/// `repair_delay`, if any, as the [module documentation](self) describes.
 ///
 /// Fails if a file cannot be read or written, or if the guest agent does not fit an archive
 /// entry, whose size has 32 bits. The error names the file.
-pub fn write(base: &Path, guest_agent: &Path, output: &Path) -> io::Result<()> {
+pub fn write(
+    base: &Path,
+    guest_agent: &Path,
+    repair_delay: Option<Duration>,
+    output: &Path,
+) -> io::Result<()> {
     let agent = fs::read(guest_agent).map_err(naming(guest_agent))?;
-    let archive = archive(&agent)?;
+    let archive = archive(&agent, repair_delay)?;
     let mut file = File::create(output).map_err(naming(output))?;
     let mut source = File::open(base).map_err(naming(base))?;
     let length = io::copy(&mut source, &mut file).map_err(naming(output))?;
@@ -106,14 +117,16 @@ fn naming(path: &Path) -> impl Fn(io::Error) -> io::Error + '_ {
     move |error| io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
 
-/// Returns the archive that [`write`](fn@write) appends, with the guest agent `guest_agent`:
-/// every entry that the [module documentation](self) lists, owned by root, then the trailer.
+/// Returns the archive that [`write`](fn@write) appends, with the guest agent `guest_agent`, and
+/// the file that delays the repair of each clone of a template by `repair_delay`, if any: every
+/// entry that the [module documentation](self) lists, owned by root, then the trailer.
 ///
 /// Fails if the guest agent does not fit an archive entry, whose size has 32 bits.
-pub fn archive(guest_agent: &[u8]) -> io::Result<Vec<u8>> {
+pub fn archive(guest_agent: &[u8], repair_delay: Option<Duration>) -> io::Result<Vec<u8>> {
     let script = launcher_script();
     let layered_script = layered_launcher_script();
-    let entries: [(&str, u32, &[u8]); 5] = [
+    let delay = repair_delay.map(repair_delay_contents);
+    let mut entries: Vec<(&str, u32, &[u8])> = vec![
         (GUEST_AGENT, REGULAR | 0o755, guest_agent),
         (LAUNCHER, REGULAR | 0o755, script.as_bytes()),
         // A link's data is its target.
@@ -121,6 +134,9 @@ pub fn archive(guest_agent: &[u8]) -> io::Result<Vec<u8>> {
         (LAYERED_LAUNCHER, REGULAR | 0o755, layered_script.as_bytes()),
         (INIT_AGENT, SYMLINK | 0o777, LAYERED_LAUNCHER.as_bytes()),
     ];
+    if let Some(delay) = &delay {
+        entries.push((REPAIR_DELAY_FILE, REGULAR | 0o644, delay.as_bytes()));
+    }
     let mut archive = Vec::new();
     for (inode, (path, mode, data)) in (1..).zip(entries) {
         // Archives name their entries relative to the root.

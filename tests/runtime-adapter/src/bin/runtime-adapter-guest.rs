@@ -188,13 +188,14 @@ fn worker(tty: &std::path::Path, sibling: Option<u32>) -> ExitCode {
 /// standard error, or `None` in a VM that boots cold, whose worker serves the host.
 ///
 /// A command line that the worker cannot read, or that `runtime_adapter::template::boot` refuses,
-/// ends the worker with `COMMAND_LINE_STATUS`.
+/// ends the worker with `COMMAND_LINE_STATUS`, as does a template's repair delay, for tests, that
+/// the worker cannot read, or that `runtime_adapter::template::parse_repair_delay` refuses.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn capture_template(
     tty: &std::path::Path,
     operations: &mut runtime_adapter::worker::LibraryRoot,
 ) -> Option<u8> {
-    use runtime_adapter::template::{self, Boot, COMMAND_LINE_STATUS};
+    use runtime_adapter::template::{self, Boot, COMMAND_LINE_STATUS, REPAIR_DELAY_FILE};
     use runtime_adapter::worker::capture;
     use runtime_adapter::worker::{RootOperations, SESSION_STATUS};
 
@@ -209,8 +210,25 @@ fn capture_template(
             return Some(COMMAND_LINE_STATUS);
         }
     };
+    let repair_delay = match std::fs::read(REPAIR_DELAY_FILE) {
+        Ok(contents) => match template::parse_repair_delay(&contents) {
+            Some(delay) => Some(delay),
+            None => {
+                eprintln!(
+                    "runtime-adapter-guest: {REPAIR_DELAY_FILE} holds no repair delay: {}",
+                    contents.escape_ascii()
+                );
+                return Some(COMMAND_LINE_STATUS);
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            eprintln!("runtime-adapter-guest: cannot read {REPAIR_DELAY_FILE}: {error}");
+            return Some(COMMAND_LINE_STATUS);
+        }
+    };
     Some(
-        match capture::capture_on_terminal(tty, operations, gateway) {
+        match capture::capture_on_terminal(tty, operations, gateway, repair_delay) {
             Ok(templated) => {
                 eprintln!("runtime-adapter-guest: {templated}");
                 templated.status()

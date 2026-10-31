@@ -17,7 +17,7 @@ use nvx::protocol::root::{ImageFormat, RootImage};
 use nvx::uuid::Uuid;
 use runtime_adapter::capture::{
     DEFAULT_BOOT_PROCESSORS, DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH,
-    LOGICAL_BLOCK_SIZE, Request, geometry,
+    LOGICAL_BLOCK_SIZE, REPAIR_DELAY_SETTING, REPAIR_DELAY_VARIABLE, Request, geometry,
 };
 use runtime_adapter::layered::read_network;
 use runtime_adapter::runtime::Runtime;
@@ -88,6 +88,7 @@ fn template(distro: &Path, network: Option<SandboxNetwork>) -> Request {
         memory_capacity: 256 * MIB,
         scratch_length: DEFAULT_SCRATCH_LENGTH,
         network,
+        repair_delay: None,
     }
 }
 
@@ -207,7 +208,7 @@ fn a_capture_takes_its_class_and_inputs_from_the_request() {
     more.boot_processors = 2;
     let capture = more
         .capture(
-            staged.distro.binding,
+            staged.distro.binding.clone(),
             &runtime,
             "build",
             &initramfs,
@@ -219,6 +220,23 @@ fn a_capture_takes_its_class_and_inputs_from_the_request() {
         (4, 2)
     );
     assert_ne!(capture.class.identity().unwrap(), fewer);
+
+    // A template whose clones delay their repair, for tests, is of a class of its own, which
+    // holds the delay as its one invariant setting.
+    let mut delayed = template(&distro, Some(network));
+    delayed.repair_delay = Some(std::time::Duration::from_secs(8));
+    let capture = delayed
+        .capture(
+            staged.distro.binding,
+            &runtime,
+            "build",
+            &initramfs,
+            &directory,
+        )
+        .unwrap();
+    let invariants = capture.class.invariants.iter().collect::<Vec<_>>();
+    assert_eq!(invariants, [(REPAIR_DELAY_SETTING, "8000")]);
+    assert_ne!(capture.class.identity().unwrap(), with_nic);
 
     // OpenVMM presents logical blocks of 512 bytes.
     let presented = geometry(&distro, 4096).unwrap();
@@ -283,5 +301,41 @@ fn the_host_program_refuses_a_template_before_it_creates_anything() {
             stderr.contains(&format!("set {} to NVX's artifacts", Artifacts::ENV_DIR)),
             "{stderr}"
         );
+    }
+}
+
+#[test]
+fn the_host_program_refuses_a_repair_delay_that_it_cannot_read() {
+    // A delay of each clone's repair, for tests, is a positive number of milliseconds, of at most
+    // half a minute: anything else is a usage error of `create` and `refresh`, which creates
+    // nothing.
+    let directory = directory("template-capture-repair-delay");
+    let store = directory.join("templates");
+    for command in ["create", "refresh"] {
+        for value in ["", "0", "30001", "8s", "-1", " 8000", "8000\n", "1.5"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+                .arg(command)
+                .arg(&store)
+                .args(["--guest-agent", "agent", "--distro", "erofs:image"])
+                .args(["--distro-identity", &identity().to_string()])
+                .env(REPAIR_DELAY_VARIABLE, value)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{command} {value:?}: {output:?}"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let problem = format!(
+                "{REPAIR_DELAY_VARIABLE} takes a positive number of milliseconds, of at most \
+                 30000, not {value:?}"
+            );
+            assert!(
+                stderr.contains(&problem) && stderr.contains("usage: runtime-adapter-host"),
+                "{command} {value:?}: {stderr}"
+            );
+            assert!(!store.exists(), "{command} {value:?}: {output:?}");
+        }
     }
 }
