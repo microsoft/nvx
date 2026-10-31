@@ -125,7 +125,7 @@ changes only when the module's purpose does.
 | [`nvx::testing::fake_openvmm`](#nvxtestingfake_openvmm) | A fake OpenVMM that serves the control console and runs scripted workloads without a VM |
 | [`nvx::host::cli`](#nvxhostcli) | Feature `cli`: the `nvx-rs` executable; see [The nvx-rs CLI](#the-nvx-rs-cli) |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
-| [`nvx::guest::mappings`](#nvxguestmappings) | `Mapper`: applies host mappings beneath the descriptors of their roots, for any guest init or agent |
+| [`nvx::guest::mappings`](#nvxguestmappings) | `Mapper` and `MappingTable`: apply host mappings beneath the descriptors of their roots, and a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
 | [`nvx::guest::spawn`](#nvxguestspawn) | `Command`: starts a program in a new process, for any guest init or agent |
@@ -1042,11 +1042,27 @@ failure.
 
 `bind` applies one runtime bind through the same walk and attach.
 
+`MappingTable` keeps a guest agent's account of a host mapping table: the
+mappings that the host hands the agent in `MAPS` parts once it is ready, after
+it announced how many, with the `nvx_maps=` token of the kernel command line,
+which `MappingTable::announced` reads, or as an adapter's own protocol has it,
+which `MappingTable::new` takes. `MappingTable::apply` checks each part against
+the announcement and the entries applied in order, and refuses one that does not
+decode, holds no entry, does not continue the table, ends past the
+announcement, or maps the export's root, which an empty source names, as a
+`TableError::Refused` at the entry that it expects next, which changes nothing.
+It hands the part's mappings to the caller, which applies them beneath the root
+of its choice, such as through a `Mapper` or a layered `Root`; the first that
+fails latches the table, which reports it as a `TableError::Failed` with its
+entry, and refuses every later part. The table is complete once every announced
+mapping is applied, and none failed, and the root's teardown tears it down.
+
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
-it, beneath `/` in direct mode and beneath the container's assembled root in
-sandbox mode, and refuses an empty source, since its export is an aggregate,
-whose root lists its children; NVX's hosts, whose exports are all aggregates,
-send none; a layered `Root` applies its live shares and mappings through it.
+a `MappingTable` and a mapper, beneath `/` in direct mode and beneath the
+container's assembled root in sandbox mode; the table refuses an empty source,
+since the export is an aggregate, whose root lists its children, and NVX's
+hosts, whose exports are all aggregates, send none. A layered `Root` applies its
+live shares and mappings through a mapper.
 
 ### `nvx::guest::nvxs`
 

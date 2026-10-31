@@ -5,11 +5,12 @@
 //! namespaces, view, root, and identity; [`process`], through which it collects the status of
 //! each child that it names, and of no other; [`cgroup`], through which it places, accounts,
 //! kills, and settles the processes of its executions; [`mappings`], through which it mounts host
-//! mappings beneath the descriptors of the roots that it names; [`exec`], which drives each
-//! program as one execution, with its launch, its bounded output and input, its ending, and its
-//! outcome, alone or, through its [`binding`](exec::binding), under the
-//! [execution engine](crate::exec); [`root`], through which it bootstraps the guest for a layered
-//! root, assembles the root, mounts live shares and mappings in it, and tears it down;
+//! mappings beneath the descriptors of the roots that it names, and keeps the account of a host's
+//! mapping table; [`exec`], which drives each program as one execution, with its launch, its
+//! bounded output and input, its ending, and its outcome, alone or, through its
+//! [`binding`](exec::binding), under the [execution engine](crate::exec); [`root`], through which
+//! it bootstraps the guest for a layered root, assembles the root, mounts live shares and mappings
+//! in it, and tears it down;
 //! [`gpt`], through which it reads the partition table of a GPT disk that the kernel attached as
 //! a block device; and, on x86-64, `clone`, through which a template's guest prepares for and
 //! requests a snapshot's capture before its root's assembly, behind the caller's fence of
