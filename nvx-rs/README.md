@@ -83,8 +83,16 @@ OpenVMM limits, and recorded-plan checks and rendering. The
 [instance module](src/host/instance/mod.rs) separates private-file helpers,
 lock-held lifecycle transitions, and workload execution. The CLI's
 [managed sandbox lifecycle](src/host/cli/sandbox/lifecycle/mod.rs) separates state
-directories, outcome reports, start and exec, and stop and deprovision. Their
-`mod.rs` files retain the existing entry points through re-exports; their
+directories, outcome reports, start and exec, and stop and deprovision. The
+[Linux](src/host/platform/linux/mod.rs) and
+[Windows](src/host/platform/windows/mod.rs) platform modules each separate
+processes, spawns, private directories and files, file identities, the claim of a
+launch's log, and OpenVMM's endpoints, and on Windows, the CLI's Ctrl-C. The
+[store](src/host/store/mod.rs) keeps `SandboxStore` and its documentation, with
+private siblings for the names of its files, `LockedStore`, and launches. The
+[supervisor](src/host/supervisor/mod.rs) keeps its documentation, with private
+siblings for launches, the VMs that it holds and their stops, and reattaches.
+Their `mod.rs` files retain the existing entry points through re-exports; their
 `tests.rs` files keep the unit tests at the same module paths.
 
 The table below says in one line what each module is for, and links to the

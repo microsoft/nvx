@@ -3,15 +3,24 @@
 
 use std::cell::{Cell, RefCell};
 use std::fs;
+use std::io;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use super::reattach::reattach_with;
+use super::vmm::{Stoppable, stop_process, terminate_process};
 use super::*;
+use crate::error::{Error, Result};
 use crate::host::launch::MAX_TIMEOUT;
 use crate::host::platform;
-use crate::host::process::BootId;
-use crate::host::store::{ArtifactIdentity, CallerFiles, FORMAT, JOURNAL_NAME, RUNTIME_NAME};
+use crate::host::process::{BootId, Process, ProcessRef};
+use crate::host::store::{
+    ArtifactIdentity, CallerFiles, FORMAT, IdentityPart, JOURNAL_NAME, LaunchId, LockedStore,
+    RUNTIME_NAME, Recovery, RuntimeIdentity, SandboxStore,
+};
 use crate::host::template::{self, Acquired, HostTime, Lease};
+use crate::protocol::CAPABILITY_LEN;
 use crate::{ErrorCode, ErrorKind};
 
 /// A launch capability.

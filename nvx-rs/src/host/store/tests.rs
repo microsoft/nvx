@@ -8,7 +8,8 @@ use std::thread;
 use super::*;
 use crate::ErrorKind;
 use crate::contract;
-use crate::host::process::{BootId, ProcessRef};
+use crate::host::filesystem::FileIdentity;
+use crate::host::process::{BootId, Process, ProcessRef};
 use crate::host::test_support::released;
 
 /// A launch capability.
