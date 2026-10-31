@@ -397,6 +397,14 @@ the 32,767-character limit of a Windows command line, and `LaunchSpec::check`,
 which every command line applies to the memory size, the non-root identity, the
 hostname, the guest network, and the kernel parameters.
 
+`process_command_line_units` counts the Windows command line that runs a program
+with its arguments, in UTF-16 code units, as Windows quotes them, and
+`fit_process_command_line` checks it against `PROCESS_COMMAND_LINE_LIMIT`, on
+every host, with the reserve that its caller keeps.
+`LaunchSpec::check_process_command_line`, which a caller runs before it
+provisions an instance, keeps 1024 code units for what may change before the
+instance starts, whose own check keeps none.
+
 `kernel_parameters_problem` checks the extra kernel parameters as the guest's
 kernel reads them, with `nvx::protocol::cmdline`: trimmed, split at every byte
 that the kernel takes for whitespace, including the 0xa0 that ends the UTF-8

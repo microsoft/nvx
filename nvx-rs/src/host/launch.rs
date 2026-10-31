@@ -4,6 +4,12 @@
 //! disk. OpenVMM's managed lifecycle adds the control tty and workload identity tokens; the guest
 //! init then starts the managed agent, which runs workloads as the configured non-root identity.
 //! The arguments mirror the managed-lifecycle check of `scripts/nvx_tools/microvm_tests.py`.
+//!
+//! [`LaunchSpec::check_process_command_line`] holds a managed microVM's command line to
+//! [`PROCESS_COMMAND_LINE_LIMIT`], the longest that Windows starts a process with, on every host,
+//! so that a launch behaves alike on all of them, as [`process_command_line_units`] counts it and
+//! [`fit_process_command_line`] checks it, and any other caller may check a command line with
+//! them.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -284,26 +290,14 @@ impl LaunchSpec {
     }
 
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless OpenVMM's
-    /// command line with `arguments` leaves `reserve` of [`PROCESS_COMMAND_LINE_LIMIT`] unused.
+    /// command line with `arguments` leaves `reserve` of [`PROCESS_COMMAND_LINE_LIMIT`] unused, as
+    /// [`fit_process_command_line`] checks it.
     pub(crate) fn fit_process_command_line(
         &self,
         arguments: &[OsString],
         reserve: usize,
     ) -> Result<()> {
-        let length = process_command_line_units(self.openvmm.as_os_str(), arguments);
-        if length + reserve <= PROCESS_COMMAND_LINE_LIMIT {
-            return Ok(());
-        }
-        let held = if reserve == 0 {
-            String::new()
-        } else {
-            format!(", with {reserve} held in reserve")
-        };
-        Err(Error::unsupported(format!(
-            "OpenVMM's command line would take {length} of the {PROCESS_COMMAND_LINE_LIMIT} \
-             characters that a Windows process command line allows{held}; map, hide, or allow \
-             fewer or shorter filesystem paths, or use fewer network rules"
-        )))
+        fit_process_command_line(self.openvmm.as_os_str(), arguments, reserve)
     }
 }
 
@@ -395,32 +389,82 @@ pub fn timeout_problem(value: Duration, positive: bool) -> Option<String> {
     })
 }
 
-/// Length in UTF-16 code units, including the terminating NUL, of the Windows command line that
-/// runs `program` with `arguments`, quoted the way the Windows platform quotes it.
-fn process_command_line_units(program: &OsStr, arguments: &[OsString]) -> usize {
-    let mut length = 0;
-    for (index, argument) in std::iter::once(program)
-        .chain(arguments.iter().map(OsString::as_os_str))
-        .enumerate()
-    {
-        let text = argument.to_string_lossy();
-        let quoted = index == 0 || text.is_empty() || text.contains([' ', '\t']);
-        // A separating space, or the terminating NUL after the last argument.
-        length += 1 + text.encode_utf16().count() + if quoted { 2 } else { 0 };
-        let mut backslashes = 0;
-        for character in text.chars() {
-            match character {
-                '\\' => backslashes += 1,
-                '"' => {
-                    length += backslashes + 1;
-                    backslashes = 0;
-                }
-                _ => backslashes = 0,
+/// Returns the length in UTF-16 code units, including the terminating NUL, of the Windows command
+/// line that runs `program` with `arguments`, quoted the way the Windows platform quotes it: the
+/// program always in quotes, and each argument in quotes if it is empty or holds a space or a
+/// tab, with a backslash before each quote that it holds and a backslash before each backslash
+/// that precedes a quote, its closing quote included, and one space between them.
+///
+/// It is the length that [`PROCESS_COMMAND_LINE_LIMIT`] bounds, whatever the host:
+/// [`fit_process_command_line`] checks it.
+pub fn process_command_line_units(program: &OsStr, arguments: &[OsString]) -> usize {
+    argument_units(program, true) + arguments_units(arguments)
+}
+
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless the Windows command
+/// line that runs `program`, such as OpenVMM, with `arguments`, as [`process_command_line_units`]
+/// counts it, leaves `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] unused: none for the
+/// complete command line of a launch about to spawn OpenVMM, and some for what may change before
+/// then, such as the paths of the artifacts.
+///
+/// The error says how long the command line is, and how to shorten it.
+pub fn fit_process_command_line(
+    program: &OsStr,
+    arguments: &[OsString],
+    reserve: usize,
+) -> Result<()> {
+    let length = process_command_line_units(program, arguments);
+    let held = if reserve == 0 {
+        String::new()
+    } else {
+        format!(", with {reserve} held in reserve")
+    };
+    fit("OpenVMM's command line", length, reserve, &held)
+}
+
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), saying that `subject`
+/// would take `length` code units, `held` describing `reserve`, unless they leave `reserve` of
+/// [`PROCESS_COMMAND_LINE_LIMIT`] unused.
+fn fit(subject: &str, length: usize, reserve: usize, held: &str) -> Result<()> {
+    if length.saturating_add(reserve) <= PROCESS_COMMAND_LINE_LIMIT {
+        return Ok(());
+    }
+    Err(Error::unsupported(format!(
+        "{subject} would take {length} of the {PROCESS_COMMAND_LINE_LIMIT} characters that a \
+         Windows process command line allows{held}; map, hide, or allow fewer or shorter \
+         filesystem paths, or use fewer network rules"
+    )))
+}
+
+/// Returns the length in UTF-16 code units of `arguments` on a Windows command line, quoted as
+/// [`process_command_line_units`] quotes them, each with the space before it.
+fn arguments_units(arguments: &[OsString]) -> usize {
+    arguments
+        .iter()
+        .map(|argument| argument_units(argument, false))
+        .sum()
+}
+
+/// Returns the length in UTF-16 code units of `argument` on a Windows command line, quoted as
+/// [`process_command_line_units`] quotes it, always if it is the `program`, with one separating
+/// space, or the terminating NUL after the last argument.
+fn argument_units(argument: &OsStr, program: bool) -> usize {
+    let text = argument.to_string_lossy();
+    let quoted = program || text.is_empty() || text.contains([' ', '\t']);
+    let mut length = 1 + text.encode_utf16().count() + if quoted { 2 } else { 0 };
+    let mut backslashes = 0;
+    for character in text.chars() {
+        match character {
+            '\\' => backslashes += 1,
+            '"' => {
+                length += backslashes + 1;
+                backslashes = 0;
             }
+            _ => backslashes = 0,
         }
-        if quoted {
-            length += backslashes;
-        }
+    }
+    if quoted {
+        length += backslashes;
     }
     length
 }
@@ -627,6 +671,37 @@ mod tests {
                 .contains("a Windows process command line allows; map"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_process_command_line_fits_while_it_leaves_its_reserve() {
+        // Any program and arguments, such as an adapter's: a command line of the limit fits,
+        // one more code unit does not, and a reserve takes its part of the limit.
+        let arguments: Vec<OsString> = ["--a", "b c"].map(OsString::from).into();
+        let base = process_command_line_units(OsStr::new("/o"), &arguments);
+        let program = |extra: usize| OsString::from(format!("/o{}", "o".repeat(extra)));
+        let fitting = program(PROCESS_COMMAND_LINE_LIMIT - base);
+        assert_eq!(
+            process_command_line_units(&fitting, &arguments),
+            PROCESS_COMMAND_LINE_LIMIT
+        );
+        fit_process_command_line(&fitting, &arguments, 0).unwrap();
+        let held = fit_process_command_line(&fitting, &arguments, 1).unwrap_err();
+        assert_eq!(held.kind(), ErrorKind::Unsupported);
+        assert!(
+            held.to_string()
+                .contains("would take 32767 of the 32767 characters"),
+            "{held}"
+        );
+        assert!(
+            held.to_string().contains("with 1 held in reserve"),
+            "{held}"
+        );
+        let longer = program(PROCESS_COMMAND_LINE_LIMIT - base + 1);
+        let error = fit_process_command_line(&longer, &arguments, 0).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        // A reserve past the limit leaves no room for any command line.
+        assert!(fit_process_command_line(OsStr::new("o"), &[], usize::MAX).is_err());
     }
 
     #[test]
