@@ -27,6 +27,11 @@ use crate::host::supervisor::Inherited;
 /// hold in place. `nvx-rs run`, which holds no checked files, passes none, as `nvx.py run` passed
 /// none to `subprocess.run`.
 ///
+/// On Linux, OpenVMM starts with this process's umask without the owner's bits, where
+/// `subprocess.run` passed the umask unchanged, so that its outcome report keeps the owner's
+/// permissions that OpenVMM gives it whatever the umask, outside a directory with a default ACL,
+/// as [`spawn`](crate::host::spawn::spawn) describes.
+///
 /// OpenVMM shares the terminal and its process group, so Ctrl-C reaches it too. As
 /// `subprocess.run` does, the CLI then gives it 0.25 s to exit on Unix before it kills it, and on
 /// Windows, where Python cannot interrupt its wait, waits for it to exit; either way the command

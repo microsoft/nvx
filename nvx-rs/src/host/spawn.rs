@@ -68,13 +68,16 @@ impl VmmCommand<'_> {
 /// handles that `command` allows, as [`Inherited`] describes, and nothing else of the caller's,
 /// so a caller whose own output is a pipe sees its end when the caller exits rather than when the
 /// VM does. On Linux, the VMM starts in a new session, so that it outlives the caller and its
-/// terminal; on Windows, without a console window, and outside the caller's job object when
-/// `command` asks for it, in a job object of its own that is named after `log`, which limits no
-/// resource but lets no process that the VMM starts break away from it, unless `log` is not a file
-/// of a disk volume, such as `NUL` or a pipe, or what takes that name is not the user's job. A
-/// process that the caller spawns while the VMM is created, which can inherit the log as
-/// [`Inherited`] describes, never joins the VMM's job, so it holds the log's claim only if the VMM
-/// has none: see [the store](crate::host::store#the-log-claim).
+/// terminal, and with the caller's umask without the owner's bits, so that the files that OpenVMM
+/// creates for the caller, such as its outcome report, keep the owner's permissions that OpenVMM
+/// gives them whatever the caller's umask, outside directories with a default ACL, which Linux
+/// applies instead of the umask; on Windows, without a console window, and outside the caller's
+/// job object when `command` asks for it, in a job object of its own that is named after `log`,
+/// which limits no resource but lets no process that the VMM starts break away from it, unless
+/// `log` is not a file of a disk volume, such as `NUL` or a pipe, or what takes that name is not
+/// the user's job. A process that the caller spawns while the VMM is created, which can inherit
+/// the log as [`Inherited`] describes, never joins the VMM's job, so it holds the log's claim only
+/// if the VMM has none: see [the store](crate::host::store#the-log-claim).
 ///
 /// Record the VMM's identity right after the spawn, with
 /// [`Launch::record_process`](crate::host::store::Launch::record_process), as
@@ -476,5 +479,88 @@ mod tests {
         assert!(error.to_string().contains("close-on-exec"), "{error}");
         // The refusal, which comes before the spawn, leaves the descriptor as it was.
         assert!(!close_on_exec(writer.as_fd()));
+    }
+
+    /// Returns the umask that the status file of a process or a thread at `status`, in procfs,
+    /// tells.
+    fn umask_in(status: &str) -> u32 {
+        fs::read_to_string(status)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("Umask:"))
+            .and_then(|umask| u32::from_str_radix(umask.trim(), 8).ok())
+            .unwrap()
+    }
+
+    /// Asserts that the process that `spawn` starts in a directory of its own, from a thread whose
+    /// umask no other thread shares, has the thread's umask without the owner's bits, and that
+    /// the thread keeps its own, for the usual umasks, which keep the owner's bits, and for umasks
+    /// that clear some of them.
+    fn assert_spawns_clear_the_owners_bits(spawn: impl Fn(&Path) -> Child + Sync) {
+        use nix::sys::stat::{Mode, umask};
+
+        for mask in [
+            0o002, 0o022, 0o027, 0o077, 0o100, 0o200, 0o400, 0o477, 0o777,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let (child, caller) = thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+                        umask(Mode::from_bits_truncate(mask));
+                        let child = Reaped(spawn(directory.path()));
+                        (child, umask_in("/proc/thread-self/status"))
+                    })
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            });
+            assert_eq!(
+                caller, mask,
+                "the caller's umask {mask:03o} became {caller:03o}"
+            );
+            let pid = child.0.id();
+            let inherited = umask_in(&format!("/proc/{pid}/status"));
+            assert_eq!(
+                inherited,
+                mask & 0o077,
+                "the caller's umask {mask:03o} gave the process {inherited:03o}"
+            );
+        }
+    }
+
+    #[test]
+    fn vmms_start_with_the_callers_umask_without_the_owners_bits() {
+        assert_spawns_clear_the_owners_bits(|directory| {
+            spawn_sleeper(directory, Vec::new()).unwrap().child
+        });
+    }
+
+    /// The one-shot runs of the CLI start OpenVMM in the caller's session, as `inherit_only` makes
+    /// a command start, with the umask that a detached VMM starts with.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn one_shot_vmms_start_with_the_callers_umask_without_the_owners_bits() {
+        assert_spawns_clear_the_owners_bits(|_| {
+            let mut command = sleeper();
+            platform::inherit_only(&mut command, &[]).unwrap();
+            command.spawn().unwrap()
+        });
+    }
+
+    #[test]
+    fn spawns_fail_with_the_error_of_a_refused_umask() {
+        // As under a seccomp policy that refuses `umask`: the spawn fails with the call's error,
+        // rather than return a process that ended before it could run its program. The filter
+        // refuses the call with `EDOM`, which no other step of the spawn returns, so a failure to
+        // install the filter cannot pass for the refusal.
+        let mut command = sleeper();
+        sys::refuse_umask_on_spawn(&mut command, nix::libc::EDOM);
+        platform::detach(&mut command, &[]).unwrap();
+        let error = command
+            .spawn()
+            .map(Reaped)
+            .err()
+            .expect("the spawn succeeded");
+        assert_eq!(error.raw_os_error(), Some(nix::libc::EDOM), "{error}");
     }
 }

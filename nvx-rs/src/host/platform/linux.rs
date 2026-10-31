@@ -315,21 +315,26 @@ pub(crate) fn monotonic_ns() -> io::Result<u64> {
 
 /// Starts the command in a new session so it outlives the caller and its terminal, with the
 /// descriptors `inherit` under their numbers in the caller, and no other descriptor of the caller
-/// beyond the standard streams that the command sets up.
+/// beyond the standard streams that the command sets up, and with the caller's umask without the
+/// owner's bits, so that the files that the command creates for the caller keep the owner's
+/// permissions that it gives them, whatever the caller's umask, outside directories with a default
+/// ACL, which Linux applies instead of the umask.
 ///
-/// Only the new process clears the close-on-exec flag of the descriptors in `inherit`, so no
-/// process that another thread spawns meanwhile inherits them. Fails with
-/// [`io::ErrorKind::InvalidInput`] for a descriptor of a standard stream, 0 to 2, which the
-/// command's own standard streams replace in the new process, and for a descriptor that is not
-/// close-on-exec in the caller, which any process that the caller spawns would inherit.
+/// Only the new process clears the close-on-exec flag of the descriptors in `inherit`, and changes
+/// its umask, so no process that another thread spawns meanwhile inherits the descriptors, and the
+/// caller keeps its umask. Fails with [`io::ErrorKind::InvalidInput`] for a descriptor of a
+/// standard stream, 0 to 2, which the command's own standard streams replace in the new process,
+/// and for a descriptor that is not close-on-exec in the caller, which any process that the caller
+/// spawns would inherit.
 pub(crate) fn detach(command: &mut Command, inherit: &[Inherited<'_>]) -> io::Result<()> {
     sys::detach(command, allowlist(inherit)?);
     Ok(())
 }
 
 /// Starts the command in the caller's session, as a child that shares the caller's terminal, with
-/// the descriptors `inherit` under their numbers in the caller, and no other descriptor of the
-/// caller beyond the standard streams that the command sets up, as [`detach`] does.
+/// the descriptors `inherit` under their numbers in the caller, no other descriptor of the caller
+/// beyond the standard streams that the command sets up, and the caller's umask without the
+/// owner's bits, as [`detach`] does.
 ///
 /// Fails as [`detach`] does.
 #[cfg(feature = "cli")]
