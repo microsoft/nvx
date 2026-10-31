@@ -38,20 +38,22 @@
 //!
 //! The paths of descriptors exist only in the launch: [`PreparedLaunch::openvmm_arguments`]
 //! renders them, and the plan, which callers persist, keeps the real paths. The caller adds its own
-//! arguments, such as its boot console, CPU profile, and guest control, starts the VMM with
-//! [`PreparedLaunch::inherited`] as its allowlist, and holds the prepared launch until the guest
-//! reports authenticated Ready, when [`PreparedLaunch::release`] closes the checked files, which
-//! releases the guards, or until it has torn down a launch that failed, when dropping the prepared
-//! launch closes them. The VMM keeps its own opens of the images, and the claim of the scratch
-//! image, which it inherited. On Windows, the release also closes the VMM's copies of the checked
-//! files, through the handle of the VMM that its launch holds; a prepared launch that is dropped
-//! without one, as when its caller ends before the guest is ready, leaves them to the VMM until it
-//! exits.
+//! arguments, such as its boot console, CPU profile, and guest control, or, for an adapter's plan,
+//! has [`PreparedLaunch::adapter_arguments`] render the launch's complete arguments, which it holds
+//! to the limit of a Windows command line, starts the VMM with [`PreparedLaunch::inherited`] as
+//! its allowlist, and holds the prepared launch until the guest reports authenticated Ready, when
+//! [`PreparedLaunch::release`] closes the checked files, which releases the guards, or until it has
+//! torn down a launch that failed, when dropping the prepared launch closes them. The VMM keeps its
+//! own opens of the images, and the claim of the scratch image, which it inherited. On Windows, the
+//! release also closes the VMM's copies of the checked files, through the handle of the VMM that
+//! its launch holds; a prepared launch that is dropped without one, as when its caller ends before
+//! the guest is ready, leaves them to the VMM until it exits.
 //!
 //! A plan never names a root identity for the workload: [`SandboxPlan::new`] refuses a zero UID
 //! or GID, so the VMM's `--microvm-workload-identity` never encodes root, and an adapter's plan,
 //! [`SandboxPlan::adapter`], names no workload identity, which the adapter's own guest chooses.
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::path::Path;
 
@@ -66,6 +68,8 @@ use super::{reject_container_path, reject_disk_path};
 #[cfg(windows)]
 use crate::error::Error;
 use crate::error::Result;
+use crate::host::filesystem::ExportPlan;
+use crate::host::launch::{VmmLaunch, fit_process_command_line};
 use crate::host::process::Process;
 #[cfg(windows)]
 #[cfg(windows)]
@@ -299,6 +303,50 @@ impl PreparedLaunch {
     /// one-shot launch with the shares' boot tokens.
     pub fn kernel_command_line(&self) -> &str {
         &self.kernel_command_line
+    }
+
+    /// Returns OpenVMM's complete arguments for this launch of an adapter's plan,
+    /// [`SandboxPlan::adapter`], with the inputs of `launch`, and with `export`, the export of the
+    /// host paths that the adapter shares with its guest's root, if any: the plan's
+    /// [arguments](Self::openvmm_arguments), which name the checked files, then those that export
+    /// the shares, which [`ExportPlan::openvmm_arguments`] renders, since an adapter's plan holds
+    /// no export, then those of the launch's own inputs, which [`VmmLaunch::arguments`] renders
+    /// with the plan's [kernel command line](Self::kernel_command_line). OpenVMM appends the boot
+    /// tokens with which the guest mounts the export to the kernel command line.
+    ///
+    /// Unlike those of NVX's sandbox profile, they name no workload identity, which an adapter's
+    /// plan does not hold, and no managed lifecycle: OpenVMM only checks the arguments of the
+    /// managed lifecycle and labels its outcome report with it, and only NVX's init agent, which
+    /// an adapter's guest replaces, reads its boot token. A caller that adds arguments of its own,
+    /// such as a CPU profile, checks the command line with them again, with
+    /// [`fit_process_command_line`].
+    ///
+    /// The arguments name the checked files of this launch alone: never persist them.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for the plan of NVX's
+    /// sandbox profile, which its own start launches with the managed lifecycle, for a launch of
+    /// no memory, and if the command line that runs the launch's OpenVMM executable with the
+    /// arguments would not fit
+    /// [`PROCESS_COMMAND_LINE_LIMIT`](crate::host::launch::PROCESS_COMMAND_LINE_LIMIT), as
+    /// [`fit_process_command_line`] checks it without a reserve: Windows would not start
+    /// OpenVMM with it, and every host holds a launch to it.
+    pub fn adapter_arguments(
+        &self,
+        launch: &VmmLaunch<'_>,
+        export: Option<&ExportPlan>,
+    ) -> Result<Vec<OsString>> {
+        self.plan.require_adapter()?;
+        if launch.memory_mib == 0 {
+            return Err(refused("the memory of a launch must be positive"));
+        }
+        let mut arguments: Vec<OsString> =
+            self.openvmm_arguments.iter().map(OsString::from).collect();
+        if let Some(export) = export {
+            arguments.extend(export.openvmm_arguments().into_iter().map(OsString::from));
+        }
+        arguments.extend(launch.arguments(&self.kernel_command_line));
+        fit_process_command_line(launch.openvmm.as_os_str(), &arguments, 0)?;
+        Ok(arguments)
     }
 
     /// Returns the descriptors or handles that the VMM inherits, for the allowlist of its

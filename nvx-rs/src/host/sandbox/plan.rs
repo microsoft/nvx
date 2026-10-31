@@ -674,6 +674,18 @@ impl SandboxPlan {
         self.command_line(user_command_line, Delivery::MappingTable)
     }
 
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for the plan of NVX's
+    /// sandbox profile, which an adapter does not launch.
+    pub(super) fn require_adapter(&self) -> Result<()> {
+        match self.settings {
+            Some(_) => Err(refused(
+                "the plan of NVX's sandbox profile launches with the managed lifecycle, not as \
+                 an adapter's",
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Returns the kernel command line of the plan as the one-shot lifecycle boots it: as
     /// [`kernel_command_line`](Self::kernel_command_line) does, but with the `nvx_share=` tokens
     /// of an aggregate, which [`mount::boot_shares`] renders, instead of `nvx_maps=`.

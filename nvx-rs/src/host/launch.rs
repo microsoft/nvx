@@ -1,4 +1,4 @@
-//! OpenVMM command line of a managed microVM.
+//! OpenVMM command line of a managed microVM, and the inputs that an adapter's launch shares.
 //!
 //! The VM runs the guest's own Alpine Linux userland directly, with no sandbox layers or scratch
 //! disk. OpenVMM's managed lifecycle adds the control tty and workload identity tokens; the guest
@@ -10,6 +10,11 @@
 //! so that a launch behaves alike on all of them, as [`process_command_line_units`] counts it and
 //! [`fit_process_command_line`] checks it, and any other caller may check a command line with
 //! them.
+//!
+//! An adapter's [`PreparedLaunch`](super::sandbox::PreparedLaunch) names the inputs of its launch
+//! as a [`LaunchSpec`] does, whatever its devices: [`VmmLaunch`] renders them for both, and
+//! [`PreparedLaunch::adapter_arguments`](super::sandbox::PreparedLaunch::adapter_arguments) holds
+//! an adapter's command line to the limit too.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -246,30 +251,12 @@ impl LaunchSpec {
         let mut arguments: Vec<OsString> = vec!["--machine".into(), "microvm".into()];
         arguments.push("--microvm-workload-identity".into());
         arguments.push(format!("{}:{}", self.identity.uid, self.identity.gid).into());
-        for argument in [
-            "--microvm-lifecycle",
-            "managed",
-            "--single-process",
-            "--hypervisor",
-            self.hypervisor.as_str(),
-        ] {
-            arguments.push(argument.into());
-        }
-        arguments.push("--memory".into());
-        arguments.push(format!("{}M", self.memory_mib).into());
-        arguments.push("--kernel".into());
-        arguments.push(self.kernel.clone().into());
-        arguments.push("--initrd".into());
-        arguments.push(self.initrd.clone().into());
-        arguments.push("--cmdline".into());
-        arguments.push(self.checked_kernel_command_line()?.into());
-        arguments.push("--virtio-console".into());
-        arguments.push("none".into());
-        arguments.push("--microvm-control-console".into());
-        arguments.push(format!("listen={endpoint}").into());
-        arguments.push("--microvm-control-auth-stdin".into());
-        arguments.push("--microvm-report".into());
-        arguments.push(report.into());
+        arguments.push("--microvm-lifecycle".into());
+        arguments.push("managed".into());
+        arguments.extend(
+            self.vmm_launch(endpoint, report)
+                .arguments(&self.checked_kernel_command_line()?),
+        );
         arguments.extend(
             network::openvmm_arguments(self.network.as_ref(), &self.guest_network)?
                 .into_iter()
@@ -279,6 +266,24 @@ impl LaunchSpec {
             arguments.extend(plan.openvmm_arguments().into_iter().map(OsString::from));
         }
         Ok(arguments)
+    }
+
+    /// Returns the inputs of the launch of a VM of the specification whose control console listens
+    /// on `endpoint` and whose outcome report goes to `report`: its OpenVMM executable,
+    /// hypervisor, memory, kernel, and initramfs, the endpoint, and the report.
+    ///
+    /// An adapter that launches its own guest with the specification's artifacts gives them to
+    /// [`PreparedLaunch::adapter_arguments`](super::sandbox::PreparedLaunch::adapter_arguments).
+    pub fn vmm_launch<'a>(&'a self, endpoint: &'a str, report: &'a Path) -> VmmLaunch<'a> {
+        VmmLaunch {
+            openvmm: &self.openvmm,
+            hypervisor: self.hypervisor,
+            memory_mib: self.memory_mib,
+            kernel: &self.kernel,
+            initrd: &self.initrd,
+            endpoint,
+            report,
+        }
     }
 
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) if OpenVMM's command
@@ -298,6 +303,71 @@ impl LaunchSpec {
         reserve: usize,
     ) -> Result<()> {
         fit_process_command_line(self.openvmm.as_os_str(), arguments, reserve)
+    }
+}
+
+/// The inputs of a cold launch that OpenVMM's command line names besides the VM's devices and
+/// its kernel command line: the OpenVMM executable that runs the VM, the hypervisor, the guest's
+/// memory, kernel, and initramfs, the endpoint on which the control console listens, and the
+/// path of OpenVMM's outcome report.
+///
+/// [`arguments`](Self::arguments) renders them for a [`LaunchSpec`]'s launch, after the managed
+/// lifecycle, and for an adapter's, after the devices of its plan, with
+/// [`PreparedLaunch::adapter_arguments`](super::sandbox::PreparedLaunch::adapter_arguments).
+/// Paths are used as given, and OpenVMM runs in the directory that its launch chooses, so make
+/// them absolute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VmmLaunch<'a> {
+    /// The `openvmm` executable, which the command line runs.
+    pub openvmm: &'a Path,
+    /// Hypervisor used by OpenVMM.
+    pub hypervisor: Hypervisor,
+    /// Guest memory in MiB; positive.
+    pub memory_mib: u32,
+    /// The guest kernel (`vmlinux`).
+    pub kernel: &'a Path,
+    /// The initramfs.
+    pub initrd: &'a Path,
+    /// The endpoint on which the control console listens, such as the path of a socket.
+    pub endpoint: &'a str,
+    /// The path of OpenVMM's outcome report.
+    pub report: &'a Path,
+}
+
+impl VmmLaunch<'_> {
+    /// Returns the arguments that name the launch's inputs, with the kernel command line
+    /// `kernel_command_line`: the VM in one process, `--single-process`, on the hypervisor,
+    /// `--hypervisor`, with the memory, `--memory {memory_mib}M`, the kernel, `--kernel`, the
+    /// initramfs, `--initrd`, and the kernel command line, `--cmdline`, then no virtio console,
+    /// `--virtio-console none`, the control console listening on the endpoint,
+    /// `--microvm-control-console listen={endpoint}`, authenticated by the capability that
+    /// OpenVMM reads from its standard input, `--microvm-control-auth-stdin`, and the outcome
+    /// report, `--microvm-report`.
+    pub fn arguments(&self, kernel_command_line: &str) -> Vec<OsString> {
+        let memory = format!("{}M", self.memory_mib);
+        let control = format!("listen={}", self.endpoint);
+        [
+            OsStr::new("--single-process"),
+            OsStr::new("--hypervisor"),
+            OsStr::new(self.hypervisor.as_str()),
+            OsStr::new("--memory"),
+            OsStr::new(&memory),
+            OsStr::new("--kernel"),
+            self.kernel.as_os_str(),
+            OsStr::new("--initrd"),
+            self.initrd.as_os_str(),
+            OsStr::new("--cmdline"),
+            OsStr::new(kernel_command_line),
+            OsStr::new("--virtio-console"),
+            OsStr::new("none"),
+            OsStr::new("--microvm-control-console"),
+            OsStr::new(&control),
+            OsStr::new("--microvm-control-auth-stdin"),
+            OsStr::new("--microvm-report"),
+            self.report.as_os_str(),
+        ]
+        .map(OsStr::to_os_string)
+        .into()
     }
 }
 
@@ -702,6 +772,65 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         // A reserve past the limit leaves no room for any command line.
         assert!(fit_process_command_line(OsStr::new("o"), &[], usize::MAX).is_err());
+    }
+
+    #[test]
+    fn every_launch_names_its_own_inputs_alike() {
+        let launch = VmmLaunch {
+            openvmm: Path::new("/o/openvmm"),
+            hypervisor: Hypervisor::Mshv,
+            memory_mib: 512,
+            kernel: Path::new("/k/vmlinux"),
+            initrd: Path::new("/k/initramfs.cpio.gz"),
+            endpoint: "/state/t/control.sock",
+            report: Path::new("/state/t/outcome.json"),
+        };
+        let arguments = launch.arguments("quiet nvx_sandbox=1");
+        let arguments: Vec<&str> = arguments.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            arguments,
+            [
+                "--single-process",
+                "--hypervisor",
+                "mshv",
+                "--memory",
+                "512M",
+                "--kernel",
+                "/k/vmlinux",
+                "--initrd",
+                "/k/initramfs.cpio.gz",
+                "--cmdline",
+                "quiet nvx_sandbox=1",
+                "--virtio-console",
+                "none",
+                "--microvm-control-console",
+                "listen=/state/t/control.sock",
+                "--microvm-control-auth-stdin",
+                "--microvm-report",
+                "/state/t/outcome.json",
+            ]
+        );
+        // A managed launch names them after its lifecycle, with its own command line.
+        let spec = spec();
+        let endpoint = "/state/t/control.sock";
+        let report = Path::new("/state/t/outcome.json");
+        let launch = spec.vmm_launch(endpoint, report);
+        assert_eq!(
+            launch,
+            VmmLaunch {
+                openvmm: Path::new("/o"),
+                hypervisor: Hypervisor::Kvm,
+                memory_mib: DEFAULT_MEMORY_MIB,
+                kernel: Path::new("/k/vmlinux"),
+                initrd: Path::new("/k/initrd"),
+                endpoint,
+                report,
+            }
+        );
+        let managed = spec.openvmm_arguments(endpoint, report).unwrap();
+        let own = launch.arguments(&spec.kernel_command_line().unwrap());
+        assert_eq!(managed[6..6 + own.len()], own);
+        assert_eq!(managed[4..6], ["--microvm-lifecycle", "managed"]);
     }
 
     #[test]

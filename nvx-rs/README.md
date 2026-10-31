@@ -109,7 +109,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
-| [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec`: the OpenVMM command line of a managed microVM, and the checks that every command line applies |
+| [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
 | [`nvx::host::network::policy`](#nvxhostnetworkpolicy) | Egress policy files and their compilation into OpenVMM's native rules |
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
@@ -396,6 +396,14 @@ executable, kernel, and Alpine initramfs from the install metadata, a release's
 the 32,767-character limit of a Windows command line, and `LaunchSpec::check`,
 which every command line applies to the memory size, the non-root identity, the
 hostname, the guest network, and the kernel parameters.
+
+`VmmLaunch` holds the inputs that a cold launch's command line names besides the
+VM's devices and its kernel command line: the OpenVMM executable, the
+hypervisor, the memory, the kernel, the initramfs, the endpoint of the control
+console, and the outcome report. `VmmLaunch::arguments` renders them for a
+`LaunchSpec`'s launch, after its managed lifecycle, and for an adapter's
+prepared launch, after its devices, and `LaunchSpec::vmm_launch` gives a
+specification's.
 
 `process_command_line_units` counts the Windows command line that runs a program
 with its arguments, in UTF-16 code units, as Windows quotes them, and
@@ -1003,6 +1011,10 @@ line, naming the checked files as `/proc/self/fd/N` on Linux and by their final
 paths on Windows, lists the descriptors or handles that the VMM inherits through
 `VmmCommand::inherit`, and releases the checked files, and on Windows the VMM's
 copies of them, at authenticated Ready; see [Checked handoff](#checked-handoff).
+For an adapter's plan, `PreparedLaunch::adapter_arguments` renders the complete
+arguments of the launch: the plan's, those that export the adapter's shares,
+and those of the launch's `VmmLaunch`, and refuses a command line that Windows
+would not start OpenVMM with.
 
 ### `nvx::testing::fake_openvmm`
 
@@ -1679,12 +1691,14 @@ Images are raw: OpenVMM attaches a file's bytes as they are, and chooses a
 container format by the file's extension, which `/proc/self/fd/N` lacks, so a
 caller whose images use a container format, such as a fixed VHD, stages a raw
 file. The paths in the arguments hold for the launch alone: the plan, which
-callers persist, keeps the real paths. The caller adds its own arguments,
-starts the VMM, and releases the prepared launch with `PreparedLaunch::release`
-once the guest reports authenticated Ready, or drops it once it has torn down a
-launch that failed; the VMM's own opens then keep the images, and what it
-inherited keeps the scratch image's claim. Staging, the checks, and the
-preparation of a launch read no content of the images.
+callers persist, keeps the real paths. The caller adds its own arguments, or,
+for an adapter's plan, has `PreparedLaunch::adapter_arguments` render the
+complete arguments of its launch, starts the VMM, and releases the prepared
+launch with `PreparedLaunch::release` once the guest reports authenticated
+Ready, or drops it once it has torn down a launch that failed; the VMM's own
+opens then keep the images, and what it inherited keeps the scratch image's
+claim. Staging, the checks, and the preparation of a launch read no content of
+the images.
 
 The clone of a template takes its block devices by path instead, as the
 template's capture does, since OpenVMM opens the files of a restore itself:

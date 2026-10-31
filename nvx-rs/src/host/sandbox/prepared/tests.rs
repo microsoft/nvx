@@ -771,3 +771,135 @@ fn no_plan_encodes_root_as_the_workload_identity() {
         plan.kernel_command_line(user).unwrap()
     );
 }
+
+#[test]
+fn an_adapter_s_launch_renders_complete_arguments_that_fit_a_command_line() {
+    use crate::Hypervisor;
+    use crate::host::launch::{PROCESS_COMMAND_LINE_LIMIT, process_command_line_units};
+    use crate::host::sandbox::tests::exported;
+    use crate::host::sandbox::{MountAccess, MountKind};
+
+    let staged = Staged::new();
+    let (_, distro) = staged.checked_distro("distro.erofs");
+    let plan = SandboxPlan::adapter(
+        SandboxDistro::new(
+            &staged.text("distro.erofs"),
+            RootImage::erofs(Uuid::parse(UUID)),
+        ),
+        SandboxUpper::RAM,
+    );
+    let user = "nvx_sandbox=1";
+    let prepared = PreparedLaunch::new(plan.clone(), distro, None, user).unwrap();
+    let launch = VmmLaunch {
+        openvmm: Path::new("/o/openvmm"),
+        hypervisor: Hypervisor::Whp,
+        memory_mib: 384,
+        kernel: Path::new("/k/vmlinux"),
+        initrd: Path::new("/k/initramfs.cpio.gz"),
+        endpoint: "/s/control.sock",
+        report: Path::new("/s/outcome.json"),
+    };
+    let command_line = plan.kernel_command_line(user).unwrap();
+    let own = [
+        "--single-process",
+        "--hypervisor",
+        "whp",
+        "--memory",
+        "384M",
+        "--kernel",
+        "/k/vmlinux",
+        "--initrd",
+        "/k/initramfs.cpio.gz",
+        "--cmdline",
+        command_line.as_str(),
+        "--virtio-console",
+        "none",
+        "--microvm-control-console",
+        "listen=/s/control.sock",
+        "--microvm-control-auth-stdin",
+        "--microvm-report",
+        "/s/outcome.json",
+    ]
+    .map(OsString::from);
+    // The plan's arguments, which name the checked files, then the launch's own inputs.
+    let devices: Vec<OsString> = prepared
+        .openvmm_arguments()
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let arguments = prepared.adapter_arguments(&launch, None).unwrap();
+    assert_eq!(arguments, [devices.clone(), own.to_vec()].concat());
+    // Without a workload identity or a lifecycle, which only NVX's sandbox profile names.
+    for option in ["--microvm-workload-identity", "--microvm-lifecycle"] {
+        assert!(
+            !arguments.iter().any(|argument| argument == option),
+            "{option}"
+        );
+    }
+    // The export of the adapter's shares between the two, as OpenVMM exports it.
+    let export = exported(&[(
+        "/workspace",
+        "/host/work",
+        MountAccess::ReadWrite,
+        MountKind::Directory,
+    )]);
+    let shared: Vec<OsString> = export
+        .openvmm_arguments()
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    assert!(
+        shared
+            .iter()
+            .any(|argument| argument == "--mount-aggregate")
+    );
+    let arguments = prepared.adapter_arguments(&launch, Some(&export)).unwrap();
+    assert_eq!(arguments, [devices, shared, own.to_vec()].concat());
+
+    // A command line of the limit fits, and one more code unit does not.
+    let base = process_command_line_units(launch.openvmm.as_os_str(), &arguments);
+    let program = |extra: usize| PathBuf::from(format!("/o/openvmm{}", "o".repeat(extra)));
+    let fitting = program(PROCESS_COMMAND_LINE_LIMIT - base);
+    let at_limit = VmmLaunch {
+        openvmm: &fitting,
+        ..launch
+    };
+    let arguments = prepared
+        .adapter_arguments(&at_limit, Some(&export))
+        .unwrap();
+    assert_eq!(
+        process_command_line_units(fitting.as_os_str(), &arguments),
+        PROCESS_COMMAND_LINE_LIMIT
+    );
+    let longer = program(PROCESS_COMMAND_LINE_LIMIT - base + 1);
+    let past_limit = VmmLaunch {
+        openvmm: &longer,
+        ..launch
+    };
+    let (kind, message) = failure(prepared.adapter_arguments(&past_limit, Some(&export)));
+    assert_eq!(kind, ErrorKind::Unsupported, "{message}");
+    assert!(
+        message.contains("a Windows process command line allows; map"),
+        "{message}"
+    );
+
+    // A launch of no memory is refused, as is the plan of NVX's sandbox profile.
+    let empty = VmmLaunch {
+        memory_mib: 0,
+        ..launch
+    };
+    let (kind, message) = failure(prepared.adapter_arguments(&empty, None));
+    assert_eq!(kind, ErrorKind::Unsupported, "{message}");
+    assert!(message.contains("memory"), "{message}");
+    let (_, distro) = staged.checked_distro("distro.erofs");
+    let profile = PreparedLaunch::new(
+        staged.launch().plan().clone(),
+        distro,
+        Some(staged.checked_scratch("scratch.ext4")),
+        "",
+    )
+    .unwrap();
+    let (kind, message) = failure(profile.adapter_arguments(&launch, None));
+    assert_eq!(kind, ErrorKind::Unsupported, "{message}");
+    assert!(message.contains("NVX's sandbox profile"), "{message}");
+}
