@@ -66,11 +66,12 @@ use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetProcessTimes, INFINITE,
-    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS,
-    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    ResetEvent, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetProcessIoCounters, GetProcessTimes,
+    INFINITE, IO_COUNTERS, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    OpenProcess, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, ResetEvent,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject,
 };
 use windows_sys::Win32::System::WindowsProgramming::QueryInterruptTimePrecise;
@@ -148,6 +149,27 @@ fn has_exited(process: &OwnedHandle) -> io::Result<bool> {
         WAIT_OBJECT_0 => Ok(true),
         _ => Err(io::Error::last_os_error()),
     }
+}
+
+/// Returns how many bytes the process of `process`, a handle with query access, has read through
+/// read calls: the `ReadTransferCount` of `GetProcessIoCounters`, which counts every `ReadFile`,
+/// whatever it reads, and whether the cache served it or not.
+fn read_transfer(process: HANDLE) -> io::Result<u64> {
+    let mut counters = IO_COUNTERS::default();
+    // SAFETY: the handle has query access, and the output pointer is valid.
+    if unsafe { GetProcessIoCounters(process, &mut counters) } != 0 {
+        Ok(counters.ReadTransferCount)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Returns how many bytes this process has read through read calls, as [`read_transfer`] counts
+/// them.
+pub(crate) fn own_bytes_read() -> io::Result<u64> {
+    // SAFETY: GetCurrentProcess has no preconditions, and returns a pseudo-handle with every
+    // access, which needs no closing.
+    read_transfer(unsafe { GetCurrentProcess() })
 }
 
 /// Returns the outcome of a termination that Windows refused with `error` through a handle with
@@ -271,6 +293,13 @@ impl ProcessHandle {
             },
             || has_exited(&self.process),
         )
+    }
+
+    /// Returns how many bytes the process has read through read calls, as [`read_transfer`]
+    /// counts them: once the process has exited, those that it read until then, which the handle
+    /// keeps.
+    pub(crate) fn bytes_read(&self, _pid: u32, _start_time: u64) -> io::Result<u64> {
+        read_transfer(raw(&self.process))
     }
 
     /// Closes the handle of process `pid` that has the value of this process's handle `ours`,

@@ -54,6 +54,19 @@ pub trait Transport: Send {
     /// [`io::ErrorKind::TimedOut`] error if it has not by then, however much of it the endpoint
     /// reads meanwhile.
     fn write_all(&mut self, data: &[u8], timeout: Option<Duration>) -> io::Result<()>;
+
+    /// Returns what the platform tells of the data that this end wrote, and that the endpoint has
+    /// not read yet, or `None` where it tells nothing.
+    ///
+    /// On Linux, it is what `SIOCOUTQ` reports of the Unix socket: the memory that the kernel
+    /// charges the socket for the buffers that hold that data, each write's buffers of their own,
+    /// until the endpoint read each buffer whole. The charge exceeds the data's bytes, and a read
+    /// of part of a buffer leaves it as it was, so only data written a byte at a time shows the
+    /// read of each byte. It is zero once the endpoint read everything. A named pipe tells its
+    /// writer nothing of the kind, so on Windows, and by default, it is `None`.
+    fn unread(&self) -> io::Result<Option<usize>> {
+        Ok(None)
+    }
 }
 
 /// Returns the time left until `deadline`, `None` without one, or an [`io::ErrorKind::TimedOut`]
