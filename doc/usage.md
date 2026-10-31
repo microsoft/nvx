@@ -605,10 +605,10 @@ the change detector's
 `run-openvmm-vmm-tests`, `run-microvm-tests`, and `run-benchmarks` outputs as
 `name=true` or `name=false` lines. Documentation selects no suite. Pull
 requests, merge groups, and pushes run each test suite only when one of its
-own inputs changed. A pull request or a merge group runs the platform
-benchmarks only when one of their inputs changed, but a push runs them for
-every change but documentation, because it publishes the development release
-and records the performance history. The guest artifacts and the OpenVMM
+own inputs changed. A pull request or merge group runs the platform benchmarks
+and package jobs only when one of their inputs changed, but a push runs them
+for every change but documentation, because it publishes the development
+release and records the performance history. The guest artifacts and the OpenVMM
 binaries are built exactly when a job that uses them runs. The summary file
 receives a Markdown
 explanation of each decision. CI runs the full matrix instead when the command
@@ -637,9 +637,12 @@ enabled by the event, repository, and suite flags, and `skipped` for jobs that
 are not enabled; mismatches are reported as errors and cause a nonzero exit.
 As in CI, a job that uses the guest artifacts or the OpenVMM binaries is
 enabled only when the flags enable the jobs that build them too. A merge group
-expects the jobs of a same-repository pull request, whatever
-`--same-repository` says, but the rehearsal of the guest artifact reuse, which
-its pull request's run made; see [Merge queue](ci.md#merge-queue).
+expects the jobs of a same-repository pull request, including the `nvx-rs`
+builds and the platform and package jobs when their suite runs, whatever
+`--same-repository` says, but not the rehearsal of the guest artifact reuse,
+which its pull request's run made. A pull request runs the debug kernel on MSHV,
+a merge group on KVM, and a push or full run on every backend; see
+[Merge queue](ci.md#merge-queue).
 
 ### `report-nightly-ci`
 
@@ -913,8 +916,9 @@ the executable's SHA-256 to the digest of this checkout's `nvx-rs` sources,
 the Rust release that `rust-toolchain.toml` pins, the target, and the `cli`
 feature, so record it right after building `nvx-rs` from this checkout. For
 `x86_64-unknown-linux-musl`, the target of the Linux release packages, the
-executable must be static. CI's NVX CLI jobs record the builds that they hand
-to the packages, and `nvx.py` records the builds that it makes itself.
+executable must be static. CI's `nvx-rs` build jobs record the builds that
+they hand to the packages, and `nvx.py` records the builds that it makes
+itself.
 
 ### `build`
 

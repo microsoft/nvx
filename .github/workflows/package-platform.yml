@@ -1,0 +1,122 @@
+name: Package NVX platform
+
+on:
+  workflow_call:
+    inputs:
+      display-name:
+        description: Platform name shown in the job list
+        required: true
+        type: string
+      runner:
+        description: JSON array of labels selecting a runner of the platform's OS
+        required: true
+        type: string
+      release-platform:
+        description: Platform suffix used in release artifact names
+        required: true
+        type: string
+      openvmm-artifact:
+        description: Base name of the compatible OpenVMM artifacts
+        required: true
+        type: string
+      nvx-rs-artifact:
+        description: Base name of the nvx-rs artifacts for the runner's OS
+        required: true
+        type: string
+    secrets:
+      OPENVMM_DEPLOY_KEY:
+        description: SSH deploy key used to checkout OpenVMM
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package / ${{ inputs.display-name }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # The package ships OpenVMM's license from the submodule.
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      # The release that the self-hosted runners provide.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verify source pins on Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 scripts/nvx.py verify
+
+      - name: Verify source pins on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: python scripts\nvx.py verify
+
+      # The package ships every guest image and the sandbox scratch template.
+      - name: Download guest kernel
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-kernel
+          path: build
+
+      - name: Download Alpine initramfs
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-alpine
+          path: build
+
+      - name: Download Ubuntu initramfs
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-ubuntu
+          path: build
+
+      - name: Download Ubuntu distro layer and scratch template
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-ubuntu-distro
+          path: build
+
+      - name: Download Azure Linux initramfs
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-azurelinux
+          path: build
+
+      - name: Download OpenVMM executable
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openvmm-artifact }}-executable
+          path: openvmm/target/release
+
+      - name: Download OpenVMM provenance
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openvmm-artifact }}-provenance
+          path: build
+
+      - name: Make OpenVMM executable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: chmod +x openvmm/target/release/openvmm
+
+      # Pull requests and merge groups package and archive the release too, so
+      # that they prove it builds, but only dev pushes upload it for publication.
+      - name: Package release
+        uses: ./.github/actions/package-release
+        with:
+          platform: ${{ inputs.release-platform }}
+          nvx-rs-artifact: ${{ inputs.nvx-rs-artifact }}
+          upload: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}

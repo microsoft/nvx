@@ -15,20 +15,12 @@ on:
         description: NVX backend to run
         required: true
         type: string
-      release-platform:
-        description: Platform suffix used in release artifact names
-        required: true
-        type: string
       benchmark-platform:
         description: Platform identifier used for performance results
         required: true
         type: string
       openvmm-artifact:
         description: Base name of the compatible OpenVMM artifacts
-        required: true
-        type: string
-      nvx-rs-artifact:
-        description: Base name of the nvx-rs artifacts for the runner's OS
         required: true
         type: string
       teardown-mode:
@@ -47,12 +39,6 @@ on:
         description: Guest readiness timeout in seconds
         required: true
         type: number
-      package-release:
-        description: >-
-          Whether the platform packages a release, which dev pushes upload for
-          the development release
-        required: true
-        type: boolean
     secrets:
       OPENVMM_DEPLOY_KEY:
         description: SSH deploy key used to checkout OpenVMM
@@ -97,8 +83,7 @@ jobs:
         run: python scripts\nvx.py verify
 
       # The runner qualification and the benchmarks boot the kernel and the
-      # Alpine initramfs; the release package also ships the Ubuntu and Azure
-      # Linux images.
+      # Alpine initramfs alone. The package jobs package the release.
       - name: Download guest kernel
         uses: actions/download-artifact@v8
         with:
@@ -109,27 +94,6 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: guest-alpine
-          path: build
-
-      - name: Download Ubuntu initramfs
-        if: inputs.package-release
-        uses: actions/download-artifact@v8
-        with:
-          name: guest-ubuntu
-          path: build
-
-      - name: Download Ubuntu distro layer
-        if: inputs.package-release
-        uses: actions/download-artifact@v8
-        with:
-          name: guest-ubuntu-distro
-          path: build
-
-      - name: Download Azure Linux initramfs
-        if: inputs.package-release
-        uses: actions/download-artifact@v8
-        with:
-          name: guest-azurelinux
           path: build
 
       - name: Download OpenVMM executable
@@ -170,13 +134,3 @@ jobs:
           cpus: ${{ inputs.benchmark-cpus }}
           host-cpu-reserve: ${{ inputs.host-cpu-reserve }}
           marker-timeout: ${{ inputs.marker-timeout }}
-
-      # Pull requests package and archive the release too, so that they prove
-      # that it builds, but only dev pushes upload it for publication.
-      - name: Package release
-        if: inputs.package-release
-        uses: ./.github/actions/package-release
-        with:
-          platform: ${{ inputs.release-platform }}
-          nvx-rs-artifact: ${{ inputs.nvx-rs-artifact }}
-          upload: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
