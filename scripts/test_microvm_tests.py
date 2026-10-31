@@ -2606,6 +2606,11 @@ class GuestConsoleEchoTests(unittest.TestCase):
                 f"echo {microvm_tests.PLATFORM_NETWORK_LISTENING_MARKER.decode()}",
                 "read -r release exchange",
             ),
+            (
+                "untiered-network-policy.sh.in",
+                f"echo {microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER.decode()}",
+                "read -r release exchanges",
+            ),
         ):
             with self.subTest(name=name):
                 script = microvm_tests._read_script(name)
@@ -11879,6 +11884,766 @@ class MicrovmTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, message):
                     self._run_platform_network_policy(
+                        Path(temporary), fingerprints=fingerprints
+                    )
+
+    def test_untiered_network_policy_script_reports_the_repair_and_serves_the_host(
+        self,
+    ):
+        script = microvm_tests.untiered_network_policy_script(
+            allowed_port=40001, other_port=40002, guest_port=50001
+        )
+        self.assertNotRegex(script, r"@[A-Z0-9_]+@")
+        # The guest reports the resolver and the announcer that its repair set
+        # up, and probes both host services.
+        self.assertIn("' /etc/resolv.conf 2>/dev/null) ||\n    resolver=none", script)
+        self.assertIn("if pidof nvx-ingress >/dev/null; then", script)
+        self.assertIn('"http://192.0.2.1:$2/$1"', script)
+        self.assertIn("wget -T 2 -qO /tmp/nvx-untiered-network-probe", script)
+        self.assertIn("\nprobe allowed 40001\n", script)
+        self.assertIn("\nprobe other 40002\n", script)
+        self.assertIn(
+            'echo "'
+            + microvm_tests.UNTIERED_NETWORK_REPORT_PREFIX.decode()
+            + 'resolver=$resolver announcer=$announcer allowed=$allowed other=$other"',
+            script,
+        )
+        # The guest's server answers the host, one client at a time, as many
+        # as a restore's host reaches it through.
+        ack = microvm_tests.HOST_LOOPBACK_TCP_ACK.decode().removesuffix("\n")
+        self.assertIn('while [ "$client" -lt 2 ]; do', script)
+        self.assertIn(f"printf '{ack}\\n' |\n            nc -l -p 50001 -w 20", script)
+        self.assertIn("printf '%04X' 50001", script)
+        # Once released, the guest waits for each line that the host sent,
+        # which the release may overtake, before it stops its server.
+        request = microvm_tests.HOST_LOOPBACK_TCP_REQUEST.decode().strip()
+        self.assertIn("read -r release exchanges ||", script)
+        self.assertIn(
+            f'grep -qx {request} \\\n        "/tmp/nvx-untiered-network-inbound-$client"',
+            script,
+        )
+        self.assertLess(
+            script.index("read -r release exchanges"), script.index('kill "$server"')
+        )
+        for marker in (
+            microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER,
+            microvm_tests.UNTIERED_NETWORK_CHECKED,
+        ):
+            self.assertIn(marker.decode(), script)
+        self.assertTrue(
+            script.endswith(
+                'echo "'
+                + microvm_tests.UNTIERED_NETWORK_INBOUND_PREFIX.decode()
+                + '$exchanges"\n'
+            )
+        )
+        self.assertIn(
+            'echo "' + microvm_tests.UNTIERED_NETWORK_FAILURE_MARKER.decode() + ' $1"',
+            script,
+        )
+
+    def test_untiered_network_restores_name_what_their_policies_give_the_guest(self):
+        restores = microvm_tests.untiered_network_restores(
+            allowed_port=40001, host_port=40003, guest_port=50001
+        )
+        self.assertEqual(
+            [
+                (
+                    restore.name,
+                    restore.dns_server,
+                    restore.announces,
+                    restore.allowed,
+                    restore.other,
+                    restore.forward,
+                    restore.publication,
+                    restore.exchanges,
+                    restore.network_settings,
+                )
+                for restore in restores
+            ],
+            [
+                ("deny-all", None, False, False, False, False, None, 0, False),
+                ("egress-dns", "192.0.2.1", False, True, False, False, None, 0, True),
+                (
+                    "host-loopback",
+                    "fd00::c000:201",
+                    True,
+                    False,
+                    False,
+                    True,
+                    "host-loopback",
+                    2,
+                    True,
+                ),
+                (
+                    "private-ingress",
+                    "192.0.2.1",
+                    True,
+                    True,
+                    True,
+                    False,
+                    "private-networks",
+                    1,
+                    True,
+                ),
+            ],
+        )
+        deny_all, egress_dns, host_loopback, private_ingress = restores
+        # A restore without connectivity keeps the template's own policy.
+        self.assertEqual(
+            deny_all.policy, microvm_tests.PLATFORM_NETWORK_TEMPLATE_POLICY
+        )
+        self.assertEqual(
+            egress_dns.policy,
+            (
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "192.0.2.1/32:udp:53",
+                "--network-egress-allow",
+                "192.0.2.1/32:tcp:40001",
+            ),
+        )
+        self.assertEqual(
+            host_loopback.policy,
+            (
+                "--network-egress",
+                "deny",
+                "--network-egress-allow",
+                "fd00::c000:201/128:udp:53",
+                "--host-loopback",
+                "allow",
+                "--host-loopback-forward",
+                "tcp:40003:50001",
+            ),
+        )
+        self.assertEqual(
+            private_ingress.policy,
+            (
+                "--network-egress",
+                "allow",
+                "--network-ingress",
+                "allow",
+                "--host-loopback",
+                "allow",
+            ),
+        )
+        # Each restore's expectations are what OpenVMM gives its policy.
+        for restore in restores:
+            with self.subTest(restore=restore.name):
+                self.assertEqual(
+                    self._untiered_network_settings(restore.policy, 40001),
+                    (
+                        restore.dns_server,
+                        restore.announces,
+                        restore.allowed,
+                        restore.other,
+                    ),
+                )
+
+    def test_untiered_network_reports_hold_what_each_policy_gives_the_guest(self):
+        restores = {
+            restore.name: restore
+            for restore in microvm_tests.untiered_network_restores(
+                allowed_port=40001, host_port=40003, guest_port=50001
+            )
+        }
+
+        def line(fields: str) -> bytes:
+            return (
+                microvm_tests.UNTIERED_NETWORK_REPORT_PREFIX + fields.encode() + b"\r\n"
+            )
+
+        report = microvm_tests._untiered_network_report(
+            b"NVX-POST-RESTORE-OK: tier=legacy\r\n"
+            + line("resolver=192.0.2.1 announcer=none allowed=reached other=denied"),
+            "restore egress-dns",
+        )
+        self.assertEqual(
+            report,
+            {
+                "resolver": "192.0.2.1",
+                "announcer": "none",
+                "allowed": "reached",
+                "other": "denied",
+            },
+        )
+        microvm_tests._check_untiered_network_report(
+            restores["egress-dns"], report, "restore egress-dns"
+        )
+        # Without a DNS server, the resolver keeps the image's own, which may
+        # name a local resolver but never a gateway.
+        for resolver in ("none", "127.0.0.53"):
+            microvm_tests._check_untiered_network_report(
+                restores["deny-all"],
+                {
+                    "resolver": resolver,
+                    "announcer": "none",
+                    "allowed": "denied",
+                    "other": "denied",
+                },
+                "restore deny-all",
+            )
+
+        def fields(
+            resolver: str, announcer: str, allowed: str, other: str
+        ) -> dict[str, str]:
+            return {
+                "resolver": resolver,
+                "announcer": announcer,
+                "allowed": allowed,
+                "other": other,
+            }
+
+        for name, report, message in (
+            (
+                "egress-dns",
+                fields("none", "none", "reached", "denied"),
+                r"names none, not 192\.0\.2\.1$",
+            ),
+            (
+                "egress-dns",
+                fields("192.0.2.1,127.0.0.53", "none", "reached", "denied"),
+                r"names 192\.0\.2\.1,127\.0\.0\.53, not 192\.0\.2\.1$",
+            ),
+            (
+                "deny-all",
+                fields("192.0.2.1", "none", "denied", "denied"),
+                "although the policy names no DNS server$",
+            ),
+            (
+                "deny-all",
+                fields("127.0.0.53,fd00::c000:201", "none", "denied", "denied"),
+                "although the policy names no DNS server$",
+            ),
+            (
+                "host-loopback",
+                fields("fd00::c000:201", "none", "denied", "denied"),
+                "reported announcer=none$",
+            ),
+            (
+                "egress-dns",
+                fields("192.0.2.1", "running", "reached", "denied"),
+                "reported announcer=running$",
+            ),
+            (
+                "private-ingress",
+                fields("192.0.2.1", "running", "reached", "denied"),
+                "reported other=denied$",
+            ),
+        ):
+            with (
+                self.subTest(name=name, report=report),
+                self.assertRaisesRegex(RuntimeError, f"^restore {name}: .*{message}"),
+            ):
+                microvm_tests._check_untiered_network_report(
+                    restores[name], report, f"restore {name}"
+                )
+
+        valid = line("resolver=none announcer=none allowed=denied other=denied")
+        for output, message in (
+            (b"", "printed 0 network reports, not 1$"),
+            (valid + valid, "printed 2 network reports, not 1$"),
+            (line("resolver=none announcer=none allowed=denied"), "malformed report"),
+            (
+                line("resolver=none announcer=none allowed=denied other=a other=b"),
+                "malformed report",
+            ),
+            (
+                line("resolver announcer=none allowed=denied other=denied"),
+                "malformed report",
+            ),
+        ):
+            with (
+                self.subTest(output=output),
+                self.assertRaisesRegex(RuntimeError, f"^restore deny-all .*{message}"),
+            ):
+                microvm_tests._untiered_network_report(output, "restore deny-all")
+
+    @staticmethod
+    def _untiered_network_settings(
+        policy: Sequence[str], allowed_port: int
+    ) -> tuple[str | None, bool, bool, bool]:
+        """Return what OpenVMM gives the guest of a restore under ``policy``:
+        the DNS server, as its gateway_dns_server derives it, whether the guest
+        announces its listeners, and whether the guest reaches the host service
+        at ``allowed_port`` of the gateway and the other host service."""
+
+        def values(option: str) -> list[str]:
+            return [
+                policy[index + 1]
+                for index, value in enumerate(policy)
+                if value == option
+            ]
+
+        allow_all = values("--network-egress") == ["allow"]
+        rules = values("--network-egress-allow")
+        if allow_all or "192.0.2.1/32:udp:53" in rules:
+            dns_server: str | None = "192.0.2.1"
+        elif "fd00::c000:201/128:udp:53" in rules:
+            dns_server = "fd00::c000:201"
+        else:
+            dns_server = None
+        announces = values("--network-ingress") == ["allow"] or values(
+            "--host-loopback"
+        ) == ["allow"]
+        allowed = allow_all or f"192.0.2.1/32:tcp:{allowed_port}" in rules
+        return dns_server, announces, allowed, allow_all
+
+    def _simulate_untiered_network_guest(
+        self, command: list[str], ports: dict[str, int]
+    ) -> list[bytes]:
+        """Return the lines of the guest that ``command`` restores before its
+        release, after it requests each host service in ``ports`` that its
+        policy admits."""
+        policy = command[command.index("--restore-network-policy") + 1 :]
+        dns_server, announces, allowed, other = self._untiered_network_settings(
+            policy, ports["allowed"]
+        )
+        for name, reached in (("allowed", allowed), ("other", other)):
+            if not reached:
+                continue
+            with socket.create_connection(
+                ("127.0.0.1", ports[name]), timeout=5
+            ) as client:
+                client.sendall(
+                    f"GET /{name} HTTP/1.1\r\nHost: 192.0.2.1\r\n\r\n".encode()
+                )
+                answer = b""
+                while chunk := client.recv(4096):
+                    answer += chunk
+            self.assertTrue(
+                answer.endswith(f"\r\n\r\nNVX-PLATFORM-NETWORK-{name}".encode())
+            )
+        lines: list[bytes] = []
+        if dns_server is not None or announces:
+            lines.append(microvm_tests.UNTIERED_POST_RESTORE_MARKER)
+        lines.append(
+            microvm_tests.UNTIERED_NETWORK_REPORT_PREFIX
+            + (
+                f"resolver={dns_server or 'none'} "
+                f"announcer={'running' if announces else 'none'} "
+                f"allowed={'reached' if allowed else 'denied'} "
+                f"other={'reached' if other else 'denied'}"
+            ).encode()
+        )
+        return lines
+
+    def _run_untiered_network_policy(
+        self,
+        output_dir: Path,
+        *,
+        guest: Callable[[list[str], dict[str, int]], list[bytes]] | None = None,
+        fingerprints: Sequence[tuple[str, str, str]] | None = None,
+        host_addresses: Sequence[str] = ("192.0.2.10",),
+        accepts_tcp: bool = False,
+        exchange: Callable[[str, int, float], None] | None = None,
+    ) -> dict[str, Any]:
+        """Run the scenario with a simulated OpenVMM, whose restores request
+        the scenario's real host services as their policies admit, on a host
+        whose addresses other than loopback are ``host_addresses``, through
+        which a TCP connection completes if ``accepts_tcp``, and with
+        ``exchange`` standing for each exchange with the guest's server, and
+        return its calls."""
+        captures: list[tuple[list[str], dict[str, Any]]] = []
+        restores: list[list[str]] = []
+        releases: list[str] = []
+        ports: dict[str, int] = {}
+
+        def capture(command: list[str], *_args: object, **kwargs: Any) -> None:
+            captures.append((command, kwargs))
+            script = kwargs["post_restore_script"]
+            for name in ("allowed", "other"):
+                match = re.search(rf"\nprobe {name} (\d+)\n", script)
+                assert match is not None
+                ports[name] = int(match[1])
+            match = re.search(r"nc -l -p (\d+) ", script)
+            assert match is not None
+            ports["guest"] = int(match[1])
+
+        simulated_guest = guest or self._simulate_untiered_network_guest
+
+        class FakeProcess:
+            def __init__(self, command: list[str], log_path: Path) -> None:
+                restores.append(command)
+                self.command = command
+                self.log_path = log_path
+                self.lines: list[bytes] = []
+                self.exchanges: bytes | None = None
+
+            def __enter__(self) -> "FakeProcess":
+                return self
+
+            def __exit__(self, *_exception: object) -> None:
+                return None
+
+            def wait_for_line(self, marker: bytes, _timeout: float) -> None:
+                assert marker == microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER
+                self.lines = simulated_guest(self.command, ports)
+
+            def send_line(self, line: str) -> None:
+                releases.append(line)
+                self.exchanges = line.split()[1].encode()
+
+            def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
+                assert self.exchanges is not None
+                lines = [
+                    *self.lines,
+                    microvm_tests.UNTIERED_NETWORK_INBOUND_PREFIX + self.exchanges,
+                    benchmark.RESTORE_MARKER,
+                ]
+                output = b"".join(line + b"\r\n" for line in lines)
+                self.log_path.write_bytes(output)
+                return openvmm_process.OpenvmmProcessResult(0, output)
+
+        fingerprint = ("manifest", "state", "memory")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm", "boot"],
+            ) as workload_boot_command,
+            patch.object(microvm_tests, "capture_snapshot", side_effect=capture),
+            patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
+            patch.object(
+                microvm_tests, "_host_loopback_tcp_exchange", side_effect=exchange
+            ) as exchange_mock,
+            patch.object(microvm_tests, "_wait_until") as wait_until,
+            patch.object(
+                microvm_tests, "_holds_loopback", return_value=False
+            ) as holds_loopback,
+            patch.object(
+                microvm_tests, "_host_ipv4_addresses", return_value=list(host_addresses)
+            ),
+            patch.object(
+                microvm_tests, "_accepts_tcp", return_value=accepts_tcp
+            ) as accepts_tcp_mock,
+            patch.object(
+                microvm_tests,
+                "_snapshot_fingerprint",
+                side_effect=fingerprints or itertools.repeat(fingerprint),
+            ),
+            patch.object(microvm_tests, "_expect_process_failure") as expect_failure,
+        ):
+            microvm_tests.run_untiered_network_policy(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                memory_mib=128,
+                timeout=60,
+                output_dir=output_dir,
+            )
+        return {
+            "workload_boot_command": workload_boot_command,
+            "captures": captures,
+            "restores": restores,
+            "releases": releases,
+            "exchange": exchange_mock,
+            "wait_until": wait_until,
+            "holds_loopback": holds_loopback,
+            "accepts_tcp": accepts_tcp_mock,
+            "expect_failure": expect_failure,
+            "ports": ports,
+        }
+
+    def test_untiered_network_policy_restores_one_template_with_four_policies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "logs"
+            calls = self._run_untiered_network_policy(output_dir)
+            logs = sorted(path.name for path in output_dir.iterdir())
+
+        self.assertIn("untiered-network-policy", microvm_tests.MICROVM_TEST_SCENARIOS)
+        # Every guest runs it: the non-sandbox mode captures the template.
+        self.assertNotIn(
+            "untiered-network-policy", microvm_tests.SANDBOX_CONTROL_SCENARIOS
+        )
+        self.assertNotIn(
+            "untiered-network-policy", microvm_tests.UBUNTU_UNSUPPORTED_SCENARIOS
+        )
+        boot_call = calls["workload_boot_command"].call_args
+        self.assertEqual(boot_call.args[5], "")
+        self.assertEqual(
+            boot_call.kwargs["network"], microvm_tests.UNTIERED_NETWORK_CIDR
+        )
+
+        # The template is a snapshot without a tier or sandbox blocks, whose
+        # NIC has the complete deny-all policy.
+        ((template, template_kwargs),) = calls["captures"]
+        self.assertEqual(
+            template[:-2],
+            [
+                "openvmm",
+                "boot",
+                *microvm_tests.PLATFORM_NETWORK_TEMPLATE_POLICY,
+            ],
+        )
+        self.assertEqual(template[-2], "--snapshot-destination")
+        self.assertNotIn("--snapshot-tier", template)
+        self.assertNotIn("--microvm-sandbox-block", template)
+        ports = calls["ports"]
+        self.assertEqual(
+            template_kwargs["post_restore_script"],
+            microvm_tests.untiered_network_policy_script(
+                allowed_port=ports["allowed"],
+                other_port=ports["other"],
+                guest_port=ports["guest"],
+            ),
+        )
+        self.assertEqual(template_kwargs["processors"], 1)
+
+        # Each restore installs its own policy on the template.
+        restores = calls["restores"]
+        names = ("deny-all", "egress-dns", "host-loopback", "private-ingress")
+        forward_port = None
+        for command, name in zip(restores, names, strict=True):
+            with self.subTest(restore=name):
+                self.assertEqual(
+                    command[command.index("--restore-snapshot") + 1], template[-1]
+                )
+                self.assertEqual(
+                    command[command.index("--network-profile") + 1], "portable"
+                )
+                self.assertNotIn("--microvm-sandbox-block", command)
+                self.assertNotIn("--restore-absent-scratch", command)
+                self.assertIn("--restore-network-policy", command)
+                if "--host-loopback-forward" in command:
+                    forward = command[command.index("--host-loopback-forward") + 1]
+                    forward_port = int(forward.split(":")[1])
+                    self.assertEqual(forward, f"tcp:{forward_port}:{ports['guest']}")
+        self.assertIsNotNone(forward_port)
+        self.assertNotEqual(forward_port, ports["guest"])
+        # The host reaches the guest's server through the forward and the port
+        # that a policy publishes, on host loopback alone, which no other host
+        # address reaches, or through another host address for private-network
+        # ingress, and finds it on no host loopback port when the policy
+        # publishes nothing.
+        self.assertEqual(
+            [entry.args for entry in calls["exchange"].call_args_list],
+            [
+                ("127.0.0.1", forward_port, 60),
+                ("127.0.0.1", ports["guest"], 60),
+                ("192.0.2.10", ports["guest"], 60),
+            ],
+        )
+        self.assertEqual(
+            [entry.args for entry in calls["accepts_tcp"].call_args_list],
+            [("192.0.2.10", ports["guest"])],
+        )
+        self.assertEqual(calls["wait_until"].call_count, 2)
+        self.assertEqual(
+            [entry.args for entry in calls["holds_loopback"].call_args_list],
+            [(socket.AF_INET, socket.SOCK_STREAM, ports["guest"])] * 2,
+        )
+        self.assertEqual(
+            calls["releases"],
+            [
+                "NVX-UNTIERED-NETWORK-CHECKED 0",
+                "NVX-UNTIERED-NETWORK-CHECKED 0",
+                "NVX-UNTIERED-NETWORK-CHECKED 2",
+                "NVX-UNTIERED-NETWORK-CHECKED 1",
+            ],
+        )
+        self.assertEqual(
+            logs,
+            sorted(f"untiered-network-policy-{name}.log" for name in names),
+        )
+
+        # OpenVMM refuses the other restores before the guest runs.
+        failures = calls["expect_failure"].call_args_list
+        self.assertEqual(
+            [entry.args[3] for entry in failures],
+            [reason for _, reason in microvm_tests.UNTIERED_NETWORK_REJECTED],
+        )
+        for entry in failures:
+            self.assertEqual(
+                entry.kwargs["forbidden_markers"],
+                microvm_tests.UNTIERED_NETWORK_GUEST_MARKERS,
+            )
+            self.assertNotIn("--restore-network-policy", entry.args[0])
+        kept_policy, ingress = (entry.args[0] for entry in failures)
+        self.assertEqual(kept_policy[-2:], ["--network-egress", "allow"])
+        self.assertEqual(
+            ingress[-6:],
+            [
+                *microvm_tests.PLATFORM_NETWORK_TEMPLATE_POLICY,
+                "--network-ingress",
+                "allow",
+            ],
+        )
+
+    def test_untiered_network_policy_requires_what_each_policy_gives_the_guest(self):
+        def guest_reporting(
+            replace: bytes, by: bytes
+        ) -> Callable[[list[str], dict[str, int]], list[bytes]]:
+            def guest(command: list[str], ports: dict[str, int]) -> list[bytes]:
+                return [
+                    line.replace(replace, by)
+                    for line in self._simulate_untiered_network_guest(command, ports)
+                ]
+
+            return guest
+
+        def guest_dropping(
+            dropped: bytes,
+        ) -> Callable[[list[str], dict[str, int]], list[bytes]]:
+            def guest(command: list[str], ports: dict[str, int]) -> list[bytes]:
+                return [
+                    line
+                    for line in self._simulate_untiered_network_guest(command, ports)
+                    if line != dropped
+                ]
+
+            return guest
+
+        def guest_reporting_completion(
+            command: list[str], ports: dict[str, int]
+        ) -> list[bytes]:
+            lines = self._simulate_untiered_network_guest(command, ports)
+            if microvm_tests.UNTIERED_POST_RESTORE_MARKER in lines:
+                return lines
+            return [microvm_tests.UNTIERED_POST_RESTORE_MARKER, *lines]
+
+        for guest, message in (
+            # A guest whose repair did not name the policy's DNS server.
+            (
+                guest_reporting(b"resolver=192.0.2.1", b"resolver=none"),
+                r"^untiered network policy restore egress-dns: the guest's "
+                r"resolver names none, not 192\.0\.2\.1$",
+            ),
+            # A guest whose repair started no announcer.
+            (
+                guest_reporting(b"announcer=running", b"announcer=none"),
+                "^untiered network policy restore host-loopback: the guest "
+                "reported announcer=none$",
+            ),
+            # A guest whose repair applied settings without reporting it.
+            (
+                guest_dropping(microvm_tests.UNTIERED_POST_RESTORE_MARKER),
+                "^untiered network policy restore egress-dns: the guest's repair "
+                "did not report 'NVX-POST-RESTORE-OK: tier=legacy'$",
+            ),
+            # A guest without settings whose repair did not finish quietly.
+            (
+                guest_reporting_completion,
+                "^untiered network policy restore deny-all: the guest's repair "
+                "reported 'NVX-POST-RESTORE-OK: tier=legacy'$",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._run_untiered_network_policy(Path(temporary), guest=guest)
+
+        # The host services must receive exactly the requests that a policy
+        # admits, whatever the guest reports.
+        def guest_reaching_more(
+            command: list[str], ports: dict[str, int]
+        ) -> list[bytes]:
+            lines = self._simulate_untiered_network_guest(command, ports)
+            with socket.create_connection(
+                ("127.0.0.1", ports["other"]), timeout=5
+            ) as client:
+                client.sendall(b"GET /other HTTP/1.1\r\n\r\n")
+                while client.recv(4096):
+                    pass
+            return lines
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"^untiered network policy restore deny-all: the allowed and "
+                r"other host services received \(0, 1\) requests, not \(0, 0\)$",
+            ):
+                self._run_untiered_network_policy(
+                    Path(temporary), guest=guest_reaching_more
+                )
+
+    def test_untiered_network_policy_reports_guest_failures(self):
+        def failing_guest(_command: list[str], _ports: dict[str, int]) -> list[bytes]:
+            log_path = output_dir / "untiered-network-policy-deny-all.log"
+            log_path.write_bytes(
+                b"NVX-UNTIERED-NETWORK-FAIL the TCP server did not listen\r\n"
+            )
+            raise TimeoutError("line marker was not observed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            with self.assertRaises(RuntimeError) as raised:
+                self._run_untiered_network_policy(output_dir, guest=failing_guest)
+        self.assertEqual(
+            str(raised.exception),
+            "untiered network policy restore deny-all failed: "
+            "NVX-UNTIERED-NETWORK-FAIL the TCP server did not listen; see "
+            f"{output_dir / 'untiered-network-policy-deny-all.log'}",
+        )
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+
+    def test_untiered_network_policy_checks_where_ingress_publishes_the_guest_port(
+        self,
+    ):
+        def loopback_only(address: str, port: int, _timeout: float) -> None:
+            # A listener on host loopback alone, which the wildcard bind probe
+            # cannot tell from one on every host address.
+            if address != "127.0.0.1":
+                raise TimeoutError(f"{address}:{port} did not answer")
+
+        cases: tuple[tuple[dict[str, Any], str, str], ...] = (
+            # Private-network ingress that published the guest's port on host
+            # loopback alone.
+            (
+                {"exchange": loopback_only},
+                "private-ingress",
+                r"^192\.0\.2\.10:\d+ did not answer$",
+            ),
+            # Host-loopback access that published the guest's port on another
+            # host address too.
+            (
+                {"accepts_tcp": True},
+                "host-loopback",
+                r"^host-loopback access published guest port \d+ on 192\.0\.2\.10$",
+            ),
+            # A host without an address through which to reach the port that
+            # private-network ingress publishes.
+            (
+                {"host_addresses": ()},
+                "private-ingress",
+                "^the host has no known IPv4 address other than loopback, ",
+            ),
+        )
+        for options, restore, cause in cases:
+            with (
+                self.subTest(restore=restore, cause=cause),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    f"^untiered network policy restore {restore} failed; see ",
+                ) as raised:
+                    self._run_untiered_network_policy(Path(temporary), **options)
+                self.assertRegex(str(raised.exception.__cause__), cause)
+
+    def test_untiered_network_policy_keeps_the_template_intact(self):
+        original = ("manifest", "state", "memory")
+        changed = ("manifest", "state", "changed")
+        for fingerprints, message in (
+            # The capture, then the first restore.
+            ([original, original, changed], "^restore deny-all modified the NIC"),
+            # The capture and the four restores, then the refused restores.
+            (
+                [original] * 6 + [changed],
+                "^a refused restore modified the NIC template$",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._run_untiered_network_policy(
                         Path(temporary), fingerprints=fingerprints
                     )
 

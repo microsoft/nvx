@@ -64,21 +64,22 @@
         "structured-outcome": 0.6,
         "time-abi-conformance": 0.7,
         "time-host-correction": 14.0,
+        "untiered-network-policy": 14.0,
         "virtio-net": 3.8,
         "workload-identity": 0.7
       },
       "shards": [
         {
-          "seconds": 258.5,
+          "seconds": 265.4,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
             "directional-network-policy",
+            "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-snapshot",
             "managed-lifecycle",
             "network-snapshot",
-            "platform-aggregate-export",
             "platform-restore-processors",
             "restore-downtime",
             "restore-memory",
@@ -91,12 +92,11 @@
           ]
         },
         {
-          "seconds": 258.3,
+          "seconds": 265.4,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
-            "endpoint-policy-snapshot",
             "filesystem-owner",
             "filesystem-policy",
             "filesystem-shares",
@@ -108,6 +108,7 @@
             "l3-l4-egress-port-ranges",
             "l3-l4-egress-protocols",
             "lifecycle",
+            "platform-aggregate-export",
             "platform-filesystem",
             "platform-network-policy",
             "platform-zero-fill",
@@ -116,6 +117,7 @@
             "scratch-snapshot",
             "smp",
             "structured-outcome",
+            "untiered-network-policy",
             "virtio-net",
             "workload-identity"
           ]
@@ -164,19 +166,20 @@
         "structured-outcome": 0.5,
         "time-abi-conformance": 0.8,
         "time-host-correction": 14.0,
+        "untiered-network-policy": 14.1,
         "virtio-net": 3.7,
         "workload-identity": 0.6
       },
       "shards": [
         {
-          "seconds": 239.3,
+          "seconds": 246.7,
           "scenarios": [
             "console-snapshot",
             "directional-network-policy",
+            "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-shares",
             "filesystem-snapshot",
-            "network-snapshot",
             "platform-filesystem",
             "platform-restore-processors",
             "platform-zero-fill",
@@ -187,17 +190,17 @@
             "smp-snapshot",
             "snapshot-core",
             "snapshot-tiers",
-            "time-host-correction"
+            "time-host-correction",
+            "untiered-network-policy"
           ]
         },
         {
-          "seconds": 239.7,
+          "seconds": 246.4,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
-            "endpoint-policy-snapshot",
             "filesystem-owner",
             "filesystem-policy",
             "guest-boot",
@@ -209,6 +212,7 @@
             "l3-l4-egress-protocols",
             "lifecycle",
             "managed-lifecycle",
+            "network-snapshot",
             "platform-aggregate-export",
             "platform-network-policy",
             "private-network-ingress",
@@ -264,12 +268,13 @@
         "structured-outcome": 0.8,
         "time-abi-conformance": 1.6,
         "time-host-correction": 14.0,
+        "untiered-network-policy": 18.8,
         "virtio-net": 4.5,
         "workload-identity": 1.1
       },
       "shards": [
         {
-          "seconds": 338.7,
+          "seconds": 348.4,
           "scenarios": [
             "console-snapshot",
             "denied-filesystem-paths",
@@ -279,7 +284,6 @@
             "filesystem-snapshot",
             "host-loopback-policy",
             "network-snapshot",
-            "platform-aggregate-export",
             "platform-filesystem",
             "platform-restore-processors",
             "restore-downtime",
@@ -288,11 +292,12 @@
             "scratch-snapshot",
             "smp",
             "smp-snapshot",
-            "snapshot-tiers"
+            "snapshot-tiers",
+            "untiered-network-policy"
           ]
         },
         {
-          "seconds": 338.7,
+          "seconds": 347.8,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -308,6 +313,7 @@
             "l3-l4-egress-protocols",
             "lifecycle",
             "managed-lifecycle",
+            "platform-aggregate-export",
             "platform-network-policy",
             "platform-zero-fill",
             "private-network-ingress",

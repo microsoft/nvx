@@ -1,0 +1,88 @@
+set -eu
+on_exit() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        nvx-exit "$status"
+    fi
+}
+trap on_exit EXIT
+fail() {
+    echo "NVX-UNTIERED-NETWORK-FAIL $1"
+    exit "$2"
+}
+# The nameservers of the guest's resolver, which the restore's repair names
+# when the restore's policy has a DNS server.
+resolver=$(awk '$1 == "nameserver" { list = list sep $2; sep = "," }
+    END { print (list == "" ? "none" : list) }' /etc/resolv.conf 2>/dev/null) ||
+    resolver=none
+# The repair starts the announcer of the guest's listeners when the restore's
+# policy publishes them.
+if pidof nvx-ingress >/dev/null; then
+    announcer=running
+else
+    announcer=none
+fi
+# Sets result to whether the guest reached the host service that answers $1
+# at port $2 of the gateway, which the endpoint maps to host loopback.
+probe() {
+    rm -f /tmp/nvx-untiered-network-probe
+    if wget -T @PROBE_TIMEOUT@ -qO /tmp/nvx-untiered-network-probe \
+        "http://@GATEWAY_IPV4@:$2/$1" 2>/dev/null; then
+        [ "$(cat /tmp/nvx-untiered-network-probe)" = "NVX-PLATFORM-NETWORK-$1" ] ||
+            fail "unexpected $1 answer" 81
+        result=reached
+    else
+        result=denied
+    fi
+}
+probe allowed @ALLOWED_PORT@
+allowed=$result
+probe other @OTHER_PORT@
+other=$result
+echo "NVX-UNTIERED-NETWORK-REPORT resolver=$resolver announcer=$announcer allowed=$allowed other=$other"
+# The guest's TCP server answers the host, one client at a time, through the
+# ports that the restore's policy publishes or forwards.
+rm -f /tmp/nvx-untiered-network-inbound-*
+(
+    client=0
+    while [ "$client" -lt @MAX_CLIENTS@ ]; do
+        printf 'NVX-HOST-LOOPBACK-TCP-ACK\n' |
+            nc -l -p @GUEST_PORT@ -w 20 \
+                >"/tmp/nvx-untiered-network-inbound-$client" 2>/dev/null || true
+        client=$((client + 1))
+    done
+) &
+server=$!
+port_hex=$(printf '%04X' @GUEST_PORT@)
+tries=0
+while ! awk -v pattern=":$port_hex\$" \
+    '$2 ~ pattern && $4 == "0A" { found = 1 } END { exit !found }' \
+    /proc/net/tcp /proc/net/tcp6; do
+    [ "$tries" -lt 100 ] || fail "the TCP server did not listen" 82
+    tries=$((tries + 1))
+    sleep 0.05
+done
+# The terminal would echo the host's release into the lines after it.
+stty -echo || fail "the terminal kept echoing" 85
+echo NVX-UNTIERED-NETWORK-LISTENING
+# The host's release says how many lines it exchanged with the server. The
+# last one may still be on the way when the release arrives, so the guest
+# waits for each before it stops the server.
+read -r release exchanges || fail "the host did not release the guest" 83
+[ "$release" = NVX-UNTIERED-NETWORK-CHECKED ] || fail "release $release" 84
+case "$exchanges" in
+'' | *[!0-9]*) fail "release $release $exchanges" 84 ;;
+esac
+client=0
+while [ "$client" -lt "$exchanges" ]; do
+    tries=0
+    while ! grep -qx NVX-HOST-LOOPBACK-INBOUND \
+        "/tmp/nvx-untiered-network-inbound-$client" 2>/dev/null; do
+        [ "$tries" -lt 100 ] || fail "client $client sent no line" 86
+        tries=$((tries + 1))
+        sleep 0.05
+    done
+    client=$((client + 1))
+done
+kill "$server" 2>/dev/null || true
+echo "NVX-UNTIERED-NETWORK-INBOUND $exchanges"
