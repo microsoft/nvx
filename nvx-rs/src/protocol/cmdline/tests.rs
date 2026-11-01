@@ -12,6 +12,8 @@ use proptest::prelude::*;
 
 use super::*;
 
+pub(crate) mod model;
+
 /// The MMIO base of the scratch block device of a layered root.
 const SCRATCH: u64 = 0xd000_6000;
 

@@ -416,6 +416,4 @@ fn integer(text: &[u8], base: u32) -> (u64, usize) {
 }
 
 #[cfg(test)]
-pub(crate) mod model;
-#[cfg(test)]
-mod tests;
+pub(crate) mod tests;

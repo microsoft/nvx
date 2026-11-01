@@ -11,7 +11,7 @@ use super::mount::{aggregate_child_name, parse_mount_value, validate_mount_targe
 use super::tests::{exported, host_text};
 use super::*;
 use crate::ErrorKind;
-use crate::protocol::cmdline::model;
+use crate::protocol::cmdline::tests::model;
 
 const UUID: &str = "11111111-2222-3333-4444-555555555555";
 

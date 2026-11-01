@@ -1260,7 +1260,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::protocol::cmdline::model;
+    use crate::protocol::cmdline::tests::model;
 
     /// A valid packet header without memory ranges, of generation 1.
     fn valid_header() -> [u8; PACKET_HEADER_SIZE] {
