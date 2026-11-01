@@ -1,7 +1,6 @@
 {
   "schema": "nvx-test-layout-allowlist",
-  "schema_version": 1,
-  "baseline": {},
+  "schema_version": 2,
   "seams": {
     "nvx-rs/src/guest/cgroup.rs": 2,
     "nvx-rs/src/guest/clone/activation/apply.rs": 1,

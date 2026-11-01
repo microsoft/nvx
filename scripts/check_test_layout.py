@@ -20,23 +20,18 @@ files of `tests/fixtures/` and `tests/vectors/` are data, not modules.
 
 A production file holds no other test code: outside function bodies, no
 inline module, module of another name, or item that a cfg requiring `test`
-guards, directly or through cfg_attr; no test attribute, such as #[test], #[should_panic], or #[ignore]; no
-proptest! block; and no #![cfg(test)] that makes the whole file test-only.
-What it may hold are test hooks, the attributes and cfg! invocations whose
-predicates mention `test`, such as a field, statement, or match arm that only
-tests compile, or a derive that only tests need: exactly as many as the seams
-of scripts/test-layout-allowlist.json allow the file. A hook is test code that
-cannot move out of the code that it hooks.
+guards, directly or through cfg_attr; no test attribute, such as #[test],
+#[should_panic], or #[ignore]; no proptest! block; and no #![cfg(test)] that
+makes the whole file test-only. What it may hold are test hooks, the
+attributes and cfg! invocations whose predicates mention `test`, such as a
+field, statement, or match arm that only tests compile, or a derive that only
+tests need: exactly as many as the seams of scripts/test-layout-allowlist.json
+allow the file. A hook is test code that cannot move out of the code that it
+hooks. `--tighten` lowers the seams to the hooks that the files hold; it never
+raises an entry or adds a file.
 
-The production files that predate these rules keep their test code until it
-moves out: the baseline of the allowlist lists each with the numbers of test
-hooks and of tests that it holds, which may only go down. `--tighten` lowers
-the allowlist to what the files hold, and moves to the seams a baseline file
-that holds no test code but hooks. It never raises an entry or adds a file.
-
-Every module named `tests` is out of line and requires `test`, its file
-exists, and every test file in `src/` belongs to a module that a file
-declares. No file in `src/` sets a module's file with #[path].
+Every module named `tests` is out of line and requires `test`, and its file
+exists. No file in `src/` sets a module's file with #[path].
 
 Python unit tests are the `test_*.py` modules of scripts/,
 .github/specula/tests/, and .github/skills/*/scripts/, and the end-to-end
@@ -67,7 +62,7 @@ from typing import Protocol, cast
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = "scripts/test-layout-allowlist.json"
 ALLOWLIST_SCHEMA = "nvx-test-layout-allowlist"
-ALLOWLIST_SCHEMA_VERSION = 1
+ALLOWLIST_SCHEMA_VERSION = 2
 TIGHTEN_COMMAND = "python3 scripts/check_test_layout.py --tighten"
 
 # The directories, relative to a crate, of the data of its tests, such as
@@ -1274,17 +1269,15 @@ class Declaration:
 @dataclass
 class RustAnalysis:
     """What a Rust file of a crate's src/ or tests/ declares, and whether its
-    inner attributes keep tests from compiling it; and, for a production file,
-    the test code that it holds: the lines of its test hooks, the number of
-    its tests, and the test code that only the baseline allows."""
+    inner attributes keep tests from compiling it; for a production file, the
+    lines of the test hooks that it holds; and its problems, such as the test
+    code that a production file holds besides them."""
 
     path: str
     crate: str
     production: bool
     declarations: list[Declaration] = field(default_factory=list[Declaration])
     hooks: list[int] = field(default_factory=list[int])
-    tests: int = 0
-    legacy: list[Problem] = field(default_factory=list[Problem])
     problems: list[Problem] = field(default_factory=list[Problem])
     excluded: bool = False
 
@@ -1336,10 +1329,10 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
         )
 
     exempt: set[int] = set()
-    legacy_ranges: list[tuple[int, int]] = []
+    test_code_ranges: list[tuple[int, int]] = []
 
-    def legacy(line: int, rule: str, message: str) -> None:
-        analysis.legacy.append(Problem(path, line, rule, message))
+    def test_code(line: int, rule: str, message: str) -> None:
+        analysis.problems.append(Problem(path, line, rule, message))
 
     def walk(
         items: Sequence[Item], inline: tuple[str, ...], in_tests: bool, excluded: bool
@@ -1384,7 +1377,7 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
                 if only_tests and item.name == "tests":
                     exempt.update(attribute.start for attribute in item.attributes)
                 elif only_tests:
-                    legacy(
+                    test_code(
                         item.line,
                         "test-module-name",
                         f"module `{item.name}` compiles only for tests, but only "
@@ -1415,7 +1408,7 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
                 )
                 if only_tests:
                     walk(item.children, (*inline, item.name), True, inner)
-                    legacy_ranges.append((item.start, item.end))
+                    test_code_ranges.append((item.start, item.end))
                     if item.name == "tests":
                         message = (
                             f"inline module `tests`; move its contents to "
@@ -1428,7 +1421,7 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
                             "tests; move it into the `tests` module, as "
                             f"{module_files(crate, source, (*inline, 'tests'), item.name, base)[0]}"
                         )
-                    legacy(item.line, "inline-test-module", message)
+                    test_code(item.line, "inline-test-module", message)
                     continue
                 if item.name == "tests":
                     analysis.problems.append(
@@ -1443,8 +1436,8 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
                 walk(item.children, (*inline, item.name), False, inner)
                 continue
             if only_tests:
-                legacy_ranges.append((item.start, item.end))
-                legacy(
+                test_code_ranges.append((item.start, item.end))
+                test_code(
                     item.line,
                     "test-only-item",
                     f"{_describe(item)} compiles only for tests; move it into the "
@@ -1452,8 +1445,8 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
                 )
                 continue
             if item.kind == "macro" and item.name.split("::")[-1] == "proptest":
-                legacy_ranges.append((item.start, item.end))
-                legacy(
+                test_code_ranges.append((item.start, item.end))
+                test_code(
                     item.line,
                     "test-harness",
                     "proptest! block; tests belong in the `tests` module, "
@@ -1476,7 +1469,7 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
                 )
             )
         if production and attribute_requires_test(tokens, partner, attribute):
-            legacy(
+            test_code(
                 attribute.line,
                 "test-only-file",
                 "#![cfg(test)] makes this production file compile only for tests; "
@@ -1485,8 +1478,8 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
     if not production:
         return analysis
 
-    def in_legacy(index: int) -> bool:
-        return any(start <= index < end for start, end in legacy_ranges)
+    def in_test_code(index: int) -> bool:
+        return any(start <= index < end for start, end in test_code_ranges)
 
     for attribute in parsed.attributes:
         if attribute.start not in exempt and attribute_mentions_test(
@@ -1495,11 +1488,9 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
             analysis.hooks.append(attribute.line)
         # cfg_attr may apply a test attribute, as #[cfg_attr(test, test)] does.
         paths = attribute_paths(tokens, partner, attribute)
-        if any(is_test_function_attribute(path) for path in paths):
-            analysis.tests += 1
         harness = [path for path in paths if is_test_attribute(path)]
-        if harness and not in_legacy(attribute.start):
-            legacy(
+        if harness and not in_test_code(attribute.start):
+            test_code(
                 attribute.line,
                 "test-harness",
                 f"#[{harness[0]}] in a production file; tests belong in the "
@@ -1517,13 +1508,9 @@ def analyze_rust(path: str, crate: str, text: str) -> RustAnalysis:
 
 @dataclass
 class Allowlist:
-    """The test hooks and tests that production files may hold: the counts of
-    the baseline files, which predate the layout, and the test hooks of the
-    seams."""
+    """The test hooks that production files may hold: the seams, each with the
+    number of its file's hooks."""
 
-    baseline: dict[str, tuple[int, int]] = field(
-        default_factory=dict[str, tuple[int, int]]
-    )
     seams: dict[str, int] = field(default_factory=dict[str, int])
 
 
@@ -1538,33 +1525,13 @@ def parse_allowlist(text: str) -> tuple[Allowlist, list[str]]:
     if not isinstance(data, dict):
         return allowlist, ["is not a JSON object"]
     document = cast(dict[str, object], data)
-    expected = {"schema", "schema_version", "baseline", "seams"}
-    unknown = sorted(set(document) - expected)
+    unknown = sorted(set(document) - {"schema", "schema_version", "seams"})
     if unknown:
         errors.append(f"has unknown keys {', '.join(unknown)}")
     if document.get("schema") != ALLOWLIST_SCHEMA:
         errors.append(f'schema is not "{ALLOWLIST_SCHEMA}"')
     if document.get("schema_version") != ALLOWLIST_SCHEMA_VERSION:
         errors.append(f"schema_version is not {ALLOWLIST_SCHEMA_VERSION}")
-    baseline = document.get("baseline", {})
-    if not isinstance(baseline, dict):
-        errors.append("baseline is not an object")
-    else:
-        for path, counts in cast(dict[str, object], baseline).items():
-            if (
-                isinstance(counts, dict)
-                and set(cast(dict[str, object], counts)) == {"hooks", "tests"}
-                and all(
-                    _is_count(value)
-                    for value in cast(dict[str, object], counts).values()
-                )
-            ):
-                entry = cast(dict[str, int], counts)
-                allowlist.baseline[path] = (entry["hooks"], entry["tests"])
-            else:
-                errors.append(
-                    f'baseline entry {path} is not {{"hooks": COUNT, "tests": COUNT}}'
-                )
     seams = document.get("seams", {})
     if not isinstance(seams, dict):
         errors.append("seams is not an object")
@@ -1591,45 +1558,23 @@ def render_allowlist(allowlist: Allowlist) -> str:
     document = {
         "schema": ALLOWLIST_SCHEMA,
         "schema_version": ALLOWLIST_SCHEMA_VERSION,
-        "baseline": {
-            path: {"hooks": hooks, "tests": tests}
-            for path, (hooks, tests) in sorted(allowlist.baseline.items())
-        },
         "seams": dict(sorted(allowlist.seams.items())),
     }
     return json.dumps(document, indent=2) + "\n"
 
 
 def tighten(allowlist: Allowlist, analyses: Mapping[str, RustAnalysis]) -> Allowlist:
-    """Lowers the allowlist to what the production files hold.
-
-    A baseline file whose test code but its hooks moved out moves to the
-    seams. An entry for a file that is no production file goes. No entry
-    rises, and no file that the allowlist does not list joins it.
-    """
+    """Lowers the seams to the test hooks that the production files hold. An
+    entry for a file that is no production file, or holds no hook, goes. No
+    entry rises, and no file that the seams do not list joins them."""
     tightened = Allowlist()
-    for path, (hooks, tests) in allowlist.baseline.items():
-        analysis = analyses.get(path)
-        if analysis is None or not analysis.production:
-            continue
-        found = (len(analysis.hooks), analysis.tests)
-        if found[0] > hooks or found[1] > tests:
-            tightened.baseline[path] = (hooks, tests)
-        elif analysis.legacy or analysis.tests:
-            tightened.baseline[path] = found
-        elif found[0]:
-            tightened.seams[path] = found[0]
     for path, count in allowlist.seams.items():
         analysis = analyses.get(path)
         if analysis is None or not analysis.production:
             continue
-        if path in tightened.baseline or path in tightened.seams:
-            continue
         found = len(analysis.hooks)
-        if found > count:
-            tightened.seams[path] = count
-        elif found:
-            tightened.seams[path] = found
+        if found:
+            tightened.seams[path] = min(found, count)
     return tightened
 
 
@@ -1644,58 +1589,9 @@ def _lines(lines: Sequence[int]) -> str:
 def _rust_count_problems(analysis: RustAnalysis, allowlist: Allowlist) -> list[Problem]:
     path = analysis.path
     hooks = len(analysis.hooks)
-    if path in allowlist.baseline:
-        allowed_hooks, allowed_tests = allowlist.baseline[path]
-        if not analysis.legacy and not analysis.tests:
-            if hooks > allowed_hooks:
-                return [
-                    Problem(
-                        path,
-                        0,
-                        "test-hooks",
-                        f"holds {hooks} test hook(s), at lines "
-                        f"{_lines(analysis.hooks)}, but the baseline allows "
-                        f"{allowed_hooks}: move test code into the `tests` module",
-                    )
-                ]
-            return [
-                Problem(
-                    path,
-                    0,
-                    "allowlist",
-                    "the baseline lists this file, whose tests moved out; run "
-                    f"`{TIGHTEN_COMMAND}` to move it to the seams",
-                )
-            ]
-        problems: list[Problem] = []
-        if hooks > allowed_hooks or analysis.tests > allowed_tests:
-            problems.append(
-                Problem(
-                    path,
-                    0,
-                    "test-code",
-                    f"holds {hooks} test hook(s) and {analysis.tests} test(s), "
-                    f"but the baseline allows {allowed_hooks} and {allowed_tests}: "
-                    "this file predates the test layout, so new tests and test "
-                    "code go in its `tests` module; move its tests there first",
-                )
-            )
-        elif hooks < allowed_hooks or analysis.tests < allowed_tests:
-            problems.append(
-                Problem(
-                    path,
-                    0,
-                    "allowlist",
-                    f"holds {hooks} test hook(s) and {analysis.tests} test(s), "
-                    f"fewer than the {allowed_hooks} and {allowed_tests} that the "
-                    f"baseline allows; run `{TIGHTEN_COMMAND}`",
-                )
-            )
-        return problems
-    problems = list(analysis.legacy)
     allowed = allowlist.seams.get(path, 0)
     if hooks > allowed:
-        problems.append(
+        return [
             Problem(
                 path,
                 0,
@@ -1705,9 +1601,9 @@ def _rust_count_problems(analysis: RustAnalysis, allowlist: Allowlist) -> list[P
                 "module, and allow only a hook that cannot move in the seams of "
                 f"{ALLOWLIST}",
             )
-        )
-    elif hooks < allowed:
-        problems.append(
+        ]
+    if hooks < allowed:
+        return [
             Problem(
                 path,
                 0,
@@ -1715,8 +1611,8 @@ def _rust_count_problems(analysis: RustAnalysis, allowlist: Allowlist) -> list[P
                 f"holds {hooks} test hook(s), fewer than the {allowed} that the "
                 f"seams allow; run `{TIGHTEN_COMMAND}`",
             )
-        )
-    return problems
+        ]
+    return []
 
 
 def analyze_crates(snapshot: Snapshot) -> tuple[dict[str, RustAnalysis], list[Problem]]:
@@ -1950,7 +1846,7 @@ def check_snapshot(snapshot: Snapshot) -> Layout:
     if ALLOWLIST in snapshot.files:
         allowlist, errors = parse_allowlist(decode(snapshot.read(ALLOWLIST)))
         problems.extend(Problem(ALLOWLIST, 0, "allowlist", error) for error in errors)
-    for path in sorted(set(allowlist.baseline) | set(allowlist.seams)):
+    for path in sorted(allowlist.seams):
         analysis = analyses.get(path)
         if analysis is None or not analysis.production:
             problems.append(
@@ -1960,15 +1856,6 @@ def check_snapshot(snapshot: Snapshot) -> Layout:
                     "allowlist",
                     f"lists {path}, which is no tracked production file of a "
                     f"crate's src/; run `{TIGHTEN_COMMAND}`",
-                )
-            )
-        elif path in allowlist.baseline and path in allowlist.seams:
-            problems.append(
-                Problem(
-                    ALLOWLIST,
-                    0,
-                    "allowlist",
-                    f"lists {path} in both the baseline and the seams",
                 )
             )
     for analysis in analyses.values():
@@ -2004,7 +1891,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         tree = WorkTree(root)
         layout = check_snapshot(tree)
         if args.tighten:
-            # A file that does not parse counts no test code, and an allowlist
+            # A file that does not parse counts no test hooks, and an allowlist
             # that does not parse lacks its broken entries, so tightening then
             # would drop what they allow.
             unread = [

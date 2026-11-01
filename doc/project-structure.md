@@ -167,7 +167,7 @@ nvx/
 |   |-- powershell_testing.py    PowerShell launches of the unit tests, under a shared default time limit
 |   |-- publish_development_release.py Development release publisher run by CI
 |   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
-|   |-- test-layout-allowlist.json The test hooks and tests that production files may hold
+|   |-- test-layout-allowlist.json The test hooks that production files may hold
 |   `-- test_*.py                Python tooling unit tests
 |-- tests/                       Tests that build on the repository's crates from outside them
 |   `-- runtime-adapter/         Rust crate `runtime-adapter`, an independent adapter of nvx
