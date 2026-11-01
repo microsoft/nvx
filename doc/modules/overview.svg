@@ -92,7 +92,7 @@
 <path fill="#ccfbf1" stroke="#0d9488" stroke-width="1.2" d="M328,-174C328,-174 198,-174 198,-174 192,-174 186,-168 186,-162 186,-162 186,-114 186,-114 186,-108 192,-102 198,-102 198,-102 328,-102 328,-102 334,-102 340,-108 340,-114 340,-114 340,-162 340,-162 340,-168 334,-174 328,-174"/>
 <text text-anchor="middle" x="263" y="-155.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">guest</text>
 <text text-anchor="middle" x="263" y="-141.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">Linux guest programs</text>
-<text text-anchor="middle" x="263" y="-127.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">95 nested modules</text>
+<text text-anchor="middle" x="263" y="-127.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">96 nested modules</text>
 <text text-anchor="middle" x="263" y="-113.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">Linux only</text>
 </a>
 </g>
@@ -104,7 +104,7 @@
 <path fill="#ede9fe" stroke="#8b5cf6" stroke-width="1.2" d="M513.5,-167C513.5,-167 370.5,-167 370.5,-167 364.5,-167 358.5,-161 358.5,-155 358.5,-155 358.5,-121 358.5,-121 358.5,-115 364.5,-109 370.5,-109 370.5,-109 513.5,-109 513.5,-109 519.5,-109 525.5,-115 525.5,-121 525.5,-121 525.5,-155 525.5,-155 525.5,-161 519.5,-167 513.5,-167"/>
 <text text-anchor="middle" x="442" y="-148.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">host</text>
 <text text-anchor="middle" x="442" y="-134.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">Launch and supervision</text>
-<text text-anchor="middle" x="442" y="-120.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">113 nested modules</text>
+<text text-anchor="middle" x="442" y="-120.6" font-family="Liberation Sans,Arial,Helvetica,sans-serif" font-size="13.00" fill="#14283f">132 nested modules</text>
 </a>
 </g>
 </g>
