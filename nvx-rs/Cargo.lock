@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "nvx"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.8"
 dependencies = [
  "getrandom",
  "nix",

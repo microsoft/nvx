@@ -1,6 +1,6 @@
 [package]
 name = "nvx"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.8"
 edition = "2024"
 rust-version = "1.89"
 description = "NVX mechanics: the OpenVMM control protocol and the launch, policy lowering, and supervision of NVX microVMs"

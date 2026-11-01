@@ -145,5 +145,5 @@
   crates.io when `nvx-rs/` changed; see
   [crates.io releases](../doc/ci.md#cratesio-releases). Do not publish it by
   hand, and change the version that `nvx-rs/Cargo.toml` declares only to start
-  another series, as [The nvx crate](../doc/distribution.md#the-nvx-crate)
-  describes.
+  another series or to raise the floor of the current one, as
+  [The nvx crate](../doc/distribution.md#the-nvx-crate) describes.

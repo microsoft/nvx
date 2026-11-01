@@ -1886,14 +1886,15 @@ The versions are pre-releases, such as `0.1.0-alpha.4`. A run takes the
 number after the highest that crates.io has in the series that
 `nvx-rs/Cargo.toml` declares, yanked versions included, since crates.io never
 reuses a version, and at least the declared number, so the declared version is
-the floor: a pull request changes it only to start another series, as
-[The nvx crate](distribution.md#the-nvx-crate) describes. `Package nvx crate`
-fails rather than publish a version that would sort below the newest one on
-crates.io. When the number differs from the declared one, each job gives only
-its own checkout the new version, in `nvx-rs/Cargo.toml` and in `nvx`'s entry
-in `nvx-rs/Cargo.lock`. The package's `.cargo_vcs_info.json` then records the
-run's commit as dirty, and its `Cargo.toml.orig` and `Cargo.lock` differ from
-the commit's files in the version alone.
+the floor: a pull request changes it only to start another series or to raise
+the floor, as [The nvx crate](distribution.md#the-nvx-crate) describes.
+`Package nvx crate` fails rather than publish a version that would sort below
+the newest one on crates.io. When the number differs from the declared one,
+each job gives only its own checkout the new version, in `nvx-rs/Cargo.toml`
+and in `nvx`'s entry in `nvx-rs/Cargo.lock`. The package's
+`.cargo_vcs_info.json` then records the run's commit as dirty, and its
+`Cargo.toml.orig` and `Cargo.lock` differ from the commit's files in the
+version alone.
 
 `Package nvx crate` checks the package that `cargo package --locked` packs:
 

@@ -161,8 +161,16 @@ number, as [crates.io releases](ci.md#cratesio-releases) describes, so a
 change reaches crates.io within a day of its merge.
 
 The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
-publishes. A pull request changes it to start another series, such as
-`0.2.0-alpha.1`. Only `nvx`'s version changes in `nvx-rs/Cargo.lock` and
+publishes, and the version that a dependent sees when it takes the crate from
+a commit of this repository, through Git or a `[patch.crates-io]` entry,
+instead of from crates.io. A pull request changes it to start another series,
+such as `0.2.0-alpha.1`, or to raise the floor of the current one, so that
+the version of `dev`'s commits satisfies such a dependent's requirement on a
+version that crates.io has: `0.1.0-alpha.8` is the floor of the breaking
+release that [microsoft/nvx#1076](https://github.com/microsoft/nvx/issues/1076)
+prepares. Nightly runs keep publishing meanwhile, each with the next number
+that crates.io hasn't used, and the release takes the number after theirs.
+Only `nvx`'s version changes in `nvx-rs/Cargo.lock` and
 `tests/runtime-adapter/Cargo.lock`. The `bundled` feature of the published
 crate downloads the release that
 [`nvx-rs/artifacts.json`](../nvx-rs/artifacts.json) pins and fails unless that
