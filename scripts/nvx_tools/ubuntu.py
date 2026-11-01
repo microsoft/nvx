@@ -182,7 +182,7 @@ def load_package_lock(
                 "pre_depends": str(package_document.get("pre_depends", "")),
             },
         )
-        if package["architecture"] != UbuntuBuildConstants.ARCHITECTURE:
+        if package["architecture"] not in (UbuntuBuildConstants.ARCHITECTURE, "all"):
             raise ScriptError(
                 f"{path} package {name} has unsupported architecture "
                 f"{package['architecture']}"
@@ -744,6 +744,8 @@ def _customize_root(root: Path) -> None:
     _ensure_symlink(root, "usr/bin/netcat", "nc.openbsd")
     _ensure_symlink(root, "usr/bin/wget", "busybox")
     _ensure_symlink(root, "usr/sbin/mdev", "../bin/busybox")
+    if path_exists(root / "usr" / "bin" / "python3"):
+        _ensure_symlink(root, "usr/bin/python", "python3")
     _validate_accounts(root)
     _validate_usr_merge(root)
 

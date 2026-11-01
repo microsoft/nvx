@@ -16221,6 +16221,56 @@ class BuildTests(unittest.TestCase):
 
             ensure_symlink.assert_any_call(root, "usr/bin/wget", "busybox")
 
+    def test_ubuntu_package_lock_accepts_architecture_independent_packages(self):
+        document = json.loads(UbuntuBuildConstants.PACKAGE_LOCK.read_text("utf-8"))
+        package = dict(document["packages"][0])
+        package.update(
+            name="zz-data",
+            architecture="all",
+            url=(
+                "https://archive.ubuntu.com/ubuntu/pool/main/z/zz-data/"
+                "zz-data_1_all.deb"
+            ),
+            license_path="/usr/share/doc/zz-data/copyright",
+        )
+        document["packages"].append(package)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "packages.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            packages = ubuntu.load_package_lock(path)
+            self.assertEqual(packages[-1]["name"], "zz-data")
+            self.assertEqual(packages[-1]["architecture"], "all")
+
+            package["architecture"] = "arm64"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(
+                common.ScriptError, "unsupported architecture arm64"
+            ):
+                ubuntu.load_package_lock(path)
+
+    def test_ubuntu_customization_links_python_only_when_python3_exists(self):
+        for has_python3 in (True, False):
+            with self.subTest(has_python3=has_python3):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    for relative in ("etc", "usr/bin", "usr/sbin"):
+                        (root / relative).mkdir(parents=True)
+                    if has_python3:
+                        (root / "usr" / "bin" / "python3").touch()
+                    with (
+                        patch.object(ubuntu, "_clear_directory"),
+                        patch.object(ubuntu, "_validate_accounts"),
+                        patch.object(ubuntu, "_validate_usr_merge"),
+                        patch.object(ubuntu, "_ensure_symlink") as ensure_symlink,
+                    ):
+                        ubuntu._customize_root(root)
+
+                    linked = (
+                        call(root, "usr/bin/python", "python3")
+                        in ensure_symlink.call_args_list
+                    )
+                    self.assertEqual(linked, has_python3)
+
     def test_distro_layer_refuses_existing_output_without_replace(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "ubuntu.erofs"
