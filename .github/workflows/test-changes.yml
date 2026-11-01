@@ -1,0 +1,80 @@
+name: Test changes
+
+# Flags a pull request that modifies or removes existing tests, test data,
+# end-to-end scenarios, test doubles, test policy, or CI test wiring: it
+# labels the pull request tests-modified and keeps one comment that lists the
+# changes (doc/ci.md#test-changes). pull_request_target runs the workflow as
+# the default branch holds it, with a token that may label and comment, for
+# pull requests from forks too. So the job runs the default branch's script,
+# which reads the pull request's commits as data and never runs their code.
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+
+permissions: {}
+
+jobs:
+  flag:
+    name: Flag changes to existing tests
+    # An edit changes what the job reads only when it changes the base branch.
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # In the job, so that a run whose job the condition skips, as an edit of
+    # the title does, cancels no comparison.
+    concurrency:
+      group: test-changes-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # The default branch's script runs, whatever the pull request's base:
+      # pull_request_target runs the default branch's workflow, and the
+      # checkout names that branch, so that no other branch's script runs
+      # with the token. It fetches every branch, the base among them.
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The pull request's commits are data: nothing of them runs.
+      - name: Fetch the pull request's commits
+        id: fetch
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --quiet origin \
+            "+refs/pull/${NUMBER}/head:refs/remotes/pull/head"
+          # A push after the event that started this run starts another, which
+          # flags the newer head.
+          if [[ "$(git rev-parse refs/remotes/pull/head)" == "${HEAD_SHA}" ]]; then
+            echo "current=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "current=false" >> "${GITHUB_OUTPUT}"
+            echo "The pull request's head moved on; a newer run flags it."
+          fi
+
+      - name: Flag changes to existing tests
+        if: steps.fetch.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          python3 scripts/check_test_changes.py
+          --base "origin/${BASE_REF}"
+          --head "${HEAD_SHA}"
+          --repository "${GITHUB_REPOSITORY}"
+          --summary "${GITHUB_STEP_SUMMARY}"
+          --publish "${NUMBER}"

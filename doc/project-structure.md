@@ -8,7 +8,7 @@ are build products or caches and are not part of the tracked source tree. The
 
 | Path | Purpose |
 | --- | --- |
-| `.github/workflows` | CI, nightly failure report, module diagram, release verification, adversarial campaign, and Copilot environment workflows |
+| `.github/workflows` | CI, nightly failure report, test change flag, module diagram, release verification, adversarial campaign, and Copilot environment workflows |
 | `.github/actions` | Reusable local CI actions |
 | `.github/skills` | Copilot agent skills for common development workflows |
 | `.github/agents` | Copilot custom agents: the bounded adversarial strategist and the issue fixer |
@@ -52,7 +52,8 @@ nvx/
 |   |   |-- package-platform.yml Reusable platform release package job
 |   |   |-- run-nvx-microvm-tests.yml Reusable NVX microVM test job
 |   |   |-- run-platform.yml     Reusable platform benchmark job
-|   |   `-- specula-release.yml  Specula verification of published releases
+|   |   |-- specula-release.yml  Specula verification of published releases
+|   |   `-- test-changes.yml     Label and comment for pull requests that change existing tests
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
 |   `-- copilot-instructions.md  Repository-wide Copilot instructions
 |-- .vscode/settings.json        Shared VS Code settings
@@ -157,6 +158,7 @@ nvx/
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI
+|   |-- check_test_changes.py    Flags the changes of a pull request to existing tests
 |   |-- check_test_layout.py     Check that tests live apart from the code that they test
 |   |-- module_diagrams.py       Module diagram generator of the nvx crate
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
@@ -200,7 +202,8 @@ reusable workflows: `build-openvmm-binary.yml` builds OpenVMM for one target,
 `run-nvx-microvm-tests.yml` runs the NVX microVM tests on one backend, and
 `run-platform.yml` benchmarks one platform. The full runs of `ci.yml` on `dev`
 also publish the `nvx` crate to
-crates.io. The other workflows report failed nightly CI runs, draw the module
+crates.io. The other workflows report failed nightly CI runs, flag the pull
+requests that change existing tests, draw the module
 diagrams of the `nvx` crate after merges, run adversarial campaigns, run the
 `nvx` crate's mutation tests, verify published releases with Specula, and
 prepare the
@@ -334,8 +337,10 @@ beside `nvx.py` are the tooling's unit tests. They launch PowerShell through
 and reports what a launch that outlasts its limit printed, at once on stderr
 and in the test's failure. `check_test_layout.py` checks that every test of the
 repository lives in a test file, and that production files hold only the test
-hooks that `test-layout-allowlist.json` allows them; see
-[Test layout](contribute.md#test-layout).
+hooks that `test-layout-allowlist.json` allows them, and
+`check_test_changes.py` flags the pull requests that change existing tests; see
+[Test layout](contribute.md#test-layout) and
+[Changes to existing tests](contribute.md#changes-to-existing-tests).
 
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners
 using the [tool manifest](../scripts/setup/tool-versions.conf);

@@ -240,6 +240,45 @@ crate's [Testing](../nvx-rs/README.md#testing) section describes.
   compare the mutants that each selection catches with
   [nvx-rs mutation testing](ci.md#nvx-rs-mutation-testing).
 
+### Changes to existing tests
+
+A change to an existing test can hide the regression that the test caught,
+so the [Test changes](ci.md#test-changes) workflow labels every pull request
+that modifies or removes an existing test asset `tests-modified`, and keeps
+one comment on it that lists each, with links to it before and after the
+change. It compares the pull request's head with its merge base, item by
+item: a test, a test helper, the imports and inner attributes of a test
+module, and the test hooks of a production item; a fixture, a conformance
+vector, a scenario list, or another data file of the tests; an end-to-end
+scenario driver, guest workload, or guest probe; the fake OpenVMM; an
+allowlist entry that is new or allows more, or a change to the layout check,
+the flagging script, or their workflow; and a removed or changed line of the
+actions and workflow that run the tests and of the `ci.yml` jobs that run
+them, or an added line there that may skip them, and a test job that
+`ci.yml` no longer has. New tests flag nothing, and neither does code that
+moves unchanged under the same cfg predicates, its own and those that its
+module inherits, such as a `tests` module that moves to its own file, nor
+formatting, comments, lint attributes, visibility, or imports that a module
+only adds. A test whose module no target compiles any more, or compiles under
+other predicates, as a changed declaration of an ancestor module, or a
+manifest that sets the `test` key of its target to false or roots the target
+elsewhere, may make it, counts as removed or modified. Each target that
+compiles a module, through each chain of declarations, counts, so a test that
+one of them no longer compiles counts as modified. A comma counts in the
+token tree of a macro, unless the macro is one of the standard library's that
+take expressions and a trailing comma, such as `assert_eq!`.
+
+The label blocks nothing. It asks the reviewers to check each listed change
+against the specification that the test derives from: that a modified
+assertion still checks what it did, or that the behavior changed on purpose,
+and that a removed test's coverage moved elsewhere or is no longer needed.
+Explain each such change in the pull request's body. Run the comparison
+before you push:
+
+```bash
+python3 scripts/check_test_changes.py --base origin/dev
+```
+
 ## OpenVMM
 
 ### Access
