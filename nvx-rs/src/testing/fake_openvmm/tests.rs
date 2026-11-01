@@ -56,6 +56,58 @@ fn mount_children_resolve_to_hosts_of_their_kind() {
     }
 }
 
+#[test]
+fn sandbox_blocks_are_a_distro_layer_and_a_scratch_disk() {
+    let temporary = tempfile::tempdir().unwrap();
+    let file = temporary.path().join("block");
+    fs::write(&file, [0; 512]).unwrap();
+    let file = file.to_str().unwrap();
+    let distro = format!("distro:file:{file},ro");
+    let scratch = format!("scratch:file:{file}");
+    let (distro, scratch) = (distro.as_str(), scratch.as_str());
+    let roles = |blocks: &[&str], ram_overlay: bool| {
+        check_sandbox_blocks(blocks.iter(), ram_overlay).map(|checked| {
+            checked
+                .into_iter()
+                .map(|block| (block.role, block.read_only))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        roles(&[distro, scratch], false),
+        Ok(vec![
+            ("distro".to_owned(), true),
+            ("scratch".to_owned(), false)
+        ])
+    );
+    assert_eq!(
+        roles(&[distro], true),
+        Ok(vec![("distro".to_owned(), true)])
+    );
+    // Like OpenVMM, the fake refuses the retired runtime and custom layers.
+    for retired in ["runtime", "custom"] {
+        let layer = format!("{retired}:file:{file},ro");
+        assert_eq!(
+            roles(&[distro, &layer, scratch], false),
+            Err(format!("invalid --microvm-sandbox-block {layer}"))
+        );
+    }
+    assert_eq!(
+        roles(&[distro, distro, scratch], false),
+        Err(format!("invalid --microvm-sandbox-block {distro}"))
+    );
+    for blocks in [[distro], [scratch]] {
+        assert_eq!(
+            roles(&blocks, false),
+            Err("a sandbox needs a distro layer and a scratch disk".to_owned())
+        );
+    }
+    assert_eq!(
+        roles(&[distro, scratch], true),
+        Err("microVM RAM-backed overlay requires exactly one read-only distro block".to_owned())
+    );
+}
+
 /// Returns a directory with a kernel, an initramfs, a share with a `hidden` directory, and a
 /// snapshot directory, and the parse of the command line that `arguments` gives with the
 /// paths of that directory in place of `{dir}`.
@@ -550,6 +602,7 @@ fn a_restore_listens_in_the_directory_of_the_snapshot_that_it_restores() {
 fn captures_refuse_what_a_template_does_not_take() {
     let mut lifecycle = CAPTURE.to_vec();
     lifecycle.extend(["--microvm-lifecycle", "managed"]);
+    // OpenVMM refuses the retired runtime layer before the capture's own checks.
     let mut runtime = CAPTURE.to_vec();
     runtime.extend([
         "--microvm-sandbox-block",
@@ -576,7 +629,7 @@ fn captures_refuse_what_a_template_does_not_take() {
         ),
         (
             runtime,
-            "a capture takes a distro layer and a scratch disk".to_owned(),
+            "invalid --microvm-sandbox-block runtime:file:{dir}/placeholder,ro".to_owned(),
         ),
         (aggregate, "a capture takes no --mount-aggregate".to_owned()),
         (
