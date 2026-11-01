@@ -1074,7 +1074,8 @@ manifest, and the sandbox scratch template, which
 that selects one of them fails before its first scenario when one of those
 files is missing. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
-the Alpine-control-only `sandbox-blocks` and `scratch-snapshot` scenarios and
+the Alpine-control-only `sandbox-blocks`, `scratch-snapshot`, and
+`virtio-features` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
 `platform-zero-fill`, `platform-filesystem`, `platform-aggregate-export`,
 `platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`,
@@ -1115,7 +1116,14 @@ and report. The
 the boot to the managed agent, and runs the ignored `nvx-rs` test
 `tests/managed_lifecycle.rs` with Cargo, which starts OpenVMM with the
 scenario's command line and drives the guest's control session; the scenario
-then checks OpenVMM's outcome report and the guest console. The scenarios that
+then checks OpenVMM's outcome report and the guest console. The
+`virtio-features` scenario boots a guest with every fixed virtio device: the
+NIC, the dormant host filesystem slot, both consoles, and both sandbox blocks.
+The guest reports, for each device, the base of its MMIO window, its virtio
+device ID, and the features that its driver negotiated, and the scenario
+requires exactly the devices and features of
+[Table 2.8](design/2.5-device-topology-transport-and-discovery.md), naming each
+bit that a device has besides its documented ones or lacks. The scenarios that
 run microVMs or sandboxes as the public commands do, or that compile egress
 policies, run [`nvx-rs`](#nvx-rs). The
 command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`
