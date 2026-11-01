@@ -16199,12 +16199,14 @@ class BuildTests(unittest.TestCase):
                 patch.object(ubuntu, "_validate_ubuntu_identity"),
                 patch.object(ubuntu, "load_package_lock", return_value=()),
                 patch.object(ubuntu, "_validate_package_closure"),
+                patch.object(ubuntu, "precompile_python") as precompile,
                 patch.object(ubuntu, "_customize_root"),
                 patch.object(ubuntu.Path, "chmod", autospec=True) as chmod,
             ):
                 self.assertEqual(ubuntu.prepare_root(work), expected_root)
 
             chmod.assert_called_once_with(expected_root, 0o755)
+            precompile.assert_called_once_with(expected_root)
 
     def test_ubuntu_customization_installs_busybox_wget(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -16270,6 +16272,67 @@ class BuildTests(unittest.TestCase):
                         in ensure_symlink.call_args_list
                     )
                     self.assertEqual(linked, has_python3)
+
+    @staticmethod
+    def _python_tree(root: Path, library_name: str) -> Path:
+        library = root / "usr" / "lib" / library_name
+        (library / "package").mkdir(parents=True)
+        (library / "os.py").write_text("PATH = 'os'\n", encoding="utf-8")
+        (library / "package" / "__init__.py").write_text(
+            "def value():\n    return 1\n", encoding="utf-8"
+        )
+        return library
+
+    def test_python_precompile_is_deterministic_unchecked_hash_bytecode(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        runs: list[dict[str, bytes]] = []
+        roots: list[str] = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                roots.append(str(root))
+                library = self._python_tree(root, name)
+                ubuntu.precompile_python(root)
+                runs.append(
+                    {
+                        path.relative_to(library).as_posix(): path.read_bytes()
+                        for path in sorted(library.rglob("*.pyc"))
+                    }
+                )
+        self.assertEqual(len(runs[0]), 2)
+        self.assertEqual(runs[0], runs[1])
+        for relative, data in runs[0].items():
+            with self.subTest(relative=relative):
+                # Bytes 4..8 are the flags: 0b01 is a hash-based file that is
+                # not checked against its source.
+                self.assertEqual(int.from_bytes(data[4:8], "little"), 0b01)
+        # The recorded source path is the one inside the guest, never the
+        # build directory.
+        os_module = runs[0][f"__pycache__/os.{sys.implementation.cache_tag}.pyc"]
+        guest_path = os.path.join(f"/usr/lib/{name}", "os.py")
+        self.assertIn(guest_path.encode(), os_module)
+        for run, root in zip(runs, roots, strict=True):
+            for data in run.values():
+                self.assertNotIn(root.encode(), data)
+
+    def test_python_precompile_needs_the_matching_interpreter(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._python_tree(root, f"python3.{sys.version_info.minor + 1}")
+            with self.assertRaisesRegex(
+                common.ScriptError, "needs a final-release Python"
+            ):
+                ubuntu.precompile_python(root)
+
+    def test_python_precompile_ignores_a_root_without_python(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ubuntu.precompile_python(root)
+            (root / "usr" / "lib").mkdir(parents=True)
+            ubuntu.precompile_python(root)
+            self.assertEqual(sorted(root.rglob("*.pyc")), [])
 
     def test_distro_layer_refuses_existing_output_without_replace(self):
         with tempfile.TemporaryDirectory() as temporary:

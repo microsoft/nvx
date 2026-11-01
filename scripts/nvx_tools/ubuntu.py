@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import compileall
 import gzip
 import hashlib
 import io
@@ -9,10 +10,12 @@ import json
 import lzma
 import os
 import posixpath
+import py_compile
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import uuid
 from collections.abc import Iterable, Sequence
@@ -771,6 +774,45 @@ def _validate_ubuntu_identity(root: Path) -> None:
         )
 
 
+def precompile_python(root: Path) -> None:
+    """Byte-compiles the Python standard library of the root, if it has one.
+
+    The build never runs maintainer scripts, so the packages' own byte-compilation
+    does not happen. Workloads run unprivileged on a root they cannot write to,
+    so without these files every interpreter start recompiles the modules it
+    imports. Unchecked-hash files carry no timestamp and the recorded source
+    path is the path inside the guest rather than the build directory, which
+    keeps the output deterministic. Bytecode only fits the exact minor version
+    of the interpreter that wrote it, so the build interpreter must match.
+    """
+    libraries = sorted(
+        path
+        for path in (root / "usr" / "lib").glob("python3.[0-9]*")
+        if path.is_dir() and not path.is_symlink()
+    )
+    for library in libraries:
+        major, minor = (int(part) for part in library.name[len("python") :].split("."))
+        if (
+            sys.version_info[:2] != (major, minor)
+            or sys.version_info.releaselevel != "final"
+        ):
+            raise ScriptError(
+                f"byte-compiling {library.name} needs a final-release Python "
+                f"{major}.{minor} build interpreter; this is {sys.version.split()[0]}"
+            )
+        if not compileall.compile_dir(
+            str(library),
+            ddir=f"/usr/lib/{library.name}",
+            quiet=1,
+            force=True,
+            workers=1,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        ):
+            raise ScriptError(f"failed to byte-compile {library.name}")
+        for path in (*library.rglob("__pycache__"), *library.rglob("*.pyc")):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+
+
 def prepare_root(work: Path) -> Path:
     work.mkdir(parents=True, exist_ok=True)
     downloads = cache_root() / BuildConstants.DOWNLOAD_DIRECTORY_NAME
@@ -813,6 +855,7 @@ def prepare_root(work: Path) -> Path:
         package_path = package_downloads / filename
         download_verified(package["url"], package_path, package["sha256"])
         _install_deb(root, package, package_path)
+    precompile_python(root)
     _customize_root(root)
     return root
 
