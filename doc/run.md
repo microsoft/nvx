@@ -28,7 +28,12 @@ nvx-rs/target/release/nvx-rs run
 ```
 
 A successful Alpine boot prints both `ALPINE-MICROVM-BOOT-OK` and
-`NVX-GUEST-BOOT-OK: alpine`. Boot Ubuntu userland with the same NVX kernel:
+`NVX-GUEST-BOOT-OK: alpine`. The common init first requires procfs on `/proc`
+and sysfs on `/sys`. If either mount fails and the expected filesystem is
+not already there, it reports `NVX-INIT-ERROR` and exits the VM with status 1
+before the time service and boot-completion banner.
+
+Boot Ubuntu userland with the same NVX kernel:
 
 ```bash
 nvx-rs/target/release/nvx-rs run --guest ubuntu

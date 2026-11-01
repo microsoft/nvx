@@ -18819,6 +18819,89 @@ def _aggregate_child_name(index: int, target: str) -> str:
     return f"{index}-{hashlib.sha256(target.encode()).hexdigest()[:32]}"
 
 
+class InitPseudoMountTests(unittest.TestCase):
+    def _run(
+        self,
+        filesystem: str,
+        *,
+        mount_status: int,
+        existing_type: str,
+        stat_status: int = 0,
+        exit_returns: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        source = (Path(__file__).parents[1] / "guest/common/init").read_text(
+            encoding="utf-8"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            port = (Path(temporary) / "port").as_posix()
+            function = (
+                _shell_function(source, "mount_pseudo")
+                .replace("/dev/port", port)
+                .replace("/bin/busybox mknod", "test_mknod")
+                .replace("/sbin/nvx-exit", "test_exit")
+            )
+            script = (
+                f"mount() {{ return {mount_status}; }}\n"
+                f"stat() {{ printf '%s\\n' '{existing_type}'; "
+                f"return {stat_status}; }}\n"
+                # A mount point of the wrong type must not satisfy the check.
+                "mountpoint() { return 0; }\n"
+                "test_mknod() { printf 'CREATE-PORT %s\\n' \"$*\"; }\n"
+                "test_exit() { printf 'EXIT %s\\n' \"$1\"; "
+                + ("return 1;" if exit_returns else 'exit "$1";')
+                + " }\n"
+                "sleep() { exit 87; }\n"
+                + function
+                + f"\nmount_pseudo {filesystem} /{filesystem}\n"
+                "echo CONTINUED\n"
+            )
+            return subprocess.run(
+                [shell, "-c", script], capture_output=True, text=True, timeout=10
+            )
+
+    def test_successful_mount_continues_without_shutdown(self):
+        result = self._run("proc", mount_status=0, existing_type="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "CONTINUED\n")
+        self.assertEqual(result.stderr, "")
+
+    def test_correct_existing_filesystem_survives_a_failed_mount(self):
+        for filesystem in ("proc", "sysfs"):
+            with self.subTest(filesystem=filesystem):
+                result = self._run(filesystem, mount_status=1, existing_type=filesystem)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "CONTINUED\n")
+
+    def test_wrong_filesystem_stops_before_later_boot_steps(self):
+        for filesystem in ("proc", "sysfs"):
+            for existing in ("tmpfs", "rootfs", ""):
+                with self.subTest(filesystem=filesystem, existing=existing):
+                    result = self._run(
+                        filesystem, mount_status=1, existing_type=existing
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(
+                        f"NVX-INIT-ERROR: cannot mount {filesystem}", result.stderr
+                    )
+                    self.assertIn("CREATE-PORT -m 600 ", result.stdout)
+                    self.assertIn(" c 1 4\nEXIT 1\n", result.stdout)
+                    self.assertNotIn("CONTINUED", result.stdout)
+
+    def test_unreadable_filesystem_stops(self):
+        result = self._run("proc", mount_status=1, existing_type="", stat_status=1)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("CONTINUED", result.stdout)
+
+    def test_shutdown_failure_does_not_resume_boot(self):
+        result = self._run("proc", mount_status=1, existing_type="", exit_returns=True)
+        self.assertEqual(result.returncode, 87)
+        self.assertIn("EXIT 1", result.stdout)
+        self.assertNotIn("CONTINUED", result.stdout)
+
+
 class SandboxShareAgentTests(unittest.TestCase):
     AGENT = Path(__file__).parents[1] / "guest" / "common" / "nvx-init-agent"
 

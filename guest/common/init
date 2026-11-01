@@ -1,8 +1,21 @@
 #!/bin/sh
 # PID 1 for an NVX RAM initramfs. Mounts the pseudo-filesystems, prints a
 # recognizable boot-completion banner, and drops to an interactive shell.
-mount -t proc none /proc
-mount -t sysfs none /sys
+# Accept an existing mount only when it has the requested filesystem type.
+# These mounts precede devtmpfs, so a failed boot may have no /dev/port yet.
+mount_pseudo() {
+    mount -t "$1" none "$2" 2>/dev/null ||
+        [ "$(stat -f -c %T "$2" 2>/dev/null)" = "$1" ] || {
+        echo "NVX-INIT-ERROR: cannot mount $1 on $2" >&2
+        [ -c /dev/port ] || /bin/busybox mknod -m 600 /dev/port c 1 4
+        /sbin/nvx-exit 1
+        while :; do
+            sleep 3600
+        done
+    }
+}
+mount_pseudo proc /proc
+mount_pseudo sysfs /sys
 mount -t devtmpfs none /dev 2>/dev/null || mdev -s
 # The kernel supports modules only so that STRICT_MODULE_RWX keeps runtime
 # code, such as the ITS mitigation thunks, read-only. No module is shipped, so
