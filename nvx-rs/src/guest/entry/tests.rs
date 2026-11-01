@@ -13,10 +13,31 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
-use crate::guest::root::{Call, FakeKernel, Operation, attach_calls};
+use crate::guest::root::tests::{Call, FakeKernel, Operation, attach_calls};
 use crate::guest::spawn::{Command, LaunchFailure, LaunchStage};
-use crate::guest::sys::{ChildStatus, Simulation};
+use crate::guest::sys::ChildStatus;
+use crate::guest::sys::tests::Simulation;
 use crate::protocol::cmdline::write_resolver;
+
+impl Prepared {
+    /// Returns an execution for tests without privileges, whose child starts without new
+    /// namespaces and skips the system calls of every entry stage, so that it keeps the test's
+    /// own root and identity, except that the stage of `failure`, if any, fails with its error.
+    pub(crate) fn simulated(failure: Option<(crate::guest::spawn::LaunchStage, Errno)>) -> Self {
+        Self {
+            child: EntryChild {
+                root: c"/".to_owned(),
+                hostname: DEFAULT_HOSTNAME.as_bytes().into(),
+                simulated: Some(match failure {
+                    Some((stage, error)) => sys::tests::Simulation::Fail(stage, error),
+                    None => sys::tests::Simulation::Skip,
+                }),
+                ..EntryChild::default()
+            },
+            account: None,
+        }
+    }
+}
 
 /// The passwd database of the tests' roots.
 const PASSWD_DATABASE: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n\
@@ -412,7 +433,7 @@ fn account_databases_are_bounded_regular_files_reached_through_no_link() {
     ));
     let root = root_with(Some(PASSWD_DATABASE), None);
     let fifo = sys::path_c_string(&root.path().join("etc/group")).unwrap();
-    sys::create_fifo(&fifo, Mode::from_bits_retain(0o644)).unwrap();
+    sys::tests::create_fifo(&fifo, Mode::from_bits_retain(0o644)).unwrap();
     assert!(matches!(
         account_error(root.path(), identity()),
         AccountError::NotFile(Database::Group)
@@ -510,7 +531,7 @@ fn a_machine_id_is_generated_once_per_file() {
 #[test]
 fn a_generated_machine_id_has_mode_0444_whatever_the_umask() {
     // The umask is the process's, so the test runs alone in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_ENTRY_UMASK_TEST_CHILD",
         "guest::entry::tests::a_generated_machine_id_has_mode_0444_whatever_the_umask",
     ) {
@@ -927,7 +948,7 @@ fn each_entry_stage_reports_its_own_failure_and_runs_nothing() {
 fn a_denied_umask_fails_the_proc_stage_and_runs_nothing() {
     // A seccomp filter lasts as long as the thread that installs it, and passes to the processes
     // that the thread starts, so the test runs in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_ENTRY_DENIED_UMASK_TEST_CHILD",
         "guest::entry::tests::a_denied_umask_fails_the_proc_stage_and_runs_nothing",
     ) {
@@ -937,7 +958,7 @@ fn a_denied_umask_fails_the_proc_stage_and_runs_nothing() {
     let marker = directory.path().join("ran");
     // The simulated stage is no entry stage, so every entry stage succeeds, and the child's own
     // call, which clears its umask before it mounts the view, is the one that fails.
-    sys::deny_system_call(nix::libc::SYS_umask);
+    sys::tests::deny_system_call(nix::libc::SYS_umask);
     let (failure, status, _) = run_released(
         shell(&format!("touch '{}'", marker.display()))
             .enter(simulated(LaunchStage::Credentials, Errno::EPERM)),
@@ -1013,7 +1034,7 @@ fn check_signals(prepared: Prepared) {
 #[test]
 fn an_entered_program_ignores_and_blocks_no_signal_of_its_caller_s() {
     // Ignoring a signal changes the whole process, so the test runs in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_ENTRY_SIGNALS_TEST_CHILD",
         "guest::entry::tests::an_entered_program_ignores_and_blocks_no_signal_of_its_caller_s",
     ) {
@@ -1451,18 +1472,18 @@ fn check_search(entry: &Entry, root: &Path) {
 
 #[test]
 fn privileged_entries_see_their_own_view_and_identity() {
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_ENTRY_PRIVILEGED_TEST_CHILD",
         "guest::entry::tests::privileged_entries_see_their_own_view_and_identity",
     ) {
         return;
     }
-    if !sys::holds_capability(sys::CAP_SYS_ADMIN).unwrap() {
+    if !sys::tests::holds_capability(sys::tests::CAP_SYS_ADMIN).unwrap() {
         return;
     }
     // The test mounts its root in a mount namespace of its own, which only a process with one
     // thread may enter, so a child of the harness's process makes the calls.
-    match sys::fork_isolated_test().unwrap() {
+    match sys::tests::fork_isolated_test().unwrap() {
         sys::ForkResult::Child => {
             let outcome = std::panic::catch_unwind(|| {
                 sys::enter_private_mount_namespace().unwrap();
@@ -1580,17 +1601,17 @@ fn privileged_entries_see_their_own_view_and_identity() {
 
 #[test]
 fn privileged_runtime_binds_are_removed_before_a_teardown() {
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_ENTRY_TEARDOWN_TEST_CHILD",
         "guest::entry::tests::privileged_runtime_binds_are_removed_before_a_teardown",
     ) {
         return;
     }
-    if !sys::holds_capability(sys::CAP_SYS_ADMIN).unwrap() {
+    if !sys::tests::holds_capability(sys::tests::CAP_SYS_ADMIN).unwrap() {
         return;
     }
     // As for the entries' own test, a child of the harness's process makes the calls.
-    match sys::fork_isolated_test().unwrap() {
+    match sys::tests::fork_isolated_test().unwrap() {
         sys::ForkResult::Child => {
             let outcome = std::panic::catch_unwind(|| {
                 use nix::sys::statvfs::{FsFlags, statvfs};

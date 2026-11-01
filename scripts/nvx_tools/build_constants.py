@@ -171,11 +171,6 @@ class GuestRustBuildConstants:
     SOURCE_DIRECTORY: Final = Path("nvx-rs") / "src"
     # The Cargo configuration that a build in the crate reads, and the sources.
     SOURCE_DIRECTORIES: Final = (Path("nvx-rs") / ".cargo", SOURCE_DIRECTORY)
-    # Test-only modules that no guest build compiles, besides `tests.rs` files and
-    # `tests` directories.
-    TEST_MODULES: Final = (
-        SOURCE_DIRECTORY / "guest" / "managed_agent" / "loopback.rs",
-    )
     TOOLCHAIN_FILE: Final = BuildConstants.REPO_ROOT / "rust-toolchain.toml"
     TOOLCHAIN: Final = OpenVMMBuildConstants.RUST_TOOLCHAIN
     TARGET: Final = OpenVMMBuildConstants.MUSL_RUST_TARGET
@@ -214,18 +209,16 @@ class GuestRustBuildConstants:
     # Matches the path, relative to a checkout's root, of every input of the guest
     # executables: SOURCE_FILES, the Cargo configuration, and every source file
     # but the host side, that is, the `host` and `testing` modules and the
-    # binaries other than BINARIES, and the test modules. A guest build fails when
-    # Cargo's dep-info lists a file outside the set that it selects.
+    # binaries other than BINARIES, and the test modules, the `tests.rs` files and
+    # the files of the `tests` directories. A guest build fails when Cargo's
+    # dep-info lists a file outside the set that it selects.
     SOURCE_PATTERN: Final = re.compile(
         "|".join(re.escape(path.as_posix()) for path in SOURCE_FILES)
         + r"|nvx-rs/\.cargo/.+"
         + r"|nvx-rs/src/bin/(?:"
         + "|".join(re.escape(binary) for binary in BINARIES)
         + r")\.rs"
-        + r"|(?!(?:"
-        + "|".join(re.escape(path.as_posix()) for path in TEST_MODULES)
-        + r")$)"
-        + r"nvx-rs/src/(?!bin/|(?:host|testing)(?:/|\.rs$))"
+        + r"|nvx-rs/src/(?!bin/|(?:host|testing)(?:/|\.rs$))"
         + r"(?!(?:[^/]+/)*tests(?:/|\.rs$)).+"
     )
 

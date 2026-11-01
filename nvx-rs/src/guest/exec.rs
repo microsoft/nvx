@@ -1215,7 +1215,7 @@ fn arrived(report: &LaunchReport) -> bool {
 /// lookup is an error.
 fn leads_its_group(process: ProcessId) -> Result<bool, Errno> {
     #[cfg(test)]
-    if let Some(leads) = LEADS.take() {
+    if let Some(leads) = tests::LEADS.take() {
         return Ok(leads);
     }
     match sys::process_group_of(process) {
@@ -1234,33 +1234,16 @@ fn signal_through_pidfd(
     process_group: bool,
 ) -> Result<(), Errno> {
     #[cfg(test)]
-    SENT.with_borrow_mut(|sent| sent.push((signal, process_group)));
+    tests::SENT.with_borrow_mut(|sent| sent.push((signal, process_group)));
     #[cfg(test)]
-    if let Some(error) = REFUSED.get() {
+    if let Some(error) = tests::REFUSED.get() {
         return Err(error);
     }
     #[cfg(test)]
-    if process_group && BEFORE_LINUX_6_9.get() {
+    if process_group && tests::BEFORE_LINUX_6_9.get() {
         return Err(Errno::EINVAL);
     }
     sys::signal_through_pidfd(pidfd, signal, process_group)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// The error with which a test has the kernel refuse this thread's signals through pidfds.
-    static REFUSED: std::cell::Cell<Option<Errno>> = const { std::cell::Cell::new(None) };
-    /// Whether a test has the kernel refuse this thread's signals to process groups through
-    /// pidfds, as a kernel before Linux 6.9 does.
-    static BEFORE_LINUX_6_9: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// The signals that this thread sent through pidfds, in order, each with whether it went to
-    /// a process group.
-    static SENT: std::cell::RefCell<Vec<(i32, bool)>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
-    /// The answer that a test has the next lookup of whether a program leads its process group
-    /// give on this thread.
-    static LEADS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

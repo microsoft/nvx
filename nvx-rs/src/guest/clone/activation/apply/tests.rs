@@ -1547,7 +1547,7 @@ fn a_resolver_file_names_its_dns_server_once_and_every_execution_may_read_it() {
     ];
     for (name, server, text) in cases {
         let path = directory.path().join(name);
-        sys::with_thread_umask(0o077, || write_resolver_file(&path, server)).unwrap();
+        sys::tests::with_thread_umask(0o077, || write_resolver_file(&path, server)).unwrap();
         assert_eq!(fs::read(&path).unwrap(), text);
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o7777, 0o444, "{mode:o}");

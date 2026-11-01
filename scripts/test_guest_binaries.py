@@ -130,10 +130,6 @@ class GuestBinaryBuildTests(unittest.TestCase):
         guest_roots = {
             f"bin/{binary}.rs" for binary in GuestRustBuildConstants.BINARIES
         }
-        test_modules = {
-            path.relative_to(GuestRustBuildConstants.SOURCE_DIRECTORY).as_posix()
-            for path in GuestRustBuildConstants.TEST_MODULES
-        }
         compiled: set[str] = set()
         for path in source.rglob("*"):
             name = path.relative_to(source).as_posix()
@@ -141,9 +137,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             host = parts[0] in ("host", "host.rs", "testing", "testing.rs") or (
                 parts[0] == "bin" and name not in guest_roots
             )
-            test = (
-                "tests" in parts[:-1] or parts[-1] == "tests.rs" or name in test_modules
-            )
+            test = "tests" in parts[:-1] or parts[-1] == "tests.rs"
             if path.is_file() and not host and not test:
                 compiled.add(f"nvx-rs/src/{name}")
         self.assertEqual(
@@ -169,7 +163,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             "nvx-rs/src/bin/nvx-fake-openvmm.rs",
             "nvx-rs/src/protocol/tests.rs",
             "nvx-rs/src/protocol/nvxs/tests/guest.rs",
-            "nvx-rs/src/guest/managed_agent/loopback.rs",
+            "nvx-rs/src/guest/managed_agent/tests/loopback.rs",
         ):
             with self.subTest(omitted=path):
                 self.assertTrue((root / path).is_file())
@@ -207,7 +201,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 "nvx-rs/src/bin/nvx-fake-openvmm.rs",
                 "nvx-rs/src/protocol/tests.rs",
                 "nvx-rs/src/protocol/nvxs/tests/host.rs",
-                "nvx-rs/src/guest/managed_agent/loopback.rs",
+                "nvx-rs/src/guest/managed_agent/tests/loopback.rs",
             )
             for name in (*inputs, *others):
                 path = root / name

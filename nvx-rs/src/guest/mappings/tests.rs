@@ -10,7 +10,29 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::guest::root::{Call, FakeKernel, Operation, attach_calls};
+use crate::guest::root::tests::{Call, FakeKernel, Operation, attach_calls};
+
+mod privileged;
+
+impl Mapped {
+    /// Returns the target, relative to the root.
+    pub(crate) fn target(&self) -> &Path {
+        &self.target
+    }
+}
+
+impl TeardownError {
+    /// Returns the error of a teardown that failed to unmount the mapping at `target`, an
+    /// absolute path in the root, with `error`, for the tests of other modules.
+    pub(crate) fn of(target: impl Into<PathBuf>, error: MappingError) -> Self {
+        Self {
+            failures: vec![UnmountFailure {
+                target: target.into(),
+                error,
+            }],
+        }
+    }
+}
 
 /// A target root at `root` and a source root at `export`, below a temporary directory, each on a
 /// mount of the fake kernel's.
@@ -36,7 +58,7 @@ impl Fixture {
         fs::write(base.join("export/file.txt"), b"file").unwrap();
         std::os::unix::fs::symlink("dir", base.join("export/link")).unwrap();
         let fifo = sys::path_c_string(&base.join("export/fifo")).unwrap();
-        sys::create_fifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
+        sys::tests::create_fifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
         let kernel = FakeKernel::default();
         kernel.add_mount(base.join("root"));
         kernel.add_mount(base.join("export"));
@@ -158,7 +180,7 @@ fn mappings_are_restricted_copies_attached_in_order() {
 fn targets_are_created_with_their_modes_whatever_the_umask() {
     // A caller's restrictive umask neither narrows what a mapper creates, which a workload that
     // is not root must be able to enter, nor changes.
-    sys::with_thread_umask(0o077, || {
+    sys::tests::with_thread_umask(0o077, || {
         let fixture = Fixture::new();
         let kept = fixture.path("root/kept");
         fs::create_dir(&kept).unwrap();
@@ -181,7 +203,7 @@ fn targets_are_created_with_their_modes_whatever_the_umask() {
         ] {
             assert_eq!(mode(&fixture.path(path)), expected, "{path}");
         }
-        assert_eq!(sys::thread_umask(), 0o077);
+        assert_eq!(sys::tests::thread_umask(), 0o077);
     });
 }
 
@@ -193,7 +215,7 @@ fn targets_are_created_with_their_modes_whatever_a_default_acl() {
     let fixture = Fixture::new();
     let restricted = fixture.path("root/restricted");
     fs::create_dir(&restricted).unwrap();
-    if !sys::restrict_new_entries(&restricted) {
+    if !sys::tests::restrict_new_entries(&restricted) {
         return;
     }
     let mut mapper = fixture.mapper(Reserved::default());
@@ -788,7 +810,7 @@ fn what_a_rename_puts_in_the_place_of_a_created_component_keeps_its_mode() {
                 sys::path_c_string(created).unwrap(),
                 sys::path_c_string(&swapped).unwrap(),
             );
-            sys::exchange_paths(&created, &swapped).unwrap();
+            sys::tests::exchange_paths(&created, &swapped).unwrap();
         }
     });
     let mut mapper = fixture.mapper(Reserved::default());

@@ -2640,8 +2640,8 @@ Of this crate, the guest images depend only on the files that this build reads:
 `Cargo.toml`, `Cargo.lock`, `build.rs`, any Cargo configuration in `.cargo/`,
 and every file under `src/` but the host side and the test modules. The host
 side is `src/host/`, `src/testing/`, and the `nvx-rs` and `nvx-fake-openvmm`
-binaries; the test modules are the `tests.rs` files, the `tests` directories,
-and the managed agent's `loopback` harness. CI keys the guest images on those
+binaries; the test modules are the `tests.rs` files and the `tests`
+directories. CI keys the guest images on those
 files, so only a change to one of them rebuilds the images, while every change
 to the crate runs the NVX microVM tests; see
 [Continuous integration](../doc/ci.md#change-classification). Keep
