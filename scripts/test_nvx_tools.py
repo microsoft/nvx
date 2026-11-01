@@ -16199,6 +16199,7 @@ class BuildTests(unittest.TestCase):
                 patch.object(ubuntu, "_validate_ubuntu_identity"),
                 patch.object(ubuntu, "load_package_lock", return_value=()),
                 patch.object(ubuntu, "_validate_package_closure"),
+                patch.object(ubuntu, "require_posix_permissions") as permissions,
                 patch.object(ubuntu, "precompile_python") as precompile,
                 patch.object(ubuntu, "_customize_root"),
                 patch.object(ubuntu.Path, "chmod", autospec=True) as chmod,
@@ -16206,6 +16207,7 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(ubuntu.prepare_root(work), expected_root)
 
             chmod.assert_called_once_with(expected_root, 0o755)
+            permissions.assert_called_once_with(work)
             precompile.assert_called_once_with(expected_root)
 
     def test_ubuntu_customization_installs_busybox_wget(self):
@@ -16333,6 +16335,26 @@ class BuildTests(unittest.TestCase):
             (root / "usr" / "lib").mkdir(parents=True)
             ubuntu.precompile_python(root)
             self.assertEqual(sorted(root.rglob("*.pyc")), [])
+
+    def test_posix_permission_check_follows_the_filesystem(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            with patch.object(ubuntu.sys, "platform", "win32"):
+                ubuntu.require_posix_permissions(work / "never-created")
+
+            with (
+                patch.object(ubuntu.sys, "platform", "linux"),
+                patch.object(ubuntu.stat, "S_IMODE", return_value=0o777),
+                self.assertRaisesRegex(
+                    common.ScriptError, "does not preserve POSIX permissions"
+                ),
+            ):
+                ubuntu.require_posix_permissions(work)
+            self.assertEqual(list(work.iterdir()), [])
+
+            if os.name == "posix":
+                with patch.object(ubuntu.sys, "platform", "linux"):
+                    ubuntu.require_posix_permissions(work)
 
     def test_distro_layer_refuses_existing_output_without_replace(self):
         with tempfile.TemporaryDirectory() as temporary:

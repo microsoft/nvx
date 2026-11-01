@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import uuid
 from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
@@ -813,8 +814,32 @@ def precompile_python(root: Path) -> None:
             path.chmod(0o755 if path.is_dir() else 0o644)
 
 
+def require_posix_permissions(work: Path) -> None:
+    """Rejects a work directory whose filesystem discards permission bits.
+
+    The Ubuntu root is assembled with exact modes, and a filesystem that keeps
+    none of them (a Windows drive seen from WSL) would silently produce a root
+    with the wrong ones. Native Windows has no POSIX modes and cannot run this
+    build, so the check is skipped there.
+    """
+    if sys.platform == "win32":
+        return
+    with tempfile.TemporaryDirectory(prefix="nvx-mode-check-", dir=work) as temporary:
+        probe = Path(temporary) / "probe"
+        probe.write_bytes(b"")
+        for mode in (0o700, 0o600):
+            probe.chmod(mode)
+            if stat.S_IMODE(probe.stat().st_mode) != mode:
+                raise ScriptError(
+                    f"Ubuntu work directory {work} does not preserve POSIX "
+                    "permissions; use a native Linux filesystem (for example "
+                    "/tmp under WSL)"
+                )
+
+
 def prepare_root(work: Path) -> Path:
     work.mkdir(parents=True, exist_ok=True)
+    require_posix_permissions(work)
     downloads = cache_root() / BuildConstants.DOWNLOAD_DIRECTORY_NAME
     downloads.mkdir(parents=True, exist_ok=True)
     archive = downloads / UbuntuBuildConstants.BASE_ARCHIVE_NAME
