@@ -33,10 +33,6 @@ pub(crate) use process::inherit_only;
 pub(crate) use process::{
     LAST_STANDARD_STREAM, PidFd, detach, move_above_standard_streams, process_exists,
 };
-#[cfg(all(test, target_os = "linux"))]
-pub(crate) use process::{
-    clear_close_on_exec, mark_listed_descriptors_on_spawn, refuse_umask_on_spawn,
-};
 #[cfg(target_os = "linux")]
 pub(crate) use socket::{
     connect_nonblocking, peer_pid, send_nonblocking, unread_by_peer, wait_readable, wait_writable,
@@ -46,3 +42,6 @@ pub(crate) use socket::{
 pub(crate) fn effective_ids() -> (u32, u32) {
     (geteuid().as_raw(), getegid().as_raw())
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

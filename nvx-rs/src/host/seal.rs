@@ -245,14 +245,6 @@ pub(crate) fn final_volume_path(file: &File) -> io::Result<std::path::PathBuf> {
     imp::final_volume_path(file)
 }
 
-/// Opens `path` for its metadata alone, so that no read or mapping of its content can succeed
-/// through the file: with `O_PATH` on Linux, and on Windows with `FILE_READ_ATTRIBUTES` alone,
-/// sharing every access.
-#[cfg(all(test, any(target_os = "linux", windows)))]
-pub(crate) fn open_metadata_only(path: &Path) -> io::Result<File> {
-    imp::open_metadata_only(path)
-}
-
 #[cfg(target_os = "linux")]
 /// The Linux seal, from `statx` or `fstat` of the open file.
 mod imp {
@@ -325,16 +317,6 @@ mod imp {
             .custom_flags(OFlag::O_NONBLOCK.bits())
             .open(path)
     }
-
-    /// See [`super::open_metadata_only`]. Linux fails every read and mapping of an `O_PATH`
-    /// descriptor with `EBADF`.
-    #[cfg(test)]
-    pub(super) fn open_metadata_only(path: &Path) -> io::Result<File> {
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(OFlag::O_PATH.bits())
-            .open(path)
-    }
 }
 
 #[cfg(windows)]
@@ -369,4 +351,4 @@ mod imp {
 }
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
-mod tests;
+pub(crate) mod tests;

@@ -9,6 +9,8 @@ use crate::host::filesystem::{Bind, ExportChild, FileIdentity, Owner};
 use crate::host::paths;
 use crate::protocol::root::{RootLayout, RootUpper};
 
+mod specification;
+
 const DISTRO: &str = "distro,distro.erofs,11111111-1111-1111-1111-111111111111";
 
 fn distro() -> SandboxLayer {
@@ -955,7 +957,7 @@ fn launch_validation_rejects_overlapping_or_foreign_host_paths() {
         identity: &same,
         ..mount::HostQueries::native()
     };
-    let error = mount::validate_mount_host_paths_with(&shares, &queries).unwrap_err();
+    let error = mount::tests::validate_mount_host_paths_with(&shares, &queries).unwrap_err();
     assert!(error.to_string().contains("same directory"), "{error}");
     fs::create_dir_all(fixture.path("alias/cache")).unwrap();
     let (work_resolved, alias_resolved) = (resolve(&work), resolve(&fixture.path("alias")));
@@ -974,12 +976,12 @@ fn launch_validation_rejects_overlapping_or_foreign_host_paths() {
         &format!("/opt/hostedtoolcache,{}", fixture.path("alias/cache")),
         MountPolicy::default(),
     );
-    mount::validate_mount_host_paths_with(&shares, &queries).unwrap();
+    mount::tests::validate_mount_host_paths_with(&shares, &queries).unwrap();
     for mounts in [
         [workspace.clone(), cache.clone()],
         [cache.clone(), workspace.clone()],
     ] {
-        let error = mount::validate_mount_host_paths_with(&mounts, &queries).unwrap_err();
+        let error = mount::tests::validate_mount_host_paths_with(&mounts, &queries).unwrap_err();
         assert!(error.to_string().contains("inside the other"), "{error}");
     }
 }

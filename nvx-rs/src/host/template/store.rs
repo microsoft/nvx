@@ -4,7 +4,7 @@
 mod capture;
 mod leases;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 use std::fmt;
 use std::fs::{self, File, TryLockError};
@@ -28,8 +28,6 @@ use crate::host::store::lease::{
     ID_LEN, StoreRecord, hex, read_identity, read_private, read_record, store_error,
 };
 
-#[cfg(all(test, any(target_os = "linux", windows)))]
-pub(super) use self::capture::SNAPSHOT_ARTIFACTS;
 pub(super) use self::capture::SOCKET_PATH_LIMIT;
 pub use self::capture::{CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, TRANSACTION_NAME};
 pub use self::leases::{Acquired, LEASES_NAME, Retirement, TOMBSTONES_NAME};
@@ -496,31 +494,6 @@ pub struct Store {
     dir: PathBuf,
     /// The store's identity.
     id: StoreId,
-}
-
-#[cfg(test)]
-impl Store {
-    /// Publishes a generation of a template, whose fixed time contract names a host and boot of
-    /// its own, for the tests of other modules, and returns it.
-    pub(crate) fn publish_for_tests(&self) -> Generation {
-        tests::publish(
-            self,
-            &super::test_support::ManifestSpec::template(),
-            tests::storage(1),
-        )
-    }
-
-    /// Publishes a capture of `class` whose manifest `spec` encodes, as
-    /// [`publish_for_tests`](Self::publish_for_tests) does, for the tests of the other modules of
-    /// templates, and returns it.
-    #[cfg(any(target_os = "linux", windows))]
-    pub(super) fn publish_spec_for_tests(
-        &self,
-        class: &super::CaptureClass,
-        spec: &super::test_support::ManifestSpec,
-    ) -> Generation {
-        tests::publish_with(self, class, spec, tests::storage(1))
-    }
 }
 
 impl Store {

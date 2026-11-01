@@ -10,7 +10,34 @@ use super::*;
 use crate::host::template::MANIFEST_NAME;
 use crate::host::template::key::CaptureClass;
 use crate::host::template::manifest::TemplateManifest;
-use crate::host::template::test_support::{ManifestSpec, class};
+use crate::host::template::tests::{ManifestSpec, class};
+
+#[cfg(any(target_os = "linux", windows))]
+pub(in crate::host::template) use super::capture::SNAPSHOT_ARTIFACTS;
+
+impl Store {
+    /// Publishes a generation of a template, whose fixed time contract names a host and boot of
+    /// its own, for the tests of other modules, and returns it.
+    pub(crate) fn publish_for_tests(&self) -> Generation {
+        tests::publish(
+            self,
+            &crate::host::template::tests::ManifestSpec::template(),
+            tests::storage(1),
+        )
+    }
+
+    /// Publishes a capture of `class` whose manifest `spec` encodes, as
+    /// [`publish_for_tests`](Self::publish_for_tests) does, for the tests of the other modules of
+    /// templates, and returns it.
+    #[cfg(any(target_os = "linux", windows))]
+    pub(in crate::host::template) fn publish_spec_for_tests(
+        &self,
+        class: &crate::host::template::CaptureClass,
+        spec: &crate::host::template::tests::ManifestSpec,
+    ) -> Generation {
+        tests::publish_with(self, class, spec, tests::storage(1))
+    }
+}
 
 /// A change to a record, as JSON.
 type Change = fn(&mut Value);
@@ -118,7 +145,7 @@ pub(super) fn link_dir(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
-    crate::host::test_support::junction(link, target);
+    crate::host::tests::junction(link, target);
 }
 
 /// Links `link` to the file `target` with a symbolic link, and returns whether it could: Windows
@@ -853,7 +880,7 @@ fn private_directories_belong_to_the_current_user_and_grant_others_nothing() {
     // The check takes the owner and the current user as user IDs, and the permission bits of the
     // directory's mode, without the bits of its type, as the store reads them from its metadata.
     let owner_only_problem = |uid, mode, euid| {
-        platform::owner_only_problem(
+        platform::tests::owner_only_problem(
             Uid::from_raw(uid),
             Mode::from_bits_truncate(mode),
             Uid::from_raw(euid),
@@ -880,7 +907,7 @@ fn private_directories_belong_to_the_current_user_and_grant_others_nothing() {
 #[test]
 fn the_store_is_private_to_the_current_user() {
     let directory = tempfile::tempdir().unwrap();
-    platform::set_access(directory.path(), "D:(A;OICI;FA;;;WD)").unwrap();
+    platform::tests::set_access(directory.path(), "D:(A;OICI;FA;;;WD)").unwrap();
     // A directory that every user may change holds no store, nor does one created in it.
     let error = Store::open(directory.path()).unwrap_err();
     assert!(error.message().ends_with("allows other users"), "{error}");
@@ -891,7 +918,7 @@ fn the_store_is_private_to_the_current_user() {
     assert!(entries(&shared).unwrap().is_empty());
     // Nor does one that allows its owner alone, but passes nothing on to the files created in it,
     // which would take their creator's default list.
-    platform::set_access(&shared, "D:P(A;;FA;;;OW)").unwrap();
+    platform::tests::set_access(&shared, "D:P(A;;FA;;;OW)").unwrap();
     for error in [
         Store::create(&shared).unwrap_err(),
         Store::open(&shared).unwrap_err(),
@@ -921,7 +948,7 @@ fn the_store_is_private_to_the_current_user() {
     }
     // A payload that every user may change is refused.
     let snapshot = payload.join(SNAPSHOT_NAME);
-    platform::set_access(&snapshot, "D:(A;OICI;FA;;;WD)").unwrap();
+    platform::tests::set_access(&snapshot, "D:(A;OICI;FA;;;WD)").unwrap();
     let error = store.snapshot_dir(&published).unwrap_err();
     assert!(error.message().ends_with("allows other users"), "{error}");
     // So is a record or a key whose own list allows others, who could have written it, whatever
@@ -932,7 +959,7 @@ fn the_store_is_private_to_the_current_user() {
         } else {
             store.dir().join(name)
         };
-        platform::set_access(&path, "D:P(A;;FA;;;WD)").unwrap();
+        platform::tests::set_access(&path, "D:P(A;;FA;;;WD)").unwrap();
         let error = match name {
             KEY_NAME => store.read_key(&published).unwrap_err(),
             INDEX_NAME => store.index().unwrap_err(),
@@ -956,11 +983,11 @@ fn snapshots_that_openvmm_published_are_private_without_entries_for_their_files(
     // which allows SYSTEM and the owner, and passes nothing on to the files created in it.
     let openvmm = "D:P(A;;FA;;;SY)(A;;FA;;;OW)";
     let snapshot = payload.join(SNAPSHOT_NAME);
-    platform::set_access(&snapshot.join(MANIFEST_NAME), openvmm).unwrap();
-    platform::set_access(&snapshot, openvmm).unwrap();
+    platform::tests::set_access(&snapshot.join(MANIFEST_NAME), openvmm).unwrap();
+    platform::tests::set_access(&snapshot, openvmm).unwrap();
     assert_eq!(store.snapshot_dir(&published).unwrap(), snapshot);
     // The host's own directories still pass entries on to the files created in them.
-    platform::set_access(&payload, openvmm).unwrap();
+    platform::tests::set_access(&payload, openvmm).unwrap();
     let error = store.snapshot_dir(&published).unwrap_err();
     assert!(
         error
@@ -969,8 +996,8 @@ fn snapshots_that_openvmm_published_are_private_without_entries_for_their_files(
         "{error}"
     );
     // A snapshot whose list allows anyone else is refused.
-    platform::set_access(&payload, "D:P(A;OICI;FA;;;OW)").unwrap();
-    platform::set_access(&snapshot, "D:P(A;;FA;;;SY)(A;;FA;;;OW)(A;;FR;;;WD)").unwrap();
+    platform::tests::set_access(&payload, "D:P(A;OICI;FA;;;OW)").unwrap();
+    platform::tests::set_access(&snapshot, "D:P(A;;FA;;;SY)(A;;FA;;;OW)(A;;FR;;;WD)").unwrap();
     let error = store.snapshot_dir(&published).unwrap_err();
     assert!(error.message().ends_with("allows other users"), "{error}");
 }

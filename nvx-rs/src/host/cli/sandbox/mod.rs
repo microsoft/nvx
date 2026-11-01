@@ -48,8 +48,6 @@ use self::options::sandbox_network;
 pub(super) use self::options::{
     HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, hypervisor, parse, path_text,
 };
-#[cfg(test)]
-pub(super) use self::options::{OPTIONS, SYNTAX};
 pub(crate) use self::options::{Options, path_string};
 use self::state::RecordedDistro;
 
@@ -392,4 +390,4 @@ fn prepare_run(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

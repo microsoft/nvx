@@ -308,15 +308,6 @@ impl Curl {
         }
     }
 
-    /// Returns a `curl` that also speaks plain HTTP, to the servers of tests.
-    #[cfg(test)]
-    pub(super) fn plain() -> Self {
-        Self {
-            https_only: false,
-            ..Self::new()
-        }
-    }
-
     /// Runs `request`, and returns its response; a failure names `context`.
     fn request(&self, request: &Request<'_>, context: &str) -> Result<Response> {
         remove_stale(request.output)?;

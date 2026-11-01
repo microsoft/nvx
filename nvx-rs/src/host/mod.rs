@@ -83,4 +83,4 @@ pub mod supervisor;
 mod sys;
 pub mod template;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod tests;

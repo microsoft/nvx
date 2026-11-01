@@ -4,6 +4,7 @@ use std::fs;
 
 use proptest::prelude::*;
 
+pub(in crate::host::cli) use super::options::{OPTIONS, SYNTAX};
 use super::*;
 use crate::host::paths::resolve;
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};

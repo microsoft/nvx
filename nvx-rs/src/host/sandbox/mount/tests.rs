@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::aggregate::plan_mounts_with;
+pub(crate) use super::host_paths::validate_mount_host_paths_with;
 use super::request::require_mount_owner_supported_on;
 use super::*;
 use crate::ErrorKind;

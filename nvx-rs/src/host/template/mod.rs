@@ -91,7 +91,7 @@ mod manifest;
 mod plan;
 mod store;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod tests;
 mod wire;
 
 pub use self::clone::{

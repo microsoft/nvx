@@ -10,7 +10,7 @@ use crate::ErrorKind;
 use crate::contract;
 use crate::host::filesystem::FileIdentity;
 use crate::host::process::{BootId, Process, ProcessRef};
-use crate::host::test_support::released;
+use crate::host::tests::released;
 
 /// A launch capability.
 const CAPABILITY: [u8; CAPABILITY_LEN] = [7; CAPABILITY_LEN];
@@ -657,7 +657,7 @@ fn stores_belong_to_the_current_user_with_mode_700() {
     // The check takes the owner and the current user as user IDs, and the permission bits of the
     // directory's mode, without the bits of its type, as the store reads them from its metadata.
     let store_dir_problem = |uid, mode, euid| {
-        platform::store_dir_problem(
+        platform::tests::store_dir_problem(
             Uid::from_raw(uid),
             Mode::from_bits_truncate(mode),
             Uid::from_raw(euid),
@@ -689,7 +689,7 @@ fn stores_belong_to_the_current_user_with_mode_700() {
 #[test]
 fn the_store_is_private_to_the_current_user() {
     let directory = tempfile::tempdir().unwrap();
-    platform::set_access(directory.path(), "D:(A;OICI;FA;;;WD)").unwrap();
+    platform::tests::set_access(directory.path(), "D:(A;OICI;FA;;;WD)").unwrap();
     // A directory that every user may change holds no store, nor does one created in it.
     let error = SandboxStore::open(directory.path()).unwrap_err();
     assert!(error.message().ends_with("allows other users"), "{error}");
@@ -699,7 +699,7 @@ fn the_store_is_private_to_the_current_user() {
     assert!(error.message().ends_with("allows other users"), "{error}");
     // Nor does one that allows its owner alone, but passes nothing on to the files created in it,
     // which would take their creator's default list.
-    platform::set_access(&shared, "D:P(A;;FA;;;OW)").unwrap();
+    platform::tests::set_access(&shared, "D:P(A;;FA;;;OW)").unwrap();
     for error in [
         SandboxStore::create(&shared).unwrap_err(),
         SandboxStore::open(&shared).unwrap_err(),
@@ -730,7 +730,7 @@ fn the_store_is_private_to_the_current_user() {
     // A record or a capability whose own list allows others could have been written by them,
     // whatever the directory allows, and is refused.
     for name in [JOURNAL_NAME, CAPABILITY_NAME] {
-        platform::set_access(&store.path(name), "D:P(A;;FA;;;WD)").unwrap();
+        platform::tests::set_access(&store.path(name), "D:P(A;;FA;;;WD)").unwrap();
         assert_eq!(
             problem(name).as_deref(),
             Some("allows other users"),
@@ -760,7 +760,7 @@ fn the_store_is_private_to_the_current_user() {
     );
     // So is a lock file whose own list allows others, who could hold its lock.
     drop(locked);
-    platform::set_access(&store.path(LOCK_NAME), "D:P(A;;FA;;;WD)").unwrap();
+    platform::tests::set_access(&store.path(LOCK_NAME), "D:P(A;;FA;;;WD)").unwrap();
     let error = store.lock(None).unwrap_err();
     assert_eq!(error.message(), refused("sandbox lock", LOCK_NAME));
 }

@@ -18,9 +18,10 @@ use crate::host::sandbox::scratch::{self, ScratchBinding};
 use crate::host::sandbox::{
     LayerRole, SandboxDistro, SandboxLaunch, SandboxLayer, SandboxSettings, SandboxUpper,
 };
-use crate::host::seal::{FileSeal, open_metadata_only};
+use crate::host::seal::FileSeal;
+use crate::host::seal::tests::open_metadata_only;
 #[cfg(windows)]
-use crate::host::test_support::junction;
+use crate::host::tests::junction;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 

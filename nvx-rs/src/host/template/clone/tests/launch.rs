@@ -30,8 +30,8 @@ use crate::host::template::Retirement;
 use crate::host::template::clone::launch::{Hooks, Point};
 use crate::host::template::clone::reattach::{reattach_clone_syncing, reattach_clone_with};
 use crate::host::template::clone::records::{read_failure, read_progress, write_failure};
-use crate::host::template::store::SNAPSHOT_ARTIFACTS;
-use crate::host::template::test_support::artifact;
+use crate::host::template::store::tests::SNAPSHOT_ARTIFACTS;
+use crate::host::template::tests::artifact;
 
 /// The environment variable that names the template store of a [`launch_role`].
 const ROLE_STORE: &str = "NVX_CLONE_LAUNCH_TEST_STORE";
