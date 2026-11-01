@@ -157,6 +157,7 @@ nvx/
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI
+|   |-- check_test_layout.py     Check that tests live apart from the code that they test
 |   |-- module_diagrams.py       Module diagram generator of the nvx crate
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
@@ -164,6 +165,7 @@ nvx/
 |   |-- powershell_testing.py    PowerShell launches of the unit tests, under a shared default time limit
 |   |-- publish_development_release.py Development release publisher run by CI
 |   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
+|   |-- test-layout-allowlist.json The test hooks and tests that production files may hold
 |   `-- test_*.py                Python tooling unit tests
 |-- tests/                       Tests that build on the repository's crates from outside them
 |   `-- runtime-adapter/         Rust crate `runtime-adapter`, an independent adapter of nvx
@@ -330,7 +332,10 @@ the storage events of a failed Windows benchmark job, as
 beside `nvx.py` are the tooling's unit tests. They launch PowerShell through
 `powershell_testing.py`, which gives each launch a shared default time limit
 and reports what a launch that outlasts its limit printed, at once on stderr
-and in the test's failure.
+and in the test's failure. `check_test_layout.py` checks that every test of the
+repository lives in a test file, and that production files hold only the test
+hooks that `test-layout-allowlist.json` allows them; see
+[Test layout](contribute.md#test-layout).
 
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners
 using the [tool manifest](../scripts/setup/tool-versions.conf);

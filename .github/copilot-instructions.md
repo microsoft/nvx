@@ -33,6 +33,16 @@
   nested repository. Do not claim unavailable hardware or cross-platform gates
   passed; report the missing prerequisite and rely on CI when appropriate.
 
+## Tests
+
+- Put a Rust module's unit tests in its `tests` module, in files of their own
+  (`src/a/b.rs` declares `#[cfg(test)] mod tests;` and keeps them in
+  `src/a/b/tests.rs`), never inline or as test-only items in production files.
+  Python unit tests are `test_*.py` modules in `scripts/`. Run
+  `python3 scripts/check_test_layout.py`; a test hook that cannot move needs an
+  entry in `scripts/test-layout-allowlist.json`, and moving test code out needs
+  `--tighten`. See [Test layout](../doc/contribute.md#test-layout).
+
 ## Documentation
 
 - In [`nvx-rs/README.md`](../nvx-rs/README.md#layout), each row of the module

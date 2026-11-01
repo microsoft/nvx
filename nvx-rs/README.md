@@ -2658,6 +2658,14 @@ cd nvx-rs
 NVX_BUNDLE=skip cargo test --all-features   # unit, conformance-vector, property, and fake-OpenVMM tests
 ```
 
+A module's unit tests belong in its `tests` module, out of line, in the
+module's `tests.rs` file or in the files of its `tests` directory, which only
+tests compile, with its fixtures and test helpers. Production code holds no
+tests, only the test hooks that
+[`test-layout-allowlist.json`](../scripts/test-layout-allowlist.json) allows,
+but for the files that predate the layout, as
+[Test layout](../doc/contribute.md#test-layout) describes.
+
 The tests need no hypervisor. The fake-OpenVMM test drives `Instance` end to end
 against `nvx-fake-openvmm`, and the template-capture test runs templates'
 captures through the supervisor against it, up to a crash of the adapter whose
