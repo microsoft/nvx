@@ -1524,7 +1524,7 @@ sets.
 restore metric from a 2-, 4-, or 8-vCPU run.
 `--lifecycle-input` validates and merges a 128 MiB, guest-exit `e2e` JSON
 result, producing the 29-metric microVM CI result. A directory whose metadata
-selects `device-io` is collected as five additional ABI-2, one-vCPU `ops/s`
+selects `device-io` is collected as five additional ABI-3, one-vCPU `ops/s`
 metrics; CI merges them into a 34-metric one-vCPU result.
 `--lifecycle-attempt-log` reads the attempt log that `validate-openvmm`
 records. The `--lifecycle-input` file must be a byte-identical copy of exactly

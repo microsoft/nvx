@@ -36,6 +36,7 @@ DIRECTIONS = {"lower", "higher"}
 MICROVM_PROCESSOR_COUNTS = {
     1: frozenset({1}),
     2: frozenset({1, 2, 4, 8}),
+    3: frozenset({1, 2, 4, 8}),
 }
 SHARED_METRICS = frozenset(
     {

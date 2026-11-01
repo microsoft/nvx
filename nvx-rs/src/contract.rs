@@ -52,13 +52,16 @@
 //! rest of the crate.
 
 /// OpenVMM microVM ABI version this crate drives.
-pub const MICROVM_ABI_VERSION: u64 = 2;
+///
+/// Version 3 offers no device `VIRTIO_F_ACCESS_PLATFORM` and no console `VIRTIO_CONSOLE_F_SIZE`,
+/// which version 2 offered, so OpenVMM and this crate refuse a template of version 2.
+pub const MICROVM_ABI_VERSION: u64 = 3;
 /// Version of the boot contract this crate speaks; see the [module](self) for when it changes.
 ///
 /// Until version 3, the runtime identity recorded the microVM ABI version, 2, as the boot
 /// contract. Version 3 names the format of a layered root's image, `erofs` or `gpt`, in its boot
-/// token, and keeps the root's upper in RAM if asked.
-pub const BOOT_CONTRACT_VERSION: u64 = 3;
+/// token, and keeps the root's upper in RAM if asked. Version 4 boots guests on microVM ABI 3.
+pub const BOOT_CONTRACT_VERSION: u64 = 4;
 /// Control-console broker protocol version this crate speaks.
 pub const CONTROL_SESSION_PROTOCOL_VERSION: u64 = 1;
 /// Control contract revision this crate speaks.

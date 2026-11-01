@@ -12,19 +12,20 @@ against its own idea of them.
 | [`platform-kvm`](platform-kvm) | A KVM microVM of 2 processors and 512 MiB of RAM, of a capacity of 2 GiB, with a `distro` of 1 GiB, a fresh scratch of 64 MiB, the dormant filesystem slot, a console, a control console, and no NIC |
 | [`platform-mshv-network`](platform-mshv-network) | The same on MSHV, with a fixed NIC at `10.0.0.2/24`, its IPv6 identity, and an allow-list policy |
 
-Both are platform-tier captures for clones, after the invariant configuration
-alone, with OpenVMM's test records of the time contract, of time ABI version 2,
-and of the CPU profile `intel.icelake-sp.v1`.
+Both are platform-tier captures for clones of microVM ABI version 3, whose
+devices offer no access-platform and whose consoles offer no size, after the
+invariant configuration alone, with OpenVMM's test records of the time
+contract, of time ABI version 2, and of the CPU profile `intel.icelake-sp.v1`.
 
 ## How they were made
 
 [`generate.rs`](generate.rs) builds each manifest as a capture does, with
 `microvm_machine_contract` of OpenVMM's `openvmm_helpers`, checks it with
 OpenVMM's own validation, and encodes it with `mesh`. It wrote these files at
-OpenVMM commit `75765b6608c3dd1f0be49fc4d5c1fc84a7b6ce96`.
+OpenVMM commit `b9b1f8f6d41bcb7cc9b2d1ec7c836b30f5dc7718`.
 
-To write them again, as when a new version of the snapshot format or of the
-time ABI retires these, append `generate.rs` to
+To write them again, as when a new version of the snapshot format, the time
+ABI, or the microVM ABI retires these, append `generate.rs` to
 `openvmm/openvmm_helpers/src/snapshot/microvm.rs` in a scratch checkout of the
 pinned OpenVMM, and run, from that checkout's root:
 

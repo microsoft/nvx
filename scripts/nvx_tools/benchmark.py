@@ -5128,7 +5128,7 @@ def run_workload_benchmarks(
                 / "data"
                 / "runs"
                 / platform
-                / "microvm-v2"
+                / f"microvm-v{OpenVMMBuildConstants.MICROVM_ABI_VERSION}"
                 / "1vcpu"
                 / "device-io"
             )

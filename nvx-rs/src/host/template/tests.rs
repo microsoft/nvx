@@ -620,7 +620,7 @@ impl ManifestSpec {
         let platform = DeviceSpec::platform;
         let mut contract = ContractSpec {
             machine_profile: "microvm".to_owned(),
-            abi_version: 2,
+            abi_version: crate::contract::MICROVM_ABI_VERSION as u32,
             source_hypervisor: "kvm".to_owned(),
             command_line: COMMAND_LINE.to_owned(),
             command_line_digest: None,
@@ -680,7 +680,7 @@ impl ManifestSpec {
                     "virtiofs",
                     0xd000_1000,
                     6,
-                    0x3_3000_0000,
+                    0x1_3000_0000,
                     2,
                 ),
                 DeviceSpec::virtio(
@@ -689,7 +689,7 @@ impl ManifestSpec {
                     "virtio-console",
                     0xd000_2000,
                     7,
-                    0x3_3000_0001,
+                    0x1_3000_0000,
                     2,
                 ),
                 DeviceSpec::virtio(
@@ -698,7 +698,7 @@ impl ManifestSpec {
                     "virtio-blk",
                     0xd000_3000,
                     4,
-                    0x3_3000_0664,
+                    0x1_3000_0664,
                     1,
                 ),
                 DeviceSpec::virtio(
@@ -707,7 +707,7 @@ impl ManifestSpec {
                     "virtio-blk",
                     0xd000_6000,
                     11,
-                    0x3_3000_0644,
+                    0x1_3000_0644,
                     1,
                 ),
                 DeviceSpec::virtio(
@@ -716,7 +716,7 @@ impl ManifestSpec {
                     "virtio-control-console",
                     0xd000_7000,
                     3,
-                    0x3_3000_0001,
+                    0x1_3000_0000,
                     2,
                 ),
             ],

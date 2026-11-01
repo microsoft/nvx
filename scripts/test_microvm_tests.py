@@ -1226,7 +1226,7 @@ class _FakeSandboxCli:
                         "openvmm": "sha256:" + "1" * 64,
                         "kernel": "sha256:" + "2" * 64,
                         "initramfs": "sha256:" + "3" * 64,
-                        "bootContract": 3,
+                        "bootContract": 4,
                         "controlContract": "nvx-microvm-v2-control-v2",
                         "controlSession": 1,
                     },

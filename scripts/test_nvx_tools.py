@@ -94,6 +94,10 @@ from nvx_tools.time_abi import (  # noqa: E402
 )
 from powershell_testing import run_powershell  # noqa: E402
 
+# The directory, under a platform's runs, of the benchmarks of the microVM ABI
+# that this checkout builds, which the benchmark actions name.
+MICROVM_RUN_DIRECTORY = f"microvm-v{OpenVMMBuildConstants.MICROVM_ABI_VERSION}"
+
 
 def _workflow_job(workflow: str, job_name: str) -> str:
     lines = workflow.splitlines()
@@ -770,7 +774,7 @@ def _write_release_fixture(
         "format": 1,
         "distribution": {"name": "nvx", "version": "0.1.0"},
         "openvmm": {
-            "microvm_abi_version": 2,
+            "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
             "time_abi_version": 2,
             "restore_packet_version": 5,
             "control_session_protocol_version": 1,
@@ -969,7 +973,7 @@ def _expected_restore_remeasurement(
     published: dict[int, int] = {}
     validations = iter(statuses)
     for processors in processor_counts:
-        run_dir = f"data/runs/{platform}/microvm-v2/{processors}vcpu"
+        run_dir = f"data/runs/{platform}/{MICROVM_RUN_DIRECTORY}/{processors}vcpu"
         for attempt in (1, 2):
             attempt_dir = f"{run_dir}/{suite}-attempt-{attempt}"
             measured[processors, attempt] = len(measured) + 1
@@ -12467,7 +12471,7 @@ function python {
                     / "data"
                     / "runs"
                     / "windows-whp-virtual-machine"
-                    / "microvm-v2"
+                    / MICROVM_RUN_DIRECTORY
                     / "1vcpu"
                     / "acceptance.json"
                 )
@@ -12959,7 +12963,7 @@ function python {
                     / "data"
                     / "runs"
                     / "windows-whp-virtual-machine"
-                    / "microvm-v2"
+                    / MICROVM_RUN_DIRECTORY
                     / "1vcpu"
                 )
                 output.mkdir(parents=True)
@@ -12998,7 +13002,7 @@ function python {
                         else []
                     ),
                     [
-                        "data/runs/windows-whp-virtual-machine/microvm-v2/1vcpu/"
+                        f"data/runs/windows-whp-virtual-machine/{MICROVM_RUN_DIRECTORY}/1vcpu/"
                         "acceptance-attempts.json"
                     ]
                     * (0 if benchmark_status else len(statuses)),
@@ -13082,7 +13086,7 @@ python3() {
                 "NVX_BENCHMARK_MARKER_TIMEOUT": "40",
             }
         )
-        run_dir = f"data/runs/{platform}/microvm-v2/1vcpu"
+        run_dir = f"data/runs/{platform}/{MICROVM_RUN_DIRECTORY}/1vcpu"
         for name, statuses, benchmark_status in (
             ("first-success", (0,), 0),
             ("remeasured-success", (75, 0), 0),
@@ -13174,7 +13178,7 @@ python3() {
         published: dict[int, int],
     ) -> None:
         for processors in processor_counts:
-            run_dir = root / "data" / "runs" / platform / "microvm-v2"
+            run_dir = root / "data" / "runs" / platform / MICROVM_RUN_DIRECTORY
             run_dir /= f"{processors}vcpu"
             attempts = sorted(
                 attempt for count, attempt in measured if count == processors
@@ -13286,7 +13290,7 @@ python3() {
                     root = Path(temporary).resolve()
                     # A rerun in the same directory must not keep an attempt
                     # of the previous run.
-                    stale = root / "data" / "runs" / platform / "microvm-v2"
+                    stale = root / "data" / "runs" / platform / MICROVM_RUN_DIRECTORY
                     stale /= f"{processor_counts[0]}vcpu/{suite}-attempt-2"
                     stale.mkdir(parents=True)
                     (stale / f"{suite}.log").write_text("stale\n", encoding="utf-8")
@@ -13606,7 +13610,7 @@ function python {
                     root = Path(temporary).resolve()
                     # A rerun in the same directory must not keep an attempt
                     # of the previous run.
-                    stale = root / "data" / "runs" / platform / "microvm-v2"
+                    stale = root / "data" / "runs" / platform / MICROVM_RUN_DIRECTORY
                     stale /= f"{processor_counts[0]}vcpu/{suite}-attempt-2"
                     stale.mkdir(parents=True)
                     (stale / f"{suite}.log").write_text("stale\n", encoding="utf-8")
@@ -15661,7 +15665,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(
             manifest["openvmm"],
             {
-                "microvm_abi_version": 2,
+                "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
                 "time_abi_version": 2,
                 "restore_packet_version": 5,
                 "control_session_protocol_version": 1,
@@ -24641,7 +24645,7 @@ class BenchmarkTests(unittest.TestCase):
             )
             self.assertEqual(metadata["platform"], "windows-whp-baremetal")
             self.assertEqual(metadata["backend"], "whp")
-            self.assertEqual(metadata["microvm_abi_version"], 2)
+            self.assertEqual(metadata["microvm_abi_version"], 3)
             self.assertEqual(metadata["processors"], 8)
             self.assertEqual(metadata["host_affinity_set"], args.cpus)
             self.assertEqual(metadata["host_cpu_reserve"], args.host_cpu_reserve)
@@ -24783,7 +24787,12 @@ class BenchmarkTests(unittest.TestCase):
                     backend,
                 )
 
-            output = repository / "data" / "runs" / f"{platform}-microvm-v2-1vcpu"
+            output = (
+                repository
+                / "data"
+                / "runs"
+                / f"{platform}-{MICROVM_RUN_DIRECTORY}-1vcpu"
+            )
             self.assertEqual(
                 {path.name for path in output.iterdir()},
                 {
@@ -24834,7 +24843,7 @@ class BenchmarkTests(unittest.TestCase):
                 / "data"
                 / "runs"
                 / platform
-                / "microvm-v2"
+                / MICROVM_RUN_DIRECTORY
                 / "1vcpu"
                 / "device-io"
             )
@@ -25604,7 +25613,7 @@ class ReleaseTests(unittest.TestCase):
             )
             self.assertEqual(
                 manifest["openvmm"]["microvm_abi_version"],
-                2,
+                3,
             )
             self.assertEqual(
                 manifest["openvmm"]["control_session_protocol_version"],

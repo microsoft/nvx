@@ -31,9 +31,12 @@ Use this page for metric names and methodology. Current historical p50 values li
 virtual-machine results have separate histories and must not be compared as one regression series.
 ABI version and processor count are also separate history dimensions. Legacy
 CSV rows are interpreted as ABI v1 with one vCPU; they are never used as an
-ABI-v2 one-vCPU baseline.
-New runs always emit ABI value 2 and remain stored under `microvm-v2` paths so
-they cannot collide with legacy unsuffixed ABI-1 history.
+ABI-v2 or ABI-v3 one-vCPU baseline.
+New runs emit ABI value 3 and are stored under `microvm-v3` paths, so they
+cannot collide with the legacy unsuffixed ABI-1 history or with the `microvm-v2`
+history. ABI 3 began new series because its devices stopped offering
+`VIRTIO_F_ACCESS_PLATFORM`, so that its guests stopped mapping virtio buffers
+through the DMA API.
 The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
 through the supported NVX CLI. Guest payloads live in `scripts/nvx_tools/benchmark_scripts`; the
 coordinator fills the `.sh.in` templates before use.
@@ -71,20 +74,20 @@ Run the acceptance and diagnostic suites with:
 
 ```console
 python3 scripts/nvx.py benchmark --suite boot --backend whp
-python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-baremetal --processors 1 --memory-mib 128 --output data/runs/linux-kvm-baremetal/microvm-v2/1vcpu/acceptance.json
+python3 scripts/nvx.py benchmark --suite e2e --backend kvm --platform linux-kvm-baremetal --processors 1 --memory-mib 128 --output data/runs/linux-kvm-baremetal/microvm-v3/1vcpu/acceptance.json
 ```
 
 Run the complete performance suite with:
 
 ```console
 # Linux/KVM: run all 21 metrics and write collector-compatible logs
-python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu
+python3 scripts/nvx.py benchmark --suite performance --backend kvm --platform linux-kvm-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v3/1vcpu
 
 # Linux/MSHV: run all 21 metrics
-python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v2/1vcpu
+python3 scripts/nvx.py benchmark --suite performance --backend mshv --platform linux-mshv-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data/runs/linux-mshv-baremetal/microvm-v3/1vcpu
 
 # Windows/WHP
-python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu
+python scripts\nvx.py benchmark --suite performance --backend whp --platform windows-whp-baremetal --processors 1 --runs 5 --virtfs-runs 3 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v3\1vcpu
 ```
 
 Run the canonical device operation-rate suite with its default five warmups, 30 retained attempts
@@ -92,12 +95,12 @@ per device, ten-second operation windows, and 512 MiB backing objects:
 
 ```console
 # Linux/KVM; use --backend mshv and the matching platform on Linux/MSHV.
-python3 scripts/nvx.py benchmark --suite device-io --backend kvm --platform linux-kvm-baremetal --processors 1 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu/device-io
-python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/1vcpu/device-io --output-dir data/results
+python3 scripts/nvx.py benchmark --suite device-io --backend kvm --platform linux-kvm-baremetal --processors 1 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v3/1vcpu/device-io
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v3/1vcpu/device-io --output-dir data/results
 
 # Windows/WHP.
-python scripts\nvx.py benchmark --suite device-io --backend whp --platform windows-whp-baremetal --processors 1 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu\device-io
-python scripts\nvx.py performance collect --platform windows-whp-baremetal --commit HEAD --input-dir data\runs\windows-whp-baremetal\microvm-v2\1vcpu\device-io --output-dir data\results
+python scripts\nvx.py benchmark --suite device-io --backend whp --platform windows-whp-baremetal --processors 1 --skip-build --output-dir data\runs\windows-whp-baremetal\microvm-v3\1vcpu\device-io
+python scripts\nvx.py performance collect --platform windows-whp-baremetal --commit HEAD --input-dir data\runs\windows-whp-baremetal\microvm-v3\1vcpu\device-io --output-dir data\results
 ```
 
 For a smoke test, pass `--warmups 0 --runs 1 --device-io-duration-seconds 1`.
@@ -105,8 +108,8 @@ For a smoke test, pass `--warmups 0 --runs 1 --device-io-duration-seconds 1`.
 Run the restore-only shape used by CI for higher-vCPU coverage with:
 
 ```console
-python3 scripts/nvx.py benchmark --suite shell-snapshot-restore --backend kvm --platform linux-kvm-baremetal --processors 8 --shell-memories 512 --warmups 1 --runs 5 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu
-python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu --output-dir data/results --require-shell-snapshot-restore-512
+python3 scripts/nvx.py benchmark --suite shell-snapshot-restore --backend kvm --platform linux-kvm-baremetal --processors 8 --shell-memories 512 --warmups 1 --runs 5 --skip-build --output-dir data/runs/linux-kvm-baremetal/microvm-v3/8vcpu
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v3/8vcpu --output-dir data/results --require-shell-snapshot-restore-512
 ```
 
 Measure restore-time vCPU activation from one immutable capacity-8 snapshot
@@ -263,7 +266,7 @@ Benchmark measurements force OpenVMM logging off to avoid changing the measured 
 Collect a completed suite with:
 
 ```console
-python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v2/8vcpu --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm-baremetal/microvm-v2/8vcpu/acceptance.json
+python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --commit HEAD --input-dir data/runs/linux-kvm-baremetal/microvm-v3/8vcpu --output-dir data/results --require-network --require-shell-snapshot --require-shared-suite --lifecycle-input data/runs/linux-kvm-baremetal/microvm-v3/8vcpu/acceptance.json
 ```
 
 ## Benchmark commands
@@ -629,7 +632,7 @@ successful packets.
 unless it contains exactly the 21 shared metrics. Supplying `--lifecycle-input` requires and merges
 the eight lifecycle metrics, producing a 29-metric one-vCPU result. CI collects the five device
 operation-rate metrics from their separate raw-log directory and merges them by ABI, processor
-count, commit, and metric, producing the final 34-metric ABI-2 one-vCPU result. Higher-vCPU
+count, commit, and metric, producing the final 34-metric ABI-3 one-vCPU result. Higher-vCPU
 collection uses `--require-shell-snapshot-restore-512`, which requires exactly
 `shell_snapshot_restore_512_mib` plus canonical one-warmup/five-sample metadata for a 2-, 4-, or
 8-vCPU guest. A `device-io` directory is recognized from metadata and must contain exactly its five
@@ -854,7 +857,7 @@ accept the new host and reset the series' history, as
 [Expected benchmark hosts](#expected-benchmark-hosts) describes. For a change that the
 host doesn't record, such as a performance tier or bursting setting, reset at least the
 affected metrics by removing them from the series' history files, such as
-`data/windows-whp-virtual-machine-microvm-v2-1vcpu.csv`, so that the gate restarts
+`data/windows-whp-virtual-machine-microvm-v3-1vcpu.csv`, so that the gate restarts
 their ten-point warmup instead of comparing the new storage with the old baseline.
 Results measured before such a reset commit are not persisted into the reset
 series, so a `dev` run that finishes after the reset cannot refill it. The
@@ -954,7 +957,7 @@ pull request that, in one change:
 1. Replaces `data/<platform>-host.json` with the runner's host from the failed check's step
    summary or diagnostics artifact.
 2. Resets the series by truncating each of its history files, such as
-   `data/<platform>-microvm-v2-1vcpu.csv`, to its header line.
+   `data/<platform>-microvm-v3-1vcpu.csv`, to its header line.
 3. For a Linux/MSHV host with another hypervisor build or kernel, moves the pins of the MSHV
    packages in [`linux_mshv.py`](../scripts/setup/azure/nvx_azure/linux_mshv.py) to the new
    host's releases, which a test compares with the host file. Runners install the pinned
