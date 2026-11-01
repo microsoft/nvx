@@ -2573,12 +2573,10 @@ Windows packages are ZIP archives, which need bsdtar (Windows' own `tar`) or
 `unzip`. Every staged file must match the source's `SHA256SUMS`, a download
 must match its pinned digest, and the release must declare the microVM, time,
 restore-packet, control-session, and control contracts of `nvx::contract`. The
-build script extracts and verifies only the files that
-the bundle holds, so a release that ships `bin/nvx-rs[.exe]` stages as the
-older release that `artifacts.json` pins, which doesn't. The build scripts of
-dependents receive the staged
-directory as `DEP_NVX_ARTIFACTS_DIR` and can ship it next to their executables
-as `nvx/`.
+build script extracts and verifies only the files that the bundle holds, and
+leaves out the rest of the release, such as `bin/nvx-rs[.exe]`. The build
+scripts of dependents receive the staged directory as `DEP_NVX_ARTIFACTS_DIR`
+and can ship it next to their executables as `nvx/`.
 
 ## Guest binaries
 
