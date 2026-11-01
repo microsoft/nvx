@@ -6,12 +6,12 @@ address 0x30000. Each fixed virtio-mmio slot owns one naturally aligned u32
 in that page. The host atomically ORs interrupt status into the word and
 pulses an edge-triggered IRQ when the old value was zero.
 
-Detect the ABI through the reserved PVH E820 page and map each fixed MMIO
-slot to its stable status word. Consume status with xchg so the steady-state
-interrupt path performs neither an ISR-status MMIO read nor an ACK write.
-The xchg is sequentially consistent and cannot lose a host OR racing the
-handler. ABI version 1 leaves 0x30000 as RAM and retains the standard MMIO
-path.
+Detect the ABI through the reserved PVH E820 page and map each of the six
+fixed MMIO slots to its stable status word; a device at any other MMIO base
+fails to probe. Consume status with xchg so the steady-state interrupt path
+performs neither an ISR-status MMIO read nor an ACK write. The xchg is
+sequentially consistent and cannot lose a host OR racing the handler. ABI
+version 1 leaves 0x30000 as RAM and retains the standard MMIO path.
 
 --- a/drivers/virtio/Kconfig
 +++ b/drivers/virtio/Kconfig
@@ -48,7 +48,7 @@ path.
 
 
  /* The alignment to use between consumer and producer parts of vring.
-@@ -56,7 +60,92 @@ struct virtio_mmio_device {
+@@ -56,7 +60,80 @@ struct virtio_mmio_device {
  	void __iomem *base;
  	unsigned long version;
 +#ifdef CONFIG_VIRTIO_MMIO_SHARED_STATUS
@@ -65,11 +65,8 @@ path.
 +#define MICROVM_VIRTIO_FS_MMIO_BASE	0xd0001000
 +#define MICROVM_VIRTIO_CONSOLE_MMIO_BASE	0xd0002000
 +#define MICROVM_VIRTIO_DISTRO_BLK_MMIO_BASE	0xd0003000
-+#define MICROVM_VIRTIO_RUNTIME_BLK_MMIO_BASE	0xd0004000
-+#define MICROVM_VIRTIO_CUSTOM_BLK_MMIO_BASE	0xd0005000
 +#define MICROVM_VIRTIO_SCRATCH_BLK_MMIO_BASE	0xd0006000
 +#define MICROVM_VIRTIO_CONTROL_CONSOLE_MMIO_BASE	0xd0007000
-+#define MICROVM_VIRTIO_FS1_MMIO_BASE	0xd0008000
 +
 +static int vm_setup_shared_status(struct virtio_mmio_device *vm_dev)
 +{
@@ -98,20 +95,11 @@ path.
 +	case MICROVM_VIRTIO_DISTRO_BLK_MMIO_BASE:
 +		offset = 0x0c;
 +		break;
-+	case MICROVM_VIRTIO_RUNTIME_BLK_MMIO_BASE:
-+		offset = 0x10;
-+		break;
-+	case MICROVM_VIRTIO_CUSTOM_BLK_MMIO_BASE:
-+		offset = 0x14;
-+		break;
 +	case MICROVM_VIRTIO_SCRATCH_BLK_MMIO_BASE:
 +		offset = 0x18;
 +		break;
 +	case MICROVM_VIRTIO_CONTROL_CONSOLE_MMIO_BASE:
 +		offset = 0x1c;
-+		break;
-+	case MICROVM_VIRTIO_FS1_MMIO_BASE:
-+		offset = 0x20;
 +		break;
 +	default:
 +		dev_err(&pdev->dev,
@@ -141,7 +129,7 @@ path.
  /* Configuration interface */
 
  static u64 vm_get_features(struct virtio_device *vdev)
-@@ -291,8 +376,16 @@ static irqreturn_t vm_interrupt(int irq, void *opaque)
+@@ -291,8 +368,16 @@ static irqreturn_t vm_interrupt(int irq, void *opaque)
  	irqreturn_t ret = IRQ_NONE;
 
  	/* Read and acknowledge interrupts */
@@ -158,7 +146,7 @@ path.
 
  	if (unlikely(status & VIRTIO_MMIO_INT_CONFIG)) {
  		virtio_config_changed(&vm_dev->vdev);
-@@ -594,6 +687,10 @@ static int virtio_mmio_probe(struct platform_device *pdev)
+@@ -594,6 +679,10 @@ static int virtio_mmio_probe(struct platform_device *pdev)
  	vm_dev->vdev.config = &virtio_mmio_config_ops;
  	vm_dev->pdev = pdev;
 
@@ -169,7 +157,7 @@ path.
  	vm_dev->base = devm_platform_ioremap_resource(pdev, 0);
  	if (IS_ERR(vm_dev->base)) {
  		rc = PTR_ERR(vm_dev->base);
-@@ -817,4 +914,11 @@ static struct platform_driver virtio_mmio_driver = {
+@@ -817,4 +906,11 @@ static struct platform_driver virtio_mmio_driver = {
  static int __init virtio_mmio_init(void)
  {
 +#ifdef CONFIG_VIRTIO_MMIO_SHARED_STATUS
