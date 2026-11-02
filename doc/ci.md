@@ -2418,3 +2418,5 @@ Copilot code review uses
 [`copilot-code-review.yml`](../.github/workflows/copilot-code-review.yml)
 instead. Reviews do not build code, so it only checks out the repository and
 does not install the build and test dependencies used by cloud agent sessions.
+
+<!-- scratch: issue 1201 stacked pull request check; do not merge -->
