@@ -39,6 +39,7 @@
         "guest-boot": 0.7,
         "guest-identity": 0.7,
         "host-loopback-policy": 23.1,
+        "interrupt-map": 4.1,
         "ipv6-egress-policy": 29.4,
         "l3-l4-egress-policy": 19.3,
         "l3-l4-egress-port-ranges": 22.4,
@@ -71,7 +72,7 @@
       },
       "shards": [
         {
-          "seconds": 266.1,
+          "seconds": 267.8,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
@@ -79,6 +80,7 @@
             "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-snapshot",
+            "lifecycle",
             "managed-lifecycle",
             "network-snapshot",
             "platform-restore-processors",
@@ -94,7 +96,7 @@
           ]
         },
         {
-          "seconds": 265.4,
+          "seconds": 267.8,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -105,11 +107,11 @@
             "guest-boot",
             "guest-identity",
             "host-loopback-policy",
+            "interrupt-map",
             "ipv6-egress-policy",
             "l3-l4-egress-policy",
             "l3-l4-egress-port-ranges",
             "l3-l4-egress-protocols",
-            "lifecycle",
             "platform-aggregate-export",
             "platform-filesystem",
             "platform-network-policy",
@@ -143,6 +145,7 @@
         "guest-boot": 0.5,
         "guest-identity": 0.5,
         "host-loopback-policy": 23.5,
+        "interrupt-map": 3.8,
         "ipv6-egress-policy": 30.0,
         "l3-l4-egress-policy": 19.3,
         "l3-l4-egress-port-ranges": 22.5,
@@ -175,14 +178,15 @@
       },
       "shards": [
         {
-          "seconds": 246.7,
+          "seconds": 248.8,
           "scenarios": [
+            "command-line-limit",
             "console-snapshot",
             "directional-network-policy",
             "endpoint-policy-snapshot",
-            "filesystem-comma-paths",
             "filesystem-shares",
             "filesystem-snapshot",
+            "interrupt-map",
             "platform-filesystem",
             "platform-restore-processors",
             "platform-zero-fill",
@@ -198,12 +202,12 @@
           ]
         },
         {
-          "seconds": 247.0,
+          "seconds": 248.7,
           "scenarios": [
-            "command-line-limit",
             "console-exit",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
+            "filesystem-comma-paths",
             "filesystem-owner",
             "filesystem-policy",
             "guest-boot",
@@ -247,6 +251,7 @@
         "guest-boot": 0.8,
         "guest-identity": 0.8,
         "host-loopback-policy": 28.2,
+        "interrupt-map": 8.6,
         "ipv6-egress-policy": 38.6,
         "l3-l4-egress-policy": 19.9,
         "l3-l4-egress-port-ranges": 27.4,
@@ -279,15 +284,15 @@
       },
       "shards": [
         {
-          "seconds": 348.4,
+          "seconds": 353.1,
           "scenarios": [
-            "console-snapshot",
             "denied-filesystem-paths",
             "directional-network-policy",
             "endpoint-policy-snapshot",
             "filesystem-policy",
             "filesystem-snapshot",
             "host-loopback-policy",
+            "interrupt-map",
             "network-snapshot",
             "platform-filesystem",
             "platform-restore-processors",
@@ -302,10 +307,11 @@
           ]
         },
         {
-          "seconds": 349.3,
+          "seconds": 353.2,
           "scenarios": [
             "command-line-limit",
             "console-exit",
+            "console-snapshot",
             "cpu-profile-fallback",
             "filesystem-comma-paths",
             "filesystem-owner",

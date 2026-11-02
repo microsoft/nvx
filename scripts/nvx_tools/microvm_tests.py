@@ -112,6 +112,7 @@ MICROVM_TEST_SCENARIOS = (
     "guest-boot",
     "guest-identity",
     "host-loopback-policy",
+    "interrupt-map",
     "ipv6-egress-policy",
     "lifecycle",
     "l3-l4-egress-policy",
@@ -149,6 +150,7 @@ MICROVM_TEST_SCENARIOS = (
 UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
 SANDBOX_CONTROL_SCENARIOS = frozenset(
     (
+        "interrupt-map",
         "managed-exec-config",
         "platform-aggregate-export",
         "platform-filesystem",
@@ -209,31 +211,50 @@ VIRTIO_FEATURES_COMPLETION_MARKER = b"NVX-VIRTIO-FEATURES-OK"
 # features that its driver negotiated, one character per bit from bit 0.
 VIRTIO_FEATURES_REPORT_PREFIX = "NVX-VIRTIO-FEATURES "
 VIRTIO_FEATURES_NETWORK = "10.0.0.2/24"
+INTERRUPT_MAP_COMPLETION_MARKER = b"NVX-INTERRUPT-MAP-OK"
+INTERRUPT_MAP_CAPTURE_MARKER = b"NVX-INTERRUPT-MAP-CAPTURE"
+# The prefix of the lines on which the interrupt-map scenario's guest reports,
+# after a step, the window of a virtio device and the interrupt that its
+# driver requested, and of the line of /proc/interrupts' counts of APIC errors
+# and spurious PIC interrupts (ERR), of level-triggered interrupts that the
+# IOAPIC misrouted (MIS), and of spurious APIC interrupts (SPU).
+INTERRUPT_MAP_REPORT_PREFIX = "NVX-INTERRUPT-MAP "
+INTERRUPT_MAP_ERRORS_PREFIX = "NVX-INTERRUPT-MAP-ERRORS "
+INTERRUPT_MAP_ERROR_COUNTS = ("err", "mis", "spu")
+INTERRUPT_MAP_NETWORK = "10.0.0.2/24"
+INTERRUPT_MAP_SHARE_SEED = "NVX-INTERRUPT-MAP-SHARE"
+# The devices of the interrupt-map scenario's snapshot, by the bases of their
+# windows: the NIC and the host filesystem with a share.
+INTERRUPT_MAP_SNAPSHOT_DEVICES = (0xD000_0000, 0xD000_1000)
 
 
 class MicrovmVirtioDevice(NamedTuple):
     """A fixed virtio device of the microVM, as Table 2.8 of the architecture
     guide (doc/design/2.5-device-topology-transport-and-discovery.md) lists
     it: its name, virtio device ID, and the feature bits that it offers the
-    guest, every one of which Linux negotiates."""
+    guest, every one of which Linux negotiates, and as Table 2.7 lists its
+    interrupt, the IOAPIC input of its window."""
 
     name: str
     device_id: int
     features: frozenset[int]
+    irq: int
 
 
 # Each fixed virtio device of the microVM, by the base of its MMIO window.
 MICROVM_VIRTIO_DEVICES = {
-    0xD000_0000: MicrovmVirtioDevice("Network", 1, frozenset({5, 32})),
-    0xD000_1000: MicrovmVirtioDevice("Host filesystem", 26, frozenset({28, 29, 32})),
-    0xD000_2000: MicrovmVirtioDevice("Boot console", 3, frozenset({28, 29, 32})),
+    0xD000_0000: MicrovmVirtioDevice("Network", 1, frozenset({5, 32}), 16),
+    0xD000_1000: MicrovmVirtioDevice(
+        "Host filesystem", 26, frozenset({28, 29, 32}), 17
+    ),
+    0xD000_2000: MicrovmVirtioDevice("Boot console", 3, frozenset({28, 29, 32}), 18),
     0xD000_3000: MicrovmVirtioDevice(
-        "`distro` block", 2, frozenset({2, 5, 6, 9, 10, 28, 29, 32})
+        "`distro` block", 2, frozenset({2, 5, 6, 9, 10, 28, 29, 32}), 19
     ),
     0xD000_6000: MicrovmVirtioDevice(
-        "`scratch` block", 2, frozenset({2, 6, 9, 10, 28, 29, 32})
+        "`scratch` block", 2, frozenset({2, 6, 9, 10, 28, 29, 32}), 22
     ),
-    0xD000_7000: MicrovmVirtioDevice("Control console", 3, frozenset({28, 29, 32})),
+    0xD000_7000: MicrovmVirtioDevice("Control console", 3, frozenset({28, 29, 32}), 23),
 }
 # The x86 guest kernel's COMMAND_LINE_SIZE. OpenVMM requires the effective
 # kernel command line, with the tokens that it appends after the caller's, to
@@ -5129,6 +5150,312 @@ def run_virtio_features(
             log_path=log_path,
         )
     check_virtio_features(result["output"])
+
+
+class InterruptMapEntry(NamedTuple):
+    """A virtio device's interrupt, as the interrupt-map scenario's guest
+    reports it after a step: the device's name, the interrupt that its driver
+    requested, that interrupt's controller (chip) and input (hwirq), its
+    trigger, its handlers, how many times it fired, and how many of its
+    interrupts lately found no work for any handler (``unhandled`` of
+    /proc/irq/<n>/spurious).
+
+    The scenario reports that last count but does not check it. Linux keeps
+    it to detect a stuck line, and resets it to 1 when 100 ms pass without
+    such an interrupt, so it counts no history. A virtio console's driver
+    waits for its output by polling the used ring, so nearly every interrupt
+    of a console finds no work, and the NIC's polling can leave one such
+    interrupt too, such as after a restore. Each device's single handler, its
+    IOAPIC input, and its count rising with its own traffic catch an
+    interrupt delivered to the wrong line."""
+
+    device: str
+    irq: int
+    chip: str
+    hwirq: int
+    trigger: str
+    actions: str
+    fired: int
+    unhandled: int
+
+
+def parse_interrupt_map(
+    output: str,
+) -> tuple[dict[str, dict[int, InterruptMapEntry]], dict[str, int]]:
+    """Return the interrupt-map scenario's reports in ``output``, by step and
+    by the base of each device's window, and the guest's ERR, MIS, and SPU
+    counts.
+
+    Raises RuntimeError for a malformed line or a device that a step reports
+    twice."""
+    steps: dict[str, dict[int, InterruptMapEntry]] = {}
+    errors: dict[str, int] = {}
+    for line in output.splitlines():
+        line = line.strip()
+        for prefix in (INTERRUPT_MAP_ERRORS_PREFIX, INTERRUPT_MAP_REPORT_PREFIX):
+            if line.startswith(prefix):
+                break
+        else:
+            continue
+        try:
+            fields = dict(field.split("=", 1) for field in line[len(prefix) :].split())
+            if prefix == INTERRUPT_MAP_ERRORS_PREFIX:
+                errors = {
+                    name: int(fields[name]) for name in INTERRUPT_MAP_ERROR_COUNTS
+                }
+                continue
+            step = fields["step"]
+            base = int(fields["base"], 16)
+            entry = InterruptMapEntry(
+                fields["device"],
+                int(fields["irq"]),
+                fields["chip"],
+                int(fields["hwirq"]),
+                fields["type"],
+                fields["actions"],
+                int(fields["count"]),
+                int(fields["unhandled"]),
+            )
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(
+                f"malformed interrupt-map report {line!r}: {error}"
+            ) from error
+        entries = steps.setdefault(step, {})
+        if base in entries:
+            raise RuntimeError(
+                f"the device at {base:#x} is reported twice after step {step}"
+            )
+        entries[base] = entry
+    return steps, errors
+
+
+def check_interrupt_map(
+    steps: dict[str, dict[int, InterruptMapEntry]],
+    errors: dict[str, int],
+    bases: Collection[int],
+    *,
+    before: str,
+    after: str = "traffic",
+) -> None:
+    """Check the interrupt-map scenario's reports against the map of the
+    architecture guide (2.4.2 and Table 2.7): after the steps ``before`` and
+    ``after``, exactly the devices of ``bases`` are present, and each
+    interrupts on the IOAPIC input of its window in MICROVM_VIRTIO_DEVICES,
+    edge-triggered and with no other handler; each interrupt fired after
+    ``before``, with the traffic that the guest drove; and /proc/interrupts
+    counts no APIC error or spurious PIC interrupt (ERR), no misrouted IOAPIC
+    interrupt (MIS), and no spurious APIC interrupt (SPU).
+
+    Raises RuntimeError naming each departure."""
+    problems: list[str] = []
+    for step in (before, after):
+        entries = steps.get(step)
+        if entries is None:
+            problems.append(f"no device is reported after step {step}")
+            continue
+        for base in sorted(set(entries) - set(bases)):
+            problems.append(
+                f"an unexpected device {entries[base].device} at {base:#x} is "
+                f"reported after step {step}"
+            )
+        for base in sorted(bases):
+            expected = MICROVM_VIRTIO_DEVICES[base]
+            entry = entries.get(base)
+            if entry is None:
+                problems.append(
+                    f"no {expected.name} is reported at {base:#x} after step {step}"
+                )
+                continue
+            if entry.irq != expected.irq:
+                problems.append(
+                    f"{expected.name} at {base:#x} interrupts on IRQ {entry.irq}, "
+                    f"not {expected.irq}"
+                )
+            if entry.chip != "IO-APIC" or entry.hwirq != entry.irq:
+                problems.append(
+                    f"{expected.name}'s IRQ {entry.irq} is input {entry.hwirq} of "
+                    f"{entry.chip}, not the IOAPIC input of its number"
+                )
+            if entry.trigger != "edge":
+                problems.append(
+                    f"{expected.name}'s IRQ {entry.irq} is {entry.trigger}-triggered"
+                )
+            if entry.actions != entry.device:
+                problems.append(
+                    f"{expected.name} shares IRQ {entry.irq}, whose handlers are "
+                    f"{entry.actions}"
+                )
+    if not problems:
+        for base in sorted(bases):
+            expected = MICROVM_VIRTIO_DEVICES[base]
+            first, last = steps[before][base], steps[after][base]
+            if last.fired <= first.fired:
+                problems.append(
+                    f"{expected.name}'s IRQ {first.irq} fired {first.fired} times "
+                    f"after step {before} and {last.fired} after step {after}"
+                )
+    if not errors:
+        problems.append("the guest reported no ERR, MIS, and SPU counts")
+    elif any(errors.values()):
+        problems.append(
+            f"/proc/interrupts counts {errors['err']} APIC errors or spurious PIC "
+            f"interrupts (ERR), {errors['mis']} misrouted IOAPIC interrupts "
+            f"(MIS), and {errors['spu']} spurious APIC interrupts (SPU)"
+        )
+    if problems:
+        raise RuntimeError(
+            "the microVM's interrupts differ from the architecture guide's map: "
+            + "; ".join(problems)
+        )
+
+
+def run_interrupt_map(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Check the interrupt map of the architecture guide (2.4.2 and Table
+    2.7) end to end.
+
+    A microVM with every fixed virtio device, the NIC, the host filesystem
+    with a share, both consoles, and both sandbox blocks, reports the
+    interrupt that each device's driver requested, drives traffic through
+    each, and reports the interrupts again: each must be the IOAPIC input of
+    its window, past the ISA IRQs, edge-triggered, with no other handler, and
+    must have fired, and /proc/interrupts must count no APIC error, misrouted
+    IOAPIC interrupt, or spurious interrupt. A snapshot of a microVM with the
+    NIC and the share then restores with the same interrupts, which fire
+    again after the restore."""
+    with tempfile.TemporaryDirectory(prefix="nvx-interrupt-map-") as temporary:
+        root = Path(temporary)
+        share = root / "share"
+        share.mkdir()
+        (share / "seed").write_text(INTERRUPT_MAP_SHARE_SEED, encoding="utf-8")
+        mount = f"/mnt/share,{share},ro"
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=INTERRUPT_MAP_NETWORK,
+            mount=mount,
+        )
+        command.extend(
+            (
+                "--virtio-console",
+                "console",
+                "--microvm-control-console",
+                "none",
+            )
+        )
+        for role in ("distro", "scratch"):
+            path = root / f"{role}.img"
+            with path.open("wb") as disk:
+                disk.truncate(SANDBOX_BLOCK_SIZE)
+            read_only = ",ro" if role != "scratch" else ""
+            command.extend(
+                ("--microvm-sandbox-block", f"{role}:file:{path}{read_only}")
+            )
+        result = run_guest_script(
+            command,
+            _render_script(
+                "interrupt-map.sh.in",
+                DEVICES=str(len(MICROVM_VIRTIO_DEVICES)),
+                CAPTURE="",
+            ),
+            INTERRUPT_MAP_COMPLETION_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "interrupt-map.log",
+        )
+        steps, errors = parse_interrupt_map(result["output"])
+        check_interrupt_map(steps, errors, MICROVM_VIRTIO_DEVICES, before="boot")
+
+        snapshot_path = root / "snapshot"
+        capture_command = [
+            *workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                network=INTERRUPT_MAP_NETWORK,
+                mount=mount,
+            ),
+            "--snapshot-destination",
+            str(snapshot_path),
+        ]
+        capture_marker = INTERRUPT_MAP_CAPTURE_MARKER.decode()
+        with OpenvmmProcess(
+            capture_command,
+            output_dir / "interrupt-map-capture.log",
+        ) as process:
+            process.wait_for(BOOT_MARKER, timeout)
+            _stage_script(
+                process,
+                "/tmp/nvx-interrupt-map",
+                "NVX_INTERRUPT_MAP",
+                _render_script(
+                    "interrupt-map.sh.in",
+                    DEVICES=str(len(INTERRUPT_MAP_SNAPSHOT_DEVICES)),
+                    CAPTURE=f"echo {capture_marker}\nnvx-snapshot\nreport restore",
+                ),
+            )
+            source = process.wait(timeout)
+        if source.returncode != 0:
+            raise RuntimeError(
+                f"interrupt-map capture source exited with {source.returncode}"
+            )
+        if _output_lines(source.output).count(INTERRUPT_MAP_CAPTURE_MARKER) != 1:
+            raise RuntimeError(
+                "interrupt-map source did not reach capture exactly once"
+            )
+        captured, _ = parse_interrupt_map(
+            source.output.decode("utf-8", errors="replace")
+        )
+        if set(captured) != {"boot"}:
+            raise RuntimeError("interrupt-map source crossed its capture boundary")
+
+        restore_command = snapshot_restore_command(
+            executable,
+            backend,
+            snapshot_path,
+            network_profile="portable",
+        )
+        restore_command.extend(("--mount", mount))
+        with OpenvmmProcess(
+            restore_command,
+            output_dir / "interrupt-map-restore.log",
+        ) as process:
+            process.wait_for(INTERRUPT_MAP_COMPLETION_MARKER, timeout)
+            restored = process.wait(timeout)
+        if restored.returncode != 0:
+            raise RuntimeError(
+                f"interrupt-map restore exited with {restored.returncode}"
+            )
+    steps, errors = parse_interrupt_map(
+        restored.output.decode("utf-8", errors="replace")
+    )
+    if "boot" in steps:
+        raise RuntimeError("interrupt-map restore replayed the steps before capture")
+    check_interrupt_map(steps, errors, INTERRUPT_MAP_SNAPSHOT_DEVICES, before="restore")
+    for base in INTERRUPT_MAP_SNAPSHOT_DEVICES:
+        before = captured["boot"].get(base)
+        after = steps["restore"][base]
+        if before is None or before._replace(fired=0, unhandled=0) != after._replace(
+            fired=0, unhandled=0
+        ):
+            raise RuntimeError(
+                f"{MICROVM_VIRTIO_DEVICES[base].name}'s interrupt changed across "
+                f"the snapshot: {before} before capture, {after} after restore"
+            )
 
 
 def _measure_restore(
@@ -10871,6 +11198,20 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "virtio-features.log",
+        )
+    if "interrupt-map" in scenarios:
+        report.start(
+            "interrupt-map",
+            f"Running the microVM interrupt map on OpenVMM/{args.backend}",
+        )
+        run_interrupt_map(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
         )
     if "command-line-limit" in scenarios:
         report.start(
