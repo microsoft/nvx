@@ -162,7 +162,9 @@ def _source_inputs(root: Path) -> dict[Path, bool]:
                     "inventory does not follow"
                 )
             if path.is_file():
-                files.setdefault(path, path.suffix == ".rs" or path in rust_roots)
+                files[path] = (
+                    files.get(path, False) or path.suffix == ".rs" or path in rust_roots
+                )
     return {
         require_file(path, "nvx-rs source"): files[path]
         for path in sorted(files, key=lambda path: path.relative_to(root).as_posix())

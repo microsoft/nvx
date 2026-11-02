@@ -2562,6 +2562,42 @@ class NvxRsTests(unittest.TestCase):
                         self.assertNotEqual(nvx_rs.source_sha256(root), digest)
                         (root / name).write_bytes(original)
 
+    def test_declared_rust_roots_override_prior_data_roles(self):
+        inputs = {
+            **_STANDALONE_NVX_RS_INPUTS,
+            "nvx-rs/Cargo.toml": (
+                _STANDALONE_NVX_RS_INPUTS["nvx-rs/Cargo.toml"]
+                + '\n[dependencies]\nnested = { path = "src/nested" }\n'
+            ),
+            "nvx-rs/src/nested/Cargo.toml": (
+                '[package]\nname = "nested"\nversion = "0.1.0"\n'
+                '\n[lib]\npath = "src/library"\n'
+            ),
+            "nvx-rs/src/nested/src/library": "pub fn nested() {}\n",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            checkouts = [Path(temporary) / "lf", Path(temporary) / "crlf"]
+            for checkout, newline in zip(checkouts, ("\n", "\r\n"), strict=True):
+                _write_files(
+                    checkout,
+                    {
+                        name: text.replace("\n", newline)
+                        for name, text in inputs.items()
+                    },
+                )
+                asset = checkout / "nvx-rs/src/nested/src/catalog.bin"
+                asset.write_bytes(b"\x00data\r\n")
+                self.assertEqual(
+                    {
+                        path.relative_to(checkout).as_posix()
+                        for path in nvx_rs.source_files(checkout)
+                    },
+                    set(inputs) | {"nvx-rs/src/nested/src/catalog.bin"},
+                )
+            self.assertEqual(
+                nvx_rs.source_sha256(checkouts[0]), nvx_rs.source_sha256(checkouts[1])
+            )
+
     def test_dependency_assets_change_provenance_byte_for_byte(self):
         for name, before, after, legacy in (
             ("catalog.bin", b"\x00data\r\n", b"\x00data\n", False),
