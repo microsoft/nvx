@@ -9,17 +9,18 @@
 - Mapped fork tip: `82686c983907738d44a6eb9e3322589b573c0074`, position 144. The graph, PR
   summary, and commit mapping below cover positions 001-144 and the PR20 fixup at
   position 161.
-- NVX's pinned OpenVMM revision: `35e76265fa8b63922edead112fcd5a38c59445c8`, position 205. Positions
-  204 and 205, which microsoft/openvmm#4842 proposes for `feature/microvm/dev`, are two commits on
-  position 203, `b9b1f8f6d`, which microsoft/openvmm#4840 proposes as two commits on position 201,
+- NVX's pinned OpenVMM revision: `6ac7fa50bc209b07a4c46d12169e28ce458d11ce`, position 209. Positions
+  206-209, which microsoft/openvmm#4848 proposes for `feature/microvm/dev`, are four commits on
+  position 205, `35e76265f`, which microsoft/openvmm#4842 proposes as two commits on position 203,
+  `b9b1f8f6d`, which microsoft/openvmm#4840 proposes as two commits on position 201,
   `d891dfd9d`, which microsoft/openvmm#4839 proposes, one commit on position 200,
   `0ac254109`, the head of the `feature/microvm/release/v3.0` branch of microsoft/openvmm, to
   which `feature/microvm/dev` also points. The v3.0 reorganization regrouped the 385 commits of
   `feature/microvm/release/v2.4` that upstream had not landed into 200 commits: it folded
   fixups into the commits that they fix and combined the commits after the mapped tip into commits
   by concept, without changing what the chain adds to upstream; see
-  [The v3.0 reorganization](#the-v30-reorganization). The pin is 61 commits past the mapped tip
-  on the same first-parent chain. Positions 145-205, except the PR20 fixup at position
+  [The v3.0 reorganization](#the-v30-reorganization). The pin is 65 commits past the mapped tip
+  on the same first-parent chain. Positions 145-209, except the PR20 fixup at position
   161, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `b2676222b383bf50c7022f6a5983920421469a47` (2026-10-31), the fork base.
@@ -517,8 +518,8 @@ b2676222b
   -> network [195] -> device DMA [196-197]
   -> command lines [198] -> KVP test [199-200]
   -> sandbox block roles [201] -> virtio feature masks [202-203]
-  -> IOAPIC interrupt lines [204-205]
-  -> 35e76265f (NVX pin)
+  -> IOAPIC interrupt lines [204-205] -> nested virtualization [206-209]
+  -> 6ac7fa50b (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -534,10 +535,10 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 144 without merges. Of the 61 later
+The NVX pin extends the chain past position 144 without merges. Of the 65 later
 commits, position 161 is a PR20 fixup, and the others are not yet classified or assigned to
 PRs. Each of positions 145-200 combines the v2.4 commits that the table lists, which developed one
-concept; "(part)" marks a v2.4 fixup that split across commits. Positions 201-205 follow the
+concept; "(part)" marks a v2.4 fixup that split across commits. Positions 201-209 follow the
 reorganization, so they combine none.
 
 | Position | Commit | v2.4 positions | Topic |
@@ -603,6 +604,10 @@ reorganization, so they combine none.
 | 203 | `b9b1f8f6d` | - | microVM: drop access-platform and the console size in microVM ABI 3 (microsoft/openvmm#4840) |
 | 204 | `e13c1a644` | - | microVM: route every IOAPIC input in the MP table (microsoft/openvmm#4842) |
 | 205 | `35e76265f` | - | microVM: give each virtio slot its own IOAPIC input in ABI 3 (microsoft/openvmm#4842) |
+| 206 | `85fcac097` | - | cpu_profile: compute the effective CPUID of nested virtualization (microsoft/openvmm#4848) |
+| 207 | `29e7cac0e` | - | virt_whp: serve IA32_XSS reads on time ABI partitions (microsoft/openvmm#4848) |
+| 208 | `16e3207e5` | - | virt_whp: let time ABI partitions have nested virtualization (microsoft/openvmm#4848) |
+| 209 | `6ac7fa50b` | - | microVM: allow nested virtualization on KVM and WHP (microsoft/openvmm#4848) |
 
 Some of these commits change mapped work rather than add to it. Position 160 removes the
 legacy microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest
@@ -626,7 +631,15 @@ inputs from the loader of PR15's position 075. Position 205 moves every virtio s
 IRQ that PR16's position 080 gives it, and the NIC from the backend-specific IRQ that PR18's
 position 096 selects, to the IOAPIC input of its window, which changes the interrupts and
 discovery tokens that PR17's position 087 records in the snapshot contract and that the slots of
-PR18, PR19, and PR23 use. Assigning the later
+PR18, PR19, and PR23 use. Position 206 gives the effective CPUID of positions 158, 159, and 162
+a fourth input, nested virtualization, which sets VMX over a profile of position 151 or 164, and
+passes it through the time ABI configuration of positions 148, 152, 155, 157, 160, and 163, and
+the MSHV backend of position 147. Position 207 completes the WHP time ABI's MSR handling of
+position 153 for `IA32_XSS`, and position 208 lets that backend's partitions of positions 153,
+155, 160, and 165 have nested virtualization. Position 209 lifts the refusal of nested
+virtualization that PR15's positions 075 and 077 put in the microVM profile and CLI, and refuses
+it with a capture or a restore: at the snapshot boundary of PR17's position 085 and in the
+management RPC of PR25's position 137 and the fork tail's position 142. Assigning the later
 commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 191, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -661,7 +674,12 @@ Positions 204 and 205 change the MP-table loader of PR14 and the microVM profile
 snapshot contract of PR15-PR19 and PR23, and their Guide pages: replaying them on `b2676222b`
 conflicts in 16 of their 17 files, so they follow those PRs upstream. The 17th, the IOAPIC's
 `chipset` tests, which position 204 extends with a save and restore of the inputs past the ISA
-IRQs, applies to upstream main without conflicts.
+IRQs, applies to upstream main without conflicts. Positions 206-209 change the fork's CPU profile
+crate, the time ABI of `virt` and of the KVM, MSHV, and WHP backends, and the microVM profile,
+worker, CLI, management RPC, and their Guide pages: replaying them on `b2676222b` conflicts in 15
+of their 16 files, so they follow the time ABI series and those PRs upstream. The 16th, which
+names `WHvX64RegisterXss` in the `whp` crate's `Register64`, applies to upstream main without
+conflicts.
 
 ## PR summary
 
