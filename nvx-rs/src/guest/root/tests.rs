@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::kernel::{Call, FakeKernel, Operation, Paths, super_options};
+pub(crate) use super::kernel::tests::{Call, FakeKernel, Operation, attach_calls};
+use super::kernel::{Paths, super_options};
 use super::*;
 use crate::gpt::ExpectedPartition;
 use crate::guest::cgroup::Layout;
@@ -906,7 +907,7 @@ fn a_root_mounts_nothing_through_a_symbolic_link() {
 #[test]
 fn new_upper_and_work_directories_have_mode_0755_whatever_the_umask() {
     // The umask is the process's, so the test runs alone in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_ROOT_UMASK_TEST_CHILD",
         "guest::root::tests::new_upper_and_work_directories_have_mode_0755_whatever_the_umask",
     ) {
@@ -1060,7 +1061,7 @@ fn the_freshness_check_takes_one_entry_of_a_directory_and_opens_none() {
         fs::write(upper.join(format!("file{index}")), "content").unwrap();
     }
     let fifo = sys::path_c_string(&upper.join("fifo")).unwrap();
-    sys::create_fifo(&fifo, sys::Mode::from_bits_truncate(0o600)).unwrap();
+    sys::tests::create_fifo(&fifo, sys::Mode::from_bits_truncate(0o600)).unwrap();
     let error = guest.assemble_fresh(&guest.assembly()).unwrap_err();
     assert!(
         matches!(error.error(), Error::NotFresh { path } if *path == upper),
@@ -1325,7 +1326,7 @@ fn the_kernel_shows_a_mount_s_options() {
 #[ignore = "needs root"]
 fn a_thread_with_private_tables_finds_its_mount_points_and_options() {
     std::thread::spawn(|| {
-        sys::unshare_standard_descriptors().unwrap();
+        sys::tests::unshare_standard_descriptors().unwrap();
         sys::enter_private_mount_namespace().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let point = directory.path().join("mount");
@@ -2945,10 +2946,10 @@ fn what_a_share_s_target_lacks_is_created_with_its_mode_whatever_the_umask_or_a_
     // for a share, whatever the umask of the process that mounts it, or a default ACL of the
     // overlay's root, which withholds permissions in the umask's stead.
     for restricted in [false, true] {
-        sys::with_thread_umask(0o077, || {
+        sys::tests::with_thread_umask(0o077, || {
             let guest = Guest::new();
             let mut root = guest.assemble(&guest.assembly()).unwrap();
-            if restricted && !sys::restrict_new_entries(&guest.path("run/nvx/rootfs")) {
+            if restricted && !sys::tests::restrict_new_entries(&guest.path("run/nvx/rootfs")) {
                 root.teardown().unwrap();
                 return;
             }
@@ -2977,7 +2978,7 @@ fn what_a_share_s_target_lacks_is_created_with_its_mode_whatever_the_umask_or_a_
             ] {
                 assert_eq!(mode(relative), expected, "{relative} {restricted}");
             }
-            assert_eq!(sys::thread_umask(), 0o077);
+            assert_eq!(sys::tests::thread_umask(), 0o077);
             root.teardown().unwrap();
         });
     }

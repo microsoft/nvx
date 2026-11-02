@@ -139,8 +139,6 @@
 //! children, no table maps: a table refuses an empty source.
 
 mod kernel;
-#[cfg(test)]
-mod privileged;
 mod table;
 #[cfg(test)]
 mod tests;
@@ -736,18 +734,6 @@ impl TeardownError {
     pub fn failures(&self) -> &[UnmountFailure] {
         &self.failures
     }
-
-    /// Returns the error of a teardown that failed to unmount the mapping at `target`, an
-    /// absolute path in the root, with `error`, for the tests of other modules.
-    #[cfg(test)]
-    pub(crate) fn of(target: impl Into<PathBuf>, error: MappingError) -> Self {
-        Self {
-            failures: vec![UnmountFailure {
-                target: target.into(),
-                error,
-            }],
-        }
-    }
 }
 
 impl fmt::Display for TeardownError {
@@ -773,14 +759,6 @@ pub(crate) struct Mapped {
     target: PathBuf,
     /// The unique ID of the mapping's mount.
     mount: u64,
-}
-
-#[cfg(test)]
-impl Mapped {
-    /// Returns the target, relative to the root.
-    pub(crate) fn target(&self) -> &Path {
-        &self.target
-    }
 }
 
 /// A mapping that a rename moved away from its target while the walk ran, which the attach

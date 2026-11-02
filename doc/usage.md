@@ -514,8 +514,8 @@ Cargo configuration under `nvx-rs/.cargo/`, every file under `nvx-rs/src/`
 except the host side and the test modules, `rust-toolchain.toml`, and the
 `build_constants.py` and `guest_binaries.py` build modules. The host side is
 the `host` and `testing` modules and the `nvx-rs` and `nvx-fake-openvmm`
-binaries; the test modules are the `tests.rs` files, the `tests` directories,
-and the managed agent's `loopback` harness. `GuestRustBuildConstants` in
+binaries; the test modules are the `tests.rs` files and the `tests`
+directories. `GuestRustBuildConstants` in
 `scripts/nvx_tools/build_constants.py` defines the set, and
 [`build-guest-binaries`](#build-guest-binaries) fails when Cargo's dep-info
 lists a file outside it. The Alpine, Ubuntu, and Azure Linux cache keys end

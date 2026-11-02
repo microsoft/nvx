@@ -962,25 +962,6 @@ impl Prepared {
     pub(crate) fn into_child(self) -> EntryChild {
         self.child
     }
-
-    /// Returns an execution for tests without privileges, whose child starts without new
-    /// namespaces and skips the system calls of every entry stage, so that it keeps the test's
-    /// own root and identity, except that the stage of `failure`, if any, fails with its error.
-    #[cfg(test)]
-    pub(crate) fn simulated(failure: Option<(super::spawn::LaunchStage, Errno)>) -> Self {
-        Self {
-            child: EntryChild {
-                root: c"/".to_owned(),
-                hostname: DEFAULT_HOSTNAME.as_bytes().into(),
-                simulated: Some(match failure {
-                    Some((stage, error)) => sys::Simulation::Fail(stage, error),
-                    None => sys::Simulation::Skip,
-                }),
-                ..EntryChild::default()
-            },
-            account: None,
-        }
-    }
 }
 
 /// The account of an identity, as its passwd entry names it.

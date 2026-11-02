@@ -164,7 +164,7 @@ mod bootstrap;
 mod kernel;
 mod share;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::fmt;
 use std::fs::{self, File};
@@ -184,8 +184,6 @@ use crate::uuid::Uuid;
 pub(crate) use self::block::window_directories;
 pub use self::bootstrap::{Bootstrap, BootstrapStep, Resources, bootstrap};
 pub(crate) use self::kernel::Paths;
-#[cfg(test)]
-pub(crate) use self::kernel::{Call, FakeKernel, Operation, attach_calls};
 pub use self::share::{ShareChild, ShareKind, ShareRefusal};
 
 /// The directory of the layers' mount points, below the runtime directory.

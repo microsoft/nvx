@@ -1,7 +1,7 @@
 //! Tests of the mapper with the kernel itself, which need the privilege to mount and Linux 6.8 or
 //! later, for the unique mount IDs. Each runs in a private mount namespace of its own thread, on
 //! tmpfs roots below a temporary directory, and they are ignored unless asked for:
-//! `cargo test --all-features -- --ignored guest::mappings::privileged`, as root.
+//! `cargo test --all-features -- --ignored guest::mappings::tests::privileged`, as root.
 //!
 //! They cover what the fake kernel cannot: symbolic links and magic links at every component, a
 //! rename race during the walk, kinds, a target inside another mapping, reserved targets, the
@@ -285,8 +285,8 @@ fn a_rename_race_never_mounts_outside_the_target() {
             let path = |name: &str| sys::path_c_string(&root.join(name)).unwrap();
             let (target, other, link) = (path("a"), path("b"), path("link"));
             while !stop.load(Ordering::Relaxed) {
-                sys::exchange_paths(&target, &other).unwrap();
-                sys::exchange_paths(&target, &link).unwrap();
+                sys::tests::exchange_paths(&target, &other).unwrap();
+                sys::tests::exchange_paths(&target, &link).unwrap();
             }
         })
     };
@@ -492,7 +492,7 @@ fn a_workload_that_is_not_root_enters_what_a_mapper_created_whatever_the_umask_o
         let restricted = root.join("restricted");
         fs::create_dir(&restricted).unwrap();
         fs::set_permissions(&restricted, fs::Permissions::from_mode(0o755)).unwrap();
-        let parents: &[&str] = if sys::restrict_new_entries(&restricted) {
+        let parents: &[&str] = if sys::tests::restrict_new_entries(&restricted) {
             &["srv/new", "restricted/new"]
         } else {
             &["srv/new"]
@@ -644,7 +644,7 @@ fn a_thread_with_a_descriptor_table_of_its_own_tears_its_mappings_down() {
     std::thread::spawn(|| {
         // Before the thread owns a descriptor, so that each of the mapper's is in the thread's
         // own table, which copies none of the other tests'.
-        sys::unshare_standard_descriptors().unwrap();
+        sys::tests::unshare_standard_descriptors().unwrap();
         let Some(scene) = Scene::new() else {
             return;
         };

@@ -184,13 +184,6 @@ impl FileDescriptor {
         fcntl(&self.0, FcntlArg::F_ADD_SEALS(IMMUTABLE_SEALS)).map(|_| ())
     }
 
-    /// Returns whether this descriptor carries every seal that `seal_immutable` adds.
-    #[cfg(test)]
-    pub(crate) fn is_sealed_immutable(&self) -> Result<bool, Errno> {
-        let seals = fcntl(&self.0, FcntlArg::F_GET_SEALS).map(SealFlag::from_bits_retain)?;
-        Ok(seals.contains(IMMUTABLE_SEALS))
-    }
-
     /// Closes this descriptor and returns an error if the kernel reports one.
     pub(crate) fn close(self) -> Result<(), Errno> {
         nix::unistd::close(self.0)
@@ -308,36 +301,9 @@ pub(crate) fn close_inherited_descriptors() {
         unsafe { nix::libc::syscall(nix::libc::SYS_close_range, FIRST, nix::libc::c_uint::MAX, 0) };
 }
 
-/// Sets the soft limit of the process's open descriptors to `limit`, and returns the limit that
-/// it replaced, for a test that runs out of descriptors in a process of its own.
-///
-/// The crate does not enable `nix`'s resource limits, so this calls `getrlimit` and `setrlimit`
-/// through libc.
-#[cfg(test)]
-pub(crate) fn set_descriptor_limit(limit: nix::libc::rlim_t) -> Result<nix::libc::rlim_t, Errno> {
-    let mut limits = nix::libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: `limits` is a writable `rlimit`, which the call only fills.
-    Errno::result(unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &mut limits) })?;
-    let previous = limits.rlim_cur;
-    limits.rlim_cur = limit;
-    // SAFETY: `limits` is a valid `rlimit`, which the call only reads.
-    Errno::result(unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &limits) })?;
-    Ok(previous)
-}
-
 /// Creates `path` as a directory with `mode`.
 pub(crate) fn create_directory(path: &CStr, mode: Mode) -> Result<(), Errno> {
     nix::unistd::mkdir(path, mode)
-}
-
-/// Creates `path` as a FIFO with `mode`, with which tests stand for a console, and keep their
-/// system calls in this module.
-#[cfg(test)]
-pub(crate) fn create_fifo(path: &CStr, mode: Mode) -> Result<(), Errno> {
-    nix::unistd::mkfifo(path, mode)
 }
 
 /// Removes a filesystem entry without following it.
@@ -466,3 +432,6 @@ pub(crate) fn page_size() -> Option<usize> {
         .and_then(|size| usize::try_from(size).ok())
         .filter(|size| size.is_power_of_two())
 }
+
+#[cfg(test)]
+pub(super) mod tests;

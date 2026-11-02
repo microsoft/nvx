@@ -12,7 +12,24 @@ use nix::poll::{PollFd, PollFlags};
 
 use super::*;
 use crate::guest::cgroup::Layout;
-use crate::guest::spawn::{Command, LaunchStage, shell};
+use crate::guest::spawn::tests::shell;
+use crate::guest::spawn::{Command, LaunchStage};
+
+thread_local! {
+    /// The error with which a test has the kernel refuse this thread's signals through pidfds.
+    pub(super) static REFUSED: std::cell::Cell<Option<Errno>> = const { std::cell::Cell::new(None) };
+    /// Whether a test has the kernel refuse this thread's signals to process groups through
+    /// pidfds, as a kernel before Linux 6.9 does.
+    pub(super) static BEFORE_LINUX_6_9: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The signals that this thread sent through pidfds, in order, each with whether it went to
+    /// a process group.
+    pub(super) static SENT: std::cell::RefCell<Vec<(i32, bool)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    /// The answer that a test has the next lookup of whether a program leads its process group
+    /// give on this thread.
+    pub(super) static LEADS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
 
 /// How long a test waits for an execution before it fails.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -37,7 +54,7 @@ fn start(command: Command, input: bool, options: Options) -> Execution {
 
 /// Makes `SIGPIPE` end the process, as a caller's default disposition does.
 fn default_sigpipe() {
-    sys::default_sigpipe();
+    sys::tests::default_sigpipe();
 }
 
 /// What a test saw of one execution.
@@ -409,7 +426,7 @@ fn stdin_eof_follows_every_byte_that_a_write_took() {
 fn a_program_that_closes_its_input_ends_the_writes_without_sigpipe() {
     // A `SIGPIPE` would end this process under its default disposition, so the test runs in a
     // process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_EXEC_SIGPIPE_TEST_CHILD",
         "guest::exec::tests::a_program_that_closes_its_input_ends_the_writes_without_sigpipe",
     ) {
@@ -440,7 +457,7 @@ fn a_program_that_closes_its_input_ends_the_writes_without_sigpipe() {
 
 #[test]
 fn concurrent_writers_meet_closed_inputs_without_sigpipe() {
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_EXEC_SIGPIPE_THREADS_TEST_CHILD",
         "guest::exec::tests::concurrent_writers_meet_closed_inputs_without_sigpipe",
     ) {
@@ -496,14 +513,14 @@ fn a_timeout_ends_the_program() {
 fn a_timeout_whose_signals_the_kernel_refuses_fires_once() {
     // The kernel refuses the execution's signals, as it does those that the caller may not
     // send, so the program outlives its timeout.
-    super::REFUSED.set(Some(Errno::EPERM));
+    REFUSED.set(Some(Errno::EPERM));
     let mut execution = start(
         shell("sleep 0.3; echo done"),
         false,
         Options::new().timeout(Duration::from_millis(50)),
     );
     let record = run(&mut execution);
-    super::REFUSED.set(None);
+    REFUSED.set(None);
     // The timeout ends the program once, and the execution goes on with its output.
     assert_eq!(
         record.kill_failures,
@@ -587,7 +604,7 @@ fn a_caller_that_reaps_is_the_program_s_only_collector() {
     let id = execution.id();
     let process = ProcessId::from_positive(i64::from(id)).unwrap();
     let started = Instant::now();
-    while !sys::has_exited(process).unwrap() {
+    while !sys::tests::has_exited(process).unwrap() {
         assert!(started.elapsed() < PATIENCE, "the program ended in time");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -810,7 +827,7 @@ fn an_unrelated_child_s_status_is_left_alone() {
         .args(["-c", "exit 7"])
         .spawn()
         .unwrap();
-    while !sys::has_exited(ProcessId::from_child(&unrelated)).unwrap() {
+    while !sys::tests::has_exited(ProcessId::from_child(&unrelated)).unwrap() {
         std::thread::yield_now();
     }
     let mut execution = start(shell("printf ran"), false, Options::new());
@@ -996,7 +1013,7 @@ fn a_kill_never_reaches_a_cgroup_that_took_the_path_later() {
 fn a_failed_start_ends_the_program_and_its_cgroup_even_without_descriptors() {
     // Other tests could open nothing under the lowered descriptor limit, so this test runs in a
     // process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_EXEC_DESCRIPTOR_LIMIT_TEST_CHILD",
         "guest::exec::tests::a_failed_start_ends_the_program_and_its_cgroup_even_without_descriptors",
     ) {
@@ -1016,7 +1033,7 @@ fn a_failed_start_ends_the_program_and_its_cgroup_even_without_descriptors() {
     // the descriptors that it took, and kills the cgroup, which opens `cgroup.kill` with one of
     // them. The process opens its lowest free descriptor next.
     let lowest = std::fs::File::open("/dev/null").unwrap().as_raw_fd();
-    let previous = sys::set_descriptor_limit(lowest as _).unwrap();
+    let previous = sys::tests::set_descriptor_limit(lowest as _).unwrap();
     let started = Execution::new(
         spawned,
         pipes,
@@ -1024,7 +1041,7 @@ fn a_failed_start_ends_the_program_and_its_cgroup_even_without_descriptors() {
             .process_group()
             .cgroup(&cgroup, Scope::Execution),
     );
-    sys::set_descriptor_limit(previous).unwrap();
+    sys::tests::set_descriptor_limit(previous).unwrap();
     assert_eq!(sys::errno_of(&started.unwrap_err()), Errno::EMFILE);
     assert_eq!(
         std::fs::read(cgroup.path().join("cgroup.kill")).unwrap(),
@@ -1054,7 +1071,10 @@ fn a_failed_start_ends_a_program_that_joined_another_process_group() {
         return;
     }
     // As the test above, it lowers the descriptor limit, so it runs in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test("NVX_EXEC_GROUP_JOINER_TEST_CHILD", TEST) {
+    if crate::guest::managed_agent::tests::isolate_process_test(
+        "NVX_EXEC_GROUP_JOINER_TEST_CHILD",
+        TEST,
+    ) {
         return;
     }
     let temporary = tempfile::tempdir().unwrap();
@@ -1099,9 +1119,9 @@ fn a_failed_start_ends_a_program_that_joined_another_process_group() {
     assert_eq!(nix::sys::signal::killpg(program, None), Err(Errno::ESRCH));
     // Without a spare descriptor, the pidfd does not open, and no cgroup holds the program.
     let lowest = std::fs::File::open("/dev/null").unwrap().as_raw_fd();
-    let previous = sys::set_descriptor_limit(lowest as _).unwrap();
+    let previous = sys::tests::set_descriptor_limit(lowest as _).unwrap();
     let started = Execution::new(spawned, pipes, Options::new().process_group());
-    sys::set_descriptor_limit(previous).unwrap();
+    sys::tests::set_descriptor_limit(previous).unwrap();
     assert_eq!(sys::errno_of(&started.unwrap_err()), Errno::EMFILE);
     assert_eq!(signal_of(Child::new(id).unwrap().wait().unwrap()), Some(9));
 }
@@ -1337,7 +1357,7 @@ fn adopting_a_program_whose_status_another_collector_took_ends_nothing_by_id() {
 #[test]
 fn a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors() {
     // As for a failed start, the lowered descriptor limit runs this test in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_EXEC_ADOPT_DESCRIPTOR_LIMIT_TEST_CHILD",
         "guest::exec::tests::a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors",
     ) {
@@ -1349,7 +1369,7 @@ fn a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors() {
     // Without a spare descriptor, the pidfd does not open by the program's ID. `adopt` then ends
     // the program, closes the descriptors that it took, and kills the cgroup.
     let lowest = std::fs::File::open("/dev/null").unwrap().as_raw_fd();
-    let previous = sys::set_descriptor_limit(lowest as _).unwrap();
+    let previous = sys::tests::set_descriptor_limit(lowest as _).unwrap();
     let adopted = Execution::adopt(
         Child::new(id).unwrap(),
         pipes,
@@ -1357,7 +1377,7 @@ fn a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors() {
             .process_group()
             .cgroup(&cgroup, Scope::Execution),
     );
-    sys::set_descriptor_limit(previous).unwrap();
+    sys::tests::set_descriptor_limit(previous).unwrap();
     assert_eq!(sys::errno_of(&adopted.unwrap_err()), Errno::EMFILE);
     assert_eq!(
         std::fs::read(cgroup.path().join("cgroup.kill")).unwrap(),
@@ -1370,7 +1390,7 @@ fn a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors() {
 fn adopted_ends_are_pipe_ends_that_go_the_way_of_their_streams() {
     // For a moment the caller's ends are inheritable, and a child that another test's thread
     // started meanwhile could keep them, so this test runs in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_EXEC_ADOPTED_ENDS_TEST_CHILD",
         "guest::exec::tests::adopted_ends_are_pipe_ends_that_go_the_way_of_their_streams",
     ) {
@@ -1448,7 +1468,7 @@ fn start_leading(command: Command, leads: bool, options: Options) -> Execution {
 fn collect_once_ended(id: u32) -> ExitStatus {
     let process = ProcessId::from_positive(i64::from(id)).unwrap();
     let started = Instant::now();
-    while !sys::has_exited(process).unwrap() {
+    while !sys::tests::has_exited(process).unwrap() {
         assert!(started.elapsed() < PATIENCE, "the program ended in time");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -1528,7 +1548,7 @@ fn a_program_that_ignores_a_signal_runs_until_the_caller_terminates_it() {
     }
     std::thread::sleep(Duration::from_millis(200));
     record.pump(&mut execution, true);
-    assert!(!sys::has_exited(process).unwrap());
+    assert!(!sys::tests::has_exited(process).unwrap());
     assert!(execution.status().is_none());
     assert_eq!(execution.deadline(), deadline);
     assert!(execution.input().is_some());
@@ -1555,7 +1575,7 @@ fn a_signal_reaches_the_process_group_that_the_program_leads_if_the_options_say_
     // Whether the options name the group, and whether the execution signals it through the
     // program's pidfd or, as before Linux 6.9, by its ID.
     for (process_group, before_linux_6_9) in [(false, false), (true, false), (true, true)] {
-        super::BEFORE_LINUX_6_9.set(before_linux_6_9);
+        BEFORE_LINUX_6_9.set(before_linux_6_9);
         // The program leads a process group of its own either way.
         let options = if process_group {
             Options::new().process_group()
@@ -1579,7 +1599,7 @@ fn a_signal_reaches_the_process_group_that_the_program_leads_if_the_options_say_
         // The program ignores the signal, so it runs until the caller ends it.
         assert!(execution.cancel());
         record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
-        super::BEFORE_LINUX_6_9.set(false);
+        BEFORE_LINUX_6_9.set(false);
         let outcome = record.outcome.unwrap();
         assert_eq!(
             outcome.cause(),
@@ -1630,10 +1650,10 @@ fn a_signal_reaches_each_process_once() {
         record.drive_until(&mut execution, true, |record, _| {
             record.output[0] == b"ready"
         });
-        super::SENT.take();
-        super::LEADS.set(looked_up);
+        SENT.take();
+        LEADS.set(looked_up);
         assert!(execution.signal(SIGTERM).unwrap(), "{case}");
-        assert_eq!(super::SENT.take(), sent, "{case}");
+        assert_eq!(SENT.take(), sent, "{case}");
         record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
         assert_eq!(record.output, [b"readybye".to_vec(), Vec::new()], "{case}");
         let outcome = record.outcome.unwrap();
@@ -1675,7 +1695,7 @@ fn signal_once_a_collector_took_the_status(
         "sleep 30 </dev/null >/dev/null 2>&1 & echo $! >'{}'",
         file.display()
     );
-    super::BEFORE_LINUX_6_9.set(before_linux_6_9);
+    BEFORE_LINUX_6_9.set(before_linux_6_9);
     let mut options = Options::new();
     if caller_reaps {
         options = options.caller_reaps();
@@ -1692,15 +1712,15 @@ fn signal_once_a_collector_took_the_status(
     // may that of its process group once the descendant leaves it.
     let status = collect_once_ended(id);
     let descendant = Descendant::open(&file);
-    super::SENT.take();
+    SENT.take();
     for _ in 0..2 {
-        super::LEADS.set(leader.then_some(true));
+        LEADS.set(leader.then_some(true));
         assert!(!execution.signal(SIGTERM).unwrap(), "{case}");
     }
     // Nothing reached the program's process group, which the descendant still holds, and the
     // signals changed nothing in the execution. A program that the lookup found leading its group
     // got nothing at all, as the wait through its pidfd found its status taken.
-    let sent = super::SENT.take();
+    let sent = SENT.take();
     assert!(sent.iter().all(|&(_, group)| !group), "{case}");
     assert!(!leader || sent.is_empty(), "{case}");
     descendant.assert_runs();
@@ -1734,7 +1754,7 @@ fn signal_once_a_collector_took_the_status(
     assert!(execution.input().is_none());
     assert!(!execution.signal(SIGTERM).unwrap());
     record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
-    super::BEFORE_LINUX_6_9.set(false);
+    BEFORE_LINUX_6_9.set(false);
     let outcome = record.outcome.unwrap();
     assert!(outcome.status().success(), "{case}");
     assert_eq!(outcome.cause(), None);
@@ -1745,7 +1765,7 @@ fn signal_once_a_collector_took_the_status(
 fn a_failed_group_lookup_is_an_error_that_sends_no_second_signal() {
     // A seccomp filter lasts as long as the thread that installs it, and passes to the processes
     // that the thread starts, so the test runs in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_EXEC_DENIED_GETPGID_TEST_CHILD",
         "guest::exec::tests::a_failed_group_lookup_is_an_error_that_sends_no_second_signal",
     ) {
@@ -1763,18 +1783,18 @@ fn a_failed_group_lookup_is_an_error_that_sends_no_second_signal() {
     record.drive_until(&mut execution, true, |record, _| {
         record.output[0] == b"ready"
     });
-    sys::deny_system_call(nix::libc::SYS_getpgid);
+    sys::tests::deny_system_call(nix::libc::SYS_getpgid);
     // A first lookup that fails sends nothing.
-    super::SENT.take();
+    SENT.take();
     let error = execution.signal(SIGTERM).unwrap_err();
     assert_eq!(sys::errno_of(&error), Errno::EPERM);
-    assert!(super::SENT.take().is_empty());
+    assert!(SENT.take().is_empty());
     // One that fails after the group's signal, where the hook answers the first, sends the program
     // no signal of its own.
-    super::LEADS.set(Some(true));
+    LEADS.set(Some(true));
     let error = execution.signal(SIGTERM).unwrap_err();
     assert_eq!(sys::errno_of(&error), Errno::EPERM);
-    assert_eq!(super::SENT.take(), [(SIGTERM, true)]);
+    assert_eq!(SENT.take(), [(SIGTERM, true)]);
     // The kill needs no lookup.
     assert!(execution.cancel());
     record.drive_until(&mut execution, true, |record, _| record.outcome.is_some());
@@ -1795,13 +1815,13 @@ fn a_kill_and_a_signal_that_the_kernel_refuses_are_errors_that_end_nothing() {
         assert_eq!(sys::errno_of(&error), Errno::EINVAL, "{signal}");
     }
     // The kernel refuses the execution's signals, as it does those that the caller may not send.
-    super::REFUSED.set(Some(Errno::EPERM));
+    REFUSED.set(Some(Errno::EPERM));
     let refused = execution.signal(SIGTERM);
-    super::REFUSED.set(None);
+    REFUSED.set(None);
     assert_eq!(sys::errno_of(&refused.unwrap_err()), Errno::EPERM);
     // The program runs on, the execution has no cause yet, and no event reports the refusals.
     std::thread::sleep(Duration::from_millis(100));
-    assert!(!sys::has_exited(process).unwrap());
+    assert!(!sys::tests::has_exited(process).unwrap());
     assert!(execution.cancel());
     let record = run(&mut execution);
     assert!(record.kill_failures.is_empty());

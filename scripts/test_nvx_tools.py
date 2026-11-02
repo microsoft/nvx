@@ -8359,7 +8359,7 @@ class CiConfigurationTests(unittest.TestCase):
             "nvx-rs/src/bin/nvx-rs.rs",
             "nvx-rs/src/bin/nvx-fake-openvmm.rs",
             "nvx-rs/src/protocol/nvxs/tests/host.rs",
-            "nvx-rs/src/guest/managed_agent/loopback.rs",
+            "nvx-rs/src/guest/managed_agent/tests/loopback.rs",
             "nvx-rs/tests/guest_tools.rs",
             "nvx-rs/artifacts.json",
         )

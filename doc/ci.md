@@ -440,8 +440,8 @@ inputs are the files that the guest binaries' build reads:
 `rust-toolchain.toml`; the crate's manifest, lockfile, build script, and Cargo
 configuration; every file under `nvx-rs/src/` but the host side, which is the
 `host` and `testing` modules and the `nvx-rs` and `nvx-fake-openvmm` binaries,
-and the test modules, which are the `tests.rs` files, the `tests` directories,
-and the managed agent's `loopback` harness; and the two Python modules that
+and the test modules, which are the `tests.rs` files and the `tests`
+directories; and the two Python modules that
 define the build. `GuestRustBuildConstants` in
 [`build_constants.py`](../scripts/nvx_tools/build_constants.py) selects them,
 and every guest build fails when Cargo's dep-info for the nine executables

@@ -1214,7 +1214,7 @@ fn errors_name_their_stage_and_their_cause() {
 fn a_repair_draws_no_randomness_before_its_reseed() {
     // A seccomp filter lasts as long as the thread that installs it, and passes to the processes
     // that the thread starts, so the test runs in a process of its own.
-    if crate::guest::managed_agent::isolate_process_test(
+    if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_CLONE_REPAIR_RANDOMNESS_TEST_CHILD",
         "guest::clone::repair::tests::a_repair_draws_no_randomness_before_its_reseed",
     ) {
@@ -1226,7 +1226,7 @@ fn a_repair_draws_no_randomness_before_its_reseed() {
     // From here on, `getrandom`, or an open, which a read of `/dev/urandom` or `/dev/random`
     // needs, ends the process with `SIGSYS`. The fake system opens no file, so only randomness
     // that the repair drew, such as the keys of a hashed map, would make either call.
-    sys::forbid_system_calls(&[
+    sys::tests::forbid_system_calls(&[
         nix::libc::SYS_getrandom,
         nix::libc::SYS_open,
         nix::libc::SYS_openat,

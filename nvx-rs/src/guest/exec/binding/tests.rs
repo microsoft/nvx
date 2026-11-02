@@ -906,7 +906,7 @@ fn an_unrelated_child_s_status_stays_with_its_owner() {
         .args(["-c", "exit 7"])
         .spawn()
         .unwrap();
-    while !sys::has_exited(ProcessId::from_child(&unrelated)).unwrap() {
+    while !sys::tests::has_exited(ProcessId::from_child(&unrelated)).unwrap() {
         std::thread::yield_now();
     }
     let temporary = tempfile::tempdir().unwrap();
@@ -952,7 +952,7 @@ fn a_caller_that_reaps_hands_the_program_s_status_over() {
     });
     let process = ProcessId::from_positive(i64::from(id)).unwrap();
     let started = Instant::now();
-    while !sys::has_exited(process).unwrap() {
+    while !sys::tests::has_exited(process).unwrap() {
         assert!(started.elapsed() < PATIENCE, "the program ended in time");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -1043,7 +1043,7 @@ fn the_program_s_end_reaches_the_runner_before_queued_output_whoever_collects_it
         let id = side.binding.id();
         let process = ProcessId::from_positive(i64::from(id)).unwrap();
         let started = Instant::now();
-        while !sys::has_exited(process).unwrap() {
+        while !sys::tests::has_exited(process).unwrap() {
             assert!(started.elapsed() < PATIENCE, "the program ended in time");
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1111,7 +1111,7 @@ fn the_program_s_end_reaches_the_runner_before_its_timeout_in_a_first_call_after
         let id = side.binding.id();
         let process = ProcessId::from_positive(i64::from(id)).unwrap();
         let started = Instant::now();
-        while !sys::has_exited(process).unwrap() {
+        while !sys::tests::has_exited(process).unwrap() {
             assert!(started.elapsed() < PATIENCE, "the program ended in time");
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1185,7 +1185,7 @@ fn the_program_s_end_reaches_the_runner_before_its_timeout_while_its_launch_repo
         let id = side.binding.id();
         let process = ProcessId::from_positive(i64::from(id)).unwrap();
         let started = Instant::now();
-        while !sys::has_exited(process).unwrap() {
+        while !sys::tests::has_exited(process).unwrap() {
             assert!(started.elapsed() < PATIENCE, "the program ended in time");
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1256,7 +1256,7 @@ fn the_runner_gives_up_in_time_on_a_launch_report_that_a_process_holds_after_the
         let id = side.binding.id();
         let process = ProcessId::from_positive(i64::from(id)).unwrap();
         let started = Instant::now();
-        while !sys::has_exited(process).unwrap() {
+        while !sys::tests::has_exited(process).unwrap() {
             assert!(started.elapsed() < PATIENCE, "the program ended in time");
             std::thread::sleep(Duration::from_millis(1));
         }
