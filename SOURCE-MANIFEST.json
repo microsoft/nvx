@@ -42,6 +42,7 @@
       "Cargo.toml",
       "Cargo.lock",
       ".cargo",
+      "crates",
       "nvx-rs",
       "rust-toolchain.toml"
     ],
@@ -68,6 +69,7 @@
       "Cargo.toml",
       "Cargo.lock",
       ".cargo",
+      "crates",
       "nvx-rs",
       "rust-toolchain.toml"
     ],
@@ -91,6 +93,7 @@
       "Cargo.toml",
       "Cargo.lock",
       ".cargo",
+      "crates",
       "nvx-rs",
       "rust-toolchain.toml"
     ],

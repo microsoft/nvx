@@ -15,6 +15,7 @@ WORKDIR /repo
 COPY rust-toolchain.toml /repo/
 COPY Cargo.toml Cargo.lock /repo/
 COPY .cargo/ /repo/.cargo/
+COPY crates/ /repo/crates/
 COPY nvx-rs/ /repo/nvx-rs/
 COPY scripts/ /repo/scripts/
 RUN set -eux; \
@@ -65,6 +66,7 @@ RUN python3 scripts/nvx.py build-kernel --debug
 FROM base AS guest-base
 COPY Cargo.toml Cargo.lock /repo/
 COPY .cargo/ /repo/.cargo/
+COPY crates/ /repo/crates/
 COPY nvx-rs/ /repo/nvx-rs/
 COPY rust-toolchain.toml /repo/
 COPY --from=guest-binaries /out/guest-binaries/ /repo/build/guest-binaries/

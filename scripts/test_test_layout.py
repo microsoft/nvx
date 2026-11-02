@@ -600,6 +600,30 @@ class RustRuleTests(unittest.TestCase):
                     rules(crate({"src/lib.rs": "", "Cargo.toml": manifest})),
                 )
 
+    def test_a_root_workspace_manifest_is_a_crate_without_targets(self) -> None:
+        # The repository's root Cargo.toml declares the workspace, its
+        # profiles, and its lints, but no package, and its members stay
+        # crates of their own.
+        workspace = (
+            '[workspace]\nresolver = "3"\nmembers = ["demo"]\nexclude = ["other"]\n\n'
+            '[profile.guest]\ninherits = "release"\nstrip = true\n\n'
+            '[workspace.lints.rust]\nmissing_docs = "warn"\n'
+        )
+        files = {
+            "Cargo.toml": workspace,
+            "demo/Cargo.toml": CARGO,
+            "demo/src/lib.rs": LIBRARY,
+            "demo/src/a.rs": TESTED,
+            "demo/src/a/tests.rs": TESTS,
+        }
+        self.assertEqual(layout.rust_crates(files), ("", "demo"))
+        self.assertEqual(layout.target_roots(workspace, set()), {})
+        self.assertEqual(rules(FakeTree(files)), [])
+        self.assertEqual(
+            rules(FakeTree({**files, "demo/src/b/tests.rs": TESTS})),
+            [("demo/src/b/tests.rs", 0, "orphan-test-file")],
+        )
+
     def test_test_hooks_need_seams(self) -> None:
         source = (
             "#[cfg_attr(test, derive(Debug))]\n"

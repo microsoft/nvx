@@ -15048,6 +15048,33 @@ class BuildConstantsTests(unittest.TestCase):
                 )
                 self.assertEqual(tracked.returncode, 0, tracked.stderr)
 
+    def test_source_paths_hold_every_input_of_the_guest_binaries(self):
+        # The project source archive holds every input of the guest binaries,
+        # and each guest's guest_sources names every one but the Python build
+        # recipe, which the archive holds in scripts/. crates/ is an input
+        # before it holds a crate.
+        inputs = [
+            path.relative_to(BuildConstants.REPO_ROOT).as_posix()
+            for path in guest_binaries.guest_binary_source_files()
+        ]
+        self.assertIn("crates/.gitkeep", inputs)
+
+        def outside(paths: tuple[str, ...]) -> list[str]:
+            return [
+                path
+                for path in inputs
+                if not any(path == top or path.startswith(f"{top}/") for top in paths)
+            ]
+
+        self.assertEqual(outside(ReleaseBuildConstants.PROJECT_SOURCE_PATHS), [])
+        self.assertEqual(
+            outside(GuestRustBuildConstants.SOURCE_PATHS),
+            [
+                "scripts/nvx_tools/build_constants.py",
+                "scripts/nvx_tools/guest_binaries.py",
+            ],
+        )
+
     def test_no_c_or_assembler_sources_remain_outside_openvmm(self):
         tracked = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],

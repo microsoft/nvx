@@ -372,9 +372,9 @@ and the sandbox scratch template, under `scratch_template_sha256` in its
 SHA-256, the digest of the `nvx-rs` sources that built it, and the build's
 Rust release, target, and features. Its `guest_rust` section pins Rust 1.95.0
 and `x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
-the Cargo workspace's `Cargo.toml`, `Cargo.lock`, and `.cargo`, `nvx-rs`, and
-`rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 2,
-control-session protocol 1, and contract
+the Cargo workspace's `Cargo.toml`, `Cargo.lock`, `.cargo`, and `crates`,
+`nvx-rs`, and `rust-toolchain.toml`. The OpenVMM section advertises microVM
+ABI 2, control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
 part of this platform manifest.
 
@@ -409,8 +409,9 @@ SHA256SUMS
 
 Packages built with `--include-source` additionally contain `source/` and omit
 the Azure Linux guest artifacts, whose corresponding source is not collected.
-The project source archive includes `nvx-rs` and excludes its generated
-`target/` tree.
+The project source archive includes the Cargo workspace's `Cargo.toml`,
+`Cargo.lock`, `.cargo`, and `crates`, and `nvx-rs`, and excludes the
+workspace's generated `nvx-rs/target/` tree.
 `SHA256SUMS` has sorted `SHA256  relative/path` entries using POSIX separators
 for every packaged file, including `SOURCE-MANIFEST.json`, except
 `SHA256SUMS` itself.

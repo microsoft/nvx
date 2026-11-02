@@ -196,6 +196,7 @@ class GuestRustBuildConstants:
         "Cargo.toml",
         "Cargo.lock",
         ".cargo",
+        "crates",
         "nvx-rs",
         "rust-toolchain.toml",
     )
@@ -491,6 +492,7 @@ class ReleaseBuildConstants:
         "Cargo.toml",
         "Cargo.lock",
         ".cargo",
+        "crates",
         "nvx-rs",
         "ubuntu",
         "azurelinux",
