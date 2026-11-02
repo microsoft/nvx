@@ -1,19 +1,26 @@
-"""Publication of the nvx crate to crates.io by CI's full runs of dev.
+"""Publication of NVX's crates to crates.io by CI's full runs of dev.
 
-The crate's versions are pre-releases of the form ``X.Y.Z-LABEL.N``. A run
-publishes a new version whenever the crate's directory changed since the
+CRATES lists the crates that CI publishes, each after the crates that it
+depends on, all with one version, a pre-release of the form
+``X.Y.Z-LABEL.N``. A run publishes a new version whenever the crates'
+directories, or their workspace's manifest or lockfile, changed since the
 commit from which the newest version on crates.io was packed: the next number
-of the series that the crate's ``Cargo.toml`` declares, and at least the
-declared number. The new version exists only in the run's checkout, so the
-package's ``.cargo_vcs_info.json`` records the run's commit, as dirty when the
-version differs from the declared one.
+of the series that the crates declare, and at least the declared number. A
+crate requires each of the others by path and at exactly the declared
+version. The new version exists only in the run's checkout, which gives it to
+the crates and their requirements on each other, so each package's
+``.cargo_vcs_info.json`` records the run's commit, as dirty when the version
+differs from the declared one.
 
-Before the upload, the package must hold the commit's files byte for byte, but
-for the version, and must build with every feature, ``bundled`` included,
-which downloads and verifies the release that ``artifacts.json`` pins. The
-package job checks and builds the package without the right to publish it, so
-that no build script or procedural macro can publish either. The publish job
-builds nothing: it packs the same bytes again and uploads them, and then
+Before the upload, each package must hold the commit's files byte for byte,
+but for the versions, with a manifest and a lockfile that Cargo generates from
+the workspace's, which must mean what the commit's do. The packages must build
+with every feature, ``bundled`` included, which downloads and verifies the
+release that ``artifacts.json`` pins. The package job checks and builds the
+packages without the right to publish them, so that no build script or
+procedural macro can publish either. The publish job builds nothing: it packs
+the same bytes again, and uploads each package after those that it depends
+on, which crates.io must serve before Cargo packs it alone, and then
 crates.io must serve those very bytes.
 """
 
@@ -23,19 +30,20 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sys
 import tarfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 from typing import cast
 
+from .cargo_workspace import DEPENDENCIES, Table, read_toml, table, workspace_root
 from .common import (
     CommandResult,
     ScriptError,
@@ -48,6 +56,7 @@ from .common import (
 INDEX_URL = "https://index.crates.io"
 DOWNLOAD_URL = "https://static.crates.io/crates"
 CRATE_PAGE_URL = "https://crates.io/crates"
+CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 USER_AGENT = "nvx-crate-release (+https://github.com/microsoft/nvx)"
 
 FETCH_ATTEMPTS = 3
@@ -58,13 +67,14 @@ FETCH_RETRY_SECONDS = 10.0
 INDEX_WAIT_SECONDS = 900.0
 INDEX_POLL_SECONDS = 15.0
 
-# Files that Cargo writes into every package instead of copying them.
-GENERATED_FILES = frozenset({".cargo_vcs_info.json", "Cargo.toml"})
-# Files of the package that Cargo copies from the checkout's files named
-# here, whose version a run that publishes another version than the declared
-# one rewrites.
-VERSIONED_FILES = {"Cargo.toml.orig": "Cargo.toml", "Cargo.lock": "Cargo.lock"}
-# Files without which the package does not build, document, or license itself.
+# Files that Cargo writes into every package instead of copying them. The
+# manifest and the lockfile, which it generates from the workspace's, are
+# checked by meaning.
+GENERATED_FILES = frozenset({".cargo_vcs_info.json", "Cargo.toml", "Cargo.lock"})
+# The package's copy of the crate's manifest, whose versions a run that
+# publishes another version than the declared one rewrites.
+VERSIONED_FILES = {"Cargo.toml.orig": "Cargo.toml"}
+# Files without which no package builds, documents, or licenses itself.
 REQUIRED_FILES = (
     ".cargo_vcs_info.json",
     "Cargo.toml",
@@ -72,9 +82,6 @@ REQUIRED_FILES = (
     "Cargo.lock",
     "LICENSE",
     "README.md",
-    "build.rs",
-    "artifacts.json",
-    "src/lib.rs",
 )
 # Environment variables that would make `bundled` stage something else than
 # the release that artifacts.json pins.
@@ -83,6 +90,20 @@ BUNDLE_VARIABLES = ("NVX_BUNDLE", "NVX_BUNDLE_DIR", "NVX_BUNDLE_HYPERVISOR")
 STATE_FILE = "state.json"
 # The most problems that a failed package check lists.
 MAXIMUM_REPORTED_PROBLEMS = 20
+
+
+@dataclass(frozen=True)
+class Crate:
+    """A crate that CI publishes: its directory in the checkout, and the files
+    beyond REQUIRED_FILES without which its package does not build."""
+
+    directory: str
+    required: tuple[str, ...] = ()
+
+
+# The crates that CI publishes, with one version, each after the crates that
+# it depends on.
+CRATES = (Crate("nvx-rs", ("build.rs", "artifacts.json", "src/lib.rs")),)
 
 _NUMERIC = r"(?:0|[1-9][0-9]*)"
 _IDENTIFIER = rf"(?:{_NUMERIC}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -93,11 +114,6 @@ _SEMVER = re.compile(
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-_PACKAGE_TABLE = re.compile(r"\[\s*package\s*\]\s*(?:#.*)?")
-_PACKAGE_FIELD = re.compile(
-    r'(?P<key>name|version)\s*=\s*"(?P<value>[^"\\]*)"\s*(?:#.*)?'
-)
-_VERSION_VALUE = re.compile(r'(version\s*=\s*")[^"\\]*(")')
 
 
 @dataclass(frozen=True)
@@ -191,57 +207,103 @@ def next_version(declared: Version, published: Iterable[Version]) -> Version:
 
 @dataclass(frozen=True)
 class Manifest:
-    """The fields of a Cargo manifest's [package] table that publication reads."""
+    """The name and version of a crate that CI publishes."""
 
     name: str
     version: Version
 
 
-def _package_fields(lines: Sequence[str], source: str) -> dict[str, tuple[int, str]]:
-    """Return the line and value of the [package] table's name and version."""
-    fields: dict[str, tuple[int, str]] = {}
-    in_package = False
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("["):
-            in_package = _PACKAGE_TABLE.fullmatch(stripped) is not None
-            continue
-        match = _PACKAGE_FIELD.fullmatch(stripped) if in_package else None
-        if match is None:
-            continue
-        key = match.group("key")
-        if key in fields:
-            raise ScriptError(f"{source} sets package.{key} twice")
-        fields[key] = (index, match.group("value"))
-    for key in ("name", "version"):
-        if key not in fields:
-            raise ScriptError(f"{source} sets no package.{key} string")
-    return fields
+def _options(member: Table, specification: Table) -> str:
+    """Return what the dependency `member` asks of its crate, as Cargo merges
+    it with `specification`, the workspace's dependency that it inherits, or
+    else itself: whether it is optional, as `member` says; whether it takes
+    the crate's default features, which `member` may turn on, or else
+    `specification` turn off; and the features that either names."""
+    both = (member, specification)
+    defaults = [t.get("default-features", t.get("default_features")) for t in both]
+    features = {f for t in both for f in cast(list[str], t.get("features") or [])}
+    default = defaults[0] is True or defaults[1] is not False
+    optional = member.get("optional") is True
+    return f"optional={optional} default-features={default} features={sorted(features)}"
 
 
-def read_manifest(data: bytes, source: str) -> Manifest:
-    fields = _package_fields(data.decode("utf-8").splitlines(), source)
-    return Manifest(fields["name"][1], Version.parse(fields["version"][1]))
+def _requirements(
+    manifest: Table, names: Collection[str], inherited: Table
+) -> Iterator[tuple[str, Table, tuple[str, ...]]]:
+    """Yield the crate, the specification, and the place of each dependency of
+    `manifest` on one of the crates `names`, as it inherits it from the
+    workspace's dependencies `inherited`: an empty specification for a
+    requirement alone, and a place that names the platform that the dependency
+    is for, if any, its kind, its key, the crate, and its _options()."""
+    for platform, tables in [("", manifest), *table(manifest.get("target")).items()]:
+        for kind in DEPENDENCIES:
+            for key, value in table(table(tables).get(kind)).items():
+                member = specification = table(value)
+                if member.get("workspace") is True:
+                    specification = table(inherited.get(key))
+                name = specification.get("package", key)
+                if isinstance(name, str) and name in names:
+                    place = (platform, kind.replace("_", "-"), key, name)
+                    yield name, specification, (*place, _options(member, specification))
 
 
-def rewrite_manifest(data: bytes, source: str, version: Version) -> bytes:
-    """Return a manifest whose [package] table declares `version`, every
-    other byte unchanged."""
-    lines = data.decode("utf-8").splitlines(keepends=True)
-    index = _package_fields(lines, source)["version"][0]
-    lines[index] = _VERSION_VALUE.sub(
-        lambda match: f"{match.group(1)}{version}{match.group(2)}",
-        lines[index],
-        count=1,
-    )
-    return "".join(lines).encode("utf-8")
+def _give_version(
+    manifest: Table, names: Collection[str], declared: Version, version: Version
+) -> Table:
+    """Return a copy of `manifest` with `version` instead of `declared` in its
+    package's version and its workspace's, and in its own and its workspace's
+    exact requirements on the crates `names`."""
+    copy = deepcopy(manifest)
+    workspace = table(copy.get("workspace"))
+    inherited = table(workspace.get("dependencies"))
+    for owner in (table(copy.get("package")), table(workspace.get("package"))):
+        if owner.get("version") == str(declared):
+            owner["version"] = str(version)
+    workspace_dependencies: Table = {"dependencies": inherited}
+    for dependencies in (copy, workspace_dependencies):
+        for _, specification, _ in _requirements(dependencies, names, inherited):
+            if specification.get("version") == f"={declared}":
+                specification["version"] = f"={version}"
+    return copy
+
+
+def rewrite_manifest(
+    data: bytes,
+    source: str,
+    names: Collection[str],
+    declared: Version,
+    version: Version,
+) -> bytes:
+    """Return a manifest that declares `version` wherever _give_version()
+    puts it, every other byte unchanged: each version or exact requirement of
+    `declared` that _give_version() changes, and no other, such as a version in
+    the manifest's metadata."""
+    text = data.decode("utf-8")
+    original = read_toml(text, source)
+    expected = _give_version(original, names, declared, version)
+    pattern = rf"""(\bversion[ \t]*=[ \t]*)(["'])(=?){re.escape(str(declared))}\2"""
+    rewritten = text
+    for match in reversed([*re.finditer(pattern, text)]):
+        new = f"{match[1]}{match[2]}{match[3]}{version}{match[2]}"
+        read = read_toml(text[: match.start()] + new + text[match.end() :], source)
+        given = _give_version(read, names, declared, version)
+        if read != original and given == expected:
+            rewritten = rewritten[: match.start()] + new + rewritten[match.end() :]
+    if read_toml(rewritten, source) != expected:
+        raise ScriptError(
+            f"rewriting {declared} as {version} in {source} changes other values "
+            "than the versions of the crates that CI publishes, or misses one"
+        )
+    return rewritten.encode("utf-8")
 
 
 def rewrite_lockfile(
     data: bytes, source: str, name: str, declared: Version, version: Version
 ) -> bytes:
     """Return a lockfile in which the package `name` has `version` instead of
-    `declared`, every other byte unchanged."""
+    `declared`, every other byte unchanged. Checkout.open() makes sure that
+    the lockfile holds no other package of the name, so the references to it
+    name it alone."""
     entry = re.compile(
         rf'^(\[\[package\]\]\nname = "{re.escape(name)}"\nversion = ")'
         rf'{re.escape(str(declared))}("\n)',
@@ -257,15 +319,17 @@ def rewrite_lockfile(
 
 
 def versioned_file(
-    path: str, data: bytes, name: str, declared: Version, version: Version
+    path: str, data: bytes, names: Collection[str], declared: Version, version: Version
 ) -> bytes:
-    """Return the checkout's file `path`, one of VERSIONED_FILES' sources,
-    as a run that publishes `version` rewrites it."""
+    """Return the checkout's manifest or lockfile `path` as a run that
+    publishes `version` of the crates `names` rewrites it."""
     if version == declared:
         return data
-    if path == "Cargo.toml":
-        return rewrite_manifest(data, path, version)
-    return rewrite_lockfile(data, path, name, declared, version)
+    if PurePosixPath(path).name == "Cargo.toml":
+        return rewrite_manifest(data, path, names, declared, version)
+    for name in names:
+        data = rewrite_lockfile(data, path, name, declared, version)
+    return data
 
 
 def git_blob_id(data: bytes, commit: str) -> str:
@@ -278,18 +342,15 @@ def git_blob_id(data: bytes, commit: str) -> str:
 
 
 class Repository:
-    """The Git checkout that holds the crate."""
+    """The Git checkout that holds the crates, at its root."""
 
-    def __init__(self, crate_dir: Path) -> None:
-        self.crate_dir = crate_dir
-        # The crate's directory relative to the root of the checkout, with a
-        # trailing slash, as `git status` names its files.
-        self.prefix = self._text("locating the crate", "rev-parse", "--show-prefix")
-        # The same without the slash, as `.cargo_vcs_info.json` names it.
-        self.path_in_vcs = self.prefix.rstrip("/")
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        if self._text("locating the checkout", "rev-parse", "--show-prefix"):
+            raise ScriptError(f"{root} is not the root of its Git checkout")
 
     def _git(self, *arguments: str) -> CommandResult:
-        return run_capture(["git", "-C", self.crate_dir, *arguments])
+        return run_capture(["git", "-C", self.root, *arguments])
 
     def _text(self, label: str, *arguments: str) -> str:
         result = self._git(*arguments)
@@ -314,10 +375,10 @@ class Repository:
             "comparing commits", "merge-base", "--is-ancestor", ancestor, descendant
         )
 
-    def changed(self, base: str, head: str) -> bool:
-        """Return whether the crate's directory differs between two commits."""
+    def changed(self, base: str, head: str, paths: Sequence[str]) -> bool:
+        """Return whether `paths` differ between two commits."""
         return not self._predicate(
-            "comparing the crate's files",
+            "comparing the crates' files",
             "diff",
             "--quiet",
             "--no-ext-diff",
@@ -325,23 +386,21 @@ class Repository:
             base,
             head,
             "--",
-            ".",
+            *paths,
         )
 
-    def status(self) -> list[str]:
-        """Return the changed and untracked files of the crate's directory,
-        as `git status --porcelain` lists them."""
+    def status(self, paths: Sequence[str]) -> list[str]:
+        """Return the changed and untracked files of `paths`, as
+        `git status --porcelain` lists them."""
         result = self._git(
-            "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."
+            "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *paths
         )
         require_success(result, "git status")
         return [entry for entry in result.stdout.decode("utf-8").split("\0") if entry]
 
-    def tree(self, commit: str) -> dict[str, str]:
-        """Map each file of the crate's directory in `commit` to its blob."""
-        tree = f"{commit}:{self.path_in_vcs}" if self.path_in_vcs else commit
-        # Without --full-tree, ls-tree lists only the part of the tree beneath
-        # the working directory's path, which the crate's subtree lacks.
+    def tree(self, commit: str, directory: str) -> dict[str, str]:
+        """Map each file of `directory` in `commit` to its blob."""
+        tree = f"{commit}:{directory}"
         result = self._git("ls-tree", "--full-tree", "-r", "-z", tree)
         require_success(result, f"listing the crate's files in {commit}")
         files: dict[str, str] = {}
@@ -359,17 +418,22 @@ class Repository:
         require_success(result, f"reading blob {object_id}")
         return result.stdout
 
+    def file(self, commit: str, path: str) -> bytes:
+        return self.blob(f"{commit}:{path}")
 
-def require_checkout(repository: Repository, modified: Iterable[str]) -> None:
-    """Fail unless the crate's directory differs from its commit in exactly
-    the `modified` files, which the working tree changed."""
-    expected = sorted(f" M {repository.prefix}{path}" for path in modified)
-    actual = sorted(repository.status())
+
+def require_checkout(
+    repository: Repository, paths: Sequence[str], modified: Iterable[str]
+) -> None:
+    """Fail unless `paths` differ from their commit in exactly the `modified`
+    files, which the working tree changed."""
+    expected = sorted(f" M {path}" for path in modified)
+    actual = sorted(repository.status(paths))
     if actual != expected:
         changes = "\n".join(actual) or "(none)"
         wanted = "\n".join(expected) or "(none)"
         raise ScriptError(
-            f"the checkout of {repository.prefix or './'} has these changes:\n"
+            f"the checkout of {', '.join(paths)} has these changes:\n"
             f"{changes}\nbut publication expects these:\n{wanted}"
         )
 
@@ -599,20 +663,108 @@ def read_vcs_info(files: Mapping[str, bytes], source: str) -> VcsInfo | None:
     return VcsInfo(commit, dirty, path_in_vcs)
 
 
+def _dependencies(
+    entry: Table,
+    keys: Sequence[tuple[object, ...]],
+    run: Collection[tuple[object, ...]],
+) -> set[tuple[object, ...]]:
+    """Return the name, version, and source of each package that a lockfile's
+    `entry` depends on, among the packages of the lockfile, `keys`: a reference
+    names the package, then gives its version if the lockfile holds another of
+    that name, and then its source if it holds another of that version too.
+    One to a package of the run, whose name and version `run` holds, is to it
+    from the checkout, from crates.io or not."""
+    found: set[tuple[object, ...]] = set()
+    references = entry.get("dependencies")
+    references = cast(list[object], references) if isinstance(references, list) else []
+    for reference in references:
+        parts = str(reference).split(" ", 2)
+        named = [
+            key for key in keys if [*key[:2], f"({key[2]})"][: len(parts)] == parts
+        ]
+        crate, number, source = named[0] if len(named) == 1 else (reference, 0, 0)
+        found.add((crate, number, None if (crate, number) in run else source))
+    return found
+
+
+def _lockfile_problems(
+    data: bytes,
+    workspace: Table,
+    name: str,
+    version: Version,
+    checksums: Mapping[str, str],
+) -> list[str]:
+    """Return how the lockfile that Cargo generated for a package of `name`
+    `version`, by pruning the workspace's lockfile to the package's
+    dependencies, differs in meaning: it locks the run's packages of the other
+    crates, of `version`, as crates.io's, with the SHA-256 digests
+    `checksums`."""
+    try:
+        lockfile = read_toml(data, "Cargo.lock")
+    except ScriptError as error:
+        return [str(error)]
+    problems: list[str] = []
+    if (found := lockfile.get("version")) != (wanted := workspace.get("version")):
+        problems.append(f"Cargo.lock has format {found}, not {wanted}")
+    entries: dict[tuple[object, ...], Table] = {}
+    keys: dict[bool, list[tuple[object, ...]]] = {False: [], True: []}
+    # The crate packed is the root, from its path; Cargo locks the run's other
+    # crates as crates.io's packages.
+    run = {(crate, str(version)) for crate in checksums if crate != name}
+    for document, packed in ((workspace, False), (lockfile, True)):
+        packages = document.get("package")
+        for value in cast(list[object], packages) if isinstance(packages, list) else []:
+            entry = table(value)
+            key = (entry.get("name"), entry.get("version"), entry.get("source"))
+            keys[packed].append(key)
+            entries[(*key, packed)] = entry
+    for (crate, number, source, packed), entry in entries.items():
+        if not packed:
+            continue
+        expected = entries.get((crate, number, source, False))
+        if (crate, number) in run:
+            # Cargo locks a crate of the run as the package that it packed.
+            expected = entries.get((crate, number, None, False))
+            if source != CRATES_IO_SOURCE:
+                expected = None
+            checksum = checksums[str(crate)]
+        else:
+            checksum = None if expected is None else expected.get("checksum")
+        if expected is None or entry.get("checksum") != checksum:
+            problems.append(
+                f"Cargo.lock locks {crate} {number} from {source or 'its path'}, "
+                "unlike the workspace's lockfile and this run's packages"
+            )
+        elif not _dependencies(entry, keys[True], run) <= _dependencies(
+            expected, keys[False], run
+        ):
+            problems.append(
+                f"Cargo.lock gives {crate} {number} dependencies that the "
+                "workspace's lockfile does not"
+            )
+    if (name, str(version), None, True) not in entries:
+        problems.append(f"Cargo.lock does not lock {name} {version}")
+    return problems
+
+
 def check_package(
     files: Mapping[str, bytes],
     *,
     source: str,
-    repository: Repository,
-    commit: str,
+    checkout: Checkout,
     name: str,
-    declared: Version,
     version: Version,
+    checksums: Mapping[str, str],
 ) -> None:
-    """Fail unless a package of `name` `version` was packed from `commit`, in
-    which the crate declares `declared`: it records the commit, as dirty
-    exactly when the versions differ, and it holds the commit's files byte for
-    byte, but for the rewritten version and the files that Cargo generates."""
+    """Fail unless a package of `name` `version` was packed from the
+    checkout's commit, with the run's packages of the other crates, whose
+    SHA-256 digests are `checksums`: it records the commit, as dirty exactly
+    when the version is not the declared one, and it holds the commit's files
+    byte for byte, but for the rewritten version and the files that Cargo
+    generates, whose meaning the workspace's manifest and lockfile give."""
+    repository, commit, names = checkout.repository, checkout.commit, checkout.names
+    declared = checkout.declared
+    crate = checkout.crates[names.index(name)]
     problems: list[str] = []
     vcs = read_vcs_info(files, source)
     dirty = version != declared
@@ -621,10 +773,10 @@ def check_package(
     else:
         if vcs.commit != commit:
             problems.append(f".cargo_vcs_info.json records {vcs.commit}, not {commit}")
-        if vcs.path_in_vcs != repository.path_in_vcs:
+        if vcs.path_in_vcs != crate.directory:
             problems.append(
                 f".cargo_vcs_info.json records the path {vcs.path_in_vcs!r}, not "
-                f"{repository.path_in_vcs!r}"
+                f"{crate.directory!r}"
             )
         if vcs.dirty != dirty:
             problems.append(
@@ -633,9 +785,11 @@ def check_package(
                 f"a {'dirty' if dirty else 'clean'} one"
             )
     problems.extend(
-        f"{path} is missing" for path in REQUIRED_FILES if path not in files
+        f"{path} is missing"
+        for path in (*REQUIRED_FILES, *crate.required)
+        if path not in files
     )
-    tree = repository.tree(commit)
+    tree = repository.tree(commit, crate.directory)
     for path, data in sorted(files.items()):
         if path in GENERATED_FILES:
             if b"\r" in data:
@@ -650,7 +804,7 @@ def check_package(
             original = repository.blob(object_id)
             try:
                 expected = versioned_file(
-                    original_path, original, name, declared, version
+                    original_path, original, names, declared, version
                 )
             except ScriptError as error:
                 problems.append(str(error))
@@ -664,15 +818,31 @@ def check_package(
     manifest_data = files.get("Cargo.toml")
     if manifest_data is not None:
         try:
-            manifest = read_manifest(manifest_data, f"{source}: Cargo.toml")
+            manifest = read_toml(manifest_data, f"{source}: Cargo.toml")
         except (ScriptError, UnicodeDecodeError) as error:
             problems.append(str(error))
         else:
-            if manifest != Manifest(name, version):
+            package = table(manifest.get("package"))
+            if [package.get("name"), package.get("version")] != [name, str(version)]:
                 problems.append(
-                    f"Cargo.toml declares {manifest.name} {manifest.version}, not "
-                    f"{name} {version}"
+                    f"Cargo.toml declares {package.get('name')} "
+                    f"{package.get('version')}, not {name} {version}"
                 )
+            for other, specification, _ in _requirements(manifest, names, {}):
+                exact = specification.get("version") == f"={version}"
+                if not exact or "path" in specification:
+                    problems.append(
+                        f"Cargo.toml requires {other} as {specification}, not as "
+                        f"={version} from crates.io"
+                    )
+            given = sorted(place for *_, place in _requirements(manifest, names, {}))
+            if given != (wanted := checkout.requirements[name]):
+                problems.append(f"Cargo.toml requires the crates {given}, not {wanted}")
+    lockfile = files.get("Cargo.lock")
+    if lockfile is not None:
+        problems += _lockfile_problems(
+            lockfile, checkout.lockfile_table(version), name, version, checksums
+        )
     if problems:
         shown = problems[:MAXIMUM_REPORTED_PROBLEMS]
         hidden = len(problems) - len(shown)
@@ -693,31 +863,36 @@ def crate_url(name: str, version: Version) -> str:
 
 
 def cargo_package(
-    crate_dir: Path,
+    checkout: Checkout,
     target_dir: Path,
-    manifest: Manifest,
+    names: Sequence[str],
+    version: Version,
     *,
-    allow_dirty: bool,
     environment: Mapping[str, str],
-) -> Path:
-    """Pack the crate with Cargo, without building it, and return the package."""
+    verify: bool = False,
+) -> dict[str, Path]:
+    """Pack the crates `names`, which have `version`, with Cargo, without
+    building them unless `verify`, and return the packages by crate."""
     command: list[str | os.PathLike[str]] = [
         "cargo",
         "package",
         "--locked",
-        "--no-verify",
+        "--all-features" if verify else "--no-verify",
         "--manifest-path",
-        crate_dir / "Cargo.toml",
+        checkout.repository.root / checkout.manifest,
         "--target-dir",
         target_dir,
     ]
-    if allow_dirty:
+    for name in names:
+        command += ["--package", name]
+    if version != checkout.declared:
         command.append("--allow-dirty")
     run_checked(command, env=environment)
-    package = target_dir / "package" / f"{manifest.name}-{manifest.version}.crate"
-    if not package.is_file():
-        raise ScriptError(f"cargo package wrote no {package}")
-    return package
+    packages = {name: target_dir / f"package/{name}-{version}.crate" for name in names}
+    for package in packages.values():
+        if not package.is_file():
+            raise ScriptError(f"cargo package wrote no {package}")
+    return packages
 
 
 def bundle_hypervisors(platform: str = sys.platform) -> tuple[str | None, ...]:
@@ -726,24 +901,20 @@ def bundle_hypervisors(platform: str = sys.platform) -> tuple[str | None, ...]:
     return ("kvm", "mshv") if platform.startswith("linux") else (None,)
 
 
-def build_package(
-    files: Mapping[str, bytes],
-    root: str,
+def build_packages(
+    checkout: Checkout,
+    checksums: Mapping[str, str],
+    version: Version,
     work_dir: Path,
     environment: Mapping[str, str],
     *,
     platform: str = sys.platform,
 ) -> None:
-    """Build the package's files with every feature, as a dependent would.
+    """Build the packages with every feature, as dependents would: `cargo
+    package` packs the same bytes again, and builds each package from its
+    files, with the crates that it depends on from the other packages.
     `bundled` downloads the release that the package's artifacts.json pins,
     which must match its digest and declare the crate's control contract."""
-    source = work_dir / "build" / root
-    if source.exists():
-        shutil.rmtree(source)
-    for relative, data in files.items():
-        destination = source.joinpath(*PurePosixPath(relative).parts)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
     base = {
         key: value for key, value in environment.items() if key not in BUNDLE_VARIABLES
     }
@@ -753,20 +924,14 @@ def build_package(
         if hypervisor is not None:
             build_environment["NVX_BUNDLE_HYPERVISOR"] = hypervisor
             description += f", bundling the {hypervisor} release"
-        print(f">> building {root} {description}")
-        run_checked(
-            [
-                "cargo",
-                "build",
-                "--locked",
-                "--all-features",
-                "--manifest-path",
-                source / "Cargo.toml",
-                "--target-dir",
-                work_dir / "build-target",
-            ],
-            env=build_environment,
+        print(f">> building {', '.join(checksums)} {version} {description}")
+        target, names = work_dir / "build-target", tuple(checksums)
+        packages = cargo_package(
+            checkout, target, names, version, environment=build_environment, verify=True
         )
+        for name, package in packages.items():
+            if sha256_file(package) != checksums[name]:
+                raise ScriptError(f"cargo built {package.name} from other bytes")
 
 
 @dataclass(frozen=True)
@@ -777,29 +942,21 @@ class Plan:
     publish: bool
     version: Version
     reason: str
-    # The newest package on crates.io, when this commit already published it,
-    # so that a rerun checks it instead.
-    published_package: Path | None = None
+    # The packages of the version that crates.io holds of this commit
+    # already, by crate, which a rerun checks instead of publishing them.
+    published: Mapping[str, Path] = field(default_factory=dict[str, Path])
 
 
-def plan_release(
+def _packed_from(
     repository: Repository,
+    crate: Crate,
     manifest: Manifest,
-    commit: str,
+    newest: Release,
     registry: Registry,
     work_dir: Path,
-) -> Plan:
-    """Decide whether `commit` needs a new version: it does when the crate's
-    directory changed since the commit from which the newest version on
-    crates.io was packed, unless that commit already contains it."""
-    releases = registry.releases(manifest.name)
-    if not releases:
-        return Plan(
-            True,
-            next_version(manifest.version, ()),
-            f"crates.io has no version of {manifest.name}",
-        )
-    newest = max(releases, key=lambda release: release.version.precedence)
+) -> tuple[str, Path]:
+    """Return the commit from which a crate's newest version on crates.io was
+    packed, and its package."""
     label = f"{manifest.name} {newest.version}"
     package = registry.download(
         manifest.name,
@@ -815,10 +972,9 @@ def plan_release(
             "this run cannot tell which changes it holds: publish the next "
             "version by hand (doc/distribution.md, The nvx crate)"
         )
-    if vcs.path_in_vcs != repository.path_in_vcs:
+    if vcs.path_in_vcs != crate.directory:
         raise ScriptError(
-            f"{label} was packed from {vcs.path_in_vcs!r}, not from "
-            f"{repository.path_in_vcs!r}"
+            f"{label} was packed from {vcs.path_in_vcs!r}, not from {crate.directory!r}"
         )
     if not repository.has_commit(vcs.commit):
         raise ScriptError(
@@ -826,34 +982,72 @@ def plan_release(
             "check out the full history, or publish the next version by hand "
             "(doc/distribution.md, The nvx crate)"
         )
-    directory = f"{repository.prefix or './'}"
-    short = vcs.commit[:12]
-    if vcs.commit == commit:
-        return Plan(
-            False, newest.version, f"{label} was packed from this commit", package
-        )
-    if repository.contains(commit, vcs.commit):
-        return Plan(
-            False,
-            newest.version,
-            f"{label} was packed from {short}, which contains this commit",
-        )
-    if not repository.changed(vcs.commit, commit):
-        return Plan(
-            False,
-            newest.version,
-            f"{directory} is unchanged since {short}, from which {label} was packed",
-        )
+    return vcs.commit, package
+
+
+def plan_release(checkout: Checkout, registry: Registry, work_dir: Path) -> Plan:
+    """Decide whether the checkout's commit needs a new version of the crates:
+    it does when their files changed since the commit from which the newest
+    version on crates.io was packed, unless that commit already contains it.
+    A rerun of that commit publishes its version of the crates that crates.io
+    lacks, and while crates.io lacks any, a later commit publishes the next
+    version of them all, even if their files did not change."""
+    repository, commit = checkout.repository, checkout.commit
+    releases = [registry.releases(name) for name in checkout.names]
+    versions = [release.version for found in releases for release in found]
+    if not versions:
+        reason = f"crates.io has no version of {', '.join(checkout.names)}"
+        return Plan(True, next_version(checkout.declared, ()), reason)
+    newest = max(versions, key=lambda version: version.precedence)
+    # The crates whose newest version is the newest of all, and its commit.
+    heads: dict[str, tuple[str, str, Path]] = {}
+    for crate, manifest, found in zip(
+        checkout.crates, checkout.manifests, releases, strict=True
+    ):
+        for release in found:
+            if release.version == newest:
+                heads[manifest.name] = (
+                    f"{manifest.name} {newest}",
+                    *_packed_from(
+                        repository, crate, manifest, release, registry, work_dir
+                    ),
+                )
+    here = {name: path for name, (_, base, path) in heads.items() if base == commit}
+    missing = [name for name in checkout.names if name not in heads]
+    lacks = f", but crates.io lacks {', '.join(missing)} {newest}" if missing else ""
+    first_label, first_base, _package = next(iter(heads.values()))
+    if here:
+        for label, base, _package in heads.values():
+            if base != commit:
+                raise ScriptError(f"{label} was packed from {base}, not this commit")
+        reason = f"{first_label} was packed from this commit{lacks}"
+        return Plan(bool(missing), newest, reason, here)
+    inputs = ", ".join(checkout.inputs)
+    for label, base, _package in heads.values():
+        if repository.contains(commit, base):
+            reason = f"{label} was packed from {base[:12]}, which contains this commit"
+            return Plan(False, newest, reason)
+    for label, base, _package in heads.values():
+        if repository.changed(base, commit, checkout.inputs):
+            return Plan(
+                True,
+                next_version(checkout.declared, versions),
+                f"{inputs} changed since {base[:12]}, from which {label} was packed",
+            )
+    if missing:
+        reason = f"{first_label} was packed from {first_base[:12]}{lacks}"
+        return Plan(True, next_version(checkout.declared, versions), reason)
     return Plan(
-        True,
-        next_version(manifest.version, [release.version for release in releases]),
-        f"{directory} changed since {short}, from which {label} was packed",
+        False,
+        newest,
+        f"{inputs} did not change since {first_base[:12]}, from which "
+        f"{first_label} was packed",
     )
 
 
 @dataclass(frozen=True)
 class PackageState:
-    """The package that the prepare step checked, for the publish step."""
+    """A package that the package job checked and built, for the publish job."""
 
     name: str
     declared: str
@@ -862,28 +1056,41 @@ class PackageState:
     sha256: str
 
 
-def _write_state(work_dir: Path, state: PackageState) -> None:
+def write_states(states: Iterable[PackageState]) -> str:
+    """Return the JSON of `states` on one line, which read_states() reads."""
+    return json.dumps([asdict(state) for state in states], separators=(",", ":"))
+
+
+def read_states(text: str, source: str) -> list[PackageState]:
+    try:
+        value: object = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ScriptError(f"{source} is not JSON: {error}") from error
+    fields = [field.name for field in dataclass_fields(PackageState)]
+    states: list[PackageState] = []
+    for entry in cast(list[object], value) if isinstance(value, list) else [None]:
+        document = table(entry)
+        values = {name: document.get(name) for name in fields}
+        if not all(isinstance(value, str) for value in values.values()):
+            raise ScriptError(f"{source} is not the state of checked packages")
+        states.append(PackageState(**cast(dict[str, str], values)))
+    return states
+
+
+def _write_state(work_dir: Path, states: Sequence[PackageState]) -> None:
     work_dir.mkdir(parents=True, exist_ok=True)
-    (work_dir / STATE_FILE).write_text(
-        json.dumps(asdict(state), indent=2) + "\n", encoding="utf-8"
-    )
+    (work_dir / STATE_FILE).write_text(write_states(states) + "\n", encoding="utf-8")
 
 
-def _read_state(work_dir: Path) -> PackageState:
+def _read_state(work_dir: Path) -> list[PackageState]:
     path = work_dir / STATE_FILE
     try:
-        value: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
         raise ScriptError(
             f"cannot read {path}, which the prepare step writes: {error}"
         ) from error
-    document = cast(dict[str, object], value) if isinstance(value, dict) else {}
-    values = {
-        field.name: document.get(field.name) for field in dataclass_fields(PackageState)
-    }
-    if not all(isinstance(value, str) for value in values.values()):
-        raise ScriptError(f"{path} is not the state of a checked package")
-    return PackageState(**cast(dict[str, str], values))
+    return read_states(text, str(path))
 
 
 def _set_output(environment: Mapping[str, str], name: str, value: str) -> None:
@@ -903,208 +1110,358 @@ def _summarize(environment: Mapping[str, str], text: str) -> None:
 
 @dataclass(frozen=True)
 class Checkout:
-    """The crate's checkout, which a step finds unchanged from its commit."""
+    """The checkout of the crates that CI publishes, whose files a step finds
+    unchanged from its commit but for the version that it gives the crates."""
 
-    crate_dir: Path
     repository: Repository
     commit: str
-    manifest: Manifest
+    crates: tuple[Crate, ...]
+    manifests: tuple[Manifest, ...]
+    # The manifest and the lockfile of the crates' workspace.
+    manifest: str
+    lockfile: str
+    # The files whose versions a run rewrites, as the commit holds them: the
+    # crates' manifests, the workspace's, and its lockfile.
+    originals: Mapping[str, bytes]
+    # The paths whose changes publish a new version: the crates' directories,
+    # and the workspace's manifest and lockfile, which they share.
+    inputs: tuple[str, ...]
+    # The places of each crate's requirements on the others, sorted: the
+    # platform that each is for, if any, its kind, its key, the crate, and
+    # what it asks of the crate, as _options() puts it.
+    requirements: Mapping[str, Sequence[tuple[str, ...]]]
+    # The workspace's packages that its lockfile locks from a path at the
+    # crates' version: the crates, and others, which take it from the
+    # workspace or, as the workspace's own package, declare it.
+    members: tuple[str, ...]
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(manifest.name for manifest in self.manifests)
+
+    @property
+    def declared(self) -> Version:
+        return self.manifests[0].version
 
     @classmethod
-    def open(cls, crate_dir: Path) -> Checkout:
-        repository = Repository(crate_dir)
+    def open(cls, root: Path, crates: Sequence[Crate]) -> Checkout:
+        """Read the crates' names, their version, and their requirements on
+        each other in the commit of the checkout at `root`."""
+        repository = Repository(root)
         commit = repository.head()
-        require_checkout(repository, ())
-        manifest_path = crate_dir / "Cargo.toml"
-        manifest = read_manifest(manifest_path.read_bytes(), str(manifest_path))
-        return cls(crate_dir, repository, commit, manifest)
+        workspaces = {workspace_root(root / crate.directory, root) for crate in crates}
+        if len(workspaces) != 1:
+            raise ScriptError("the crates that CI publishes must share one workspace")
+        directory = workspaces.pop().relative_to(root).as_posix()
+        prefix = "" if directory == "." else f"{directory}/"
+        manifest, lockfile = f"{prefix}Cargo.toml", f"{prefix}Cargo.lock"
+        paths = [f"{crate.directory}/Cargo.toml" for crate in crates]
+        originals = {
+            path: repository.file(commit, path)
+            for path in dict.fromkeys([*paths, manifest, lockfile])
+        }
+        documents = {
+            path: read_toml(originals[path], f"{path} in {commit}")
+            for path in dict.fromkeys([*paths, manifest])
+        }
+        workspace = table(documents[manifest].get("workspace"))
+        manifests: list[Manifest] = []
+        for path in paths:
+            package = table(documents[path].get("package"))
+            name, version = package.get("name"), package.get("version")
+            if table(version).get("workspace") is True:
+                version = table(workspace.get("package")).get("version")
+            if not isinstance(name, str) or not isinstance(version, str):
+                raise ScriptError(f"{path} in {commit} declares no name and version")
+            manifests.append(Manifest(name, Version.parse(version)))
+        names = [crate.name for crate in manifests]
+        declared = manifests[0].version
+        if any(crate.version != declared for crate in manifests):
+            raise ScriptError(
+                "the crates that CI publishes declare different versions: "
+                + ", ".join(f"{crate.name} {crate.version}" for crate in manifests)
+            )
+        inherited = table(workspace.get("dependencies"))
+        requirements: dict[str, list[tuple[str, ...]]] = {}
+        for index, path in enumerate(paths):
+            required = requirements.setdefault(names[index], [])
+            found = _requirements(documents[path], names, inherited)
+            for name, specification, place in found:
+                required.append(place)
+                if (
+                    not isinstance(specification.get("path"), str)
+                    or specification.get("version") != f"={declared}"
+                    or names.index(name) >= index
+                ):
+                    raise ScriptError(
+                        f"{path} must require {name} by its path and as "
+                        f"={declared}, and CI must publish {name} before it"
+                    )
+        # The workspace's packages that a run gives the new version in the
+        # lockfile: those that it locks from a path at the crates' version. The
+        # lockfile must hold no other package of their names, which the
+        # references to them would then have to tell apart.
+        locked = read_toml(originals[lockfile], f"{lockfile} in {commit}")
+        entries = [*map(table, cast(list[object], locked.get("package") or []))]
+        members = tuple(
+            str(entry.get("name"))
+            for entry in entries
+            if "source" not in entry and entry.get("version") == str(declared)
+        )
+        for entry in entries:
+            own = "source" not in entry and entry.get("version") == str(declared)
+            if entry.get("name") in members and not own:
+                raise ScriptError(
+                    f"{lockfile} in {commit} locks {entry.get('name')} "
+                    f"{entry.get('version')} from {entry.get('source', 'a path')} "
+                    "too: a package of the crates' version must be the only "
+                    "package of its name in the workspace"
+                )
+        inputs = [f"{crate.directory}/" for crate in crates]
+        inputs += [
+            path
+            for path in (manifest, lockfile)
+            if not any(path.startswith(crate) for crate in inputs)
+        ]
+        return cls(
+            repository,
+            commit,
+            tuple(crates),
+            tuple(manifests),
+            manifest,
+            lockfile,
+            originals,
+            tuple(inputs),
+            {name: sorted(required) for name, required in requirements.items()},
+            members,
+        )
 
-    def check(self, files: Mapping[str, bytes], source: str, version: Version) -> None:
+    def versioned(self, version: Version) -> dict[str, bytes]:
+        """Return the files that a run that publishes `version` rewrites, by
+        path, as it rewrites them."""
+        names = tuple(dict.fromkeys((*self.names, *self.members)))
+        files = {
+            path: versioned_file(path, data, names, self.declared, version)
+            for path, data in self.originals.items()
+        }
+        return {
+            path: data for path, data in files.items() if data != self.originals[path]
+        }
+
+    def lockfile_table(self, version: Version) -> Table:
+        """Return the workspace's lockfile as a run that publishes `version`
+        rewrites it."""
+        data = self.versioned(version).get(self.lockfile, self.originals[self.lockfile])
+        return read_toml(data, self.lockfile)
+
+    def require(self, version: Version) -> None:
+        """Fail unless the working tree holds the commit's files, but for the
+        versions that a run that publishes `version` gives the crates."""
+        files = self.versioned(version)
+        require_checkout(self.repository, self.inputs, files)
+        for path, data in files.items():
+            if (self.repository.root / path).read_bytes() != data:
+                raise ScriptError(
+                    f"{path} differs from {self.commit} in more than {version}"
+                )
+
+    def check(
+        self,
+        files: Mapping[str, bytes],
+        source: str,
+        name: str,
+        version: Version,
+        checksums: Mapping[str, str],
+    ) -> None:
         """Check a package of `version` against the checkout's commit."""
         check_package(
             files,
             source=source,
-            repository=self.repository,
-            commit=self.commit,
-            name=self.manifest.name,
-            declared=self.manifest.version,
+            checkout=self,
+            name=name,
             version=version,
+            checksums=checksums,
         )
 
     def check_published(self, plan: Plan) -> None:
-        """Check the newest package on crates.io, which this commit packed."""
-        package = plan.published_package
-        if package is None:
-            raise ScriptError(f"{plan.reason}, so no package of this commit exists")
-        self.check(
-            read_crate(package, f"{self.manifest.name}-{plan.version}"),
-            package.name,
-            plan.version,
-        )
+        """Check the packages on crates.io that this commit packed."""
+        checksums = {name: sha256_file(path) for name, path in plan.published.items()}
+        for name, package in plan.published.items():
+            files = read_crate(package, f"{name}-{plan.version}")
+            self.check(files, package.name, name, plan.version, checksums)
 
     def pack(
-        self, version: Version, work_dir: Path, environment: Mapping[str, str]
-    ) -> tuple[Path, dict[str, bytes]]:
-        """Give the checkout `version`, pack the crate, and check the package.
-        The checkout keeps the version, which `cargo publish` packs again."""
-        name, declared = self.manifest.name, self.manifest.version
-        dirty = version != declared
-        if dirty:
-            for path in VERSIONED_FILES.values():
-                file = self.crate_dir / path
-                file.write_bytes(
-                    versioned_file(path, file.read_bytes(), name, declared, version)
-                )
-        require_checkout(self.repository, VERSIONED_FILES.values() if dirty else ())
-        package = cargo_package(
-            self.crate_dir,
-            work_dir / "target",
-            Manifest(name, version),
-            allow_dirty=dirty,
-            environment=environment,
+        self, plan: Plan, work_dir: Path, environment: Mapping[str, str]
+    ) -> dict[str, str]:
+        """Give the crates the plan's version, pack them, and check the
+        packages, of which those that crates.io holds of this commit must be
+        its bytes. The checkout keeps the version, which `cargo publish` packs
+        again. Return the packages' SHA-256 digests by crate."""
+        version = plan.version
+        files = self.versioned(version)
+        for path, data in files.items():
+            (self.repository.root / path).write_bytes(data)
+        self.require(version)
+        packages = cargo_package(
+            self, work_dir / "target", self.names, version, environment=environment
         )
-        files = read_crate(package, f"{name}-{version}")
-        self.check(files, package.name, version)
-        return package, files
+        checksums = {name: sha256_file(package) for name, package in packages.items()}
+        for name, package in packages.items():
+            files = read_crate(package, f"{name}-{version}")
+            self.check(files, package.name, name, version, checksums)
+            published = sha256_file(plan.published.get(name, package))
+            if published != checksums[name]:
+                raise ScriptError(
+                    f"crates.io holds {name} {version} with SHA-256 {published}, "
+                    f"but this commit packs {checksums[name]}"
+                )
+        return checksums
 
 
 def package_release(
-    crate_dir: Path,
+    root: Path,
     work_dir: Path,
     *,
+    crates: Sequence[Crate] = CRATES,
     registry: Registry | None = None,
     environment: Mapping[str, str] | None = None,
     platform: str = sys.platform,
 ) -> Plan:
     """The package job: decide whether the checkout's commit needs a new
-    version, and if so, pack the crate with that version, check the package,
-    and build it with every feature. Its outputs give the publish job the
-    version and the SHA-256 of the package. The job never publishes, so the
+    version of the crates, and if so, pack them with that version, check the
+    packages, and build them with every feature. Its outputs give the publish
+    job each package's version and SHA-256. The job never publishes, so the
     build scripts and procedural macros that its build runs cannot either."""
     environment = dict(os.environ) if environment is None else environment
     registry = Registry() if registry is None else registry
-    checkout = Checkout.open(crate_dir)
-    manifest = checkout.manifest
-    plan = plan_release(
-        checkout.repository, manifest, checkout.commit, registry, work_dir
-    )
-    url = crate_url(manifest.name, plan.version)
+    checkout = Checkout.open(root, crates)
+    checkout.require(checkout.declared)
+    plan = plan_release(checkout, registry, work_dir)
+    url = crate_url(checkout.names[-1], plan.version)
+    labels = ", ".join(f"{name} {plan.version}" for name in checkout.names)
     if not plan.publish:
-        if plan.published_package is not None:
-            checkout.check_published(plan)
+        checkout.check_published(plan)
         for name, value in (("publish", "false"), ("version", str(plan.version))):
             _set_output(environment, name, value)
         _set_output(environment, "url", url)
         _summarize(
             environment,
             f"Publishes nothing: {plan.reason}. The newest version is "
-            f"[{manifest.name} {plan.version}]({url}).",
+            f"[{labels}]({url}).",
         )
         return plan
-    print(
-        f">> {plan.reason}: packing {manifest.name} {plan.version} from "
-        f"{checkout.commit}"
+    print(f">> {plan.reason}: packing {labels} from {checkout.commit}")
+    checksums = checkout.pack(plan, work_dir, environment)
+    build_packages(
+        checkout, checksums, plan.version, work_dir, environment, platform=platform
     )
-    package, files = checkout.pack(plan.version, work_dir, environment)
-    build_package(
-        files,
-        f"{manifest.name}-{plan.version}",
-        work_dir,
-        environment,
-        platform=platform,
-    )
-    sha256 = sha256_file(package)
+    states = [
+        PackageState(
+            name, str(checkout.declared), str(plan.version), checkout.commit, sha256
+        )
+        for name, sha256 in checksums.items()
+    ]
     for name, value in (
         ("publish", "true"),
         ("version", str(plan.version)),
-        ("sha256", sha256),
+        ("packages", write_states(states)),
         ("url", url),
     ):
         _set_output(environment, name, value)
     _summarize(
         environment,
-        f"Packed, checked, and built {manifest.name} {plan.version} from "
-        f"`{checkout.commit}`, with SHA-256 `{sha256}`: {plan.reason}.",
+        f"Packed, checked, and built {labels} from `{checkout.commit}`, with "
+        f"SHA-256 {', '.join(f'`{sha256}`' for sha256 in checksums.values())}: "
+        f"{plan.reason}.",
     )
     return plan
 
 
 def prepare_release(
-    crate_dir: Path,
+    root: Path,
     work_dir: Path,
-    version: Version,
-    sha256: str,
+    states: Sequence[PackageState],
     *,
+    crates: Sequence[Crate] = CRATES,
     registry: Registry | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> bool:
     """The publish job, before it authenticates with crates.io: check that
-    crates.io still needs `version`, which the package job packed, checked,
-    and built with the SHA-256 `sha256`, and that the checkout packs the same
-    bytes, which it checks again. Return whether to upload them: the rerun of
-    a job that uploaded them finds them on crates.io."""
+    crates.io still needs the version of the packages that the package job
+    packed, checked, and built, the `states`, and that the checkout packs the
+    same bytes, which it checks again. Return whether to upload any: the rerun
+    of a job that uploaded them all finds them on crates.io."""
     environment = dict(os.environ) if environment is None else environment
     registry = Registry() if registry is None else registry
-    if _SHA256.fullmatch(sha256) is None:
-        raise ScriptError(f"{sha256!r} is not a SHA-256 digest")
-    checkout = Checkout.open(crate_dir)
-    manifest = checkout.manifest
-    label = f"{manifest.name} {version}"
-    plan = plan_release(
-        checkout.repository, manifest, checkout.commit, registry, work_dir
-    )
-    if not plan.publish:
-        if plan.published_package is None or plan.version != version:
-            raise ScriptError(
-                f"crates.io changed since the package job packed {label}: {plan.reason}"
-            )
-        published = sha256_file(plan.published_package)
-        if published != sha256:
-            raise ScriptError(
-                f"crates.io holds {label} with SHA-256 {published}, not the "
-                f"{sha256} that the package job built"
-            )
-        checkout.check_published(plan)
-        _set_output(environment, "upload", "false")
-        _summarize(
-            environment,
-            f"[{label}]({crate_url(manifest.name, version)}) was published "
-            f"from `{checkout.commit}` already.",
+    checkout = Checkout.open(root, crates)
+    label = ", ".join(f"{state.name} {state.version}" for state in states)
+    version = Version.parse(states[0].version) if states else checkout.declared
+    if [(s.name, s.declared, s.version, s.commit) for s in states] != [
+        (name, str(checkout.declared), str(version), checkout.commit)
+        for name in checkout.names
+    ]:
+        raise ScriptError(
+            f"the package job packed {label or 'nothing'}, not one version of "
+            f"{', '.join(checkout.names)} from {checkout.commit}"
         )
-        return False
+    sha256 = {state.name: state.sha256 for state in states}
+    for digest in sha256.values():
+        if _SHA256.fullmatch(digest) is None:
+            raise ScriptError(f"{digest!r} is not a SHA-256 digest")
+    checkout.require(checkout.declared)
+    plan = plan_release(checkout, registry, work_dir)
+    if not plan.publish and (
+        plan.version != version or len(plan.published) != len(states)
+    ):
+        raise ScriptError(
+            f"crates.io changed since the package job packed {label}: {plan.reason}"
+        )
     if plan.version != version:
         raise ScriptError(
             f"the package job packed {label}, but crates.io needs "
             f"{plan.version} now: {plan.reason}"
         )
-    package, _files = checkout.pack(version, work_dir, environment)
-    actual = sha256_file(package)
-    if actual != sha256:
-        raise ScriptError(
-            f"the checkout packs {package.name} with SHA-256 {actual}, not the "
-            f"{sha256} that the package job built"
+    for name, package in plan.published.items():
+        published = sha256_file(package)
+        if published != sha256[name]:
+            raise ScriptError(
+                f"crates.io holds {name} {version} with SHA-256 {published}, not "
+                f"the {sha256[name]} that the package job built"
+            )
+    if not plan.publish:
+        checkout.check_published(plan)
+        _set_output(environment, "upload", "false")
+        _summarize(
+            environment,
+            f"[{label}]({crate_url(checkout.names[-1], version)}) was published "
+            f"from `{checkout.commit}` already.",
         )
-    _write_state(
-        work_dir,
-        PackageState(
-            manifest.name, str(manifest.version), str(version), checkout.commit, sha256
-        ),
-    )
+        return False
+    for name, actual in checkout.pack(plan, work_dir, environment).items():
+        if actual != sha256[name]:
+            raise ScriptError(
+                f"the checkout packs {name}-{version}.crate with SHA-256 {actual}, "
+                f"not the {sha256[name]} that the package job built"
+            )
+    _write_state(work_dir, states)
     _set_output(environment, "upload", "true")
-    print(f">> {package.name} holds the bytes that the package job built")
+    print(f">> the checkout packs the bytes that the package job built: {label}")
     return True
 
 
 def publish_release(
-    crate_dir: Path,
+    root: Path,
     work_dir: Path,
     *,
+    crates: Sequence[Crate] = CRATES,
     registry: Registry | None = None,
     environment: Mapping[str, str] | None = None,
     index_timeout_seconds: float = INDEX_WAIT_SECONDS,
 ) -> None:
-    """Upload the package that the prepare step checked, and check that
-    crates.io serves the same bytes."""
+    """Upload each package that the prepare step checked and that crates.io
+    lacks, after the packages of the crates that it depends on, and check
+    that crates.io serves the checked bytes of each, those that it listed
+    already included."""
     environment = dict(os.environ) if environment is None else environment
     registry = Registry() if registry is None else registry
     if not environment.get("CARGO_REGISTRY_TOKEN"):
@@ -1112,30 +1469,54 @@ def publish_release(
             "CARGO_REGISTRY_TOKEN, the token of the crates.io authentication "
             "step, is required to publish"
         )
-    state = _read_state(work_dir)
-    repository = Repository(crate_dir)
-    commit = repository.head()
-    if commit != state.commit:
-        raise ScriptError(f"the checkout is at {commit}, but {state.commit} was packed")
-    manifest_path = crate_dir / "Cargo.toml"
-    manifest = read_manifest(manifest_path.read_bytes(), str(manifest_path))
-    declared = Version.parse(state.declared)
-    version = Version.parse(state.version)
-    if manifest != Manifest(state.name, version):
-        raise ScriptError(
-            f"the checkout declares {manifest.name} {manifest.version}, but "
-            f"{state.name} {version} was packed"
+    states = _read_state(work_dir)
+    checkout = Checkout.open(root, crates)
+    commit = checkout.commit
+    for state in states:
+        if commit != state.commit:
+            raise ScriptError(
+                f"the checkout is at {commit}, but {state.commit} was packed"
+            )
+    if [state.name for state in states] != list(checkout.names):
+        raise ScriptError(f"{STATE_FILE} names other crates than {checkout.names}")
+    checkout.require(Version.parse(states[0].version))
+    checksums = {state.name: state.sha256 for state in states}
+    for state in states:
+        version = Version.parse(state.version)
+        releases = registry.releases(state.name)
+        _publish_package(
+            checkout,
+            state,
+            checksums,
+            work_dir,
+            registry,
+            environment,
+            index_timeout_seconds,
+            upload=all(release.version != version for release in releases),
         )
+
+
+def _publish_package(
+    checkout: Checkout,
+    state: PackageState,
+    checksums: Mapping[str, str],
+    work_dir: Path,
+    registry: Registry,
+    environment: Mapping[str, str],
+    index_timeout_seconds: float,
+    upload: bool,
+) -> None:
+    """Pack a package that the prepare step checked alone again, with the
+    crates that it depends on from crates.io, upload it if `upload`, and check
+    that crates.io serves the same bytes."""
+    commit, declared = checkout.commit, checkout.declared
+    version = Version.parse(state.version)
     dirty = version != declared
-    require_checkout(repository, VERSIONED_FILES.values() if dirty else ())
+    manifest_path = checkout.repository.root / checkout.manifest
     # Cargo packs deterministically, so `cargo publish` uploads these bytes.
     package = cargo_package(
-        crate_dir,
-        work_dir / "target",
-        manifest,
-        allow_dirty=dirty,
-        environment=environment,
-    )
+        checkout, work_dir / "target", (state.name,), version, environment=environment
+    )[state.name]
     actual = sha256_file(package)
     if actual != state.sha256:
         raise ScriptError(
@@ -1153,10 +1534,13 @@ def publish_release(
         manifest_path,
         "--target-dir",
         work_dir / "target",
+        "--package",
+        state.name,
     ]
     if dirty:
         command.append("--allow-dirty")
-    run_checked(command, env=environment)
+    if upload:
+        run_checked(command, env=environment)
     release = registry.wait_for(
         state.name, version, timeout_seconds=index_timeout_seconds
     )
@@ -1171,11 +1555,10 @@ def publish_release(
     check_package(
         read_crate(published, f"{state.name}-{version}"),
         source=f"{published.name} from crates.io",
-        repository=repository,
-        commit=commit,
+        checkout=checkout,
         name=state.name,
-        declared=declared,
         version=version,
+        checksums=checksums,
     )
     _summarize(
         environment,

@@ -127,7 +127,7 @@ nvx/
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   |-- collect_ubuntu_sources.py Ubuntu source collection
 |   |   |-- common.py            Shared process and configuration helpers
-|   |   |-- crate_release.py     Checked publication of the nvx crate to crates.io
+|   |   |-- crate_release.py     Checked publication of NVX's crates to crates.io
 |   |   |-- create_linux_source_archive.py Linux source packaging
 |   |   |-- development_release.py Resumable development release publication
 |   |   |-- doctor.py            Time ABI host qualification
@@ -167,7 +167,7 @@ nvx/
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
 |   |-- powershell_testing.py    PowerShell launches of the unit tests, under a shared default time limit
 |   |-- publish_development_release.py Development release publisher run by CI
-|   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
+|   |-- publish_nvx_crate.py     Crate publisher run by CI's full runs of dev
 |   |-- test-layout-allowlist.json The test hooks and tests that production files may hold
 |   `-- test_*.py                Python tooling unit tests
 |-- tests/                       Tests that build on the repository's crates from outside them
@@ -349,7 +349,7 @@ see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 `nvx-hosts.example.json` is the template for the
 [remote agent host](setup.md#remote-agent-hosts) inventory, and CI runs
 `publish_development_release.py` to publish development releases,
-`publish_nvx_crate.py` to publish the `nvx` crate to crates.io (see
+`publish_nvx_crate.py` to publish NVX's crates to crates.io (see
 [crates.io releases](ci.md#cratesio-releases)), and `module_diagrams.py` to
 draw the module diagrams that `doc/modules` publishes (see
 [Module diagrams](ci.md#module-diagrams)).

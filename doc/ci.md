@@ -1908,60 +1908,104 @@ flagging script shares to read Rust.
 
 ## crates.io releases
 
-A scheduled or manually dispatched full run of `dev` publishes the
-[`nvx` crate](../nvx-rs/README.md) to crates.io once every job of the run has
-passed, which `Required status check` confirms. Two jobs on GitHub-hosted
+A scheduled or manually dispatched full run of `dev` publishes NVX's crates
+to crates.io once every job of the run has passed, which
+`Required status check` confirms: the crates that `CRATES` lists in
+[`crate_release.py`](../scripts/nvx_tools/crate_release.py), each after the
+crates that it depends on, which today is the
+[`nvx` crate](../nvx-rs/README.md) alone. Two jobs on GitHub-hosted
 Ubuntu runners, whose checkouts have the LF line endings of the commit, run
 [`publish_nvx_crate.py`](../scripts/publish_nvx_crate.py): `crate-package`,
 `Package nvx crate`, waits for that check, and `crate-release`,
 `Publish nvx crate`, waits for `crate-package`. Pushes, pull requests, and
-merge groups never publish the crate. A run publishes a new version only when `nvx-rs/`
-changed since the commit from which the newest version on crates.io was
-packed, which that version's `.cargo_vcs_info.json` records. A night without
-changes to the crate publishes nothing, and neither does a run of a commit
-that the newest version's commit already contains, such as a rerun of an
-older nightly run. Such a run skips `Publish nvx crate`.
+merge groups never publish the crates. A run publishes a new version only
+when the crates' directories, or the manifest or the lockfile of their
+workspace, which they share, changed since the commit from which the newest
+version on crates.io was packed, which that version's `.cargo_vcs_info.json`
+records, or when crates.io lacks that version of some of the crates, as after
+a partial upload. A night without either publishes nothing, and neither does
+a run of a commit that the newest version's commit already contains, such as
+a rerun of an older nightly run. Such a run skips `Publish nvx crate`.
 
-The versions are pre-releases, such as `0.1.0-alpha.4`. A run takes the
-number after the highest that crates.io has in the series that
-`nvx-rs/Cargo.toml` declares, yanked versions included, since crates.io never
-reuses a version, and at least the declared number, so the declared version is
-the floor: a pull request changes it only to start another series, as
-[The nvx crate](distribution.md#the-nvx-crate) describes. `Package nvx crate`
-fails rather than publish a version that would sort below the newest one on
-crates.io. When the number differs from the declared one, each job gives only
-its own checkout the new version, in `nvx-rs/Cargo.toml` and in `nvx`'s entry
-in `nvx-rs/Cargo.lock`. The package's `.cargo_vcs_info.json` then records the
-run's commit as dirty, and its `Cargo.toml.orig` and `Cargo.lock` differ from
-the commit's files in the version alone.
+The versions are pre-releases, such as `0.1.0-alpha.4`, and the crates share
+one. A run takes the number after the highest that crates.io has, of any of
+the crates, in the series that they declare, yanked versions included, since
+crates.io never reuses a version, and at least the declared number, so the
+declared version is the floor: a pull request changes it only to start
+another series, as
+[The nvx crate](distribution.md#the-nvx-crate) describes.
+`Package nvx crate` fails rather than publish a version that would sort
+below the newest one on crates.io. Every crate must declare that version, in
+its own manifest or as the workspace's, and require each of the others that
+it depends on by path and at exactly that version, directly or as a workspace
+dependency, such as
+`nvx-sys = { path = "../crates/nvx-sys", version = "=0.1.0-alpha.3" }`, and
+`CRATES` lists each crate after those that it requires. When the
+number differs from the declared one, each job gives only its own checkout
+the new version: in the crates' manifests or the workspace's, in their
+requirements on each other, and in the workspace's lockfile, in the entry of
+each package that it locks from a path at their version. So the workspace's
+other packages of that version must take it from the workspace or, as the
+workspace's own package, declare it, and no such package may share its name
+with another that the lockfile locks, such as an older one from crates.io or
+another path. The other crates of the workspace require them by path alone.
+The packages' `.cargo_vcs_info.json` then record the run's commit as dirty,
+and their `Cargo.toml.orig` differ from the crates' manifests in the versions
+alone.
 
-`Package nvx crate` checks the package that `cargo package --locked` packs:
+`Package nvx crate` checks each package that `cargo package --locked` packs:
 
-- Its `.cargo_vcs_info.json` records the run's commit, `nvx-rs` as the path,
-  and a dirty checkout exactly when the job rewrote the version.
+- Its `.cargo_vcs_info.json` records the run's commit, the crate's directory
+  as the path, and a dirty checkout exactly when the job rewrote the version.
 - Every file is the commit's byte for byte, which rules out CRLF line endings,
-  but for the rewritten version and the files that Cargo generates,
-  `Cargo.toml` and `.cargo_vcs_info.json`, which must hold no CR either.
-- It holds the license, the readme, the build script, and `artifacts.json`.
-- Its files build with every feature, as a dependent's build does. `bundled`
-  downloads the Linux KVM and MSHV packages of the release that
-  `artifacts.json` pins, which must match their digests and declare the
-  crate's control contract.
+  but for the rewritten versions and the files that Cargo generates,
+  `Cargo.toml`, `Cargo.lock`, and `.cargo_vcs_info.json`, which must hold no
+  CR either.
+- Cargo generates `Cargo.toml` and `Cargo.lock` from the workspace's, so the
+  check reads them by meaning. `Cargo.toml` declares the crate's name and the
+  version, and requires the other crates that the crate's manifest requires,
+  in the same tables, for the same platforms, and under the same keys, and no
+  others, at exactly that version, from crates.io. Each requirement is
+  optional or not, takes the required crate's default features or not, and
+  names its features, as the crate's manifest asks, with what it inherits
+  from the workspace's merged in as Cargo merges it. `Cargo.lock` is the
+  workspace's lockfile, pruned to the crate's dependencies: the same format,
+  and each package with the version, source, and checksum that the
+  workspace's lockfile gives it, and with dependencies on the same packages,
+  by name, version, and source, or on fewer, but for the run's packages of the
+  other crates, which it locks as crates.io packages with the checksums of the
+  run's packages.
+- It holds the license and the readme, and the `nvx` crate's package holds
+  its build script, `artifacts.json`, and `src/lib.rs` too.
+- Its files build with every feature, as a dependent's build does:
+  `cargo package` packs the crates again, which must give the same bytes, and
+  builds each from its files, with the crates that it depends on from the
+  other packages. `bundled` downloads the Linux KVM and MSHV packages of the
+  release that `artifacts.json` pins, which must match their digests and
+  declare the crate's control contract.
 
-The job outputs the version and the package's SHA-256. Its build runs the
-build scripts and procedural macros of the crate's dependencies, so it holds
-no right to publish. `Publish nvx crate` builds nothing: it decides again
-whether crates.io needs the version, packs the crate again, and checks that
-the package holds the commit's files and the very bytes that
-`Package nvx crate` built. Only then does it authenticate with crates.io,
-publish the package, wait until the crates.io index lists the version, and
-download it, which must hold the same bytes. A rerun of either job after the
-upload checks the published package instead of publishing again. The job
-summaries name the version, or the reason why the run published nothing, and
-the run's `crates-io` deployment links the version. One `Publish nvx crate`
-job runs at a time. One that finds its version taken by another commit fails
-rather than publish the next number, which its package job did not build, and
-the next nightly run publishes that number.
+The job outputs the version, and each package's crate, version, and SHA-256,
+with the commit and the declared version, as JSON. Its build runs the build
+scripts and procedural macros of the crates' dependencies, so it holds no
+right to publish. `Publish nvx crate` builds nothing: it decides again whether
+crates.io needs the version, packs the crates again, and checks that the
+packages hold the commit's files and the very bytes that `Package nvx crate`
+built. Only then does it authenticate with crates.io and publish, in the
+order of `CRATES`, each package that crates.io lacks: Cargo packs the crate
+alone again, so it finds the crates that the crate depends on on crates.io,
+and the package must hold the same bytes. The job uploads it, waits until
+the crates.io index lists the version, and downloads it, which must hold the
+same bytes, and it packs, downloads, and checks a package that crates.io
+lists already the same way, without uploading it. A rerun of either job
+after the upload checks the published packages instead of publishing again,
+and one after a partial upload publishes the version of the crates that
+crates.io lacks, while a run of a later commit publishes the next version of
+them all. The job summaries name the version, or the reason why the run
+published nothing, and the run's `crates-io` deployment links the version of
+the last crate. One `Publish nvx crate` job runs at a time. One that finds
+its version taken by another commit fails rather than publish the next
+number, which its package job did not build, and the next nightly run
+publishes that number.
 
 crates.io trusted publishing issues the token of the publish step for the
 OpenID Connect token of a `ci.yml` job in the `crates-io` environment, which
@@ -1971,9 +2015,11 @@ environment, and only its publish step sees the registry token, which the
 [authentication action](https://github.com/rust-lang/crates-io-auth-action)
 revokes when the job ends. To set publication up, once:
 
-1. A crate owner adds a trusted publisher in the settings of the `nvx` crate
-   on crates.io: GitHub, owner `microsoft`, repository `nvx`, workflow
-   `ci.yml`, and environment `crates-io`.
+1. A crate owner adds a trusted publisher in the settings of each crate that
+   CI publishes on crates.io: GitHub, owner `microsoft`, repository `nvx`,
+   workflow `ci.yml`, and environment `crates-io`. crates.io adds a trusted
+   publisher only to a crate that exists, so a crate's owners publish its
+   first version by hand before `CRATES` lists it.
 2. A repository administrator creates the `crates-io` environment and limits
    its deployment branches to `dev`, with no required reviewers, since
    nightly runs are unattended. GitHub creates a missing environment without

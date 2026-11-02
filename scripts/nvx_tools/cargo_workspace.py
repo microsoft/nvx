@@ -38,6 +38,7 @@ CONFIGURATION = (Path(".cargo") / "config", Path(".cargo") / "config.toml")
 # dependencies of a package's build. Its dev-dependencies build only its tests,
 # examples, and benchmarks.
 BUILD_DEPENDENCIES = ("dependencies", "build-dependencies", "build_dependencies")
+DEPENDENCIES = (*BUILD_DEPENDENCIES, "dev-dependencies", "dev_dependencies")
 
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 _INTEGER = re.compile(
@@ -466,9 +467,13 @@ def configuration_files(directory: Path, checkout: Path) -> tuple[Path, ...]:
     return tuple(files)
 
 
-def _build_dependency_tables(manifest: Table) -> Iterator[Table]:
+def dependency_tables(
+    manifest: Table, keys: tuple[str, ...] = DEPENDENCIES
+) -> Iterator[Table]:
+    """Yield the dependency tables `keys` of `manifest` and of its
+    `target.<platform>` tables, an empty table for each that it lacks."""
     for platform in (manifest, *map(table, table(manifest.get("target")).values())):
-        for key in BUILD_DEPENDENCIES:
+        for key in keys:
             yield table(platform.get(key))
 
 
@@ -516,8 +521,8 @@ def local_packages(package: Path, checkout: Path) -> tuple[Path, ...]:
         own = workspace_root(current, checkout)
         workspace = table(read_toml_file(own / MANIFEST).get("workspace"))
         inherited = table(workspace.get("dependencies"))
-        for dependencies in _build_dependency_tables(
-            read_toml_file(current / MANIFEST)
+        for dependencies in dependency_tables(
+            read_toml_file(current / MANIFEST), BUILD_DEPENDENCIES
         ):
             for name, value in dependencies.items():
                 base, specification = current, table(value)

@@ -7117,7 +7117,7 @@ class CiConfigurationTests(unittest.TestCase):
             job["outputs"],
             {
                 output: f"${{{{ steps.crate.outputs.{output} }}}}"
-                for output in ("publish", "version", "sha256", "url")
+                for output in ("publish", "version", "packages", "url")
             },
         )
         steps = job["steps"]
@@ -7188,18 +7188,15 @@ class CiConfigurationTests(unittest.TestCase):
         self.assertIn("rust-toolchain.toml", toolchain["run"])
         self.assertEqual(check["id"], "check")
         # The package job's outputs reach the script as variables, never as
-        # text that the shell would parse.
+        # text that the shell would parse: each package's crate, version, and
+        # SHA-256.
         self.assertEqual(
             check["env"],
-            {
-                "CRATE_VERSION": "${{ needs.crate-package.outputs.version }}",
-                "CRATE_SHA256": "${{ needs.crate-package.outputs.sha256 }}",
-            },
+            {"CRATE_PACKAGES": "${{ needs.crate-package.outputs.packages }}"},
         )
         for argument in (
             "python3 -u scripts/publish_nvx_crate.py prepare",
-            '--crate-version "${CRATE_VERSION}"',
-            '--sha256 "${CRATE_SHA256}"',
+            '--packages "${CRATE_PACKAGES}"',
         ):
             self.assertIn(argument, check["run"])
         self.assertRegex(

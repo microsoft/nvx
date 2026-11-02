@@ -1922,12 +1922,13 @@ jobs:
           branch: dev
           token: ${{ github.token }}
 
-  # A full run of dev publishes the nvx crate to crates.io once every job
+  # A full run of dev publishes NVX's crates to crates.io once every job
   # passed, which Required status check confirms: a new pre-release whenever
-  # nvx-rs/ changed since the commit from which the newest version on
-  # crates.io was packed (doc/ci.md, "crates.io releases"). This job packs,
-  # checks, and builds the package without the right to publish it, so that
-  # no build script or procedural macro that its build runs can publish.
+  # the crates or their workspace's manifest or lockfile changed since the
+  # commit from which the newest version on crates.io was packed (doc/ci.md,
+  # "crates.io releases"). This job packs, checks, and builds the packages
+  # without the right to publish them, so that no build script or procedural
+  # macro that its build runs can publish.
   crate-package:
     name: Package nvx crate
     needs: [required-status-check]
@@ -1949,7 +1950,7 @@ jobs:
     outputs:
       publish: ${{ steps.crate.outputs.publish }}
       version: ${{ steps.crate.outputs.version }}
-      sha256: ${{ steps.crate.outputs.sha256 }}
+      packages: ${{ steps.crate.outputs.packages }}
       url: ${{ steps.crate.outputs.url }}
     steps:
       # The full history holds the commits from which the published versions
@@ -1976,9 +1977,10 @@ jobs:
           --work-dir "${RUNNER_TEMP}/nvx-crate"
 
   # The publish job builds nothing: it packs the package job's bytes again,
-  # checks them, and uploads them with a token that crates.io issues for the
-  # OpenID Connect token of a ci.yml job in the crates-io environment, which
-  # only dev may deploy to, so the repository stores no registry token.
+  # checks them, and uploads each package after those of the crates that it
+  # depends on, with a token that crates.io issues for the OpenID Connect
+  # token of a ci.yml job in the crates-io environment, which only dev may
+  # deploy to, so the repository stores no registry token.
   crate-release:
     name: Publish nvx crate
     needs: [crate-package]
@@ -2026,13 +2028,11 @@ jobs:
       - name: Check the nvx package
         id: check
         env:
-          CRATE_VERSION: ${{ needs.crate-package.outputs.version }}
-          CRATE_SHA256: ${{ needs.crate-package.outputs.sha256 }}
+          CRATE_PACKAGES: ${{ needs.crate-package.outputs.packages }}
         run: >-
           python3 -u scripts/publish_nvx_crate.py prepare
           --work-dir "${RUNNER_TEMP}/nvx-crate"
-          --crate-version "${CRATE_VERSION}"
-          --sha256 "${CRATE_SHA256}"
+          --packages "${CRATE_PACKAGES}"
 
       # The token expires within 30 minutes, and the action's post step
       # revokes it when the job ends.

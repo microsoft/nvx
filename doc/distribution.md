@@ -163,8 +163,11 @@ change reaches crates.io within a day of its merge.
 The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
 publishes. A pull request changes it to start another series, such as
 `0.2.0-alpha.1`. Only `nvx`'s version changes in `nvx-rs/Cargo.lock` and
-`tests/runtime-adapter/Cargo.lock`. The `bundled` feature of the published
-crate downloads the release that
+`tests/runtime-adapter/Cargo.lock`. CI publishes the crates of a workspace
+with one version, so a crate that it publishes besides `nvx` declares the same
+version, and requires each of the others at exactly that version; see
+[crates.io releases](ci.md#cratesio-releases). The `bundled` feature of the
+published crate downloads the release that
 [`nvx-rs/artifacts.json`](../nvx-rs/artifacts.json) pins and fails unless that
 release declares the crate's microVM, time, restore-packet, control-session,
 and control contracts, which CI checks before it publishes. When a contract has
