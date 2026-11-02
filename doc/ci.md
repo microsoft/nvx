@@ -439,6 +439,30 @@ does a documented feature that the guest lacks. A unit test checks that the
 scenario's devices are those of Tables 2.7 and 2.8, and OpenVMM's unit tests
 check the exact feature mask that each device offers.
 
+The `interrupt-map` scenario covers the interrupt map of
+[2.4.2](design/2.4-interrupt-and-io-architecture.md#242-interrupt-routing) and
+[Table 2.7](design/2.5-device-topology-transport-and-discovery.md). It boots a
+guest with every fixed virtio device: the NIC, the host filesystem with a
+share, both consoles, and both sandbox blocks. Once a driver has bound each of
+the six, the guest reports, for each, the base of its MMIO window and the
+interrupt that its driver requested, as `/sys/kernel/irq` describes it: its
+controller and input, its trigger, its handlers, and how many times it fired.
+It then drives each device, pinging the gateway, reading the share, writing to
+both consoles, reading the `distro` block and writing the `scratch` block past
+the page cache, and reports again. Each device must interrupt on the IOAPIC
+input of its window, 16 through 23, edge-triggered and with no other handler,
+its interrupt must have fired, and `/proc/interrupts` must count no APIC error
+or spurious PIC interrupt (`ERR`), no level-triggered interrupt that the IOAPIC
+misrouted (`MIS`), and no spurious APIC interrupt (`SPU`). The guest also
+reports how many of each device's interrupts lately found no work for any
+handler (`unhandled` in `/proc/irq/<n>/spurious`), which the scenario does not
+check: a console's driver polls for its output's completion, so nearly every
+interrupt of a console finds no work, and the NIC's polling can leave one such
+interrupt too. A guest with the NIC and the share then captures a snapshot,
+whose restore must report the same interrupts and fire them again. A unit test
+checks that the scenario's interrupts are those of Table 2.7, and OpenVMM's
+unit tests check the MP table's routing and each slot's input.
+
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
 separate cache keys. The EROFS layer's entry also holds the sandbox scratch

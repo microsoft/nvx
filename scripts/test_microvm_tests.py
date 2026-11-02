@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -10394,7 +10394,8 @@ class MicrovmTests(unittest.TestCase):
         bases = {
             row[0]: int(row[2].strip("`").split("..")[0], 16) for row in table("2.7")
         }
-        documented = {}
+        irqs = {row[0]: int(row[3]) for row in table("2.7")}
+        documented: dict[int, microvm_tests.MicrovmVirtioDevice] = {}
         for device, device_id, bits, features in table("2.8"):
             numbers = frozenset(int(bit) for bit in bits.split(", "))
             self.assertEqual(
@@ -10403,9 +10404,313 @@ class MicrovmTests(unittest.TestCase):
                 device,
             )
             documented[bases[device]] = microvm_tests.MicrovmVirtioDevice(
-                device, int(device_id), numbers
+                device, int(device_id), numbers, irqs[device]
             )
         self.assertEqual(documented, microvm_tests.MICROVM_VIRTIO_DEVICES)
+        # The device of window n, n windows of 4 KiB past 0xd0000000, has IOAPIC
+        # input 16 + n, past the ISA IRQs.
+        for base, device in documented.items():
+            self.assertEqual(device.irq, 16 + (base - 0xD000_0000) // 0x1000, device)
+
+    @staticmethod
+    def _interrupt_report(
+        steps: dict[str, dict[int, tuple[str, int, int]]],
+        *,
+        chip: str = "IO-APIC",
+        trigger: str = "edge",
+        shared: str = "",
+        unhandled: Mapping[int, int] | None = None,
+        errors: tuple[int, int, int] | None = (0, 0, 0),
+    ) -> str:
+        """Returns the interrupt-map scenario's report of `steps`: after each
+        step, each device by the base of its window, with its name, interrupt,
+        interrupt count, and count of interrupts that found no work, which
+        `unhandled` gives by base and is otherwise 0, as the scenario's script
+        prints it, with the console's carriage returns."""
+        lines = ["NVX-GUEST-SCRIPT-START echo is not a report"]
+        for step, devices in steps.items():
+            for base, (name, irq, count) in devices.items():
+                actions = name + (f",{shared}" if shared else "")
+                lines.append(
+                    f"NVX-INTERRUPT-MAP step={step} base={base:#x} device={name} "
+                    f"irq={irq} chip={chip} hwirq={irq} type={trigger} "
+                    f"actions={actions} count={count} "
+                    f"unhandled={(unhandled or {}).get(base, 0)}\r"
+                )
+        if errors is not None:
+            lines.append(
+                f"NVX-INTERRUPT-MAP-ERRORS err={errors[0]} mis={errors[1]} "
+                f"spu={errors[2]}\r"
+            )
+        lines.append("NVX-INTERRUPT-MAP-OK\r")
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _documented_interrupts(
+        bases: Collection[int], step: str, count: int
+    ) -> dict[str, dict[int, tuple[str, int, int]]]:
+        return {
+            step: {
+                base: (
+                    f"virtio{index}",
+                    microvm_tests.MICROVM_VIRTIO_DEVICES[base].irq,
+                    count,
+                )
+                for index, base in enumerate(sorted(bases))
+            }
+        }
+
+    def _check_interrupts(self, report: str) -> None:
+        steps, errors = microvm_tests.parse_interrupt_map(report)
+        microvm_tests.check_interrupt_map(
+            steps, errors, microvm_tests.MICROVM_VIRTIO_DEVICES, before="boot"
+        )
+
+    def test_interrupt_map_names_each_departure_from_the_guide(self):
+        bases = microvm_tests.MICROVM_VIRTIO_DEVICES
+        accepted = {
+            **self._documented_interrupts(bases, "boot", 1),
+            **self._documented_interrupts(bases, "traffic", 5),
+        }
+        self._check_interrupts(self._interrupt_report(accepted))
+        # Interrupts that found no work are reported, not checked: a console's
+        # driver polls for its output, so nearly all of its interrupts find
+        # none, and the NIC's polling can leave one too.
+        self._check_interrupts(
+            self._interrupt_report(
+                accepted,
+                unhandled={0xD000_0000: 1, 0xD000_2000: 4177, 0xD000_7000: 1},
+            )
+        )
+
+        # ABI 2 put each device on an ISA IRQ, and the NIC on 10 on KVM.
+        isa = {0xD000_0000: 10, 0xD000_1000: 6, 0xD000_2000: 7}
+        abi_2 = {
+            step: {
+                base: (name, isa.get(base, irq), count)
+                for base, (name, irq, count) in devices.items()
+            }
+            for step, devices in accepted.items()
+        }
+        with self.assertRaises(RuntimeError) as raised:
+            self._check_interrupts(self._interrupt_report(abi_2))
+        message = str(raised.exception)
+        self.assertIn("Network at 0xd0000000 interrupts on IRQ 10, not 16", message)
+        self.assertIn(
+            "Host filesystem at 0xd0001000 interrupts on IRQ 6, not 17", message
+        )
+        self.assertIn("Boot console at 0xd0002000 interrupts on IRQ 7, not 18", message)
+        self.assertNotIn("`distro` block", message)
+
+        quiet = {
+            **accepted,
+            "traffic": {
+                base: (name, irq, 1 if base == 0xD000_6000 else count)
+                for base, (name, irq, count) in accepted["traffic"].items()
+            },
+        }
+        missing = {
+            step: {
+                base: entry for base, entry in devices.items() if base != 0xD000_3000
+            }
+            for step, devices in accepted.items()
+        }
+        unknown = {
+            step: {**devices, 0xD000_4000: ("virtio9", 20, 1)}
+            for step, devices in accepted.items()
+        }
+        for name, report, problem in (
+            (
+                "level",
+                self._interrupt_report(accepted, trigger="level"),
+                "Network's IRQ 16 is level-triggered",
+            ),
+            (
+                "pic",
+                self._interrupt_report(accepted, chip="XT-PIC"),
+                "Network's IRQ 16 is input 16 of XT-PIC, not the IOAPIC input of "
+                "its number",
+            ),
+            (
+                "shared",
+                self._interrupt_report(accepted, shared="rtc0"),
+                "Control console shares IRQ 23, whose handlers are virtio5,rtc0",
+            ),
+            (
+                "quiet",
+                self._interrupt_report(quiet),
+                "`scratch` block's IRQ 22 fired 1 times after step boot and 1 "
+                "after step traffic",
+            ),
+            (
+                "missing",
+                self._interrupt_report(missing),
+                "no `distro` block is reported at 0xd0003000 after step boot",
+            ),
+            (
+                "unknown",
+                self._interrupt_report(unknown),
+                "an unexpected device virtio9 at 0xd0004000 is reported after step "
+                "boot",
+            ),
+            (
+                "errors",
+                self._interrupt_report(accepted, errors=(2, 1, 0)),
+                "/proc/interrupts counts 2 APIC errors or spurious PIC interrupts "
+                "(ERR), 1 misrouted IOAPIC interrupts (MIS), and 0 spurious APIC "
+                "interrupts (SPU)",
+            ),
+            (
+                "spurious",
+                self._interrupt_report(accepted, errors=(0, 0, 3)),
+                "and 3 spurious APIC interrupts (SPU)",
+            ),
+            (
+                "no errors",
+                self._interrupt_report(accepted, errors=None),
+                "the guest reported no ERR, MIS, and SPU counts",
+            ),
+            (
+                "no traffic",
+                self._interrupt_report({"boot": accepted["boot"]}),
+                "no device is reported after step traffic",
+            ),
+        ):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(RuntimeError, re.escape(problem)),
+            ):
+                self._check_interrupts(report)
+        for line in (
+            "NVX-INTERRUPT-MAP step=boot base=0xd0000000 device=virtio0 irq=16",
+            "NVX-INTERRUPT-MAP step=boot base=0xd0000000 device=virtio0 irq=x "
+            "chip=IO-APIC hwirq=16 type=edge actions=virtio0 count=1 unhandled=0",
+            "NVX-INTERRUPT-MAP step=boot base=0xd0000000 device=virtio0 irq=16 "
+            "chip=IO-APIC hwirq=16 type=edge actions=virtio0 count=1",
+            "NVX-INTERRUPT-MAP-ERRORS err=0 mis=0",
+        ):
+            with (
+                self.subTest(line=line),
+                self.assertRaisesRegex(RuntimeError, "malformed interrupt-map report"),
+            ):
+                microvm_tests.parse_interrupt_map(line + "\n")
+        report = self._interrupt_report(accepted)
+        with self.assertRaisesRegex(RuntimeError, "is reported twice after step boot"):
+            microvm_tests.parse_interrupt_map(report + report)
+
+    def test_interrupt_map_boots_every_device_and_restores_the_nic_and_share(self):
+        bases = microvm_tests.MICROVM_VIRTIO_DEVICES
+        snapshot_bases = microvm_tests.INTERRUPT_MAP_SNAPSHOT_DEVICES
+        cold = self._interrupt_report(
+            {
+                **self._documented_interrupts(bases, "boot", 1),
+                **self._documented_interrupts(bases, "traffic", 5),
+            }
+        )
+        captured = self._interrupt_report(
+            self._documented_interrupts(snapshot_bases, "boot", 3), errors=None
+        ).replace("NVX-INTERRUPT-MAP-OK", "NVX-INTERRUPT-MAP-CAPTURE")
+        # The NIC's polling can leave an interrupt without work after a
+        # restore, which the comparison with the capture ignores.
+        restored = self._interrupt_report(
+            {
+                **self._documented_interrupts(snapshot_bases, "restore", 3),
+                **self._documented_interrupts(snapshot_bases, "traffic", 9),
+            },
+            unhandled={0xD000_0000: 1},
+        )
+        launched: list[list[str]] = []
+        staged: list[str] = []
+
+        class FakeProcess:
+            def __init__(self, command: list[str], _log_path: Path) -> None:
+                launched.append(command)
+                self.command = command
+
+            def __enter__(self) -> "FakeProcess":
+                return self
+
+            def __exit__(self, *_exception: object) -> None:
+                return None
+
+            def wait_for(self, _marker: bytes, _timeout: float) -> None:
+                return None
+
+            def send_bytes(self, data: bytes) -> None:
+                staged.append(data.decode())
+
+            def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
+                output = restored if "--restore-snapshot" in self.command else captured
+                return openvmm_process.OpenvmmProcessResult(0, output.encode())
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests,
+                "run_guest_script",
+                return_value={"text": cold, "output": cold},
+            ) as run_guest_script,
+            patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
+        ):
+            microvm_tests.run_interrupt_map(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                memory_mib=128,
+                timeout=60,
+                output_dir=Path(temporary),
+            )
+
+        command, script, marker = run_guest_script.call_args.args
+        self.assertEqual(marker, microvm_tests.INTERRUPT_MAP_COMPLETION_MARKER)
+        self.assertIn("--net", command)
+        self.assertTrue(command[command.index("--mount") + 1].startswith("/mnt/share,"))
+        self.assertEqual(
+            command[command.index("--virtio-console") + 1 :][:3],
+            ["console", "--microvm-control-console", "none"],
+        )
+        self.assertEqual(command.count("--microvm-sandbox-block"), 2)
+        self.assertIn('[ "$(bound_devices)" -eq 6 ]', script)
+        self.assertNotIn("nvx-snapshot", script)
+        capture, restore = launched
+        self.assertIn("--snapshot-destination", capture)
+        self.assertNotIn("--microvm-sandbox-block", capture)
+        self.assertNotIn("--virtio-console", capture)
+        self.assertEqual(
+            restore[restore.index("--mount") + 1], capture[capture.index("--mount") + 1]
+        )
+        self.assertEqual(restore[restore.index("--network-profile") + 1], "portable")
+        self.assertIn('[ "$(bound_devices)" -eq 2 ]', staged[0])
+        self.assertIn(
+            "echo NVX-INTERRUPT-MAP-CAPTURE\nnvx-snapshot\nreport restore\n", staged[0]
+        )
+
+        # A restore whose interrupts differ from those before the capture fails.
+        restored = restored.replace("irq=17 ", "irq=21 ").replace(
+            "hwirq=17", "hwirq=21"
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests,
+                "run_guest_script",
+                return_value={"text": cold, "output": cold},
+            ),
+            patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
+            self.assertRaisesRegex(
+                RuntimeError, "Host filesystem at 0xd0001000 interrupts on IRQ 21"
+            ),
+        ):
+            microvm_tests.run_interrupt_map(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                memory_mib=128,
+                timeout=60,
+                output_dir=Path(temporary),
+            )
 
     def test_smp_snapshot_runs_the_warp_probe_after_each_restore(self):
         def measure(command: list[str], **kwargs: object) -> None:

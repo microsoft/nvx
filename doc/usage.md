@@ -1074,8 +1074,8 @@ manifest, and the sandbox scratch template, which
 that selects one of them fails before its first scenario when one of those
 files is missing. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
-the Alpine-control-only `sandbox-blocks`, `scratch-snapshot`, and
-`virtio-features` scenarios and
+the Alpine-control-only `interrupt-map`, `sandbox-blocks`, `scratch-snapshot`,
+and `virtio-features` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
 `platform-zero-fill`, `platform-filesystem`, `platform-aggregate-export`,
 `platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`,
@@ -1123,7 +1123,16 @@ The guest reports, for each device, the base of its MMIO window, its virtio
 device ID, and the features that its driver negotiated, and the scenario
 requires exactly the devices and features of
 [Table 2.8](design/2.5-device-topology-transport-and-discovery.md), naming each
-bit that a device has besides its documented ones or lacks. The scenarios that
+bit that a device has besides its documented ones or lacks. The
+`interrupt-map` scenario boots the same devices, with a share in the host
+filesystem slot, and reports the interrupt that each device's driver
+requested before and after it drives traffic through every device; each must
+be the IOAPIC input of its device's window that
+[Table 2.7](design/2.5-device-topology-transport-and-discovery.md) lists,
+edge-triggered, unshared, and firing, and `/proc/interrupts` must count no APIC
+error, misrouted IOAPIC interrupt, or spurious interrupt. A snapshot of a guest
+with the NIC and the share must then restore with the same interrupts, which
+fire again. The scenarios that
 run microVMs or sandboxes as the public commands do, or that compile egress
 policies, run [`nvx-rs`](#nvx-rs). The
 command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`
