@@ -575,7 +575,7 @@ mod tests {
     use super::*;
     use crate::ErrorKind;
     use crate::host::filesystem::{Bind, ExportChild, Owner};
-    use crate::protocol::cmdline::model;
+    use crate::protocol::cmdline::tests::model;
 
     fn spec() -> LaunchSpec {
         LaunchSpec::new(

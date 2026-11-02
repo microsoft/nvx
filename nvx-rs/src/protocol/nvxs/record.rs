@@ -500,15 +500,6 @@ impl RecordParser {
         }
     }
 
-    /// Returns the capacity of the payload buffer, which tests check against the declared
-    /// length.
-    #[cfg(test)]
-    pub(super) fn payload_capacity(&self) -> usize {
-        self.body
-            .as_ref()
-            .map_or(0, |(_, payload)| payload.capacity())
-    }
-
     /// Consumes bytes of the record in progress; [`push`](Self::push) records a failure.
     fn accept(&mut self, input: &[u8]) -> Result<(usize, Option<Record>), RecordError> {
         let mut consumed = 0;
@@ -564,3 +555,6 @@ impl fmt::Debug for RecordParser {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -2,18 +2,6 @@
   "schema": "nvx-test-layout-allowlist",
   "schema_version": 1,
   "baseline": {
-    "nvx-rs/src/contract.rs": {
-      "hooks": 1,
-      "tests": 2
-    },
-    "nvx-rs/src/error.rs": {
-      "hooks": 1,
-      "tests": 5
-    },
-    "nvx-rs/src/gpt/crc.rs": {
-      "hooks": 1,
-      "tests": 2
-    },
     "nvx-rs/src/guest/cgroup.rs": {
       "hooks": 5,
       "tests": 17
@@ -517,42 +505,6 @@
     "nvx-rs/src/host/template/wire.rs": {
       "hooks": 1,
       "tests": 6
-    },
-    "nvx-rs/src/hypervisor.rs": {
-      "hooks": 1,
-      "tests": 2
-    },
-    "nvx-rs/src/net/cidr.rs": {
-      "hooks": 1,
-      "tests": 7
-    },
-    "nvx-rs/src/net/mod.rs": {
-      "hooks": 1,
-      "tests": 3
-    },
-    "nvx-rs/src/protocol/cmdline.rs": {
-      "hooks": 1,
-      "tests": 0
-    },
-    "nvx-rs/src/protocol/nvxs/record.rs": {
-      "hooks": 1,
-      "tests": 0
-    },
-    "nvx-rs/src/protocol/share.rs": {
-      "hooks": 1,
-      "tests": 2
-    },
-    "nvx-rs/src/protocol/status.rs": {
-      "hooks": 1,
-      "tests": 2
-    },
-    "nvx-rs/src/testing/fake_openvmm.rs": {
-      "hooks": 1,
-      "tests": 13
-    },
-    "nvx-rs/src/uuid.rs": {
-      "hooks": 1,
-      "tests": 4
     },
     "tests/runtime-adapter/src/frame.rs": {
       "hooks": 1,
