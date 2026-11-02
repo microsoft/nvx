@@ -216,6 +216,7 @@ jobs:
           --backend "${{ inputs.backend }}"
           --scenario managed-exec-config
           --scenario sandbox-lifecycle
+          --scenario sandbox-nested-virtualization
           --scenario sandbox-proxy-only
           --scenario sandbox-ram-upper
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
@@ -228,6 +229,7 @@ jobs:
           --backend "${{ inputs.backend }}"
           --scenario managed-exec-config
           --scenario sandbox-lifecycle
+          --scenario sandbox-nested-virtualization
           --scenario sandbox-proxy-only
           --scenario sandbox-ram-upper
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"

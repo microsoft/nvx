@@ -69,9 +69,11 @@ from .managed_exec_tests import run_managed_exec_configuration, workload_artifac
 from .microvm_durations import REPORT_NAME, DurationReport
 from .microvm_shards import configure_parser as configure_shards_parser
 from .microvm_shards import load_partition, shard_scenarios
+from .nested_virtualization import host_refusal
 from .nvx_rs import EgressRules, compile_egress_policy
 from .openvmm_process import OpenvmmProcess, TcpConsole
 from .sandbox_lifecycle_tests import run_sandbox_lifecycle
+from .sandbox_nested_tests import run_sandbox_nested_virtualization
 from .sandbox_proxy_tests import run_sandbox_proxy_only
 from .sandbox_ram_upper_tests import run_sandbox_ram_upper
 from .shard_plans import parse_shard
@@ -120,6 +122,7 @@ MICROVM_TEST_SCENARIOS = (
     "l3-l4-egress-protocols",
     "managed-lifecycle",
     "managed-exec-config",
+    "nested-virtualization",
     "network-snapshot",
     "platform-aggregate-export",
     "platform-filesystem",
@@ -132,6 +135,7 @@ MICROVM_TEST_SCENARIOS = (
     "restore-processors",
     "sandbox-blocks",
     "sandbox-lifecycle",
+    "sandbox-nested-virtualization",
     "sandbox-proxy-only",
     "sandbox-ram-upper",
     "scratch-snapshot",
@@ -159,6 +163,7 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "platform-zero-fill",
         "sandbox-blocks",
         "sandbox-lifecycle",
+        "sandbox-nested-virtualization",
         "sandbox-proxy-only",
         "sandbox-ram-upper",
         "scratch-snapshot",
@@ -174,6 +179,7 @@ PUBLIC_SANDBOX_SCENARIOS = frozenset(
     (
         "managed-exec-config",
         "sandbox-lifecycle",
+        "sandbox-nested-virtualization",
         "sandbox-proxy-only",
         "sandbox-ram-upper",
     )
@@ -211,6 +217,33 @@ VIRTIO_FEATURES_COMPLETION_MARKER = b"NVX-VIRTIO-FEATURES-OK"
 # features that its driver negotiated, one character per bit from bit 0.
 VIRTIO_FEATURES_REPORT_PREFIX = "NVX-VIRTIO-FEATURES "
 VIRTIO_FEATURES_NETWORK = "10.0.0.2/24"
+NESTED_VIRTUALIZATION_COMPLETION_MARKER = b"NVX-NESTED-VIRTUALIZATION-OK"
+# The prefixes of the lines on which the nested-virtualization scenario's guest
+# reports what it sees of hardware virtualization, and what nvx-kvm-probe
+# printed.
+NESTED_VIRTUALIZATION_REPORT_PREFIX = "NVX-NESTED-VIRTUALIZATION "
+NESTED_VIRTUALIZATION_PROBE_PREFIX = "NVX-NESTED-VIRTUALIZATION-PROBE "
+# What nvx-kvm-probe prints once the vCPU of its VM halted, and where the
+# guest has no KVM device.
+KVM_PROBE_SUCCESS = "nvx-kvm-probe: api=12 vm=created vcpu=created exit=hlt"
+KVM_PROBE_ABSENT = "open /dev/kvm: No such file or directory"
+# The guest's KVM device, as `stat -c %A:%u:%g:%t:%T` shows it: the character
+# device 10:232, which only root opens.
+GUEST_KVM_DEVICE = "crw-------:0:0:a:e8"
+# The backends whose time ABI partitions serve the guest's reads of IA32_XSS,
+# which the guest's KVM reads when it starts: those that give nested
+# virtualization. MSHV's still fault them, which no guest notices, since its
+# KVM never starts there.
+XSS_READ_BACKENDS = frozenset(("kvm", "whp"))
+# What OpenVMM says when it refuses to capture or to restore a microVM with
+# nested virtualization, before the VM starts.
+NESTED_CAPTURE_REFUSAL = (
+    b"microVM nested virtualization does not support snapshot capture"
+)
+NESTED_RESTORE_REFUSAL = (
+    b"a microVM restore takes its machine from the snapshot, which never has "
+    b"nested virtualization"
+)
 INTERRUPT_MAP_COMPLETION_MARKER = b"NVX-INTERRUPT-MAP-OK"
 INTERRUPT_MAP_CAPTURE_MARKER = b"NVX-INTERRUPT-MAP-CAPTURE"
 # The prefix of the lines on which the interrupt-map scenario's guest reports,
@@ -5150,6 +5183,198 @@ def run_virtio_features(
             log_path=log_path,
         )
     check_virtio_features(result["output"])
+
+
+def parse_nested_virtualization(output: str) -> dict[str, str]:
+    """Return the fields of the nested-virtualization guest's report, with
+    what nvx-kvm-probe printed under ``probe``.
+
+    Raises RuntimeError for a report that is missing, repeated, or
+    malformed."""
+    reports: list[str] = []
+    probes: list[str] = []
+    for line in output.splitlines():
+        line = line.rstrip("\r")
+        if line.startswith(NESTED_VIRTUALIZATION_REPORT_PREFIX):
+            reports.append(line[len(NESTED_VIRTUALIZATION_REPORT_PREFIX) :])
+        elif line.startswith(NESTED_VIRTUALIZATION_PROBE_PREFIX):
+            probes.append(line[len(NESTED_VIRTUALIZATION_PROBE_PREFIX) :])
+    if len(reports) != 1 or len(probes) != 1:
+        raise RuntimeError(
+            f"the nested-virtualization guest reported {len(reports)} report(s) "
+            f"and {len(probes)} probe line(s), not one of each"
+        )
+    try:
+        fields = dict(field.split("=", 1) for field in reports[0].split())
+    except ValueError as error:
+        raise RuntimeError(
+            f"malformed nested-virtualization report {reports[0]!r}"
+        ) from error
+    fields["probe"] = probes[0].strip()
+    return fields
+
+
+def check_nested_virtualization(
+    fields: dict[str, str], *, nested: bool, backend: str, context: str
+) -> None:
+    """Check what a guest of ``backend`` reported of hardware virtualization.
+
+    A microVM with nested virtualization exposes VMX and never SVM, its guest
+    has the KVM device, which only root opens, and the probe's VM runs until
+    its vCPU halts. A microVM without it exposes neither, and its guest has no
+    KVM device. Every guest sees XSAVES, which every CPU profile enumerates,
+    and a guest of KVM or WHP reads IA32_XSS, which a guest hypervisor reads
+    when it starts."""
+    expected = {
+        "vmx": "1" if nested else "0",
+        "svm": "0",
+        "xsaves": "1",
+        "kvm": GUEST_KVM_DEVICE if nested else "absent",
+        "probe_status": "0" if nested else "1",
+        "probe": KVM_PROBE_SUCCESS if nested else KVM_PROBE_ABSENT,
+    }
+    if backend in XSS_READ_BACKENDS:
+        expected["xss"] = "read"
+    problems = [
+        f"{name}={fields.get(name)!r}, not {value!r}"
+        for name, value in expected.items()
+        if fields.get(name) != value
+    ]
+    if problems:
+        raise RuntimeError(f"{context}: " + "; ".join(problems))
+
+
+def run_nested_virtualization(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Check nested virtualization where the host gives it, and its refusal
+    where it does not, and that the default microVM never has it.
+
+    A probe of the host, independent of OpenVMM, decides which: a microVM
+    with ``--nested-virt`` on KVM whose ``kvm_intel`` offers nested VMX, or on
+    WHP that offers it, with an Intel CPU, exposes VMX, and its guest's KVM
+    creates a VM and a vCPU that runs until it halts. Elsewhere, MSHV always
+    included, OpenVMM refuses ``--nested-virt`` before the guest runs. On
+    every host, the default microVM exposes neither VMX nor SVM and has no KVM
+    device, and on KVM and WHP, OpenVMM refuses to capture or to restore a
+    microVM with nested virtualization before the VM starts, leaving no
+    snapshot."""
+    command = workload_boot_command(
+        executable, backend, kernel, initrd, memory_mib, "quiet loglevel=0"
+    )
+    script = _read_script("nested-virtualization.sh")
+    result = run_guest_script(
+        command,
+        script,
+        NESTED_VIRTUALIZATION_COMPLETION_MARKER,
+        timeout=timeout,
+        log_path=output_dir / "nested-virtualization-default.log",
+    )
+    check_nested_virtualization(
+        parse_nested_virtualization(result["output"]),
+        nested=False,
+        backend=backend,
+        context="the default microVM",
+    )
+    nested = [*command, "--nested-virt"]
+    refusal = host_refusal(backend)
+    # The log names the path that the host takes.
+    print(
+        "nested-virtualization: "
+        + (
+            "the host gives nested virtualization"
+            if refusal is None
+            else f"the host refuses nested virtualization: {refusal.reason}"
+        ),
+        flush=True,
+    )
+    if refusal is None:
+        result = run_guest_script(
+            nested,
+            script,
+            NESTED_VIRTUALIZATION_COMPLETION_MARKER,
+            timeout=timeout,
+            log_path=output_dir / "nested-virtualization.log",
+        )
+        check_nested_virtualization(
+            parse_nested_virtualization(result["output"]),
+            nested=True,
+            backend=backend,
+            context="the microVM with nested virtualization",
+        )
+    else:
+        with OpenvmmProcess(
+            nested, output_dir / "nested-virtualization-refused.log"
+        ) as process:
+            refused = process.wait(timeout)
+        if refused.returncode == 0 or BOOT_MARKER in refused.output:
+            raise RuntimeError(
+                f"OpenVMM gave a microVM nested virtualization, which this host "
+                f"does not offer: {refusal.reason}"
+            )
+        if not any(message.encode() in refused.output for message in refusal.openvmm):
+            raise RuntimeError(
+                f"OpenVMM refused nested virtualization ({refusal.reason}) without "
+                f"saying {' or '.join(map(repr, refusal.openvmm))}"
+            )
+    if backend == "mshv":
+        return
+    with tempfile.TemporaryDirectory(prefix="nvx-nested-virtualization-") as temporary:
+        snapshot = Path(temporary) / "snapshot"
+        for name, arguments, message in (
+            (
+                "capture",
+                [*nested, "--snapshot-destination", str(snapshot)],
+                NESTED_CAPTURE_REFUSAL,
+            ),
+            (
+                "restore",
+                [
+                    *snapshot_restore_command(executable, backend, snapshot),
+                    "--nested-virt",
+                ],
+                NESTED_RESTORE_REFUSAL,
+            ),
+        ):
+            _check_nested_snapshot_refusal(
+                arguments,
+                output_dir / f"nested-virtualization-{name}.log",
+                timeout,
+                name=name,
+                message=message,
+            )
+            if snapshot.exists():
+                raise RuntimeError(
+                    f"the refused {name} of nested virtualization left {snapshot}"
+                )
+
+
+def _check_nested_snapshot_refusal(
+    command: list[str], log_path: Path, timeout: float, *, name: str, message: bytes
+) -> None:
+    """Checks that OpenVMM refuses ``command``, the capture or the restore
+    ``name`` of a microVM with nested virtualization, with ``message``, before
+    the guest boots: its output holds no part of the guest's boot banner, such
+    as ``NVX-GUEST-BOOT-OK: alpine``."""
+    with OpenvmmProcess(command, log_path) as process:
+        result = process.wait(timeout)
+    if result.returncode == 0 or BOOT_MARKER in result.output:
+        raise RuntimeError(
+            f"OpenVMM did not refuse the {name} of a microVM with nested "
+            "virtualization before its guest booted"
+        )
+    if message not in result.output:
+        raise RuntimeError(
+            f"OpenVMM refused the {name} of a microVM with nested virtualization "
+            f"without saying {message.decode()!r}"
+        )
 
 
 class InterruptMapEntry(NamedTuple):
@@ -10729,6 +10954,15 @@ def _run_scenarios(
             f"Running public RAM-upper sandboxes on OpenVMM/{args.backend}",
         )
         run_sandbox_ram_upper(args.backend, timeout=args.timeout, output_dir=output_dir)
+    if "sandbox-nested-virtualization" in scenarios:
+        report.start(
+            "sandbox-nested-virtualization",
+            "Running public sandboxes with nested virtualization on "
+            f"OpenVMM/{args.backend}",
+        )
+        run_sandbox_nested_virtualization(
+            args.backend, timeout=args.timeout, output_dir=output_dir
+        )
     if "managed-lifecycle" in scenarios:
         report.start(
             "managed-lifecycle",
@@ -11198,6 +11432,20 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "virtio-features.log",
+        )
+    if "nested-virtualization" in scenarios:
+        report.start(
+            "nested-virtualization",
+            f"Running microVM nested virtualization on OpenVMM/{args.backend}",
+        )
+        run_nested_virtualization(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
         )
     if "interrupt-map" in scenarios:
         report.start(

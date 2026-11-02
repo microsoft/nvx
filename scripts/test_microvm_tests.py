@@ -40,9 +40,11 @@ from nvx_tools import (  # noqa: E402
     microvm_durations,
     microvm_shards,
     microvm_tests,
+    nested_virtualization,
     nvx_rs,
     openvmm_process,
     sandbox_lifecycle_tests,
+    sandbox_nested_tests,
     sandbox_proxy_tests,
     sandbox_ram_upper_tests,
     time_abi,
@@ -17029,6 +17031,613 @@ class MicrovmShardTests(unittest.TestCase):
                     path.write_text(text, encoding="utf-8")
                     with self.assertRaisesRegex(common.ScriptError, message):
                         microvm_shards.load_partition(path)
+
+
+def _nested_report(
+    *,
+    vmx: str = "0",
+    svm: str = "0",
+    xsaves: str = "1",
+    xss: str = "read",
+    kvm: str = "absent",
+    probe_status: str = "1",
+    probe: str = "open /dev/kvm: No such file or directory",
+) -> str:
+    """Returns the nested-virtualization guest's report, as its script prints
+    it, with the console's carriage returns."""
+    return (
+        "NVX-GUEST-SCRIPT-START\r\n"
+        f"NVX-NESTED-VIRTUALIZATION vmx={vmx} svm={svm} xsaves={xsaves} "
+        f"xss={xss} kvm={kvm} probe_status={probe_status}\r\n"
+        f"NVX-NESTED-VIRTUALIZATION-PROBE {probe}\r\n"
+        "NVX-NESTED-VIRTUALIZATION-OK\r\n"
+    )
+
+
+_NESTED_REPORT = _nested_report(
+    vmx="1",
+    kvm=microvm_tests.GUEST_KVM_DEVICE,
+    probe_status="0",
+    probe=microvm_tests.KVM_PROBE_SUCCESS,
+)
+
+
+class NestedVirtualizationTests(unittest.TestCase):
+    def test_hosts_decide_their_path_independently_of_openvmm(self):
+        refusal = nested_virtualization.host_refusal
+        # MSHV never gives it, whatever the CPU.
+        mshv = refusal("mshv", vendor="GenuineIntel", kvm_nested="Y")
+        assert mshv is not None
+        self.assertEqual(mshv.openvmm, (nested_virtualization.OPENVMM_MSHV_REFUSAL,))
+        # KVM gives it where kvm_intel offers nested VMX.
+        for value in ("Y", "1"):
+            self.assertIsNone(
+                refusal("kvm", vendor="GenuineIntel", kvm_nested=value), value
+            )
+        for value in ("N", "0", ""):
+            kvm = refusal("kvm", vendor="GenuineIntel", kvm_nested=value)
+            assert kvm is not None
+            self.assertEqual(kvm.openvmm, (nested_virtualization.OPENVMM_KVM_REFUSAL,))
+            self.assertIn(str(nested_virtualization.KVM_INTEL_NESTED), kvm.reason)
+        # WHP gives it where it offers it.
+        self.assertIsNone(refusal("whp", vendor="GenuineIntel", whp_nested=True))
+        whp = refusal("whp", vendor="GenuineIntel", whp_nested=False)
+        assert whp is not None
+        self.assertEqual(whp.openvmm, (nested_virtualization.OPENVMM_WHP_REFUSAL,))
+        # An AMD CPU never does: no CPU profile describes SVM.
+        for backend in ("kvm", "whp"):
+            amd = refusal(
+                backend, vendor="AuthenticAMD", kvm_nested="1", whp_nested=True
+            )
+            assert amd is not None
+            self.assertIn(nested_virtualization.OPENVMM_PROFILE_REFUSAL, amd.openvmm)
+            self.assertIn("AuthenticAMD", amd.reason)
+        with self.assertRaises(ValueError):
+            refusal("hvf", vendor="GenuineIntel")
+
+    def test_the_host_reports_its_vendor_and_kvm_nesting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            nested = Path(temporary) / "nested"
+            nested.write_text("Y\n", encoding="utf-8")
+            with (
+                patch.object(nested_virtualization, "KVM_INTEL_NESTED", nested),
+                patch.object(
+                    nested_virtualization,
+                    "host_cpu_vendor",
+                    return_value="GenuineIntel",
+                ),
+            ):
+                self.assertIsNone(nested_virtualization.host_refusal("kvm"))
+                nested.write_text("N\n", encoding="utf-8")
+                refused = nested_virtualization.host_refusal("kvm")
+                assert refused is not None
+                self.assertTrue(refused.reason.endswith("is N"))
+                nested.unlink()
+                refused = nested_virtualization.host_refusal("kvm")
+                assert refused is not None
+                self.assertTrue(refused.reason.endswith("is unreadable"))
+        vendor = nested_virtualization.host_cpu_vendor()
+        if vendor is not None:
+            self.assertRegex(vendor, r"^\S+$")
+
+    def test_reports_name_each_departure_from_the_machine(self):
+        default = microvm_tests.parse_nested_virtualization(_nested_report())
+        microvm_tests.check_nested_virtualization(
+            default, nested=False, backend="kvm", context="default"
+        )
+        nested = microvm_tests.parse_nested_virtualization(_NESTED_REPORT)
+        microvm_tests.check_nested_virtualization(
+            nested, nested=True, backend="whp", context="nested"
+        )
+        with self.assertRaisesRegex(RuntimeError, "vmx='1', not '0'"):
+            microvm_tests.check_nested_virtualization(
+                nested, nested=False, backend="kvm", context="default"
+            )
+        cases = (
+            (_nested_report(vmx="1"), False, "vmx='1', not '0'"),
+            (_nested_report(svm="1"), False, "svm='1', not '0'"),
+            (_nested_report(xss="fault"), False, "xss='fault', not 'read'"),
+            (
+                _nested_report(kvm="crw-rw-rw-:0:0:a:e8"),
+                False,
+                "kvm='crw-rw-rw-:0:0:a:e8', not 'absent'",
+            ),
+            (
+                _nested_report(vmx="1", kvm="absent", probe_status="1"),
+                True,
+                "kvm='absent', not 'crw-------:0:0:a:e8'",
+            ),
+            (
+                _nested_report(
+                    vmx="1",
+                    kvm=microvm_tests.GUEST_KVM_DEVICE,
+                    probe_status="1",
+                    probe="KVM_RUN exited with reason 17, not KVM_EXIT_HLT (5)",
+                ),
+                True,
+                "probe_status='1', not '0'",
+            ),
+        )
+        for report, is_nested, message in cases:
+            with self.subTest(message=message):
+                fields = microvm_tests.parse_nested_virtualization(report)
+                with self.assertRaisesRegex(RuntimeError, re.escape(message)):
+                    microvm_tests.check_nested_virtualization(
+                        fields, nested=is_nested, backend="kvm", context="case"
+                    )
+        # MSHV's time ABI partitions fault the guest's reads of IA32_XSS,
+        # which no guest notices, since its KVM never starts there.
+        microvm_tests.check_nested_virtualization(
+            microvm_tests.parse_nested_virtualization(_nested_report(xss="fault")),
+            nested=False,
+            backend="mshv",
+            context="MSHV",
+        )
+        for report in (
+            "NVX-NESTED-VIRTUALIZATION-OK\n",
+            _NESTED_REPORT + _NESTED_REPORT,
+            "NVX-NESTED-VIRTUALIZATION vmx\nNVX-NESTED-VIRTUALIZATION-PROBE x\n",
+        ):
+            with self.subTest(report=report), self.assertRaises(RuntimeError):
+                microvm_tests.parse_nested_virtualization(report)
+
+    def _run(
+        self,
+        backend: str,
+        refusal: nested_virtualization.NestedRefusal | None,
+        *,
+        nested_report: str = _NESTED_REPORT,
+        refused_output: bytes = b"",
+        refused_status: int = 1,
+        capture_output: bytes = microvm_tests.NESTED_CAPTURE_REFUSAL + b"\n",
+        restore_output: bytes = microvm_tests.NESTED_RESTORE_REFUSAL + b"\n",
+    ) -> tuple[MagicMock, list[list[str]]]:
+        """Runs the scenario on ``backend``, whose host the probe finds to
+        refuse nested virtualization as ``refusal`` says, and returns the
+        guest scripts that it ran and the commands that it launched to fail:
+        the refused nested boot, and the capture and the restore, which
+        OpenVMM answers with ``capture_output`` and ``restore_output``."""
+        reports = iter((_nested_report(), nested_report))
+        launched: list[list[str]] = []
+
+        def guest(command: list[str], *_: object, **__: object) -> dict[str, str]:
+            report = next(reports)
+            return {"text": report, "output": report}
+
+        def openvmm(command: list[str], _log: Path) -> MagicMock:
+            launched.append(command)
+            if "--snapshot-destination" in command:
+                result = (1, capture_output)
+            elif command[:2] == ["openvmm", "restore"]:
+                result = (1, restore_output)
+            else:
+                result = (refused_status, refused_output)
+            process = MagicMock()
+            process.__enter__.return_value.wait.return_value = (
+                openvmm_process.OpenvmmProcessResult(*result)
+            )
+            return process
+
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm", "boot"],
+            ),
+            patch.object(
+                microvm_tests,
+                "snapshot_restore_command",
+                return_value=["openvmm", "restore"],
+            ),
+            patch.object(microvm_tests, "host_refusal", return_value=refusal),
+            patch.object(
+                microvm_tests, "run_guest_script", side_effect=guest
+            ) as run_guest_script,
+            patch.object(microvm_tests, "OpenvmmProcess", side_effect=openvmm),
+        ):
+            microvm_tests.run_nested_virtualization(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                backend,
+                memory_mib=128,
+                timeout=60,
+                output_dir=Path("results"),
+            )
+        return run_guest_script, launched
+
+    def test_hosts_that_nest_run_a_vm_in_the_guest(self):
+        for backend in ("kvm", "whp"):
+            with self.subTest(backend=backend):
+                run_guest_script, launched = self._run(backend, None)
+                commands = [call.args[0] for call in run_guest_script.call_args_list]
+                self.assertEqual(
+                    commands,
+                    [["openvmm", "boot"], ["openvmm", "boot", "--nested-virt"]],
+                )
+                # A capture and a restore are refused before the VM starts.
+                self.assertEqual(len(launched), 2)
+                self.assertEqual(launched[0][:3], ["openvmm", "boot", "--nested-virt"])
+                self.assertEqual(launched[0][3], "--snapshot-destination")
+                self.assertEqual(launched[1], ["openvmm", "restore", "--nested-virt"])
+        # A refusal after the guest booted, or one that another message
+        # explains, is no refusal of nested virtualization.
+        booted = b"NVX-GUEST-BOOT-OK: alpine\r\n"
+        capture = microvm_tests.NESTED_CAPTURE_REFUSAL
+        restore = microvm_tests.NESTED_RESTORE_REFUSAL
+        for capture_output, restore_output, message in (
+            (
+                booted + capture,
+                restore,
+                "capture of a microVM with nested virtualization before its guest",
+            ),
+            (
+                capture,
+                booted + restore,
+                "restore of a microVM with nested virtualization before its guest",
+            ),
+            (
+                capture,
+                b"fatal error: no such snapshot\n",
+                "restore of a microVM with nested virtualization without saying",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                self._run(
+                    "kvm",
+                    None,
+                    capture_output=capture_output,
+                    restore_output=restore_output,
+                )
+        with self.assertRaisesRegex(RuntimeError, "probe_status='1', not '0'"):
+            self._run(
+                "kvm",
+                None,
+                nested_report=_nested_report(
+                    vmx="1", kvm=microvm_tests.GUEST_KVM_DEVICE, probe_status="1"
+                ),
+            )
+
+    def test_hosts_that_do_not_nest_refuse_before_the_guest_runs(self):
+        mshv = nested_virtualization.host_refusal("mshv")
+        assert mshv is not None
+        output = b"fatal error: " + mshv.openvmm[0].encode() + b": mshv\n"
+        run_guest_script, launched = self._run("mshv", mshv, refused_output=output)
+        self.assertEqual(
+            [call.args[0] for call in run_guest_script.call_args_list],
+            [["openvmm", "boot"]],
+        )
+        # MSHV refuses every nested request before it would refuse a snapshot.
+        self.assertEqual(launched, [["openvmm", "boot", "--nested-virt"]])
+        kvm = nested_virtualization.NestedRefusal(
+            "kvm_intel's nested is N", (nested_virtualization.OPENVMM_KVM_REFUSAL,)
+        )
+        _, launched = self._run(
+            "kvm",
+            kvm,
+            refused_output=nested_virtualization.OPENVMM_KVM_REFUSAL.encode(),
+        )
+        self.assertEqual(len(launched), 3)
+        # A refusal that another message, or a boot, explains is no refusal.
+        for status, output, message in (
+            (1, b"fatal error: something else\n", "without saying"),
+            (0, nested_virtualization.OPENVMM_KVM_REFUSAL.encode(), "which this host"),
+            (
+                1,
+                microvm_tests.BOOT_MARKER + b"\n",
+                "which this host does not offer",
+            ),
+        ):
+            with (
+                self.subTest(output=output),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                self._run("kvm", kvm, refused_output=output, refused_status=status)
+
+
+class _FakeNestedSandbox:
+    """Emulates `nvx-rs sandbox` for the nested-virtualization acceptance: what
+    it refuses, what it records, and what the workload sees of KVM, on a host
+    that gives a microVM nested virtualization unless `refusal`, the refusal of
+    `nvx-rs`, or `openvmm_refuses`, OpenVMM's.
+
+    Each fault names a regression that the acceptance must detect."""
+
+    def __init__(
+        self,
+        *faults: str,
+        refusal: sandbox_lifecycle_tests.Refusal | None = None,
+        openvmm_refuses: bool = False,
+        console: bytes = b"",
+    ) -> None:
+        self.faults = set(faults)
+        self.refusal = refusal
+        self.openvmm_refuses = openvmm_refuses
+        # What the console of a run that OpenVMM refuses holds before its
+        # refusal.
+        self.console = console
+        self.operations: list[str] = []
+        self.running: set[Path] = set()
+
+    def __call__(
+        self, command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        position = command.index("sandbox")
+        operation = command[position + 1]
+        self.operations.append(operation)
+        arguments = command[position + 2 :]
+        nested = "--nested-virt" in arguments
+        state = (
+            Path(arguments[arguments.index("--state-dir") + 1])
+            if "--state-dir" in arguments
+            else None
+        )
+        result = self._dispatch(operation, arguments, state, nested)
+        return subprocess.CompletedProcess(command, *result)
+
+    @staticmethod
+    def _error(code: str, message: str) -> _CliResult:
+        return 1, b"", f"error[{code}]: {message}\n".encode()
+
+    def _workload(self, arguments: list[str], device: bool) -> _CliResult:
+        """Runs the workload that `arguments` name, in a sandbox whose workload
+        has /dev/kvm if `device`."""
+        position = arguments.index("--entrypoint")
+        entrypoint = arguments[position + 1]
+        workload = tuple(
+            argument
+            for argument in arguments[position + 2 :]
+            if argument.startswith("--arg=")
+        )
+        if entrypoint == sandbox_nested_tests.STAT:
+            if workload != sandbox_nested_tests.KVM_DEVICE_ARGUMENTS:
+                raise AssertionError(f"unexpected stat {workload}")
+            if not device:
+                return 1, b"", b"stat: cannot statx '/dev/kvm': No such file\n"
+            if "world-device" in self.faults:
+                return 0, b"crw-rw-rw-:0:0:a:e8\n", b""
+            return 0, sandbox_nested_tests.WORKLOAD_KVM_DEVICE + b"\n", b""
+        if entrypoint != sandbox_nested_tests.PROBE or workload:
+            raise AssertionError(f"unexpected workload {entrypoint} {workload}")
+        if not device:
+            return 1, b"", sandbox_nested_tests.KVM_PROBE_ABSENT + b"\n"
+        if "probe-fails" in self.faults:
+            return 1, b"", b"KVM_RUN exited with reason 17, not KVM_EXIT_HLT (5)\n"
+        return 0, sandbox_nested_tests.KVM_PROBE_SUCCESS + b"\n", b""
+
+    def _device(self, nested: bool, *, managed: bool) -> bool:
+        if not nested:
+            return "default-device" in self.faults
+        return "no-device" not in self.faults and not (
+            managed and "managed-no-device" in self.faults
+        )
+
+    def _dispatch(
+        self, operation: str, arguments: list[str], state: Path | None, nested: bool
+    ) -> _CliResult:
+        if nested and operation not in ("run", "provision"):
+            if "start-takes-nested" in self.faults:
+                return 0, b"", b""
+            return self._error(
+                "unsupported",
+                "--nested-virt is only valid for sandbox run or provision",
+            )
+        if operation == "run":
+            if nested and self.refusal is not None:
+                code = self.refusal.code
+                return self._error(code, " ".join(self.refusal.fragments))
+            shown = nested and "drops-option" not in self.faults
+            command = ">> openvmm" + (" --nested-virt" if shown else "") + "\n"
+            if nested and self.openvmm_refuses:
+                refusal = nested_virtualization.OPENVMM_WHP_REFUSAL
+                return (
+                    1,
+                    command.encode() + self.console,
+                    f"Error: {refusal}\n".encode(),
+                )
+            # The console of a one-shot run carries what the workload writes,
+            # and the run exits with the workload's status.
+            status, out, err = self._workload(
+                arguments, self._device(nested, managed=False)
+            )
+            return status, command.encode() + out + err, b""
+        assert state is not None
+        if operation == "provision":
+            mshv = sandbox_nested_tests.MSHV_REFUSAL
+            if nested and self.refusal is mshv:
+                return self._error(mshv.code, " ".join(mshv.fragments))
+            state.mkdir(parents=True)
+            (state / "sandbox.lock").touch()
+            recorded = nested and "unrecorded" not in self.faults
+            (state / "config.json").write_text(
+                json.dumps({"format": 9, "nested_virt": recorded}), encoding="utf-8"
+            )
+            return 0, b"", b""
+        if operation == "start":
+            config = json.loads((state / "config.json").read_text(encoding="utf-8"))
+            if config["nested_virt"] and self.refusal is not None:
+                return self._error(self.refusal.code, " ".join(self.refusal.fragments))
+            self.running.add(state)
+            return 0, b"", b""
+        if operation == "exec":
+            assert state in self.running
+            config = json.loads((state / "config.json").read_text(encoding="utf-8"))
+            return self._workload(
+                arguments, self._device(config["nested_virt"], managed=True)
+            )
+        if operation == "stop":
+            self.running.discard(state)
+            (state / "openvmm.log").write_bytes(b"")
+            (state / "outcome.json").write_text("{}", encoding="utf-8")
+            return 0, b"", b""
+        if operation == "deprovision":
+            shutil.rmtree(state)
+            return 0, b"", b""
+        raise AssertionError(f"unexpected operation {operation}")
+
+
+class PublicSandboxNestedVirtualizationTests(unittest.TestCase):
+    def _run(
+        self,
+        fake: _FakeNestedSandbox,
+        refusal: nested_virtualization.NestedRefusal | None = None,
+        backend: str = "kvm",
+    ) -> list[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            distro = root / "ubuntu-distro.erofs"
+            distro.write_bytes(b"distro")
+            template = root / "ubuntu-smoke-scratch.ext4"
+            template.write_bytes(bytes(4096))
+            artifacts = managed_exec_tests.WorkloadArtifacts(
+                distro, "12345678-1234-1234-1234-123456789abc", template
+            )
+            mkdtemp = tempfile.mkdtemp
+
+            def fixture(prefix: str) -> str:
+                return mkdtemp(prefix=prefix, dir=root)
+
+            with (
+                patch.object(
+                    sandbox_nested_tests,
+                    "load_workload_artifacts",
+                    return_value=artifacts,
+                ),
+                patch.object(
+                    sandbox_nested_tests.tempfile, "mkdtemp", side_effect=fixture
+                ),
+                patch.object(
+                    sandbox_nested_tests, "host_refusal", return_value=refusal
+                ),
+                patch.object(
+                    sandbox_nested_tests,
+                    "nvx_rs_refusal",
+                    return_value=fake.refusal,
+                ),
+                patch.object(
+                    sandbox_lifecycle_tests.subprocess, "run", side_effect=fake
+                ),
+                patch.object(
+                    sandbox_lifecycle_tests.nvx_rs,
+                    "require_binary",
+                    return_value=Path("nvx-rs"),
+                ),
+                patch.object(
+                    sandbox_lifecycle_tests, "openvmm_processes", return_value=()
+                ),
+                patch.object(
+                    sandbox_nested_tests,
+                    "check_managed_report",
+                    return_value=None,
+                ),
+                patch.object(sandbox_nested_tests, "managed_report", return_value={}),
+                # The lifecycle acceptance checks what a start leaves.
+                patch.object(
+                    sandbox_lifecycle_tests.LifecycleAcceptance,
+                    "require_started",
+                    return_value={},
+                ),
+            ):
+                sandbox_nested_tests.run_sandbox_nested_virtualization(
+                    backend, timeout=2, output_dir=root / "results"
+                )
+            self.assertEqual(list(root.glob("nvx-public-nested-*")), [])
+        return fake.operations
+
+    def test_a_nested_sandbox_gives_its_workload_dev_kvm(self):
+        fake = _FakeNestedSandbox()
+        self.assertEqual(
+            self._run(fake),
+            [
+                "start",
+                "run",
+                "run",
+                "run",
+                "provision",
+                "start",
+                "exec",
+                "exec",
+                "stop",
+                "deprovision",
+            ],
+        )
+
+    def test_hosts_that_do_not_nest_refuse_before_anything_launches(self):
+        unavailable = sandbox_lifecycle_tests.Refusal(
+            "unavailable", ("--nested-virt", "nested virtualization")
+        )
+        refusal = nested_virtualization.NestedRefusal("N", ("refused",))
+        fake = _FakeNestedSandbox(refusal=unavailable)
+        self.assertEqual(
+            self._run(fake, refusal),
+            ["start", "run", "run", "provision", "start", "deprovision"],
+        )
+        mshv = nested_virtualization.host_refusal("mshv")
+        fake = _FakeNestedSandbox(refusal=sandbox_nested_tests.MSHV_REFUSAL)
+        self.assertEqual(
+            self._run(fake, mshv, backend="mshv"),
+            ["start", "run", "run", "provision"],
+        )
+
+    def test_openvmm_refuses_where_whp_does_not_nest(self):
+        refusal = nested_virtualization.NestedRefusal(
+            "WHP offers no nested virtualization",
+            (nested_virtualization.OPENVMM_WHP_REFUSAL,),
+        )
+        fake = _FakeNestedSandbox(openvmm_refuses=True)
+        self.assertEqual(
+            self._run(fake, refusal, backend="whp"), ["start", "run", "run"]
+        )
+        with self.assertRaisesRegex(RuntimeError, "OpenVMM did not refuse"):
+            self._run(_FakeNestedSandbox(), refusal, backend="whp")
+        # A refusal after the guest ran, which a failing probe would follow,
+        # is no refusal before the guest runs.
+        for console in (
+            b"[    0.000000] Linux version 6.18.38 (root@buildkitsandbox)\r\n",
+            b"NVX-SANDBOX-READY: pid=42 layers=1\r\n"
+            + sandbox_nested_tests.KVM_PROBE_ABSENT
+            + b"\r\n",
+        ):
+            with (
+                self.subTest(console=console),
+                self.assertRaisesRegex(RuntimeError, "only after the guest ran"),
+            ):
+                self._run(
+                    _FakeNestedSandbox(openvmm_refuses=True, console=console),
+                    refusal,
+                    backend="whp",
+                )
+
+    def test_acceptance_detects_regressions(self):
+        device = sandbox_nested_tests.WORKLOAD_KVM_DEVICE.decode()
+        regressions = {
+            "start-takes-nested": "start returned 0, expected 1",
+            "no-device": "public sandbox run returned 1, expected 0",
+            "managed-no-device": "public sandbox exec returned 1, expected 0",
+            "world-device": f"the workload did not print {device!r}",
+            "probe-fails": "public sandbox run returned 1, expected 0",
+            "default-device": "public sandbox run returned 0, expected 1",
+            "drops-option": "the one-shot run run-nested launched",
+            "unrecorded": "provision recorded nested virtualization as",
+        }
+        for fault, message in regressions.items():
+            with self.subTest(fault=fault):
+                with self.assertRaisesRegex(RuntimeError, re.escape(message)):
+                    self._run(_FakeNestedSandbox(fault))
+
+    def test_workload_lines(self):
+        line = sandbox_nested_tests.KVM_PROBE_SUCCESS
+        sandbox_nested_tests.require_line(b"boot\r\n" + line + b"\r\n", line, "run")
+        with self.assertRaisesRegex(RuntimeError, "run: the workload did not print"):
+            sandbox_nested_tests.require_line(b"x" + line + b"\n", line, "run")
+
+    def test_workload_arguments_are_kernel_tokens(self):
+        # A one-shot run passes each argument as a kernel command-line token.
+        for argument in sandbox_nested_tests.KVM_DEVICE_ARGUMENTS:
+            self.assertRegex(argument, r"^--arg=[^\s'\"]+$")
 
 
 if __name__ == "__main__":

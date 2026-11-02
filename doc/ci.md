@@ -463,6 +463,27 @@ whose restore must report the same interrupts and fire them again. A unit test
 checks that the scenario's interrupts are those of Table 2.7, and OpenVMM's
 unit tests check the MP table's routing and each slot's input.
 
+The `nested-virtualization` scenario covers
+[nested virtualization](design/2.2-cpu-and-topology.md#2214-nested-virtualization)
+on every backend, without skipping any. The default microVM's guest must see
+neither VMX nor SVM and have no `/dev/kvm`, and on KVM and WHP, read
+`IA32_XSS`, which the guest's KVM reads when it starts. A probe of the
+host, independent of OpenVMM, then selects one of two paths, which the
+scenario's log names. Where KVM's `kvm_intel` offers nested VMX, or WHP offers
+nested virtualization, on an Intel CPU, a microVM with `--nested-virt` must
+expose VMX alone, and its guest's `nvx-kvm-probe` must open `/dev/kvm`, which
+only root may open, and create a VM with a vCPU that runs until it halts.
+Elsewhere, OpenVMM must refuse `--nested-virt` before the guest runs, as it
+always does on MSHV. On KVM and WHP, OpenVMM must also refuse to capture or to
+restore a microVM with nested virtualization before the VM starts. CI's
+runners are Azure VMs with Intel CPUs, whose KVM and WHP offer nested
+virtualization, so their default suites run the nested path, and MSHV's the
+refusal. The public `sandbox-nested-virtualization` scenario, which the guest
+and sandbox jobs run, checks the sandbox's device contract on the same paths:
+a workload gets `/dev/kvm`, mode 0660 for root and its group, exactly when its
+sandbox has nested virtualization, and runs its VM through it, and where the
+host gives none, `nvx-rs` refuses the request before anything launches.
+
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
 separate cache keys. The EROFS layer's entry also holds the sandbox scratch
@@ -503,7 +524,8 @@ directory on scratch, and that the memory controller kills an allocation of
 twice the limit and the pids controller stops the workload at eight
 processes. The live-share runs below repeat the profile checks. Each
 backend also runs the public `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper` scenarios of `test-microvm`,
+`sandbox-nested-virtualization`, `sandbox-proxy-only`, and `sandbox-ram-upper`
+scenarios of `test-microvm`,
 which drive `nvx-rs sandbox run`, `provision`, `start`,
 `exec`, `stop`, and `deprovision` as subprocesses (see
 [Run](run.md#managed-lifecycle)): request-scoped working directories and

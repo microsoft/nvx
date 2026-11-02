@@ -1071,8 +1071,9 @@ against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
 it, every scenario supported by the selected guest runs, except `smp-lapic`,
 which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper`, the public sandbox scenarios,
-drive the public `nvx-rs sandbox` lifecycle commands (see
+`sandbox-nested-virtualization`, `sandbox-proxy-only`, and
+`sandbox-ram-upper`, the public sandbox scenarios, drive the public
+`nvx-rs sandbox` lifecycle commands (see
 [Run](run.md#managed-lifecycle)) and also read the Ubuntu distro layer, its
 manifest, and the sandbox scratch template, which
 [`download`](#download) installs and the guest-artifact build makes; a run
@@ -1084,7 +1085,8 @@ and `virtio-features` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
 `platform-zero-fill`, `platform-filesystem`, `platform-aggregate-export`,
 `platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper` scenarios. Ubuntu also rejects
+`sandbox-nested-virtualization`, `sandbox-proxy-only`, and
+`sandbox-ram-upper` scenarios. Ubuntu also rejects
 the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
 the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
 detectors the guest's time ABI watcher reports; without `--scenario`, it runs
@@ -1137,7 +1139,27 @@ be the IOAPIC input of its device's window that
 edge-triggered, unshared, and firing, and `/proc/interrupts` must count no APIC
 error, misrouted IOAPIC interrupt, or spurious interrupt. A snapshot of a guest
 with the NIC and the share must then restore with the same interrupts, which
-fire again. The scenarios that
+fire again. The `nested-virtualization` scenario checks
+[nested virtualization](run.md#nested-virtualization). A default microVM's
+guest must see neither VMX nor SVM and have no `/dev/kvm`, and every guest of
+KVM or WHP must read `IA32_XSS`, which its CPU profile's `XSAVES` enumerates.
+A probe of the host, independent of OpenVMM, then decides the path: where
+KVM's `kvm_intel` offers nested VMX, or WHP offers nested virtualization, on
+an Intel CPU, a microVM that requests nested virtualization must expose VMX
+alone, its guest's `/dev/kvm` must be root's alone, and `nvx-kvm-probe` must
+create a VM and a vCPU that runs until it halts; elsewhere, MSHV always
+included, OpenVMM must refuse the request before the guest runs. On KVM and
+WHP, OpenVMM must also refuse to capture or to restore a microVM with nested
+virtualization before the VM starts, leaving no snapshot. The
+`sandbox-nested-virtualization` scenario checks the sandbox's device contract:
+a `start` that requests nested virtualization is refused, a one-shot run
+without the request has no `/dev/kvm`, and where the host offers nested
+virtualization, a one-shot run and a managed sandbox with it give the workload
+`/dev/kvm`, mode 0660, owned by root and the workload's group, through which
+`nvx-kvm-probe` runs its VM. Where the host does not offer it, `nvx-rs`
+refuses the run, and the start of a provisioned sandbox, before anything
+launches, and MSHV refuses the provision too, or, on WHP with an Intel CPU,
+OpenVMM refuses the run. The scenarios that
 run microVMs or sandboxes as the public commands do, or that compile egress
 policies, run [`nvx-rs`](#nvx-rs). The
 command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`

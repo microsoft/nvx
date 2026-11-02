@@ -46,6 +46,7 @@
         "l3-l4-egress-protocols": 31.1,
         "lifecycle": 1.7,
         "managed-lifecycle": 4.2,
+        "nested-virtualization": 3.3,
         "network-snapshot": 17.0,
         "platform-aggregate-export": 3.4,
         "platform-filesystem": 6.0,
@@ -72,7 +73,7 @@
       },
       "shards": [
         {
-          "seconds": 267.8,
+          "seconds": 269.4,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
@@ -80,8 +81,8 @@
             "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-snapshot",
-            "lifecycle",
             "managed-lifecycle",
+            "nested-virtualization",
             "network-snapshot",
             "platform-restore-processors",
             "restore-downtime",
@@ -96,7 +97,7 @@
           ]
         },
         {
-          "seconds": 267.8,
+          "seconds": 269.5,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -112,6 +113,7 @@
             "l3-l4-egress-policy",
             "l3-l4-egress-port-ranges",
             "l3-l4-egress-protocols",
+            "lifecycle",
             "platform-aggregate-export",
             "platform-filesystem",
             "platform-network-policy",
@@ -152,6 +154,7 @@
         "l3-l4-egress-protocols": 31.3,
         "lifecycle": 1.6,
         "managed-lifecycle": 4.3,
+        "nested-virtualization": 0.6,
         "network-snapshot": 16.8,
         "platform-aggregate-export": 4.5,
         "platform-filesystem": 6.0,
@@ -202,7 +205,7 @@
           ]
         },
         {
-          "seconds": 248.7,
+          "seconds": 249.3,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -219,6 +222,7 @@
             "l3-l4-egress-protocols",
             "lifecycle",
             "managed-lifecycle",
+            "nested-virtualization",
             "network-snapshot",
             "platform-aggregate-export",
             "platform-network-policy",
@@ -258,6 +262,7 @@
         "l3-l4-egress-protocols": 37.5,
         "lifecycle": 2.1,
         "managed-lifecycle": 17.8,
+        "nested-virtualization": 3.4,
         "network-snapshot": 17.6,
         "platform-aggregate-export": 9.1,
         "platform-filesystem": 6.0,
@@ -284,8 +289,9 @@
       },
       "shards": [
         {
-          "seconds": 353.1,
+          "seconds": 354.8,
           "scenarios": [
+            "cpu-profile-fallback",
             "denied-filesystem-paths",
             "directional-network-policy",
             "endpoint-policy-snapshot",
@@ -293,8 +299,8 @@
             "filesystem-snapshot",
             "host-loopback-policy",
             "interrupt-map",
+            "nested-virtualization",
             "network-snapshot",
-            "platform-filesystem",
             "platform-restore-processors",
             "restore-downtime",
             "restore-memory",
@@ -307,12 +313,11 @@
           ]
         },
         {
-          "seconds": 353.2,
+          "seconds": 354.9,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "console-snapshot",
-            "cpu-profile-fallback",
             "filesystem-comma-paths",
             "filesystem-owner",
             "filesystem-shares",
@@ -325,6 +330,7 @@
             "lifecycle",
             "managed-lifecycle",
             "platform-aggregate-export",
+            "platform-filesystem",
             "platform-network-policy",
             "platform-zero-fill",
             "private-network-ingress",
