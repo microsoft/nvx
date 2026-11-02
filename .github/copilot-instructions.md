@@ -131,7 +131,9 @@
   pull requests skip CI jobs; opening or marking a pull request ready starts the
   matrix. Converting an active pull request to draft does not cancel its existing
   run. Prefer Draft for workload-affecting changes until local deterministic gates
-  pass.
+  pass. A stacked pull request gets CI on its own base, and again when retargeted;
+  title and body edits run nothing (see
+  [Stacked pull requests](../doc/ci.md#stacked-pull-requests)).
 - Pull-request concurrency cancels superseded runs, while `dev` pushes queue in
   order and never cancel one another. Before debugging a cancelled pull-request
   run, compare its head SHA with the current pull-request head and classify an

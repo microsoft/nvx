@@ -1052,8 +1052,9 @@ takes the merged pull request's head from the second parent of the run's merge
 commit, which the queue builds as a push's, and the latest `pull_request` run
 of `ci.yml` for that head whose head repository is `microsoft/nvx`, so never a
 fork's run, and that kept the job's record. A later run that uploaded no
-record, such as one whose guest artifact jobs did not run, gives way to the
-run before it; when none kept the record, the latest run's refusal
+record, such as that of an
+[edit that keeps the base](#stacked-pull-requests), which runs no job, gives
+way to the run before it; when none kept the record, the latest run's refusal
 stands. It downloads the job's record from
 that run, unless the record has expired, which it does after one day, or lacks
 the SHA-256 digest that GitHub records at upload, and compares its keys with
@@ -1106,9 +1107,12 @@ again, but reuses the artifacts for real (see [Merge queue](#merge-queue)).
 ## Run concurrency
 
 Each pull request runs in a concurrency group of its own, and a push to it
-cancels the run of the previous head, whether that run waits or runs. Each
-merge group's run also has a concurrency group of its own (see
-[Merge queue](#merge-queue)). Pushes to `dev` share one group and run one at a
+cancels the run of the previous head, whether that run waits or runs, as does
+a change of its base (see [Stacked pull requests](#stacked-pull-requests)).
+Each merge group's run, and that of an edit that keeps a pull request's base,
+also has a concurrency group of its own (see [Merge queue](#merge-queue) and
+[Stacked pull requests](#stacked-pull-requests)).
+Pushes to `dev` share one group and run one at a
 time in the order in which they arrive. The group keeps up to 100 waiting runs
 (`queue: max`), so a merge does not cancel the waiting run of an earlier
 merge. Until October 2026 the group
@@ -1162,6 +1166,43 @@ release, and the recording uploads the results of that same SHA again, which
 the next full run of `dev` persists only while the history holds no newer
 commit (see
 [Development releases and performance history](#development-releases-and-performance-history)).
+
+## Stacked pull requests
+
+A pull request runs `ci.yml` whatever its base, so one stacked on another
+pull request's branch gets the checks that GitHub evaluates for it, and
+reports `Required status check` like one to `dev`. A manually dispatched run
+of the branch can't stand in for them: GitHub never evaluates the checks of a
+`workflow_dispatch` run for a pull request, and such a run is a full run of
+the branch rather than a run of the pull request (see
+[Change classification](#change-classification)). Its change detector
+compares the head with the base that the pull request names, so a stacked
+pull request classifies only its own layer, the commits after its base
+branch's tip. The draft and fork rules are those of any pull request, and the
+performance gate still compares with the history of `dev`.
+
+GitHub reports a change of the base, made by hand or when the base branch's
+pull request merges and GitHub retargets the stacked one to `dev`, as an
+`edited` event whose `changes.base` names the earlier base. That event runs
+CI as a push to the pull request does: in the pull request's concurrency
+group, cancelling the run for the earlier base, and with change detection
+against the new one, so the layer's run gives way to one that classifies
+everything that the pull request adds to `dev`.
+
+Every other edit, such as of the title or the body, triggers a run too, since
+a workflow can't filter an event by what changed. Every job of that run but
+the aggregator skips. The run takes a concurrency group of its own,
+`ignored-edit-<run ID>`, so it neither cancels nor replaces the pull
+request's run. Its aggregator runs, since GitHub evaluates a job's name only
+when the job runs, but checks nothing and reports as
+`Ignored pull request edit`, so no `Required status check`, which GitHub
+would count as a success, replaces the result of the run that tested
+the head. The pull request's checks keep every run's results, so a failure
+stays visible after an edit. Guest artifact reuse passes over such a run for
+the run that kept its records (see
+[Guest artifact reuse](#guest-artifact-reuse)). The
+[`test-changes.yml`](#test-changes) workflow, which labels a pull request
+whose changes touch the tests, handles edits the same way.
 
 ## Merge queue
 

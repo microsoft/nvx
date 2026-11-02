@@ -7149,6 +7149,10 @@ class CiConfigurationTests(unittest.TestCase):
             "format('full-{0}', github.run_id) || "
             "github.event_name == 'merge_group' && "
             "format('merge-group-{0}', github.run_id) || "
+            "github.event_name == 'pull_request' && "
+            "github.event.action == 'edited' && "
+            "github.event.changes.base == null && "
+            "format('ignored-edit-{0}', github.run_id) || "
             "github.event.pull_request.number || github.ref",
             header,
         )
@@ -7171,7 +7175,6 @@ class CiConfigurationTests(unittest.TestCase):
             triggers["merge_group"],
             {"types": ["checks_requested"], "branches": ["dev"]},
         )
-        self.assertEqual(triggers["pull_request"]["branches"], ["dev"])
         self.assertEqual(triggers["push"]["branches"], ["dev"])
 
         # The detector compares a merge group's head with the commit on which
@@ -7291,21 +7294,34 @@ class CiConfigurationTests(unittest.TestCase):
         )
         repository = "microsoft/nvx"
 
-        def pull_request(full_name: str) -> dict[str, Any]:
+        def pull_request(
+            full_name: str, base: str = "dev", **event: Any
+        ) -> dict[str, Any]:
             return {
                 "ref": "refs/pull/7/merge",
                 "event": {
                     "pull_request": {
                         "number": 7,
                         "draft": False,
+                        "base": {"ref": base},
                         "head": {"repo": {"full_name": full_name}},
-                    }
+                    },
+                    **event,
                 },
             }
 
+        # A stacked pull request, and a retarget, which GitHub reports as an
+        # edit that changes the base, run as any other pull request does.
+        retarget: dict[str, Any] = {
+            "action": "edited",
+            "changes": {"base": {"ref": {"from": "f"}}},
+        }
         scenarios: tuple[tuple[str, bool, dict[str, Any]], ...] = (
             ("pull_request", True, pull_request(repository)),
             ("pull_request", False, pull_request("contributor/nvx")),
+            ("pull_request", True, pull_request(repository, "feature")),
+            ("pull_request", True, pull_request(repository, **retarget)),
+            ("pull_request", False, pull_request("contributor/nvx", **retarget)),
             (
                 "merge_group",
                 True,
@@ -7344,6 +7360,14 @@ class CiConfigurationTests(unittest.TestCase):
                     )
                     self.assertEqual({job: results[job] for job in expected}, expected)
                     self.assertEqual(results["required-status-check"], "success")
+                    self.assertEqual(
+                        _interpolate_expressions(
+                            workflow["jobs"]["required-status-check"]["name"],
+                            {"github": context},
+                            {},
+                        ),
+                        "Required status check",
+                    )
                     # Only a dev push publishes its release and records its
                     # performance results, and only once its platform jobs
                     # ran; only a full run publishes the crate and persists the
@@ -7369,6 +7393,124 @@ class CiConfigurationTests(unittest.TestCase):
                         results["cancel-superseded-merge-groups"],
                         "success" if event_name == "merge_group" else "skipped",
                     )
+
+    def test_ci_edits_that_keep_the_base_leave_the_required_result(self):
+        # A title or body edit of a pull request, ready or draft, stacked or
+        # not, runs only the aggregator, which checks nothing and reports no `Required status check` that could
+        # replace the result of the pull request's run, and neither cancels
+        # nor replaces that run; an edit that changes the base runs as a push
+        # to the pull request does (doc/ci.md#stacked-pull-requests).
+        workflow = yaml.safe_load(
+            (BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        triggers = workflow[True]["pull_request"]
+        self.assertNotIn("branches", triggers)
+        self.assertNotIn("branches-ignore", triggers)
+        self.assertEqual(
+            triggers["types"],
+            ["opened", "synchronize", "reopened", "ready_for_review", "edited"],
+        )
+
+        def github(run_id: int, draft: bool, base: str, **event: Any) -> dict[str, Any]:
+            return {
+                "workflow": "CI",
+                "run_id": run_id,
+                "event_name": "pull_request",
+                "repository": "microsoft/nvx",
+                "ref": "refs/pull/7/merge",
+                "event": {
+                    "pull_request": {
+                        "number": 7,
+                        "draft": draft,
+                        "base": {"ref": base},
+                        "head": {"repo": {"full_name": "microsoft/nvx"}},
+                    },
+                    **event,
+                },
+            }
+
+        def format_expression(template: str, *values: object) -> str:
+            return template.format(*values)
+
+        functions: dict[str, Callable[..., Any]] = {"format": format_expression}
+
+        def settings(context: Mapping[str, Any]) -> tuple[Any, ...]:
+            return tuple(
+                _interpolate_expressions(
+                    str(workflow["concurrency"][key]), {"github": context}, functions
+                )
+                for key in ("group", "cancel-in-progress", "queue")
+            )
+
+        def name(context: Mapping[str, Any]) -> Any:
+            return _interpolate_expressions(
+                workflow["jobs"]["required-status-check"]["name"],
+                {"github": context},
+                {},
+            )
+
+        # GitHub evaluates a job's name only when the job runs, so the
+        # aggregator of an ignored edit runs and only its check is skipped.
+        (verify,) = (
+            step
+            for step in workflow["jobs"]["required-status-check"]["steps"]
+            if step["name"] == "Verify required jobs"
+        )
+
+        def verifies(context: Mapping[str, Any]) -> bool:
+            return _expression_truthy(
+                _evaluate_expression(
+                    " ".join(str(verify["if"]).split()), {"github": context}, {}
+                )
+            )
+
+        changes = ci.CiChanges(*(True,) * len(ci.CI_CHANGE_OUTPUTS))
+        outputs = {
+            "openvmm-changes": {
+                output: str(selected).lower()
+                for output, selected in changes.outputs().items()
+            }
+        }
+        retarget = {"base": {"ref": {"from": "feature"}, "sha": {"from": "1" * 40}}}
+        for draft, base in itertools.product((False, True), ("dev", "feature")):
+            with self.subTest(draft=draft, base=base):
+                edit = github(
+                    201, draft, base, action="edited", changes={"title": {"from": "a"}}
+                )
+                results = _simulate_workflow_jobs(workflow, edit, outputs)
+                self.assertEqual(
+                    {
+                        job: result
+                        for job, result in results.items()
+                        if result != "skipped"
+                    },
+                    {"required-status-check": "success"},
+                )
+                self.assertEqual(name(edit), "Ignored pull request edit")
+                self.assertFalse(verifies(edit))
+                self.assertEqual(
+                    settings(edit), ("ci-CI-ignored-edit-201", True, "single")
+                )
+
+                # A retarget joins the pull request's group, so it cancels the
+                # run for the earlier base, and reports the required check.
+                moved = github(202, draft, base, action="edited", changes=retarget)
+                self.assertEqual(settings(moved), ("ci-CI-7", True, "single"))
+                self.assertEqual(name(moved), "Required status check")
+                self.assertEqual(verifies(moved), not draft)
+                self.assertEqual(
+                    _simulate_workflow_jobs(workflow, moved, outputs)[
+                        "required-status-check"
+                    ],
+                    "success",
+                )
+                for action in ("opened", "synchronize", "reopened", "ready_for_review"):
+                    context = github(203, draft, base, action=action)
+                    self.assertEqual(settings(context), ("ci-CI-7", True, "single"))
+                    self.assertEqual(name(context), "Required status check")
+                    self.assertEqual(verifies(context), not draft)
 
     def test_ci_dev_pushes_queue_while_pull_requests_cancel(self):
         workflow = (
@@ -7480,7 +7622,9 @@ class CiConfigurationTests(unittest.TestCase):
                 "( github.event_name == 'pull_request' || "
                 "github.event_name == 'merge_group' )",
                 "( github.event_name != 'pull_request' || "
-                "github.event.pull_request.draft == false )",
+                "github.event.pull_request.draft == false && "
+                "(github.event.action != 'edited' || "
+                "github.event.changes.base != null) )",
             ],
         )
 

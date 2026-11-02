@@ -1,14 +1,18 @@
 name: CI
 
 on:
+  # Pull requests to any branch run, so that a stacked one gets checks that
+  # GitHub evaluates for it, and a retarget, which GitHub reports as an edit,
+  # runs it again on its new base. Every job skips an edit that leaves the
+  # base as it was, as of a title or body, which joins no run's concurrency
+  # group and reports no `Required status check` (doc/ci.md#stacked-pull-requests).
   pull_request:
-    branches:
-      - dev
     types:
       - opened
       - synchronize
       - reopened
       - ready_for_review
+      - edited
   # The merge queue's groups of dev report the required check on the commit
   # that the queue merges (doc/ci.md#merge-queue).
   merge_group:
@@ -24,14 +28,15 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.run_id) || github.event_name == 'merge_group' && format('merge-group-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.run_id) || github.event_name == 'merge_group' && format('merge-group-{0}', github.run_id) || github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && format('ignored-edit-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
   # dev pushes wait in order instead of cancelling the run that waits. GitHub
   # rejects queueing together with cancel-in-progress, so pull requests keep
   # the single waiting run that a newer push replaces. Each merge group's run
   # has a group of its own: a pull request that returns to the queue on the
   # same base gets its earlier group's ref again, whose run must not hold the
-  # new one.
+  # new one. So does the run of an edit that keeps the base, which runs no job
+  # and so must neither cancel nor replace the pull request's run.
   queue: ${{ github.event_name == 'pull_request' && 'single' || 'max' }}
 
 permissions:
@@ -85,7 +90,10 @@ jobs:
 
   quality:
     name: Lint, typing, and formatting
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft == false &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -103,7 +111,10 @@ jobs:
 
   nvx-rs:
     name: nvx-rs / ${{ matrix.os }}
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft == false &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -132,7 +143,8 @@ jobs:
       ${{
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -200,7 +212,8 @@ jobs:
       ${{
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -283,7 +296,8 @@ jobs:
       ${{
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -371,7 +385,8 @@ jobs:
       ${{
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -452,7 +467,10 @@ jobs:
 
   openvmm-changes:
     name: Detect CI workload inputs
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft == false &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -558,7 +576,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           needs.openvmm-changes.result != 'success' ||
@@ -625,7 +644,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           needs.openvmm-changes.result != 'success' ||
@@ -787,7 +807,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           needs.openvmm-changes.result != 'success' ||
@@ -828,7 +849,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -858,7 +880,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -888,7 +911,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -928,7 +952,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           needs.openvmm-changes.result != 'success' ||
@@ -976,7 +1001,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1015,7 +1041,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1054,7 +1081,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1098,7 +1126,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1133,7 +1162,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1168,7 +1198,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1236,7 +1267,8 @@ jobs:
         github.event_name != 'merge_group' &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1311,7 +1343,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1347,7 +1380,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1383,7 +1417,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1427,7 +1462,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1461,7 +1497,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1495,7 +1532,8 @@ jobs:
         !cancelled() &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -1638,7 +1676,8 @@ jobs:
         ) &&
         (
           github.event_name != 'pull_request' ||
-          github.event.pull_request.draft == false
+          github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null)
         ) &&
         !cancelled() &&
         needs.platform-kvm.result == 'success' &&
@@ -1663,7 +1702,11 @@ jobs:
           absolute-tolerance-ms: ${{ env.PERFORMANCE_REGRESSION_ABSOLUTE_TOLERANCE_MS }}
 
   required-status-check:
-    name: Required status check
+    # An edit that keeps the base runs no job, and its aggregator, which
+    # verifies nothing, must not replace the result of the pull request's
+    # run, so it reports under another name. GitHub evaluates a job's name
+    # only when the job runs, so the aggregator runs for that edit too.
+    name:  ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'Ignored pull request edit' || 'Required status check' }}
     needs:
       - quality
       - nvx-rs
@@ -1706,7 +1749,10 @@ jobs:
           persist-credentials: false
 
       - name: Verify required jobs
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        if: >-
+          github.event_name != 'pull_request' ||
+          (github.event.pull_request.draft == false &&
+          (github.event.action != 'edited' || github.event.changes.base != null))
         shell: bash
         env:
           SAME_REPOSITORY: >-
