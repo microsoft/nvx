@@ -59,9 +59,24 @@ choices. They rebuild nothing once the executable exists. The
 
 The provenance of a checkout's `nvx-rs`, `build/nvx-rs.provenance.json`, binds
 the SHA-256 of its executable to a digest of the `nvx-rs` sources that built
-it, the crate's manifest, lock file, build script, and `src/` tree and
-`rust-toolchain.toml`, and to the Rust release, target, and Cargo features of
-the build. `nvx.py` records it when it builds `nvx-rs` for the scenarios, and
+it, and to the Rust release, target, and Cargo features of the build. The
+sources are `rust-toolchain.toml`; the lock file and manifest of the crate's
+workspace, which is the crate itself while no workspace holds it; the Cargo
+configuration of the checkout's root, `.cargo/config.toml` or `.cargo/config`;
+and, for the crate and for each local package that its build uses through path
+dependencies, or through the path patches, replacements, and overrides of its
+workspace or that configuration, the package's manifest, its workspace's
+manifest, its build script if it has one, and its `src/` tree. Each package
+keeps the root files of its library and binaries, and their modules, in
+`src/`: the inventory refuses a root file that a manifest names elsewhere, a
+link to a directory in `src/`, and a package or build script whose path, as
+the manifests and the configuration give it, lies outside the checkout. It
+follows the other links, such as a package's directory that is one, and hashes
+the files that they name, wherever these lie. It does not follow whatever else
+a build reads: files outside `src/` that a build script's modules, a `#[path]`
+attribute, or `include!` name, Cargo configuration outside the checkout, and
+the build's environment.
+`nvx.py` records it when it builds `nvx-rs` for the scenarios, and
 [`record-nvx-rs-provenance`](#record-nvx-rs-provenance) records it for a build
 made otherwise, such as with the command above. [`package`](#package) and the
 [adversarial executor](adversarial-testing.md#nvx-rs-on-the-target) refuse an

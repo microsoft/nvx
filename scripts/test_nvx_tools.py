@@ -4,6 +4,7 @@
 import argparse
 import ast
 import contextlib
+import datetime
 import errno
 import hashlib
 import http.client
@@ -12,6 +13,7 @@ import io
 import itertools
 import json
 import lzma
+import math
 import os
 import queue
 import re
@@ -46,6 +48,7 @@ from nvx_tools import (  # noqa: E402
     benchmark,
     build,
     build_config,
+    cargo_workspace,
     ci,
     collect_alpine_sources,
     collect_ubuntu_sources,
@@ -1879,6 +1882,462 @@ def _completed(
     return subprocess.CompletedProcess(["nvx-rs"], returncode, stdout, stderr)
 
 
+def _write_files(root: Path, files: Mapping[str, str]) -> None:
+    for name, text in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """Make `link` lead to the directory `target`: by a junction on Windows,
+    where it needs no privilege, and by a symbolic link elsewhere."""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=True,
+        )
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+_TOOLCHAIN = '[toolchain]\nchannel = "1.95.0"\n'
+# The inputs of an nvx-rs build in a checkout where the crate is alone, and
+# files of that checkout that are none.
+_STANDALONE_NVX_RS_INPUTS = {
+    "rust-toolchain.toml": _TOOLCHAIN,
+    "nvx-rs/Cargo.toml": (
+        '[package]\nname = "nvx"\nversion = "0.1.0-alpha.8"\n\n'
+        '[dev-dependencies]\nhelper = { path = "../helper" }\n'
+    ),
+    "nvx-rs/Cargo.lock": "version = 4\n",
+    "nvx-rs/build.rs": "fn main() {}\n",
+    "nvx-rs/src/lib.rs": "//! nvx\n",
+    "nvx-rs/src/bin/nvx-rs.rs": "fn main() {}\n",
+}
+_STANDALONE_NVX_RS_OTHERS = {
+    "nvx-rs/README.md": "# nvx\n",
+    "nvx-rs/artifacts.json": "{}\n",
+    "nvx-rs/tests/cli.rs": "\n",
+    "helper/Cargo.toml": '[package]\nname = "helper"\nversion = "0.1.0"\n',
+    "helper/src/lib.rs": "\n",
+}
+# The same in a workspace, where the crate uses a package that it inherits from
+# the workspace, another for its build script on one platform, which enables
+# its build script explicitly, one that a patch of the workspace names, one
+# that a replacement of the workspace does, one that a patch of the Cargo
+# configuration does, replacing the workspace's patch of the same package, and
+# one that a path override of the configuration does, a package of another
+# workspace, which inherits one from its own, and a procedural macro whose
+# manifest's metadata holds a float and a date; and the build scripts of the
+# first two packages are their only ones. A build in the checkout's root reads
+# .cargo/config rather than .cargo/config.toml, and no configuration of a
+# directory beneath the root.
+_WORKSPACE_NVX_RS_INPUTS = {
+    "rust-toolchain.toml": _TOOLCHAIN,
+    "Cargo.toml": (
+        '[workspace]\nmembers = ["nvx-rs", "crates/*"]\n'
+        'exclude = ["tests/adapter", "third-party"]\n'
+        '\n[workspace.dependencies]\nnvx-sys = { path = "crates/nvx-sys" }\n'
+        '\n[patch.crates-io]\ngetrandom = { path = "vendor/getrandom" }\n'
+        'libc = { path = "vendor/old-libc" }\n'
+        '\n[replace]\n"cc:1.2.0" = { path = "vendor/cc" }\n'
+    ),
+    "Cargo.lock": "version = 4\n",
+    ".cargo/config": (
+        'paths = ["vendor/zlib"]\n'
+        '\n[patch.crates-io]\nlibc = { path = "vendor/libc" }\n'
+    ),
+    "nvx-rs/Cargo.toml": (
+        '[package]\nname = "nvx"\nversion = "0.1.0-alpha.8"\n\n'
+        "[dependencies]\nnvx-sys.workspace = true\n"
+        'branch = { path = "../third-party/branch" }\n'
+        'nvx-macros = { path = "../crates/nvx-macros" }\n\n'
+        "[target.'cfg(windows)'.build-dependencies]\n"
+        'nvx-build = { path = "../crates/nvx-build" }\n\n'
+        '[dev-dependencies]\nnvx-testing = { path = "../crates/nvx-testing" }\n'
+    ),
+    "nvx-rs/src/lib.rs": "//! nvx\n",
+    "nvx-rs/src/bin/nvx-rs.rs": "fn main() {}\n",
+    "crates/nvx-sys/Cargo.toml": '[package]\nname = "nvx-sys"\nversion = "0.1.0"\n',
+    "crates/nvx-sys/build.rs": "fn main() {}\n",
+    "crates/nvx-sys/src/lib.rs": "//! nvx-sys\n",
+    "crates/nvx-build/Cargo.toml": (
+        '[package]\nname = "nvx-build"\nversion = "0.1.0"\nbuild = true\n'
+    ),
+    "crates/nvx-build/build.rs": "fn main() {}\n",
+    "crates/nvx-build/src/lib.rs": "\n",
+    "crates/nvx-macros/Cargo.toml": (
+        '[package]\nname = "nvx-macros"\nversion = "0.1.0"\n\n'
+        "[lib]\nproc-macro = true\n\n"
+        "[package.metadata.tool]\nthreshold = 0.5\nsince = 2026-11-01\n"
+    ),
+    "crates/nvx-macros/src/lib.rs": "mod expand;\n",
+    "crates/nvx-macros/src/expand/mod.rs": "\n",
+    "third-party/Cargo.toml": (
+        '[workspace]\nmembers = ["branch", "leaf"]\n\n'
+        '[workspace.dependencies]\nleaf = { path = "leaf" }\n'
+    ),
+    "third-party/branch/Cargo.toml": (
+        '[package]\nname = "branch"\nversion = "0.1.0"\n\n'
+        "[dependencies]\nleaf.workspace = true\n"
+    ),
+    "third-party/branch/src/lib.rs": "\n",
+    "third-party/leaf/Cargo.toml": '[package]\nname = "leaf"\nversion = "0.1.0"\n',
+    "third-party/leaf/src/lib.rs": "\n",
+    "vendor/getrandom/Cargo.toml": '[package]\nname = "getrandom"\nversion = "0.4.0"\n',
+    "vendor/getrandom/src/lib.rs": "\n",
+    "vendor/cc/Cargo.toml": '[package]\nname = "cc"\nversion = "1.2.0"\n',
+    "vendor/cc/src/lib.rs": "\n",
+    "vendor/libc/Cargo.toml": '[package]\nname = "libc"\nversion = "0.2.0"\n',
+    "vendor/libc/src/lib.rs": "\n",
+    "vendor/zlib/Cargo.toml": '[package]\nname = "zlib"\nversion = "1.0.0"\n',
+    "vendor/zlib/src/lib.rs": "\n",
+}
+_WORKSPACE_NVX_RS_OTHERS = {
+    ".cargo/config.toml": '[patch.crates-io]\nlibc = { path = "vendor/missing" }\n',
+    "nvx-rs/.cargo/config.toml": (
+        '[patch.crates-io]\nserde = { path = "../vendor/missing" }\n'
+    ),
+    "nvx-rs/tests/cli.rs": "\n",
+    "crates/nvx-macros/target/debug/libnvx_macros.so": "\n",
+    "crates/nvx-testing/Cargo.toml": '[package]\nname = "nvx-testing"\n',
+    "crates/nvx-testing/src/lib.rs": "\n",
+    "crates/nvx-init/Cargo.toml": '[package]\nname = "nvx-init"\n',
+    "crates/nvx-init/src/main.rs": "fn main() {}\n",
+    "tests/adapter/Cargo.toml": (
+        '[package]\nname = "adapter"\n\n[dependencies]\nnvx = { path = "../../nvx-rs" }\n'
+    ),
+    "tests/adapter/Cargo.lock": "version = 4\n",
+    "tests/adapter/src/lib.rs": "\n",
+}
+
+
+class CargoWorkspaceTests(unittest.TestCase):
+    def test_reads_the_toml_of_cargo_files(self):
+        document = "\n".join(
+            (
+                "# A comment.",
+                'basic = "a \\"quote\\", \\t, \\u00e9 and \\U0001F600" # trailing',
+                "literal = 'C:\\path'",
+                'multi = """',
+                "first \\",
+                '    second ""quoted"" and two at the end"""""',
+                "raw = '''",
+                "line'''",
+                "numbers = [1, +2, -3, 1_000, 0x1F, 0o17, 0b101]",
+                "floats = [1.5, -0.0, 1e3, 6.626E-3_4, 1_000.25, +inf, -inf]",
+                "dates = [1979-05-27, 1979-05-27T07:32:00Z, 07:32:00.1234567,",
+                "  1979-05-27 00:32:00.999999-07:00, 1979-05-27t07:32:00.5]",
+                'mixed = [ [1, 2], ["a"], { inline = true }, ] # trailing comma',
+                'inline = { text = """two',
+                'lines""", list = [',
+                "  1,",
+                "] }",
+                '"quoted key".dotted.key = true',
+                'site."example.com" = false',
+                'escapes = "\\e[0m, \\x41 and \\xff"',
+                "short = [07:32, 1979-05-27 07:32, 1979-05-27T07:32-07:00]",
+                "leap = [23:59:60, 1979-12-31T23:59:60.5Z, 1979-12-31 23:59:60,",
+                "  1979-12-31T15:59:60-08:00]",
+                "spread = { # Line breaks and comments,",
+                "  a = 1,",
+                "  b # even around the = of a pair,",
+                "  =",
+                "  2,",
+                "  c = { d = 3, }, # and a comma after the last pair.",
+                "}",
+                "",
+                "[package]",
+                'name = "nvx"',
+                "version.workspace = true",
+                "",
+                "[target.'cfg(windows)'.dependencies]",
+                'windows-sys = { version = "0.61", features = [',
+                '    "A", # a comment',
+                '    "B",',
+                "] }",
+                "",
+                "[[bin]]",
+                'name = "a"',
+                "",
+                "[[bin]]",
+                'name = "b"',
+                "",
+                "[bin.details]",
+                "x = 1",
+                "",
+                "[target]",
+                "y = 2",
+                "'cfg(windows)'.implicit = true",
+                "",
+                "[target.'cfg(windows)'.build-dependencies]",
+                "z = 3",
+                "",
+            )
+        )
+        expected = {
+            "basic": 'a "quote", \t, \u00e9 and \U0001f600',
+            "literal": "C:\\path",
+            "multi": 'first second ""quoted"" and two at the end""',
+            "raw": "line",
+            "numbers": [1, 2, -3, 1000, 31, 15, 5],
+            "floats": [1.5, -0.0, 1000.0, 6.626e-34, 1000.25, math.inf, -math.inf],
+            "dates": [
+                datetime.date(1979, 5, 27),
+                datetime.datetime(1979, 5, 27, 7, 32, tzinfo=datetime.timezone.utc),
+                datetime.time(7, 32, 0, 123456),
+                datetime.datetime(
+                    1979,
+                    5,
+                    27,
+                    0,
+                    32,
+                    0,
+                    999999,
+                    datetime.timezone(-datetime.timedelta(hours=7)),
+                ),
+                datetime.datetime(1979, 5, 27, 7, 32, 0, 500000),
+            ],
+            "mixed": [[1, 2], ["a"], {"inline": True}],
+            "inline": {"text": "two\nlines", "list": [1]},
+            "quoted key": {"dotted": {"key": True}},
+            "site": {"example.com": False},
+            "escapes": "\x1b[0m, A and \xff",
+            "short": [
+                datetime.time(7, 32),
+                datetime.datetime(1979, 5, 27, 7, 32),
+                datetime.datetime(
+                    1979,
+                    5,
+                    27,
+                    7,
+                    32,
+                    tzinfo=datetime.timezone(-datetime.timedelta(hours=7)),
+                ),
+            ],
+            "spread": {"a": 1, "b": 2, "c": {"d": 3}},
+            "leap": [
+                cargo_workspace.LeapSecond(datetime.time(23, 59, 59)),
+                cargo_workspace.LeapSecond(
+                    datetime.datetime(
+                        1979, 12, 31, 23, 59, 59, 500000, tzinfo=datetime.timezone.utc
+                    )
+                ),
+                cargo_workspace.LeapSecond(datetime.datetime(1979, 12, 31, 23, 59, 59)),
+                cargo_workspace.LeapSecond(
+                    datetime.datetime(
+                        1979,
+                        12,
+                        31,
+                        15,
+                        59,
+                        59,
+                        tzinfo=datetime.timezone(-datetime.timedelta(hours=8)),
+                    )
+                ),
+            ],
+            "package": {"name": "nvx", "version": {"workspace": True}},
+            "target": {
+                "cfg(windows)": {
+                    "dependencies": {
+                        "windows-sys": {"version": "0.61", "features": ["A", "B"]}
+                    },
+                    "implicit": True,
+                    "build-dependencies": {"z": 3},
+                },
+                "y": 2,
+            },
+            "bin": [{"name": "a"}, {"name": "b", "details": {"x": 1}}],
+        }
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=repr(newline)):
+                text = document.replace("\n", newline)
+                self.assertEqual(
+                    cargo_workspace.read_toml(text.encode(), "x.toml"), expected
+                )
+        # A byte order mark may begin a document, as Cargo allows.
+        for data in (f"\ufeff{document}", f"\ufeff{document}".encode()):
+            self.assertEqual(cargo_workspace.read_toml(data, "x.toml"), expected)
+        # A float that is not a number equals none, not even itself, but the
+        # reader reads each sign of one as a single float, so documents that
+        # hold the same ones in the same places are equal.
+        not_a_number = cargo_workspace.read_toml("a = -nan\n", "x.toml")["a"]
+        self.assertTrue(math.isnan(cast(float, not_a_number)))
+        signs = "a = [nan, -nan]\n"
+        read = cargo_workspace.read_toml(signs, "x.toml")
+        self.assertEqual(cargo_workspace.read_toml(signs, "x.toml"), read)
+        self.assertEqual(
+            cargo_workspace.read_toml("a = [+nan, -nan]\n", "x.toml"), read
+        )
+        self.assertNotEqual(
+            cargo_workspace.read_toml("a = [nan, nan]\n", "x.toml"), read
+        )
+
+    def test_a_leap_second_equals_only_the_same_leap_second(self):
+        def read(value: str) -> object:
+            return cargo_workspace.read_toml(f"a = {value}\n", "x.toml")["a"]
+
+        # No time that Python holds is in a leap second: not second 59, nor
+        # the second after it, nor the text of the leap second.
+        for leap, others in (
+            ("23:59:60", ("23:59:59", "23:59:60.5", '"23:59:60"')),
+            (
+                "1979-12-31 23:59:60",
+                ("1979-12-31 23:59:59", "1980-01-01 00:00:00", "1979-12-31T23:59:60Z"),
+            ),
+            (
+                "1979-12-31T23:59:60.5Z",
+                (
+                    "1979-12-31T23:59:59.5Z",
+                    "1980-01-01T00:00:00.5Z",
+                    '"1979-12-31T23:59:60.5Z"',
+                ),
+            ),
+        ):
+            for other in others:
+                with self.subTest(leap=leap, other=other):
+                    self.assertNotEqual(read(leap), read(other))
+        # At another offset, the same leap second keeps its offset.
+        utc = read("1979-12-31T23:59:60Z")
+        pacific = read("1979-12-31T15:59:60-08:00")
+        self.assertEqual(utc, pacific)
+        self.assertEqual(hash(utc), hash(pacific))
+        moment = cast(cargo_workspace.LeapSecond, pacific).moment
+        self.assertEqual(moment.utcoffset(), -datetime.timedelta(hours=8))
+
+    def test_refuses_what_is_not_toml(self):
+        for document, message in (
+            (b"a = 1\na = 2\n", "line 2: a is defined twice"),
+            (b"[a]\n[a]\n", "line 2: table a is defined twice"),
+            (b"a.b = 1\n[a]\n", "line 2: table a is defined twice"),
+            (b"a = { b = 1 }\n[a.c]\n", "line 2: a is not a table"),
+            (b"a = { b = 1 }\na.c = 2\n", "line 2: a is not a table"),
+            (b"a = [1]\n[[a]]\n", "line 2: a is not an array of tables"),
+            (b"a = 1.\n", "invalid value"),
+            (b"a = 07:32.5\n", "invalid value"),
+            (b"a = 1979-13-27\n", "invalid date or time"),
+            (b"a = 1979-05-27T25:00:00\n", "invalid date or time"),
+            (b"a = 1979-05-27T07:32:61\n", "invalid date or time"),
+            (b"a = 23:59:61\n", "invalid date or time"),
+            # An offset has the hours and minutes of a clock.
+            (b"a = 1979-05-27T07:32:00+00:60\n", "invalid value"),
+            (b"a = 1979-05-27T07:32:00-24:00\n", "invalid value"),
+            (b'a = "open\n', "unterminated string"),
+            (b'a = """x""""""\n', "unterminated string"),
+            (b'a = "\\x4"\n', "invalid escape sequence"),
+            (b'a = "\\uD800"\n', "invalid escape sequence"),
+            (b"a = 1 b = 2\n", "expected the end of the line"),
+            (b"a = [1 2]\n", "expected ',' or ']'"),
+            (b"a = { b = 1 c = 2 }\n", "expected ',' or '}'"),
+            # An inline table has no comma before its first pair or after
+            # another comma, and no line break in a dotted key, and each of its
+            # keys has a value.
+            (b"a = { , }\n", "expected a key"),
+            (b"a = {\n,\n}\n", "expected a key"),
+            (b"a = { b = 1,, }\n", "expected a key"),
+            (b"a = { b.\nc = 1 }\n", "expected a key"),
+            (b"a = { b\n.c = 1 }\n", "expected '='"),
+            (b"a = { b }\n", "expected '='"),
+            (b"a = { b = }\n", "expected a value"),
+            (b"= 1\n", "expected a key"),
+            (b"a =\n", "expected a value"),
+            (b'"""a""" = 1\n', "a key cannot be a multi-line string"),
+            (b"[a\n", "expected ']'"),
+            (b"\xff = 1\n", "is not UTF-8"),
+            # A byte order mark may only begin a document, once.
+            (b"\xef\xbb\xbf\xef\xbb\xbfa = 1\n", "expected a key"),
+            (b"a = 1\n\xef\xbb\xbfb = 2\n", "line 2: expected a key"),
+            # TOML allows no control character but tabs and line ends.
+            (b'a = 1\nb = "\x00"\n', "line 2: control character '\\x00'"),
+            (b"a = 'x\x01'\n", "control character '\\x01'"),
+            (b"# \x7f\n", "control character '\\x7f'"),
+            (b"a = 1\rb = 2\n", "control character '\\r'"),
+            # Dotted keys extend no table that a header defined.
+            (b"[a.b.c]\n[a]\nb.c.d = 1\n", "line 3: table c is defined twice"),
+            (b"[x.y]\nz = 1\n[x]\ny.w = 2\n", "line 4: table y is defined twice"),
+            # A table that dotted keys extended takes no header after them.
+            (b"[a.b.c]\n[a]\nb.d = 2\n[a.b]\n", "line 4: table a.b is defined twice"),
+        ):
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(
+                    common.ScriptError, rf"^x\.toml.*{re.escape(message)}"
+                ):
+                    cargo_workspace.read_toml(document, "x.toml")
+
+    def test_finds_the_workspace_and_the_local_packages_of_a_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_files(root, {**_WORKSPACE_NVX_RS_INPUTS, **_WORKSPACE_NVX_RS_OTHERS})
+            for package, workspace in (
+                (root / "nvx-rs", root),
+                (root / "crates" / "nvx-sys", root),
+                # The workspace excludes the adapter, alone in its own.
+                (root / "tests" / "adapter", root / "tests" / "adapter"),
+                # It excludes another workspace, which holds its packages.
+                (root / "third-party" / "branch", root / "third-party"),
+            ):
+                with self.subTest(package=package):
+                    self.assertEqual(
+                        cargo_workspace.workspace_root(package, root), workspace
+                    )
+            self.assertEqual(
+                {
+                    package.relative_to(root).as_posix()
+                    for package in cargo_workspace.local_packages(root / "nvx-rs", root)
+                },
+                {
+                    "nvx-rs",
+                    "crates/nvx-sys",
+                    "crates/nvx-build",
+                    "crates/nvx-macros",
+                    "third-party/branch",
+                    "third-party/leaf",
+                    "vendor/cc",
+                    "vendor/getrandom",
+                    "vendor/libc",
+                    "vendor/zlib",
+                },
+            )
+            # Cargo reads .cargo/config rather than .cargo/config.toml, and the
+            # configuration of the directory where it runs and of those above.
+            self.assertEqual(
+                cargo_workspace.configuration_files(root, root),
+                (root / ".cargo" / "config",),
+            )
+            self.assertEqual(
+                cargo_workspace.configuration_files(root / "nvx-rs", root),
+                (
+                    root / "nvx-rs" / ".cargo" / "config.toml",
+                    root / ".cargo" / "config",
+                ),
+            )
+            self.assertEqual(
+                cargo_workspace.build_script(root / "crates" / "nvx-build", root),
+                root / "crates" / "nvx-build" / "build.rs",
+            )
+            # A manifest may name the root of its workspace.
+            inner = root / "other" / "inner"
+            _write_files(
+                inner,
+                {"Cargo.toml": '[package]\nname = "inner"\nworkspace = "../.."\n'},
+            )
+            self.assertEqual(cargo_workspace.workspace_root(inner, root), root)
+            # Every local package lies in the checkout.
+            _write_files(
+                root,
+                {
+                    "crates/nvx-build/Cargo.toml": (
+                        '[package]\nname = "nvx-build"\n\n'
+                        '[dependencies]\noutside = { path = "../../.." }\n'
+                    )
+                },
+            )
+            with self.assertRaisesRegex(common.ScriptError, "is outside the checkout"):
+                cargo_workspace.local_packages(root / "nvx-rs", root)
+
+
 class NvxRsTests(unittest.TestCase):
     def test_nvx_rs_variable_names_the_executable(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2037,18 +2496,14 @@ class NvxRsTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             checkouts = [Path(temporary) / "lf", Path(temporary) / "crlf"]
-            for checkout, newline in zip(checkouts, (b"\n", b"\r\n"), strict=True):
-                for name in (
-                    "nvx-rs/Cargo.toml",
-                    "nvx-rs/Cargo.lock",
-                    "nvx-rs/build.rs",
-                    "nvx-rs/src/lib.rs",
-                    "nvx-rs/src/bin/nvx-rs.rs",
-                    "rust-toolchain.toml",
-                ):
-                    path = checkout / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(newline.join((name.encode(), b"line", b"")))
+            for checkout, newline in zip(checkouts, ("\n", "\r\n"), strict=True):
+                _write_files(
+                    checkout,
+                    {
+                        name: text.replace("\n", newline)
+                        for name, text in _STANDALONE_NVX_RS_INPUTS.items()
+                    },
+                )
             digest = nvx_rs.source_sha256(checkouts[0])
             # Checkouts differ only in line endings, as on Windows.
             self.assertEqual(nvx_rs.source_sha256(checkouts[1]), digest)
@@ -2063,6 +2518,151 @@ class NvxRsTests(unittest.TestCase):
                 common.ScriptError, "nvx-rs source directory not found"
             ):
                 nvx_rs.source_sha256(checkouts[1])
+
+    def test_source_inventory_follows_the_crate_alone_or_in_a_workspace(self):
+        for layout, inputs, others in (
+            ("standalone", _STANDALONE_NVX_RS_INPUTS, _STANDALONE_NVX_RS_OTHERS),
+            ("workspace", _WORKSPACE_NVX_RS_INPUTS, _WORKSPACE_NVX_RS_OTHERS),
+        ):
+            with (
+                self.subTest(layout=layout),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                _write_files(root, {**inputs, **others})
+
+                def inventory(root: Path = root) -> list[str]:
+                    return [
+                        path.relative_to(root).as_posix()
+                        for path in nvx_rs.source_files(root)
+                    ]
+
+                self.assertEqual(inventory(), sorted(inputs))
+                digest = nvx_rs.source_sha256(root)
+                # Tests, documentation, the packages that only tests use, and
+                # those that the crate doesn't use build no part of it.
+                for name in others:
+                    with (root / name).open("ab") as stream:
+                        stream.write(b"// changed\n")
+                    self.assertEqual(nvx_rs.source_sha256(root), digest, name)
+                # Each input of the workspace, and of each local package that
+                # the crate's build uses, changes its digest.
+                for name in inputs:
+                    original = (root / name).read_bytes()
+                    (root / name).write_bytes(original + b"# changed\n")
+                    self.assertNotEqual(nvx_rs.source_sha256(root), digest, name)
+                    (root / name).write_bytes(original)
+                self.assertEqual(nvx_rs.source_sha256(root), digest)
+                # A build script is optional: once deleted, it is no input.
+                for name in inputs:
+                    if name.endswith("/build.rs"):
+                        original = (root / name).read_bytes()
+                        (root / name).unlink()
+                        self.assertEqual(inventory(), sorted(set(inputs) - {name}))
+                        self.assertNotEqual(nvx_rs.source_sha256(root), digest)
+                        (root / name).write_bytes(original)
+
+    def test_a_fresh_record_describes_a_build_in_a_workspace(self):
+        # Packaging accepts the record of a build in a workspace until a local
+        # package that the build uses changes, even one whose directory is a
+        # link to another outside the checkout: the inventory hashes its files
+        # through the link. The crate's build script lies above it, where its
+        # manifest names it.
+        manifest = _WORKSPACE_NVX_RS_INPUTS["nvx-rs/Cargo.toml"].replace(
+            'version = "0.1.0-alpha.8"\n',
+            'version = "0.1.0-alpha.8"\nbuild = "../build.rs"\n',
+            1,
+        )
+        inputs = {
+            **_WORKSPACE_NVX_RS_INPUTS,
+            "nvx-rs/Cargo.toml": manifest,
+            "build.rs": "fn main() {}\n",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "checkout"
+            binary = root / "nvx-rs" / "target" / "release" / "nvx-rs"
+            _write_files(root, {**inputs, "nvx-rs/target/release/nvx-rs": "nvx"})
+            elsewhere = Path(temporary) / "nvx-sys"
+            shutil.move(root / "crates" / "nvx-sys", elsewhere)
+            _link_directory(root / "crates" / "nvx-sys", elsewhere)
+            with (
+                _without_nvx_rs_variable(),
+                patch.object(BuildConstants, "REPO_ROOT", root),
+                patch.object(nvx_rs, "DIRECTORY", root / "nvx-rs"),
+                patch.object(nvx_rs, "binary_path", return_value=binary),
+                patch.object(
+                    nvx_rs,
+                    "provenance_path",
+                    return_value=root / "build" / nvx_rs.PROVENANCE_NAME,
+                ),
+            ):
+                self.assertEqual(
+                    [
+                        path.relative_to(root).as_posix()
+                        for path in nvx_rs.source_files(root)
+                    ],
+                    sorted(inputs),
+                )
+                recorded = nvx_rs.record_provenance("x86_64-pc-windows-msvc")
+                release._validate_nvx_rs_provenance(
+                    binary, recorded, target="x86_64-pc-windows-msvc"
+                )
+                source = elsewhere / "src" / "lib.rs"
+                source.write_bytes(b"//! changed\n")
+                with self.assertRaisesRegex(common.ScriptError, "does not describe"):
+                    release._validate_nvx_rs_provenance(
+                        binary, recorded, target="x86_64-pc-windows-msvc"
+                    )
+            # A build script lies in the checkout.
+            _write_files(Path(temporary), {"outside.rs": "fn main() {}\n"})
+            _write_files(
+                root,
+                {
+                    "nvx-rs/Cargo.toml": manifest.replace(
+                        "../build.rs", "../../outside.rs"
+                    )
+                },
+            )
+            with self.assertRaisesRegex(common.ScriptError, "is outside the checkout"):
+                nvx_rs.source_files(root)
+
+    def test_source_inventory_refuses_sources_that_it_would_miss(self):
+        # The inventory takes in each package's src/ tree, so a root file that
+        # a manifest names elsewhere, or a link to a directory in src/, would
+        # escape it.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_files(
+                root,
+                {
+                    **_STANDALONE_NVX_RS_INPUTS,
+                    "nvx-rs/lib.rs": "//! nvx\n",
+                    "tools/main.rs": "fn main() {}\n",
+                    "shared/mod.rs": "\n",
+                },
+            )
+            manifest = root / "nvx-rs" / "Cargo.toml"
+            original = manifest.read_bytes().decode()
+            for targets, error in (
+                (
+                    '[lib]\npath = "src/lib.rs"\n\n'
+                    '[[bin]]\nname = "nvx-rs"\npath = "src/bin/nvx-rs.rs"\n',
+                    None,
+                ),
+                ('[lib]\npath = "lib.rs"\n', "lies outside"),
+                ('[[bin]]\nname = "tool"\npath = "../tools/main.rs"\n', "lies outside"),
+            ):
+                manifest.write_bytes(f"{original}\n{targets}".encode())
+                with self.subTest(targets=targets):
+                    if error is None:
+                        nvx_rs.source_files(root)
+                        continue
+                    with self.assertRaisesRegex(common.ScriptError, error):
+                        nvx_rs.source_files(root)
+            manifest.write_bytes(original.encode())
+            _link_directory(root / "nvx-rs" / "src" / "shared", root / "shared")
+            with self.assertRaisesRegex(common.ScriptError, "is a link"):
+                nvx_rs.source_files(root)
 
     def test_host_target_is_the_host_of_the_pinned_rust(self):
         version = (

@@ -122,6 +122,7 @@ nvx/
 |   |   |-- build.py             Artifact build workflows
 |   |   |-- build_config.py      Per-invocation build configuration
 |   |   |-- build_constants.py   Grouped build pins, paths, and fixed defaults
+|   |   |-- cargo_workspace.py   TOML reader of Cargo's files, and the workspace layout of a package
 |   |   |-- ci.py                CI change classification, required jobs, and local OpenVMM test runs
 |   |   |-- collect_alpine_sources.py Alpine source collection
 |   |   |-- collect_ubuntu_sources.py Ubuntu source collection

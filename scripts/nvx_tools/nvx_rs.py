@@ -40,10 +40,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from . import cargo_workspace
 from .build_constants import BuildConstants, OpenVMMBuildConstants
 from .common import (
     ScriptError,
     artifact_path,
+    is_link_or_junction,
     normalized_sha256_file,
     require_file,
     sha256_file,
@@ -107,21 +109,52 @@ def release_target() -> str:
 
 def source_files(root: Path | None = None) -> tuple[Path, ...]:
     """Return the files that determine the nvx-rs executable of the checkout at
-    `root`, this one by default, in path order: the crate's manifest, lock
-    file, build script, and sources, and rust-toolchain.toml, which pins the
-    Rust release that builds it."""
+    `root`, this one by default, in path order: rust-toolchain.toml, which pins
+    the Rust release that builds it; the lock file and manifest of the crate's
+    workspace, which is the crate itself while no workspace holds it; the Cargo
+    configuration of the checkout's root, where BUILD_COMMAND runs; and, for
+    the crate and each local package that its build uses, the package's
+    manifest, its workspace's manifest, its build script if it has one, and
+    the files beneath its src/ directory.
+
+    Each package keeps the root files of its library and binaries, and their
+    modules, in src/: a root file that its manifest names elsewhere, or a
+    link to a directory in src/, whose files the inventory would miss, is an
+    error."""
     root = DIRECTORY.parent if root is None else root
     crate = root / DIRECTORY.name
-    files = [
-        crate / "Cargo.toml",
-        crate / "Cargo.lock",
-        crate / "build.rs",
+    workspace = cargo_workspace.workspace_root(crate, root)
+    files = {
         root / "rust-toolchain.toml",
-    ]
-    sources = crate / "src"
-    if not sources.is_dir():
-        raise ScriptError(f"nvx-rs source directory not found: {sources}")
-    files.extend(path for path in sources.rglob("*") if path.is_file())
+        workspace / cargo_workspace.LOCKFILE,
+        workspace / cargo_workspace.MANIFEST,
+        *cargo_workspace.configuration_files(root, root),
+    }
+    for package in cargo_workspace.local_packages(crate, root):
+        sources = package / "src"
+        if not sources.is_dir():
+            raise ScriptError(f"nvx-rs source directory not found: {sources}")
+        for path in cargo_workspace.root_files(package):
+            if sources not in path.parents:
+                raise ScriptError(
+                    f"nvx-rs source {path} lies outside {sources}, the only "
+                    "directory of its package that the inventory takes in"
+                )
+        files.add(package / cargo_workspace.MANIFEST)
+        files.add(
+            cargo_workspace.workspace_root(package, root) / cargo_workspace.MANIFEST
+        )
+        build_script = cargo_workspace.build_script(package, root)
+        if build_script is not None:
+            files.add(build_script)
+        for path in sources.rglob("*"):
+            if is_link_or_junction(path) and path.is_dir():
+                raise ScriptError(
+                    f"nvx-rs source directory {path} is a link, which the "
+                    "inventory does not follow"
+                )
+            if path.is_file():
+                files.add(path)
     return tuple(
         sorted(
             (require_file(path, "nvx-rs source") for path in files),
