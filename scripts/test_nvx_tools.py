@@ -3268,11 +3268,9 @@ _REUSE_ARTIFACT_IDS = {
 }
 
 
-def _reuse_list(name: str) -> str:
-    """Return the endpoint that lists the artifacts named `name` of run 102."""
-    return (
-        f"repos/{_REUSE_REPOSITORY}/actions/runs/102/artifacts?name={name}&per_page=100"
-    )
+def _reuse_list(name: str, *, run: int = 102) -> str:
+    """Return the endpoint that lists the artifacts named `name` of `run`."""
+    return f"repos/{_REUSE_REPOSITORY}/actions/runs/{run}/artifacts?name={name}&per_page=100"
 
 
 def _reuse_download(name: str) -> str:
@@ -3471,6 +3469,11 @@ class GuestArtifactReuseTests(unittest.TestCase):
                         _reuse_run(102, 1850),
                         _reuse_run(101, 1849),
                     ]
+                },
+                # Run 101 kept no record, so run 102 serves.
+                **{
+                    _reuse_list(name, run=101): {"artifacts": []}
+                    for name in _REUSE_RECORDS.values()
                 },
             }
         )
@@ -3867,6 +3870,83 @@ class GuestArtifactReuseTests(unittest.TestCase):
         )
         with self.assertRaises(guest_artifact_reuse.ReuseRefused):
             latest({"event": "pull_request", "head_sha": _REUSE_HEAD})
+
+    def test_reuse_passes_over_later_runs_that_kept_no_record(self):
+        # A later run for the head whose guest artifact jobs skipped or were
+        # cancelled holds no record.
+        later = _reuse_run(104, 1852)
+        for components in _REUSE_JOBS:
+            with (
+                self.subTest(components=components),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                api, kernel_inputs, _files = self._fixture(root, components)
+                record = _REUSE_RECORDS[components]
+                runs = api.documents[_REUSE_RUNS]
+                assert isinstance(runs, dict)
+                runs["workflow_runs"] = [later, *runs["workflow_runs"]]
+                api.documents[_reuse_list(record, run=104)] = {"artifacts": []}
+                destination = root / "destination"
+
+                outcome = self._reuse(
+                    api, kernel_inputs, destination, _reuse_request(components)
+                )
+
+                self.assertTrue(outcome.reused, outcome.detail)
+                self.assertIn(
+                    "[run 102](https://github.com/microsoft/nvx/actions/runs/102), "
+                    f"the latest run of `{_REUSE_WORKFLOW}` for pull request head "
+                    f"`{_REUSE_HEAD}` that kept its `{record}` record",
+                    outcome.detail,
+                )
+                self.assertEqual(
+                    api.requests[1:4],
+                    [
+                        _REUSE_RUNS,
+                        _reuse_list(record, run=104),
+                        _reuse_list(record),
+                    ],
+                )
+                self.assertNotIn(_reuse_list(record, run=101), api.requests)
+
+                # When no run kept it, the latest run's refusal stands.
+                api.documents[_reuse_list(record)] = {
+                    "artifacts": [
+                        _reuse_artifact(
+                            _REUSE_ARTIFACT_IDS[record], 102, name=record, expired=True
+                        )
+                    ]
+                }
+                for name in guest_artifact_reuse.component_files(components):
+                    (destination / name).unlink()
+                destination.rmdir()
+
+                outcome = self._reuse(
+                    api, kernel_inputs, destination, _reuse_request(components)
+                )
+
+                self._assert_built(
+                    outcome,
+                    destination,
+                    re.escape(
+                        "[run 104](https://github.com/microsoft/nvx/actions/runs/104) "
+                        f"has no unexpired `{record}` artifact"
+                    ),
+                    "notice",
+                )
+                self.assertIn(_reuse_list(record, run=101), api.requests)
+
+                # A fault ends the search rather than pass over a run.
+                del api.documents[_reuse_list(record, run=104)]
+                api.requests.clear()
+
+                outcome = self._reuse(
+                    api, kernel_inputs, destination, _reuse_request(components)
+                )
+
+                self._assert_built(outcome, destination, "HTTP 404", "warning")
+                self.assertNotIn(_reuse_list(record), api.requests)
 
     def test_fork_runs_never_supply_guest_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:

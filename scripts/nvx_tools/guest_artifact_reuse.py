@@ -8,7 +8,8 @@ each of their files in a guest artifact record, which the build-guest-artifacts
 action uploads beside the components' own artifacts. When a file of its
 components missed the cache, the job of a push or a merge group looks up the
 latest run of its workflow for the head of the pull request that its merge
-commit merged, from the same repository and never from a fork, and installs
+commit merged that kept its guest artifact record, from the same repository
+and never from a fork, and installs
 every file of its components from that run's artifacts once each artifact
 matches the digest that GitHub recorded for it, the record's keys equal the
 job's own, and the files match the record, their provenance, and the job's
@@ -412,6 +413,17 @@ def latest_pull_request_run(
 ) -> PullRequestRun:
     """Return the latest pull_request run of `workflow` for `head_sha` whose
     head is in `repository`; a fork's run never qualifies."""
+    return pull_request_runs(api, repository, workflow, head_sha)[0]
+
+
+def pull_request_runs(
+    api: GitHubApi,
+    repository: str,
+    workflow: str,
+    head_sha: str,
+) -> list[PullRequestRun]:
+    """Return the pull_request runs of `workflow` for `head_sha` whose head is
+    in `repository`, newest first; a fork's run never qualifies."""
     query = urllib.parse.urlencode(
         {"event": "pull_request", "head_sha": head_sha, "per_page": 100}
     )
@@ -454,7 +466,32 @@ def latest_pull_request_run(
             f"`{head_sha}`{ignored}",
             expected=True,
         )
-    return max(candidates, key=lambda candidate: candidate[:2])[2]
+    candidates.sort(key=lambda candidate: candidate[:2], reverse=True)
+    return [candidate[2] for candidate in candidates]
+
+
+def recorded_pull_request_run(
+    api: GitHubApi,
+    repository: str,
+    workflow: str,
+    head_sha: str,
+    record: str,
+) -> tuple[PullRequestRun, RunArtifact]:
+    """Return the latest pull_request run of `workflow` for `head_sha` whose
+    head is in `repository` and that kept an unexpired `record`, and that
+    record. A later run whose guest artifact jobs skipped, as every job of an
+    edit that keeps the pull request's base does, or were cancelled, does not
+    hide an earlier run's artifacts. Without such a run, refuse as the latest
+    run's record does."""
+    refusals: list[ReuseRefused] = []
+    for run in pull_request_runs(api, repository, workflow, head_sha):
+        try:
+            return run, retained_artifact(api, repository, run, record)
+        except ReuseRefused as error:
+            if not error.expected:
+                raise
+            refusals.append(error)
+    raise refusals[0]
 
 
 def retained_artifact(
@@ -708,9 +745,9 @@ def _checked_artifacts(
     request: ReuseRequest,
     staging: Path,
 ) -> str:
-    """Select the latest run for the pull request's head, download into
-    `staging` its record and the artifacts of the request's components, check
-    the components' files, and describe them."""
+    """Select the latest run for the pull request's head that kept the record,
+    download into `staging` its record and the artifacts of the request's
+    components, check the components' files, and describe them."""
     workflow = workflow_path(request.workflow_ref, request.repository)
     if request.head_sha is not None:
         head_sha = request.head_sha
@@ -718,12 +755,13 @@ def _checked_artifacts(
         head_sha = merged_head(api, request.repository, request.commit)
     else:
         raise ReuseRefused("neither a merge commit nor a head was given")
-    run = latest_pull_request_run(api, request.repository, workflow, head_sha)
+    run, record = recorded_pull_request_run(
+        api, request.repository, workflow, head_sha, request.record
+    )
     source = (
         f"[run {run.id}]({run.url}), the latest run of `{workflow}` for pull "
-        f"request head `{head_sha}`"
+        f"request head `{head_sha}` that kept its `{record.name}` record"
     )
-    record = retained_artifact(api, request.repository, run, request.record)
     archive = staging / f"{record.name}.zip"
     _download(api, request.repository, record, archive)
     keys, digests = _read_record(archive, record.name)
@@ -778,7 +816,8 @@ def reuse_guest_artifacts(
     deadline: float | None = None,
 ) -> ReuseOutcome:
     """Install the files of the request's components from the artifacts of
-    the latest run for the pull request's head when `destination` lacks any
+    the latest run for the pull request's head that kept the record when
+    `destination` lacks any
     of them, or explain why not, giving up on the artifacts at the
     time.monotonic() value `deadline`.
 

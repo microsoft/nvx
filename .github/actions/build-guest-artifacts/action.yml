@@ -218,7 +218,8 @@ runs:
     # Neither a push nor a merge group can restore the caches that its pull
     # request's runs saved, so each installs the selected components, when one
     # missed the cache, from the artifacts of the latest run for the merged
-    # head, from this repository and never a fork, when that run recorded
+    # head that kept their record, from this repository and never a fork, when
+    # that run recorded
     # these keys and the files match the record, their provenance, and this
     # checkout. Any other outcome builds them below, and a push's saves cache
     # what it installed.

@@ -1051,7 +1051,10 @@ runs in each of the two jobs when a file of its components is missing. It
 takes the merged pull request's head from the second parent of the run's merge
 commit, which the queue builds as a push's, and the latest `pull_request` run
 of `ci.yml` for that head whose head repository is `microsoft/nvx`, so never a
-fork's run. It downloads the job's record from
+fork's run, and that kept the job's record. A later run that uploaded no
+record, such as one whose guest artifact jobs did not run, gives way to the
+run before it; when none kept the record, the latest run's refusal
+stands. It downloads the job's record from
 that run, unless the record has expired, which it does after one day, or lacks
 the SHA-256 digest that GitHub records at upload, and compares its keys with
 the run's own keys for the job's components, so the keys of the other job's
