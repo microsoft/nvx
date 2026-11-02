@@ -732,9 +732,9 @@ class GuestBinaryBuildTests(unittest.TestCase):
             for binary in GuestRustBuildConstants.BINARIES
             if binary not in GuestRustBuildConstants.ADDED_BINARIES
         )
-        latest = GuestRustBuildConstants.ADDED_BINARIES[-2:]
-        # The time tools arrived together, so the immediate predecessor lacks both.
-        self.assertEqual(latest, ("nvx-time", "nvx-time-probe"))
+        latest = GuestRustBuildConstants.ADDED_BINARIES[-1:]
+        # The KVM probe arrived alone, so the immediate predecessor lacks only it.
+        self.assertEqual(latest, ("nvx-kvm-probe",))
         predecessor = tuple(
             binary
             for binary in GuestRustBuildConstants.BINARIES

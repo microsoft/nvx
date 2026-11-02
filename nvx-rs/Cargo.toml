@@ -196,6 +196,13 @@ required-features = ["guest"]
 doc = false
 test = false
 
+[[bin]]
+name = "nvx-kvm-probe"
+path = "src/bin/nvx-kvm-probe.rs"
+required-features = ["guest"]
+doc = false
+test = false
+
 # The guest binaries: small, static, and stripped.
 [profile.guest]
 inherits = "release"

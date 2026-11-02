@@ -31,6 +31,7 @@ fn binary(name: &str) -> PathBuf {
         "nvx-ingress" => env!("CARGO_BIN_EXE_nvx-ingress"),
         "nvx-time" => env!("CARGO_BIN_EXE_nvx-time"),
         "nvx-time-probe" => env!("CARGO_BIN_EXE_nvx-time-probe"),
+        "nvx-kvm-probe" => env!("CARGO_BIN_EXE_nvx-kvm-probe"),
         "nvx-exit" => env!("CARGO_BIN_EXE_nvx-exit"),
         "nvx-device-io" => env!("CARGO_BIN_EXE_nvx-device-io"),
         _ => panic!("no guest binary {name}"),
@@ -2025,6 +2026,15 @@ fn time_test_mode_covers_checks_events_records_and_workers() {
                 .any(|window| window == b"code=G_CONFORMANCE_C9")
         );
     }
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn kvm_probe_takes_no_arguments() {
+    assert_eq!(
+        run("nvx-kvm-probe", ["--help"]),
+        (Some(2), Vec::new(), b"usage: nvx-kvm-probe\n".to_vec())
+    );
 }
 
 #[test]

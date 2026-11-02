@@ -59,6 +59,8 @@ mod fd;
 mod filesystem;
 mod ioctl;
 pub(crate) mod kernel;
+#[cfg(target_arch = "x86_64")]
+mod kvm;
 mod mapping;
 #[cfg(target_arch = "x86_64")]
 mod msr;
@@ -106,6 +108,8 @@ pub(crate) use ioctl::{
     block_device_size, console_pending, flush_block_buffers, logical_block_size,
     reread_partition_table, reseed_random,
 };
+#[cfg(target_arch = "x86_64")]
+pub(crate) use kvm::{KVM_API_VERSION, KVM_EXIT_HLT, Kvm};
 pub(crate) use mapping::MemoryMapping;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use msr::{MsrAccess, MsrFile};

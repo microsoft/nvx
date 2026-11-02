@@ -103,6 +103,8 @@ pub mod exec;
 pub mod exit;
 pub mod gpt;
 pub mod ingress;
+#[cfg(target_arch = "x86_64")]
+pub mod kvm_probe;
 pub mod managed_agent;
 pub mod mappings;
 #[cfg(target_arch = "x86_64")]

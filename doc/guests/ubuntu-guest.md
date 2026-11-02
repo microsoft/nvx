@@ -87,7 +87,7 @@ The builder then:
    `/nonexistent`, a `nogroup` group, and usr-merged `/bin`, `/sbin`, `/lib`,
    and `/lib64` links; and
 7. installs the NVX scripts from `guest/common` and `guest/ubuntu`, and the
-   nine Rust guest binaries from `nvx-rs`.
+   ten Rust guest binaries from `nvx-rs`.
 
 The builder never executes a binary from the Ubuntu tree on the host. Both
 artifacts are packed with root ownership, fixed timestamps, and a stable file
@@ -116,8 +116,8 @@ snapshots, including the guest obligations of the time ABI. The test harness
 rejects the `console-snapshot` scenario for Ubuntu instead of substituting
 Alpine.
 
-It installs the same nine Rust guest binaries as Alpine and Azure Linux under
-their `/sbin/nvx-*` names. Docker copies all nine from one digest-pinned Rust
+It installs the same ten Rust guest binaries as Alpine and Azure Linux under
+their `/sbin/nvx-*` names. Docker copies all ten from one digest-pinned Rust
 builder, while native and determinism builds use the shared fresh-target
 routine. The package manifest records one aggregate `nvx-rs` source digest
 and each installed binary's digest.

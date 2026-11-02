@@ -226,7 +226,7 @@ verification of the pinned OpenVMM release.
 
 `guest/common` contains scripts shared by the Alpine, Ubuntu, and Azure Linux
 initramfs builds, plus the Azure Linux variants of the container-entry
-scripts. The nine compiled `/sbin/nvx-*` programs live under `nvx-rs/src/guest`
+scripts. The ten compiled `/sbin/nvx-*` programs live under `nvx-rs/src/guest`
 and `nvx-rs/src/bin`. `init` controls early boot and then starts an
 initramfs program named by `nvx_exec=`, the Alpine-only `nvx-init-agent`
 sandbox profile, `nvx-managed-agent` for a managed workload, a virtio restore
@@ -290,7 +290,7 @@ Windows hosts, the supervision of VM instances, the sandbox launch profile of
 `nvx-rs sandbox`, the `nvx-rs` command-line interface that runs NVX's
 microVMs and sandboxes, downloads releases, compiles egress policies, and looks
 up artifacts, and a fake OpenVMM for tests. Its
-`guest` feature builds the nine static executables that every guest image
+`guest` feature builds the ten static executables that every guest image
 installs at `/sbin/nvx-*`. It is a standalone crate with its own `Cargo.lock`,
 and builds independently of the OpenVMM submodule. See its
 [README](../nvx-rs/README.md) and its [module diagrams](modules/README.md).

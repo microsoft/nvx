@@ -2582,7 +2582,7 @@ and can ship it next to their executables as `nvx/`.
 
 The `guest` feature adds the programs that run in NVX's Linux guests: the
 `nvx::guest` module and one binary per program. The Alpine, Ubuntu, and Azure
-Linux images ship all nine at their established `/sbin/nvx-*` paths. The
+Linux images ship all ten at their established `/sbin/nvx-*` paths. The
 module's libraries are not programs: `terminal` opens the terminal on which an
 agent serves its session, `spawn` starts a program in a new process, `entry`
 has the program enter an execution's namespaces, view, root, and identity,
@@ -2620,6 +2620,7 @@ disk's block device.
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v2: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
+| `nvx-kvm-probe` | Runs a VM of its own through `/dev/kvm`, a page that halts at the x86 reset vector on one vCPU, and prints `nvx-kvm-probe: api=12 vm=created vcpu=created exit=hlt` once `KVM_RUN` returns `KVM_EXIT_HLT`, for the microVM scenarios of nested virtualization (x86_64) |
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
