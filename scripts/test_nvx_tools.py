@@ -16319,6 +16319,56 @@ class BuildTests(unittest.TestCase):
             for data in run.values():
                 self.assertNotIn(root.encode(), data)
 
+    def _precompile_in_subprocess(
+        self, root: Path, *interpreter_flags: str, env: Mapping[str, str] | None = None
+    ) -> None:
+        code = (
+            "import sys; from pathlib import Path; "
+            "from nvx_tools import ubuntu; "
+            "ubuntu.precompile_python(Path(sys.argv[1]))"
+        )
+        scripts = Path(__file__).resolve().parent
+        environment = {**os.environ, "PYTHONPATH": str(scripts), **(env or {})}
+        subprocess.run(
+            [sys.executable, *interpreter_flags, "-c", code, str(root)],
+            check=True,
+            env=environment,
+        )
+
+    def test_python_precompile_ignores_the_build_optimization_level(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library = self._python_tree(root, name)
+            self._precompile_in_subprocess(root, "-O")
+            names = sorted(path.name for path in library.rglob("*.pyc"))
+        tag = sys.implementation.cache_tag
+        self.assertEqual(names, [f"__init__.{tag}.pyc", f"os.{tag}.pyc"])
+
+    def test_python_precompile_ignores_the_build_cache_prefix(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            prefix = Path(temporary) / "host-cache"
+            library = self._python_tree(root, name)
+            self._precompile_in_subprocess(
+                root, env={"PYTHONPYCACHEPREFIX": str(prefix)}
+            )
+            self.assertEqual(len(list(library.rglob("*.pyc"))), 2)
+            # The interpreter that runs this build imports its own modules
+            # under the prefix; only the root's modules, which the prefix
+            # mirrors under the root's own path, must stay out of it.
+            leaked = [
+                p
+                for p in prefix.rglob("*.pyc")
+                if Path(temporary).name in p.relative_to(prefix).parts
+            ]
+            self.assertEqual(leaked, [])
+
     def test_python_precompile_needs_the_matching_interpreter(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

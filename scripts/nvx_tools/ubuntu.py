@@ -801,14 +801,25 @@ def precompile_python(root: Path) -> None:
                 f"byte-compiling {library.name} needs a final-release Python "
                 f"{major}.{minor} build interpreter; this is {sys.version.split()[0]}"
             )
-        if not compileall.compile_dir(
-            str(library),
-            ddir=f"/usr/lib/{library.name}",
-            quiet=1,
-            force=True,
-            workers=1,
-            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
-        ):
+        # compileall follows the build interpreter's settings unless told
+        # otherwise: -O would write only *.opt-1.pyc files, which the guest's
+        # interpreter does not read, and a cache prefix would send the bytecode
+        # to a host directory instead of the root.
+        cache_prefix = sys.pycache_prefix
+        sys.pycache_prefix = None
+        try:
+            compiled = compileall.compile_dir(
+                str(library),
+                ddir=f"/usr/lib/{library.name}",
+                quiet=1,
+                force=True,
+                workers=1,
+                optimize=0,
+                invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+            )
+        finally:
+            sys.pycache_prefix = cache_prefix
+        if not compiled:
             raise ScriptError(f"failed to byte-compile {library.name}")
         for path in (*library.rglob("__pycache__"), *library.rglob("*.pyc")):
             path.chmod(0o755 if path.is_dir() else 0o644)
