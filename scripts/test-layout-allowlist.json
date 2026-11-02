@@ -1,48 +1,6 @@
 {
   "schema": "nvx-test-layout-allowlist",
-  "schema_version": 1,
-  "baseline": {
-    "tests/runtime-adapter/src/frame.rs": {
-      "hooks": 1,
-      "tests": 8
-    },
-    "tests/runtime-adapter/src/generations.rs": {
-      "hooks": 1,
-      "tests": 2
-    },
-    "tests/runtime-adapter/src/probe.rs": {
-      "hooks": 1,
-      "tests": 4
-    },
-    "tests/runtime-adapter/src/root.rs": {
-      "hooks": 1,
-      "tests": 10
-    },
-    "tests/runtime-adapter/src/template.rs": {
-      "hooks": 1,
-      "tests": 9
-    },
-    "tests/runtime-adapter/src/worker/activation.rs": {
-      "hooks": 1,
-      "tests": 3
-    },
-    "tests/runtime-adapter/src/worker/capture.rs": {
-      "hooks": 1,
-      "tests": 7
-    },
-    "tests/runtime-adapter/src/worker/entries.rs": {
-      "hooks": 1,
-      "tests": 6
-    },
-    "tests/runtime-adapter/src/worker/mapping.rs": {
-      "hooks": 1,
-      "tests": 2
-    },
-    "tests/runtime-adapter/src/worker/probes.rs": {
-      "hooks": 1,
-      "tests": 10
-    }
-  },
+  "schema_version": 2,
   "seams": {
     "nvx-rs/src/guest/cgroup.rs": 2,
     "nvx-rs/src/guest/clone/activation/apply.rs": 1,

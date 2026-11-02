@@ -180,15 +180,9 @@ statement, or a match arm that only tests compile, or a
 `#[cfg_attr(test, derive(...))]`. The seams of
 [`scripts/test-layout-allowlist.json`](../scripts/test-layout-allowlist.json)
 list how many each production file may hold. A change that adds a hook
-records it there, and a reviewer checks that the hook cannot move.
-
-The production files that predate the layout keep their test code until it
-moves out: the allowlist's baseline lists each with the numbers of its test
-hooks and of its tests, which may only go down. So a new test of such a file
-goes in its `tests` module, to which its other tests move first. Once a file's
-tests have moved, `--tighten` lowers the allowlist to what the files hold and
-moves the file from the baseline to the seams; it never raises an entry or
-adds one.
+records it there, and a reviewer checks that the hook cannot move. A change
+that removes one runs `--tighten`, which lowers the seams to the hooks that
+the files hold; it never raises an entry or adds one.
 
 Python unit tests are the `test_*.py` modules of `scripts/`,
 `.github/specula/tests/`, and `.github/skills/*/scripts/`, and the end-to-end
@@ -205,7 +199,7 @@ a new file before you run it:
 
 ```bash
 python3 scripts/check_test_layout.py
-python3 scripts/check_test_layout.py --tighten   # after moving test code out
+python3 scripts/check_test_layout.py --tighten   # after removing a test hook
 ```
 
 ## Test expectations

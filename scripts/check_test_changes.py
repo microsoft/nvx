@@ -1576,13 +1576,79 @@ def file_entry(path: str, blob: str, category: str) -> Entry:
 # Test policy and CI wiring.
 
 
+@dataclass
+class _Allowances:
+    """What an allowlist allows the production files: the test hooks of the
+    seams and, in the first schema version, the test hooks and tests of the
+    baseline, which listed the files that predated the test layout."""
+
+    seams: dict[str, int] = field(default_factory=dict[str, int])
+    baseline: dict[str, tuple[int, int]] = field(
+        default_factory=dict[str, tuple[int, int]]
+    )
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _first_version(text: str) -> _Allowances | None:
+    """Reads an allowlist of the first schema version, or returns None if the
+    text is no such allowlist."""
+    try:
+        data: object = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    document = cast(dict[str, object], data)
+    baseline = document.get("baseline", {})
+    seams = document.get("seams", {})
+    if (
+        set(document) - {"schema", "schema_version", "baseline", "seams"}
+        or document.get("schema") != layout.ALLOWLIST_SCHEMA
+        or document.get("schema_version") != 1
+        or not isinstance(baseline, dict)
+        or not isinstance(seams, dict)
+    ):
+        return None
+    allowances = _Allowances()
+    for path, counts in cast(dict[str, object], baseline).items():
+        if not isinstance(counts, dict):
+            return None
+        entry = cast(dict[str, object], counts)
+        hooks, tests = entry.get("hooks"), entry.get("tests")
+        if set(entry) != {"hooks", "tests"} or not (
+            _is_count(hooks) and _is_count(tests)
+        ):
+            return None
+        allowances.baseline[path] = (cast(int, hooks), cast(int, tests))
+    for path, count in cast(dict[str, object], seams).items():
+        if not _is_count(count):
+            return None
+        allowances.seams[path] = cast(int, count)
+    return allowances
+
+
+def _allowances(text: str) -> tuple[_Allowances, list[str]]:
+    """Reads an allowlist of either schema version; returns what it allows and
+    what is wrong with its form. Merge bases from before the baseline went, and
+    branches that start from them, hold the first."""
+    allowlist, errors = layout.parse_allowlist(text)
+    if errors:
+        first = _first_version(text)
+        if first is not None:
+            return first, []
+    return _Allowances(dict(allowlist.seams)), errors
+
+
 def allowlist_changes(base: str | None, head: str | None) -> list[Change]:
     """Returns the allowlist entries that are new or allow more. The first
     allowlist loosens nothing that a test policy held before."""
     if base is None or head is None:
         return []
-    before = layout.parse_allowlist(base)[0]
-    after, errors = layout.parse_allowlist(head)
+    before = _allowances(base)[0]
+    after, errors = _allowances(head)
     location = Location(layout.ALLOWLIST, 0)
     if errors:
         return [
@@ -1612,8 +1678,9 @@ def allowlist_changes(base: str | None, head: str | None) -> list[Change]:
             )
         )
 
-    # The baseline allows test code besides hooks, and its two numbers bound
-    # different things, so each counts on its own.
+    # A baseline, which only the first schema version has, allows test code
+    # besides hooks, and its two numbers bound different things, so each
+    # counts on its own.
     for path, (hooks, tests) in sorted(after.baseline.items()):
         if path in before.baseline:
             old_hooks, old_tests = before.baseline[path]

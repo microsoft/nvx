@@ -43,13 +43,8 @@ def crate(files: Mapping[str, str], allowlist: str | None = None) -> FakeTree:
     return FakeTree(tree)
 
 
-def allowlist(
-    baseline: Mapping[str, tuple[int, int]] | None = None,
-    seams: Mapping[str, int] | None = None,
-) -> str:
-    return layout.render_allowlist(
-        layout.Allowlist(dict(baseline or {}), dict(seams or {}))
-    )
+def allowlist(seams: Mapping[str, int] | None = None) -> str:
+    return layout.render_allowlist(layout.Allowlist(dict(seams or {})))
 
 
 def rules(tree: layout.Snapshot) -> list[tuple[str, int, str]]:
@@ -646,33 +641,22 @@ class RustRuleTests(unittest.TestCase):
         found = rules(crate(files, allowlist(seams={"demo/src/a.rs": 1})))
         self.assertEqual(found, [("demo/src/a.rs", 2, "test-only-item")])
 
-    def test_baseline_files_keep_their_test_code_but_no_more(self) -> None:
-        legacy = (
+    def test_seams_allow_no_inline_tests(self) -> None:
+        inline = (
             "pub fn f() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n"
         )
-        files = {"src/lib.rs": LIBRARY, "src/a.rs": legacy}
+        files = {"src/lib.rs": LIBRARY, "src/a.rs": inline}
         path = "demo/src/a.rs"
-        self.assertEqual(rules(crate(files, allowlist({path: (1, 1)}))), [])
-        grown = legacy.replace("fn t() {}", "fn t() {}\n    #[test]\n    fn u() {}")
-        self.assertEqual(
-            rules(crate({**files, "src/a.rs": grown}, allowlist({path: (1, 1)}))),
-            [(path, 0, "test-code")],
-        )
-        helper = legacy + "#[cfg(test)]\nfn helper() {}\n"
-        self.assertEqual(
-            rules(crate({**files, "src/a.rs": helper}, allowlist({path: (1, 1)}))),
-            [(path, 0, "test-code")],
-        )
-        self.assertEqual(
-            rules(crate(files, allowlist({path: (2, 1)}))), [(path, 0, "allowlist")]
-        )
+        found = rules(crate(files, allowlist(seams={path: 1})))
+        self.assertIn((path, 3, "inline-test-module"), found)
         moved = {
             "src/lib.rs": LIBRARY,
             "src/a.rs": "pub fn f() {}\n#[cfg(test)]\nmod tests;\n",
             "src/a/tests.rs": "#[test]\nfn t() {}\n",
         }
+        self.assertEqual(rules(crate(moved)), [])
         self.assertEqual(
-            rules(crate(moved, allowlist({path: (1, 1)}))), [(path, 0, "allowlist")]
+            rules(crate(moved, allowlist(seams={path: 1}))), [(path, 0, "allowlist")]
         )
 
     def test_unreadable_files_fail(self) -> None:
@@ -682,12 +666,16 @@ class RustRuleTests(unittest.TestCase):
 
 class AllowlistTests(unittest.TestCase):
     def test_entries_must_name_production_files(self) -> None:
-        files = {"src/lib.rs": LIBRARY, "src/a.rs": "#[cfg(test)]\nfn f() {}\n"}
-        both = layout.render_allowlist(
-            layout.Allowlist({"demo/src/a.rs": (1, 0)}, {"demo/src/a.rs": 1})
+        files = {
+            "src/lib.rs": LIBRARY,
+            "src/a.rs": "#[cfg(test)]\nmod tests;\n",
+            "src/a/tests.rs": "#[cfg(test)]\nfn f() {}\n",
+        }
+        self.assertEqual(rules(crate(files)), [])
+        listed = allowlist(seams={"demo/src/a/tests.rs": 1})
+        self.assertEqual(
+            rules(crate(files, listed)), [(layout.ALLOWLIST, 0, "allowlist")]
         )
-        found = rules(crate(files, both))
-        self.assertIn((layout.ALLOWLIST, 0, "allowlist"), found)
         stale = allowlist(seams={"demo/src/gone.rs": 1})
         self.assertEqual(
             rules(crate({"src/lib.rs": LIBRARY}, stale)),
@@ -698,9 +686,11 @@ class AllowlistTests(unittest.TestCase):
         for text in (
             "[]",
             "{",
-            '{"schema": "other", "schema_version": 1, "baseline": {}, "seams": {}}\n',
+            '{"schema": "other", "schema_version": 2, "seams": {}}\n',
+            '{"schema": "nvx-test-layout-allowlist", "schema_version": 2, '
+            '"seams": {"a": 0}}\n',
             '{"schema": "nvx-test-layout-allowlist", "schema_version": 1, '
-            '"baseline": {}, "seams": {"a": 0}}\n',
+            '"baseline": {}, "seams": {}}\n',
             allowlist().replace("\n", "\r\n").replace("  ", "    "),
         ):
             with self.subTest(text=text):
@@ -711,37 +701,36 @@ class AllowlistTests(unittest.TestCase):
     def test_tighten_only_lowers(self) -> None:
         analyses = {
             "demo/src/lowered.rs": layout.RustAnalysis(
-                "demo/src/lowered.rs", "demo", True, hooks=[3], tests=1,
-                legacy=[layout.Problem("demo/src/lowered.rs", 3, "inline-test-module", "")],
-            ),
-            "demo/src/moved.rs": layout.RustAnalysis(
-                "demo/src/moved.rs", "demo", True, hooks=[4, 9]
+                "demo/src/lowered.rs", "demo", True, hooks=[4, 9]
             ),
             "demo/src/clean.rs": layout.RustAnalysis("demo/src/clean.rs", "demo", True),
             "demo/src/grown.rs": layout.RustAnalysis(
                 "demo/src/grown.rs", "demo", True, hooks=[1, 2, 3]
             ),
-            "demo/src/fewer.rs": layout.RustAnalysis(
-                "demo/src/fewer.rs", "demo", True, hooks=[1]
+            "demo/src/kept.rs": layout.RustAnalysis(
+                "demo/src/kept.rs", "demo", True, hooks=[1]
             ),
             "demo/src/new.rs": layout.RustAnalysis(
                 "demo/src/new.rs", "demo", True, hooks=[1]
             ),
-        }  # fmt: skip
+            "demo/src/a/tests.rs": layout.RustAnalysis(
+                "demo/src/a/tests.rs", "demo", False
+            ),
+        }
         before = layout.Allowlist(
             {
-                "demo/src/lowered.rs": (2, 3),
-                "demo/src/moved.rs": (5, 4),
-                "demo/src/clean.rs": (1, 1),
-                "demo/src/gone.rs": (1, 1),
-            },
-            {"demo/src/grown.rs": 2, "demo/src/fewer.rs": 2},
+                "demo/src/lowered.rs": 5,
+                "demo/src/clean.rs": 1,
+                "demo/src/grown.rs": 2,
+                "demo/src/kept.rs": 1,
+                "demo/src/gone.rs": 1,
+                "demo/src/a/tests.rs": 1,
+            }
         )
         after = layout.tighten(before, analyses)
-        self.assertEqual(after.baseline, {"demo/src/lowered.rs": (1, 1)})
         self.assertEqual(
             after.seams,
-            {"demo/src/moved.rs": 2, "demo/src/grown.rs": 2, "demo/src/fewer.rs": 1},
+            {"demo/src/lowered.rs": 2, "demo/src/grown.rs": 2, "demo/src/kept.rs": 1},
         )
 
 

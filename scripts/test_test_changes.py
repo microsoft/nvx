@@ -1027,37 +1027,79 @@ class WiringTests(unittest.TestCase):
         )
 
     def test_allowlist_entries_that_allow_more(self) -> None:
-        def allowlist(
-            baseline: Mapping[str, tuple[int, int]], seams: Mapping[str, int]
-        ) -> str:
-            return layout.render_allowlist(
-                layout.Allowlist(dict(baseline), dict(seams))
-            )
+        def allowlist(seams: Mapping[str, int]) -> str:
+            return layout.render_allowlist(layout.Allowlist(dict(seams)))
 
-        base = allowlist({"a.rs": (2, 3), "b.rs": (1, 1)}, {"c.rs": 2})
-        lowered = allowlist({"a.rs": (2, 1)}, {"b.rs": 1, "c.rs": 1})
-        self.assertEqual(changes.allowlist_changes(base, lowered), [])
-        raised = allowlist({"a.rs": (2, 4), "b.rs": (1, 1)}, {"c.rs": 2, "d.rs": 1})
+        base = allowlist({"a.rs": 2, "b.rs": 1})
+        self.assertEqual(changes.allowlist_changes(base, allowlist({"a.rs": 1})), [])
+        raised = allowlist({"a.rs": 3, "b.rs": 1, "c.rs": 1})
         self.assertEqual(
-            [change.what for change in changes.allowlist_changes(base, raised)],
-            ["`a.rs`", "`d.rs`"],
+            [change.detail for change in changes.allowlist_changes(base, raised)],
+            ["the seams allow 3 test hooks, up from 2", "the seams allow 1 test hooks"],
         )
         self.assertEqual(
             [change.action for change in changes.allowlist_changes(base, "[]")],
             ["modified"],
         )
         self.assertEqual(changes.allowlist_changes(None, raised), [])
+
+    def test_allowlists_of_the_first_schema_version(self) -> None:
+        # Merge bases from before the baseline went hold the first version.
+        def first(
+            baseline: Mapping[str, tuple[int, int]], seams: Mapping[str, int]
+        ) -> str:
+            document = {
+                "schema": layout.ALLOWLIST_SCHEMA,
+                "schema_version": 1,
+                "baseline": {
+                    path: {"hooks": hooks, "tests": tests}
+                    for path, (hooks, tests) in sorted(baseline.items())
+                },
+                "seams": dict(sorted(seams.items())),
+            }
+            return json.dumps(document, indent=2) + "\n"
+
+        base = first({"a.rs": (2, 3), "b.rs": (1, 1)}, {"c.rs": 2})
+        lowered = first({"a.rs": (2, 1)}, {"b.rs": 1, "c.rs": 1})
+        self.assertEqual(changes.allowlist_changes(base, lowered), [])
+        raised = first({"a.rs": (2, 4), "b.rs": (1, 1)}, {"c.rs": 2, "d.rs": 1})
+        self.assertEqual(
+            [change.what for change in changes.allowlist_changes(base, raised)],
+            ["`a.rs`", "`d.rs`"],
+        )
         # Fewer hooks do not pay for more tests, and a file of the seams that
         # moves to the baseline may hold test code again.
-        traded = allowlist({"a.rs": (1, 4), "b.rs": (1, 1)}, {"c.rs": 2})
+        traded = first({"a.rs": (1, 4), "b.rs": (1, 1)}, {"c.rs": 2})
         self.assertEqual(
             [change.what for change in changes.allowlist_changes(base, traded)],
             ["`a.rs`"],
         )
-        back = allowlist({"a.rs": (2, 3), "b.rs": (1, 1), "c.rs": (1, 0)}, {})
+        back = first({"a.rs": (2, 3), "b.rs": (1, 1), "c.rs": (1, 0)}, {})
         self.assertEqual(
             [change.detail for change in changes.allowlist_changes(base, back)],
             ["moves from the seams to the baseline, which allows tests"],
+        )
+
+        # The seams of the current version allow a baseline file its hooks.
+        def current(seams: Mapping[str, int]) -> str:
+            return layout.render_allowlist(layout.Allowlist(dict(seams)))
+
+        self.assertEqual(
+            changes.allowlist_changes(base, current({"a.rs": 2, "c.rs": 2})), []
+        )
+        self.assertEqual(
+            [
+                change.detail
+                for change in changes.allowlist_changes(
+                    base, current({"a.rs": 3, "c.rs": 2})
+                )
+            ],
+            ["the seams allow 3 test hooks, up from 2"],
+        )
+        renamed = base.replace('"tests"', '"cases"')
+        self.assertEqual(
+            [change.action for change in changes.allowlist_changes(base, renamed)],
+            ["modified"],
         )
 
 
