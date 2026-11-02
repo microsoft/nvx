@@ -19,7 +19,7 @@ expect_error() {
 # The restore attached an aggregate to the slot that the platform capture left
 # dormant. The guest keeps its captured command line, which discovers the slot
 # but names no filesystem, so the guest mounts the aggregate itself.
-grep -q 'virtio_mmio.device=0x1000@0xd0001000:6' /proc/cmdline || fail "discovery" 80
+grep -q 'virtio_mmio.device=0x1000@0xd0001000:17' /proc/cmdline || fail "discovery" 80
 if grep -Eq '(^| )(virtfs_|nvx_share=)' /proc/cmdline; then
     fail "command line" 81
 fi

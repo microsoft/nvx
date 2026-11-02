@@ -7912,7 +7912,7 @@ class MicrovmTests(unittest.TestCase):
         # network bootstrap.
         head = "earlycon=xe9 console=hvc0 reboot=t panic=-1 quiet loglevel=0"
         tail = (
-            "nr_cpus=1 virtio_mmio.device=0x1000@0xd0000000:5 virtnet_ip=10.0.0.2 "
+            "nr_cpus=1 virtio_mmio.device=0x1000@0xd0000000:16 virtnet_ip=10.0.0.2 "
             "virtnet_mask=255.255.255.0 virtnet_gw=10.0.0.1 "
             "virtnet_ip6=fd00::a00:2/120 virtnet_gw6=fd00::a00:1"
         )
@@ -13107,7 +13107,7 @@ class MicrovmTests(unittest.TestCase):
         # The clone keeps its captured command line, which discovers the slot
         # but names no filesystem, so the guest mounts the aggregate itself.
         self.assertIn(
-            "\ngrep -q 'virtio_mmio.device=0x1000@0xd0001000:6' /proc/cmdline ||",
+            "\ngrep -q 'virtio_mmio.device=0x1000@0xd0001000:17' /proc/cmdline ||",
             script,
         )
         self.assertIn(

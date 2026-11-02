@@ -610,7 +610,7 @@ trap 'exit 143' TERM
 
 has_scratch=false
 case " $(cat /proc/cmdline) " in
-    *" virtio_mmio.device=0x1000@0xd0006000:11 "*) has_scratch=true ;;
+    *" virtio_mmio.device=0x1000@0xd0006000:22 "*) has_scratch=true ;;
 esac
 scratch_mounted=false
 mountpoint -q "$scratch_mount" && scratch_mounted=true
@@ -631,7 +631,7 @@ if [ "$has_scratch" = true ]; then
         exit 1
     fi
 elif [ "$scratch_policy" = fresh ]; then
-    echo "nvx-snapshot: fresh-scratch capture requires an ABI-v2 scratch device" >&2
+    echo "nvx-snapshot: fresh-scratch capture requires an ABI-v3 scratch device" >&2
     exit 1
 fi
 

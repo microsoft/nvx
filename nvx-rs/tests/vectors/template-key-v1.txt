@@ -17,8 +17,10 @@
 #
 # The keys and classes are those of the captures that tests/fixtures/template/README.md
 # describes, as microVM ABI 2 captured them, when every virtio device but the NIC also offered
-# access-platform (feature bit 33) and each console also offered its size (feature bit 0), with
-# the OpenVMM, kernel, and initramfs identities sha256:a..., sha256:b..., and
+# access-platform (feature bit 33), each console also offered its size (feature bit 0), and the
+# virtio devices interrupted on ISA IRQs (the NIC on 10, the filesystem on 6, the consoles on 7
+# and 3, and the distro and scratch blocks on 4 and 11), with the OpenVMM, kernel, and initramfs
+# identities sha256:a..., sha256:b..., and
 # sha256:c..., the guest build guest-build-1, boot contract 3, control contract
 # nvx-microvm-v2-control-v2, control session 1, snapshot format 6, device-state schema 1, time
 # ABI 1, restore packet 4, and activation contract 1.

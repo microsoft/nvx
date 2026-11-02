@@ -54,7 +54,8 @@
 /// OpenVMM microVM ABI version this crate drives.
 ///
 /// Version 3 offers no device `VIRTIO_F_ACCESS_PLATFORM` and no console `VIRTIO_CONSOLE_F_SIZE`,
-/// which version 2 offered, so OpenVMM and this crate refuse a template of version 2.
+/// which version 2 offered, and gives each virtio device an IOAPIC input of its own past the ISA
+/// IRQs, where version 2 used ISA IRQs, so OpenVMM and this crate refuse a template of version 2.
 pub const MICROVM_ABI_VERSION: u64 = 3;
 /// Version of the boot contract this crate speaks; see the [module](self) for when it changes.
 ///
