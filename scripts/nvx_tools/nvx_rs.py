@@ -87,7 +87,7 @@ RELEASE_TARGETS = {
 }
 # The domain and format of the inventory that source_sha256() hashes.
 SOURCE_DIGEST_DOMAIN = "nvx-rs-cli-sources"
-SOURCE_DIGEST_FORMAT = 1
+SOURCE_DIGEST_FORMAT = 2
 # The provenance of the nvx-rs that nvx.py runs, in build/, beside that of
 # OpenVMM, and the format of its record.
 PROVENANCE_NAME = "nvx-rs.provenance.json"
@@ -121,32 +121,40 @@ def source_files(root: Path | None = None) -> tuple[Path, ...]:
     modules, in src/: a root file that its manifest names elsewhere, or a
     link to a directory in src/, whose files the inventory would miss, is an
     error."""
-    root = DIRECTORY.parent if root is None else root
+    return tuple(_source_inputs(DIRECTORY.parent if root is None else root))
+
+
+def _source_inputs(root: Path) -> dict[Path, bool]:
+    """Map input paths to whether Rust/Cargo text normalizes their line endings."""
     crate = root / DIRECTORY.name
     workspace = cargo_workspace.workspace_root(crate, root)
     files = {
-        root / "rust-toolchain.toml",
-        workspace / cargo_workspace.LOCKFILE,
-        workspace / cargo_workspace.MANIFEST,
-        *cargo_workspace.configuration_files(root, root),
+        path: True
+        for path in (
+            root / "rust-toolchain.toml",
+            workspace / cargo_workspace.LOCKFILE,
+            workspace / cargo_workspace.MANIFEST,
+            *cargo_workspace.configuration_files(root, root),
+        )
     }
     for package in cargo_workspace.local_packages(crate, root):
         sources = package / "src"
         if not sources.is_dir():
             raise ScriptError(f"nvx-rs source directory not found: {sources}")
-        for path in cargo_workspace.root_files(package):
+        rust_roots = cargo_workspace.root_files(package)
+        for path in rust_roots:
             if sources not in path.parents:
                 raise ScriptError(
                     f"nvx-rs source {path} lies outside {sources}, the only "
                     "directory of its package that the inventory takes in"
                 )
-        files.add(package / cargo_workspace.MANIFEST)
-        files.add(
+        files[package / cargo_workspace.MANIFEST] = True
+        files[
             cargo_workspace.workspace_root(package, root) / cargo_workspace.MANIFEST
-        )
+        ] = True
         build_script = cargo_workspace.build_script(package, root)
         if build_script is not None:
-            files.add(build_script)
+            files[build_script] = True
         for path in sources.rglob("*"):
             if is_link_or_junction(path) and path.is_dir():
                 raise ScriptError(
@@ -154,18 +162,16 @@ def source_files(root: Path | None = None) -> tuple[Path, ...]:
                     "inventory does not follow"
                 )
             if path.is_file():
-                files.add(path)
-    return tuple(
-        sorted(
-            (require_file(path, "nvx-rs source") for path in files),
-            key=lambda path: path.relative_to(root).as_posix(),
-        )
-    )
+                files.setdefault(path, path.suffix == ".rs" or path in rust_roots)
+    return {
+        require_file(path, "nvx-rs source"): files[path]
+        for path in sorted(files, key=lambda path: path.relative_to(root).as_posix())
+    }
 
 
 def source_sha256(root: Path | None = None) -> str:
-    """Hash the paths and contents of source_files(root), with line endings
-    normalized, so that every checkout of the same sources has one digest."""
+    """Hash source paths and contents, normalizing Rust/Cargo text line endings
+    and preserving every byte of data assets."""
     root = DIRECTORY.parent if root is None else root
     inventory = {
         "domain": SOURCE_DIGEST_DOMAIN,
@@ -173,9 +179,13 @@ def source_sha256(root: Path | None = None) -> str:
         "files": [
             {
                 "path": path.relative_to(root).as_posix(),
-                "sha256": normalized_sha256_file(path),
+                "sha256": (
+                    normalized_sha256_file(path)
+                    if normalize_newlines
+                    else sha256_file(path)
+                ),
             }
-            for path in source_files(root)
+            for path, normalize_newlines in _source_inputs(root).items()
         ],
     }
     encoded = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()

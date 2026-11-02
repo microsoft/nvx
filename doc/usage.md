@@ -66,7 +66,12 @@ configuration of the checkout's root, `.cargo/config.toml` or `.cargo/config`;
 and, for the crate and for each local package that its build uses through path
 dependencies, or through the path patches, replacements, and overrides of its
 workspace or that configuration, the package's manifest, its workspace's
-manifest, its build script if it has one, and its `src/` tree. Each package
+manifest, its build script if it has one, and its `src/` tree. Rust `.rs`
+sources, declared Rust roots and build scripts, and Cargo/toolchain metadata
+keep CRLF-to-LF normalization. Other `src/` files, including binary, JSON
+and other data assets, are hashed byte for byte. This hashing policy uses a
+new source-inventory format, so regenerate older provenance after a trusted
+build. Each package
 keeps the root files of its library and binaries, and their modules, in
 `src/`: the inventory refuses a root file that a manifest names elsewhere, a
 link to a directory in `src/`, and a package or build script whose path, as

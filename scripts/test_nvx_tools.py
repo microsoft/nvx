@@ -2562,6 +2562,74 @@ class NvxRsTests(unittest.TestCase):
                         self.assertNotEqual(nvx_rs.source_sha256(root), digest)
                         (root / name).write_bytes(original)
 
+    def test_dependency_assets_change_provenance_byte_for_byte(self):
+        for name, before, after, legacy in (
+            ("catalog.bin", b"\x00data\r\n", b"\x00data\n", False),
+            ("catalog.json", b'{"value":1}\r\n', b'{"value":1}\n', False),
+            ("Cargo.toml", b"value = 1\r\n", b"value = 1\n", False),
+            ("catalog.bin", b"\xffdata\r", b"\xffdata\n", False),
+            ("catalog.bin", b"\x00data\r\n", b"\x00data\n", True),
+        ):
+            with (
+                self.subTest(name=name, before=before, legacy=legacy),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                binary = root / "nvx-rs" / "target" / "release" / "nvx-rs"
+                _write_files(
+                    root,
+                    {
+                        **_WORKSPACE_NVX_RS_INPUTS,
+                        "crates/nvx-sys/src/lib.rs": (
+                            f'pub const DATA: &[u8] = include_bytes!("{name}");\n'
+                        ),
+                        "nvx-rs/target/release/nvx-rs": "nvx",
+                    },
+                )
+                asset = root / "crates" / "nvx-sys" / "src" / name
+                asset.write_bytes(before)
+                with (
+                    _without_nvx_rs_variable(),
+                    patch.object(BuildConstants, "REPO_ROOT", root),
+                    patch.object(nvx_rs, "DIRECTORY", root / "nvx-rs"),
+                    patch.object(nvx_rs, "binary_path", return_value=binary),
+                    patch.object(
+                        nvx_rs,
+                        "provenance_path",
+                        return_value=root / "build" / nvx_rs.PROVENANCE_NAME,
+                    ),
+                ):
+                    digest = nvx_rs.source_sha256(root)
+                    # Legacy inventories normalized every file, including assets.
+                    with (
+                        patch.object(
+                            nvx_rs,
+                            "SOURCE_DIGEST_FORMAT",
+                            1 if legacy else nvx_rs.SOURCE_DIGEST_FORMAT,
+                        ),
+                        patch.object(
+                            nvx_rs,
+                            "sha256_file",
+                            side_effect=(
+                                common.normalized_sha256_file
+                                if legacy
+                                else common.sha256_file
+                            ),
+                        ),
+                    ):
+                        recorded = nvx_rs.record_provenance("x86_64-pc-windows-msvc")
+                        release._validate_nvx_rs_provenance(
+                            binary, recorded, target="x86_64-pc-windows-msvc"
+                        )
+                    asset.write_bytes(after)
+                    self.assertNotEqual(nvx_rs.source_sha256(root), digest)
+                    with self.assertRaisesRegex(
+                        common.ScriptError, "does not describe"
+                    ):
+                        release._validate_nvx_rs_provenance(
+                            binary, recorded, target="x86_64-pc-windows-msvc"
+                        )
+
     def test_a_fresh_record_describes_a_build_in_a_workspace(self):
         # Packaging accepts the record of a build in a workspace until a local
         # package that the build uses changes, even one whose directory is a
