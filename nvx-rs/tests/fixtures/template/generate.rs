@@ -62,7 +62,6 @@ mod nvx_fixture {
                     ]),
                 )
                 .unwrap();
-            let irq = defs::microvm_virtio_net_irq(Some(hypervisor)).unwrap();
             let blocks = [
                 defs::MicrovmSandboxBlockConfig {
                     role: defs::MicrovmSandboxBlockRole::Distro,
@@ -75,7 +74,7 @@ mod nvx_fixture {
             ];
             defs::append_microvm_virtio_discovery(
                 &mut command_line,
-                with_network.then(|| (&network, irq, egress_policy.gateway_dns_server(), None)),
+                with_network.then(|| (&network, egress_policy.gateway_dns_server(), None)),
                 true,
                 &[],
                 true,

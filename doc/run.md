@@ -660,6 +660,10 @@ run retired ABI-1 guests or snapshots.
 ABI 3 offers no virtio device `VIRTIO_F_ACCESS_PLATFORM` and no console its
 size, which ABI 2 offered (see
 [Guest-Visible Capabilities](design/3.4-block-storage.md#342-guest-visible-capabilities)),
+and gives each virtio device an IOAPIC input of its own past the ISA IRQs, the
+same on every backend, where ABI 2 used ISA IRQs and another one for the NIC
+on WHP (see
+[Interrupt Routing](design/2.4-interrupt-and-io-architecture.md#242-interrupt-routing)),
 so OpenVMM refuses to restore a snapshot of ABI 2, with `snapshot microVM ABI
 version 2 is unsupported; this OpenVMM supports version 3`, and `nvx-rs`
 refuses a template of ABI 2. Capture them again; to restore them as they are,

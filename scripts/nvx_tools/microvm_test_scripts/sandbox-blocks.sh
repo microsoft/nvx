@@ -15,8 +15,8 @@ for name in vda vdb; do
     [ -b "/dev/$name" ] || fail 20
 done
 [ ! -b /dev/vdc ] || fail 30
-grep -q 'virtio_mmio.device=0x1000@0xd0003000:4' /proc/cmdline || fail 21
-grep -q 'virtio_mmio.device=0x1000@0xd0006000:11' /proc/cmdline || fail 24
+grep -q 'virtio_mmio.device=0x1000@0xd0003000:19' /proc/cmdline || fail 21
+grep -q 'virtio_mmio.device=0x1000@0xd0006000:22' /proc/cmdline || fail 24
 # The windows and interrupts of the removed runtime and custom layers stay unassigned.
 ! grep -q '0xd0004000' /proc/cmdline || fail 31
 ! grep -q '0xd0005000' /proc/cmdline || fail 32

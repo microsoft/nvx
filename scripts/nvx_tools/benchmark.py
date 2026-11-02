@@ -131,6 +131,9 @@ VIRTFS_HOST_WAITING = b"waiting\n"
 VIRTFS_HOST_TO_GUEST = b"host-to-guest\n"
 SMP_PROBE_COMPLETION_MARKER = b"NVX-SMP-PROBE-OK"
 SMP_PROBE_PATH = "/tmp/nvx-smp-probe"
+# The microVM NIC's interrupt: IOAPIC input 16 on every backend, as Table 2.7
+# of the architecture guide lists it.
+MICROVM_NETWORK_IRQ = 16
 SNAPSHOT_CAPTURE_PATH = "/tmp/nvx-c"
 SNAPSHOT_POST_RESTORE_PATH = "/tmp/nvx-post-restore"
 SNAPSHOT_GUEST_DISPATCH_MARKER = b"NVX-SNAPSHOT-DISPATCHED"
@@ -4812,13 +4815,12 @@ def benchmark_network_snapshot_workload(
         command_prefix=command_prefix,
         network=network,
     )
-    ioapic_irq = 5 if backend == "whp" else 10
     run_guest_script(
         cold_command,
         smp_probe_script(
             args.processors,
             network_gateway=gateway,
-            ioapic_irq=ioapic_irq,
+            ioapic_irq=MICROVM_NETWORK_IRQ,
         ),
         SMP_PROBE_COMPLETION_MARKER,
         timeout=max(args.timeout, 40.0),

@@ -188,7 +188,7 @@ fn a_templates_manifest_is_read_whole() {
                 start: 0xd000_3000,
                 length: 0x1000,
             }],
-            irq: Some(4),
+            irq: Some(19),
             feature_banks: vec![0x3000_0664, 1],
             queue_count: 1,
             queue_max_sizes: vec![256],
@@ -289,8 +289,8 @@ fn other_versions_of_the_format_are_unsupported() {
         unsupported,
         "describes a machine of profile \"standard\"",
     );
-    // A template of microVM ABI version 2, whose devices offered access-platform and whose
-    // consoles offered their size, is refused, as are the versions around it.
+    // A template of microVM ABI version 2, whose devices offered access-platform and used ISA
+    // IRQs and whose consoles offered their size, is refused, as are the versions around it.
     for version in [1, 2, 4] {
         assert_refused(
             |spec| spec.contract().abi_version = version,

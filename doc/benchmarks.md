@@ -36,7 +36,8 @@ New runs emit ABI value 3 and are stored under `microvm-v3` paths, so they
 cannot collide with the legacy unsuffixed ABI-1 history or with the `microvm-v2`
 history. ABI 3 began new series because its devices stopped offering
 `VIRTIO_F_ACCESS_PLATFORM`, so that its guests stopped mapping virtio buffers
-through the DMA API.
+through the DMA API, and moved from ISA IRQs, which the PIC also sees, to
+IOAPIC inputs of their own.
 The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
 through the supported NVX CLI. Guest payloads live in `scripts/nvx_tools/benchmark_scripts`; the
 coordinator fills the `.sh.in` templates before use.

@@ -18,7 +18,7 @@ expect_read_only() {
 
 # One virtio-fs slot carries every share as a child of one aggregate, which
 # the guest mounts where only root can enter and binds at each target.
-grep -q 'virtio_mmio.device=0x1000@0xd0001000:6' /proc/cmdline || fail 40
+grep -q 'virtio_mmio.device=0x1000@0xd0001000:17' /proc/cmdline || fail 40
 if grep -q '0xd0008000' /proc/cmdline; then
     fail 41
 fi

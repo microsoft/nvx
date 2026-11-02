@@ -7,7 +7,7 @@ fail() {
 }
 
 grep -q 'console=hvc1' /proc/cmdline || fail 50
-grep -q 'virtio_mmio.device=0x1000@0xd0002000:7' /proc/cmdline || fail 51
+grep -q 'virtio_mmio.device=0x1000@0xd0002000:18' /proc/cmdline || fail 51
 [ -e /sys/class/tty/hvc1 ] || fail 52
 stty -F /dev/hvc1 raw -echo
 printf '\000\015\012\177\377NVX-CONSOLE-BINARY\n'

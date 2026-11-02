@@ -229,9 +229,9 @@ fn the_guest_reads_the_root_of_every_plan_from_its_command_line() {
             // OpenVMM appends its own tokens, the discovery of the plan's block devices among
             // them, which the guest reads alike.
             let mut effective =
-                format!("{command_line} nr_cpus=1 virtio_mmio.device=0x1000@0xd0003000:4");
+                format!("{command_line} nr_cpus=1 virtio_mmio.device=0x1000@0xd0003000:19");
             if upper.scratch_path().is_some() {
-                effective.push_str(" virtio_mmio.device=0x1000@0xd0006000:11");
+                effective.push_str(" virtio_mmio.device=0x1000@0xd0006000:22");
             }
             effective.push_str(&fragment(&plan));
             assert_eq!(
@@ -253,9 +253,9 @@ fn plans_refuse_the_command_lines_that_the_guest_refuses() {
     for image in images() {
         let plan = plan(image, SandboxUpper::RAM, SandboxSettings::default());
         for user in [
-            "virtio_mmio.device=0x1000@0xd0006000:11",
+            "virtio_mmio.device=0x1000@0xd0006000:22",
             "quiet virtio-mmio.device=4K@0xd0006000:11:3",
-            "\"virtio_mmio.device=0x1000@0xd0006000:11\"",
+            "\"virtio_mmio.device=0x1000@0xd0006000:22\"",
             "virtio_mmio.device=\"0x1000@ 0xd0006000:11\"",
             "virtio_mmio.device=0x1000@3489685504:11",
         ] {
@@ -268,8 +268,8 @@ fn plans_refuse_the_command_lines_that_the_guest_refuses() {
             "virtio_mmio.device=0x1000@0xd0006000:0",
             "virtio_mmio.device=0x1000@0xd0006000",
             // A device elsewhere, and a token that the kernel reads inside another value.
-            "virtio_mmio.device=0x1000@0xd0007000:3",
-            "x=\"y virtio_mmio.device=0x1000@0xd0006000:11\"",
+            "virtio_mmio.device=0x1000@0xd0007000:23",
+            "x=\"y virtio_mmio.device=0x1000@0xd0006000:22\"",
         ] {
             let command_line = plan.kernel_command_line(user).unwrap();
             assert_eq!(
@@ -1440,7 +1440,7 @@ fn adapter_plans_refuse_what_their_root_and_openvmm_own() {
     );
     // The guest must read the plan's root from the command line.
     assert_eq!(
-        message(plan.kernel_command_line("virtio_mmio.device=0x1000@0xd0006000:11")),
+        message(plan.kernel_command_line("virtio_mmio.device=0x1000@0xd0006000:22")),
         "the kernel command line of an adapter's plan conflicts with the boot tokens of its root: \
          a RAM upper takes no scratch block device, but the command line adds a virtio-mmio \
          device at 0xd0006000"
