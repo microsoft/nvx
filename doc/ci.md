@@ -1811,7 +1811,9 @@ start the workflow, and a manually dispatched run notifies the person who
 started it.
 The job checks out the default branch, never the run's code. Its token can
 read the repository, the run's jobs and logs, and their check annotations,
-and write issues, and no other workflow can write issues. The job runs one
+and write issues, and no other workflow can write issues; the
+[Test changes](#test-changes) workflow labels and comments on pull requests
+with a token that writes pull requests instead. The job runs one
 report at a time; a newer reporter can replace one that waits for its turn,
 but it reports the latest nightly result anyway. Its job summary repeats
 the report.
@@ -1865,6 +1867,44 @@ owner triages a new report within a working day:
 
 To hand triage over or to rotate it, change the workflow's `--assignee`
 options, and reassign the open report.
+
+## Test changes
+
+The [`test-changes.yml`](../.github/workflows/test-changes.yml) workflow flags
+a pull request that modifies or removes an existing test asset, as
+[Changes to existing tests](contribute.md#changes-to-existing-tests)
+describes: it labels the pull request `tests-modified`, which the workflow
+creates when the repository lacks it, and keeps one comment that lists the
+changes, which a hidden marker at its start identifies. It runs when a pull
+request to any branch, a stacked one included, is opened, reopened, pushed
+to, marked ready for review, or retargeted, drafts included, and replaces a
+run of the same pull request in progress. A run that finds no change to an
+existing test removes the label and rewrites the comment, if there is one,
+to say so; the label then blocks nothing, and `Required status check` does
+not wait for the workflow. Its job summary lists every change, where the
+comment, which GitHub limits to 65,536 characters, may cut a section short.
+
+`pull_request_target` gives the job a token that can label and comment, for
+pull requests from forks too, so the job never runs a pull request's code. It
+runs the workflow and script of the default branch: `pull_request_target`
+always runs that branch's workflow, and its checkout names that branch, with
+every other fetched and without the token's credentials kept. It fetches the
+pull request's commits as data, and
+[`check_test_changes.py`](../scripts/check_test_changes.py) reads their files
+from Git's objects: it parses Rust and Python without running them and
+compares the merge base of the pull request's base branch and head with the
+head. A head that moved on since the event exits, since the push starts
+another run. The token can read the repository's contents and write pull
+requests, with which GitHub labels and comments on them, but not issues, which
+only the [nightly failure report](#nightly-failure-reports) writes. A change
+to the workflow or to the script takes effect once it merges into `dev`, and
+the script itself counts as test policy, so a pull request that changes it is
+flagged once it does.
+
+The `quality` job checks the [test layout](contribute.md#test-layout) with
+[`check_test_layout.py`](../scripts/check_test_layout.py), whose rules say
+where tests live, which test hooks a production file may hold, and which the
+flagging script shares to read Rust.
 
 ## crates.io releases
 

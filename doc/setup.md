@@ -243,10 +243,12 @@ shfmt -d -ln posix -i 4 -ci \
 shfmt -d -ln bash -i 4 -ci \
   .github/specula/setup-runner.sh guest/ubuntu/nvx-bashrc
 python3 scripts/check_markdown_links.py
+python3 scripts/check_test_layout.py
 ```
 
 Pyright runs in strict mode for both Linux and Windows platform APIs. The link
-check reads the files that Git tracks, so stage a new file before you run it.
+and test layout checks read the files that Git tracks, so stage a new file
+before you run them.
 
 ### Adversarial campaign controller
 

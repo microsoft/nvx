@@ -1,0 +1,603 @@
+{
+  "schema": "nvx-test-layout-allowlist",
+  "schema_version": 1,
+  "baseline": {
+    "nvx-rs/src/contract.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/error.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/gpt/crc.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/cgroup.rs": {
+      "hooks": 5,
+      "tests": 17
+    },
+    "nvx-rs/src/guest/clone/mounts.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/console_pending.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/guest/device_io.rs": {
+      "hooks": 1,
+      "tests": 10
+    },
+    "nvx-rs/src/guest/entry.rs": {
+      "hooks": 2,
+      "tests": 0
+    },
+    "nvx-rs/src/guest/exec.rs": {
+      "hooks": 5,
+      "tests": 0
+    },
+    "nvx-rs/src/guest/exit.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/generation.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/gpt.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/ingress/address.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/ingress/announcer.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/guest/ingress/collect.rs": {
+      "hooks": 1,
+      "tests": 10
+    },
+    "nvx-rs/src/guest/ingress/diag.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/ingress/encode.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/ingress/mod.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/ingress/sender.rs": {
+      "hooks": 1,
+      "tests": 7
+    },
+    "nvx-rs/src/guest/ingress/table.rs": {
+      "hooks": 1,
+      "tests": 11
+    },
+    "nvx-rs/src/guest/ingress/test_mode.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/kernel_text.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/guest/managed_agent/cgroup.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/guest/managed_agent/dispatch.rs": {
+      "hooks": 1,
+      "tests": 32
+    },
+    "nvx-rs/src/guest/managed_agent/environment.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/managed_agent/exec.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/managed_agent/exec_config.rs": {
+      "hooks": 2,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/managed_agent/helper.rs": {
+      "hooks": 1,
+      "tests": 4
+    },
+    "nvx-rs/src/guest/managed_agent/launch.rs": {
+      "hooks": 1,
+      "tests": 8
+    },
+    "nvx-rs/src/guest/managed_agent/loopback.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/managed_agent/mappings.rs": {
+      "hooks": 3,
+      "tests": 13
+    },
+    "nvx-rs/src/guest/managed_agent/mod.rs": {
+      "hooks": 5,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/managed_agent/seam.rs": {
+      "hooks": 8,
+      "tests": 0
+    },
+    "nvx-rs/src/guest/mappings.rs": {
+      "hooks": 3,
+      "tests": 0
+    },
+    "nvx-rs/src/guest/mappings/privileged.rs": {
+      "hooks": 0,
+      "tests": 10
+    },
+    "nvx-rs/src/guest/mappings/table.rs": {
+      "hooks": 1,
+      "tests": 10
+    },
+    "nvx-rs/src/guest/mmio_write.rs": {
+      "hooks": 1,
+      "tests": 4
+    },
+    "nvx-rs/src/guest/parse.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/guest/process.rs": {
+      "hooks": 1,
+      "tests": 9
+    },
+    "nvx-rs/src/guest/reseed.rs": {
+      "hooks": 2,
+      "tests": 10
+    },
+    "nvx-rs/src/guest/root.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/guest/root/block.rs": {
+      "hooks": 1,
+      "tests": 4
+    },
+    "nvx-rs/src/guest/root/bootstrap.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/root/kernel.rs": {
+      "hooks": 2,
+      "tests": 0
+    },
+    "nvx-rs/src/guest/root/share.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/guest/spawn.rs": {
+      "hooks": 5,
+      "tests": 22
+    },
+    "nvx-rs/src/guest/status.rs": {
+      "hooks": 2,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/sys/clock.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/guest/sys/discipline.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/sys/entry.rs": {
+      "hooks": 5,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/sys/fd.rs": {
+      "hooks": 3,
+      "tests": 0
+    },
+    "nvx-rs/src/guest/sys/ioctl.rs": {
+      "hooks": 1,
+      "tests": 7
+    },
+    "nvx-rs/src/guest/sys/kernel.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/sys/mod.rs": {
+      "hooks": 12,
+      "tests": 10
+    },
+    "nvx-rs/src/guest/sys/msr.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/sys/poll.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/sys/port.rs": {
+      "hooks": 3,
+      "tests": 9
+    },
+    "nvx-rs/src/guest/sys/process.rs": {
+      "hooks": 11,
+      "tests": 6
+    },
+    "nvx-rs/src/guest/sys/rooted.rs": {
+      "hooks": 6,
+      "tests": 7
+    },
+    "nvx-rs/src/guest/sys/scheduler.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/sys/secret.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/sys/signal.rs": {
+      "hooks": 4,
+      "tests": 5
+    },
+    "nvx-rs/src/guest/sys/sock_diag.rs": {
+      "hooks": 5,
+      "tests": 5
+    },
+    "nvx-rs/src/guest/sys/socket.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/sys/spawn.rs": {
+      "hooks": 23,
+      "tests": 15
+    },
+    "nvx-rs/src/guest/sys/timer.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/sys/x86.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/terminal.rs": {
+      "hooks": 1,
+      "tests": 4
+    },
+    "nvx-rs/src/guest/time/api.rs": {
+      "hooks": 3,
+      "tests": 17
+    },
+    "nvx-rs/src/guest/time/checks.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/guest/time/commands.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/time/cpu_mask.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/time/daemon.rs": {
+      "hooks": 1,
+      "tests": 9
+    },
+    "nvx-rs/src/guest/time/decoders.rs": {
+      "hooks": 1,
+      "tests": 28
+    },
+    "nvx-rs/src/guest/time/events.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/time/mod.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/time/state.rs": {
+      "hooks": 1,
+      "tests": 8
+    },
+    "nvx-rs/src/guest/time/system.rs": {
+      "hooks": 4,
+      "tests": 25
+    },
+    "nvx-rs/src/guest/time/test_mode.rs": {
+      "hooks": 1,
+      "tests": 10
+    },
+    "nvx-rs/src/guest/time_probe/clock.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/guest/time_probe/format.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/guest/time_probe/latency.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/guest/time_probe/mod.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/guest/time_probe/support.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/guest/time_probe/warp.rs": {
+      "hooks": 1,
+      "tests": 4
+    },
+    "nvx-rs/src/host/cli/args.rs": {
+      "hooks": 2,
+      "tests": 10
+    },
+    "nvx-rs/src/host/cli/artifacts.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/host/cli/cpu_profile.rs": {
+      "hooks": 1,
+      "tests": 9
+    },
+    "nvx-rs/src/host/cli/deadline.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/host/cli/download/github.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/cli/json.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/host/cli/mod.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/host/cli/output.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/host/cli/run.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/cli/run/specification.rs": {
+      "hooks": 0,
+      "tests": 4
+    },
+    "nvx-rs/src/host/cli/sandbox/lock.rs": {
+      "hooks": 1,
+      "tests": 5
+    },
+    "nvx-rs/src/host/cli/sandbox/mod.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/cli/shell.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/host/launch.rs": {
+      "hooks": 1,
+      "tests": 16
+    },
+    "nvx-rs/src/host/mod.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/network/address.rs": {
+      "hooks": 4,
+      "tests": 6
+    },
+    "nvx-rs/src/host/network/lowering.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/host/network/policy/json.rs": {
+      "hooks": 1,
+      "tests": 7
+    },
+    "nvx-rs/src/host/paths.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/host/platform/linux/mod.rs": {
+      "hooks": 2,
+      "tests": 0
+    },
+    "nvx-rs/src/host/platform/linux/process.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/platform/mod.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/host/platform/windows/mod.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/platform/windows/private.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/process.rs": {
+      "hooks": 2,
+      "tests": 15
+    },
+    "nvx-rs/src/host/report.rs": {
+      "hooks": 1,
+      "tests": 1
+    },
+    "nvx-rs/src/host/sandbox/layer.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/host/sandbox/mod.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/sandbox/mount/mod.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/sandbox/specification.rs": {
+      "hooks": 0,
+      "tests": 22
+    },
+    "nvx-rs/src/host/seal.rs": {
+      "hooks": 2,
+      "tests": 0
+    },
+    "nvx-rs/src/host/seal/windows.rs": {
+      "hooks": 2,
+      "tests": 3
+    },
+    "nvx-rs/src/host/session.rs": {
+      "hooks": 1,
+      "tests": 16
+    },
+    "nvx-rs/src/host/spawn.rs": {
+      "hooks": 1,
+      "tests": 7
+    },
+    "nvx-rs/src/host/store/caller.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/host/sys/mod.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/sys/process.rs": {
+      "hooks": 3,
+      "tests": 0
+    },
+    "nvx-rs/src/host/template/canonical.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/host/template/clone/failure.rs": {
+      "hooks": 1,
+      "tests": 10
+    },
+    "nvx-rs/src/host/template/clone/launch.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/template/clone/records.rs": {
+      "hooks": 1,
+      "tests": 11
+    },
+    "nvx-rs/src/host/template/mod.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/host/template/store.rs": {
+      "hooks": 2,
+      "tests": 0
+    },
+    "nvx-rs/src/host/template/wire.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "nvx-rs/src/hypervisor.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/net/cidr.rs": {
+      "hooks": 1,
+      "tests": 7
+    },
+    "nvx-rs/src/net/mod.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "nvx-rs/src/protocol/cmdline.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/protocol/nvxs/record.rs": {
+      "hooks": 1,
+      "tests": 0
+    },
+    "nvx-rs/src/protocol/share.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/protocol/status.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "nvx-rs/src/testing/fake_openvmm.rs": {
+      "hooks": 1,
+      "tests": 13
+    },
+    "nvx-rs/src/uuid.rs": {
+      "hooks": 1,
+      "tests": 4
+    },
+    "tests/runtime-adapter/src/frame.rs": {
+      "hooks": 1,
+      "tests": 8
+    },
+    "tests/runtime-adapter/src/generations.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "tests/runtime-adapter/src/probe.rs": {
+      "hooks": 1,
+      "tests": 4
+    },
+    "tests/runtime-adapter/src/root.rs": {
+      "hooks": 1,
+      "tests": 10
+    },
+    "tests/runtime-adapter/src/template.rs": {
+      "hooks": 1,
+      "tests": 9
+    },
+    "tests/runtime-adapter/src/worker/activation.rs": {
+      "hooks": 1,
+      "tests": 3
+    },
+    "tests/runtime-adapter/src/worker/capture.rs": {
+      "hooks": 1,
+      "tests": 7
+    },
+    "tests/runtime-adapter/src/worker/entries.rs": {
+      "hooks": 1,
+      "tests": 6
+    },
+    "tests/runtime-adapter/src/worker/mapping.rs": {
+      "hooks": 1,
+      "tests": 2
+    },
+    "tests/runtime-adapter/src/worker/probes.rs": {
+      "hooks": 1,
+      "tests": 10
+    }
+  },
+  "seams": {
+    "nvx-rs/src/guest/clone/activation/apply.rs": 1,
+    "nvx-rs/src/host/platform/windows/spawn.rs": 1,
+    "nvx-rs/src/host/sandbox/plan.rs": 5
+  }
+}

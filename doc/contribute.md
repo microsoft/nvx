@@ -3,7 +3,8 @@
 NVX takes contributions as pull requests to the `dev` branch of
 [microsoft/nvx](https://github.com/microsoft/nvx). This guide covers the
 workflow, the conventions that reviewers expect, the quality gates, test
-ownership, the expectations of tests, and how OpenVMM changes reach NVX.
+ownership, the layout and expectations of tests, and how OpenVMM changes
+reach NVX.
 Report security vulnerabilities as [SECURITY.md](../SECURITY.md) describes,
 never in a public issue.
 
@@ -84,6 +85,7 @@ the Python, shell, and link checks.
 | Guest and setup shell scripts | ShellCheck, and shfmt with four-space indentation and indented `case` branches. Scripts are POSIX `sh` unless check-quality checks them as Bash. | [check-quality](../.github/actions/check-quality/action.yml) |
 | `scripts/setup/setup-windows-whp.ps1` | PowerShell syntax | [check-quality](../.github/actions/check-quality/action.yml) |
 | Markdown files and `doc/` paths | Every relative link and image in a tracked Markdown file resolves to a tracked file, and every anchor to a heading slug that GitHub generates, ignoring code. Every `doc/` path that a tracked file mentions resolves too, except the test fixtures that `DOC_PATH_FIXTURES` lists. | [check-quality](../.github/actions/check-quality/action.yml), [check_markdown_links.py](../scripts/check_markdown_links.py) |
+| Tests | Every test lives in a test file, and production files hold only the test hooks that the allowlist allows; see [Test layout](#test-layout) | [check-quality](../.github/actions/check-quality/action.yml), [check_test_layout.py](../scripts/check_test_layout.py) |
 | `nvx-rs/` | rustfmt, Clippy and rustdoc with warnings denied, tests including a bundled-release fixture, the minimum supported Rust version, a macOS check, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) |
 | `tests/runtime-adapter/` | rustfmt, then Clippy and rustdoc with warnings denied, the build, the tests, and the minimum supported Rust version of `nvx`, in the protocol-only, host-only, and, on Linux, static musl guest-only configurations; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) |
 | NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module, and checks command help, on Linux and Windows, and compares the copies of OpenVMM's protocol vectors in `nvx-rs/tests/vectors/openvmm/`, and of the identities of its built-in CPU profiles in `nvx-rs/src/host/cli/cpu_generations.json`, with the submodule's files | [validate-nvx](../.github/actions/validate-nvx/action.yml), [ci.yml](../.github/workflows/ci.yml) |
@@ -125,9 +127,10 @@ scenarios drive them as commands, compile egress policies with
 Python client of the control protocol, lifecycle, or egress logic.
 
 Unit tests for the host tooling live in `scripts/test_*.py`. The `nvx` crate
-keeps unit tests alongside its Rust source and integration tests in its
-`tests` directory, and also runs `tests/guest_tools.rs` against the exact
-guest-profile binaries. Tests of the NVX
+keeps the unit tests of each module in the module's `tests` module, in files
+of their own beside its source, as [Test layout](#test-layout) describes, and
+integration tests in its `tests` directory, and also runs
+`tests/guest_tools.rs` against the exact guest-profile binaries. Tests of the NVX
 mechanics, such as the conformance vectors of the control protocol, belong in
 `nvx`. Tests of what an independent adapter observes through
 the public API of `nvx` alone, such as its own framing over the control
@@ -136,6 +139,74 @@ session between the host and the guest, belong in the
 suite the microVM jobs run on each backend with
 `scripts/nvx.py test-runtime-adapter --backend BACKEND`. [Continuous integration](ci.md)
 describes how CI checks OpenVMM's own CI and what the NVX microVM suite covers.
+
+## Test layout
+
+Tests live apart from the code that they test, so that a change to one never
+hides in a change to the other, and so that the guest images, which carry the
+code of `nvx-rs` but not its tests, never rebuild for a test. A Rust crate's
+test files are those beneath its `tests` directory and, in its `src/`, the
+`tests.rs` files and the files beneath a `tests` directory. Its other files in
+`src/` are production files, which declare their unit tests only as an
+out-of-line `tests` module that only tests compile:
+
+```rust
+#[cfg(test)]
+mod tests;
+```
+
+`src/a/b.rs` keeps its unit tests in `src/a/b/tests.rs`, or in
+`src/a/b/tests/mod.rs` and the files beside it, and `src/a/mod.rs` keeps them
+in `src/a/tests.rs`. A test file belongs to a module that the crate's library,
+one of its binaries, or one of its integration tests compiles for tests,
+through the `mod` declarations from the target's root, since no other test
+runs. `Cargo.toml` names the targets, or Cargo discovers them, and a target
+with `test = false` runs none; a declaration that a cfg excludes from every
+build of tests, such as `#[cfg(any())]` or `#[cfg(not(test))]`, compiles
+nothing for them. The Rust files of
+`tests/fixtures/` and `tests/vectors/` are data, not modules. The `tests`
+module may be `pub(crate)`, so that the tests of other modules use its
+fixtures and helpers, and its cfg may add conditions, as
+`#[cfg(all(test, unix))]` does. The code that only tests use belongs in it
+too: fixtures, helpers, test doubles, and the methods of production types that
+only tests call, in an `impl` block of the `tests` module. A production file
+holds no other test code: outside its function bodies, no inline module, no
+module of another name, and no item that a cfg requiring `test` guards; no
+test attribute, such as `#[test]`, `#[should_panic]`, or `#[ignore]`; no
+`proptest!` block; and no `#![cfg(test)]`. What remains are test hooks, the
+code that cannot move out of the code that it hooks: the attributes and
+`cfg!` invocations whose predicates mention `test`, such as a field, a
+statement, or a match arm that only tests compile, or a
+`#[cfg_attr(test, derive(...))]`. The seams of
+[`scripts/test-layout-allowlist.json`](../scripts/test-layout-allowlist.json)
+list how many each production file may hold. A change that adds a hook
+records it there, and a reviewer checks that the hook cannot move.
+
+The production files that predate the layout keep their test code until it
+moves out: the allowlist's baseline lists each with the numbers of its test
+hooks and of its tests, which may only go down. So a new test of such a file
+goes in its `tests` module, to which its other tests move first. Once a file's
+tests have moved, `--tighten` lowers the allowlist to what the files hold and
+moves the file from the baseline to the seams; it never raises an entry or
+adds one.
+
+Python unit tests are the `test_*.py` modules of `scripts/`,
+`.github/specula/tests/`, and `.github/skills/*/scripts/`, and the end-to-end
+scenario drivers are the `*_tests.py` modules of `scripts/nvx_tools/`, whose
+guest workloads live in `scripts/nvx_tools/microvm_test_scripts/`. No other
+module imports `unittest`, `pytest`, `doctest`, a `test_*` module, or the
+PowerShell test support of `scripts/powershell_testing.py`.
+
+`check_test_layout.py` checks these rules, which check-quality runs. It reads
+the package and target tables of each `Cargo.toml`, whose keys it reads when
+they hold a string or a boolean on their own lines, and reports a declaration
+of a target that it cannot read. It reads the files that Git tracks, so stage
+a new file before you run it:
+
+```bash
+python3 scripts/check_test_layout.py
+python3 scripts/check_test_layout.py --tighten   # after moving test code out
+```
 
 ## Test expectations
 
@@ -168,6 +239,45 @@ crate's [Testing](../nvx-rs/README.md#testing) section describes.
 - To show that new tests catch what the tests that they replace caught,
   compare the mutants that each selection catches with
   [nvx-rs mutation testing](ci.md#nvx-rs-mutation-testing).
+
+### Changes to existing tests
+
+A change to an existing test can hide the regression that the test caught,
+so the [Test changes](ci.md#test-changes) workflow labels every pull request
+that modifies or removes an existing test asset `tests-modified`, and keeps
+one comment on it that lists each, with links to it before and after the
+change. It compares the pull request's head with its merge base, item by
+item: a test, a test helper, the imports and inner attributes of a test
+module, and the test hooks of a production item; a fixture, a conformance
+vector, a scenario list, or another data file of the tests; an end-to-end
+scenario driver, guest workload, or guest probe; the fake OpenVMM; an
+allowlist entry that is new or allows more, or a change to the layout check,
+the flagging script, or their workflow; and a removed or changed line of the
+actions and workflow that run the tests and of the `ci.yml` jobs that run
+them, or an added line there that may skip them, and a test job that
+`ci.yml` no longer has. New tests flag nothing, and neither does code that
+moves unchanged under the same cfg predicates, its own and those that its
+module inherits, such as a `tests` module that moves to its own file, nor
+formatting, comments, lint attributes, visibility, or imports that a module
+only adds. A test whose module no target compiles any more, or compiles under
+other predicates, as a changed declaration of an ancestor module, or a
+manifest that sets the `test` key of its target to false or roots the target
+elsewhere, may make it, counts as removed or modified. Each target that
+compiles a module, through each chain of declarations, counts, so a test that
+one of them no longer compiles counts as modified. A comma counts in the
+token tree of a macro, unless the macro is one of the standard library's that
+take expressions and a trailing comma, such as `assert_eq!`.
+
+The label blocks nothing. It asks the reviewers to check each listed change
+against the specification that the test derives from: that a modified
+assertion still checks what it did, or that the behavior changed on purpose,
+and that a removed test's coverage moved elsewhere or is no longer needed.
+Explain each such change in the pull request's body. Run the comparison
+before you push:
+
+```bash
+python3 scripts/check_test_changes.py --base origin/dev
+```
 
 ## OpenVMM
 

@@ -73,6 +73,10 @@ runs:
       shell: bash
       run: python scripts/check_markdown_links.py
 
+    - name: Check test layout
+      shell: bash
+      run: python scripts/check_test_layout.py
+
     - name: Test Specula CI wiring
       shell: bash
       working-directory: .github/specula
