@@ -764,6 +764,7 @@ def _write_release_fixture(
                 *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
                 *KernelBuildConstants.REQUIRED_NETWORK_CONFIG,
                 *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+                *KernelBuildConstants.REQUIRED_NESTED_VIRTUALIZATION_CONFIG,
                 *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
             )
         )
@@ -15473,6 +15474,7 @@ class BuildTests(unittest.TestCase):
                         *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
                         *KernelBuildConstants.REQUIRED_NETWORK_CONFIG,
                         *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+                        *KernelBuildConstants.REQUIRED_NESTED_VIRTUALIZATION_CONFIG,
                         *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
                     )
                 )
@@ -17849,6 +17851,41 @@ class BuildTests(unittest.TestCase):
             any(line.startswith("CONFIG_CPU_FREQ_") for line in configured)
         )
 
+    def test_checked_in_config_builds_kvm_for_nested_virtualization(self):
+        config = BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG
+        build._assert_nested_virtualization_kernel_config(config)
+        configured = config.read_text(encoding="utf-8").splitlines()
+        # The microVM contract exposes VMX but no SVM, and the guest is no KVM
+        # guest. The configuration records what KVM selects: -Werror, which
+        # the kernel builds with, and FRED.
+        for setting in (
+            "# CONFIG_KVM_AMD is not set",
+            "# CONFIG_KVM_XEN is not set",
+            "# CONFIG_KVM_GUEST is not set",
+            "CONFIG_KVM_WERROR=y",
+            "CONFIG_X86_FRED=y",
+        ):
+            with self.subTest(setting=setting):
+                self.assertIn(setting, configured)
+
+    def test_nested_virtualization_kernel_config_requires_every_setting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / ".config"
+            required = KernelBuildConstants.REQUIRED_NESTED_VIRTUALIZATION_CONFIG
+            config.write_text("\n".join(required) + "\n", encoding="utf-8")
+            build._assert_nested_virtualization_kernel_config(config)
+            for missing in required:
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(setting for setting in required if setting != missing)
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        common.ScriptError, "nested virtualization: " + missing
+                    ):
+                        build._assert_nested_virtualization_kernel_config(config)
+
     def test_time_abi_kernel_config_requires_every_setting(self):
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / ".config"
@@ -17996,6 +18033,7 @@ class BuildTests(unittest.TestCase):
                         *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
                         *KernelBuildConstants.REQUIRED_NETWORK_CONFIG,
                         *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+                        *KernelBuildConstants.REQUIRED_NESTED_VIRTUALIZATION_CONFIG,
                         *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
                         "# CONFIG_DEBUG_KERNEL is not set",
                     )

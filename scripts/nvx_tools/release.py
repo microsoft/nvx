@@ -1678,6 +1678,7 @@ def verify_source_tree() -> None:
         *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
         *KernelBuildConstants.REQUIRED_NETWORK_CONFIG,
         *KernelBuildConstants.REQUIRED_TIME_ABI_CONFIG,
+        *KernelBuildConstants.REQUIRED_NESTED_VIRTUALIZATION_CONFIG,
         *KernelBuildConstants.REQUIRED_HARDENING_CONFIG,
     ):
         if setting not in config.splitlines():
@@ -1696,6 +1697,7 @@ def verify_source_tree() -> None:
             "CONFIG_HVC_XE9=y",
             *KernelBuildConstants.REQUIRED_SANDBOX_CONFIG,
             *KernelBuildConstants.REQUIRED_NETWORK_CONFIG,
+            *KernelBuildConstants.REQUIRED_NESTED_VIRTUALIZATION_CONFIG,
         ):
             if setting not in generated:
                 raise ScriptError(f"{generated_config} is missing {setting}")

@@ -95,6 +95,14 @@ class KernelBuildConstants:
         "# CONFIG_KVM_GUEST is not set",
         "# CONFIG_CPU_FREQ is not set",
     )
+    # Nested virtualization runs the guest's own VMs through KVM, on the VMX
+    # that a microVM with nested virtualization presents. The microVM contract
+    # exposes no SVM, so KVM_AMD stays off. Without VMX, as on every other
+    # microVM, KVM's initialization only logs that VMX is unsupported.
+    REQUIRED_NESTED_VIRTUALIZATION_CONFIG: Final = (
+        "CONFIG_KVM=y",
+        "CONFIG_KVM_INTEL=y",
+    )
     # x86 makes runtime-generated code, such as the ITS mitigation thunks,
     # read-only only through STRICT_MODULE_RWX (ARCH_HAS_EXECMEM_ROX), which
     # needs MODULES. No module is ever built or shipped: there is no autoload

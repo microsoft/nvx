@@ -256,6 +256,33 @@ kernels must not enable the soft-lockup or hung-task detectors. Changing an
 archive hash or patch invalidates both source and object caches; changing the
 input configuration invalidates the object cache.
 
+The kernel also builds in KVM with its Intel support, `CONFIG_KVM` and
+`CONFIG_KVM_INTEL`, so that a guest whose microVM has
+[nested virtualization](design/2.2-cpu-and-topology.md#2214-nested-virtualization)
+runs VMs of its own through `/dev/kvm`. KVM's other options keep their
+defaults, such as the in-kernel IOAPIC, SMM, and Hyper-V emulation that its
+guests' VMMs and firmware use, and Xen emulation off, but `CONFIG_KVM_AMD`
+stays off, since the microVM exposes VMX and no SVM. The checked-in
+configuration also records what KVM selects or enables by default, among
+them `CONFIG_KVM_WERROR`, since the kernel builds with `CONFIG_WERROR`,
+`CONFIG_X86_FRED`, whose event delivery Linux 6.18 uses only with `fred=on` on
+its command line, and `CONFIG_MITIGATION_VMSCAPE`, which flushes branch
+predictions before a VMM process resumes after its guest ran, on CPUs that
+VMSCAPE affects. On every other microVM, whose CPU profile clears VMX, KVM's
+initialization stops at boot, logs `kvm_intel: VMX not supported by CPU 0`,
+and creates no `/dev/kvm`.
+
+KVM adds 0.53 MiB of code and about 0.4 MiB of read-only data, unwind
+tables, and data to the 6.18.38 kernel, and 2.5 MB to `vmlinux`. The kernel
+aligns its read-only data and the end of its zero-initialized data to 2 MiB,
+and the added code moves both past a boundary, so the image spans 24.2 MiB of
+guest memory instead of 20.2 MiB, and at boot the guest clears 1.8 MiB more
+zero-initialized data and frees 1.3 MiB more alignment padding, which it
+overwrites as it frees it. That costs a default microVM's cold boot about
+10 ms on a bare-metal KVM host and 17 ms in a KVM Azure VM, about 3% and 5%,
+and 4.7 MiB of peak RSS; the time of its snapshots and restores does not
+change.
+
 The kernel keeps the code it generates at run time read-only. On x86, only
 `CONFIG_STRICT_MODULE_RWX` makes such memory read-only and executable
 (`CONFIG_ARCH_HAS_EXECMEM_ROX`), and it requires `CONFIG_MODULES`. Without it,
@@ -292,17 +319,18 @@ live in `KernelBuildConstants` in
 | Network | IPv4; IPv6 without the SIT tunnel driver; virtio-net | Configure the dual-stack NIC of the [portable network profile](design/3.5-network.md); SIT would add an `sit0` device that decapsulates IPv6 from IPv4 packets |
 | Shared interrupt status | `CONFIG_VIRTIO_MMIO_SHARED_STATUS` from the kernel patches | Read [shared virtio interrupt status](design/2.4-interrupt-and-io-architecture.md#244-shared-interrupt-status) |
 | Time ABI | Hypervisor-guest and paravirtualization support on; Hyper-V, KVM guest, and cpufreq off | Meet the [time ABI](design/3.2-clock-and-time.md), as described above |
+| Nested virtualization | KVM and its Intel support | Run the guest's own VMs under [nested virtualization](design/2.2-cpu-and-topology.md#2214-nested-virtualization), as described above |
 | Hardening | Strict kernel and module RWX with read-only executable memory, the ITS mitigation, an empty modprobe path, trimmed symbol exports, the boot-time W+X audit, and no option built as a module | Keep runtime code read-only, as described above |
 | Watchdogs | Soft-lockup and hung-task detectors off, or on in the [CI debug kernel](#ci-debug-kernel) | Keep the detectors out of production kernels |
 
 `build-kernel` runs every check, and packaging runs them again on the
 packaged config. `scripts/nvx.py verify` is a lighter source check. It looks
-for the fixed settings of the direct-boot, sandbox, network, time-ABI, and
-hardening groups, plus the xe9 console and virtio-fs, in the checked-in
-`kernel/config-microvm`. It does not reject options built as modules; only the
-build and packaging checks do. When `build/vmlinux.config` exists, `verify`
-also checks that file for the direct-boot, sandbox, and network groups plus
-the xe9 console.
+for the fixed settings of the direct-boot, sandbox, network, time-ABI, nested
+virtualization, and hardening groups, plus the xe9 console and virtio-fs, in
+the checked-in `kernel/config-microvm`. It does not reject options built as
+modules; only the build and packaging checks do. When `build/vmlinux.config`
+exists, `verify` also checks that file for the direct-boot, sandbox, network,
+and nested virtualization groups plus the xe9 console.
 
 ## CI debug kernel
 

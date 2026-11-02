@@ -143,6 +143,15 @@ def _assert_time_abi_kernel_config(path: Path) -> None:
     )
 
 
+def _assert_nested_virtualization_kernel_config(path: Path) -> None:
+    _assert_kernel_config(
+        path,
+        KernelBuildConstants.REQUIRED_NESTED_VIRTUALIZATION_CONFIG,
+        "kernel configuration cannot run the guest's own VMs under nested "
+        "virtualization: ",
+    )
+
+
 def _assert_hardening_kernel_config(path: Path) -> None:
     _assert_kernel_config(
         path,
@@ -190,6 +199,7 @@ def assert_required_kernel_config(path: Path, *, debug: bool = False) -> None:
     _assert_network_kernel_config(path)
     _assert_shared_status_kernel_config(path)
     _assert_time_abi_kernel_config(path)
+    _assert_nested_virtualization_kernel_config(path)
     _assert_hardening_kernel_config(path)
     _assert_watchdog_kernel_config(path, debug=debug)
 
