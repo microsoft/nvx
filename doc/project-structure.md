@@ -134,6 +134,7 @@ nvx/
 |   |   |-- guests.py            Typed guest descriptors
 |   |   |-- host_telemetry.py    Benchmark host provenance and Windows capture storage telemetry
 |   |   |-- host_time_probe.rs   Host TSC probe that doctor builds and runs
+|   |   |-- kconfig.py           Kconfig reader that attributes a configuration's symbols to their rules
 |   |   |-- managed_exec_tests.py Managed workload environment, directory, and timeout tests
 |   |   |-- merge_queue.py       Cancellation of the CI runs of superseded merge groups
 |   |   |-- microvm_durations.py Scenario duration report of the microVM tests
