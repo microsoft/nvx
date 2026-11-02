@@ -71,18 +71,27 @@ const BENEATH: u64 = libc::RESOLVE_BENEATH
 const CAPABILITY_VERSION: u32 = 0x2008_0522;
 /// The mode of the directories that an entry creates in its root, whatever its umask.
 const DIRECTORY_MODE: u32 = 0o755;
-/// The mode of the device nodes that an entry creates in its `/dev`.
+/// The mode of the device nodes that an entry creates in its `/dev`, which any execution may
+/// open, but those of [`GROUP_DEVICES`].
 const DEVICE_MODE: u32 = 0o666;
+/// The mode of the device nodes of [`GROUP_DEVICES`], which only user ID 0 and the execution's
+/// group may open.
+const GROUP_DEVICE_MODE: u32 = 0o660;
+/// The device nodes, as bits of [`EntryChild::devices`], that an entry gives user ID 0 and the
+/// group ID of its identity, with [`GROUP_DEVICE_MODE`]: `kvm`.
+const GROUP_DEVICES: u8 = 1 << 6;
 
 /// The device nodes that an entry may create in its `/dev`: the name, and the major and minor
-/// numbers of the character device. Bit `n` of [`EntryChild::devices`] selects node `n`.
-pub(crate) const DEVICE_NODES: [(&CStr, u32, u32); 6] = [
+/// numbers of the character device. Bit `n` of [`EntryChild::devices`] selects node `n`. KVM's
+/// is the fixed misc device minor `KVM_MINOR`.
+pub(crate) const DEVICE_NODES: [(&CStr, u32, u32); 7] = [
     (c"null", 1, 3),
     (c"zero", 1, 5),
     (c"full", 1, 7),
     (c"random", 1, 8),
     (c"urandom", 1, 9),
     (c"tty", 5, 0),
+    (c"kvm", 10, 232),
 ];
 /// The symbolic links in every entry's `/dev`: the name and the target.
 const DEVICE_LINKS: [(&CStr, &CStr); 5] = [
@@ -266,7 +275,9 @@ impl EntryChild {
             }
             Ok(())
         })?;
-        self.stage(LaunchStage::Devices, || mount_devices(self.devices))
+        self.stage(LaunchStage::Devices, || {
+            mount_devices(self.devices, self.gid)
+        })
     }
 
     /// Takes the child's identity: drops every capability but its own from the bounding set,
@@ -533,10 +544,11 @@ fn mask_entry(directory: RawFd, name: &CStr, source: RawFd) -> Result<(), Errno>
 }
 
 /// Mounts the child's `/dev`: a tmpfs, `nosuid` and with mode 0755, which holds the device
-/// nodes that `devices` selects, with mode 0666, the symbolic links of [`DEVICE_LINKS`], a
-/// devpts instance of its own at `pts`, `nosuid` and `noexec`, and a tmpfs at `shm`, `nosuid`,
-/// `nodev`, and with mode 1777.
-fn mount_devices(devices: u8) -> Result<(), Errno> {
+/// nodes that `devices` selects, with mode 0666, but those of [`GROUP_DEVICES`], with mode 0660,
+/// user ID 0, and the group ID `gid`, the symbolic links of [`DEVICE_LINKS`], a devpts instance
+/// of its own at `pts`, `nosuid` and `noexec`, and a tmpfs at `shm`, `nosuid`, `nodev`, and with
+/// mode 1777.
+fn mount_devices(devices: u8, gid: u32) -> Result<(), Errno> {
     let target = directory_target(libc::AT_FDCWD, c"dev")?;
     let dev = new_mount(
         c"tmpfs",
@@ -545,21 +557,35 @@ fn mount_devices(devices: u8) -> Result<(), Errno> {
     )?;
     move_mount(dev, target)?;
     for (bit, (name, major, minor)) in DEVICE_NODES.iter().enumerate() {
-        if devices & (1 << bit) == 0 {
+        let node = 1 << bit;
+        if devices & node == 0 {
             continue;
         }
+        let group = GROUP_DEVICES & node != 0;
+        let mode = if group {
+            GROUP_DEVICE_MODE
+        } else {
+            DEVICE_MODE
+        };
         // SAFETY: the name is a NUL-terminated string, and the mode and device integers.
         unit(
             unsafe {
                 libc::mknodat(
                     dev,
                     name.as_ptr(),
-                    libc::S_IFCHR | DEVICE_MODE,
+                    libc::S_IFCHR | mode,
                     libc::makedev(*major, *minor),
                 )
             }
             .into(),
         )?;
+        if group {
+            // SAFETY: the name is a NUL-terminated string, and the IDs and flags integers.
+            unit(
+                unsafe { libc::fchownat(dev, name.as_ptr(), 0, gid, libc::AT_SYMLINK_NOFOLLOW) }
+                    .into(),
+            )?;
+        }
     }
     for (name, link) in DEVICE_LINKS {
         // SAFETY: both strings are NUL-terminated.

@@ -39,6 +39,13 @@ impl Prepared {
     }
 }
 
+impl Entry {
+    /// Returns the device nodes of `/dev`, as [`DeviceNode::bit`]s.
+    pub(crate) fn device_set(&self) -> u8 {
+        self.devices
+    }
+}
+
 /// The passwd database of the tests' roots.
 const PASSWD_DATABASE: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n\
 # A comment names no account.\n\
@@ -859,9 +866,19 @@ fn device_sets_select_their_nodes() {
     assert_eq!(entry.clone().devices([]).devices, 0);
     assert_eq!(
         entry
+            .clone()
             .devices([DeviceNode::Null, DeviceNode::Tty, DeviceNode::Null])
             .devices,
         0b10_0001
+    );
+    // `/dev/kvm` is never a default node.
+    assert!(!DeviceNode::ALL.contains(&DeviceNode::Kvm));
+    assert_eq!(entry.clone().devices([DeviceNode::Kvm]).devices, 0b100_0000);
+    assert_eq!(
+        entry
+            .devices(DeviceNode::ALL.into_iter().chain([DeviceNode::Kvm]))
+            .devices,
+        0b111_1111
     );
 }
 
@@ -1094,6 +1111,7 @@ echo "resolver=$(cat /etc/resolv.conf)"
 echo "time=$(cat /run/nvx/time/state)"
 echo "dev=$(cd /dev && echo *)"
 echo "pts=$(ls -A /dev/pts)"
+echo "kvm=$(stat -c '%A %u %g %t:%T' /dev/kvm 2>/dev/null || echo absent)"
 echo "first-process=$(cd /proc && set -- [0-9]* && echo "$1")"
 while read -r _ _ _ _ point options _; do echo "mount=$point $options"; done </proc/self/mountinfo
 if : >/dev/null; then echo "null=writable"; fi
@@ -1250,6 +1268,7 @@ fn check_view(output: &str, machine_id: &str) {
         "fd full null ptmx pts random shm stderr stdin stdout tty urandom zero"
     );
     assert_eq!(value(output, "pts"), "ptmx");
+    assert_eq!(value(output, "kvm"), "absent");
     assert_eq!(value(output, "null"), "writable");
     assert_eq!(value(output, "mknod"), "refused");
     assert_eq!(value(output, "port-start"), "refused");
@@ -1538,6 +1557,18 @@ fn privileged_entries_see_their_own_view_and_identity() {
                     assert_eq!(value(&output, set), "0000000000000000", "{set}");
                 }
                 assert_eq!(value(&output, "kcore"), "unreadable");
+
+                // `/dev/kvm`, which an entry gives only when asked, is the execution's group's
+                // alone.
+                let output = probe(
+                    &entry(Identity::new(65534, 65534))
+                        .devices(DeviceNode::ALL.into_iter().chain([DeviceNode::Kvm])),
+                );
+                assert_eq!(
+                    value(&output, "dev"),
+                    "fd full kvm null ptmx pts random shm stderr stdin stdout tty urandom zero"
+                );
+                assert_eq!(value(&output, "kvm"), "crw-rw---- 0 65534 a:e8");
 
                 // A machine ID that the guest rewrites in place, as after a restore, is what the
                 // later executions see.

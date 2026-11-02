@@ -23,6 +23,9 @@ pub(crate) struct Paths {
     pub(crate) machine_id: PathBuf,
     /// The guest's time status, which the sandbox agent binds for its executions.
     pub(crate) time_status: PathBuf,
+    /// The guest's KVM device, which the guest has only with nested virtualization, and with
+    /// which the sandbox agent gives its executions `/dev/kvm`.
+    pub(crate) kvm_device: PathBuf,
     /// Managed-agent helper executable.
     pub(crate) helper: PathBuf,
     /// VM exit helper.
@@ -42,6 +45,7 @@ impl Default for Paths {
             null_device: "/dev/null".into(),
             machine_id: "/run/nvx/workload-machine-id".into(),
             time_status: "/run/nvx/time".into(),
+            kvm_device: "/dev/kvm".into(),
             helper: "/sbin/nvx-managed-agent".into(),
             exit: "/sbin/nvx-exit".into(),
             setpriv: "/bin/setpriv".into(),

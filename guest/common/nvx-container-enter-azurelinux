@@ -66,6 +66,13 @@ ln -s /proc/self/fd/0 "$rootfs/dev/stdin"
 ln -s /proc/self/fd/1 "$rootfs/dev/stdout"
 ln -s /proc/self/fd/2 "$rootfs/dev/stderr"
 
+# Only a microVM with nested virtualization gives the guest /dev/kvm, which
+# the workload's group alone may then open, to run VMs of its own.
+if [ -c /dev/kvm ] && [ ! -L /dev/kvm ]; then
+    mknod -m 660 "$rootfs/dev/kvm" c 10 232
+    chown "0:$workload_gid" "$rootfs/dev/kvm"
+fi
+
 hostname "$hostname_value"
 export HOME="$workload_home" USER="$workload_name" LOGNAME="$workload_name"
 exec chroot "$rootfs" /.nvx-agent/ld-linux-x86-64.so.2 \

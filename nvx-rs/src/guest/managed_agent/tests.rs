@@ -95,6 +95,40 @@ fn the_sandbox_entry_takes_an_existing_account_and_one_machine_id_per_boot() {
 }
 
 #[test]
+fn only_a_guest_kvm_device_gives_the_sandbox_entry_dev_kvm() {
+    let config = sandbox_config(b"sandbox", b"65534");
+    // The default nodes of every entry.
+    let all = Entry::new("/", Identity::new(1, 1)).device_set();
+    for (device, expected) in [
+        (None, all),
+        (Some(std::path::Path::new("/dev/null")), all | 1 << 6),
+    ] {
+        let (temporary, mut system) = TestSystem::with_container_cgroup();
+        let missing = temporary.path().join("kvm");
+        system.paths.kvm_device = device.map_or(missing, ToOwned::to_owned);
+        let entry = sandbox_entry(system.paths(), &config).unwrap();
+        assert_eq!(entry.device_set(), expected);
+    }
+    // A file of another kind, or a link to a device, is no KVM device.
+    let (temporary, mut system) = TestSystem::with_container_cgroup();
+    let file = temporary.path().join("kvm");
+    std::fs::write(&file, b"").unwrap();
+    system.paths.kvm_device = file;
+    assert_eq!(
+        sandbox_entry(system.paths(), &config).unwrap().device_set(),
+        all
+    );
+    let (temporary, mut system) = TestSystem::with_container_cgroup();
+    let link = temporary.path().join("kvm");
+    std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+    system.paths.kvm_device = link;
+    assert_eq!(
+        sandbox_entry(system.paths(), &config).unwrap().device_set(),
+        all
+    );
+}
+
+#[test]
 fn a_refused_sandbox_entry_generates_nothing_and_stops_the_agent() {
     let (_temporary, mut system) = TestSystem::with_container_cgroup();
     for (hostname, uid) in [

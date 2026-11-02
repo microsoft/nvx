@@ -66,7 +66,8 @@
 //! 8. mounts a tmpfs at `/dev`, `nosuid`, which holds only the allowlisted device nodes, the
 //!    links `fd`, `stdin`, `stdout`, `stderr`, and `ptmx`, a devpts instance of its own at
 //!    `/dev/pts`, `nosuid` and `noexec`, and a tmpfs at `/dev/shm`, `nosuid` and `nodev`. Every
-//!    other mount of the execution is `nodev`;
+//!    other mount of the execution is `nodev`. Any execution may open the device nodes, but
+//!    [`DeviceNode::Kvm`], which only user ID 0 and the identity's group may open;
 //! 9. takes its [identity](Identity), and sets `no_new_privs`;
 //! 10. closes every descriptor that its stages used or opened but its program's, and enters its
 //!     working directory, `/` unless its command names another, with that identity, through no
@@ -532,10 +533,16 @@ pub enum DeviceNode {
     Urandom,
     /// `/dev/tty`, the controlling terminal, of which the execution has none.
     Tty,
+    /// `/dev/kvm`, through which the execution runs VMs of its own, on a guest whose kernel has
+    /// KVM and whose machine has nested virtualization. Unlike the other nodes, which have mode
+    /// 0666, it has mode 0660, user ID 0, and the group ID of the entry's identity, so that only
+    /// the execution's own group may open it.
+    Kvm,
 }
 
 impl DeviceNode {
-    /// Every device node, which an execution's `/dev` holds by default.
+    /// The device nodes that an execution's `/dev` holds by default: every one but
+    /// [`Kvm`](Self::Kvm), which an entry gives only where the guest has nested virtualization.
     pub const ALL: [Self; 6] = [
         Self::Null,
         Self::Zero,
@@ -555,6 +562,7 @@ impl DeviceNode {
             Self::Random => 3,
             Self::Urandom => 4,
             Self::Tty => 5,
+            Self::Kvm => 6,
         }
     }
 }
@@ -586,7 +594,7 @@ pub struct Entry {
 impl Entry {
     /// Describes executions that enter the mount at `root`, an absolute path, as `identity`,
     /// with the hostname `nvx-sandbox`, the image's machine ID, published listeners, no time
-    /// status, the image's resolver file, and every [`DeviceNode`].
+    /// status, the image's resolver file, and the device nodes of [`DeviceNode::ALL`].
     pub fn new(root: impl Into<PathBuf>, identity: Identity) -> Self {
         Self {
             root: root.into(),

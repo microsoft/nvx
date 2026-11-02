@@ -8,7 +8,9 @@
 //! mapping table beneath `ROOTFS`, the container's assembled root, has each workload enter
 //! `ROOTFS` as an [`entry`](crate::guest::entry) execution, as `UID` and `GID` with their existing
 //! account, with `HOSTNAME`, held at a barrier until the agent has placed it in its cgroup, and
-//! after `STOP` unmounts the table and returns to the init agent. When it starts, it generates the
+//! after `STOP` unmounts the table and returns to the init agent. On a guest with `/dev/kvm`, which
+//! only nested virtualization gives it, each workload's `/dev` holds `/dev/kvm` too, which only the
+//! workload's group may open. When it starts, it generates the
 //! workload's machine ID and binds it, with the guest's time status, into `ROOTFS` in a mount
 //! namespace of its own, of which each execution's starts as a copy, so that the binds end with
 //! the agent, and it maps the table in that namespace too. Both refuse workloads until the table
@@ -67,7 +69,7 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
-use super::entry::{Entry, Identity, MachineId};
+use super::entry::{DeviceNode, Entry, Identity, MachineId};
 use super::status::{CommandError, ExitStatus};
 use super::sys::{self, Errno};
 
@@ -167,18 +169,34 @@ fn run(system: &mut impl System, arguments: &[CString]) -> Result<(), CommandErr
 
 /// Returns the entry of the sandbox agent's executions: `ROOTFS`, entered as `UID` and `GID`
 /// with their existing account, with `HOSTNAME`, the machine ID that it generates for this boot
-/// at its path, and the guest's time status.
+/// at its path, the guest's time status, and, on a guest whose KVM device is a character device,
+/// `/dev/kvm`.
 fn sandbox_entry(paths: &Paths, config: &AgentConfig) -> Result<Entry, Errno> {
     let uid = launch::parse_id(config.uid.as_bytes())?;
     let gid = launch::parse_id(config.gid.as_bytes())?;
     let rootfs = std::ffi::OsStr::from_bytes(config.rootfs.as_bytes());
-    let entry = Entry::new(rootfs, Identity::new(uid, gid))
+    let mut entry = Entry::new(rootfs, Identity::new(uid, gid))
         .hostname(config.hostname.as_bytes())
         .time_status(&paths.time_status);
+    if has_character_device(&paths.kvm_device)? {
+        entry = entry.devices(DeviceNode::ALL.into_iter().chain([DeviceNode::Kvm]));
+    }
     entry.check().map_err(|_| Errno::EINVAL)?;
     let machine_id =
         MachineId::generate(&paths.machine_id).map_err(|error| sys::errno_of(&error))?;
     Ok(entry.machine_id(machine_id))
+}
+
+/// Returns whether `path` is a character device, without following a symbolic link: the guest's
+/// KVM device exists only where its machine has nested virtualization, and its kernel KVM.
+fn has_character_device(path: &std::path::Path) -> Result<bool, Errno> {
+    use std::os::unix::fs::FileTypeExt;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_char_device()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(sys::errno_of(&error)),
+    }
 }
 
 /// Serves the control session on `control_tty` until the host stops the agent.

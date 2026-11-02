@@ -1188,7 +1188,11 @@ and `CAP_NET_RAW` while the execution's listeners are `Publication::Published`,
 taken with `no_new_privs`.
 
 Its program starts with every signal's default disposition and none blocked. For
-user ID 0, the risky procfs and sysfs entries are read-only or masked.
+user ID 0, the risky procfs and sysfs entries are read-only or masked. Any
+execution may open the default nodes, `DeviceNode::ALL`; `DeviceNode::Kvm`,
+`/dev/kvm`, which an entry holds only when asked, as the managed agent asks on
+a guest with nested virtualization, has mode 0660, user ID 0, and the
+identity's group ID, so that only the execution's group may open it.
 
 `Entry::prepare` checks it, reads the existing `Account` of the IDs from the
 root's account databases unless `AccountMode::Numeric` takes them as they are,

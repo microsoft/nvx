@@ -37,6 +37,18 @@ fn capability_sets_split_into_two_data_words() {
 }
 
 #[test]
+fn only_kvm_belongs_to_the_execution_group() {
+    let group: Vec<_> = DEVICE_NODES
+        .iter()
+        .enumerate()
+        .filter(|(bit, _)| GROUP_DEVICES & (1 << bit) != 0)
+        .map(|(_, node)| *node)
+        .collect();
+    assert_eq!(group, [(c"kvm", 10, 232)]);
+    assert_eq!(GROUP_DEVICE_MODE, 0o660);
+}
+
+#[test]
 fn the_kernel_structures_have_their_uapi_sizes() {
     assert_eq!(std::mem::size_of::<CloneArgs>(), 64);
     assert_eq!(std::mem::size_of::<OpenHow>(), 24);
