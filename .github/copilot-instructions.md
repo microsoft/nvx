@@ -27,7 +27,7 @@
   [validate-nvx](./actions/validate-nvx/action.yml) as the authoritative local
   quality and CLI test definitions. Start with the narrowest affected test, then
   run the applicable commands from those actions.
-- For changes under `nvx-rs/`, run the commands in
+- For changes under `nvx-rs/` or `crates/`, run the commands in
   [check-nvx-rs](./actions/check-nvx-rs/action.yml). It also checks the
   runtime adapter in `tests/runtime-adapter/`, which builds on `nvx`; run its
   steps for changes to either.

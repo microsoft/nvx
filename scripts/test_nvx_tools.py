@@ -7402,14 +7402,63 @@ class CiConfigurationTests(unittest.TestCase):
                         f'rustup target add --toolchain "${{toolchain}}" {musl}', script
                     )
 
+    def test_nvx_rs_checks_every_crate_of_the_workspace(self):
+        # Formatting, Clippy, the tests, rustdoc, and the minimum Rust version
+        # and macOS checks select every package of the Cargo workspace, nvx and
+        # the crates in crates/, and none of them alone; all run on Linux and
+        # Windows but the macOS cross-check, which runs on Linux.
+        action = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "check-nvx-rs"
+            / "action.yml"
+        ).read_text(encoding="utf-8")
+        for name in (
+            "Check formatting",
+            "Lint",
+            "Test",
+            "Build documentation",
+            "Check the minimum supported Rust version",
+            "Check the macOS build",
+        ):
+            with self.subTest(step=name):
+                step = _composite_action_step(action, name)
+                self.assertEqual(
+                    "      if: runner.os == 'Linux'\n" in step,
+                    name == "Check the macOS build",
+                )
+                run = step.partition("      run: ")[2]
+                block = [
+                    line[8:]
+                    for line in run.splitlines()[1:]
+                    if line.startswith(" " * 8)
+                ]
+                script = {"|": "\n".join(block), ">-": " ".join(block)}.get(
+                    run.splitlines()[0], run.splitlines()[0]
+                )
+                commands = [
+                    re.sub(r'"\+\$\{\{ [^}]+ \}\}"', "+toolchain", line).split()
+                    for line in script.replace("\\\n", " ").splitlines()
+                    if line.startswith("cargo ")
+                ]
+                self.assertNotEqual(commands, [])
+                for command in commands:
+                    self.assertEqual(command[1], "+toolchain")
+                    self.assertIn(
+                        "--all" if command[2] == "fmt" else "--workspace", command
+                    )
+                    for selection in ("-p", "--package", "--exclude"):
+                        self.assertNotIn(selection, command)
+
     def test_cargo_keeps_each_workspace_in_its_target_directory(self):
         # Cargo reads its configuration from the directory in which it runs,
         # whatever manifest it builds. Where CI and the scripts run it, the
-        # repository's workspace builds into nvx-rs/target, where they find its
-        # artifacts, and the runtime adapter, outside that workspace, into its
-        # own target directory, where they find its guest agent. Neither
-        # setting of the target directory in the environment may stand in for
-        # the configuration's.
+        # repository's workspace, nvx and the crates in crates/, builds into
+        # nvx-rs/target, where they find its artifacts, and the runtime adapter,
+        # outside that workspace, into its own target directory, where they find
+        # its guest agent. Neither setting of the target directory in the
+        # environment may stand in for the configuration's.
         cargo = shutil.which("cargo")
         if cargo is None:
             self.fail("the target directory test runs Cargo, which is not on PATH")
@@ -7420,11 +7469,13 @@ class CiConfigurationTests(unittest.TestCase):
             for name, value in os.environ.items()
             if name not in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR")
         }
+        members = ["nvx", "nvx-sys"]
         for directory, manifest, workspace, packages in (
-            (root, None, root, ["nvx"]),
-            (root, root / "nvx-rs" / "Cargo.toml", root, ["nvx"]),
-            (root / "nvx-rs", None, root, ["nvx"]),
-            (root / "nvx-rs" / "src", None, root, ["nvx"]),
+            (root, None, root, members),
+            (root, root / "nvx-rs" / "Cargo.toml", root, members),
+            (root / "nvx-rs", None, root, members),
+            (root / "nvx-rs" / "src", None, root, members),
+            (root / "crates" / "nvx-sys", None, root, members),
             (adapter, None, adapter, ["runtime-adapter"]),
         ):
             command = [cargo, "metadata", "--format-version", "1", "--no-deps"]
@@ -15051,13 +15102,14 @@ class BuildConstantsTests(unittest.TestCase):
     def test_source_paths_hold_every_input_of_the_guest_binaries(self):
         # The project source archive holds every input of the guest binaries,
         # and each guest's guest_sources names every one but the Python build
-        # recipe, which the archive holds in scripts/. crates/ is an input
-        # before it holds a crate.
+        # recipe, which the archive holds in scripts/. The crates in crates/
+        # are inputs.
         inputs = [
             path.relative_to(BuildConstants.REPO_ROOT).as_posix()
             for path in guest_binaries.guest_binary_source_files()
         ]
-        self.assertIn("crates/.gitkeep", inputs)
+        self.assertIn("crates/nvx-sys/Cargo.toml", inputs)
+        self.assertIn("crates/nvx-sys/src/lib.rs", inputs)
 
         def outside(paths: tuple[str, ...]) -> list[str]:
             return [
@@ -15177,13 +15229,18 @@ class BuildConstantsTests(unittest.TestCase):
         # chacha20 takes cpufeatures 0.3, and sha2 the cpufeatures that ships.
         unshipped_versions = {("cpufeatures", "0.3.1")}
         lock = (BuildConstants.REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8")
-        packages = re.findall(
-            r'^\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"$',
+        entries = re.findall(
+            r'^\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\n(source = )?',
             lock,
             re.MULTILINE,
         )
+        packages = [(name, version) for name, version, _ in entries]
+        # The workspace's crates, which the lockfile locks from their paths, are
+        # NVX's own.
+        own = {name for name, _, source in entries if not source}
+        self.assertIn("nvx", own)
         # A new dependency is one or the other, and a shipped one needs notices.
-        self.assertEqual({name for name, _ in packages} - {"nvx"}, shipped | unshipped)
+        self.assertEqual({name for name, _ in packages} - own, shipped | unshipped)
         self.assertFalse(shipped & unshipped)
         self.assertLessEqual(unshipped_versions, set(packages))
         notices = (BuildConstants.REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(

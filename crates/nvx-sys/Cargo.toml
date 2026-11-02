@@ -1,0 +1,24 @@
+# The OS layer that NVX's crates share. It declares no version yet, so Cargo
+# won't publish it.
+[package]
+name = "nvx-sys"
+edition = "2024"
+
+[lints]
+workspace = true
+
+# The first modules that move here, the guest's descriptor and socket
+# primitives, call nix with these features.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = [
+    "feature",
+    "fs",
+    "net",
+    "poll",
+    "socket",
+    "uio",
+] }
+
+# The tests of those modules.
+[dev-dependencies]
+tempfile = "3.10"

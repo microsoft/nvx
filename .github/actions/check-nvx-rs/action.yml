@@ -1,7 +1,7 @@
 name: Check nvx-rs
 description: >-
-  Format, lint, document, and test the nvx crate, and the runtime adapter that builds on it
-  as an independent adapter
+  Format, lint, document, and test the crates of the Cargo workspace, and the runtime
+  adapter that builds on nvx as an independent adapter
 
 inputs:
   toolchain:
@@ -34,6 +34,9 @@ runs:
           echo "msrv=${msrv}"
         } >> "${GITHUB_OUTPUT}"
 
+    # Formatting, Clippy, the tests, rustdoc, and the Rust version and macOS checks cover every
+    # crate of the Cargo workspace. The steps for the bundled artifacts and the guest binaries
+    # check nvx's features, and the last steps the runtime adapter, which the workspace excludes.
     - name: Check formatting
       shell: bash
       working-directory: nvx-rs
@@ -47,12 +50,12 @@ runs:
         NVX_BUNDLE: skip
       run: |
         set -euo pipefail
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --all-targets --all-features \
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --workspace --all-targets \
+          --all-features -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --workspace --lib \
           -- -D warnings
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib \
-          -- -D warnings
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --no-default-features \
-          -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --workspace --lib \
+          --no-default-features -- -D warnings
 
     - name: Test
       shell: bash
@@ -62,11 +65,13 @@ runs:
         NVX_BUNDLE: skip
       run: |
         set -euo pipefail
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --all-features
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked
-        # Without features, the library still holds the protocol and the execution engine.
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked --lib --no-default-features
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --lib --no-default-features
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --workspace --all-features
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --workspace
+        # Without features, nvx's library still holds the protocol and the execution engine.
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked --workspace --lib \
+          --no-default-features
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --workspace --lib \
+          --no-default-features
 
     # Stages a synthetic release in the current layout, with nvx-rs and its
     # provenance, which the bundled-artifacts test then requires to find.
@@ -103,7 +108,9 @@ runs:
       env:
         NVX_BUNDLE: skip
         RUSTDOCFLAGS: -D warnings
-      run: cargo "+${{ steps.toolchains.outputs.toolchain }}" doc --locked --no-deps --all-features
+      run: >-
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" doc
+        --locked --workspace --no-deps --all-features
 
     - name: Check the minimum supported Rust version
       shell: bash
@@ -113,7 +120,7 @@ runs:
         NVX_BUNDLE: skip
       run: >-
         cargo "+${{ steps.toolchains.outputs.msrv }}" check
-        --locked --all-targets --all-features
+        --locked --workspace --all-targets --all-features
 
     - name: Check the macOS build
       if: runner.os == 'Linux'
@@ -125,8 +132,8 @@ runs:
       run: |
         set -euo pipefail
         rustup target add --toolchain "${{ steps.toolchains.outputs.toolchain }}" aarch64-apple-darwin
-        cargo "+${{ steps.toolchains.outputs.toolchain }}" check --locked --all-targets --all-features \
-          --target aarch64-apple-darwin
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" check --locked --workspace --all-targets \
+          --all-features --target aarch64-apple-darwin
 
     # The guest binaries are static x86_64-unknown-linux-musl executables; see the README's
     # guest binaries section. This step also adds the musl target that the build step needs.

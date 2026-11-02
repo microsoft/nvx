@@ -1,10 +1,11 @@
-# The Cargo workspace of NVX's Rust crates: the nvx crate in nvx-rs/. Cargo
-# builds them into nvx-rs/target, which .cargo/config.toml selects for every
-# Cargo command that runs in the repository, so that CI, the scripts, and the
-# packages find their artifacts there.
+# The Cargo workspace of NVX's Rust crates: the nvx crate in nvx-rs/, and the
+# crates in crates/. Cargo builds them into nvx-rs/target, which
+# .cargo/config.toml selects for every Cargo command that runs in the
+# repository, so that CI, the scripts, and the packages find their artifacts
+# there.
 [workspace]
 resolver = "3"
-members = ["nvx-rs"]
+members = ["nvx-rs", "crates/*"]
 # OpenVMM is a workspace of its own, whose Cargo commands nvx.py runs with
 # OpenVMM's own target directory. The runtime adapter builds on nvx as an
 # independent adapter does, with a lockfile of its own and, through its own

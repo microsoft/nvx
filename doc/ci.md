@@ -2162,16 +2162,18 @@ derive both from the image's contents.
 
 ## Rust crates
 
-The required `nvx-rs` job checks the [`nvx` crate](../nvx-rs/README.md),
-which holds the NVX mechanics, on GitHub-hosted Ubuntu and Windows runners
+The required `nvx-rs` job checks the crates of the repository's Cargo
+workspace, the [`nvx` crate](../nvx-rs/README.md), which holds the NVX
+mechanics, and those in `crates/`, on GitHub-hosted Ubuntu and Windows runners
 through the [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml)
-action, on the Rust release that `rust-toolchain.toml` pins. It runs rustfmt,
-Clippy with warnings denied for all targets and features and for the library
-without default features, the unit, protocol
-conformance-vector and property, and fake-OpenVMM instance tests, a test that
-the direct children of `nvx::host` depend on one another without cycles, rustdoc
-with warnings denied, the minimum Rust version check, and the macOS cross-check.
-It also validates bundled artifact staging with a fixture package. The action
+action, on the Rust release that `rust-toolchain.toml` pins. For every crate of
+the workspace, it runs rustfmt, Clippy with warnings denied for all targets and
+features and for the library without default features, the tests, rustdoc with
+warnings denied, the minimum Rust version check, and the macOS cross-check. The
+tests of `nvx` are the unit, protocol conformance-vector and property, and
+fake-OpenVMM instance tests, and a test that the direct children of `nvx::host`
+depend on one another without cycles. The job also validates the bundled
+artifact staging of `nvx` with a fixture package. The action
 sets `NVX_BUNDLE=skip` for `--all-features` builds, so that `bundled` stages
 nothing instead of downloading the pinned release.
 
