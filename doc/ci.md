@@ -1187,7 +1187,7 @@ that tested the head, which GitHub attaches to the commit, so it reports
 tests the pull request merged into the latest `dev`, checks the result before
 the queue merges it (see [Merge queue](#merge-queue)). A pull request whose
 head has no run yet needs a push, a close and reopen, or its marking ready for
-review.
+review. (Scratch layer for validating stacked pull request CI; never merged.)
 
 ## Merge queue
 
