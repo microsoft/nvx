@@ -5011,6 +5011,9 @@ def write_benchmark_metadata(
         "backend": backend,
         "microvm_abi_version": microvm_abi_version,
         "processors": processors,
+        # Benchmarks never give the microVM nested virtualization; collection
+        # refuses results that record it (doc/benchmarks.md).
+        "nested_virtualization": False,
         "restore_processor_targets": (
             list(RESTORE_VCPU_TARGETS)
             if args.suite in {"snapshot-restore-vcpu", "platform-snapshot-restore-vcpu"}
@@ -6478,6 +6481,7 @@ def result_document(
             "backend": backend or args.backend,
             "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
             "processors": args.processors,
+            "nested_virtualization": False,
             "artifact_revisions": {
                 "nvx": _git_revision(args.nvx_dir.resolve()),
                 "openvmm": _git_revision(args.openvmm_dir.resolve()),

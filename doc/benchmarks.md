@@ -38,6 +38,14 @@ history. ABI 3 began new series because its devices stopped offering
 `VIRTIO_F_ACCESS_PLATFORM`, so that its guests stopped mapping virtio buffers
 through the DMA API, and moved from ISA IRQs, which the PIC also sees, to
 IOAPIC inputs of their own.
+Benchmarks never give the microVM
+[nested virtualization](run.md#nested-virtualization), which changes the CPU
+that the guest sees and the backend's work. `benchmark-metadata.json` and the
+`controls` of the lifecycle result record `"nested_virtualization": false`,
+and collection refuses a result that records anything else, so no result of
+a microVM with nested virtualization is collected, compared with a baseline,
+or persisted, and no series holds one. Results without the field predate it
+and measured ordinary microVMs.
 The OpenVMM benchmark coordinator is implemented in `scripts/nvx_tools/benchmark.py` and exposed
 through the supported NVX CLI. Guest payloads live in `scripts/nvx_tools/benchmark_scripts`; the
 coordinator fills the `.sh.in` templates before use.

@@ -21431,6 +21431,8 @@ class BenchmarkTests(unittest.TestCase):
 
         host.assert_called_once_with(args)
         self.assertEqual(document["host"], {"runner_name": "azure-windows-3"})
+        # Benchmarks never give the microVM nested virtualization.
+        self.assertIs(document["controls"]["nested_virtualization"], False)
 
     def test_host_provenance_names_workspace_temporary_and_scratch_volumes(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -24033,6 +24035,7 @@ class BenchmarkTests(unittest.TestCase):
 
         self.assertEqual(document["suite"], "platform-snapshot-restore-vcpu")
         self.assertEqual(document["processors"], 8)
+        self.assertIs(document["nested_virtualization"], False)
         self.assertEqual(document["restore_processor_targets"], [1, 2, 4, 8])
 
     def test_benchmark_preserves_exact_process_wall_samples(self):

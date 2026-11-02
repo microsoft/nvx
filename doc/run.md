@@ -125,6 +125,8 @@ host hypervisor's emulation of VMX, which the default microVM never reaches.
 Keep it for workloads that need to run VMs. The guest's VMs live within the
 microVM's RAM and processors; see the
 [sandbox](#sandbox-nested-virtualization) for their accounting.
+[Benchmarks](benchmarks.md) never run with it, and their collection refuses
+results that record it.
 
 ## Run OpenVMM directly
 

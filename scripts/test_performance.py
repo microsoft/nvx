@@ -2831,6 +2831,61 @@ class PerformanceTests(unittest.TestCase):
                     )
                 )
 
+    def test_refuses_results_of_nested_virtualization(self):
+        metadata = {
+            "platform": "linux-kvm-baremetal",
+            "backend": "kvm",
+            "microvm_abi_version": 3,
+            "processors": 1,
+        }
+        for value, message in (
+            (True, "measured a microVM with nested virtualization"),
+            ("false", "nested_virtualization must be false"),
+            (None, "nested_virtualization must be false"),
+        ):
+            with (
+                self.subTest(value=value),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                logs = root / "logs"
+                logs.mkdir()
+                (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+                (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+                (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                    json.dumps({**metadata, "nested_virtualization": value}),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(performance.PerformanceError, message):
+                    performance.collect_results(
+                        "linux-kvm-baremetal", "commit", logs, root / "results"
+                    )
+                self.assertFalse((root / "results").exists())
+
+                document = lifecycle_document()
+                controls = cast(dict[str, object], document["controls"])
+                controls["nested_virtualization"] = value
+                lifecycle = root / "lifecycle.json"
+                lifecycle.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaisesRegex(performance.PerformanceError, message):
+                    performance.read_lifecycle_data("linux-kvm-baremetal", lifecycle)
+
+        # Ordinary microVMs record false, and earlier results nothing.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                json.dumps({**metadata, "nested_virtualization": False}),
+                encoding="utf-8",
+            )
+            path = performance.collect_results(
+                "linux-kvm-baremetal", "commit", logs, root / "results"
+            )
+            self.assertEqual(path.name, "linux-kvm-baremetal-microvm-v3-1vcpu.csv")
+
     def test_rejects_unreadable_benchmark_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:
             logs = Path(temporary)

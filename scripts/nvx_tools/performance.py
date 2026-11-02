@@ -864,9 +864,31 @@ def _json_object(value: object, location: str) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _refuse_nested_virtualization(values: dict[str, object], location: str) -> None:
+    """Refuse the results of a microVM with nested virtualization.
+
+    Nested virtualization changes the CPU that the guest sees and the work of
+    the backend, so its measurements would never be comparable with those of
+    ordinary microVMs, and NVX keeps no series of its own for them: no result
+    that records it is collected, compared, or persisted. Results that predate
+    the control measured ordinary microVMs.
+    """
+    nested = values.get("nested_virtualization", False)
+    if nested is True:
+        raise PerformanceError(
+            f"{location} measured a microVM with nested virtualization, whose "
+            "results NVX never collects, compares, or persists"
+        )
+    if nested is not False:
+        raise PerformanceError(
+            f"{location} nested_virtualization must be false, not {nested!r}"
+        )
+
+
 def _benchmark_dimensions(
     values: dict[str, object], expected_platform: str, location: str
 ) -> BenchmarkDimensions:
+    _refuse_nested_virtualization(values, location)
     abi_value = values.get("microvm_abi_version")
     processors_value = values.get("processors")
     if abi_value is None and processors_value is None:
