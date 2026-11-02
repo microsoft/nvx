@@ -82,7 +82,7 @@ CRATE_FILES = {
     "src/lib.rs": "//! Demo.\n",
     "src/main.rs": "fn main() {}\n",
 }
-# The crate in crate/, alone in its workspace, as nvx-rs/ is.
+# The crate in crate/, alone in its workspace.
 CRATE = Crate("crate", ("build.rs", "artifacts.json", "src/lib.rs"))
 CHECKOUT_FILES = {
     **{f"crate/{path}": text for path, text in CRATE_FILES.items()},
@@ -801,20 +801,29 @@ class ManifestTests(unittest.TestCase):
     def test_ci_publishes_the_nvx_crate_alone_with_a_version_that_it_can_publish(self):
         # The repository's own crates: CI publishes nvx alone, at a version
         # whose counter the next release raises, and a run that gives it the
-        # next version changes only its version in its manifest and lockfile.
+        # next version changes only its version in its manifest and in the
+        # lockfile of its workspace, at the repository's root, whose manifest
+        # and lockfile are inputs of the crate too.
         checkout = crate_release.Checkout.open(
             BuildConstants.REPO_ROOT, crate_release.CRATES
         )
         self.assertEqual(checkout.names, ("nvx",))
         self.assertEqual(
-            checkout.inputs, ("nvx-rs/", ".cargo/config", ".cargo/config.toml")
+            checkout.inputs,
+            (
+                "nvx-rs/",
+                "Cargo.toml",
+                "Cargo.lock",
+                ".cargo/config",
+                ".cargo/config.toml",
+            ),
         )
         counter = checkout.declared.counter
         self.assertIsNotNone(counter)
         assert counter is not None
         following = Version(*checkout.declared.core, (counter[0], str(counter[1] + 1)))
         files = checkout.versioned(following)
-        self.assertEqual(sorted(files), ["nvx-rs/Cargo.lock", "nvx-rs/Cargo.toml"])
+        self.assertEqual(sorted(files), ["Cargo.lock", "nvx-rs/Cargo.toml"])
         for path, data in files.items():
             with self.subTest(path=path):
                 self.assertEqual(

@@ -18,9 +18,12 @@ run publishes `dev` as the next pre-release, such as `0.1.0-alpha.4`, whenever
 the crate changed; see [crates.io releases](../doc/ci.md#cratesio-releases).
 Cargo resolves a requirement such as `nvx = "0.1.0-alpha.4"` to the newest
 pre-release of `0.1.0`, so require an exact version, such as
-`nvx = "=0.1.0-alpha.4"`, to keep one. It has a
-`Cargo.lock` of its own; a workspace at the repository root would interact with
-the nested `openvmm/` workspace.
+`nvx = "=0.1.0-alpha.4"`, to keep one. It is a member of the Cargo workspace
+whose manifest is at the repository's root, which holds its `Cargo.lock`, its
+lints, and the `guest` profile of its guest binaries, and whose
+`.cargo/config.toml` keeps the build output in `nvx-rs/target` for every Cargo
+command that runs in the repository. OpenVMM's nested workspace stays out of
+it.
 
 ## Layout
 
@@ -2636,9 +2639,12 @@ Native guest builds, the digest-pinned Docker Rust stage, and CI all call this
 routine. Docker builds the set once and installs identical bytes in all three
 guest images; Ubuntu determinism checks rebuild from fresh targets.
 
-Of this crate, the guest images depend only on the files that this build reads:
-`Cargo.toml`, `Cargo.lock`, `build.rs`, any Cargo configuration in `.cargo/`,
-and every file under `src/` but the host side and the test modules. The host
+Of the repository, the guest images depend only on the files that this build
+reads: the workspace's `Cargo.toml` and `Cargo.lock` and its Cargo
+configuration in `.cargo/`, at the repository's root; this crate's
+`Cargo.toml`, `build.rs`, any Cargo configuration in its `.cargo/`, and every
+file under `src/` but the host side and the test modules; and the files of the
+workspace's other crates, in `crates/`, but their test modules. The host
 side is `src/host/`, `src/testing/`, and the `nvx-rs` and `nvx-fake-openvmm`
 binaries; the test modules are the `tests.rs` files and the `tests`
 directories. CI keys the guest images on those

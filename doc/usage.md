@@ -529,9 +529,12 @@ python3 scripts/nvx.py guest-binary-source-identity [--root PATH]
 
 Prints the source digest that guest package manifests record for the Rust guest
 binaries: a digest of the relative path and content of every file that their
-build reads. Those are the crate's manifest, lockfile, and build script, its
-Cargo configuration under `nvx-rs/.cargo/`, every file under `nvx-rs/src/`
-except the host side and the test modules, `rust-toolchain.toml`, and the
+build reads. Those are the manifest, lockfile, and Cargo configuration under
+`.cargo/` of the Cargo workspace, at the repository's root, the crate's
+manifest and build script, its Cargo configuration under `nvx-rs/.cargo/`,
+every file under `nvx-rs/src/` except the host side and the test modules,
+every file of the workspace's other crates, under `crates/`, except their test
+modules, `rust-toolchain.toml`, and the
 `build_constants.py` and `guest_binaries.py` build modules. The host side is
 the `host` and `testing` modules and the `nvx-rs` and `nvx-fake-openvmm`
 binaries; the test modules are the `tests.rs` files and the `tests`

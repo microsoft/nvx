@@ -437,12 +437,14 @@ of the Rust guest binaries' inputs that the guest package manifests record,
 which `nvx.py guest-binary-source-identity` prints, because the images carry
 only those binaries of `nvx-rs` and `hashFiles` hashes contents only. The
 inputs are the files that the guest binaries' build reads:
-`rust-toolchain.toml`; the crate's manifest, lockfile, build script, and Cargo
-configuration; every file under `nvx-rs/src/` but the host side, which is the
+`rust-toolchain.toml`; the manifest, lockfile, and Cargo configuration of the
+crate's workspace, at the repository's root; the crate's manifest, build
+script, and Cargo configuration; every file under `nvx-rs/src/` but the host side, which is the
 `host` and `testing` modules and the `nvx-rs` and `nvx-fake-openvmm` binaries,
 and the test modules, which are the `tests.rs` files and the `tests`
-directories; and the two Python modules that
-define the build. `GuestRustBuildConstants` in
+directories; every file of the workspace's other crates, under `crates/`, but
+their test modules; and the two Python modules that define the build.
+`GuestRustBuildConstants` in
 [`build_constants.py`](../scripts/nvx_tools/build_constants.py) selects them,
 and every guest build fails when Cargo's dep-info for the nine executables
 lists another file, such as a host module that guest code starts to compile.
@@ -1564,7 +1566,9 @@ other path selects each suite that takes it as an input:
 - `run-microvm-tests` enables the NVX microVM tests and their debug-kernel
   jobs. Their inputs are the OpenVMM pin, the guests and every input of their
   cache keys, the `nvx` crate, whose executable their scenarios run and whose
-  guest binaries every guest ships, the runtime adapter in
+  guest binaries every guest ships, with the rest of its Cargo workspace, the
+  workspace's manifest, lockfile, and Cargo configuration and its crates under
+  `crates/`, the runtime adapter in
   `tests/runtime-adapter/`, which they test, the workflows,
   actions, and CLI modules that their jobs and the jobs that build their
   artifacts run, the runner setup scripts, the Rust pin, and
@@ -1573,7 +1577,8 @@ other path selects each suite that takes it as an input:
   package jobs, which package its release, and so the performance regression
   gate of a pull request or merge group. Their inputs are the OpenVMM pin, the
   guests and every input of their cache keys, the `nvx` crate, which every
-  package ships, the performance history and expected hosts under `data/`,
+  package ships, with the rest of its Cargo workspace, the performance history
+  and expected hosts under `data/`,
   `VERSION`, `LICENSE`, the workflows, actions, and CLI modules that the
   platform and package jobs, the gate, and the jobs that build their artifacts
   run, the runner setup scripts, the Rust pin, and `.gitattributes`. A pull
@@ -1671,8 +1676,9 @@ artifacts: the reusable workflows and actions that these reach,
 the files that the cache keys there hash and the source identity's, the CLI
 modules of the `nvx.py` commands that they run, which the tests map from
 `nvx.py`'s parser, with every module that those import and every file that
-those read beside them, and the `nvx` crate, from which the `nvx-rs` build
-jobs build the executable. The tests also check that no file of `nvx-rs` but
+those read beside them, and the `nvx` crate and the rest of its Cargo
+workspace, from which the `nvx-rs` build jobs build the executable. The tests
+also check that no file of `nvx-rs` but
 the inputs of the guest binaries changes a guest image key, while every one
 selects the NVX microVM tests and the platform and package jobs.
 
@@ -2114,7 +2120,8 @@ release:
 ```bash
 rustup toolchain install RELEASE --profile minimal --target x86_64-unknown-uefi
 cd openvmm
-cargo +RELEASE build -p guest_test_uefi --target x86_64-unknown-uefi --profile release
+cargo +RELEASE build -p guest_test_uefi --target x86_64-unknown-uefi --profile release \
+  --target-dir target
 ```
 
 Then change the release in `rust-toolchain.toml`,
@@ -2182,8 +2189,9 @@ executables.
 
 The `nvx-rs` job also checks the
 [runtime adapter](../tests/runtime-adapter/README.md) in
-`tests/runtime-adapter/`, an independent adapter that builds on `nvx` with a
-lockfile of its own, default features off, and the public API only. For each
+`tests/runtime-adapter/`, an independent adapter that builds on `nvx` from
+outside the repository's Cargo workspace, with a lockfile and a target
+directory of its own, default features off, and the public API only. For each
 of its configurations, protocol-only, host-only, and, on Linux, guest-only for
 `x86_64-unknown-linux-musl`, the action runs Clippy with warnings denied, the
 build, the tests, rustdoc with warnings denied, and a check with the
@@ -2238,7 +2246,8 @@ Linux jobs build the guest agent, a static musl executable, first, and the
 Windows job takes the one that `distro-artifacts` builds on Linux, as it takes
 the Ubuntu and Azure Linux images. The adapter's other tests, including those
 of its guest agent, run in the `nvx-rs` job. Changes under
-`tests/runtime-adapter/` or `nvx-rs/`, which the adapter builds on, therefore
+`tests/runtime-adapter/`, or to `nvx-rs/` and the rest of its Cargo workspace,
+which the adapter builds on, therefore
 trigger the NVX microVM test matrix.
 
 ## nvx-rs mutation testing
@@ -2252,7 +2261,9 @@ golden tests that compared `nvx-rs` with behavior recorded from Python.
 [cargo-mutants](https://mutants.rs/), at the release that it pins, on
 GitHub-hosted runners on a manual dispatch. It never runs for pull requests, so
 no required check depends on it. Its inputs name the files to mutate, as globs
-relative to `nvx-rs`, the arguments of the test binaries that select the tests,
+relative to `nvx-rs`, which each job gives cargo-mutants from the repository's
+root, the root of the crate's workspace, from which cargo-mutants matches a glob
+that holds a `/`, the arguments of the test binaries that select the tests,
 such as a module's filters, the arguments of `cargo test` that select the test
 targets, such as `--lib` or `--test cli`, the runner, and the number of jobs,
 from 1 to 16, that share the mutants. Each job runs cargo-mutants in place, in
@@ -2300,7 +2311,8 @@ edits the diagrams by hand:
 again every night, with the nightly full run of CI, and commits them to `dev`
 when they changed, so that `dev` takes at most one push of them a night outside
 the merge queue (see [Pushes outside the queue](#pushes-outside-the-queue)).
-They follow a merge that changes their inputs, `nvx-rs/`, the Rust pin, the
+They follow a merge that changes their inputs, `nvx-rs/`, the manifest and
+lockfile of its Cargo workspace, the Rust pin, the
 script, the build constants that name the crate's targets, or the workflow,
 within a day.
 
@@ -2413,7 +2425,9 @@ Copilot always runs the version on `dev`, even for sessions based on other
 branches, so changes reach agent sessions only after they merge. Pushes run it
 as a normal workflow for validation when they change the workflow or a file
 that its steps take versions, requirements, metadata, or code from: the
-`build-guest-artifacts` action, all `nvx-rs/**` files, the files that pin its Rust, cargo-nextest,
+`build-guest-artifacts` action, the Cargo workspace of `nvx-rs`, which is the
+workspace's `Cargo.toml`, `Cargo.lock`, and `.cargo/**` and all `nvx-rs/**`
+and `crates/**` files, the files that pin its Rust, cargo-nextest,
 and shell linter versions, `requirements-dev.txt`, `SOURCE-MANIFEST.json`,
 `.gitmodules`, the OpenVMM submodule pin, and the NVX CLI and its modules.
 

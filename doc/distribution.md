@@ -97,8 +97,8 @@ published merely because it is aggregated with Linux. See
 The `nvx-rs` executables are MIT licensed NVX code that statically links the
 Rust standard library and permissively licensed crates, with musl and LLVM's
 `libunwind` on Linux and the Microsoft C runtime on Windows.
-`THIRD_PARTY_NOTICES.md` lists each with its license; `nvx-rs/Cargo.lock`
-pins every crate by checksum.
+`THIRD_PARTY_NOTICES.md` lists each with its license; `Cargo.lock`, the
+lockfile of the repository's Cargo workspace, pins every crate by checksum.
 
 ## Release archives
 
@@ -162,7 +162,7 @@ change reaches crates.io within a day of its merge.
 
 The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
 publishes. A pull request changes it to start another series, such as
-`0.2.0-alpha.1`. Only `nvx`'s version changes in `nvx-rs/Cargo.lock` and
+`0.2.0-alpha.1`. Only `nvx`'s version changes in the workspace's `Cargo.lock` and
 `tests/runtime-adapter/Cargo.lock`. CI publishes the crates of a workspace
 with one version, so a crate that it publishes besides `nvx` declares the same
 version, and requires each of the others at exactly that version; see

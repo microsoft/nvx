@@ -246,14 +246,17 @@ class MutantsWorkflowStepTests(unittest.TestCase):
         environment = {key: DISPATCH[key] for key in ("FILES", "TESTS", "TARGETS")}
         result, arguments = self._mutate(environment, 0)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # cargo-mutants matches a glob with a / against the path from the root
+        # of the workspace, which holds the crate in nvx-rs, so the step gives
+        # it the path of the inputs' files from there.
         self.assertEqual(
             arguments,
             [
                 *common,
                 "--file",
-                "src/host/a.rs",
+                "nvx-rs/src/host/a.rs",
                 "--file",
-                "src/host/b/*.rs",
+                "nvx-rs/src/host/b/*.rs",
                 "--",
                 "--lib",
                 "--",
@@ -262,12 +265,16 @@ class MutantsWorkflowStepTests(unittest.TestCase):
                 "slow",
             ],
         )
-        # Without test or target arguments, every test of every target runs.
+        # Without test or target arguments, every test of every target runs. A
+        # glob without a / matches the names of files, wherever they are.
         result, arguments = self._mutate(
-            {"FILES": "src/a.rs", "TESTS": "", "TARGETS": ""}, 0
+            {"FILES": "src/a.rs crc.rs", "TESTS": "", "TARGETS": ""}, 0
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(arguments, [*common, "--file", "src/a.rs", "--", "--"])
+        self.assertEqual(
+            arguments,
+            [*common, "--file", "nvx-rs/src/a.rs", "--file", "crc.rs", "--", "--"],
+        )
 
     def test_missed_mutants_and_timeouts_are_outcomes_and_failures_fail(self):
         environment = {"FILES": "src/a.rs", "TESTS": "", "TARGETS": ""}

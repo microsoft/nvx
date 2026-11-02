@@ -118,8 +118,12 @@ class GuestBinaryBuildTests(unittest.TestCase):
             relative,
         )
         self.assertIn("rust-toolchain.toml", relative)
+        # The workspace's manifest, lockfile, and Cargo configuration, which a
+        # build of the crate reads, and the crate's own manifest.
+        self.assertIn("Cargo.toml", relative)
+        self.assertIn("Cargo.lock", relative)
+        self.assertIn(".cargo/config.toml", relative)
         self.assertIn("nvx-rs/Cargo.toml", relative)
-        self.assertIn("nvx-rs/Cargo.lock", relative)
         self.assertIn("nvx-rs/build.rs", relative)
         self.assertIn("scripts/nvx_tools/build_constants.py", relative)
         self.assertIn("scripts/nvx_tools/guest_binaries.py", relative)
@@ -224,17 +228,36 @@ class GuestBinaryBuildTests(unittest.TestCase):
                         guest_binaries.guest_binary_source_sha256(root), identity
                     )
                     path.write_bytes(original)
-            # A new module counts unless it belongs to the host side or tests.
+            # A new module counts unless it belongs to the host side or tests,
+            # and so does a new file of the workspace's other crates or of its
+            # Cargo configuration.
             for name in (
                 "nvx-rs/src/guest/added.rs",
                 "nvx-rs/src/added.rs",
                 "nvx-rs/.cargo/config.toml",
+                ".cargo/config.toml",
+                "crates/nvx-sys/Cargo.toml",
+                "crates/nvx-sys/src/lib.rs",
             ):
                 with self.subTest(added=name):
                     path = root / name
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text("added\n", encoding="utf-8")
                     self.assertNotEqual(
+                        guest_binaries.guest_binary_source_sha256(root), identity
+                    )
+                    path.unlink()
+            # The tests of the workspace's other crates don't.
+            for name in (
+                "crates/nvx-sys/src/fd/tests.rs",
+                "crates/nvx-sys/src/fd/tests/unix.rs",
+                "crates/nvx-sys/tests/fd.rs",
+            ):
+                with self.subTest(added=name):
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("added\n", encoding="utf-8")
+                    self.assertEqual(
                         guest_binaries.guest_binary_source_sha256(root), identity
                     )
                     path.unlink()
@@ -266,8 +289,9 @@ class GuestBinaryBuildTests(unittest.TestCase):
             source.mkdir(parents=True)
             tools.mkdir(parents=True)
             for path in (
+                root / "Cargo.toml",
+                root / "Cargo.lock",
                 crate / "Cargo.toml",
-                crate / "Cargo.lock",
                 crate / "build.rs",
                 source / "lib.rs",
                 tools / "build_constants.py",
@@ -296,8 +320,9 @@ class GuestBinaryBuildTests(unittest.TestCase):
             module.mkdir(parents=True)
             tools.mkdir(parents=True)
             for path in (
+                root / "Cargo.toml",
+                root / "Cargo.lock",
                 crate / "Cargo.toml",
-                crate / "Cargo.lock",
                 crate / "build.rs",
                 crate / "src" / "lib.rs",
                 module / "encode.rs",
@@ -337,8 +362,9 @@ class GuestBinaryBuildTests(unittest.TestCase):
             recipe_constants = tools / "build_constants.py"
             recipe_builder = tools / "guest_binaries.py"
             files = {
+                root / "Cargo.toml": '[workspace]\nmembers = ["nvx-rs"]\n',
+                root / "Cargo.lock": "# lock\n",
                 crate / "Cargo.toml": '[package]\nname = "fixture"\n',
-                crate / "Cargo.lock": "# lock\n",
                 crate / "build.rs": "fn main() {}\n",
                 source / "lib.rs": "pub fn fixture() {}\n",
                 recipe_constants: "PROFILE = 'guest'\n",

@@ -1005,6 +1005,10 @@ class WorkflowTests(unittest.TestCase):
         constants = sys.modules[diagrams.GuestRustBuildConstants.__module__].__file__
         inputs = [
             f"{diagrams.MANIFEST.parent.relative_to(REPO_ROOT).as_posix()}/**",
+            # The manifest and the lockfile of the workspace, from which
+            # cargo-modules loads the crate.
+            "Cargo.toml",
+            "Cargo.lock",
             "rust-toolchain.toml",
             Path(diagrams.__file__).resolve().relative_to(REPO_ROOT).as_posix(),
             # The script takes the crate and its targets from the build constants.

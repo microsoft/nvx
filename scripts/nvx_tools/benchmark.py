@@ -29,7 +29,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from string import Template
 from typing import IO, Literal, NoReturn, Protocol, TextIO, TypedDict, cast
@@ -580,9 +580,14 @@ def network_port(value: str) -> int:
     return parsed
 
 
-def run_checked(command: Sequence[str], *, cwd: Path | None = None) -> None:
+def run_checked(
+    command: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> None:
     print("+", subprocess.list2cmdline(list(command)), flush=True)
-    subprocess.run(command, cwd=cwd, check=True)
+    subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
 def _read_benchmark_script(name: str) -> str:
@@ -6117,6 +6122,7 @@ def build_whp(openvmm_dir: Path) -> Path:
     run_checked(
         ["cargo", "build", "--release", "-p", "openvmm", "--bin", "openvmm"],
         cwd=openvmm_dir,
+        env=common.openvmm_cargo_environment(openvmm_dir),
     )
     return require_file(
         openvmm_dir / "target" / "release" / OpenVMMBuildConstants.WINDOWS_BINARY_NAME,
@@ -6157,6 +6163,7 @@ def build_kvm_native(openvmm_dir: Path) -> Path:
             "openvmm",
         ],
         cwd=openvmm_dir,
+        env=common.openvmm_cargo_environment(openvmm_dir),
     )
     return require_file(
         openvmm_dir / "target" / "release" / "openvmm",
@@ -6176,6 +6183,7 @@ def build_phase2_whp_host(openvmm_dir: Path) -> Path:
             "phase2_snapshot_bench",
         ],
         cwd=openvmm_dir,
+        env=common.openvmm_cargo_environment(openvmm_dir),
     )
     return require_file(
         openvmm_dir / "target" / "release" / "examples" / "phase2_snapshot_bench.exe",
@@ -6611,6 +6619,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                     "phase2_snapshot_bench",
                 ],
                 cwd=openvmm_dir,
+                env=common.openvmm_cargo_environment(openvmm_dir),
             )
             phase2_executable = require_file(
                 openvmm_dir

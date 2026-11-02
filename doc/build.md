@@ -44,8 +44,8 @@ uses `--locked`, a fresh target directory, disabled incremental compilation,
 stable source and Cargo-home path remapping, and no linker build IDs. One
 Cargo invocation builds all nine programs, and every result must pass
 `check-static-elf`. The output's `manifest.json` binds the exact build pins,
-one digest over the `nvx` crate, the shared Python build recipe, and
-`rust-toolchain.toml`, and each binary SHA-256.
+one digest over the `nvx` crate and the root files of its Cargo workspace, the
+shared Python build recipe, and `rust-toolchain.toml`, and each binary SHA-256.
 
 The native build keeps the Linux archive, the Ubuntu Base archive, and the
 supplemental Ubuntu packages under `downloads/` in the cache directory,
@@ -67,6 +67,18 @@ MSVC on Windows. For example, this builds musl without requiring `/dev/mshv`:
 ```bash
 python3 scripts/nvx.py build-openvmm --backend mshv
 ```
+
+Cargo reads the configuration of the directory in which it runs and of its
+parents, so in `openvmm/` it also reads the repository's `.cargo/config.toml`,
+which keeps the build output of the repository's own Cargo workspace in
+`nvx-rs/target`. `nvx.py` therefore runs OpenVMM's Cargo commands, those of
+`build-openvmm`, `test-openvmm-unit`, `test-openvmm`, and `benchmark`, with
+`CARGO_TARGET_DIR` set to `openvmm/target`, where it takes OpenVMM's artifacts
+from, whatever the environment names. A Cargo command that you run in
+`openvmm/` yourself builds in `nvx-rs/target` too, unless it names
+`--target-dir target` or you set `CARGO_TARGET_DIR` to the absolute path of
+`openvmm/target`, which, unlike `--target-dir`, also reaches aliases such as
+`cargo xflowey` and the Cargo commands that they run.
 
 The combined `build` command rejects unsupported OS/backend combinations before
 producing guest artifacts. Guest-only and source-only commands do not select an
@@ -360,7 +372,8 @@ and the sandbox scratch template, under `scratch_template_sha256` in its
 SHA-256, the digest of the `nvx-rs` sources that built it, and the build's
 Rust release, target, and features. Its `guest_rust` section pins Rust 1.95.0
 and `x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
-`nvx-rs` and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 2,
+the Cargo workspace's `Cargo.toml`, `Cargo.lock`, and `.cargo`, `nvx-rs`, and
+`rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 2,
 control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
 part of this platform manifest.

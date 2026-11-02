@@ -20,7 +20,11 @@ on:
       - .github/actions/check-quality/action.yml
       - .gitmodules
       - SOURCE-MANIFEST.json
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/**
       - nvx-rs/**
+      - crates/**
       - openvmm
       - requirements-dev.txt
       - rust-toolchain.toml

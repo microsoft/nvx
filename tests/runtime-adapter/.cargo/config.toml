@@ -1,0 +1,6 @@
+# The adapter builds outside the repository's workspace, in a target directory
+# of its own, rather than in the workspace's nvx-rs/target, which the
+# repository's .cargo/config.toml selects. Paths here are relative to the
+# adapter's directory.
+[build]
+target-dir = "target"

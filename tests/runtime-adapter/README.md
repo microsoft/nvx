@@ -6,7 +6,10 @@ builds and runs it, and it depends on [`nvx`](../../nvx-rs/README.md) the way
 an adapter outside the repository does:
 
 - as a path dependency with default features off;
-- with a `Cargo.lock` of its own, outside any other workspace;
+- with a `Cargo.lock` of its own, outside any other workspace: the
+  repository's workspace excludes it;
+- with a target directory of its own, `target` in this directory, which its
+  `.cargo/config.toml` selects when Cargo runs here;
 - through the public API alone, with unsafe code forbidden;
 - with the minimum supported Rust version of `nvx`.
 

@@ -1,0 +1,31 @@
+# The Cargo workspace of NVX's Rust crates: the nvx crate in nvx-rs/. Cargo
+# builds them into nvx-rs/target, which .cargo/config.toml selects for every
+# Cargo command that runs in the repository, so that CI, the scripts, and the
+# packages find their artifacts there.
+[workspace]
+resolver = "3"
+members = ["nvx-rs"]
+# OpenVMM is a workspace of its own, whose Cargo commands nvx.py runs with
+# OpenVMM's own target directory. The runtime adapter builds on nvx as an
+# independent adapter does, with a lockfile of its own and, through its own
+# .cargo/config.toml, a target directory of its own.
+exclude = ["openvmm", "tests/runtime-adapter"]
+
+# The guest binaries: small, static, and stripped.
+[profile.guest]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+missing_docs_in_private_items = "warn"

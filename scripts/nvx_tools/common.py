@@ -102,6 +102,27 @@ def openvmm_binary_path() -> Path:
     )
 
 
+def openvmm_cargo_environment(
+    directory: Path, environment: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Return ``environment``, else this process's, for the Cargo commands that
+    build or test the OpenVMM workspace in ``directory``, with the workspace's
+    own target directory, where their callers find its artifacts.
+
+    Cargo reads the configuration of the directory in which it runs and of each
+    of its parents, so in the OpenVMM submodule it also reads the repository's
+    ``.cargo/config.toml``, which keeps the build output of the repository's
+    own workspace in ``nvx-rs/target``, while OpenVMM's configuration names no
+    target directory. ``CARGO_TARGET_DIR`` overrides both, and any target
+    directory that the environment names.
+    """
+    result = dict(os.environ if environment is None else environment)
+    result["CARGO_TARGET_DIR"] = os.fspath(
+        directory.resolve() / OpenVMMBuildConstants.TARGET_DIRECTORY_NAME
+    )
+    return result
+
+
 @dataclass(frozen=True)
 class CommandResult:
     args: tuple[str, ...]

@@ -829,13 +829,18 @@ fn rename_away_and_back(path: &Path) {
 }
 
 /// Makes `link` a junction to the directory `target`, which needs no privilege.
+///
+/// `mklink` reads a `/` as the start of an option, so it gets the paths with `\` alone: Cargo
+/// joins the target directory that the repository's configuration names, `nvx-rs/target`, to the
+/// checkout's root as written, so the paths below `CARGO_TARGET_TMPDIR` hold both separators.
 #[cfg(windows)]
 fn junction(link: &Path, target: &Path) {
+    let native = |path: &Path| path.components().collect::<PathBuf>();
     let mut command = Command::new("cmd");
     command
         .args(["/C", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
+        .arg(native(link))
+        .arg(native(target))
         .stdout(Stdio::null());
     let status = supervisor::spawn_command(&mut command)
         .unwrap()

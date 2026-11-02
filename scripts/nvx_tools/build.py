@@ -42,6 +42,7 @@ from .common import (
     download_verified,
     format_size,
     normalized_sha256_file,
+    openvmm_cargo_environment,
     openvmm_git_state,
     require_file,
     require_success,
@@ -434,6 +435,7 @@ def _restore_openvmm_packages(config: OpenVmmBuildConfig) -> None:
     _run_openvmm_command(
         ["cargo", "xflowey", "restore-packages", "--no-compat-igvm"],
         cwd=config.directory,
+        env=openvmm_cargo_environment(config.directory),
     )
 
 
@@ -448,7 +450,7 @@ def _build_openvmm_musl(
         sysroot / "lib" / "libsymcrypt.a",
         "restored OpenVMM musl SymCrypt library",
     )
-    environment = os.environ.copy()
+    environment = openvmm_cargo_environment(config.directory)
     environment.update(
         {
             "X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR": os.fspath(sysroot),
@@ -501,6 +503,7 @@ def build_openvmm(
                 OpenVMMBuildConstants.BINARY_NAME,
             ],
             cwd=config.directory,
+            env=openvmm_cargo_environment(config.directory),
         )
     source = require_file(
         config.openvmm_target_output(selected),

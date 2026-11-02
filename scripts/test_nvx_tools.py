@@ -2481,8 +2481,10 @@ class NvxRsTests(unittest.TestCase):
         ]
         self.assertEqual(relative, sorted(relative))
         for name in (
+            "Cargo.toml",
+            "Cargo.lock",
+            ".cargo/config.toml",
             "nvx-rs/Cargo.toml",
-            "nvx-rs/Cargo.lock",
             "nvx-rs/build.rs",
             "nvx-rs/src/bin/nvx-rs.rs",
             "rust-toolchain.toml",
@@ -3322,12 +3324,21 @@ class CiTests(unittest.TestCase):
                 patch.object(ci, "require_tool", return_value="cargo"),
                 patch.object(ci, "run_capture", return_value=fuzz_crates) as capture,
                 patch.object(ci, "run_checked") as run_checked,
-                patch.dict(os.environ, {"NVX_TEST_VARIABLE": "1"}, clear=True),
+                patch.dict(
+                    os.environ,
+                    {"NVX_TEST_VARIABLE": "1", "CARGO_TARGET_DIR": "elsewhere"},
+                    clear=True,
+                ),
             ):
                 ci.run_openvmm_unit_tests()
 
             environment = capture.call_args.kwargs["env"]
-            expected_environment = {"NVX_TEST_VARIABLE": "1"}
+            # OpenVMM builds in its own target directory, whatever the
+            # environment or the repository's Cargo configuration names.
+            expected_environment = {
+                "NVX_TEST_VARIABLE": "1",
+                "CARGO_TARGET_DIR": os.fspath(openvmm.resolve() / "target"),
+            }
             if os.name == "nt":
                 expected_environment["_LINK_"] = ci.MSVC_REPRODUCIBLE_LINK_OPTION
             self.assertEqual(environment, expected_environment)
@@ -3479,6 +3490,7 @@ class CiTests(unittest.TestCase):
                         "PETRI_CAPABILITIES": "vpci",
                         "RUNNER_TEMP": os.fspath(root),
                         "_LINK_": "",
+                        "CARGO_TARGET_DIR": "elsewhere",
                     },
                 ),
             ):
@@ -3504,6 +3516,9 @@ class CiTests(unittest.TestCase):
             self.assertEqual(
                 environment["RUSTUP_TOOLCHAIN"],
                 OpenVMMBuildConstants.RUST_TOOLCHAIN,
+            )
+            self.assertEqual(
+                environment["CARGO_TARGET_DIR"], os.fspath(openvmm.resolve() / "target")
             )
             if os.name == "nt":
                 self.assertNotIn("XDG_CACHE_HOME", environment)
@@ -3559,6 +3574,9 @@ class CiTests(unittest.TestCase):
 
         expected_environment = {
             "RUSTUP_TOOLCHAIN": OpenVMMBuildConstants.RUST_TOOLCHAIN,
+            "CARGO_TARGET_DIR": os.fspath(
+                OpenVMMBuildConstants.DIRECTORY.resolve() / "target"
+            ),
         }
         if os.name == "nt":
             expected_environment["_LINK_"] = ci.MSVC_REPRODUCIBLE_LINK_OPTION
@@ -7384,6 +7402,131 @@ class CiConfigurationTests(unittest.TestCase):
                         f'rustup target add --toolchain "${{toolchain}}" {musl}', script
                     )
 
+    def test_cargo_keeps_each_workspace_in_its_target_directory(self):
+        # Cargo reads its configuration from the directory in which it runs,
+        # whatever manifest it builds. Where CI and the scripts run it, the
+        # repository's workspace builds into nvx-rs/target, where they find its
+        # artifacts, and the runtime adapter, outside that workspace, into its
+        # own target directory, where they find its guest agent. Neither
+        # setting of the target directory in the environment may stand in for
+        # the configuration's.
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            self.fail("the target directory test runs Cargo, which is not on PATH")
+        root = BuildConstants.REPO_ROOT.resolve()
+        adapter = root / "tests" / "runtime-adapter"
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR")
+        }
+        for directory, manifest, workspace, packages in (
+            (root, None, root, ["nvx"]),
+            (root, root / "nvx-rs" / "Cargo.toml", root, ["nvx"]),
+            (root / "nvx-rs", None, root, ["nvx"]),
+            (root / "nvx-rs" / "src", None, root, ["nvx"]),
+            (adapter, None, adapter, ["runtime-adapter"]),
+        ):
+            command = [cargo, "metadata", "--format-version", "1", "--no-deps"]
+            command += ["--offline"]
+            if manifest is not None:
+                command += ["--manifest-path", os.fspath(manifest)]
+            with self.subTest(directory=directory, manifest=manifest):
+                result = subprocess.run(
+                    command,
+                    cwd=directory,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                metadata = json.loads(result.stdout)
+                self.assertEqual(Path(metadata["workspace_root"]).resolve(), workspace)
+                self.assertEqual(
+                    Path(metadata["target_directory"]).resolve(),
+                    (root / "nvx-rs" if workspace == root else adapter) / "target",
+                )
+                self.assertEqual(
+                    sorted(package["name"] for package in metadata["packages"]),
+                    packages,
+                )
+
+    def test_cargo_keeps_openvmm_in_its_target_directory(self):
+        # Cargo also reads the repository's .cargo/config.toml in the OpenVMM
+        # submodule, whose own configuration names no target directory, so
+        # without the pin OpenVMM would build in nvx-rs/target, where NVX would
+        # not find its artifacts. The Cargo commands that NVX runs there name
+        # OpenVMM's own target directory, whatever the environment names. The
+        # repository's workspace excludes the submodule, so the packages that
+        # OpenVMM's workspace excludes stay workspaces of their own. A copy of
+        # the repository's Cargo files stands for the checkout around a
+        # submodule with OpenVMM's layout.
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            self.fail(
+                "the OpenVMM target directory test runs Cargo, which is not on PATH"
+            )
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR")
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for name in ("Cargo.toml", ".cargo/config.toml", "rust-toolchain.toml"):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(BuildConstants.REPO_ROOT / name, root / name)
+            openvmm = root / "openvmm"
+            package = '[package]\nname = "{}"\nversion = "0.1.0"\nedition = "2024"\n'
+            for directory, manifest in (
+                (openvmm, '[workspace]\nexclude = ["xsync"]\n\n' + package),
+                (openvmm / "xsync", package),
+            ):
+                (directory / "src").mkdir(parents=True)
+                (directory / "src" / "lib.rs").write_text("", encoding="utf-8")
+                (directory / "Cargo.toml").write_text(
+                    manifest.format(directory.name), encoding="utf-8"
+                )
+            for directory, case, variables, pinned in (
+                (openvmm, "no target directory", environment, False),
+                (openvmm, "no target directory", environment, True),
+                (
+                    openvmm,
+                    "another target directory",
+                    {**environment, "CARGO_TARGET_DIR": os.fspath(root)},
+                    True,
+                ),
+                (openvmm / "xsync", "no target directory", environment, True),
+            ):
+                with self.subTest(
+                    directory=directory.name, environment=case, pinned=pinned
+                ):
+                    result = subprocess.run(
+                        [cargo, "metadata", "--format-version", "1", "--no-deps"]
+                        + ["--offline"],
+                        cwd=directory,
+                        env=(
+                            common.openvmm_cargo_environment(openvmm, variables)
+                            if pinned
+                            else variables
+                        ),
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    metadata = json.loads(result.stdout)
+                    self.assertEqual(
+                        Path(metadata["workspace_root"]).resolve(), directory
+                    )
+                    self.assertEqual(
+                        Path(metadata["target_directory"]).resolve(),
+                        openvmm / "target" if pinned else root / "nvx-rs" / "target",
+                    )
+
     def test_required_ci_result_policy(self):
         always_successful = {
             "quality",
@@ -8318,8 +8461,13 @@ class CiConfigurationTests(unittest.TestCase):
             ((".gitattributes",), microvm_and_benchmarks, None),
             # Every nvx-rs change: the microVM tests run the nvx-rs CLI, every
             # package ships it, and the guest images carry its guest binaries.
+            # So does every change to the workspace that builds them: its
+            # manifest, lockfile, Cargo configuration, and other crates.
             (("nvx-rs/src/lib.rs",), microvm_and_benchmarks, None),
-            (("nvx-rs/Cargo.lock",), microvm_and_benchmarks, None),
+            (("Cargo.toml",), microvm_and_benchmarks, None),
+            (("Cargo.lock",), microvm_and_benchmarks, None),
+            ((".cargo/config.toml",), microvm_and_benchmarks, None),
+            (("crates/nvx-sys/src/lib.rs",), microvm_and_benchmarks, None),
             (("nvx-rs/src/guest/exit.rs",), microvm_and_benchmarks, None),
             (("nvx-rs/src/bin/nvx-time.rs",), microvm_and_benchmarks, None),
             (("nvx-rs/src/host/cli/args.rs",), microvm_and_benchmarks, None),
@@ -8997,7 +9145,8 @@ class CiConfigurationTests(unittest.TestCase):
                     path in identity,
                 )
         # A new module counts unless it belongs to the host side or the tests,
-        # and a file beside an input doesn't.
+        # and a file beside an input doesn't. So does every file of the
+        # workspace's other crates but their tests.
         for path, selected in (
             ("nvx-rs/src/added.rs", True),
             ("nvx-rs/src/guest/added/mod.rs", True),
@@ -9006,6 +9155,11 @@ class CiConfigurationTests(unittest.TestCase):
             ("nvx-rs/src/protocol/added/tests.rs", False),
             ("nvx-rs/Cargo.toml.orig", False),
             ("nvx-rs/src/bin/nvx-time.rs.orig", False),
+            ("crates/nvx-sys/Cargo.toml", True),
+            ("crates/nvx-sys/src/lib.rs", True),
+            ("crates/nvx-sys/src/fd/tests.rs", False),
+            ("crates/nvx-sys/src/fd/tests/mod.rs", False),
+            ("crates/nvx-sys/tests/fd.rs", False),
         ):
             with self.subTest(path=path):
                 self.assertIsNotNone(ci.MICROVM_TEST_INPUT_PATHS.match(path))
@@ -9065,8 +9219,10 @@ class CiConfigurationTests(unittest.TestCase):
             "nvx-rs/artifacts.json",
         )
         guest_side = (
+            "Cargo.toml",
+            "Cargo.lock",
+            ".cargo/config.toml",
             "nvx-rs/Cargo.toml",
-            "nvx-rs/Cargo.lock",
             "nvx-rs/build.rs",
             "nvx-rs/src/lib.rs",
             "nvx-rs/src/protocol/nvxs/host.rs",
@@ -14993,9 +15149,7 @@ class BuildConstantsTests(unittest.TestCase):
         # Versions of shipped crates that only the tests use: proptest's
         # chacha20 takes cpufeatures 0.3, and sha2 the cpufeatures that ships.
         unshipped_versions = {("cpufeatures", "0.3.1")}
-        lock = (BuildConstants.REPO_ROOT / "nvx-rs" / "Cargo.lock").read_text(
-            encoding="utf-8"
-        )
+        lock = (BuildConstants.REPO_ROOT / "Cargo.lock").read_text(encoding="utf-8")
         packages = re.findall(
             r'^\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"$',
             lock,
@@ -15024,7 +15178,7 @@ class BuildConstantsTests(unittest.TestCase):
                 self.assertEqual(len(versions), 1, versions)
                 row = rows[f"| Rust `{name}` crate {versions[0]}"]
                 self.assertIn("bin/nvx-rs", row)
-                self.assertIn("nvx-rs/Cargo.lock", row)
+                self.assertIn("pinned in `Cargo.lock`", row)
         # The runtimes that the release executables link statically.
         for component, location in (
             ("| Rust core and standard libraries", "`bin/nvx-rs`"),
@@ -15820,7 +15974,9 @@ class BuildTests(unittest.TestCase):
                             guest.assert_not_called()
 
                     access.assert_not_called()
-                    run_checked.assert_called_once_with(
+                    run_checked.assert_called_once()
+                    self.assertEqual(
+                        run_checked.call_args.args[0],
                         [
                             "cargo",
                             "build",
@@ -15830,8 +15986,8 @@ class BuildTests(unittest.TestCase):
                             "--bin",
                             "openvmm",
                         ],
-                        cwd=openvmm_dir,
                     )
+                    self.assertEqual(run_checked.call_args.kwargs["cwd"], openvmm_dir)
 
     def test_openvmm_target_output_matches_build_mode(self):
         config = build_config.OpenVmmBuildConfig(directory=Path("checkout"))
@@ -15920,35 +16076,51 @@ class BuildTests(unittest.TestCase):
             with (
                 patch.object(build, "run_checked") as run_checked,
                 patch.object(build, "record_openvmm_provenance") as provenance,
+                patch.dict(os.environ, {"CARGO_TARGET_DIR": "elsewhere"}),
             ):
                 build.build_openvmm(config, platform="linux-gnu")
 
             self.assertEqual(
-                run_checked.call_args_list,
                 [
-                    call(
-                        [
-                            "cargo",
-                            "xflowey",
-                            "restore-packages",
-                            "--no-compat-igvm",
-                        ],
-                        cwd=openvmm_dir,
+                    (command.args, command.kwargs["cwd"])
+                    for command in run_checked.call_args_list
+                ],
+                [
+                    (
+                        (
+                            [
+                                "cargo",
+                                "xflowey",
+                                "restore-packages",
+                                "--no-compat-igvm",
+                            ],
+                        ),
+                        openvmm_dir,
                     ),
-                    call(
-                        [
-                            "cargo",
-                            "build",
-                            "--release",
-                            "-p",
-                            "openvmm",
-                            "--bin",
-                            "openvmm",
-                        ],
-                        cwd=openvmm_dir,
+                    (
+                        (
+                            [
+                                "cargo",
+                                "build",
+                                "--release",
+                                "-p",
+                                "openvmm",
+                                "--bin",
+                                "openvmm",
+                            ],
+                        ),
+                        openvmm_dir,
                     ),
                 ],
             )
+            # Cargo builds OpenVMM in its own target directory, where the build
+            # takes its executable from, whatever the environment or the
+            # repository's Cargo configuration names.
+            for command in run_checked.call_args_list:
+                self.assertEqual(
+                    command.kwargs["env"]["CARGO_TARGET_DIR"],
+                    os.fspath(openvmm_dir.resolve() / "target"),
+                )
             provenance.assert_called_once_with(config)
 
     def test_openvmm_build_honors_skip_restore(self):
@@ -16013,6 +16185,10 @@ class BuildTests(unittest.TestCase):
             cargo_call = run_checked.call_args_list[2]
             self.assertIn("x86_64-unknown-linux-musl", cargo_call.args[0])
             environment = cargo_call.kwargs["env"]
+            self.assertEqual(
+                environment["CARGO_TARGET_DIR"],
+                os.fspath(openvmm_dir.resolve() / "target"),
+            )
             resolved_sysroot = (
                 openvmm_dir.resolve() / ".packages" / "extracted" / "x86_64-sysroot"
             )
@@ -17990,6 +18166,59 @@ class BuildTests(unittest.TestCase):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
         )
+
+        def copied(stage: str) -> set[str]:
+            # The paths of the build context that the stage's COPY instructions
+            # take to the same path below /repo, and those that the stage that
+            # it builds on takes. COPY copies a directory's contents, and a
+            # file into a destination that ends with a slash.
+            found = re.search(
+                rf"^FROM (\S+) AS {re.escape(stage)}$", dockerfile, re.MULTILINE
+            )
+            assert found is not None, stage
+            body = dockerfile[found.end() :].split("\nFROM ", 1)[0]
+            paths: set[str] = set()
+            for line in body.replace("\\\n", " ").splitlines():
+                words = line.split()
+                if words[:1] != ["COPY"] or any(w.startswith("--") for w in words):
+                    continue
+                *sources, destination = words[1:]
+                for source in sources:
+                    name = source.rstrip("/")
+                    placed = (
+                        destination.rstrip("/")
+                        if (BuildConstants.REPO_ROOT / name).is_dir()
+                        or not destination.endswith("/")
+                        else destination + PurePosixPath(name).name
+                    )
+                    if placed == f"/repo/{name}":
+                        paths.add(name)
+            base = re.escape(found[1])
+            if re.search(rf"^FROM \S+ AS {base}$", dockerfile, re.MULTILINE):
+                paths |= copied(found[1])
+            return paths
+
+        # The stage that builds the guest binaries, and the one that records
+        # their source identity in the images, hold every input of that
+        # identity, so that the identity in the image is the checkout's.
+        identity = [
+            path.relative_to(BuildConstants.REPO_ROOT).as_posix()
+            for path in guest_binaries.guest_binary_source_files()
+        ]
+        for stage in ("guest-binaries", "guest-base"):
+            paths = copied(stage)
+            with self.subTest(stage=stage):
+                self.assertEqual(
+                    [
+                        path
+                        for path in identity
+                        if not any(
+                            path == copy or path.startswith(f"{copy}/")
+                            for copy in paths
+                        )
+                    ],
+                    [],
+                )
         self.assertIn(
             f"ARG RUST_BUILDER_IMAGE={DockerBuildConstants.RUST_BUILDER_IMAGE}",
             dockerfile,
@@ -17997,8 +18226,6 @@ class BuildTests(unittest.TestCase):
         builder = dockerfile.split("FROM ${RUST_BUILDER_IMAGE} AS guest-binaries", 1)[
             1
         ].split("\nFROM ", 1)[0]
-        self.assertIn("COPY rust-toolchain.toml /repo/", builder)
-        self.assertIn("COPY nvx-rs/ /repo/nvx-rs/", builder)
         self.assertIn(
             'rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl',
             builder,
@@ -18017,12 +18244,13 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn("nvx-rs", base)
         self.assertNotIn("rust-toolchain.toml", base)
         self.assertNotIn("guest-binaries", base)
+        # The kernel and Linux source targets, which build on the base, take no
+        # input of the guest binaries.
+        self.assertFalse(copied("base") & set(GuestRustBuildConstants.SOURCE_PATHS))
 
         guest_base = dockerfile.split("FROM base AS guest-base", 1)[1].split(
             "\nFROM ", 1
         )[0]
-        self.assertIn("COPY nvx-rs/ /repo/nvx-rs/", guest_base)
-        self.assertIn("COPY rust-toolchain.toml /repo/", guest_base)
         self.assertIn(
             "COPY --from=guest-binaries /out/guest-binaries/ "
             "/repo/build/guest-binaries/",
@@ -18364,8 +18592,9 @@ class BuildTests(unittest.TestCase):
             crate = checkout / "nvx-rs"
             (crate / "src").mkdir(parents=True)
             sources = {
+                checkout / "Cargo.toml": '[workspace]\nmembers = ["nvx-rs"]\n',
+                checkout / "Cargo.lock": "# lock\n",
                 crate / "Cargo.toml": "[package]\nname = 'fixture'\n",
-                crate / "Cargo.lock": "# lock\n",
                 crate / "build.rs": "fn main() {}\n",
                 crate / "src" / "lib.rs": "pub fn fixture() {}\n",
                 checkout / "rust-toolchain.toml": (
@@ -21393,6 +21622,39 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_native_openvmm_builds_use_openvmm_target_directory(self):
+        # The builds take their executables from OpenVMM's own target
+        # directory, whatever the environment or the repository's Cargo
+        # configuration names.
+        for build_function, output in (
+            (benchmark.build_whp, Path("release") / "openvmm.exe"),
+            (benchmark.build_kvm_native, Path("release") / "openvmm"),
+            (
+                benchmark.build_phase2_whp_host,
+                Path("release") / "examples" / "phase2_snapshot_bench.exe",
+            ),
+        ):
+            with (
+                self.subTest(build=build_function.__name__),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                openvmm_dir = Path(temporary) / "openvmm"
+                executable = openvmm_dir / "target" / output
+                executable.parent.mkdir(parents=True)
+                executable.write_bytes(b"openvmm")
+                with (
+                    patch.object(benchmark.subprocess, "run") as run,
+                    patch.dict(os.environ, {"CARGO_TARGET_DIR": "elsewhere"}),
+                ):
+                    self.assertEqual(build_function(openvmm_dir), executable)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0][:2], ["cargo", "build"])
+                self.assertEqual(run.call_args.kwargs["cwd"], openvmm_dir)
+                self.assertEqual(
+                    run.call_args.kwargs["env"]["CARGO_TARGET_DIR"],
+                    os.fspath(openvmm_dir.resolve() / "target"),
+                )
+
     def test_kvm_worker_result_decoding(self):
         completed = subprocess.CompletedProcess(
             ["worker"],

@@ -160,6 +160,12 @@ jobs:
           # repository that holds the crate, which a copy of the crate lacks.
           arguments=(--all-features --in-place --shard "${SHARD}" --output ../build/mutants)
           for file in "${files[@]}"; do
+            # cargo-mutants matches a glob that holds a / against the path
+            # from the workspace's root, the repository's root, and a glob
+            # without one against the names of files.
+            if [[ "${file}" == */* ]]; then
+              file="nvx-rs/${file}"
+            fi
             arguments+=(--file "${file}")
           done
           # cargo-mutants creates only the last directory of its output.

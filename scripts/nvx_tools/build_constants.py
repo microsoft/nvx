@@ -160,17 +160,26 @@ class GuestRustBuildConstants:
     DIRECTORY: Final = BuildConstants.REPO_ROOT / "nvx-rs"
     # The inputs of every guest executable, relative to a checkout's root: these
     # files, and every file under SOURCE_DIRECTORIES that SOURCE_PATTERN matches.
+    # The workspace's manifest and lockfile come first, then the crate's.
     SOURCE_FILES: Final = (
+        Path("Cargo.toml"),
+        Path("Cargo.lock"),
         Path("nvx-rs") / "Cargo.toml",
-        Path("nvx-rs") / "Cargo.lock",
         Path("nvx-rs") / "build.rs",
         Path("rust-toolchain.toml"),
         Path("scripts") / "nvx_tools" / "build_constants.py",
         Path("scripts") / "nvx_tools" / "guest_binaries.py",
     )
     SOURCE_DIRECTORY: Final = Path("nvx-rs") / "src"
-    # The Cargo configuration that a build in the crate reads, and the sources.
-    SOURCE_DIRECTORIES: Final = (Path("nvx-rs") / ".cargo", SOURCE_DIRECTORY)
+    # The Cargo configuration that a build in the crate reads, the workspace's
+    # and the crate's, the crate's sources, and the workspace's other crates,
+    # which a directory may lack.
+    SOURCE_DIRECTORIES: Final = (
+        Path(".cargo"),
+        Path("nvx-rs") / ".cargo",
+        SOURCE_DIRECTORY,
+        Path("crates"),
+    )
     TOOLCHAIN_FILE: Final = BuildConstants.REPO_ROOT / "rust-toolchain.toml"
     TOOLCHAIN: Final = OpenVMMBuildConstants.RUST_TOOLCHAIN
     TARGET: Final = OpenVMMBuildConstants.MUSL_RUST_TARGET
@@ -183,7 +192,13 @@ class GuestRustBuildConstants:
     BUILD_MANIFEST_FORMAT: Final = 1
     BUILD_MANIFEST_DOMAIN: Final = "nvx-rust-guest-binary-build"
     OUTPUT_DIRECTORY_NAME: Final = "guest-binaries"
-    SOURCE_PATHS: Final = ("nvx-rs", "rust-toolchain.toml")
+    SOURCE_PATHS: Final = (
+        "Cargo.toml",
+        "Cargo.lock",
+        ".cargo",
+        "nvx-rs",
+        "rust-toolchain.toml",
+    )
     BINARIES: Final = (
         "nvx-console-pending",
         "nvx-mmio-write",
@@ -207,19 +222,21 @@ class GuestRustBuildConstants:
         "nvx-time-probe",
     )
     # Matches the path, relative to a checkout's root, of every input of the guest
-    # executables: SOURCE_FILES, the Cargo configuration, and every source file
-    # but the host side, that is, the `host` and `testing` modules and the
-    # binaries other than BINARIES, and the test modules, the `tests.rs` files and
-    # the files of the `tests` directories. A guest build fails when Cargo's
+    # executables: SOURCE_FILES, the Cargo configuration, every source file of
+    # the crate but the host side, that is, the `host` and `testing` modules and
+    # the binaries other than BINARIES, and the test modules, the `tests.rs` files
+    # and the files of the `tests` directories, and every file of the workspace's
+    # other crates but their test modules. A guest build fails when Cargo's
     # dep-info lists a file outside the set that it selects.
     SOURCE_PATTERN: Final = re.compile(
         "|".join(re.escape(path.as_posix()) for path in SOURCE_FILES)
-        + r"|nvx-rs/\.cargo/.+"
+        + r"|(?:nvx-rs/)?\.cargo/.+"
         + r"|nvx-rs/src/bin/(?:"
         + "|".join(re.escape(binary) for binary in BINARIES)
         + r")\.rs"
         + r"|nvx-rs/src/(?!bin/|(?:host|testing)(?:/|\.rs$))"
         + r"(?!(?:[^/]+/)*tests(?:/|\.rs$)).+"
+        + r"|crates/(?!(?:[^/]+/)*tests(?:/|\.rs$)).+"
     )
 
 
@@ -471,6 +488,9 @@ class ReleaseBuildConstants:
     PROJECT_SOURCE_PATHS: Final = (
         ".github/agents/nvx-adversary.md",
         "guest",
+        "Cargo.toml",
+        "Cargo.lock",
+        ".cargo",
         "nvx-rs",
         "ubuntu",
         "azurelinux",

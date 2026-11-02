@@ -196,21 +196,7 @@ required-features = ["guest"]
 doc = false
 test = false
 
-# The guest binaries: small, static, and stripped.
-[profile.guest]
-inherits = "release"
-opt-level = "s"
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
-debug = false
-incremental = false
-
-[lints.rust]
-missing_docs = "warn"
-unsafe_op_in_unsafe_fn = "deny"
-unreachable_pub = "warn"
-
-[lints.clippy]
-missing_docs_in_private_items = "warn"
+# The workspace's lints; its manifest, at the repository's root, also holds the `guest` profile
+# of the guest binaries.
+[lints]
+workspace = true

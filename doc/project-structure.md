@@ -56,6 +56,8 @@ nvx/
 |   |   `-- test-changes.yml     Label and comment for pull requests that change existing tests
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
 |   `-- copilot-instructions.md  Repository-wide Copilot instructions
+|-- .cargo/
+|   `-- config.toml              Keeps the Cargo workspace's build output in nvx-rs/target
 |-- .vscode/settings.json        Shared VS Code settings
 |-- guest/                       Guest-owned scripts
 |   |-- common/                  Shared init, agent, snapshot, and probe scripts
@@ -179,6 +181,8 @@ nvx/
 |-- .gitattributes               Git path attributes
 |-- .gitignore                   Generated-file exclusions
 |-- .gitmodules                  OpenVMM submodule definition
+|-- Cargo.lock                   Lockfile of the Cargo workspace
+|-- Cargo.toml                   Cargo workspace of the repository's Rust crates
 |-- LICENSE                      Repository license
 |-- pyproject.toml               Pyright and Ruff configuration
 |-- README.md                    Project overview and documentation index
@@ -292,8 +296,9 @@ Windows hosts, the supervision of VM instances, the sandbox launch profile of
 microVMs and sandboxes, downloads releases, compiles egress policies, and looks
 up artifacts, and a fake OpenVMM for tests. Its
 `guest` feature builds the nine static executables that every guest image
-installs at `/sbin/nvx-*`. It is a standalone crate with its own `Cargo.lock`,
-and builds independently of the OpenVMM submodule. See its
+installs at `/sbin/nvx-*`. It is a member of the repository's Cargo
+workspace, whose `Cargo.lock` it shares, and builds independently of the
+OpenVMM submodule. See its
 [README](../nvx-rs/README.md) and its [module diagrams](modules/README.md).
 
 ### `openvmm/`
@@ -358,7 +363,9 @@ draw the module diagrams that `doc/modules` publishes (see
 
 Tests that build on the repository's crates from outside them.
 `runtime-adapter/` is an independent adapter of the NVX runtime: a standalone
-crate with its own `Cargo.lock` that depends on `nvx` with default features
+crate outside the repository's workspace, with its own `Cargo.lock` and,
+through its own `.cargo/config.toml`, its own target directory, that depends on
+`nvx` with default features
 off and uses its public API only. Its protocol-only, host-only, and guest-only
 configurations build in CI, and its tests check that each one builds as an
 independent adapter's does. Its host program and its guest agent exchange the
@@ -376,6 +383,9 @@ See its [README](../tests/runtime-adapter/README.md).
 | Path | Responsibility |
 | --- | --- |
 | `README.md` | Project overview and documentation index |
+| `Cargo.toml` | The Cargo workspace of the repository's Rust crates: its members, the directories that it excludes, the `guest` profile, and the lints |
+| `Cargo.lock` | The Cargo workspace's lockfile |
+| `.cargo/config.toml` | Keeps the Cargo workspace's build output in `nvx-rs/target` for the Cargo commands that run in the repository |
 | `pyproject.toml` | Strict Pyright policy plus Ruff lint and format settings |
 | `requirements-dev.txt` | Pinned Python tools used by contributors and CI |
 | `rust-toolchain.toml` | Rust release that builds OpenVMM, its test guests, and the repository's Rust code |
@@ -399,7 +409,7 @@ See its [README](../tests/runtime-adapter/README.md).
 | `data/runs/` | Raw benchmark logs and per-platform artifacts |
 | `dist/` | Staged binary and source release archives |
 | `openvmm/target/` | Rust build output produced inside the OpenVMM submodule |
-| `nvx-rs/target/` | Rust build output of the `nvx` crate |
+| `nvx-rs/target/` | Rust build output of the Cargo workspace, which holds the `nvx` crate |
 | `tests/runtime-adapter/target/` | Rust build output of the runtime adapter |
 | `.ruff_cache/` | Ruff's local lint cache |
 | `__pycache__/` | Python bytecode caches that may appear below Python source directories |

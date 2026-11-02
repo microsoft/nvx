@@ -21,6 +21,7 @@ from .common import (
     ScriptError,
     artifact_path,
     download,
+    openvmm_cargo_environment,
     require_file,
     require_success,
     require_tool,
@@ -157,14 +158,15 @@ CI_CHANGE_OUTPUTS = (
 )
 CI_DOCUMENTATION_PATHS = re.compile(r"^(doc/|.*\.md$)", re.IGNORECASE)
 # Inputs of the NVX microVM tests: the OpenVMM pin, the guests and every input
-# of their cache keys, the nvx-rs executable that their scenarios run, the
-# runtime adapter that they test, the workflows, actions, and CLI modules that
-# their jobs and the jobs that build their artifacts run, the runners, and the
-# attributes that check out their scripts on Windows. Every module of the CLI
-# is an input but those that none of these jobs runs.
+# of their cache keys, the Cargo workspace that builds the nvx-rs executable
+# that their scenarios run, the runtime adapter that they test, the workflows,
+# actions, and CLI modules that their jobs and the jobs that build their
+# artifacts run, the runners, and the attributes that check out their scripts
+# on Windows. Every module of the CLI is an input but those that none of these
+# jobs runs.
 MICROVM_TEST_INPUT_PATHS = re.compile(
     r"^(openvmm($|/)|rust-toolchain\.toml$|scripts/setup/|\.gitattributes$|"
-    r"nvx-rs/|tests/runtime-adapter/|"
+    r"Cargo\.(toml|lock)$|\.cargo/|nvx-rs/|crates/|tests/runtime-adapter/|"
     r"kernel/|guest/|ubuntu/|azurelinux/|"
     r"docker/|\.dockerignore$|SOURCE-MANIFEST\.json$|"
     r"\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests)\.yml$|"
@@ -178,14 +180,16 @@ MICROVM_TEST_INPUT_PATHS = re.compile(
 # Inputs of the platform jobs, which benchmark each backend, of the package
 # jobs, which package its release, and of the regression gate that reads the
 # benchmark results: the OpenVMM pin, the guests and every input of their cache
-# keys, the nvx-rs executable that the packages ship, the performance history
-# and expected hosts, the release version and license, the workflows, actions,
-# and CLI modules that these jobs and the jobs that build their artifacts run,
-# the runners, and the attributes that check out their inputs on Windows. Every
-# module of the CLI is an input but those that none of these jobs runs.
+# keys, the Cargo workspace that builds the nvx-rs executable that the packages
+# ship, the performance history and expected hosts, the release version and
+# license, the workflows, actions, and CLI modules that these jobs and the jobs
+# that build their artifacts run, the runners, and the attributes that check
+# out their inputs on Windows. Every module of the CLI is an input but those
+# that none of these jobs runs.
 BENCHMARK_INPUT_PATHS = re.compile(
     r"^(openvmm($|/)|rust-toolchain\.toml$|scripts/setup/|\.gitattributes$|"
-    r"nvx-rs/|kernel/|guest/|ubuntu/|azurelinux/|"
+    r"Cargo\.(toml|lock)$|\.cargo/|nvx-rs/|crates/|"
+    r"kernel/|guest/|ubuntu/|azurelinux/|"
     r"docker/|\.dockerignore$|SOURCE-MANIFEST\.json$|"
     r"data/|VERSION$|LICENSE$|"
     r"\.github/workflows/(ci|build-openvmm-binary|package-platform|run-platform)\.yml$|"
@@ -710,7 +714,7 @@ def _prepare_openvmm_test_environment(
     if toolchain_installed:
         installed_targets.update(installed.stdout.decode("utf-8").splitlines())
 
-    environment = os.environ.copy()
+    environment = openvmm_cargo_environment(OpenVMMBuildConstants.DIRECTORY)
     environment["RUSTUP_TOOLCHAIN"] = toolchain
     if os.name == "nt":
         _link_reproducibly_with_msvc(environment)
@@ -767,7 +771,7 @@ def run_openvmm_unit_tests() -> None:
         OpenVMMBuildConstants.DIRECTORY / "Cargo.toml", "initialized OpenVMM submodule"
     )
     cargo = require_tool("cargo")
-    environment = os.environ.copy()
+    environment = openvmm_cargo_environment(OpenVMMBuildConstants.DIRECTORY)
     if os.name == "nt":
         _link_reproducibly_with_msvc(environment)
 

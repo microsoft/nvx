@@ -39,6 +39,9 @@
     "guest_sources": [
       "guest/common",
       "guest/alpine",
+      "Cargo.toml",
+      "Cargo.lock",
+      ".cargo",
       "nvx-rs",
       "rust-toolchain.toml"
     ],
@@ -62,6 +65,9 @@
       "guest/common",
       "guest/ubuntu",
       "ubuntu/packages.lock.json",
+      "Cargo.toml",
+      "Cargo.lock",
+      ".cargo",
       "nvx-rs",
       "rust-toolchain.toml"
     ],
@@ -82,6 +88,9 @@
     "guest_sources": [
       "guest/common",
       "azurelinux/packages.lock.json",
+      "Cargo.toml",
+      "Cargo.lock",
+      ".cargo",
       "nvx-rs",
       "rust-toolchain.toml"
     ],

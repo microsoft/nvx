@@ -1,0 +1,8 @@
+# Cargo reads this configuration wherever it runs in the repository, OpenVMM's
+# submodule included: the repository's workspace keeps its build output in
+# nvx-rs/target, where the nvx crate's was before the workspace held it.
+# Paths here are relative to the repository's root. The runtime adapter's
+# .cargo/config.toml selects its own target directory, and nvx.py gives
+# OpenVMM's Cargo commands OpenVMM's.
+[build]
+target-dir = "nvx-rs/target"
