@@ -58,12 +58,15 @@ pushes record their results, and the nightly full run appends them.
 
 ## Draft or Ready
 
-CI runs for a pull request to `dev` when it is opened, reopened, pushed to,
-or marked ready for review, and skips its lint, build, and test jobs while the
-pull request is a draft. A new push cancels the pull request's run in
-progress; converting it back to a draft does not. A ready pull request that
-changes more than documentation runs the hypervisor jobs that its changes
-select on the shared self-hosted KVM, MSHV, and WHP runner pools, so:
+CI runs for a pull request, whatever its base, when it is opened, reopened,
+pushed to, or marked ready for review, and skips its lint, build, and test
+jobs while the pull request is a draft. A pull request stacked on another's
+branch gets its own checks and keeps them when GitHub retargets it to `dev`
+(see [Stacked pull requests](ci.md#stacked-pull-requests)). A new push cancels
+the pull request's run in progress; converting it back to a draft does not. A
+ready pull request that changes more than documentation runs the hypervisor
+jobs that its changes select on the shared self-hosted KVM, MSHV, and WHP
+runner pools, so:
 
 - Open a **Draft** when the change touches more than documentation and has
   not yet passed the [quality gates](#quality-gates) and

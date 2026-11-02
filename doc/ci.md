@@ -1160,6 +1160,35 @@ the next full run of `dev` persists only while the history holds no newer
 commit (see
 [Development releases and performance history](#development-releases-and-performance-history)).
 
+## Stacked pull requests
+
+A pull request runs `ci.yml` whatever its base, so one stacked on another
+pull request's branch gets the checks that GitHub evaluates for it, when it is
+opened, reopened, pushed to, or marked ready for review, and reports
+`Required status check` like one to `dev`. A manually dispatched run of the
+branch can't stand in for them: GitHub never evaluates the checks of a
+`workflow_dispatch` run for a pull request, and such a run is a full run of the
+branch rather than a run of the pull request (see
+[Change classification](#change-classification)). The change detector
+compares the head with the base that the pull request names, so a stacked pull
+request classifies only its own layer, the commits after its base branch's
+tip, and the performance gate still compares with the history of `dev`. The
+draft and fork rules are those of any pull request.
+
+When the pull request of a stacked one's base branch merges, GitHub retargets
+the stacked one to `dev`, and reports the change of the base as an `edited`
+event, as it does each edit of a title or a body. `ci.yml` doesn't listen for
+`edited`: a workflow can't tell the one from the other, and a run for each
+edit would cancel the pull request's run in progress, or replace its result
+with that of a run that tested nothing. A retarget that leaves the head as it
+was therefore starts no run, and the pull request keeps the checks of the run
+that tested the head, which GitHub attaches to the commit, so it reports
+`Required status check` once it targets `dev` too. Its merge group, which
+tests the pull request merged into the latest `dev`, checks the result before
+the queue merges it (see [Merge queue](#merge-queue)). A pull request whose
+head has no run yet needs a push, a close and reopen, or its marking ready for
+review.
+
 ## Merge queue
 
 `dev` requires `Required status check`, but not pull requests that are up to

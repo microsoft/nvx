@@ -1,9 +1,10 @@
 name: CI
 
 on:
+  # A pull request runs for any base, so that one stacked on another pull
+  # request's branch gets its own checks, and keeps them when GitHub retargets
+  # it to dev (doc/ci.md#stacked-pull-requests).
   pull_request:
-    branches:
-      - dev
     types:
       - opened
       - synchronize
