@@ -10,6 +10,16 @@ use serde_json::json;
 
 use super::*;
 
+impl Curl {
+    /// Returns a `curl` that also speaks plain HTTP, to the servers of tests.
+    pub(crate) fn plain() -> Self {
+        Self {
+            https_only: false,
+            ..Self::new()
+        }
+    }
+}
+
 /// A request that a test server received.
 #[derive(Debug, Clone)]
 struct Received {

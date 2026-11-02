@@ -11,7 +11,8 @@ use super::*;
 use crate::ErrorKind;
 use crate::host::paths;
 use crate::host::sandbox::LayerRole;
-use crate::host::seal::{open_metadata_only, open_read};
+use crate::host::seal::open_read;
+use crate::host::seal::tests::open_metadata_only;
 
 /// The UUID of the staged layers.
 const UUID: &str = "11111111-1111-1111-1111-111111111111";

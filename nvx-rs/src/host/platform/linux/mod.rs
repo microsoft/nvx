@@ -28,14 +28,10 @@ pub(crate) use self::private::{
     create_store_dir, foreign_writer_problem, make_sparse, private_file_problem, rename_no_replace,
     restore_private_file_mode,
 };
-#[cfg(test)]
-pub(crate) use self::private::{owner_only_problem, store_dir_problem};
 pub use self::process::process_start_time;
 pub(crate) use self::process::{
     ProcessHandle, boot_id, host_id, monotonic_ns, open_process, own_bytes_read, pin_child,
 };
-#[cfg(test)]
-pub(crate) use self::process::{check_identity, start_time_from_stat};
 pub(crate) use self::spawn::detach;
 #[cfg(feature = "cli")]
 pub(crate) use self::spawn::inherit_only;
@@ -73,4 +69,4 @@ pub(crate) fn probe_hypervisor(hypervisor: Hypervisor) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

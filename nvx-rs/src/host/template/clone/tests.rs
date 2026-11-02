@@ -28,17 +28,18 @@ use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings, SandboxUpper};
-use crate::host::seal::{FileSeal, open_metadata_only};
+use crate::host::seal::FileSeal;
+use crate::host::seal::tests::open_metadata_only;
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_SCRATCH_NAME, CallerFiles, LOG_NAME,
     SandboxStore,
 };
 use crate::host::template::store::{CAPTURES_NAME, SNAPSHOT_NAME, TRANSACTION_NAME};
-use crate::host::template::test_support::{MIB, ManifestSpec, class, network_class};
+use crate::host::template::tests::{MIB, ManifestSpec, class, network_class};
 use crate::host::template::{CaptureClass, HostTime, KEY_NAME};
 #[cfg(windows)]
-use crate::host::test_support::junction;
-use crate::host::test_support::released;
+use crate::host::tests::junction;
+use crate::host::tests::released;
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 
@@ -2223,7 +2224,7 @@ fn files_that_their_paths_do_not_name_as_checked_are_refused() {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
     }
     #[cfg(windows)]
-    platform::set_access(&path, "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;WD)").unwrap();
+    platform::tests::set_access(&path, "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;WD)").unwrap();
     let binding = DistroBinding::import(&layer(&path), PolicyVerdict::ACCEPTED).unwrap();
     let problem = if cfg!(windows) {
         "allows other users to change it"

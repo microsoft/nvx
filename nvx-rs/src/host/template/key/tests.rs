@@ -6,9 +6,7 @@ use std::collections::HashSet;
 use super::*;
 use crate::ErrorCode;
 use crate::host::network::{Access, EgressRule, HostLoopback, NetworkPolicy, NetworkProxy};
-use crate::host::template::test_support::{
-    self as support, MIB, ManifestSpec, artifact, network_class,
-};
+use crate::host::template::tests::{self as support, MIB, ManifestSpec, artifact, network_class};
 
 /// Returns the manifest that `spec` encodes.
 fn manifest(spec: &ManifestSpec) -> TemplateManifest {

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::ErrorKind;
-use crate::host::network::address::probe;
+use crate::host::network::address::tests::probe;
 
 // Ports of the former `scripts/test_egress_policy.py`, one test for each of its tests, under the
 // same names.

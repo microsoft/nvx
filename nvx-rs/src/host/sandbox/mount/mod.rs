@@ -45,8 +45,6 @@ pub use self::boot::{
     BootShares, aggregate_command_line_fragment, aggregate_share_tokens, boot_shares,
 };
 pub use self::host_paths::validate_mount_host_paths;
-#[cfg(test)]
-pub(crate) use self::host_paths::validate_mount_host_paths_with;
 pub(crate) use self::host_paths::{HostQueries, check_distinct_export_roots};
 pub use self::request::{
     SandboxMount, mount_kind, parse_mount_value, require_mount_owner_supported,
@@ -269,4 +267,4 @@ impl MountPolicy {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

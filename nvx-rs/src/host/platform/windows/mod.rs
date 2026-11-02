@@ -31,8 +31,6 @@ pub(crate) use self::identity::{
 pub(crate) use self::interrupt::{interrupted, watch_interrupts};
 pub(crate) use self::log_claim::{claim_log, create_log_job, log_claim_held, serves_launch};
 pub use self::private::create_private_dir;
-#[cfg(test)]
-pub(crate) use self::private::set_access;
 pub(crate) use self::private::{
     check_owner_only_dir, check_snapshot_dir, check_store_dir, create_owner_only_dir,
     create_store_dir, foreign_writer_problem, make_sparse, private_file_problem, rename_no_replace,
@@ -134,4 +132,4 @@ pub(crate) fn probe_hypervisor(hypervisor: Hypervisor) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

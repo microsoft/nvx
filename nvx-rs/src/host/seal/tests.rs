@@ -6,6 +6,40 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::*;
 
+/// Opens `path` for its metadata alone, so that no read or mapping of its content can succeed
+/// through the file: with `O_PATH` on Linux, and on Windows with `FILE_READ_ATTRIBUTES` alone,
+/// sharing every access. Linux fails every read and mapping of an `O_PATH` descriptor with
+/// `EBADF`.
+#[cfg(target_os = "linux")]
+pub(crate) fn open_metadata_only(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    use nix::fcntl::OFlag;
+
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlag::O_PATH.bits())
+        .open(path)
+}
+
+/// Opens `path` for its metadata alone, as the Linux variant does. Without `FILE_READ_DATA`,
+/// Windows refuses every read of the handle, and every mapping of the file through it.
+#[cfg(windows)]
+pub(crate) fn open_metadata_only(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+
+    OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
 /// The scheme of this host's seals.
 const SCHEME: SealScheme = if cfg!(windows) {
     SealScheme::Windows

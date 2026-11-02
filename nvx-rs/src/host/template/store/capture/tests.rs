@@ -20,7 +20,7 @@ use crate::host::template::store::Lease;
 use crate::host::template::store::tests::{
     cause, link_dir, link_file, private_dir, publish_with, storage, store,
 };
-use crate::host::template::test_support::{MIB, ManifestSpec, class, network_class};
+use crate::host::template::tests::{MIB, ManifestSpec, class, network_class};
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 
@@ -90,7 +90,8 @@ fn let_anyone_write(path: &Path) {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
     #[cfg(windows)]
-    platform::set_access(path, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;WD)").unwrap();
+    platform::tests::set_access(path, "D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FA;;;WD)")
+        .unwrap();
 }
 
 /// Returns the names of the entries of `dir`, sorted.
@@ -179,10 +180,10 @@ impl Emulation {
             }
             #[cfg(windows)]
             for name in entries(&staging).unwrap() {
-                platform::set_access(&staging.join(name), OPENVMM_ACCESS).unwrap();
+                platform::tests::set_access(&staging.join(name), OPENVMM_ACCESS).unwrap();
             }
             #[cfg(windows)]
-            platform::set_access(&staging, OPENVMM_ACCESS).unwrap();
+            platform::tests::set_access(&staging, OPENVMM_ACCESS).unwrap();
             fs::rename(&staging, vm.template.destination()).unwrap();
         }
         if self.leftovers {

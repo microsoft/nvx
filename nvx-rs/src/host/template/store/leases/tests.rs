@@ -28,8 +28,8 @@ use crate::host::template::store::tests::{
     cause, link_dir, link_file, publish, publish_with, remove, storage, store as new_store,
     unlink_dir,
 };
-use crate::host::template::test_support::{ManifestSpec, artifact, network_class};
-use crate::host::test_support::released;
+use crate::host::template::tests::{ManifestSpec, artifact, network_class};
+use crate::host::tests::released;
 use crate::protocol::CAPABILITY_LEN;
 
 /// A change to a record, as JSON.
@@ -2780,12 +2780,12 @@ mod windows {
         // A file whose list refuses every open, also one without access rights, is not removed.
         // Nor is it where the process's privileges bypass the list, as the backup privilege lets
         // the open of `file_identity`, which has backup semantics, through.
-        platform::set_access(&path, NO_ACCESS).unwrap();
+        platform::tests::set_access(&path, NO_ACCESS).unwrap();
         if let Err(error) = platform::file_identity(&path) {
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
         }
         assert!(!was_removed(&path, &denied));
-        platform::set_access(&path, OWNER_ONLY).unwrap();
+        platform::tests::set_access(&path, OWNER_ONLY).unwrap();
         // One whose deletion is pending is, as is one that is gone, but only a denied access tells
         // so.
         let held = delete_pending(&path);
@@ -2815,7 +2815,7 @@ mod windows {
             (record, LEASE_DESCRIPTION),
             (sandbox.join(CLONE_BINDING_NAME), BINDING_DESCRIPTION),
         ] {
-            platform::set_access(&path, NO_ACCESS).unwrap();
+            platform::tests::set_access(&path, NO_ACCESS).unwrap();
             let error = store.retire(generation, None).unwrap_err();
             assert!(
                 error
@@ -2823,7 +2823,7 @@ mod windows {
                     .starts_with(&format!("cannot read the {description} ")),
                 "{error}"
             );
-            platform::set_access(&path, OWNER_ONLY).unwrap();
+            platform::tests::set_access(&path, OWNER_ONLY).unwrap();
         }
         assert_eq!(
             store.retire(generation, None).unwrap(),
@@ -2837,7 +2837,7 @@ mod windows {
             .dir()
             .join(TOMBSTONES_NAME)
             .join(format!("{}.json", other.generation()));
-        platform::set_access(&tombstone, NO_ACCESS).unwrap();
+        platform::tests::set_access(&tombstone, NO_ACCESS).unwrap();
         let now = after(&other, 1);
         let leasing = provision(directory.path(), "leasing");
         for error in [
@@ -2853,7 +2853,7 @@ mod windows {
             );
         }
         assert_eq!(binding(&leasing), None);
-        platform::set_access(&tombstone, OWNER_ONLY).unwrap();
+        platform::tests::set_access(&tombstone, OWNER_ONLY).unwrap();
         assert_eq!(
             store.tombstones().unwrap(),
             [generation, other.generation()]

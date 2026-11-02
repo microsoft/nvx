@@ -443,7 +443,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
 }
 
 #[cfg(test)]
-mod specification;
+mod tests;
 
 /// Appends the shares of `options`, their policy paths and owner, the network options with the
 /// egress `rules`, and the outcome report to `command`, as `command_run` did, and returns the

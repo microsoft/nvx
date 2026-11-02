@@ -110,12 +110,6 @@ pub(super) fn wait_step(left: Duration) -> (Duration, Duration) {
 pub(crate) struct ProcessHandle(Option<PidFd>);
 
 impl ProcessHandle {
-    /// Returns a handle without a pidfd, as hosts without pidfds have.
-    #[cfg(test)]
-    pub(crate) fn without_pidfd() -> Self {
-        Self(None)
-    }
-
     /// Whether the process's exit wakes its waiters: it does through a pidfd.
     pub(crate) fn has_exit_event(&self) -> bool {
         self.0.is_some()
@@ -334,3 +328,6 @@ pub(crate) fn monotonic_ns() -> io::Result<u64> {
         .and_then(|(seconds, nanos)| seconds.checked_add(nanos))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CLOCK_BOOTTIME is out of range"))
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

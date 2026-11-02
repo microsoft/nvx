@@ -15,7 +15,7 @@ use crate::host::store::{
     CAPABILITY_NAME, CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME,
     CLONE_SCRATCH_NAME, CONSOLE_NAME, LOG_NAME, OUTCOME_NAME, RESTORE_READY_NAME, SOCKET_NAME,
 };
-use crate::host::test_support::released;
+use crate::host::tests::released;
 
 /// The configuration record of these tests' caller.
 const CONFIG: &str = "config.json";
@@ -280,7 +280,7 @@ fn directories_that_others_may_access_are_refused() {
     };
     #[cfg(windows)]
     let problem = {
-        platform::set_access(&dir, "D:(A;OICI;FA;;;WD)").unwrap();
+        platform::tests::set_access(&dir, "D:(A;OICI;FA;;;WD)").unwrap();
         "allows other users"
     };
     for error in [
@@ -496,7 +496,7 @@ fn link_dir(target: &Path, link: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
-    crate::host::test_support::junction(link, target);
+    crate::host::tests::junction(link, target);
 }
 
 /// Makes the link `link`, which [`link_dir`] made, name the directory `target` instead.
@@ -741,7 +741,8 @@ fn only_the_directory_that_the_path_still_names_is_removed() {
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn directories_are_identified_as_their_seals_identify_them() {
-    use crate::host::seal::{FileSeal, open_metadata_only};
+    use crate::host::seal::FileSeal;
+    use crate::host::seal::tests::open_metadata_only;
 
     // On Windows, by the 128-bit file ID of `FILE_ID_INFO`, which tells the directories of ReFS
     // volumes apart where their 64-bit file index may not.

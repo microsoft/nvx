@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use super::*;
-use crate::host::template::test_support::{MIB, ManifestSpec, Proto};
+use crate::host::template::tests::{MIB, ManifestSpec, Proto};
 
 /// Returns the manifest that the encoding of `spec` parses to.
 fn parse(spec: &ManifestSpec) -> TemplateManifest {
@@ -986,7 +986,7 @@ fn read_refuses_a_junction() {
     )
     .unwrap();
     let path = directory.path().join(MANIFEST_NAME);
-    crate::host::test_support::junction(&path, &target);
+    crate::host::tests::junction(&path, &target);
     read_refusal(directory.path(), ErrorCode::Io);
 }
 

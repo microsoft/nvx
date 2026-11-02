@@ -772,12 +772,6 @@ impl<'s> Restoring<'s> {
     pub fn abandon(self) -> Result<Recovery> {
         self.starting.abandon()
     }
-
-    /// Returns the launch, which a test commits as a clone's restore does once its VMM runs.
-    #[cfg(test)]
-    pub(super) fn into_starting(self) -> Starting<'s> {
-        self.starting
-    }
 }
 
 impl fmt::Debug for Restoring<'_> {
@@ -793,3 +787,6 @@ impl fmt::Debug for Restoring<'_> {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;
