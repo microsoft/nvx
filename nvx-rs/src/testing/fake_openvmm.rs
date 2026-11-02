@@ -58,12 +58,13 @@
 //! `fake-openvmm-<token>-sessions.log` there, so that a test can tell whether a host connected.
 //!
 //! The fake also serves the sandbox profile of `nvx-rs sandbox`, which a
-//! `--microvm-sandbox-block` option selects: read-only `distro`, `runtime`, and `custom` layers
-//! and a `scratch` disk, each an existing file, with `nvx_sandbox=1`, `nvx_entrypoint=`, and
+//! `--microvm-sandbox-block` option selects: a read-only `distro` layer and a `scratch` disk,
+//! each an existing file, with `nvx_sandbox=1`, `nvx_entrypoint=`, and
 //! `nvx_hostname=` on the kernel command line, or, for a RAM-backed overlay, which one
 //! `nvx_overlay_upper=ramfs` there requests, as OpenVMM reads it, the `distro` layer alone. Like
-//! OpenVMM, it opens each block device at the
-//! path that its option names, a layer read-only and the scratch disk for reading and writing,
+//! OpenVMM, it refuses every other role, the retired `runtime` and `custom` layers included,
+//! and opens each block device at the
+//! path that its option names, the layer read-only and the scratch disk for reading and writing,
 //! and holds them until it exits; it reads them whole, and records what each held, with its role
 //! and path, in `fake-openvmm-<token>-blocks.json` next to the kernel. The
 //! `fake_block_delay_ms=MS` token delays the opens. Its guest advertises the features of the
@@ -388,7 +389,7 @@ struct Mapped {
 /// A sandbox block device of the command line.
 #[derive(Debug, Clone)]
 struct SandboxBlock {
-    /// Its role: `distro`, `runtime`, `custom`, or `scratch`.
+    /// Its role: `distro` or `scratch`.
     role: String,
     /// The path of its file, as the option names it.
     path: PathBuf,
@@ -1699,10 +1700,11 @@ fn check_control_console(endpoint: &str, snapshot: Option<&Path>) -> Result<(), 
     Ok(())
 }
 
-/// Checks the sandbox block devices of a sandbox: each layer, `ROLE:file:PATH,ro` with a role of
-/// `distro`, `runtime`, or `custom`, at most once each, and one scratch disk, `scratch:file:PATH`,
-/// each an existing regular file, and returns them in order. A RAM-backed overlay, `ram_overlay`,
-/// takes the `distro` layer alone instead, as OpenVMM admits it.
+/// Checks the sandbox block devices of a sandbox: the `distro` layer, `distro:file:PATH,ro`, and
+/// one scratch disk, `scratch:file:PATH`, each an existing regular file, and returns them in
+/// order. Like OpenVMM, it refuses every other role, the retired `runtime` and `custom` layers
+/// included. A RAM-backed overlay, `ram_overlay`, takes the `distro` layer alone instead, as
+/// OpenVMM admits it.
 fn check_sandbox_blocks<'a>(
     blocks: impl Iterator<Item = &'a &'a str>,
     ram_overlay: bool,
@@ -1714,9 +1716,7 @@ fn check_sandbox_blocks<'a>(
         let (role, rest) = block.split_once(':').ok_or_else(invalid)?;
         let path = rest.strip_prefix("file:").ok_or_else(invalid)?;
         let (path, read_only) = match role {
-            "distro" | "runtime" | "custom" => {
-                (path.strip_suffix(",ro").ok_or_else(invalid)?, true)
-            }
+            "distro" => (path.strip_suffix(",ro").ok_or_else(invalid)?, true),
             "scratch" => (path, false),
             _ => return Err(invalid()),
         };
@@ -1735,8 +1735,8 @@ fn check_sandbox_blocks<'a>(
                 "microVM RAM-backed overlay requires exactly one read-only distro block".to_owned(),
             );
         }
-    } else if !roles.contains("scratch") || roles.len() < 2 {
-        return Err("a sandbox needs a layer and a scratch disk".to_owned());
+    } else if roles != BTreeSet::from(["distro", "scratch"]) {
+        return Err("a sandbox needs a distro layer and a scratch disk".to_owned());
     }
     Ok(checked)
 }

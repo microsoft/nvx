@@ -9,14 +9,15 @@
 - Mapped fork tip: `82686c983907738d44a6eb9e3322589b573c0074`, position 144. The graph, PR
   summary, and commit mapping below cover positions 001-144 and the PR20 fixup at
   position 161.
-- NVX's pinned OpenVMM revision: `0ac254109ed32fc5fa2b1a6fc526a10593b1f986`, position 200, the
-  head of the `feature/microvm/release/v3.0` branch of microsoft/openvmm, to which
-  `feature/microvm/dev` also points. The v3.0 reorganization regrouped the 385 commits of
+- NVX's pinned OpenVMM revision: `d891dfd9d9c9243f045069f5f077dbf5e13f9a4c`, position 201. Position
+  201, which microsoft/openvmm#4839 proposes for `feature/microvm/dev`, is one commit on position
+  200, `0ac254109`, the head of the `feature/microvm/release/v3.0` branch of microsoft/openvmm, to
+  which `feature/microvm/dev` also points. The v3.0 reorganization regrouped the 385 commits of
   `feature/microvm/release/v2.4` that upstream had not landed into 200 commits: it folded
   fixups into the commits that they fix and combined the commits after the mapped tip into commits
   by concept, without changing what the chain adds to upstream; see
-  [The v3.0 reorganization](#the-v30-reorganization). The pin is 56 commits past the mapped tip
-  on the same first-parent chain. Positions 145-200, except the PR20 fixup at position
+  [The v3.0 reorganization](#the-v30-reorganization). The pin is 57 commits past the mapped tip
+  on the same first-parent chain. Positions 145-201, except the PR20 fixup at position
   161, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `b2676222b383bf50c7022f6a5983920421469a47` (2026-10-31), the fork base.
@@ -513,7 +514,8 @@ b2676222b
   -> network [192-193] -> host filesystem [194]
   -> network [195] -> device DMA [196-197]
   -> command lines [198] -> KVP test [199-200]
-  -> 0ac254109 (NVX pin)
+  -> sandbox block roles [201]
+  -> d891dfd9d (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -529,10 +531,11 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 144 without merges. Of the 56 later
+The NVX pin extends the chain past position 144 without merges. Of the 57 later
 commits, position 161 is a PR20 fixup, and the others are not yet classified or assigned to
-PRs. Each combines the v2.4 commits that the table lists, which developed one concept; "(part)"
-marks a v2.4 fixup that split across commits.
+PRs. Each of positions 145-200 combines the v2.4 commits that the table lists, which developed one
+concept; "(part)" marks a v2.4 fixup that split across commits. Position 201 follows the
+reorganization, so it combines none.
 
 | Position | Commit | v2.4 positions | Topic |
 | ---: | --- | --- | --- |
@@ -592,6 +595,7 @@ marks a v2.4 fixup that split across commits.
 | 198 | `9fda4ba25` | 302, 303, 304, 305, 306, 307 | microVM: refuse command lines that the guest kernel would truncate |
 | 199 | `3528a85c1` | 361 | vmm_tests: Fix kvp test flakiness by updating windows version |
 | 200 | `0ac254109` | 362 | ci: run the Windows Server 2025 KVP test on Linux KVM |
+| 201 | `d891dfd9d` | - | microVM: remove the runtime and custom sandbox block roles (microsoft/openvmm#4839) |
 
 Some of these commits change mapped work rather than add to it. Position 160 removes the
 legacy microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest
@@ -600,8 +604,11 @@ version 6 the only snapshot format, changing files that PR11 and PR17 also chang
 position 180. Position 192 changes the snapshot network policy and the forward refusal
 of PR21's position 119 and the snapshot refusals of position 188. Position 194
 changes the dormant-slot restore of PR18's position 103, as the aggregates of position
-183 restricted it. Assigning the later commits therefore means revisiting those PRs, not only
-appending new ones.
+183 restricted it. Position 201 removes the `runtime` and `custom` sandbox block roles that PR19's
+position 104 adds, with the slots and IRQs that PR16's position 080 places for them and the
+shared-status words that PR16's position 082 gives them, which stay unassigned, and the role
+names and layer counts of PR19's position 105's snapshot capture and restore. Assigning the later
+commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 191, by contrast, changes only `disk_blob`, which upstream main and the fork base
 have alike and no other commit of the chain changes, so it can go upstream on its own. Position
@@ -625,7 +632,9 @@ moves the time ABI to version 2: it changes the time ABI backends of KVM, MSHV, 
 portb device's time sample, the restore packet, and the microVM worker's time-abi unit, all of
 which the time ABI series added, so it follows that series upstream. Position 195 changes
 the tier check of position 192's restore that installs a new policy and extends restore
-packet 5 of position 174, so it builds on those fork-only commits.
+packet 5 of position 174, so it builds on those fork-only commits. Position 201 changes only the
+microVM profile, CLI, and snapshot contract that PR16 and PR19 add, and their Guide pages, so it
+does not apply to upstream main and follows those PRs upstream.
 
 ## PR summary
 
