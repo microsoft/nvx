@@ -1919,8 +1919,9 @@ Ubuntu runners, whose checkouts have the LF line endings of the commit, run
 `Package nvx crate`, waits for that check, and `crate-release`,
 `Publish nvx crate`, waits for `crate-package`. Pushes, pull requests, and
 merge groups never publish the crates. A run publishes a new version only
-when the crates' directories, or the manifest or the lockfile of their
-workspace, which they share, changed since the commit from which the newest
+when the crates' directories, the manifest or lockfile of their workspace,
+or root `.cargo/config` or `.cargo/config.toml` changed since the commit from
+which the newest
 version on crates.io was packed, which that version's `.cargo_vcs_info.json`
 records, or when crates.io lacks that version of some of the crates, as after
 a partial upload. A night without either publishes nothing, and neither does

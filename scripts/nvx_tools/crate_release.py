@@ -1124,7 +1124,7 @@ class Checkout:
     # crates' manifests, the workspace's, and its lockfile.
     originals: Mapping[str, bytes]
     # The paths whose changes publish a new version: the crates' directories,
-    # and the workspace's manifest and lockfile, which they share.
+    # and the workspace's manifest and lockfile and root Cargo configuration.
     inputs: tuple[str, ...]
     # The places of each crate's requirements on the others, sorted: the
     # platform that each is for, if any, its kind, its key, the crate, and
@@ -1220,7 +1220,7 @@ class Checkout:
         inputs = [f"{crate.directory}/" for crate in crates]
         inputs += [
             path
-            for path in (manifest, lockfile)
+            for path in (manifest, lockfile, ".cargo/config", ".cargo/config.toml")
             if not any(path.startswith(crate) for crate in inputs)
         ]
         return cls(

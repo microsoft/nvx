@@ -806,7 +806,9 @@ class ManifestTests(unittest.TestCase):
             BuildConstants.REPO_ROOT, crate_release.CRATES
         )
         self.assertEqual(checkout.names, ("nvx",))
-        self.assertEqual(checkout.inputs, ("nvx-rs/",))
+        self.assertEqual(
+            checkout.inputs, ("nvx-rs/", ".cargo/config", ".cargo/config.toml")
+        )
         counter = checkout.declared.counter
         self.assertIsNotNone(counter)
         assert counter is not None
@@ -1593,7 +1595,8 @@ class ReleaseTests(_JobTests):
             crate_release.Plan(
                 True,
                 _version("0.1.0-alpha.4"),
-                f"crate/ changed since {base}, from which demo {DECLARED} was packed",
+                f"crate/, .cargo/config, .cargo/config.toml changed since {base}, "
+                f"from which demo {DECLARED} was packed",
             ),
         )
         # Only the job's checkout has the version.
@@ -1624,8 +1627,8 @@ class ReleaseTests(_JobTests):
         self.assertFalse(plan.publish)
         self.assertEqual(
             plan.reason,
-            f"crate/ did not change since {base}, from which demo {DECLARED} was "
-            "packed",
+            f"crate/, .cargo/config, .cargo/config.toml did not change since "
+            f"{base}, from which demo {DECLARED} was packed",
         )
         self.assertEqual(self.cargo.commands, [])
         self.assertEqual(
@@ -1637,7 +1640,7 @@ class ReleaseTests(_JobTests):
             },
         )
         self.assertIn(
-            "Publishes nothing: crate/ did not change",
+            "Publishes nothing: crate/, .cargo/config, .cargo/config.toml did not change",
             self.summary.read_text(encoding="utf-8"),
         )
 
@@ -1964,7 +1967,14 @@ class WorkspaceTests(_JobTests):
         self.assertEqual(checkout.declared, _version(DECLARED))
         self.assertEqual(
             checkout.inputs,
-            ("crates/base/", "crates/demo/", "Cargo.toml", "Cargo.lock"),
+            (
+                "crates/base/",
+                "crates/demo/",
+                "Cargo.toml",
+                "Cargo.lock",
+                ".cargo/config",
+                ".cargo/config.toml",
+            ),
         )
         files = checkout.versioned(_version("0.1.0-alpha.4"))
         # base inherits the workspace's version, and its requirement.
@@ -2146,7 +2156,10 @@ class WorkspaceTests(_JobTests):
     def test_changes_to_the_workspace_s_shared_files_publish(self):
         self.crates_io.release(self.checkout)
         base = self.checkout.head[:12]
-        files = "crates/base/, crates/demo/, Cargo.toml, Cargo.lock"
+        files = (
+            "crates/base/, crates/demo/, Cargo.toml, Cargo.lock, "
+            ".cargo/config, .cargo/config.toml"
+        )
         # tool, which CI does not publish, changed.
         self.change_crate("crates/tool/src/main.rs")
         plan = self.package()
@@ -2174,6 +2187,34 @@ class WorkspaceTests(_JobTests):
                     ),
                 )
                 self.checkout.restore()
+
+    def test_root_cargo_configuration_changes_publish_and_dirty_changes_fail(self):
+        for index, (path, change) in enumerate(
+            (path, change)
+            for path in (".cargo/config", ".cargo/config.toml")
+            for change in ("add", "edit", "delete")
+        ):
+            with self.subTest(path=path, change=change):
+                self.use(
+                    _Checkout(
+                        self.temporary / f"configuration-{index}",
+                        WORKSPACE_FILES,
+                        WORKSPACE_CRATES,
+                    )
+                )
+                if change != "add":
+                    self.checkout.write(path, "[build]\njobs = 1\n")
+                    self.checkout.commit("Add Cargo configuration")
+                self.crates_io.release(self.checkout)
+                if change == "delete":
+                    (self.checkout.root / path).unlink()
+                else:
+                    self.checkout.write(path, "[build]\njobs = 2\n")
+                checkout = self.checkout.open()
+                with self.assertRaisesRegex(ScriptError, "has these changes"):
+                    checkout.require(checkout.declared)
+                self.checkout.commit(f"{change} Cargo configuration")
+                self.assertTrue(self.package().publish)
 
     def test_each_crate_is_published_after_those_that_it_depends_on(self):
         self.crates_io.release(self.checkout)
