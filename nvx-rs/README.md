@@ -2071,6 +2071,14 @@ status.
   `--mount-write` name host paths, which OpenVMM attributes to the share that
   holds them, and which must be absolute with an aggregate, unlike those of
   `sandbox`, which apply to the `--mount` before them.
+- `--nested-virt` passes OpenVMM `--nested-virt`, which gives the microVM of a
+  cold boot
+  [nested virtualization](../doc/run.md#nested-virtualization). The private
+  `host::cli::nested` refuses it, with `unsupported`, for a restore and on MSHV
+  whatever the host, and, unless the run is dry, with `unsupported` on a CPU
+  other than Intel's and with `unavailable` where KVM's
+  `/sys/module/kvm_intel/parameters/nested` is not `Y` or `1`, before anything
+  launches; OpenVMM checks WHP's own offer.
 - After OpenVMM exits with a status other than 0 from a cold boot, on a host
   whose CPU no built-in CPU profile serves, it prints guidance to standard
   error: what `--cpu-profile auto` does on that CPU, and, on an Intel or AMD
@@ -2107,7 +2115,12 @@ before them.
   `--outcome-report` asks OpenVMM for its outcome report.
 - `provision` records the sandbox in its state directory. `start` launches
   OpenVMM detached with the managed lifecycle, passes it a fresh capability
-  through its standard input, and waits until the guest answers. `exec` runs a
+  through its standard input, and waits until the guest answers.
+  `--nested-virt`, which only `run` and `provision` take, gives the sandbox's
+  microVM [nested virtualization](../doc/run.md#sandbox-nested-virtualization),
+  and its workload `/dev/kvm`, as for `nvx-rs run`; `provision` checks the
+  request alone and records it, and each `start` checks the request and the
+  host before it launches anything. `exec` runs a
   workload, prints its standard output and then its standard error, and exits
   with its status; `--outcome-report` writes
   `{"operation_id": HEX, "outcome": {"category": CATEGORY, "operation":
@@ -2127,7 +2140,7 @@ earlier `nvx-rs` provisioned, which has no bindings or no typed network:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 8, with the export plan of its shares under `export`, `null` for none, its upper under `upper`, `scratch` or `ram`, the binding of its distro layer under `distro_binding`, its scratch image under `scratch` and that image's binding under `scratch_binding`, both `null` for an upper in RAM, and its network under `network`, `null` for none, written by `serde_json`'s pretty printer with the members of every object sorted by name, with mode 0600, through a temporary file. `start` reads it as strict JSON, as egress policy files are read, into the typed fields of format 8, and also reads the format 7 that earlier builds wrote, which records no `upper` and keeps the upper on scratch, and the format 1 that they wrote for a sandbox without shares, with `mount` `null` and no `export` |
+| `config.json` | The provisioned sandbox, in format 9, with the export plan of its shares under `export`, `null` for none, its upper under `upper`, `scratch` or `ram`, the binding of its distro layer under `distro_binding`, its scratch image under `scratch` and that image's binding under `scratch_binding`, both `null` for an upper in RAM, its network under `network`, `null` for none, and whether its microVM has nested virtualization under `nested_virt`, written by `serde_json`'s pretty printer with the members of every object sorted by name, with mode 0600, through a temporary file. `start` reads it as strict JSON, as egress policy files are read, into the typed fields of format 9, and also reads the format 8 that earlier builds wrote, which records no `nested_virt` and has none, the format 7 that they wrote, which records no `upper` either and keeps the upper on scratch, and the format 1 that they wrote for a sandbox without shares, with `mount` `null` and no `export` |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
 | `runtime.json` | The store's runtime record of the running VM, in its format 4: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |

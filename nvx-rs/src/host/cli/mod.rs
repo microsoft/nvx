@@ -41,6 +41,7 @@ mod deadline;
 mod download;
 mod egress;
 mod json;
+mod nested;
 mod network;
 mod output;
 mod run;

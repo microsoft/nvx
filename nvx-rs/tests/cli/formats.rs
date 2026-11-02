@@ -1,9 +1,9 @@
 //! The configurations of every format that a build of `nvx-rs` or `nvx.py` wrote, from the
-//! hand-written `config.json` files of `tests/fixtures/state/`: `start` reads format 7, which
-//! earlier builds wrote, with shares or without, and format 1, which they wrote for a sandbox
-//! without shares, and refuses the others, and the configurations that `nvx.py` wrote, without
-//! bindings, before it launches OpenVMM. The lifecycle tests cover format 8, which this build
-//! writes.
+//! hand-written `config.json` files of `tests/fixtures/state/`: `start` reads formats 8 and 7,
+//! which earlier builds wrote, the latter with shares or without, and format 1, which they wrote
+//! for a sandbox without shares, and refuses the others, and the configurations that `nvx.py`
+//! wrote, without bindings, before it launches OpenVMM. The lifecycle tests cover format 9, which
+//! this build writes.
 //!
 //! A fixture names the paths of a root as `{root/RELATIVE}`, the hypervisor that a provision
 //! records on this host as `{hypervisor}`, and the bindings of the root's distro layer and scratch
@@ -37,8 +37,9 @@ enum Start {
     Refused(&'static [&'static str]),
 }
 
-/// Returns the options with which a start launches OpenVMM for the sandbox of `format-1.json` and
-/// `format-7-without-shares.json`, a reader without shares, from those of the minimal sandbox.
+/// Returns the options with which a start launches OpenVMM for the sandbox of `format-1.json`,
+/// `format-7-without-shares.json`, and `format-8.json`, a reader without shares, from those of the
+/// minimal sandbox.
 fn reader(options: Options) -> Options {
     options
         .with("--microvm-workload-identity", ["2000:2000"])
@@ -55,7 +56,7 @@ fn reader(options: Options) -> Options {
 }
 
 /// The configurations of every format, as fixtures, and what a start does with each.
-fn formats() -> [(&'static str, &'static str, Start); 10] {
+fn formats() -> [(&'static str, &'static str, Start); 11] {
     let unsupported = &[
         "sandbox configuration has an unsupported format",
         "{root/state/config.json}",
@@ -127,6 +128,16 @@ fn formats() -> [(&'static str, &'static str, Start); 10] {
                 openvmm: reader,
                 maps: None,
                 exec: (&["--entrypoint", "/bin/echo", "--arg", "seven"], "seven\n"),
+            },
+        ),
+        // Format 8 records no nested virtualization, which its sandbox's microVM never has.
+        (
+            "format 8",
+            include_str!("../fixtures/state/format-8.json"),
+            Start::Runs {
+                openvmm: reader,
+                maps: None,
+                exec: (&["--entrypoint", "/bin/echo", "--arg", "eight"], "eight\n"),
             },
         ),
         // Formats 2 to 6 recorded shares as they were requested, which no start reads any more:

@@ -1,20 +1,22 @@
-//! The CLI's own record in a state directory, `config.json`, which `provision` writes in format 8
-//! and `start` also reads in formats 1 and 7.
+//! The CLI's own record in a state directory, `config.json`, which `provision` writes in format 9
+//! and `start` also reads in formats 1, 7, and 8.
 //!
 //! - [`write_json`] writes JSON text and a line end, with each `\n` turned into the line separator
 //!   of the host, into a temporary file of mode 0600 that then replaces the file.
 //! - [`read_config`] reads a configuration as [`read_object`] reads a JSON file, whose `format` is
-//!   1, 7, or 8, and [`Config::new`] holds the fields that `start` reads, as their types require
+//!   1, 7, 8, or 9, and [`Config::new`] holds the fields that `start` reads, as their types require
 //!   them: a configuration without one, or with a value of another type, is malformed. Guest RAM
 //!   outside the range of `--memory-mib`, which `nvx.py` and earlier releases of `nvx-rs`
 //!   recorded, is refused with the advice to provision the sandbox again.
-//! - [`serialize_launch`] writes a provisioned launch in format 8, with the export plan of its
-//!   shares under `export`, `null` without shares, and its upper under `upper`, `scratch` or
-//!   `ram`, with its members sorted by name, as [`pretty_serde`] writes them, and
-//!   [`Config::launch`] reads it back. It also reads format 7, which earlier builds wrote, the
-//!   same without `upper`, whose upper is on scratch, and format 1, which they wrote for a sandbox
-//!   without shares, with `mount` `null` and no `export`. Formats 2 to 6 recorded the shares as
-//!   they were requested; `start` no longer reads them, and such a sandbox is provisioned again.
+//! - [`serialize_launch`] writes a provisioned launch in format 9, with the export plan of its
+//!   shares under `export`, `null` without shares, its upper under `upper`, `scratch` or `ram`,
+//!   and whether its microVM has nested virtualization under `nested_virt`, with its members
+//!   sorted by name, as [`pretty_serde`] writes them, and [`Config::launch`] and
+//!   [`Config::nested_virt`] read it back. It also reads format 8, which earlier builds wrote, the
+//!   same without `nested_virt`, whose microVM has none, format 7, the same as 8 without `upper`,
+//!   whose upper is on scratch, and format 1, which they wrote for a sandbox without shares, with
+//!   `mount` `null` and no `export`. Formats 2 to 6 recorded the shares as they were requested;
+//!   `start` no longer reads them, and such a sandbox is provisioned again.
 //! - Every configuration also records the [`DistroBinding`] of the sandbox's distro layer, under
 //!   `distro_binding` in its serde form, which [`Config::distro_binding`] reads back for `start`
 //!   to check. `nvx.py` never wrote one, and `start` refuses a configuration without one. The
@@ -60,12 +62,19 @@ pub(crate) const CONFIG_FORMAT: u64 = 1;
 /// shares under `export`, in its serde form, or `null` for a sandbox without shares, and whose
 /// upper is on scratch, which `start` still reads.
 pub(crate) const EXPORT_CONFIG_FORMAT: u64 = 7;
-/// The configuration that `provision` writes: that of [`EXPORT_CONFIG_FORMAT`], with the upper
-/// under `upper`, `scratch` or `ram`.
+/// The configuration that earlier builds wrote: that of [`EXPORT_CONFIG_FORMAT`], with the upper
+/// under `upper`, `scratch` or `ram`, which `start` still reads.
 pub(crate) const UPPER_CONFIG_FORMAT: u64 = 8;
+/// The configuration that `provision` writes: that of [`UPPER_CONFIG_FORMAT`], with whether the
+/// sandbox's microVM has nested virtualization under `nested_virt`.
+pub(crate) const NESTED_CONFIG_FORMAT: u64 = 9;
 /// Every configuration format that `start` reads.
-pub(crate) const CONFIG_FORMATS: [u64; 3] =
-    [CONFIG_FORMAT, EXPORT_CONFIG_FORMAT, UPPER_CONFIG_FORMAT];
+pub(crate) const CONFIG_FORMATS: [u64; 4] = [
+    CONFIG_FORMAT,
+    EXPORT_CONFIG_FORMAT,
+    UPPER_CONFIG_FORMAT,
+    NESTED_CONFIG_FORMAT,
+];
 /// What messages call a configuration.
 const DESCRIPTION: &str = "sandbox configuration";
 
@@ -249,10 +258,10 @@ struct ConfigLayer {
     uuid: String,
 }
 
-/// The configuration that `provision` records, in format 8.
+/// The configuration that `provision` records, in format 9.
 #[derive(Serialize)]
 struct Record<'a> {
-    /// [`UPPER_CONFIG_FORMAT`].
+    /// [`NESTED_CONFIG_FORMAT`].
     format: u64,
     /// The distro layer, the one layer that a launch holds.
     layers: [RecordedLayer<'a>; 1],
@@ -274,6 +283,8 @@ struct Record<'a> {
     hypervisor: &'a str,
     /// `--memory-mib`.
     memory_mib: u64,
+    /// `--nested-virt`.
+    nested_virt: bool,
     /// The sandbox's network, or `None` for no network device.
     network: Option<&'a SandboxNetwork>,
     /// `--cmdline`.
@@ -300,7 +311,7 @@ pub(crate) fn serialize_launch(
     let settings = launch.settings();
     let (workload_uid, workload_gid) = settings.workload_identity;
     let record = Record {
-        format: UPPER_CONFIG_FORMAT,
+        format: NESTED_CONFIG_FORMAT,
         layers: [RecordedLayer {
             role: layer.role().as_str(),
             path: &distro.path,
@@ -315,6 +326,7 @@ pub(crate) fn serialize_launch(
         pids_max: settings.pids_max,
         hypervisor: config.hypervisor,
         memory_mib: config.memory_mib,
+        nested_virt: config.nested_virt,
         network: launch.network(),
         cmdline: config.cmdline,
         distro_binding: &distro.binding,
@@ -338,19 +350,20 @@ fn present<'de, D: Deserializer<'de>>(
     Value::deserialize(deserializer).map(Some)
 }
 
-/// The fields of a configuration of format 1, 7, or 8 that `start` reads.
+/// The fields of a configuration of format 1, 7, 8, or 9 that `start` reads.
 ///
-/// Every field is required, with its type, but the bindings, the network, the shares, and the
-/// upper, whose absence [`Config`]'s methods report: `nvx.py` wrote no bindings and no typed
-/// network, only formats 7 and 8 record `export`, and only format 8 `upper`, without which the
-/// upper is on scratch. Other fields, such as the network options of `nvx.py`, are ignored.
+/// Every field is required, with its type, but the bindings, the network, the shares, the upper,
+/// and nested virtualization, whose absence [`Config`]'s methods report: `nvx.py` wrote no
+/// bindings and no typed network, only formats 7 to 9 record `export`, only formats 8 and 9
+/// `upper`, without which the upper is on scratch, and only format 9 `nested_virt`, without which
+/// the microVM has none. Other fields, such as the network options of `nvx.py`, are ignored.
 #[derive(Deserialize)]
 pub(crate) struct Config {
     /// The format, which [`read_config`] checked.
     format: u64,
     /// The read-only layers.
     layers: Vec<ConfigLayer>,
-    /// Where the overlay keeps its upper, `scratch` or `ram`, as format 8 records it.
+    /// Where the overlay keeps its upper, `scratch` or `ram`, as formats 8 and 9 record it.
     upper: Option<String>,
     /// The scratch image, or `None` for an upper in RAM.
     scratch: Option<String>,
@@ -368,9 +381,11 @@ pub(crate) struct Config {
     hypervisor: String,
     /// The guest RAM in MiB, from 1 to [`MAX_MEMORY_MIB`].
     memory_mib: u64,
+    /// Whether the microVM has nested virtualization, as format 9 records it.
+    nested_virt: Option<bool>,
     /// The user's kernel command line.
     cmdline: String,
-    /// The export plan of the shares, `null` for none, as formats 7 and 8 record it, if recorded.
+    /// The export plan of the shares, `null` for none, as formats 7 to 9 record it, if recorded.
     #[serde(default, deserialize_with = "present")]
     export: Option<Value>,
     /// The shares as formats 1 to 6 recorded them, `null` for none, if recorded.
@@ -431,14 +446,26 @@ impl Config {
         &self.cmdline
     }
 
+    /// Returns whether the sandbox's microVM has nested virtualization: what format 9 records
+    /// under `nested_virt`, and no for the formats before it, which record none. A configuration
+    /// of format 9 without it, or of another format with it, fails as `sandbox configuration is
+    /// malformed`.
+    pub(crate) fn nested_virt(&self) -> Result<bool> {
+        match (self.format, self.nested_virt) {
+            (NESTED_CONFIG_FORMAT, Some(nested_virt)) => Ok(nested_virt),
+            (NESTED_CONFIG_FORMAT, None) | (_, Some(_)) => Err(malformed()),
+            (_, None) => Ok(false),
+        }
+    }
+
     /// Reads the launch that the configuration records and checks it against the host.
     ///
     /// A layer whose role is not `distro`, an export plan that is not of its serde form, or an
     /// upper that [`upper`](Self::upper) refuses fails as `sandbox configuration is malformed`. A
-    /// configuration whose format is not the one that its shares need, format 7 or 8 for one that
-    /// records `export` and format 1 for one that does not, fails as `sandbox configuration format
-    /// does not match its mounts`, and so does one with a share under `mount`, which only formats
-    /// that `start` no longer reads recorded. The launch must pass the checks of
+    /// configuration whose format is not the one that its shares need, format 7, 8, or 9 for one
+    /// that records `export` and format 1 for one that does not, fails as `sandbox configuration
+    /// format does not match its mounts`, and so does one with a share under `mount`, which only
+    /// formats that `start` no longer reads recorded. The launch must pass the checks of
     /// [`SandboxLaunch::new`], then the export plan those of [`SandboxLaunch::with_export`], and
     /// the launch those of [`SandboxLaunch::validated`], which checks again the host objects that
     /// the plan recorded.
@@ -469,14 +496,16 @@ impl Config {
             },
         )?;
         let (expected, mounted) = match &self.export {
-            Some(_) if self.upper.is_some() => (UPPER_CONFIG_FORMAT, false),
-            Some(_) => (EXPORT_CONFIG_FORMAT, false),
+            Some(_) if self.upper.is_some() => {
+                (&[UPPER_CONFIG_FORMAT, NESTED_CONFIG_FORMAT][..], false)
+            }
+            Some(_) => (&[EXPORT_CONFIG_FORMAT][..], false),
             None => (
-                CONFIG_FORMAT,
+                &[CONFIG_FORMAT][..],
                 self.mount.as_ref().is_some_and(|mount| !mount.is_null()),
             ),
         };
-        if mounted || self.format != expected {
+        if mounted || !expected.contains(&self.format) {
             return Err(Exit::error(
                 ErrorCode::FormatUnsupported,
                 "sandbox configuration format does not match its mounts",
@@ -487,17 +516,21 @@ impl Config {
         Ok(launch)
     }
 
-    /// Returns the upper that the configuration records. Format 8 names it under `upper`: for
-    /// `scratch`, the scratch image under `scratch`, and for `ram`, RAM, with `scratch` `null`.
-    /// Formats 1 and 7 name none, and keep the upper on the scratch image under `scratch`. Any
-    /// other combination fails as `sandbox configuration is malformed`.
+    /// Returns the upper that the configuration records. Formats 8 and 9 name it under `upper`:
+    /// for `scratch`, the scratch image under `scratch`, and for `ram`, RAM, with `scratch`
+    /// `null`. Formats 1 and 7 name none, and keep the upper on the scratch image under `scratch`.
+    /// Any other combination fails as `sandbox configuration is malformed`.
     fn upper(&self) -> Result<SandboxUpper> {
         let (scratch, ram) = (RootUpper::Scratch.as_str(), RootUpper::Ram.as_str());
         match (self.format, self.upper.as_deref(), self.scratch.as_deref()) {
-            (UPPER_CONFIG_FORMAT, Some(upper), Some(path)) if upper == scratch => {
+            (UPPER_CONFIG_FORMAT | NESTED_CONFIG_FORMAT, Some(upper), Some(path))
+                if upper == scratch =>
+            {
                 Ok(SandboxUpper::scratch(path))
             }
-            (UPPER_CONFIG_FORMAT, Some(upper), None) if upper == ram => Ok(SandboxUpper::RAM),
+            (UPPER_CONFIG_FORMAT | NESTED_CONFIG_FORMAT, Some(upper), None) if upper == ram => {
+                Ok(SandboxUpper::RAM)
+            }
             (CONFIG_FORMAT | EXPORT_CONFIG_FORMAT, None, Some(path)) => {
                 Ok(SandboxUpper::scratch(path))
             }

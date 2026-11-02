@@ -1072,9 +1072,11 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     let mut iterator = arguments.iter();
     while let Some(argument) = iterator.next() {
         let name = argument.as_str();
+        // Nested virtualization is a launch's, never a capture's.
         if name == "--single-process"
             || name == "--microvm-control-auth-stdin"
             || (run && name == "--restore-network-policy")
+            || (!capture && name == "--nested-virt")
         {
             flags.insert(name);
         } else if VALUED.contains(&name)
@@ -1178,6 +1180,13 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         let (anchor, restore) = check_run_boot(&values)?;
         if capture && restore.is_some() {
             return Err("a capture boots its VM cold".to_owned());
+        }
+        if restore.is_some() && flags.contains("--nested-virt") {
+            return Err(
+                "a microVM restore takes its machine from the snapshot, which never has \
+                 nested virtualization; omit --nested-virt"
+                    .to_owned(),
+            );
         }
         (65534, anchor, restore)
     } else {

@@ -655,82 +655,119 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
         .into_iter()
         .chain(run_launches())
         .collect();
+    in_parallel(&cases, check_launch);
+}
+
+/// `--nested-virt` launches OpenVMM with nested virtualization, for `nvx-rs run` and for
+/// `nvx-rs sandbox run`, where the host gives a microVM it, as `nvx-rs` finds it, and where it does
+/// not, they refuse it before they launch anything: which of the two depends on the host that runs
+/// the test.
+#[test]
+fn nested_virtualization_launches_only_where_the_host_offers_it() {
+    let cases = [
+        launch(
+            "run: nested virtualization",
+            run(&["--nested-virt"]),
+            cold_boot().flag("--nested-virt"),
+            0,
+            "openvmm: booted the microVM\n",
+        ),
+        launch(
+            "sandbox run: nested virtualization",
+            sandbox_run("/bin/echo", &["--nested-virt", "--arg", "nested"]),
+            workload("", "/bin/echo", &["nested"]).flag("--nested-virt"),
+            0,
+            "nested\n",
+        ),
+    ];
+    match crate::nested_refusal() {
+        None => in_parallel(&cases, check_launch),
+        Some((code, fragment)) => in_parallel(&cases, |case| {
+            let root = Root::new();
+            let before = root.snapshot();
+            root.nvx_rs(&case.arguments).assert_error(code, &[fragment]);
+            assert_eq!(root.snapshot(), before, "{}", case.name);
+            assert!(root.openvmm_records().is_empty(), "{}", case.name);
+        }),
+    }
+}
+
+/// Runs the launch of `case` in a new root, and checks how it ends and what OpenVMM received.
+fn check_launch(case: &Launch) {
     let (vendor, family, model, stepping) = crate::reported_cpu();
     let unserved = !crate::served(&vendor, family, model, stepping);
-    in_parallel(&cases, |case| {
-        let root = Root::new();
-        for (relative, content) in &case.files {
-            root.write_content(relative, *content);
-        }
-        for relative in &case.removed {
-            root.remove(relative);
-        }
-        let arguments: Vec<&str> = case.arguments.iter().map(String::as_str).collect();
-        let environment: Vec<(&str, &str)> = case
-            .environment
-            .iter()
-            .map(|(name, value)| (*name, value.as_str()))
-            .collect();
-        let outcome = root.nvx_rs_with(&arguments, &environment);
-        eprintln!("case: {}", case.name);
-        assert_eq!(outcome.status, Some(case.status), "{}", outcome.describe());
-        let (command, rest) = outcome.command();
-        // The workload's output follows the command byte for byte, as does OpenVMM's.
-        assert_eq!(rest, case.stdout.as_bytes(), "{}", outcome.describe());
-        let stderr = outcome.stderr();
-        let guidance = stderr
-            .strip_prefix(&root.expand(case.stderr))
-            .unwrap_or_else(|| panic!("{}", outcome.describe()));
-        if unserved && fails_a_cold_boot(case) {
-            assert!(
-                guidance.starts_with("nvx: no built-in CPU profile serves this host's CPU"),
-                "{}",
-                outcome.describe()
-            );
-        } else {
-            assert_eq!(guidance, "", "{}", outcome.describe());
-        }
-        let (program, arguments) = command.split_first().unwrap();
-        assert_eq!(
-            *program,
-            root.below(OPENVMM).to_str().unwrap(),
+    let root = Root::new();
+    for (relative, content) in &case.files {
+        root.write_content(relative, *content);
+    }
+    for relative in &case.removed {
+        root.remove(relative);
+    }
+    let arguments: Vec<&str> = case.arguments.iter().map(String::as_str).collect();
+    let environment: Vec<(&str, &str)> = case
+        .environment
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect();
+    let outcome = root.nvx_rs_with(&arguments, &environment);
+    eprintln!("case: {}", case.name);
+    assert_eq!(outcome.status, Some(case.status), "{}", outcome.describe());
+    let (command, rest) = outcome.command();
+    // The workload's output follows the command byte for byte, as does OpenVMM's.
+    assert_eq!(rest, case.stdout.as_bytes(), "{}", outcome.describe());
+    let stderr = outcome.stderr();
+    let guidance = stderr
+        .strip_prefix(&root.expand(case.stderr))
+        .unwrap_or_else(|| panic!("{}", outcome.describe()));
+    if unserved && fails_a_cold_boot(case) {
+        assert!(
+            guidance.starts_with("nvx: no built-in CPU profile serves this host's CPU"),
             "{}",
-            case.name
+            outcome.describe()
         );
-        // The `>> ` line splits back into the arguments that OpenVMM received.
-        if let Some(record) = case.record {
-            assert_eq!(root.openvmm_arguments(record), arguments, "{}", case.name);
+    } else {
+        assert_eq!(guidance, "", "{}", outcome.describe());
+    }
+    let (program, arguments) = command.split_first().unwrap();
+    assert_eq!(
+        *program,
+        root.below(OPENVMM).to_str().unwrap(),
+        "{}",
+        case.name
+    );
+    // The `>> ` line splits back into the arguments that OpenVMM received.
+    if let Some(record) = case.record {
+        assert_eq!(root.openvmm_arguments(record), arguments, "{}", case.name);
+    }
+    let mut options = Options::parse(arguments);
+    let mut expected = case.options.clone();
+    // A sandbox's OpenVMM opens the images through the files that the run checked: the distro
+    // layer alone for an upper in RAM, and the scratch image too for one on scratch.
+    let blocks = expected.take("--microvm-sandbox-block");
+    if !blocks.is_empty() {
+        let checked = options.take("--microvm-sandbox-block");
+        let token = case
+            .record
+            .and_then(|record| record.strip_prefix("build/fake-openvmm-"))
+            .and_then(|name| name.strip_suffix(".json"))
+            .unwrap();
+        if blocks.len() == 1 {
+            assert_checked_distro(&root, &checked);
+            assert_opened_distro(&root, token);
+        } else {
+            assert_checked_blocks(&root, &checked);
+            assert_opened_images(&root, token);
         }
-        let mut options = Options::parse(arguments);
-        let mut expected = case.options.clone();
-        // A sandbox's OpenVMM opens the images through the files that the run checked: the distro
-        // layer alone for an upper in RAM, and the scratch image too for one on scratch.
-        let blocks = expected.take("--microvm-sandbox-block");
-        if !blocks.is_empty() {
-            let checked = options.take("--microvm-sandbox-block");
-            let token = case
-                .record
-                .and_then(|record| record.strip_prefix("build/fake-openvmm-"))
-                .and_then(|name| name.strip_suffix(".json"))
-                .unwrap();
-            if blocks.len() == 1 {
-                assert_checked_distro(&root, &checked);
-                assert_opened_distro(&root, token);
-            } else {
-                assert_checked_blocks(&root, &checked);
-                assert_opened_images(&root, token);
-            }
-        }
-        expected.assert_matches(&root, &options, case.name);
-        if let Some(report) = &case.report {
-            assert_outcome_report(
-                &root.json(report.path),
-                options.value("--hypervisor"),
-                ("run", report.category, report.status),
-                report.network,
-            );
-        }
-    });
+    }
+    expected.assert_matches(&root, &options, case.name);
+    if let Some(report) = &case.report {
+        assert_outcome_report(
+            &root.json(report.path),
+            options.value("--hypervisor"),
+            ("run", report.category, report.status),
+            report.network,
+        );
+    }
 }
 
 /// A run leaves an outcome report that the caller can read whatever its umask, even one that

@@ -2493,6 +2493,27 @@ fn reported_cpu() -> (String, u32, u32, u32) {
     )
 }
 
+/// Returns how `nvx-rs` refuses `--nested-virt` for the microVM of [`harness::HYPERVISOR`] on
+/// this host, as the code of its error and a fragment of its message, or `None` where the host
+/// gives a microVM nested virtualization: a CPU other than Intel's refuses it, and so does KVM
+/// whose `kvm_intel` does not offer nested VMX. OpenVMM finds whether WHP offers it.
+fn nested_refusal() -> Option<(&'static str, &'static str)> {
+    let (vendor, ..) = reported_cpu();
+    if vendor != "GenuineIntel" {
+        return Some(("unsupported", "--nested-virt requires an Intel CPU"));
+    }
+    if harness::HYPERVISOR != "kvm" {
+        return None;
+    }
+    match fs::read_to_string("/sys/module/kvm_intel/parameters/nested") {
+        Ok(value) if matches!(value.trim_end(), "Y" | "1") => None,
+        _ => Some((
+            "unavailable",
+            "--nested-virt requires KVM's nested virtualization",
+        )),
+    }
+}
+
 /// Returns whether a built-in CPU profile serves the CPU of `vendor` with the display `family`,
 /// `model`, and `stepping`, by the copy of OpenVMM's catalog that `nvx-rs` reads.
 fn served(vendor: &str, family: u32, model: u32, stepping: u32) -> bool {

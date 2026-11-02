@@ -151,6 +151,11 @@ pub(crate) struct HostCpu {
 }
 
 impl HostCpu {
+    /// Returns the vendor string of CPUID leaf 0, such as `GenuineIntel`.
+    pub(crate) fn vendor(&self) -> &str {
+        &self.vendor
+    }
+
     /// Identifies the CPU that this process runs on, or returns `None` on a host without CPUID,
     /// which is not an x86-64 host.
     pub(crate) fn current() -> Option<Self> {

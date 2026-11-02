@@ -7,9 +7,10 @@
 //!
 //! ```text
 //! <state>/
-//!   config.json          the launch that provision records, in format 8, with the export plan of
+//!   config.json          the launch that provision records, in format 9, with the export plan of
 //!                        its shares or `null` without shares, its upper, the bindings of its
-//!                        distro layer and of its scratch image, if any, and its network
+//!                        distro layer and of its scratch image, if any, its network, and
+//!                        whether its microVM has nested virtualization
 //!   sandbox.lock         the store's lock, which serializes the lifecycle transitions
 //!   launch.json          the store's journal of a start in progress, or of an interrupted one
 //!   runtime.json         the store's runtime record of the running VM, in its format 4
@@ -95,6 +96,8 @@ pub(crate) struct ProvisionConfig<'a> {
     pub(crate) hypervisor: &'a str,
     /// `--memory-mib`.
     pub(crate) memory_mib: u64,
+    /// `--nested-virt`.
+    pub(crate) nested_virt: bool,
     /// `--cmdline`.
     pub(crate) cmdline: &'a str,
 }

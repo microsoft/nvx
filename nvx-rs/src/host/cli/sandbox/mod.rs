@@ -12,6 +12,11 @@
 //! - `provision`, `start`, `exec`, `stop`, and `deprovision` manage a persistent sandbox in its
 //!   `--state-dir`; see [`lifecycle`].
 //!
+//! `--nested-virt`, for `run` and `provision` alone, gives the sandbox's microVM nested
+//! virtualization, and with it the workload `/dev/kvm`: [`nested`](super::nested) refuses it on
+//! MSHV, and before a run that is not dry, or a start, on a host that cannot give it. `provision`
+//! records it, and `start` launches with it.
+//!
 //! The parser reads the options of `nvx.py sandbox` with their names, defaults, types, and
 //! choices, and ends a usage error with status 2. The `--mount-deny`, `--mount-allow`, and
 //! `--mount-write` options name paths of the `--mount` before them.
@@ -26,6 +31,7 @@ use std::time::Instant;
 
 use super::artifacts::{Located, OPENVMM_VARIABLE, locate};
 use super::download::{self, Hold};
+use super::nested;
 use super::shell::format_command;
 use super::{Exit, Result, output};
 use crate::ErrorCode;
@@ -156,6 +162,23 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         upper: options.upper,
     };
     let environment = checks.check()?;
+    if options.nested_virt {
+        if !matches!(
+            operation,
+            SandboxOperation::Run | SandboxOperation::Provision
+        ) {
+            return Err(Exit::error(
+                ErrorCode::Unsupported,
+                "--nested-virt is only valid for sandbox run or provision",
+            ));
+        }
+        let hypervisor = hypervisor(options.hypervisor);
+        nested::check_request(hypervisor, false)?;
+        // `start` checks the host of a provisioned sandbox, which provision launches on none.
+        if operation == SandboxOperation::Run && !options.dry_run {
+            nested::check_host(hypervisor)?;
+        }
+    }
     let artifacts = Artifacts { root };
     // A one-shot run holds the lock of the downloads into a checkout from before it reads the
     // distro layer, which may be a release's, until it has launched OpenVMM, so that no download
@@ -229,6 +252,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
                 &ProvisionConfig {
                     hypervisor: hypervisor(options.hypervisor),
                     memory_mib: options.memory_mib,
+                    nested_virt: options.nested_virt,
                     cmdline: &options.cmdline,
                 },
                 options.timeout,
@@ -322,6 +346,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
                 ]
                 .map(str::to_owned),
             );
+            if options.nested_virt {
+                command.push("--nested-virt".to_owned());
+            }
             command.extend([
                 "--memory".to_owned(),
                 format!("{}M", options.memory_mib),

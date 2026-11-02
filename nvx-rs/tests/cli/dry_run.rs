@@ -125,6 +125,13 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
     vec![
         dry_run("minimal", sandbox_run(&[]), one_shot()),
         dry_run(
+            "nested virtualization",
+            sandbox_run(&["--hypervisor", "kvm", "--nested-virt"]),
+            one_shot()
+                .with("--hypervisor", ["kvm"])
+                .flag("--nested-virt"),
+        ),
+        dry_run(
             "balanced disk path brackets",
             [
                 "sandbox",
@@ -552,6 +559,28 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: cpu profile host",
             run(&["--cpu-profile", "host"]),
             cold_boot().with("--cpu-profile", ["host"]),
+        ),
+        // A dry run forwards nested virtualization whatever the host offers.
+        dry_run(
+            "run: nested virtualization on KVM",
+            run(&["--hypervisor", "kvm", "--nested-virt"]),
+            cold_boot()
+                .with("--hypervisor", ["kvm"])
+                .flag("--nested-virt"),
+        ),
+        dry_run(
+            "run: nested virtualization on WHP",
+            run(&[
+                "--nested-virt",
+                "--hypervisor",
+                "whp",
+                "--cpu-profile",
+                "auto",
+            ]),
+            cold_boot()
+                .with("--hypervisor", ["whp"])
+                .with("--cpu-profile", ["auto"])
+                .flag("--nested-virt"),
         ),
         dry_run(
             "run: restore",

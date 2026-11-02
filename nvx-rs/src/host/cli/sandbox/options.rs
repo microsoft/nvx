@@ -64,6 +64,9 @@ options:
                         layer the managed exec environment over the guest
                         default environment instead of replacing it
   --hypervisor {auto,whp,kvm,mshv}
+  --nested-virt         give the microVM nested virtualization, and the
+                        workload /dev/kvm, for run or provision: on KVM or
+                        WHP, with an Intel CPU (doc/run.md)
   --mount GUEST_TARGET,HOST_PATH[,ro|rw]
                         live-share a host directory, or a single regular host
                         file without its directory, inside the container
@@ -139,7 +142,7 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx-rs sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 37] = [
     Spec::one("--layer"),
     Spec::one("--scratch"),
     Spec::one("--upper"),
@@ -158,6 +161,7 @@ pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
     Spec::one("--environment-file"),
     Spec::flag("--inherit-default-environment"),
     Spec::one("--hypervisor"),
+    Spec::flag("--nested-virt"),
     Spec::one("--mount"),
     Spec::one("--mount-deny"),
     Spec::one("--mount-allow"),
@@ -219,6 +223,8 @@ pub(crate) struct Options {
     pub(crate) inherit_default_environment: bool,
     /// `--hypervisor`, `auto` by default.
     pub(crate) hypervisor: &'static str,
+    /// `--nested-virt`.
+    pub(crate) nested_virt: bool,
     /// The `--mount` options.
     pub(crate) mounts: Vec<String>,
     /// The `--mount-deny`, `--mount-allow`, and `--mount-write` options, with the `--mount`
@@ -258,6 +264,7 @@ impl Default for Options {
             environment_file: None,
             inherit_default_environment: false,
             hypervisor: "auto",
+            nested_virt: false,
             mounts: Vec::new(),
             policy_paths: Vec::new(),
             mount_owner: None,
@@ -312,6 +319,7 @@ impl Receiver for Options {
             "--environment-file" => self.environment_file = Some(text()),
             "--inherit-default-environment" => self.inherit_default_environment = true,
             "--hypervisor" => self.hypervisor = choice(&text(), &HYPERVISORS)?,
+            "--nested-virt" => self.nested_virt = true,
             "--mount" => self.mounts.push(text()),
             "--mount-deny" | "--mount-allow" | "--mount-write" => {
                 let kind = match name {

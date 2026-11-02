@@ -12,6 +12,7 @@ use super::{
     CONFIG_NAME, Found, REQUIRED_FEATURES, connect, find_vm, mismatched, require_config, running_vm,
 };
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
+use crate::host::cli::nested;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{Config, random_bytes, read_config};
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
@@ -66,6 +67,13 @@ fn start_locked(
     unlink_missing_ok(&outcome_path)?;
     let config = Config::new(config)?;
     let launch = config.launch()?;
+    // Provision launched nothing, so the start checks that the host gives the microVM the nested
+    // virtualization that it records, before it checks or claims anything.
+    let nested_virt = config.nested_virt()?;
+    if nested_virt {
+        nested::check_request(config.hypervisor(), false)?;
+        nested::check_host(config.hypervisor())?;
+    }
     // The checks read no content of the distro layer, its manifest, or the scratch image, and
     // never verify them again. The prepared launch holds the files that they return, and hands
     // OpenVMM those objects: on Linux, OpenVMM inherits their descriptors; on Windows, it opens
@@ -114,6 +122,9 @@ fn start_locked(
         .map(str::to_owned),
     );
     head.push(config.hypervisor().to_owned());
+    if nested_virt {
+        head.push("--nested-virt".to_owned());
+    }
     head.push("--memory".to_owned());
     head.push(format!("{memory_mib}M"));
     head.extend(["--kernel".to_owned(), kernel, "--initrd".to_owned(), initrd]);

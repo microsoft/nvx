@@ -701,6 +701,31 @@ fn sandbox_refusals() -> Vec<Refusal> {
             sandbox_run(&["--host-loopback-forward", "8080"]),
             &["network policy options require --net"],
         ),
+        // Nested virtualization is a launch's, and never MSHV's.
+        refusal(
+            "nested virtualization outside run or provision",
+            "unsupported",
+            [
+                "sandbox",
+                "start",
+                "--state-dir",
+                "{root/state}",
+                "--nested-virt",
+            ],
+            &["--nested-virt is only valid for sandbox run or provision"],
+        ),
+        refusal(
+            "nested virtualization on MSHV",
+            "unsupported",
+            sandbox_run(&["--hypervisor", "mshv", "--nested-virt", "--dry-run"]),
+            &["--nested-virt requires the KVM or WHP hypervisor"],
+        ),
+        refusal(
+            "nested virtualization of a provision on MSHV",
+            "unsupported",
+            provision("{root/state}", &["--hypervisor", "mshv", "--nested-virt"]),
+            &["--nested-virt requires the KVM or WHP hypervisor"],
+        ),
         refusal(
             "missing OpenVMM",
             "artifact-missing",
@@ -779,6 +804,19 @@ fn run_refusals() -> Vec<Refusal> {
                 "10.0.0.2/24",
             ]),
             &["--net", "restore", "network addressing"],
+        ),
+        // A snapshot never has nested virtualization, and MSHV never gives it.
+        refusal(
+            "run: nested virtualization of a restore",
+            "unsupported",
+            run_dry(&["--restore-snapshot", "{root/snapshot}", "--nested-virt"]),
+            &["--nested-virt is not accepted for restore"],
+        ),
+        refusal(
+            "run: nested virtualization on MSHV",
+            "unsupported",
+            run_dry(&["--hypervisor", "mshv", "--nested-virt"]),
+            &["--nested-virt requires the KVM or WHP hypervisor"],
         ),
         refusal(
             "run: ready path without snapshot",

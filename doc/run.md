@@ -70,6 +70,62 @@ nvx-rs/target/release/nvx-rs run --machine microvm --processors 8
 The microVM uses fixed device topology, reserves a shared interrupt-status page, and uses
 shared-status edge-triggered virtio interrupts with 1, 2, 4, or 8 vCPUs.
 
+## Nested virtualization
+
+A microVM has no virtualization extensions by default. `--nested-virt` gives
+the microVM of a cold boot
+[nested virtualization](design/2.2-cpu-and-topology.md#2214-nested-virtualization):
+its guest sees Intel's VMX, and the guest kernel's KVM, which every NVX kernel
+builds, creates `/dev/kvm`, through which the guest runs VMs of its own:
+
+```bash
+nvx-rs/target/release/nvx-rs run --nested-virt
+```
+
+In the guest, as root:
+
+```sh
+grep -cw vmx /proc/cpuinfo
+/sbin/nvx-kvm-probe
+```
+
+`nvx-kvm-probe` creates a VM with one vCPU that halts at once, runs it, and
+prints `nvx-kvm-probe: api=12 vm=created vcpu=created exit=hlt`. Without
+`--nested-virt`, the guest's KVM finds no VMX, logs
+`kvm_intel: VMX not supported by CPU 0` at boot, and creates no `/dev/kvm`, so
+the probe fails with `open /dev/kvm: No such file or directory`.
+
+The host must give the microVM nested virtualization:
+
+- **KVM.** The CPU must be Intel's, and `kvm_intel` must offer nested VMX:
+  `/sys/module/kvm_intel/parameters/nested` reads `Y` or `1`, as it does by
+  default since Linux 4.20. Otherwise, reload the module with
+  `sudo modprobe -r kvm_intel && sudo modprobe kvm_intel nested=1` while no VM
+  runs, or add `options kvm_intel nested=1` to a file in `/etc/modprobe.d/`.
+- **WHP.** The CPU must be Intel's, and the Windows hypervisor must offer
+  nested virtualization to its partitions, as Windows 11 and Windows Server
+  2022 and later do, on bare metal and in Azure VMs whose hypervisor
+  offers it.
+- **MSHV.** Unsupported: MSHV gives nested virtualization only to a partition
+  with the Hyper-V guest interface, which the
+  [time ABI](design/3.2-clock-and-time.md) excludes.
+
+No CPU profile describes AMD's SVM, so a microVM never exposes it, and an AMD
+CPU refuses `--nested-virt` on every backend. `nvx-rs run` refuses the option
+for a restore and on MSHV, and, unless the run is dry, on a CPU other than
+Intel's and where `kvm_intel` does not offer nested VMX, before it launches
+anything; OpenVMM finds whether WHP offers it, and refuses it before the guest
+runs. No backend saves the state of a nested guest for the microVM, so a
+microVM with nested virtualization is never captured: OpenVMM refuses
+`--snapshot-destination` and `--restore-snapshot` beside `--nested-virt`
+before the VM starts, and a snapshot never has nested virtualization.
+
+Nested virtualization lets the guest, and the workload of a sandbox, drive the
+host hypervisor's emulation of VMX, which the default microVM never reaches.
+Keep it for workloads that need to run VMs. The guest's VMs live within the
+microVM's RAM and processors; see the
+[sandbox](#sandbox-nested-virtualization) for their accounting.
+
 ## Run OpenVMM directly
 
 The platform release archives are self-contained: their `bin/nvx-rs` runs the
@@ -667,7 +723,9 @@ on WHP (see
 so OpenVMM refuses to restore a snapshot of ABI 2, with `snapshot microVM ABI
 version 2 is unsupported; this OpenVMM supports version 3`, and `nvx-rs`
 refuses a template of ABI 2. Capture them again; to restore them as they are,
-use an NVX commit from before ABI 3 with the OpenVMM that it pins.
+use an NVX commit from before ABI 3 with the OpenVMM that it pins. ABI 3 also
+lets a cold boot request [nested virtualization](#nested-virtualization),
+which no snapshot records.
 
 ## Snapshot restore readiness
 
@@ -1153,7 +1211,7 @@ inside a writable part of a share. On Windows, it refuses a path that only a
 verbatim `\\?\` path names, such as that of a directory whose name ends in a
 period or a space, which the path without the prefix would not name. The
 shares' children follow their resolved host paths. A managed sandbox stores
-the plan in its configuration, in format 8, and each `start` checks it again,
+the plan in its configuration, in format 9, and each `start` checks it again,
 as `run` does once it has verified the distro layer: it refuses a host path
 that no longer holds a directory or regular file as recorded, a recorded path
 whose file identity changed, and shares whose host paths came to overlap, such
@@ -1399,6 +1457,39 @@ denied. The scenario's evidence, with a `sandbox-proxy-only-` prefix, holds its
 bounded command observations, the runtime record, and for each sandbox the
 probe's output, the proxy's request line, the OpenVMM log, and the outcome
 report.
+
+### Sandbox nested virtualization
+
+`--nested-virt` gives a sandbox's microVM
+[nested virtualization](#nested-virtualization), for `sandbox run` and
+`sandbox provision`, which records it in the sandbox's configuration, so that
+each `start` launches with it; the other operations refuse it. The workload's
+private `/dev` then also holds `kvm`, the character device 10:232, with mode
+0660, owned by root and by the workload's group, through which the workload
+runs VMs of its own:
+
+```bash
+nvx-rs/target/release/nvx-rs sandbox run --nested-virt \
+  --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
+  --scratch /var/lib/nvx/scratch.ext4 \
+  --entrypoint /sbin/nvx-kvm-probe
+```
+
+A sandbox without the option has no `/dev/kvm`, whatever the host offers:
+the guest agents give the workload the device exactly when the guest has one,
+which only a microVM with nested virtualization gives it. The host must offer
+nested virtualization as for `run`: a `run` that is not dry, and each `start`,
+check it before they launch anything, and MSHV refuses the option at
+`provision` too.
+
+The workload's VMs are its own processes: their guest memory is the
+workload's anonymous memory, which `--memory-max` bounds; their vCPU threads,
+and the worker threads that the guest's KVM starts for each VM, are its tasks,
+which `--pids-max` bounds; and the guest kernel charges the memory that KVM
+allocates for them to the workload's cgroup. The microVM's own `--memory-mib`
+and processors bound them all. Through `/dev/kvm`, the workload reaches the
+guest kernel's KVM and, through it, the host hypervisor's emulation of VMX;
+see [Trust Boundaries](design/1.4-trust-boundaries.md#146-nested-virtualization).
 
 ### Managed lifecycle
 

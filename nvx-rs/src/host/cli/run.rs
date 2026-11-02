@@ -23,6 +23,11 @@
 //! the kernel command line, and a restore does not, since its guest keeps the binds that its boot
 //! made.
 //!
+//! `--nested-virt` gives the microVM of a cold boot nested virtualization, which OpenVMM gives on
+//! KVM and WHP, so that its guest runs VMs of its own through `/dev/kvm`; [`nested`](super::nested)
+//! refuses it for a restore and on MSHV, and, unless the run is dry, on a CPU other than Intel's
+//! and where KVM does not offer it, before anything launches.
+//!
 //! After OpenVMM exits with a status other than 0 from a cold boot, on a host whose CPU no built-in
 //! CPU profile serves, it prints the guidance of [`cpu_profile`] to standard error, which says
 //! what `--cpu-profile auto` does on that CPU and how to request a built-in profile for it. It
@@ -34,6 +39,7 @@ use super::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use super::artifacts::{Located, locate};
 use super::cpu_profile::{self, HostCpu};
 use super::download;
+use super::nested;
 use super::network::{NativeRules, NetworkOptions};
 use super::sandbox::{
     HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, hypervisor, path_string, path_text, run_openvmm,
@@ -70,6 +76,9 @@ options:
                         built-in profile of the host's CPU, a built-in profile
                         ID, or host to derive a development profile from this
                         host (doc/usage.md)
+  --nested-virt         give the microVM nested virtualization, so that its
+                        guest runs VMs of its own through /dev/kvm: on KVM or
+                        WHP, with an Intel CPU, for a cold boot (doc/run.md)
   --mount GUEST_TARGET,HOST_PATH[,ro|rw]
                         live-share a host directory, or a single regular host
                         file without its directory; the mode follows the last
@@ -135,7 +144,7 @@ const MACHINES: [&str; 1] = ["microvm"];
 const PROCESSORS: [&str; 4] = ["1", "2", "4", "8"];
 
 /// The options of `nvx-rs run`, which parse with the defaults of the former `nvx.py run`.
-pub(super) const OPTIONS: [Spec; 30] = [
+pub(super) const OPTIONS: [Spec; 31] = [
     Spec::one("--guest"),
     Spec::one("--hypervisor"),
     Spec::one("--machine"),
@@ -143,6 +152,7 @@ pub(super) const OPTIONS: [Spec; 30] = [
     Spec::one("--memory-capacity-mib"),
     Spec::one("--processors"),
     Spec::one("--cpu-profile"),
+    Spec::flag("--nested-virt"),
     Spec::one("--mount"),
     Spec::one("--mount-deny"),
     Spec::one("--mount-allow"),
@@ -185,6 +195,8 @@ pub(crate) struct Options {
     pub(crate) processors: u32,
     /// `--cpu-profile`.
     pub(crate) cpu_profile: Option<String>,
+    /// `--nested-virt`.
+    pub(crate) nested_virt: bool,
     /// The `--mount` options, as given.
     pub(crate) mounts: Vec<String>,
     /// The `--mount-deny`, `--mount-allow`, and `--mount-write` options, in order, as given.
@@ -221,6 +233,7 @@ impl Default for Options {
             memory_capacity_mib: None,
             processors: 1,
             cpu_profile: None,
+            nested_virt: false,
             mounts: Vec::new(),
             policy_paths: Vec::new(),
             mount_owner: None,
@@ -265,6 +278,7 @@ impl Receiver for Options {
             "--memory-capacity-mib" => self.memory_capacity_mib = Some(memory(&text())?),
             "--processors" => self.processors = processors(&text())?,
             "--cpu-profile" => self.cpu_profile = Some(text()),
+            "--nested-virt" => self.nested_virt = true,
             "--mount" => self.mounts.push(text()),
             "--mount-deny" => self.policy_paths.push((PolicyKind::Denied, text())),
             "--mount-allow" => self.policy_paths.push((PolicyKind::Allowed, text())),
@@ -362,6 +376,13 @@ fn memory_mib(options: &Options) -> u64 {
 /// artifacts is downloaded, as [`download::ensure`] decides, unless the options are refused.
 pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     check(&options)?;
+    if options.nested_virt {
+        let hypervisor = hypervisor(options.hypervisor);
+        nested::check_request(hypervisor, options.restore_snapshot.is_some())?;
+        if !options.dry_run {
+            nested::check_host(hypervisor)?;
+        }
+    }
     let rules = options.network.egress_rules()?;
     // The shares and the network follow the artifacts on the command line, and a missing artifact
     // is reported before them, as `command_run` did, but a command that they refuse downloads
@@ -416,6 +437,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     }
     if let Some(profile) = &options.cpu_profile {
         push(&mut command, "--cpu-profile", profile.as_str());
+    }
+    if options.nested_virt {
+        command.push("--nested-virt".to_owned());
     }
     let cmdline = extend_shares_and_network(&mut command, &options, &rules)?;
     if !cmdline.is_empty() {

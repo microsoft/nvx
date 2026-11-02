@@ -2700,7 +2700,13 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
             assert state is not None
             path = state / "config.json"
             config = json.loads(path.read_text(encoding="utf-8"))
-            config.update(format=8, upper="ram", scratch=None, scratch_binding=None)
+            config.update(
+                format=9,
+                upper="ram",
+                scratch=None,
+                scratch_binding=None,
+                nested_virt=False,
+            )
             if "records-scratch" in self.faults:
                 config.update(upper="scratch", scratch="scratch.ext4")
             path.write_text(json.dumps(config), encoding="utf-8")

@@ -227,13 +227,14 @@ class RamUpperAcceptance(LifecycleAcceptance):
         config = json.loads((self.state / CONFIG).read_text(encoding="utf-8"))
         recorded = {
             name: config.get(name)
-            for name in ("format", "upper", "scratch", "scratch_binding")
+            for name in ("format", "upper", "scratch", "scratch_binding", "nested_virt")
         }
         if recorded != {
-            "format": 8,
+            "format": 9,
             "upper": "ram",
             "scratch": None,
             "scratch_binding": None,
+            "nested_virt": False,
         }:
             raise RuntimeError(f"provision recorded the RAM upper as {recorded!r}")
         self.start(description="first start")

@@ -65,18 +65,19 @@ pub(crate) fn provision(state: &str, options: &[&str]) -> Vec<String> {
     sandbox("provision", state, &all)
 }
 
-/// Returns the configuration that provision records for the minimal sandbox, in format 8, with
+/// Returns the configuration that provision records for the minimal sandbox, in format 9, with
 /// placeholders, and without the bindings of its images, which [`assert_bindings`] checks.
 pub(crate) fn minimal_config() -> Value {
     json!({
         "cmdline": "",
         "export": null,
-        "format": 8,
+        "format": 9,
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
         "layers": [{"path": "{root/distro.erofs}", "role": "distro", "uuid": UUID}],
         "memory_max": null,
         "memory_mib": 256,
+        "nested_virt": false,
         "network": null,
         "pids_max": null,
         "scratch": "{root/scratch.ext4}",
@@ -639,6 +640,55 @@ fn lifecycles_of_every_configuration() {
         .filter(|case| case.hosts.include_this_host())
         .collect();
     in_parallel(&cases, check_lifecycle);
+}
+
+/// A sandbox provisioned with `--nested-virt`, which provision records whatever the host offers,
+/// starts with nested virtualization where the host gives a microVM it, as `nvx-rs` finds it at
+/// each start, and where it does not, the start refuses it before it launches anything, and leaves
+/// the sandbox as provision left it: which of the two depends on the host that runs the test.
+#[test]
+fn lifecycle_of_a_sandbox_with_nested_virtualization() {
+    let root = Root::new();
+    let state = root.below("state");
+    root.nvx_rs(&provision("{root/state}", &["--nested-virt"]))
+        .assert_silent_success();
+    let mut expected = minimal_config();
+    expected["nested_virt"] = json!(true);
+    let config = assert_bindings(&root, json(&state.join("config.json")));
+    assert_eq!(config, root.expand_json(&expected));
+    assert!(root.openvmm_records().is_empty());
+    match crate::nested_refusal() {
+        None => {
+            root.nvx_rs(&sandbox::<&str>("start", "{root/state}", &[]))
+                .assert_silent_success();
+            let (endpoint, process) =
+                assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
+            let mut options =
+                Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
+            assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
+            let mut expected = managed("state", &endpoint).flag("--nested-virt");
+            expected.take("--microvm-sandbox-block");
+            expected.assert_matches(&root, &options, "nested virtualization");
+            root.nvx_rs(&sandbox::<&str>("stop", "{root/state}", &[]))
+                .assert_silent_success();
+            assert!(
+                process
+                    .wait(Instant::now() + Duration::from_secs(10))
+                    .unwrap(),
+                "OpenVMM runs on"
+            );
+        }
+        Some((code, fragment)) => {
+            let before = root.snapshot();
+            let outcome = root.nvx_rs(&sandbox::<&str>("start", "{root/state}", &[]));
+            assert_refused(&root, &outcome, code, &[fragment]);
+            assert_eq!(root.snapshot(), before);
+            assert_eq!(entries(&state), PROVISIONED);
+        }
+    }
+    root.nvx_rs(&sandbox::<&str>("deprovision", "{root/state}", &[]))
+        .assert_silent_success();
+    assert!(!state.exists());
 }
 
 /// A sandbox whose upper is in RAM needs no scratch image: provision records `ram` and neither a
@@ -1219,8 +1269,9 @@ fn start_without_openvmm(root: &Root) {
 fn malformed_configuration(root: &Root) {
     root.nvx_rs(&provision("{root/state}", &[]))
         .assert_silent_success();
-    // Format 8 records the shares under `export`, `null` for none, and the upper under `upper`;
-    // format 7 records no `upper`, and format 1 records no `export` either.
+    // Format 9 records the shares under `export`, `null` for none, the upper under `upper`, and
+    // nested virtualization under `nested_virt`; format 8 records no `nested_virt`, format 7 no
+    // `upper` either, and format 1 no `export` either.
     let config = json(&root.below("state/config.json"));
     let mut without_export = config.clone();
     without_export.as_object_mut().unwrap().remove("export");
@@ -1243,18 +1294,34 @@ fn malformed_configuration(root: &Root) {
     ram_with_binding["scratch"] = Value::Null;
     let mut format_1_with_export = without_upper.clone();
     format_1_with_export["format"] = json!(1);
+    let mut without_nested_virt = config.clone();
+    without_nested_virt
+        .as_object_mut()
+        .unwrap()
+        .remove("nested_virt");
+    let mut format_8_with_nested_virt = config.clone();
+    format_8_with_nested_virt["format"] = json!(8);
+    let mut nested_virt_text = config.clone();
+    nested_virt_text["nested_virt"] = json!("false");
+    let mut nested_virt_null = config.clone();
+    nested_virt_null["nested_virt"] = Value::Null;
     let unsupported = &["unsupported format", "{root/state/config.json}"][..];
     let mismatched = &["format does not match its mounts"][..];
     let malformed = &["sandbox configuration is malformed"][..];
     for (text, code, fragments) in [
         (
-            r#"{"format": 9}"#.to_owned(),
+            r#"{"format": 10}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
         ("[]".to_owned(), "format-unsupported", unsupported),
-        // Only the integers 8, 7, and 1 are formats, and the configuration is strict JSON, in
+        // Only the integers 9, 8, 7, and 1 are formats, and the configuration is strict JSON, in
         // which no object repeats a field.
+        (
+            r#"{"format": 9.0}"#.to_owned(),
+            "format-unsupported",
+            unsupported,
+        ),
         (
             r#"{"format": 8.0}"#.to_owned(),
             "format-unsupported",
@@ -1279,6 +1346,11 @@ fn malformed_configuration(root: &Root) {
         ),
         (r#"{"format": 1}"#.to_owned(), "io", malformed),
         (r#"{"format": 8}"#.to_owned(), "io", malformed),
+        (r#"{"format": 9}"#.to_owned(), "io", malformed),
+        (without_nested_virt.to_string(), "io", malformed),
+        (format_8_with_nested_virt.to_string(), "io", malformed),
+        (nested_virt_text.to_string(), "io", malformed),
+        (nested_virt_null.to_string(), "io", malformed),
         (memory_text.to_string(), "io", malformed),
         (uid_beyond_32_bits.to_string(), "io", malformed),
         (without_upper.to_string(), "io", malformed),
