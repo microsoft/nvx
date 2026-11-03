@@ -7542,7 +7542,14 @@ class MicrovmTests(unittest.TestCase):
                 "workload_boot_command",
                 return_value=["openvmm", "boot"],
             ) as boot_command,
-            patch.object(microvm_tests, "run_guest_script") as run_guest_script,
+            patch.object(
+                microvm_tests,
+                "run_guest_script",
+                return_value={
+                    "text": "NVX-GUEST-BOOT-OK: alpine\nNVX-LIFECYCLE-OK\n",
+                    "output": "NVX-LIFECYCLE-OK\n",
+                },
+            ) as run_guest_script,
         ):
             microvm_tests.run_lifecycle(
                 Path("openvmm"),
@@ -7574,6 +7581,48 @@ class MicrovmTests(unittest.TestCase):
             run_guest_script.call_args.kwargs["log_path"],
             Path("lifecycle.log"),
         )
+
+    def test_lifecycle_requires_a_quiet_console(self):
+        # OpenVMM's log, the guest's markers, and the echo of the staged
+        # script, which names a kernel log message but is not one.
+        quiet = (
+            '   0.000632698s  INFO openvmm_entry:  version="0.4.0"\r\n'
+            "NVX-GUEST-BOOT-OK: alpine\r\n"
+            "> case \"$log\" in *'bootconsole [earlyxe90] enabled'*) ;; esac\r\n"
+            "NVX-LIFECYCLE-OK\r\n"
+        )
+        microvm_tests.check_quiet_console(quiet)
+        printed = "[    0.000000] Linux version 6.18.38 (root@buildkitsandbox)\r\n"
+        for text in (
+            printed + quiet,
+            quiet.replace("NVX-GUEST", printed + "NVX-GUEST"),
+        ):
+            with self.subTest(text=text):
+                with (
+                    patch.object(
+                        microvm_tests, "workload_boot_command", return_value=["vmm"]
+                    ),
+                    patch.object(
+                        microvm_tests,
+                        "run_guest_script",
+                        return_value={"text": text, "output": "NVX-LIFECYCLE-OK\n"},
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        r"quiet loglevel=0 printed the kernel log line "
+                        r"'\[    0\.000000\] Linux version 6\.18\.38 "
+                        r"\(root@buildkitsandbox\)'$",
+                    ),
+                ):
+                    microvm_tests.run_lifecycle(
+                        Path("openvmm"),
+                        Path("vmlinux"),
+                        Path("initrd"),
+                        "kvm",
+                        memory_mib=128,
+                        timeout=45,
+                        log_path=Path("lifecycle.log"),
+                    )
 
     def test_lifecycle_script_exits_on_unexpected_command_failure(self):
         shell = _posix_shell()
@@ -7625,6 +7674,61 @@ class MicrovmTests(unittest.TestCase):
             ),
             result.stdout,
         )
+
+    def test_lifecycle_script_checks_the_early_console(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = microvm_tests._read_script("lifecycle.sh")
+        # The scenario runs the function that this test runs.
+        self.assertIn("\ncheck_early_console\n", script)
+        start = script.index("check_early_console() {\n")
+        end = script.index("\n}\n", start) + len("\n}\n")
+        function = script[start:end]
+
+        def unknown(parameters: str) -> str:
+            return (
+                f'Unknown kernel command line parameters "{parameters}", '
+                "will be passed to user space."
+            )
+
+        enabled = "printk: legacy bootconsole [earlyxe90] enabled"
+        disabled = "printk: legacy bootconsole [earlyxe90] disabled"
+        others = unknown("nvx_lifecycle=oneshot")
+        passed_on = unknown("earlycon=xe9 nvx_lifecycle=oneshot")
+        for lines, code in (
+            ((enabled, others, disabled), None),
+            ((others, disabled), 44),
+            ((enabled, others), 45),
+            ((enabled, passed_on, disabled), 46),
+        ):
+            with self.subTest(code=code):
+                log = "".join(f"[    0.000000] {line}\n" for line in lines)
+                result = subprocess.run(
+                    [shell],
+                    input=(
+                        "set -eu\n"
+                        'fail() { echo "NVX-LIFECYCLE-FAIL code=$1"; exit "$1"; }\n'
+                        f"dmesg() {{ cat <<'NVX_LOG'\n{log}NVX_LOG\n}}\n"
+                        f"{function}check_early_console\n"
+                        "echo NVX-EARLY-CONSOLE-OK\n"
+                    ),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                if code is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.stdout.splitlines(), ["NVX-EARLY-CONSOLE-OK"]
+                    )
+                else:
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    self.assertEqual(
+                        result.stdout.splitlines(),
+                        [f"NVX-LIFECYCLE-FAIL code={code}"],
+                    )
 
     def test_smp_uses_requested_processor_count(self):
         text = (

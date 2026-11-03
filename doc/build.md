@@ -385,9 +385,11 @@ symbols: 175 inventory settings and 594 derived ones, 53 of which have a
 prompt. The checked-in file had also drifted from what `olddefconfig`
 resolved: it omitted 130 symbols that the build set, such as the wireless and
 Ethernet vendor menus, and listed four that the build never set, among them
-`CONFIG_SERIAL_EARLYCON`, which no symbol selects without a serial driver;
-`earlycon=xe9` therefore has no effect, and the xe9 console prints the boot
-log once its console initcall runs.
+`CONFIG_SERIAL_EARLYCON`, which no symbol selects without a serial driver, so
+the earlycon framework never built patch 0001's console and `earlycon=xe9`
+had no effect. Patch 0001 now registers the xe9 early console from
+`earlycon=xe9` itself, as an x86 boot console that `CONFIG_EARLY_PRINTK`
+builds, so it needs neither the serial core nor `CONFIG_SERIAL_EARLYCON`.
 
 | Removed | Why no NVX path needs it |
 | --- | --- |

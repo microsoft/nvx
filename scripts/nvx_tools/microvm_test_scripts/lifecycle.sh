@@ -18,6 +18,19 @@ uptime_before="$(awk '{ print int($1); exit }' /proc/uptime)"
 sleep 1
 uptime_after="$(awk '{ print int($1); exit }' /proc/uptime)"
 [ $((uptime_after - uptime_before)) -ge 1 ] || fail 43
+# earlycon=xe9 starts the early console on the byte channel, and the kernel
+# console, hvc0, replaces it. The kernel knows earlycon=, so it does not pass it
+# to user space with the parameters that it does not know.
+check_early_console() {
+    log="$(dmesg)"
+    case "$log" in *'bootconsole [earlyxe90] enabled'*) ;; *) fail 44 ;; esac
+    case "$log" in *'bootconsole [earlyxe90] disabled'*) ;; *) fail 45 ;; esac
+    if printf '%s\n' "$log" | grep -F 'Unknown kernel command line parameters' |
+        grep -qF 'earlycon='; then
+        fail 46
+    fi
+}
+check_early_console
 # The last byte ends the debug port's line, so that the marker starts one.
 for octal in 000 015 012 177 377 012; do
     printf "\\$octal" | dd of=/dev/port bs=1 seek=233 count=1 conv=notrunc 2>/dev/null
