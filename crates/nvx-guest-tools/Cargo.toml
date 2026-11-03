@@ -1,0 +1,8 @@
+# The helper programs of NVX's Linux guests. It declares no version yet, so
+# Cargo won't publish it.
+[package]
+name = "nvx-guest-tools"
+edition = "2024"
+
+[lints]
+workspace = true

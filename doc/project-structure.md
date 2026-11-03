@@ -20,7 +20,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
 | `nvx-rs` | Rust crate `nvx`: the NVX mechanics |
-| `crates` | The Cargo workspace's other Rust crates: `nvx-sys`, the OS layer that NVX's crates share |
+| `crates` | The Cargo workspace's other Rust crates: `nvx-sys`, the OS layer that NVX's crates share; `nvx-control`, NVX's control protocol; and `nvx-guest-tools`, the helper programs of NVX's Linux guests |
 | `tests/runtime-adapter` | Rust crate `runtime-adapter`: an independent adapter that CI builds against `nvx` through its public API |
 | `openvmm` | Public OpenVMM Git submodule from `microsoft/openvmm`, tracking its `feature/microvm/dev` branch |
 | `data` | Tracked performance history and generated benchmark data |
@@ -97,6 +97,8 @@ nvx/
 |   |-- config-microvm           MicroVM kernel configuration
 |   `-- config-microvm-debug     CI debug-kernel fragment (watchdogs on)
 |-- crates/                      The Cargo workspace's other Rust crates
+|   |-- nvx-control/             Rust crate `nvx-control`: NVX's control protocol, between its host and its guests
+|   |-- nvx-guest-tools/         Rust crate `nvx-guest-tools`: the helper programs of NVX's Linux guests
 |   `-- nvx-sys/                 Rust crate `nvx-sys`: the OS layer that NVX's crates share
 |-- nvx-rs/                      Rust crate `nvx` for the NVX mechanics
 |   |-- src/

@@ -7469,7 +7469,7 @@ class CiConfigurationTests(unittest.TestCase):
             for name, value in os.environ.items()
             if name not in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR")
         }
-        members = ["nvx", "nvx-sys"]
+        members = ["nvx", "nvx-control", "nvx-guest-tools", "nvx-sys"]
         for directory, manifest, workspace, packages in (
             (root, None, root, members),
             (root, root / "nvx-rs" / "Cargo.toml", root, members),

@@ -1,0 +1,15 @@
+# NVX's control protocol, between its host and its guests. Only NVX's own
+# programs use it, so Cargo never publishes it.
+[package]
+name = "nvx-control"
+edition = "2024"
+publish = false
+
+[features]
+# The host's side of the protocol.
+host = []
+# The guest's side of the protocol.
+guest = []
+
+[lints]
+workspace = true

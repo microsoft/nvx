@@ -198,6 +198,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvx-control"
+version = "0.0.0"
+
+[[package]]
+name = "nvx-guest-tools"
+version = "0.0.0"
+
+[[package]]
 name = "nvx-sys"
 version = "0.0.0"
 dependencies = [
