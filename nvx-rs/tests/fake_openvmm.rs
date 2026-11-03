@@ -578,7 +578,16 @@ fn runs_boot_or_restore_a_microvm_on_the_terminal() {
     fs::create_dir(root.join("reports")).unwrap();
     fs::create_dir(root.join("snapshot")).unwrap();
     let (kernel, initrd) = (path("vmlinux"), path("initramfs.cpio.gz"));
-    let boot = ["--memory", "128M", "--kernel", &kernel, "--initrd", &initrd];
+    let boot = [
+        "--memory",
+        "128M",
+        "--kernel",
+        &kernel,
+        "--initrd",
+        &initrd,
+        "--virtio-console",
+        "console",
+    ];
 
     // A cold boot prints that it booted, writes its outcome report, records its command line next
     // to the kernel, and exits with 0.
@@ -707,7 +716,16 @@ fn runs_find_absolute_policy_paths_in_relative_share_roots() {
     }
     let absolute = |relative: &str| root.join(relative).to_str().unwrap().to_owned();
     let (kernel, initrd) = (absolute("vmlinux"), absolute("initramfs.cpio.gz"));
-    let boot = ["--memory", "128M", "--kernel", &kernel, "--initrd", &initrd];
+    let boot = [
+        "--memory",
+        "128M",
+        "--kernel",
+        &kernel,
+        "--initrd",
+        &initrd,
+        "--virtio-console",
+        "console",
+    ];
     let share = format!("{},share,rw", aggregate_child_name(0, "/data"));
     let other = format!("{},other,ro", aggregate_child_name(1, "/other"));
     let aggregate = [

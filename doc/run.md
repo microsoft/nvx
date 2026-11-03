@@ -86,7 +86,8 @@ directory. For Linux/KVM:
   --hypervisor kvm \
   --memory 128M \
   --kernel guest/vmlinux \
-  --initrd guest/initramfs.cpio.gz
+  --initrd guest/initramfs.cpio.gz \
+  --virtio-console console
 ```
 
 For Windows/WHP in PowerShell:
@@ -99,9 +100,12 @@ For Windows/WHP in PowerShell:
   --hypervisor whp `
   --memory 128M `
   --kernel guest\vmlinux `
-  --initrd guest\initramfs.cpio.gz
+  --initrd guest\initramfs.cpio.gz `
+  --virtio-console console
 ```
 
+`--virtio-console console` attaches the guest's console, the boot console
+`hvc1`, to the terminal, as `nvx-rs run` does.
 For Linux/MSHV, use the `linux-mshv` archive and replace `kvm` with `mshv`.
 If the artifacts are already installed in the repository layout, use
 `openvmm/target/release/openvmm[.exe]`, `build/vmlinux`, and
@@ -368,12 +372,20 @@ Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
 | `--memory-mib N` | `--memory NM` |
 | `--memory-capacity-mib N` | `--memory-capacity NM` on a fresh boot |
 | `--restore-memory-mib N` | `--restore-memory NM` |
+| A fresh boot | `--virtio-console console`, which attaches the guest's console, the boot console `hvc1`, to the terminal |
 | `--dry-run` | No equivalent; this only prints the generated command |
 
-Always include `--single-process`. When restoring, omit `--memory`, `--kernel`,
-`--initrd`, and `--net`, whose addresses the snapshot keeps; see
-[Networked snapshots](#networked-snapshots). Every restore gives the guest
-fresh entropy through the time ABI's restore packet. Do not pass
+Always include `--single-process`. Include `--virtio-console console` to type
+into the guest's shell on a fresh boot: without a boot console, the guest's
+console is the byte channel, `hvc0`. A restore keeps the console of its
+snapshot. OpenVMM requires `--virtio-console console` again to restore a
+snapshot of a boot that passed it, and refuses `--virtio-console` for a
+snapshot without a boot console. `nvx-rs run` passes the option to a fresh boot
+only, so it cannot yet restore a snapshot of a boot with it
+([#1254](https://github.com/microsoft/nvx/issues/1254)). When restoring, omit
+`--memory`, `--kernel`, `--initrd`, and `--net`, whose addresses the snapshot
+keeps; see [Networked snapshots](#networked-snapshots). Every restore gives the
+guest fresh entropy through the time ABI's restore packet. Do not pass
 `--guest ubuntu` during restore; the captured RAM and machine contract already
 identify the restored guest. For example:
 

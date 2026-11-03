@@ -2049,6 +2049,14 @@ status.
   and 512 MiB for Ubuntu and Azure Linux, which `Guest::default_memory_mib`
   gives. `--restore-snapshot` restores a snapshot instead, without them, and
   with the `--restore-*` options, which need it.
+- A cold boot attaches the guest's console, the boot console `hvc1`, to the
+  terminal with `--virtio-console console`, so that the terminal's input
+  reaches the guest through it, not through the byte channel, `hvc0`, whose
+  output, such as the kernel's early messages, goes to standard error. A
+  restore passes no `--virtio-console`, which OpenVMM requires of a snapshot
+  without a boot console, so it cannot yet restore one whose boot console was
+  on the terminal, which needs `--virtio-console console` again
+  ([microsoft/nvx#1254](https://github.com/microsoft/nvx/issues/1254)).
 - A cold boot takes `--net` and `--network-profile` together. A restore takes
   the addressing of its NIC from the snapshot, as OpenVMM does, so it refuses
   `--net`, and passes `--network-profile` alone, which OpenVMM requires, with
@@ -2096,7 +2104,8 @@ before them.
   runtime splits a command line on Windows and as a POSIX shell splits one
   elsewhere, as `nvx.py` quoted it with `subprocess.list2cmdline` and
   `shlex.join`. Unless `--dry-run` is given, it then runs OpenVMM with the
-  standard streams and exits with its status; the command then names the
+  standard streams, to which `--virtio-console console` attaches the guest's
+  boot console, and exits with its status; the command then names the
   checked distro layer, and the scratch image of an upper on scratch, as
   `/proc/self/fd/N` on Linux, which OpenVMM inherits, and by their final paths
   on Windows, as [Checked handoff](#checked-handoff) describes.
@@ -2219,6 +2228,10 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
 
 #### Other differences from nvx.py
 
+- The cold boots of `run`, and `sandbox run`, attach the guest's console to the
+  terminal through the boot console, with `--virtio-console console`, where
+  `nvx.py` left it on the byte channel, `hvc0`, which took the terminal's
+  input. The byte channel's output goes to standard error.
 - Long options cannot be abbreviated, where `argparse` accepted any prefix that
   named one option.
 - A value that starts with `-` follows its option as a separate argument only

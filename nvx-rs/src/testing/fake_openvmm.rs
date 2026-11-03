@@ -72,13 +72,13 @@
 //! the control console as above, and maps the sandbox's shares as above too: from the children of
 //! the aggregate export at `/run/nvx/hostfs/root`, as many as `nvx_maps=` announces, which `MAPS`
 //! requests deliver; it refuses a `--mount` share and `nvx_share=` tokens. With
-//! `--microvm-lifecycle one-shot`, it takes the shares through one `--mount` or the children of
-//! an aggregate at `/run/nvx/shares`, which `nvx_share=` tokens place, and whose guest targets of
-//! directory shares are directories that a workload can enter; it reads no capability and
-//! serves no console: it runs the entrypoint and arguments of the kernel command line with its
-//! own standard streams, `/bin/echo` printing its arguments, `/bin/sleep` sleeping for its
-//! argument in seconds, `/bin/true` and `/bin/false` exiting with 0 and 1, and any other program
-//! not found with 127, then writes an outcome report
+//! `--microvm-lifecycle one-shot` and `--virtio-console console`, it takes the shares through one
+//! `--mount` or the children of an aggregate at `/run/nvx/shares`, which `nvx_share=` tokens
+//! place, and whose guest targets of directory shares are directories that a workload can enter;
+//! it reads no capability and serves no control console: it runs the entrypoint and arguments of
+//! the kernel command line with its own standard streams, `/bin/echo` printing its arguments,
+//! `/bin/sleep` sleeping for its argument in seconds, `/bin/true` and `/bin/false` exiting with 0
+//! and 1, and any other program not found with 127, then writes an outcome report
 //! of operation `run` if `--microvm-report` asks for one, and exits with the workload's status,
 //! or with `STATUS` if the kernel command line has `fake_exit_status=STATUS`.
 //!
@@ -87,15 +87,16 @@
 //! line takes `--processors` and at most one `--cpu-profile`, shares through one `--mount` or the
 //! children of an aggregate at `/run/nvx/shares`, whose relative policy paths name paths in the
 //! only share, as OpenVMM resolves them, and either boots a guest, with `--memory`, an optional
-//! `--memory-capacity`, and an existing `--kernel` and `--initrd`, or restores a snapshot, with
-//! `--restore-snapshot` and optional `--restore-processors`, `--restore-memory`, and
-//! `--restore-ready-path`. It runs no guest: after `fake_boot_delay_ms=MS`, it prints that it
-//! booted or restored the microVM on standard output, writes an outcome report of operation `run`
-//! if `--microvm-report` asks for one, and exits with 0, or with `STATUS` if the kernel command
-//! line, which such a command line may omit, has `fake_exit_status=STATUS`. A restore whose
-//! snapshot directory does not exist fails with status 1 and writes no report. A restore records
-//! its command line next to its snapshot, since it has no kernel. The outcome reports of sandboxes
-//! and of these runs take the form of OpenVMM's.
+//! `--memory-capacity`, an existing `--kernel` and `--initrd`, and `--virtio-console console`, or
+//! restores a snapshot, with `--restore-snapshot` and optional `--restore-processors`,
+//! `--restore-memory`, and `--restore-ready-path`, and without `--virtio-console`, which
+//! `nvx-rs run` gives a cold boot only. It runs no guest: after `fake_boot_delay_ms=MS`, it prints
+//! that it booted or restored the microVM on standard output, writes an outcome report of
+//! operation `run` if `--microvm-report` asks for one, and exits with 0, or with `STATUS` if the
+//! kernel command line, which such a command line may omit, has `fake_exit_status=STATUS`. A
+//! restore whose snapshot directory does not exist fails with status 1 and writes no report. A
+//! restore records its command line next to its snapshot, since it has no kernel. The outcome
+//! reports of sandboxes and of these runs take the form of OpenVMM's.
 //!
 //! The fake also runs the VMs of templates' captures, whose command lines have no
 //! `--microvm-lifecycle`, a `distro` layer and a `scratch` disk on sandbox block devices and no
@@ -1142,10 +1143,17 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             } else {
                 "a one-shot run"
             };
-            for option in ["--virtio-console", "--microvm-control-console"] {
-                if values.contains_key(option) {
-                    return Err(format!("{kind} takes no {option}"));
+            // The boot console gives the guest the terminal, but `nvx-rs run` passes it to a cold
+            // boot only (microsoft/nvx#1254).
+            if values.contains_key("--restore-snapshot") {
+                if values.contains_key("--virtio-console") {
+                    return Err(format!("the restore of {kind} takes no --virtio-console"));
                 }
+            } else {
+                expect("--virtio-console", "console")?;
+            }
+            if values.contains_key("--microvm-control-console") {
+                return Err(format!("{kind} takes no --microvm-control-console"));
             }
             if flags.contains("--microvm-control-auth-stdin") {
                 return Err(format!("{kind} takes no --microvm-control-auth-stdin"));

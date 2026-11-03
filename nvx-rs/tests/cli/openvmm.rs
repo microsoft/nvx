@@ -183,6 +183,7 @@ pub(crate) fn one_shot() -> Options {
         )
         .with("--microvm-workload-identity", ["65534:65534"])
         .with("--microvm-lifecycle", ["one-shot"])
+        .with("--virtio-console", ["console"])
         .flag("--single-process")
         .with("--hypervisor", [HYPERVISOR])
         .with("--memory", ["256M"])
@@ -205,7 +206,8 @@ pub(crate) fn managed(state: &str, endpoint: &str) -> Options {
         )
 }
 
-/// Returns the options with which `nvx-rs run` cold-boots its default guest, Alpine Linux.
+/// Returns the options with which `nvx-rs run` cold-boots its default guest, Alpine Linux, with
+/// its boot console on the terminal.
 pub(crate) fn cold_boot() -> Options {
     Options::default()
         .flag("--single-process")
@@ -215,6 +217,7 @@ pub(crate) fn cold_boot() -> Options {
         .with("--memory", ["128M"])
         .with("--kernel", ["{root/build/vmlinux}"])
         .with("--initrd", ["{root/build/initramfs.cpio.gz}"])
+        .with("--virtio-console", ["console"])
 }
 
 /// Returns the options with which `nvx-rs run --restore-snapshot {root/snapshot}` restores the

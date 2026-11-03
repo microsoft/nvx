@@ -312,10 +312,14 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             };
             let mut command = vec![openvmm];
             command.extend(arguments);
+            // The boot console carries the guest's console, with the workload's output, to the
+            // terminal.
             command.extend(
                 [
                     "--microvm-lifecycle",
                     "one-shot",
+                    "--virtio-console",
+                    "console",
                     "--single-process",
                     "--hypervisor",
                     hypervisor(options.hypervisor),

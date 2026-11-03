@@ -153,6 +153,8 @@ fn runs_boot_or_restore_without_a_lifecycle() {
         "{dir}/vmlinux",
         "--initrd",
         "{dir}/initramfs.cpio.gz",
+        "--virtio-console",
+        "console",
         "--cpu-profile",
         "host",
         "--mount",
@@ -246,9 +248,11 @@ fn runs_refuse_what_their_boot_or_restore_does_not_take() {
         "--initrd",
         "{dir}/initramfs.cpio.gz",
     ];
+    const CONSOLE: [&str; 2] = ["--virtio-console", "console"];
     fn boot(extra: &[&'static str]) -> Vec<&'static str> {
         let mut arguments = vec!["--memory", "128M"];
         arguments.extend(KERNEL);
+        arguments.extend(CONSOLE);
         arguments.extend(extra);
         run_with(&arguments)
     }
@@ -328,9 +332,26 @@ fn runs_refuse_what_their_boot_or_restore_does_not_take() {
             boot(&["--microvm-workload-identity", "1000:1000"]),
             "a microVM run takes no --microvm-workload-identity",
         ),
+        // A cold boot gives the guest's boot console the terminal, which a restore's snapshot
+        // already has or not.
         (
-            boot(&["--virtio-console", "none"]),
-            "a microVM run takes no --virtio-console",
+            run_with(&[&["--memory", "128M"][..], &KERNEL[..]].concat()),
+            "--virtio-console must be given exactly once",
+        ),
+        (
+            run_with(
+                &[
+                    &["--memory", "128M"][..],
+                    &KERNEL[..],
+                    &["--virtio-console", "none"][..],
+                ]
+                .concat(),
+            ),
+            "--virtio-console must be console, not none",
+        ),
+        (
+            restore(&CONSOLE),
+            "the restore of a microVM run takes no --virtio-console",
         ),
         (
             boot(&["--mount", "/data,{dir}/share,ro", "--mount-deny", "missing"]),
@@ -348,6 +369,7 @@ fn runs_refuse_what_their_boot_or_restore_does_not_take() {
     let mut missing = RUN.to_vec();
     missing.truncate(3);
     missing.extend(["--hypervisor", "kvm", "--memory", "128M"]);
+    missing.extend(CONSOLE);
     let (_temporary, options) = parse_run(&missing);
     assert_eq!(
         options.err().as_deref(),

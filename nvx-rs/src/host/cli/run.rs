@@ -7,6 +7,13 @@
 //! `nvx.py run` with their names, defaults, types, and choices, and ends a usage error with
 //! status 2.
 //!
+//! A cold boot attaches the guest's console, the boot console `hvc1`, to the terminal with
+//! `--virtio-console console`, so that the terminal's input reaches the guest through it rather
+//! than through the byte channel, `hvc0`, whose output, such as the kernel's early messages, goes
+//! to standard error. A restore passes no `--virtio-console`, which OpenVMM requires of a snapshot
+//! without a boot console, so it cannot yet restore one whose boot console was on the terminal,
+//! which needs `--virtio-console console` again (microsoft/nvx#1254).
+//!
 //! A cold boot takes `--net` and `--network-profile` together. A restore takes the addressing of
 //! its NIC from the snapshot, as OpenVMM does, so it refuses `--net`, and passes
 //! `--network-profile` alone, which OpenVMM requires, with the network policy that the snapshot
@@ -413,6 +420,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         if let Some(capacity) = &options.memory_capacity_mib {
             push(&mut command, "--memory-capacity", format!("{capacity}M"));
         }
+        // The guest's console takes the terminal. A restore passes no console option, as a
+        // snapshot without a boot console requires (microsoft/nvx#1254).
+        push(&mut command, "--virtio-console", "console");
     }
     if let Some(profile) = &options.cpu_profile {
         push(&mut command, "--cpu-profile", profile.as_str());
