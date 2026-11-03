@@ -162,7 +162,9 @@ change reaches crates.io within a day of its merge.
 
 The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
 publishes. A pull request changes it to start another series, such as
-`0.2.0-alpha.1`. Only `nvx`'s version changes in the workspace's `Cargo.lock` and
+`0.2.0-alpha.1`, together with the version of `nvx-sys`, the OS layer that
+`nvx` requires at exactly its version, in `crates/nvx-sys/Cargo.toml`. Only
+their versions change in the workspace's `Cargo.lock` and
 `tests/runtime-adapter/Cargo.lock`. CI publishes the crates of a workspace
 with one version, so a crate that it publishes besides `nvx` declares the same
 version, and requires each of the others at exactly that version; see
@@ -176,23 +178,25 @@ see [Bundled artifacts](../nvx-rs/README.md#bundled-artifacts).
 
 When CI cannot publish, as when the newest version on crates.io records no
 commit that `dev` holds, a pull request declares the next version as above,
-and once it merges, a crate owner publishes that version from a fresh clone of
-`dev`, which needs no submodule:
+and once it merges, a crate owner publishes that version of `nvx-sys` and
+`nvx` from a fresh clone of `dev`, which needs no submodule:
 
 ```bash
 git clone --branch dev https://github.com/microsoft/nvx.git nvx-crate
 cd nvx-crate/nvx-rs
-git ls-files --eol . | grep -E 'w/(crlf|mixed)'  # prints nothing
+git ls-files --eol . ../crates/nvx-sys | grep -E 'w/(crlf|mixed)'  # prints nothing
 cargo check --locked --features bundled          # stages the pinned release
-cargo publish --locked --dry-run
-cargo publish --locked
+cargo publish --locked --package nvx-sys --package nvx --dry-run
+cargo publish --locked --package nvx-sys --package nvx
 ```
 
 `cargo publish` packs the files of the working tree, refuses uncommitted
 changes, and records the commit in the package's `.cargo_vcs_info.json`, but
-Git does not count line endings as changes. `.gitattributes` checks `nvx-rs/`
-out with LF line endings on every platform, whatever `core.autocrlf` says,
-since [microsoft/nvx#764](https://github.com/microsoft/nvx/pull/764). A clone
+Git does not count line endings as changes. It publishes `nvx-sys` first, and
+`nvx`, which requires it, once crates.io lists it. `.gitattributes` checks
+`nvx-rs/` and `crates/nvx-sys/` out with LF line endings on every platform,
+whatever `core.autocrlf` says, `nvx-rs/` since
+[microsoft/nvx#764](https://github.com/microsoft/nvx/pull/764). A clone
 that checked its files out with CRLF line endings before then keeps them until
 it checks them out again, and packs them: `0.1.0-alpha.2` came from such a
 clone, so its sources differ from the commit that it records. A fresh clone

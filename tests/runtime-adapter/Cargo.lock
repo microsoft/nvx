@@ -131,10 +131,18 @@ version = "0.1.0-alpha.3"
 dependencies = [
  "getrandom",
  "nix",
+ "nvx-sys",
  "serde",
  "serde_json",
  "sha2",
  "windows-sys",
+]
+
+[[package]]
+name = "nvx-sys"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "nix",
 ]
 
 [[package]]

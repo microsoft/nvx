@@ -369,11 +369,11 @@ def command_line(arguments: Sequence[str], *, root: Path | None = None) -> list[
 
 # nvx-rs reports an error on standard error as `error[CODE]: MESSAGE`, and a
 # usage error as its parser's usage and then `PROG: error[CODE]: MESSAGE`,
-# where CODE is one of the stable error codes of nvx-rs/README.md. An error is
-# one line, and its message may change: callers tell errors apart by their
-# codes. The program's name is tried last, and is the shortest that fits, so
-# that an error whose message names `error[...]: `, as a file of that name
-# does, keeps its own code and the whole message.
+# where CODE is one of the stable error codes of crates/nvx-sys/README.md. An
+# error is one line, and its message may change: callers tell errors apart by
+# their codes. The program's name is tried last, and is the shortest that
+# fits, so that an error whose message names `error[...]: `, as a file of that
+# name does, keeps its own code and the whole message.
 _ERROR_LINE = re.compile(
     r"^(?:[^\n]*?: )??error\[(?P<code>[a-z]+(?:-[a-z]+)*)\]: ", re.MULTILINE
 )

@@ -16,10 +16,11 @@ kernel/config-microvm text eol=lf
 kernel/config-microvm-debug text eol=lf
 # Linux hosts read the setup tool manifest, including copies staged from Windows.
 scripts/setup/tool-versions.conf text eol=lf
-# `cargo package` packs the files of the working tree, so the published nvx crate holds the files
-# of its commit only if they are checked out unchanged: check nvx-rs out with LF line endings on
-# every platform, whatever core.autocrlf says.
+# `cargo package` packs the files of the working tree, so the published crates hold the files of
+# their commit only if they are checked out unchanged: check nvx-rs and nvx-sys out with LF line
+# endings on every platform, whatever core.autocrlf says.
 nvx-rs/** text=auto eol=lf
+crates/nvx-sys/** text=auto eol=lf
 # OpenVMM wrote these template manifests: they are bytes, never text.
 nvx-rs/tests/fixtures/template/**/manifest.bin binary
 

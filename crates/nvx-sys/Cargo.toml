@@ -1,8 +1,15 @@
-# The OS layer that NVX's crates share. It declares no version yet, so Cargo
-# won't publish it.
+# The OS layer that NVX's crates share. CI publishes it before nvx, which
+# requires it at exactly their shared version (doc/ci.md, "crates.io releases").
 [package]
 name = "nvx-sys"
+version = "0.1.0-alpha.3"
 edition = "2024"
+rust-version = "1.89"
+description = "The OS layer that NVX's crates share, with no stability guarantee"
+license = "MIT"
+repository = "https://github.com/microsoft/nvx"
+readme = "README.md"
+publish = ["crates-io"]
 
 [lints]
 workspace = true

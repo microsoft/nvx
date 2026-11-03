@@ -3,10 +3,11 @@
 //! - It is a workspace of its own, with a lockfile of its own, and declares the minimum supported
 //!   Rust version of `nvx`.
 //! - Each configuration selects one side of `nvx`. The protocol-only build depends on `nvx`
-//!   alone, without features. The host-only build enables the host side of `nvx` and not its
-//!   guest side. The guest-only build for `x86_64-unknown-linux-musl` enables only the guest
-//!   side, and pulls in neither Tokio nor a dependency that only the host side of `nvx`
-//!   declares.
+//!   alone, without features, and `nvx` on its OS layer, `nvx-sys`, alone, which depends on
+//!   `nix` on Unix and on nothing elsewhere. The host-only build enables the host side of `nvx`
+//!   and not its guest side. The guest-only build for `x86_64-unknown-linux-musl` enables only
+//!   the guest side, and pulls in neither Tokio nor a dependency that only the host side of
+//!   `nvx` declares.
 //! - Each binary runs and reports the contract that it was built against, and the guest binary
 //!   is a static executable.
 //!
@@ -113,13 +114,13 @@ fn nvx_features(tree: &[Package]) -> BTreeSet<&str> {
     package.features.iter().map(String::as_str).collect()
 }
 
-/// Returns the names of the direct dependencies of `nvx` in `tree`, including its build
-/// dependencies.
-fn nvx_dependencies(tree: &[Package]) -> BTreeSet<&str> {
+/// Returns the names of the direct dependencies of the package `name` in `tree`, including its
+/// build dependencies.
+fn dependencies<'a>(tree: &'a [Package], name: &str) -> BTreeSet<&'a str> {
     let start = tree
         .iter()
-        .position(|package| package.name == "nvx")
-        .expect("the adapter depends on nvx");
+        .position(|package| package.name == name)
+        .unwrap_or_else(|| panic!("the tree holds no {name}"));
     let depth = tree[start].depth;
     tree[start + 1..]
         .iter()
@@ -127,6 +128,12 @@ fn nvx_dependencies(tree: &[Package]) -> BTreeSet<&str> {
         .filter(|package| package.depth == depth + 1)
         .map(|package| package.name.as_str())
         .collect()
+}
+
+/// Returns the names of the direct dependencies of `nvx` in `tree`, including its build
+/// dependencies.
+fn nvx_dependencies(tree: &[Package]) -> BTreeSet<&str> {
+    dependencies(tree, "nvx")
 }
 
 #[test]
@@ -154,8 +161,20 @@ fn the_adapter_declares_the_minimum_rust_version_of_nvx() {
 #[test]
 fn the_protocol_only_configuration_depends_on_nvx_alone_without_features() {
     let tree = tree(&[], None);
-    assert_eq!(names(&tree), BTreeSet::from(["nvx", "runtime-adapter"]));
+    assert_eq!(
+        dependencies(&tree, "runtime-adapter"),
+        BTreeSet::from(["nvx"])
+    );
     assert_eq!(nvx_features(&tree), BTreeSet::new());
+    // The OS layer, which nvx requires whatever its features, and the system calls of its Unix
+    // side.
+    assert_eq!(nvx_dependencies(&tree), BTreeSet::from(["nvx-sys"]));
+    let system = if cfg!(unix) {
+        BTreeSet::from(["nix"])
+    } else {
+        BTreeSet::new()
+    };
+    assert_eq!(dependencies(&tree, "nvx-sys"), system);
 }
 
 #[test]

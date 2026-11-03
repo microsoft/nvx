@@ -189,6 +189,7 @@ version = "0.1.0-alpha.3"
 dependencies = [
  "getrandom",
  "nix",
+ "nvx-sys",
  "proptest",
  "serde",
  "serde_json",
@@ -230,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "nvx-sys"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "nix",
  "tempfile",

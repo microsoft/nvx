@@ -2134,10 +2134,12 @@ independent adapter's does:
 
 - The adapter is a workspace of its own with its own lockfile, and declares
   the minimum supported Rust version of `nvx`.
-- The protocol-only build depends on `nvx` alone, without features. The
-  host-only build enables the host side of `nvx` and not its guest side. The
-  guest-only build enables only the guest side, and pulls in neither Tokio nor
-  a dependency that only the host side of `nvx` declares. The tests read
+- The protocol-only build depends on `nvx` alone, without features, and `nvx`
+  on its OS layer, `nvx-sys`, alone, which depends on `nix` on Unix and on
+  nothing elsewhere. The host-only build enables the host side of `nvx` and not
+  its guest side. The guest-only build enables only the guest side, and pulls
+  in neither Tokio nor a dependency that only the host side of `nvx` declares.
+  The tests read
   these dependency trees from `cargo tree`, which downloads the packages of the
   musl target the first time, on Windows too.
 - Each binary runs and reports the contract that it was built against, and the

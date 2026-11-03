@@ -52,6 +52,9 @@ guest = ["dep:nix", "dep:getrandom"]
 
 [dependencies]
 getrandom = { version = "0.4", optional = true }
+# The OS layer that nvx shares with NVX's other crates, which CI publishes before nvx, at exactly
+# its version (doc/ci.md, "crates.io releases").
+nvx-sys = { path = "../crates/nvx-sys", version = "=0.1.0-alpha.3" }
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }
 # The same release as the build script's: `host` enables both.

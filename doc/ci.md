@@ -1918,8 +1918,9 @@ A scheduled or manually dispatched full run of `dev` publishes NVX's crates
 to crates.io once every job of the run has passed, which
 `Required status check` confirms: the crates that `CRATES` lists in
 [`crate_release.py`](../scripts/nvx_tools/crate_release.py), each after the
-crates that it depends on, which today is the
-[`nvx` crate](../nvx-rs/README.md) alone. Two jobs on GitHub-hosted
+crates that it depends on, which today are the
+[`nvx-sys` crate](../crates/nvx-sys/README.md) and then the
+[`nvx` crate](../nvx-rs/README.md), which requires it. Two jobs on GitHub-hosted
 Ubuntu runners, whose checkouts have the LF line endings of the commit, run
 [`publish_nvx_crate.py`](../scripts/publish_nvx_crate.py): `crate-package`,
 `Package nvx crate`, waits for that check, and `crate-release`,
@@ -1982,8 +1983,8 @@ alone.
   by name, version, and source, or on fewer, but for the run's packages of the
   other crates, which it locks as crates.io packages with the checksums of the
   run's packages.
-- It holds the license and the readme, and the `nvx` crate's package holds
-  its build script, `artifacts.json`, and `src/lib.rs` too.
+- It holds the license, the readme, and `src/lib.rs`, and the `nvx` crate's
+  package holds its build script and `artifacts.json` too.
 - Its files build with every feature, as a dependent's build does:
   `cargo package` packs the crates again, which must give the same bytes, and
   builds each from its files, with the crates that it depends on from the

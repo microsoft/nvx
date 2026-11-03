@@ -227,7 +227,8 @@ crate's [Testing](../nvx-rs/README.md#testing) section describes.
   configurations in `nvx-rs/tests/fixtures/`, are written by hand from the
   specification, and no change adds one that records what an implementation
   does.
-- Callers rely on exit statuses, [error codes](../nvx-rs/README.md#error-codes),
+- Callers rely on exit statuses,
+  [error codes](../crates/nvx-sys/README.md#error-codes),
   and stable fragments of messages, such as the names of options and the paths
   of fields, but not on the wording of messages, which a change may revise.
   Tests of what callers observe, such as the CLI's scenario tests, check those.

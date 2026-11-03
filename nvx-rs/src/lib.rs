@@ -126,7 +126,6 @@
 
 pub mod activation;
 pub mod contract;
-mod error;
 pub mod exec;
 pub mod gpt;
 mod hypervisor;
@@ -142,6 +141,9 @@ pub mod host;
 pub mod testing;
 #[cfg(test)]
 mod tests;
+
+// The error type lives in nvx-sys; its old path, `crate::error`, stays for nvx's modules.
+use nvx_sys::error;
 
 pub use error::{Error, ErrorCode, ErrorKind, Result};
 #[cfg(feature = "host")]

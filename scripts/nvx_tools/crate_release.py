@@ -103,7 +103,10 @@ class Crate:
 
 # The crates that CI publishes, with one version, each after the crates that
 # it depends on.
-CRATES = (Crate("nvx-rs", ("build.rs", "artifacts.json", "src/lib.rs")),)
+CRATES = (
+    Crate("crates/nvx-sys", ("src/lib.rs",)),
+    Crate("nvx-rs", ("build.rs", "artifacts.json", "src/lib.rs")),
+)
 
 _NUMERIC = r"(?:0|[1-9][0-9]*)"
 _IDENTIFIER = rf"(?:{_NUMERIC}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"

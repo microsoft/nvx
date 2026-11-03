@@ -3059,9 +3059,9 @@ class NvxRsTests(unittest.TestCase):
                 self.assertIsNone(nvx_rs.reported_error(stderr))
 
     def test_usage_documents_every_error_code_of_nvx_rs(self):
-        # nvx-rs/README.md lists every code of nvx::ErrorCode, which a test of
-        # nvx-rs checks, and doc/usage.md lists the same codes with the status
-        # with which nvx-rs exits: 2 for usage errors and 1 for any other.
+        # crates/nvx-sys/README.md lists every code of nvx::ErrorCode, which a
+        # test of nvx-sys checks, and doc/usage.md lists the same codes with the
+        # status with which nvx-rs exits: 2 for usage errors and 1 for any other.
         def table(path: Path) -> list[tuple[str, str]]:
             lines = path.read_text(encoding="utf-8").splitlines()
             rows: list[tuple[str, str]] = []
@@ -3073,7 +3073,7 @@ class NvxRsTests(unittest.TestCase):
                     rows.append((cells[0].strip("`"), cells[1]))
             return rows
 
-        readme = table(nvx_rs.DIRECTORY / "README.md")
+        readme = table(BuildConstants.REPO_ROOT / "crates" / "nvx-sys" / "README.md")
         usage = table(BuildConstants.REPO_ROOT / "doc" / "usage.md")
         self.assertGreater(len(readme), 8)
         self.assertEqual(

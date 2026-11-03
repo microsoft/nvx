@@ -798,19 +798,21 @@ class ManifestTests(unittest.TestCase):
                 _version("0.1.1"),
             )
 
-    def test_ci_publishes_the_nvx_crate_alone_with_a_version_that_it_can_publish(self):
-        # The repository's own crates: CI publishes nvx alone, at a version
-        # whose counter the next release raises, and a run that gives it the
-        # next version changes only its version in its manifest and in the
-        # lockfile of its workspace, at the repository's root, whose manifest
-        # and lockfile are inputs of the crate too.
+    def test_ci_publishes_nvx_sys_and_then_nvx_with_a_version_they_can_publish(self):
+        # The repository's own crates: CI publishes nvx-sys, then nvx, which
+        # requires it by path and at exactly their version, whose counter the
+        # next release raises. A run that gives them the next version changes
+        # only their versions, and nvx's requirement on nvx-sys, in their
+        # manifests and in the lockfile of their workspace, at the repository's
+        # root, whose manifest and lockfile are inputs of the crates too.
         checkout = crate_release.Checkout.open(
             BuildConstants.REPO_ROOT, crate_release.CRATES
         )
-        self.assertEqual(checkout.names, ("nvx",))
+        self.assertEqual(checkout.names, ("nvx-sys", "nvx"))
         self.assertEqual(
             checkout.inputs,
             (
+                "crates/nvx-sys/",
                 "nvx-rs/",
                 "Cargo.toml",
                 "Cargo.lock",
@@ -818,18 +820,41 @@ class ManifestTests(unittest.TestCase):
                 ".cargo/config.toml",
             ),
         )
+        self.assertEqual(
+            checkout.requirements,
+            {
+                "nvx-sys": [],
+                "nvx": [
+                    (
+                        "",
+                        "dependencies",
+                        "nvx-sys",
+                        "nvx-sys",
+                        "optional=False default-features=True features=[]",
+                    )
+                ],
+            },
+        )
         counter = checkout.declared.counter
         self.assertIsNotNone(counter)
         assert counter is not None
         following = Version(*checkout.declared.core, (counter[0], str(counter[1] + 1)))
+        version = f'version = "{following}"'.encode()
+        requirement = (
+            f'nvx-sys = {{ path = "../crates/nvx-sys", version = "={following}" }}'
+        ).encode()
         files = checkout.versioned(following)
-        self.assertEqual(sorted(files), ["Cargo.lock", "nvx-rs/Cargo.toml"])
-        for path, data in files.items():
-            with self.subTest(path=path):
-                self.assertEqual(
-                    _changed_lines(checkout.originals[path], data),
-                    [f'version = "{following}"'.encode()],
-                )
+        self.assertEqual(
+            {
+                path: _changed_lines(checkout.originals[path], data)
+                for path, data in files.items()
+            },
+            {
+                "Cargo.lock": [version, version],
+                "crates/nvx-sys/Cargo.toml": [version],
+                "nvx-rs/Cargo.toml": [version, requirement],
+            },
+        )
 
 
 class RegistryTests(unittest.TestCase):
