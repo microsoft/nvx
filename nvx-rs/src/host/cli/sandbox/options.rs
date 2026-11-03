@@ -15,8 +15,8 @@ use crate::host::sandbox::mount::{MountOwner, PolicyKind};
 use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
 use crate::host::sandbox::plan::guest_gateway;
 use crate::host::sandbox::{
-    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, PIDS_MAX_LIMIT, SandboxLayer,
-    SandboxNetwork, parse_workload_identity,
+    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, SandboxLayer, SandboxNetwork,
+    parse_workload_identity,
 };
 use crate::protocol::root::RootUpper;
 
@@ -43,8 +43,6 @@ options:
   --workload-user UID:GID
                         fixed non-root workload identity (default:
                         65534:65534)
-  --memory-max MEMORY_MAX
-  --pids-max PIDS_MAX
   --memory-mib MEMORY_MIB
   --timeout TIMEOUT     control operation timeout, and the longest wait for
                         another lifecycle transition of the sandbox, in
@@ -139,7 +137,7 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx-rs sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 34] = [
     Spec::one("--layer"),
     Spec::one("--scratch"),
     Spec::one("--upper"),
@@ -148,8 +146,6 @@ pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
     Spec::one("--arg"),
     Spec::one("--hostname"),
     Spec::one("--workload-user"),
-    Spec::one("--memory-max"),
-    Spec::one("--pids-max"),
     Spec::one("--memory-mib"),
     Spec::one("--timeout"),
     Spec::one("--exec-timeout-ms"),
@@ -199,10 +195,6 @@ pub(crate) struct Options {
     pub(crate) hostname: String,
     /// `--workload-user`.
     pub(crate) workload_user: (u32, u32),
-    /// `--memory-max`.
-    pub(crate) memory_max: Option<u64>,
-    /// `--pids-max`.
-    pub(crate) pids_max: Option<u32>,
     /// `--memory-mib`, 256 by default.
     pub(crate) memory_mib: u64,
     /// `--timeout` in seconds, 60 by default.
@@ -248,8 +240,6 @@ impl Default for Options {
             args: Vec::new(),
             hostname: DEFAULT_HOSTNAME.to_owned(),
             workload_user: DEFAULT_WORKLOAD_IDENTITY,
-            memory_max: None,
-            pids_max: None,
             memory_mib: 256,
             timeout: 60.0,
             exec_timeout_ms: 0,
@@ -302,8 +292,6 @@ impl Receiver for Options {
                 self.workload_user =
                     parse_workload_identity(&text()).map_err(|error| error.message().to_owned())?;
             }
-            "--memory-max" => self.memory_max = Some(integer(&text(), 1..=u64::MAX)?),
-            "--pids-max" => self.pids_max = Some(integer(&text(), 1..=PIDS_MAX_LIMIT)?),
             "--memory-mib" => self.memory_mib = integer(&text(), 1..=MAX_MEMORY_MIB)?,
             "--timeout" => self.timeout = seconds(&text())?,
             "--exec-timeout-ms" => self.exec_timeout_ms = integer(&text(), 0..=u32::MAX)?,

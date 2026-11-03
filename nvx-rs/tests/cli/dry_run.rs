@@ -176,10 +176,6 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 "worker",
                 "--workload-user",
                 "1000:1000",
-                "--memory-max",
-                "268435456",
-                "--pids-max",
-                "64",
                 "--memory-mib",
                 "512",
                 "--hypervisor",
@@ -194,7 +190,6 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 .with("--hypervisor", ["mshv"])
                 .with("--memory", ["512M"])
                 .with("--microvm-report", ["{root/reports/openvmm-run.json}"])
-                // The guest's limit of processes counts its init too.
                 .sandbox_kernel(
                     "quiet loglevel=3",
                     &[
@@ -202,8 +197,6 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                         "nvx_hostname=worker",
                         "nvx_arg=--port",
                         "nvx_arg=8080",
-                        "nvx_memory_max=268435456",
-                        "nvx_pids_max=65",
                     ],
                 ),
         ),

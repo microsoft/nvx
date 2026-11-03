@@ -12,43 +12,6 @@ use crate::host::sandbox::mount::PolicyKind;
 use crate::host::sandbox::options::PolicyPathOption;
 
 #[test]
-fn resource_limits_are_bounded_ascii_decimal() {
-    for (option, value) in [
-        ("--memory-max", "1"),
-        ("--memory-max", "18446744073709551615"),
-        ("--pids-max", "1"),
-        ("--pids-max", "4194303"),
-    ] {
-        let arguments = [option.to_owned(), value.to_owned()];
-        let (options, _) = parse(&arguments).unwrap();
-        let actual = if option == "--memory-max" {
-            options.memory_max
-        } else {
-            options.pids_max.map(u64::from)
-        };
-        assert_eq!(actual, Some(value.parse::<u64>().unwrap()));
-    }
-    for option in ["--memory-max", "--pids-max"] {
-        for value in [
-            "0",
-            "-1",
-            "+1",
-            " 1",
-            "1 ",
-            "1_000",
-            "\u{661}",
-            "",
-            "1.0",
-            "18446744073709551616",
-        ] {
-            let arguments = [option.to_owned(), value.to_owned()];
-            assert!(parse(&arguments).is_err(), "{option} {value:?}");
-        }
-    }
-    assert!(parse(&["--pids-max".to_owned(), "4194304".to_owned()]).is_err());
-}
-
-#[test]
 fn the_upper_is_scratch_or_ram() {
     let upper = |value: &str| {
         parse(&["--upper".to_owned(), value.to_owned()]).map(|(options, _)| options.upper)

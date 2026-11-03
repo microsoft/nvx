@@ -341,19 +341,13 @@ jobs:
           )
           scratch="build/ubuntu-smoke-${{ inputs.backend }}.ext4"
           cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
-          # The probe checks the security profile and that the 32 MiB memory
-          # and 8-process limits hold.
+          # The probe checks the security profile.
           nvx-rs/target/release/nvx-rs sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
             --entrypoint /sbin/nvx-sandbox-smoke \
-            --arg limits \
-            --arg 33554432 \
-            --arg 8 \
             --workload-user 65534:65534 \
-            --memory-max 33554432 \
-            --pids-max 8 \
             --memory-mib 256
 
       - name: Run Ubuntu sandbox live-share smoke test on Linux
@@ -863,19 +857,13 @@ jobs:
               ConvertFrom-Json
           $scratch = "build\ubuntu-smoke-${{ inputs.backend }}.ext4"
           Copy-Item build\ubuntu-smoke-scratch.ext4 $scratch
-          # The probe checks the security profile and that the 32 MiB memory
-          # and 8-process limits hold.
+          # The probe checks the security profile.
           nvx-rs\target\release\nvx-rs.exe sandbox `
             --hypervisor "${{ inputs.backend }}" `
             --layer "distro,build\ubuntu-distro.erofs,$($manifest.uuid)" `
             --scratch $scratch `
             --entrypoint /sbin/nvx-sandbox-smoke `
-            --arg limits `
-            --arg 33554432 `
-            --arg 8 `
             --workload-user 65534:65534 `
-            --memory-max 33554432 `
-            --pids-max 8 `
             --memory-mib 256
 
       - name: Run Ubuntu sandbox live-share smoke test on Windows

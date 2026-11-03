@@ -75,10 +75,8 @@ pub(crate) fn minimal_config() -> Value {
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
         "layers": [{"path": "{root/distro.erofs}", "role": "distro", "uuid": UUID}],
-        "memory_max": null,
         "memory_mib": 256,
         "network": null,
-        "pids_max": null,
         "scratch": "{root/scratch.ext4}",
         "upper": "scratch",
         "workload_gid": 65534,
@@ -382,10 +380,6 @@ fn configurations() -> Vec<Configuration> {
             "worker",
             "--workload-user",
             "1000:1000",
-            "--memory-max",
-            "268435456",
-            "--pids-max",
-            "64",
             "--memory-mib",
             "384",
             "--hypervisor",
@@ -414,9 +408,7 @@ fn configurations() -> Vec<Configuration> {
             for (name, value) in [
                 ("cmdline", json!("quiet")),
                 ("hostname", json!("worker")),
-                ("memory_max", json!(268_435_456)),
                 ("memory_mib", json!(384)),
-                ("pids_max", json!(64)),
                 ("workload_gid", json!(1000)),
                 ("workload_uid", json!(1000)),
                 (
@@ -467,15 +459,7 @@ fn configurations() -> Vec<Configuration> {
                     ["tcp:18080:8080", "udp:19090:9090"],
                 )
                 .with("--memory", ["384M"])
-                .sandbox_kernel(
-                    "quiet",
-                    &[
-                        WORKLOAD[0],
-                        "nvx_hostname=worker",
-                        "nvx_memory_max=268435456",
-                        "nvx_pids_max=65",
-                    ],
-                )
+                .sandbox_kernel("quiet", &[WORKLOAD[0], "nvx_hostname=worker"])
         },
     );
     network.files = vec![(
@@ -580,6 +564,10 @@ fn check_lifecycle(case: &Configuration) {
     }
     let config = assert_bindings(&root, json(&state.join("config.json")));
     assert_eq!(config, root.expand_json(&case.config), "{}", case.name);
+    // The VM is the limit of the sandbox's workload: the record holds no limit of its own.
+    for limit in ["memory_max", "pids_max"] {
+        assert!(config.get(limit).is_none(), "{}: {limit}", case.name);
+    }
     assert!(
         root.openvmm_records().is_empty(),
         "{}: provision launched OpenVMM",

@@ -266,10 +266,6 @@ struct Record<'a> {
     workload_uid: u32,
     /// The workload's GID.
     workload_gid: u32,
-    /// The workload's memory limit in bytes, if any.
-    memory_max: Option<u64>,
-    /// The workload's process limit, if any.
-    pids_max: Option<u32>,
     /// `--hypervisor`, resolved.
     hypervisor: &'a str,
     /// `--memory-mib`.
@@ -311,8 +307,6 @@ pub(crate) fn serialize_launch(
         hostname: &settings.hostname,
         workload_uid,
         workload_gid,
-        memory_max: settings.memory_max,
-        pids_max: settings.pids_max,
         hypervisor: config.hypervisor,
         memory_mib: config.memory_mib,
         network: launch.network(),
@@ -360,10 +354,6 @@ pub(crate) struct Config {
     workload_uid: u32,
     /// The workload's GID.
     workload_gid: u32,
-    /// The workload's memory limit in bytes, or `None` for none.
-    memory_max: Option<u64>,
-    /// The workload's process limit, or `None` for none.
-    pids_max: Option<u32>,
     /// The hypervisor that OpenVMM uses.
     hypervisor: String,
     /// The guest RAM in MiB, from 1 to [`MAX_MEMORY_MIB`].
@@ -463,8 +453,6 @@ impl Config {
             SandboxSettings {
                 hostname: self.hostname.clone(),
                 workload_identity: (self.workload_uid, self.workload_gid),
-                memory_max: self.memory_max,
-                pids_max: self.pids_max,
                 ..SandboxSettings::default()
             },
         )?;

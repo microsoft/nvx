@@ -12862,15 +12862,10 @@ Write-Output (Get-BenchmarkScratchDirectory)
                     "test",
                     f"Run Ubuntu sandbox layer smoke test on {system}",
                 )
-                for option in (
-                    "--entrypoint /sbin/nvx-sandbox-smoke",
-                    "--arg limits",
-                    "--arg 33554432",
-                    "--arg 8",
-                    "--memory-max 33554432",
-                    "--pids-max 8",
-                ):
-                    self.assertIn(option, smoke)
+                self.assertIn("--entrypoint /sbin/nvx-sandbox-smoke", smoke)
+                # The VM is the limit of the sandbox's workload.
+                for option in ("--arg limits", "--memory-max", "--pids-max"):
+                    self.assertNotIn(option, smoke)
         upload = _workflow_step(
             microvm_workflow, "test", "Upload NVX microVM failure logs"
         )

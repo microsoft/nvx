@@ -182,8 +182,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             args: options.args.clone(),
             hostname: options.hostname.clone(),
             workload_identity: options.workload_user,
-            memory_max: options.memory_max,
-            pids_max: options.pids_max,
+            ..SandboxSettings::default()
         };
         // The checks above require --scratch for an upper on scratch, and refuse it for one in
         // RAM.
