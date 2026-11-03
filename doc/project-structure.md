@@ -106,6 +106,7 @@ nvx/
 |   |   |-- guest/               Programs that run in Linux guests, the guest's NVXS connection, the libraries through which any guest init or agent opens the terminal on which it serves its session, starts a program, collects its children's statuses, settles its executions' cgroups, drives each execution, mounts host mappings beneath the descriptors of the roots that it names, assembles and tears down a layered root, and reads a GPT disk's partition table through its block device, and the typed calls through which it runs the time ABI's steps and the reseed (feature `guest`)
 |   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
 |   |-- tests/                   Fake-OpenVMM instance lifecycle, sandbox store, CLI scenario, NVXS session, guest-binary, and hypervisor managed-lifecycle tests, the store's record fixtures and sandbox configurations of every format, the cases of the export and root boot tokens, and the conformance vectors of the wire formats
+|   |-- public-api/              The crate's public API on Linux and on Windows, which CI checks
 |   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
 |   `-- artifacts.json           Release package pinned for the bundled artifacts
 |-- openvmm/                     OpenVMM Git submodule
@@ -169,6 +170,7 @@ nvx/
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
 |   |-- powershell_testing.py    PowerShell launches of the unit tests, under a shared default time limit
+|   |-- public_api.py            Public-API snapshot check of the nvx crate run by CI
 |   |-- publish_development_release.py Development release publisher run by CI
 |   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
 |   |-- test-layout-allowlist.json The test hooks that production files may hold
@@ -349,6 +351,8 @@ hooks that `test-layout-allowlist.json` allows them, and
 `check_test_changes.py` flags the pull requests that change existing tests; see
 [Test layout](contribute.md#test-layout) and
 [Changes to existing tests](contribute.md#changes-to-existing-tests).
+`public_api.py` checks the public API of `nvx` against its snapshots in
+`nvx-rs/public-api/`, and rewrites them; see [Rust crates](ci.md#rust-crates).
 
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners
 using the [tool manifest](../scripts/setup/tool-versions.conf);

@@ -2219,14 +2219,36 @@ The required `nvx-rs` job checks the [`nvx` crate](../nvx-rs/README.md),
 which holds the NVX mechanics, on GitHub-hosted Ubuntu and Windows runners
 through the [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml)
 action, on the Rust release that `rust-toolchain.toml` pins. It runs rustfmt,
-Clippy with warnings denied for all targets and features and for the library
-without default features, the unit, protocol
+Clippy with warnings denied for all targets and features, for the library with
+and without default features, and for the `cli` and `testing` features alone,
+the unit, protocol
 conformance-vector and property, and fake-OpenVMM instance tests, a test that
 the direct children of `nvx::host` depend on one another without cycles, rustdoc
 with warnings denied, the minimum Rust version check, and the macOS cross-check.
+Clippy checks `cli` alone and `testing` alone so that the compiler checks the
+private code that each of them builds, which the code of other features may
+otherwise use.
 It also validates bundled artifact staging with a fixture package. The action
 sets `NVX_BUNDLE=skip` for `--all-features` builds, so that `bundled` stages
 nothing instead of downloading the pinned release.
+
+On Linux, the `nvx-rs` job also checks the public API of `nvx` against its
+snapshots, [`nvx-rs/public-api/linux.txt`](../nvx-rs/public-api/linux.txt) and
+[`windows.txt`](../nvx-rs/public-api/windows.txt), with
+[`public_api.py`](../scripts/public_api.py). The script builds the library's
+rustdoc JSON with every feature but `bundled`, on the pinned Rust release, for
+`x86_64-unknown-linux-musl`, the guests' target, and for
+`x86_64-pc-windows-msvc`, after it adds both targets to that release with
+rustup. rustdoc needs only a target's standard library, not its linker, so the
+Linux runner checks both snapshots, and any host lists both platforms alike.
+Each snapshot lists one public item a line, sorted by path: its kind, its path,
+and `(hidden)` if `#[doc(hidden)]` hides it or an item that contains it. The
+list follows re-exports, and leaves trait implementations out. The check
+prints how the API differs from a snapshot, and fails; a pull request that
+changes the public API runs `python3 scripts/public_api.py --update` and
+commits the snapshots, so that its diff shows the change. rustdoc's JSON is
+unstable, so the script reads only the format version of the pinned release,
+and a new pin may need a change to the script.
 
 On Linux, the `nvx-rs` job also lints and tests the
 [guest binaries](../nvx-rs/README.md#guest-binaries) for

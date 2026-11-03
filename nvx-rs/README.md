@@ -69,6 +69,7 @@ nvx-rs/
 │                    and root boot tokens, and the template manifests that OpenVMM wrote, in
 │                    fixtures/, and the conformance vectors of the wire formats and of a template's
 │                    key, in vectors/
+├── public-api/      the crate's public API on Linux and on Windows, which CI checks
 ├── build.rs         bundled-release staging
 └── artifacts.json   the NVX release that the `bundled` feature stages
 ```
@@ -2720,11 +2721,22 @@ python3 ../scripts/nvx.py test-guest-binaries \
 
 The
 [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml) action runs
-rustfmt, Clippy with warnings denied for all features and for the library
-with and without default features, the tests, a build and the tests of the library
+rustfmt, Clippy with warnings denied for all features, for the library
+with and without default features, and for the `cli` and `testing` features
+alone, the tests, a build and the tests of the library
 without default features, a synthetic-release `bundled` test, rustdoc with
 warnings denied, the minimum supported Rust version (1.89), and a macOS check.
-On Linux, it also lints, builds, and tests the guest binaries through `nvx.py`.
+On Linux, it also lints, builds, and tests the guest binaries through `nvx.py`,
+and checks the crate's public API against its snapshots,
+[`public-api/linux.txt`](public-api/linux.txt) and
+[`public-api/windows.txt`](public-api/windows.txt), which list each public item
+of the crate by kind and path, hidden items marked. A change to the public API
+updates them, as [Rust crates](../doc/ci.md#rust-crates) describes:
+
+```bash
+python3 ../scripts/public_api.py --update
+```
+
 Another workflow runs cargo-mutants on the files and with the tests that a
 dispatch names; see
 [nvx-rs mutation testing](../doc/ci.md#nvx-rs-mutation-testing).
