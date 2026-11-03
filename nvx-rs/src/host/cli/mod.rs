@@ -47,6 +47,7 @@ mod run;
 mod sandbox;
 mod session;
 mod shell;
+mod store;
 
 use std::borrow::Cow;
 use std::ffi::OsString;
