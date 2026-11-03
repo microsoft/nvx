@@ -1226,7 +1226,7 @@ class _FakeSandboxCli:
                         "openvmm": "sha256:" + "1" * 64,
                         "kernel": "sha256:" + "2" * 64,
                         "initramfs": "sha256:" + "3" * 64,
-                        "bootContract": 3,
+                        "bootContract": 4,
                         "controlContract": "nvx-microvm-v2-control-v2",
                         "controlSession": 1,
                     },
@@ -10184,6 +10184,229 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests.SANDBOX_BLOCKS_COMPLETION_MARKER,
         )
 
+    @staticmethod
+    def _virtio_report(
+        devices: dict[int, tuple[int, Collection[int]]],
+    ) -> str:
+        """Returns the guest's report of `devices`, by the base of their MMIO
+        windows, as the virtio-features scenario's script prints it, with
+        128-character feature strings and the console's carriage returns."""
+        lines = ["NVX-GUEST-SCRIPT-START echo is not a report"]
+        for base, (device_id, features) in devices.items():
+            bits = "".join("1" if bit in features else "0" for bit in range(128))
+            lines.append(
+                f"NVX-VIRTIO-FEATURES base={base:#x} device={device_id:#06x} "
+                f"features={bits}\r"
+            )
+        lines.append("NVX-VIRTIO-FEATURES-OK\r")
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _documented_devices() -> dict[int, tuple[int, Collection[int]]]:
+        return {
+            base: (device.device_id, device.features)
+            for base, device in microvm_tests.MICROVM_VIRTIO_DEVICES.items()
+        }
+
+    def test_virtio_features_attach_every_fixed_device(self):
+        report = self._virtio_report(self._documented_devices())
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm", "boot"],
+            ) as boot_command,
+            patch.object(
+                microvm_tests,
+                "run_guest_script",
+                return_value={"text": report, "output": report},
+            ) as run_guest_script,
+        ):
+            microvm_tests.run_virtio_features(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                memory_mib=128,
+                timeout=60,
+                log_path=Path("virtio-features.log"),
+            )
+
+        self.assertEqual(
+            boot_command.call_args.kwargs["network"],
+            microvm_tests.VIRTIO_FEATURES_NETWORK,
+        )
+        command = run_guest_script.call_args.args[0]
+        self.assertEqual(
+            command[2:6],
+            ["--virtio-console", "console", "--microvm-control-console", "none"],
+        )
+        blocks = [
+            command[index + 1]
+            for index, value in enumerate(command)
+            if value == "--microvm-sandbox-block"
+        ]
+        self.assertEqual(len(blocks), 2)
+        self.assertTrue(blocks[0].startswith("distro:file:"))
+        self.assertTrue(blocks[0].endswith(",ro"))
+        self.assertTrue(blocks[1].startswith("scratch:file:"))
+        self.assertFalse(blocks[1].endswith(",ro"))
+        self.assertEqual(
+            run_guest_script.call_args.args[2],
+            microvm_tests.VIRTIO_FEATURES_COMPLETION_MARKER,
+        )
+
+    def test_virtio_features_fail_on_the_features_of_microvm_abi_2(self):
+        # ABI 2 offered access-platform on every device but the NIC, and the
+        # console size on both consoles.
+        devices = self._documented_devices()
+        for base, (device_id, features) in list(devices.items()):
+            if device_id != 1:
+                devices[base] = (device_id, {*features, 33})
+            if device_id == 3:
+                devices[base] = (device_id, {*devices[base][1], 0})
+        report = self._virtio_report(devices)
+        with (
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                return_value=["openvmm", "boot"],
+            ),
+            patch.object(
+                microvm_tests,
+                "run_guest_script",
+                return_value={"text": report, "output": report},
+            ),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            microvm_tests.run_virtio_features(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "whp",
+                memory_mib=128,
+                timeout=60,
+                log_path=Path("virtio-features.log"),
+            )
+        message = str(raised.exception)
+        self.assertIn(
+            "Host filesystem at 0xd0001000 negotiated feature bits 33 besides its "
+            "documented ones",
+            message,
+        )
+        self.assertIn(
+            "Boot console at 0xd0002000 negotiated feature bits 0, 33 besides",
+            message,
+        )
+        self.assertIn(
+            "Control console at 0xd0007000 negotiated feature bits 0, 33 besides",
+            message,
+        )
+        self.assertIn(
+            "`distro` block at 0xd0003000 negotiated feature bits 33", message
+        )
+        self.assertIn(
+            "`scratch` block at 0xd0006000 negotiated feature bits 33", message
+        )
+        self.assertNotIn("Network", message)
+
+    def test_virtio_features_name_each_departure_from_the_guide(self):
+        accepted = self._virtio_report(self._documented_devices())
+        microvm_tests.check_virtio_features(accepted)
+        cases: list[tuple[str, dict[int, tuple[int, Collection[int]]], str]] = []
+        missing = self._documented_devices()
+        del missing[0xD000_0000]
+        cases.append(("missing", missing, "no Network is reported at 0xd0000000"))
+        unknown = self._documented_devices()
+        unknown[0xD000_4000] = (2, {28, 29, 32})
+        cases.append(
+            ("unknown", unknown, "an unexpected virtio device 2 is at 0xd0004000")
+        )
+        kind = self._documented_devices()
+        kind[0xD000_2000] = (2, kind[0xD000_2000][1])
+        cases.append(
+            (
+                "kind",
+                kind,
+                "Boot console at 0xd0002000 is virtio device 2, not 3",
+            )
+        )
+        lacking = self._documented_devices()
+        lacking[0xD000_3000] = (2, {2, 6, 9, 10, 28, 29, 32})
+        cases.append(
+            (
+                "lacking",
+                lacking,
+                "`distro` block at 0xd0003000 lacks feature bits 5",
+            )
+        )
+        for name, devices, problem in cases:
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(RuntimeError, re.escape(problem)),
+            ):
+                microvm_tests.check_virtio_features(self._virtio_report(devices))
+        with self.assertRaisesRegex(RuntimeError, "is reported twice"):
+            microvm_tests.check_virtio_features(accepted + accepted)
+        for line in (
+            "NVX-VIRTIO-FEATURES base=0xd0000000 device=0x0001",
+            "NVX-VIRTIO-FEATURES base=0xd0000000 device=0x0001 features=01x",
+            "NVX-VIRTIO-FEATURES base=d0000000z device=0x0001 features=01",
+            "NVX-VIRTIO-FEATURES base",
+        ):
+            with (
+                self.subTest(line=line),
+                self.assertRaisesRegex(RuntimeError, "malformed virtio device report"),
+            ):
+                microvm_tests.check_virtio_features(accepted + line + "\n")
+
+    def test_virtio_devices_are_the_architecture_guides(self):
+        # Table 2.7 places each fixed device, and Table 2.8 lists its device ID
+        # and its feature bits, by number and by name.
+        guide = (
+            BuildConstants.REPO_ROOT
+            / "doc"
+            / "design"
+            / "2.5-device-topology-transport-and-discovery.md"
+        ).read_text(encoding="utf-8")
+
+        def table(number: str) -> list[list[str]]:
+            caption = f"**Table {number}.**"
+            lines = guide[guide.index(caption) :].splitlines()[2:]
+            rows: list[list[str]] = []
+            for line in lines[2:]:
+                if not line.startswith("|"):
+                    break
+                rows.append([cell.strip() for cell in line.strip("|").split("|")])
+            return rows
+
+        names = {
+            "VIRTIO_NET_F_MAC": 5,
+            "VIRTIO_BLK_F_SEG_MAX": 2,
+            "VIRTIO_BLK_F_RO": 5,
+            "VIRTIO_BLK_F_BLK_SIZE": 6,
+            "VIRTIO_BLK_F_FLUSH": 9,
+            "VIRTIO_BLK_F_TOPOLOGY": 10,
+            "VIRTIO_F_INDIRECT_DESC": 28,
+            "VIRTIO_F_EVENT_IDX": 29,
+            "VIRTIO_F_VERSION_1": 32,
+        }
+        bases = {
+            row[0]: int(row[2].strip("`").split("..")[0], 16) for row in table("2.7")
+        }
+        documented = {}
+        for device, device_id, bits, features in table("2.8"):
+            numbers = frozenset(int(bit) for bit in bits.split(", "))
+            self.assertEqual(
+                frozenset(names[name.strip("`")] for name in features.split(", ")),
+                numbers,
+                device,
+            )
+            documented[bases[device]] = microvm_tests.MicrovmVirtioDevice(
+                device, int(device_id), numbers
+            )
+        self.assertEqual(documented, microvm_tests.MICROVM_VIRTIO_DEVICES)
+
     def test_smp_snapshot_runs_the_warp_probe_after_each_restore(self):
         def measure(command: list[str], **kwargs: object) -> None:
             processors = int(command[command.index("--processors") + 1])
@@ -14350,6 +14573,7 @@ class MicrovmTests(unittest.TestCase):
             "sandbox-blocks",
             "scratch-snapshot",
             "snapshot-tiers",
+            "virtio-features",
         ):
             with self.subTest(scenario=scenario):
                 args = nvx.parse_args(

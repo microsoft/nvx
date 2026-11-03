@@ -16,7 +16,9 @@
 #   Bytes that every decoder of a key must refuse.
 #
 # The keys and classes are those of the captures that tests/fixtures/template/README.md
-# describes, with the OpenVMM, kernel, and initramfs identities sha256:a..., sha256:b..., and
+# describes, as microVM ABI 2 captured them, when every virtio device but the NIC also offered
+# access-platform (feature bit 33) and each console also offered its size (feature bit 0), with
+# the OpenVMM, kernel, and initramfs identities sha256:a..., sha256:b..., and
 # sha256:c..., the guest build guest-build-1, boot contract 3, control contract
 # nvx-microvm-v2-control-v2, control session 1, snapshot format 6, device-state schema 1, time
 # ABI 1, restore packet 4, and activation contract 1.

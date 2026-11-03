@@ -652,10 +652,18 @@ platform snapshot.
 `microvm-v2`. The `microvm-v2` spelling, the former one-vCPU ABI-1 behavior,
 ABI-1 device-I/O control, TTRPC numeric value 1, ABI-1 snapshot restore, and
 boot-layout-1 snapshot restore are removed. Snapshot metadata and performance
-series continue to use numeric ABI value 2 and boot-layout value 2.
+series use numeric ABI value 3 and boot-layout value 2.
 Use NVX commit `cb52bcd454b454cb241096c33ed42a1dcdc65347` with OpenVMM commit
 `1b70365613517a10718e00284a62bdffbd80e41c`, or an earlier compatible pair, to
 run retired ABI-1 guests or snapshots.
+
+ABI 3 offers no virtio device `VIRTIO_F_ACCESS_PLATFORM` and no console its
+size, which ABI 2 offered (see
+[Guest-Visible Capabilities](design/3.4-block-storage.md#342-guest-visible-capabilities)),
+so OpenVMM refuses to restore a snapshot of ABI 2, with `snapshot microVM ABI
+version 2 is unsupported; this OpenVMM supports version 3`, and `nvx-rs`
+refuses a template of ABI 2. Capture them again; to restore them as they are,
+use an NVX commit from before ABI 3 with the OpenVMM that it pins.
 
 ## Snapshot restore readiness
 

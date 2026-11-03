@@ -26,7 +26,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISUID
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from . import nvx_rs
 from .adversarial_oracles import terminate_process_tree
@@ -142,6 +142,7 @@ MICROVM_TEST_SCENARIOS = (
     "time-abi-conformance",
     "time-host-correction",
     "untiered-network-policy",
+    "virtio-features",
     "virtio-net",
     "workload-identity",
 )
@@ -160,6 +161,7 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "sandbox-ram-upper",
         "scratch-snapshot",
         "snapshot-tiers",
+        "virtio-features",
     )
 )
 # The public `nvx-rs sandbox` scenarios, which also read the Ubuntu distro
@@ -201,6 +203,38 @@ GUEST_SCRIPT_START_MARKER = b"NVX-GUEST-SCRIPT-START"
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
 SANDBOX_BLOCKS_COMPLETION_MARKER = b"NVX-SANDBOX-BLOCKS-OK"
 VIRTIO_NET_COMPLETION_MARKER = b"NVX-VIRTIO-NET-OK"
+VIRTIO_FEATURES_COMPLETION_MARKER = b"NVX-VIRTIO-FEATURES-OK"
+# The prefix of the line on which the virtio-features scenario's guest reports
+# a virtio device: the base of its MMIO window, its virtio device ID, and the
+# features that its driver negotiated, one character per bit from bit 0.
+VIRTIO_FEATURES_REPORT_PREFIX = "NVX-VIRTIO-FEATURES "
+VIRTIO_FEATURES_NETWORK = "10.0.0.2/24"
+
+
+class MicrovmVirtioDevice(NamedTuple):
+    """A fixed virtio device of the microVM, as Table 2.8 of the architecture
+    guide (doc/design/2.5-device-topology-transport-and-discovery.md) lists
+    it: its name, virtio device ID, and the feature bits that it offers the
+    guest, every one of which Linux negotiates."""
+
+    name: str
+    device_id: int
+    features: frozenset[int]
+
+
+# Each fixed virtio device of the microVM, by the base of its MMIO window.
+MICROVM_VIRTIO_DEVICES = {
+    0xD000_0000: MicrovmVirtioDevice("Network", 1, frozenset({5, 32})),
+    0xD000_1000: MicrovmVirtioDevice("Host filesystem", 26, frozenset({28, 29, 32})),
+    0xD000_2000: MicrovmVirtioDevice("Boot console", 3, frozenset({28, 29, 32})),
+    0xD000_3000: MicrovmVirtioDevice(
+        "`distro` block", 2, frozenset({2, 5, 6, 9, 10, 28, 29, 32})
+    ),
+    0xD000_6000: MicrovmVirtioDevice(
+        "`scratch` block", 2, frozenset({2, 6, 9, 10, 28, 29, 32})
+    ),
+    0xD000_7000: MicrovmVirtioDevice("Control console", 3, frozenset({28, 29, 32})),
+}
 # The x86 guest kernel's COMMAND_LINE_SIZE. OpenVMM requires the effective
 # kernel command line, with the tokens that it appends after the caller's, to
 # fit in it with its terminating NUL, and refuses a longer one before boot.
@@ -4979,6 +5013,122 @@ def run_sandbox_blocks(
             timeout=timeout,
             log_path=log_path,
         )
+
+
+def check_virtio_features(output: str) -> None:
+    """Check the report of the virtio-features scenario's guest: one line for
+    each fixed virtio device of MICROVM_VIRTIO_DEVICES, with its device ID and
+    exactly the feature bits that the device offers and Linux negotiates.
+
+    Raises RuntimeError naming each device that is missing, unknown, or
+    reported twice, and each feature bit that a device lacks or has besides
+    its documented ones."""
+    reported: dict[int, tuple[int, frozenset[int]]] = {}
+    problems: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith(VIRTIO_FEATURES_REPORT_PREFIX):
+            continue
+        try:
+            fields = dict(
+                field.split("=", 1)
+                for field in line[len(VIRTIO_FEATURES_REPORT_PREFIX) :].split()
+            )
+            base = int(fields["base"], 16)
+            device_id = int(fields["device"], 16)
+            bits = fields["features"]
+            if not bits or set(bits) - {"0", "1"}:
+                raise ValueError(f"features {bits!r} are not a bit string")
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(
+                f"malformed virtio device report {line!r}: {error}"
+            ) from error
+        if base in reported:
+            problems.append(f"the device at {base:#x} is reported twice")
+        reported[base] = (
+            device_id,
+            frozenset(bit for bit, value in enumerate(bits) if value == "1"),
+        )
+    for base, (device_id, features) in sorted(reported.items()):
+        expected = MICROVM_VIRTIO_DEVICES.get(base)
+        if expected is None:
+            problems.append(f"an unexpected virtio device {device_id} is at {base:#x}")
+            continue
+        if device_id != expected.device_id:
+            problems.append(
+                f"{expected.name} at {base:#x} is virtio device {device_id}, "
+                f"not {expected.device_id}"
+            )
+        extra = sorted(features - expected.features)
+        missing = sorted(expected.features - features)
+        if extra:
+            problems.append(
+                f"{expected.name} at {base:#x} negotiated feature bits "
+                f"{', '.join(map(str, extra))} besides its documented ones"
+            )
+        if missing:
+            problems.append(
+                f"{expected.name} at {base:#x} lacks feature bits "
+                f"{', '.join(map(str, missing))}"
+            )
+    for base, expected in sorted(MICROVM_VIRTIO_DEVICES.items()):
+        if base not in reported:
+            problems.append(f"no {expected.name} is reported at {base:#x}")
+    if problems:
+        raise RuntimeError(
+            "the guest-visible virtio features differ from the architecture "
+            "guide's Table 2.8: " + "; ".join(problems)
+        )
+
+
+def run_virtio_features(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    log_path: Path,
+) -> None:
+    """Boot a microVM with every fixed virtio device, the NIC, the dormant
+    host filesystem slot, both consoles, and both sandbox blocks, and check
+    the features that the guest negotiated with each."""
+    with tempfile.TemporaryDirectory(prefix="nvx-virtio-features-") as temporary:
+        root = Path(temporary)
+        command = workload_boot_command(
+            executable,
+            backend,
+            kernel,
+            initrd,
+            memory_mib,
+            "quiet loglevel=0",
+            network=VIRTIO_FEATURES_NETWORK,
+        )
+        command.extend(
+            (
+                "--virtio-console",
+                "console",
+                "--microvm-control-console",
+                "none",
+            )
+        )
+        for role in ("distro", "scratch"):
+            path = root / f"{role}.img"
+            with path.open("wb") as disk:
+                disk.truncate(SANDBOX_BLOCK_SIZE)
+            read_only = ",ro" if role != "scratch" else ""
+            command.extend(
+                ("--microvm-sandbox-block", f"{role}:file:{path}{read_only}")
+            )
+        result = run_guest_script(
+            command,
+            _read_script("virtio-features.sh"),
+            VIRTIO_FEATURES_COMPLETION_MARKER,
+            timeout=timeout,
+            log_path=log_path,
+        )
+    check_virtio_features(result["output"])
 
 
 def _measure_restore(
@@ -10706,6 +10856,21 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / "virtio-net.log",
+        )
+    if "virtio-features" in scenarios:
+        report.start(
+            "virtio-features",
+            "Running microVM guest-visible virtio feature correctness on "
+            f"OpenVMM/{args.backend}",
+        )
+        run_virtio_features(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            log_path=output_dir / "virtio-features.log",
         )
     if "command-line-limit" in scenarios:
         report.start(

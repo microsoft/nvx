@@ -683,6 +683,12 @@ fn another_runtime_identity_is_mismatched() {
         |runtime| runtime.boot_contract = 2,
         IdentityPart::BootContract,
     );
+    // Builds of boot contract 3 booted guests on microVM ABI 2, whose devices offered
+    // access-platform and whose consoles offered their size.
+    mismatched(
+        |runtime| runtime.boot_contract = 3,
+        IdentityPart::BootContract,
+    );
     mismatched(
         |runtime| runtime.control_contract.push_str("-next"),
         IdentityPart::ControlContract,

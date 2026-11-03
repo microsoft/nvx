@@ -69,7 +69,7 @@ runs:
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
-        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v3/1vcpu"
         acceptance_output="${run_dir}/acceptance.json"
         attempt_log="${run_dir}/acceptance-attempts.json"
         rm -f "${acceptance_output}" "${attempt_log}" \
@@ -118,7 +118,7 @@ runs:
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
-        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v3/1vcpu"
         # Each attempt keeps its logs in its own directory; only a validated
         # attempt is copied to run_dir for collection.
         rm -rf "${run_dir}"/performance-attempt-*
@@ -166,7 +166,7 @@ runs:
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
         for processors in 2 4 8; do
-          run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
+          run_dir="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu"
           # Each attempt keeps its logs in its own directory; only a validated
           # attempt is copied to run_dir for collection.
           rm -rf "${run_dir}"/shell-snapshot-restore-attempt-*
@@ -213,7 +213,7 @@ runs:
         if [[ -n "${NVX_BENCHMARK_CPUS}" ]]; then
           cpu_args+=(--cpus "${NVX_BENCHMARK_CPUS}")
         fi
-        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v3/1vcpu/device-io"
         exec python3 scripts/nvx.py benchmark \
           --suite device-io \
           --backend "${{ inputs.backend }}" \
@@ -297,7 +297,7 @@ runs:
         if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
           $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
         }
-        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/1vcpu"
         $AcceptanceOutput = "$RunDir/acceptance.json"
         $AttemptLog = "$RunDir/acceptance-attempts.json"
         foreach ($Stale in $AcceptanceOutput, $AttemptLog) {
@@ -358,7 +358,7 @@ runs:
         if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
           $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
         }
-        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/1vcpu"
         # Each attempt keeps its logs in its own directory; only a validated
         # attempt is copied to $RunDir for collection.
         if (Test-Path -LiteralPath $RunDir) {
@@ -415,7 +415,7 @@ runs:
           $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
         }
         foreach ($Processors in 2, 4, 8) {
-          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
+          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu"
           # Each attempt keeps its logs in its own directory; only a validated
           # attempt is copied to $RunDir for collection.
           if (Test-Path -LiteralPath $RunDir) {
@@ -472,7 +472,7 @@ runs:
         if ($env:NVX_BENCHMARK_SCRATCH_DIR) {
           $ScratchArgs = @("--scratch-dir", $env:NVX_BENCHMARK_SCRATCH_DIR)
         }
-        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu/device-io"
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/1vcpu/device-io"
         python scripts\nvx.py benchmark `
           --suite device-io `
           --backend "${{ inputs.backend }}" `
@@ -494,7 +494,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        run_dir="data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        run_dir="data/runs/${{ inputs.platform }}/microvm-v3/1vcpu"
         python3 scripts/nvx.py performance collect \
           --platform "${{ inputs.platform }}" \
           --commit "${GITHUB_SHA}" \
@@ -518,7 +518,7 @@ runs:
           --source-dir "${device_results_dir}" \
           --history-dir "${run_dir}"
         for processors in 2 4 8; do
-          run_dir="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu"
+          run_dir="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu"
           python3 scripts/nvx.py performance collect \
             --platform "${{ inputs.platform }}" \
             --commit "${GITHUB_SHA}" \
@@ -533,7 +533,7 @@ runs:
       shell: powershell
       run: |
         $ErrorActionPreference = "Stop"
-        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/1vcpu"
+        $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/1vcpu"
         python scripts\nvx.py performance collect `
           --platform "${{ inputs.platform }}" `
           --commit $env:GITHUB_SHA `
@@ -560,7 +560,7 @@ runs:
           --history-dir $RunDir
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         foreach ($Processors in 2, 4, 8) {
-          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu"
+          $RunDir = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu"
           python scripts\nvx.py performance collect `
             --platform "${{ inputs.platform }}" `
             --commit $env:GITHUB_SHA `
@@ -577,7 +577,7 @@ runs:
       run: |
         set -euo pipefail
         for processors in 1 2 4 8; do
-          result="data/runs/${{ inputs.platform }}/microvm-v2/${processors}vcpu/${{ inputs.platform }}-microvm-v2-${processors}vcpu.csv"
+          result="data/runs/${{ inputs.platform }}/microvm-v3/${processors}vcpu/${{ inputs.platform }}-microvm-v3-${processors}vcpu.csv"
           test -s "${result}" || {
             echo "::error::Missing benchmark result ${result}"
             exit 1
@@ -599,7 +599,7 @@ runs:
       run: |
         $ErrorActionPreference = "Stop"
         foreach ($Processors in 1, 2, 4, 8) {
-          $Result = "data/runs/${{ inputs.platform }}/microvm-v2/${Processors}vcpu/${{ inputs.platform }}-microvm-v2-${Processors}vcpu.csv"
+          $Result = "data/runs/${{ inputs.platform }}/microvm-v3/${Processors}vcpu/${{ inputs.platform }}-microvm-v3-${Processors}vcpu.csv"
           if (-not (Test-Path $Result -PathType Leaf) -or (Get-Item $Result).Length -eq 0) {
             throw "Missing benchmark result $Result"
           }

@@ -30,7 +30,7 @@ runs:
           linux-kvm-virtual-machine \
           linux-mshv-virtual-machine \
           windows-whp-virtual-machine; do
-          run_dir="data/runs/${platform}/microvm-v2/1vcpu"
+          run_dir="data/runs/${platform}/microvm-v3/1vcpu"
           python3 scripts/nvx.py performance collect \
             --platform "${platform}" \
             --commit "${GITHUB_SHA}" \
@@ -51,7 +51,7 @@ runs:
             --source-dir "${device_results_dir}" \
             --history-dir data/results
           for processors in 2 4 8; do
-            run_dir="data/runs/${platform}/microvm-v2/${processors}vcpu"
+            run_dir="data/runs/${platform}/microvm-v3/${processors}vcpu"
             python3 scripts/nvx.py performance collect \
               --platform "${platform}" \
               --commit "${GITHUB_SHA}" \

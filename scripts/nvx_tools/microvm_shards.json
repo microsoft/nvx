@@ -65,12 +65,13 @@
         "time-abi-conformance": 0.7,
         "time-host-correction": 14.0,
         "untiered-network-policy": 14.0,
+        "virtio-features": 0.7,
         "virtio-net": 3.8,
         "workload-identity": 0.7
       },
       "shards": [
         {
-          "seconds": 265.4,
+          "seconds": 266.1,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
@@ -88,7 +89,8 @@
             "snapshot-core",
             "snapshot-tiers",
             "time-abi-conformance",
-            "time-host-correction"
+            "time-host-correction",
+            "virtio-features"
           ]
         },
         {
@@ -167,6 +169,7 @@
         "time-abi-conformance": 0.8,
         "time-host-correction": 14.0,
         "untiered-network-policy": 14.1,
+        "virtio-features": 0.6,
         "virtio-net": 3.7,
         "workload-identity": 0.6
       },
@@ -195,7 +198,7 @@
           ]
         },
         {
-          "seconds": 246.4,
+          "seconds": 247.0,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -220,6 +223,7 @@
             "sandbox-blocks",
             "structured-outcome",
             "time-abi-conformance",
+            "virtio-features",
             "virtio-net",
             "workload-identity"
           ]
@@ -269,6 +273,7 @@
         "time-abi-conformance": 1.6,
         "time-host-correction": 14.0,
         "untiered-network-policy": 18.8,
+        "virtio-features": 1.5,
         "virtio-net": 4.5,
         "workload-identity": 1.1
       },
@@ -297,7 +302,7 @@
           ]
         },
         {
-          "seconds": 347.8,
+          "seconds": 349.3,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -322,6 +327,7 @@
             "structured-outcome",
             "time-abi-conformance",
             "time-host-correction",
+            "virtio-features",
             "virtio-net",
             "workload-identity"
           ]

@@ -30,6 +30,7 @@ from nvx_tools import (  # noqa: E402
     performance,
     performance_history,
 )
+from nvx_tools.build_constants import OpenVMMBuildConstants  # noqa: E402
 from nvx_tools.common import sha256_file  # noqa: E402
 from nvx_tools.nightly_ci import GitHubApiError  # noqa: E402
 
@@ -605,8 +606,10 @@ class PerformanceTests(unittest.TestCase):
             | performance.LIFECYCLE_METRICS
             | performance.DEVICE_IO_METRIC_NAMES
         )
-        # Above one vCPU, an ABI-2 series records only shell_snapshot_restore_512_mib.
-        per_series = one_vcpu + len(performance.MICROVM_PROCESSOR_COUNTS[2] - {1})
+        # Above one vCPU, a series of the microVM ABI that this checkout builds
+        # records only shell_snapshot_restore_512_mib.
+        abi = OpenVMMBuildConstants.MICROVM_ABI_VERSION
+        per_series = one_vcpu + len(performance.MICROVM_PROCESSOR_COUNTS[abi] - {1})
         repository = Path(__file__).parents[1]
         series = re.findall(
             r"^[ \t]*benchmark-platform:[ \t]*(\S+)[ \t]*$",
@@ -639,7 +642,7 @@ class PerformanceTests(unittest.TestCase):
             f"summarizes {'/'.join(profile_memories)} MiB warm/cold restores",
             f"exactly the {shared} shared metrics",
             f"producing a {lifecycle}-metric one-vCPU result",
-            f"the final {one_vcpu}-metric ABI-2 one-vCPU result",
+            f"the final {one_vcpu}-metric ABI-{abi} one-vCPU result",
         ):
             self.assertIn(phrase, benchmarks)
         for phrase in (
@@ -2786,39 +2789,47 @@ class PerformanceTests(unittest.TestCase):
             self.assertEqual(result.microvm_abi_version, 1)
             self.assertEqual(result.processors, 1)
 
-    def test_collects_dimensioned_microvm_v2_results(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            logs = root / "logs"
-            logs.mkdir()
-            (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
-            (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
-            (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
-                json.dumps(
-                    {
-                        "platform": "linux-kvm-baremetal",
-                        "backend": "kvm",
-                        "microvm_abi_version": 2,
-                        "processors": 4,
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            path = performance.collect_results(
-                "linux-kvm-baremetal", "commit", logs, root / "results"
-            )
-            self.assertEqual(path.name, "linux-kvm-baremetal-microvm-v2-4vcpu.csv")
-            results = performance.read_results(path)
-            self.assertTrue(results)
-            self.assertTrue(
-                all(
-                    result.platform == "linux-kvm-baremetal"
-                    and result.microvm_abi_version == 2
-                    and result.processors == 4
-                    for result in results
+    def test_collects_dimensioned_microvm_results(self):
+        # Version 2's series hold the history before microVM ABI 3, whose
+        # devices stopped offering access-platform, began new ones.
+        for version in (2, 3):
+            with (
+                self.subTest(version=version),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                logs = root / "logs"
+                logs.mkdir()
+                (logs / "cold-start.log").write_text(COLD_START_LOG, encoding="utf-8")
+                (logs / "virtfs.log").write_text(VIRTFS_LOG, encoding="utf-8")
+                (logs / performance.BENCHMARK_METADATA_FILENAME).write_text(
+                    json.dumps(
+                        {
+                            "platform": "linux-kvm-baremetal",
+                            "backend": "kvm",
+                            "microvm_abi_version": version,
+                            "processors": 4,
+                        }
+                    ),
+                    encoding="utf-8",
                 )
-            )
+
+                path = performance.collect_results(
+                    "linux-kvm-baremetal", "commit", logs, root / "results"
+                )
+                self.assertEqual(
+                    path.name, f"linux-kvm-baremetal-microvm-v{version}-4vcpu.csv"
+                )
+                results = performance.read_results(path)
+                self.assertTrue(results)
+                self.assertTrue(
+                    all(
+                        result.platform == "linux-kvm-baremetal"
+                        and result.microvm_abi_version == version
+                        and result.processors == 4
+                        for result in results
+                    )
+                )
 
     def test_rejects_unreadable_benchmark_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2830,7 +2841,7 @@ class PerformanceTests(unittest.TestCase):
             ):
                 performance.read_workload_dimensions(logs, "linux-kvm-virtual-machine")
 
-    def test_rejects_microvm_v3_dimensions(self):
+    def test_rejects_microvm_v4_dimensions(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             logs = root / "logs"
@@ -2840,7 +2851,7 @@ class PerformanceTests(unittest.TestCase):
                     {
                         "platform": "linux-kvm-baremetal",
                         "backend": "kvm",
-                        "microvm_abi_version": 3,
+                        "microvm_abi_version": 4,
                         "processors": 1,
                     }
                 ),

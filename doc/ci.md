@@ -425,6 +425,20 @@ the guest must have installed the IPv6 default route that the last token,
 `virtnet_gw6=`, names. OpenVMM must refuse a command line one byte longer
 before boot, with an error that names its length and the limit.
 
+The `virtio-features` scenario covers the guest-visible virtio features of
+[Table 2.8](design/2.5-device-topology-transport-and-discovery.md). It boots a
+guest with every fixed virtio device: the NIC, the dormant host filesystem
+slot, both consoles, and both sandbox blocks. Once a driver has bound each of
+the six, the guest reports, for each, the base of its MMIO window, its virtio
+device ID, and the features that its driver negotiated, which
+`/sys/bus/virtio/devices/*/features` lists. Each device must have negotiated
+exactly the features of its row, so a feature that a device offers besides its
+documented ones fails the scenario whenever Linux's driver takes it, as
+`VIRTIO_F_ACCESS_PLATFORM` and the console size of microVM ABI 2 would, and so
+does a documented feature that the guest lacks. A unit test checks that the
+scenario's devices are those of Tables 2.7 and 2.8, and OpenVMM's unit tests
+check the exact feature mask that each device offers.
+
 Shared guest artifacts are built with Docker on a GitHub-hosted Ubuntu runner.
 The kernel, Alpine initramfs, Ubuntu initramfs, and Ubuntu EROFS layer use
 separate cache keys. The EROFS layer's entry also holds the sandbox scratch

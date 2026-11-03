@@ -360,7 +360,7 @@ and the sandbox scratch template, under `scratch_template_sha256` in its
 SHA-256, the digest of the `nvx-rs` sources that built it, and the build's
 Rust release, target, and features. Its `guest_rust` section pins Rust 1.95.0
 and `x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
-`nvx-rs` and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 2,
+`nvx-rs` and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 3,
 control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
 part of this platform manifest.

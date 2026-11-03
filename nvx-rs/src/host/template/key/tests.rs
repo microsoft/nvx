@@ -966,9 +966,11 @@ fn vector_class(name: &str) -> CaptureClass {
     class
 }
 
-/// Returns the manifest of the capture that the vectors call `name`.
+/// Returns the manifest of the capture that the vectors call `name`, as microVM ABI 2 captured it:
+/// every virtio device but the NIC also offered access-platform (bit 33), and each console also
+/// offered its size (bit 0).
 fn vector_spec(name: &str) -> ManifestSpec {
-    match name {
+    let mut spec = match name {
         "TEMPLATE" => ManifestSpec::template(),
         "NETWORK" => ManifestSpec::with_network(),
         "HOST_PROFILE" => {
@@ -977,7 +979,16 @@ fn vector_spec(name: &str) -> ManifestSpec {
             spec
         }
         _ => panic!("no capture is named {name}"),
+    };
+    for device in &mut spec.contract().devices {
+        if device.transport == "virtio-mmio" && device.kind != "virtio-net" {
+            device.feature_banks[1] |= 1 << (33 - 32);
+            if device.kind.ends_with("console") {
+                device.feature_banks[0] |= 1;
+            }
+        }
     }
+    spec
 }
 
 #[test]
