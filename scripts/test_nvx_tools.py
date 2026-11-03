@@ -21652,7 +21652,9 @@ class BenchmarkTests(unittest.TestCase):
     def test_native_openvmm_builds_use_openvmm_target_directory(self):
         # The builds take their executables from OpenVMM's own target
         # directory, whatever the environment or the repository's Cargo
-        # configuration names.
+        # configuration names, and return their canonical paths, wherever the
+        # checkout's path differs from its canonical one: through a directory
+        # link here, or the short name of a Windows runner's temporary directory.
         for build_function, output in (
             (benchmark.build_whp, Path("release") / "openvmm.exe"),
             (benchmark.build_kvm_native, Path("release") / "openvmm"),
@@ -21661,26 +21663,34 @@ class BenchmarkTests(unittest.TestCase):
                 Path("release") / "examples" / "phase2_snapshot_bench.exe",
             ),
         ):
-            with (
-                self.subTest(build=build_function.__name__),
-                tempfile.TemporaryDirectory() as temporary,
-            ):
-                openvmm_dir = Path(temporary) / "openvmm"
-                executable = openvmm_dir / "target" / output
-                executable.parent.mkdir(parents=True)
-                executable.write_bytes(b"openvmm")
+            for alias in (False, True):
                 with (
-                    patch.object(benchmark.subprocess, "run") as run,
-                    patch.dict(os.environ, {"CARGO_TARGET_DIR": "elsewhere"}),
+                    self.subTest(build=build_function.__name__, alias=alias),
+                    tempfile.TemporaryDirectory() as temporary,
                 ):
-                    self.assertEqual(build_function(openvmm_dir), executable)
-                run.assert_called_once()
-                self.assertEqual(run.call_args.args[0][:2], ["cargo", "build"])
-                self.assertEqual(run.call_args.kwargs["cwd"], openvmm_dir)
-                self.assertEqual(
-                    run.call_args.kwargs["env"]["CARGO_TARGET_DIR"],
-                    os.fspath(openvmm_dir.resolve() / "target"),
-                )
+                    root = Path(temporary)
+                    if alias:
+                        (root / "checkout").mkdir()
+                        _link_directory(root / "alias", root / "checkout")
+                        root /= "alias"
+                    openvmm_dir = root / "openvmm"
+                    executable = openvmm_dir / "target" / output
+                    executable.parent.mkdir(parents=True)
+                    executable.write_bytes(b"openvmm")
+                    with (
+                        patch.object(benchmark.subprocess, "run") as run,
+                        patch.dict(os.environ, {"CARGO_TARGET_DIR": "elsewhere"}),
+                    ):
+                        self.assertEqual(
+                            build_function(openvmm_dir), executable.resolve()
+                        )
+                    run.assert_called_once()
+                    self.assertEqual(run.call_args.args[0][:2], ["cargo", "build"])
+                    self.assertEqual(run.call_args.kwargs["cwd"], openvmm_dir)
+                    self.assertEqual(
+                        run.call_args.kwargs["env"]["CARGO_TARGET_DIR"],
+                        os.fspath(openvmm_dir.resolve() / "target"),
+                    )
 
     def test_kvm_worker_result_decoding(self):
         completed = subprocess.CompletedProcess(
