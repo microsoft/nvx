@@ -372,6 +372,11 @@ shows what the new release derives.
 
 ### What the inventory removed
 
+The guest kernel does not provide `/dev/kvm`: the inventory leaves
+`CONFIG_VIRTUALIZATION` off. Running nested VMs inside the guest is not a
+supported workload (#256). This is distinct from running NVX itself on a KVM
+host, which remains supported.
+
 The inventory was built from the configuration that CI's kernel build
 resolved before it existed, which set 1,131 symbols, 1,055 of them `y` and
 503 with a prompt: it keeps what an NVX component, contract, or workload
