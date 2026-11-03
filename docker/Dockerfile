@@ -58,6 +58,11 @@ RUN python3 scripts/nvx.py build-kernel
 FROM base AS kernel-debug
 RUN python3 scripts/nvx.py build-kernel --debug
 
+# The kernel configuration and its derived record, generated from the feature
+# inventory with the toolchain that builds the kernel (doc/build.md).
+FROM base AS kernel-config
+RUN python3 scripts/nvx.py kernel-config --native
+
 # Only the guest images install the Rust guest binaries and record their sources,
 # so the kernel and Linux source targets never build them.
 FROM base AS guest-base
@@ -254,6 +259,10 @@ FROM scratch AS kernel-debug-artifacts
 COPY --from=kernel-debug /repo/build/vmlinux-debug /vmlinux-debug
 COPY --from=kernel-debug /repo/build/vmlinux-debug.config /vmlinux-debug.config
 COPY --from=kernel-debug /repo/build/vmlinux-debug.provenance.json /vmlinux-debug.provenance.json
+
+FROM scratch AS kernel-config-artifacts
+COPY --from=kernel-config /repo/kernel/config-microvm /config-microvm
+COPY --from=kernel-config /repo/kernel/config-microvm.derived /config-microvm.derived
 
 FROM scratch AS initramfs-artifacts
 COPY --from=initramfs /repo/build/initramfs.cpio.gz /initramfs.cpio.gz

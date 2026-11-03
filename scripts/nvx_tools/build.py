@@ -56,6 +56,7 @@ from .guest_binaries import (
     inspect_guest_binaries,
 )
 from .guests import GuestDescriptor, guest_descriptor
+from .kernel_config import check_build_configuration, generate
 
 
 class ApkPackage(TypedDict):
@@ -1289,6 +1290,15 @@ def build_kernel(config: KernelBuildConfig) -> None:
     make = ["make", "-C", source, f"O={config.work}"]
     run_checked([*make, "olddefconfig"])
     assert_required_kernel_config(kernel_config, debug=config.debug)
+    if not config.debug:
+        # The debug variant adds its fragment, which the inventory never sets,
+        # so only the production configuration must be the inventory's.
+        check_build_configuration(
+            source,
+            config.work.with_name(KernelBuildConstants.INVENTORY_WORK_DIRECTORY_NAME),
+            kernel_config,
+            BuildConstants.REPO_ROOT / KernelBuildConstants.DERIVED_CONFIG,
+        )
     jobs = os.cpu_count() or 1
     print(f">> building {config.output.name} with {jobs} jobs")
     run_checked([*make, f"-j{jobs}", KernelBuildConstants.BINARY_NAME])
@@ -1316,6 +1326,82 @@ def build_kernel(config: KernelBuildConfig) -> None:
         json.dumps(provenance, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _kernel_config_paths() -> tuple[Path, Path]:
+    return (
+        BuildConstants.REPO_ROOT / KernelBuildConstants.INPUT_CONFIG,
+        BuildConstants.REPO_ROOT / KernelBuildConstants.DERIVED_CONFIG,
+    )
+
+
+def _install_kernel_config(config_text: str, derived_text: str, *, check: bool) -> None:
+    """Write the generated configuration and derived record into kernel/, or,
+    with `check`, require the checked-in files to equal them."""
+    paths = _kernel_config_paths()
+    texts = (config_text, derived_text)
+    if check:
+        stale = [
+            path.relative_to(BuildConstants.REPO_ROOT).as_posix()
+            for path, text in zip(paths, texts, strict=True)
+            if not path.is_file() or path.read_text(encoding="utf-8") != text
+        ]
+        if stale:
+            raise ScriptError(
+                "the feature inventory generates another "
+                + " and ".join(stale)
+                + "; regenerate with `nvx.py kernel-config`"
+            )
+        print(">> kernel/config-microvm and its derived record match the inventory")
+        return
+    for path, text in zip(paths, texts, strict=True):
+        path.write_text(text, encoding="utf-8", newline="\n")
+        print(f">> wrote {path.relative_to(BuildConstants.REPO_ROOT).as_posix()}")
+
+
+def generate_kernel_config(config: KernelBuildConfig, *, check: bool = False) -> None:
+    """Generate kernel/config-microvm and kernel/config-microvm.derived from
+    the feature inventory with the pinned, patched source and this host's
+    toolchain."""
+    _require_linux("kernel-config --native")
+    require_tool("make")
+    source, _ = prepare_kernel_source(config)
+    generated = generate(
+        source,
+        config.work.with_name(KernelBuildConstants.INVENTORY_WORK_DIRECTORY_NAME),
+    )
+    _install_kernel_config(generated.text, generated.record.render(), check=check)
+
+
+def generate_docker_kernel_config(
+    config: DockerBuildConfig, *, check: bool = False
+) -> None:
+    """Generate the configuration and its derived record in the Docker build's
+    image, whose toolchain builds CI's kernels."""
+    require_tool(
+        "docker",
+        "docker was not found on PATH; install Docker with the Linux engine first",
+    )
+    destination = (
+        _docker_destination(config.artifact_destination)
+        / KernelBuildConstants.CONFIG_ARTIFACTS_DIRECTORY_NAME
+    )
+    shutil.rmtree(destination, ignore_errors=True)
+    print(f">> generating the kernel configuration into '{destination}'")
+    run_checked(
+        docker_build_command(
+            DockerBuildConfig(artifact_destination=destination),
+            DockerBuildConstants.KERNEL_CONFIG_TARGET,
+        ),
+        cwd=BuildConstants.REPO_ROOT,
+    )
+    texts = [
+        require_file(
+            destination / path.name, "generated kernel configuration"
+        ).read_text(encoding="utf-8")
+        for path in _kernel_config_paths()
+    ]
+    _install_kernel_config(texts[0], texts[1], check=check)
 
 
 def docker_build_command(config: DockerBuildConfig, target: str) -> list[str | Path]:

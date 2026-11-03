@@ -6,6 +6,21 @@ import re
 from pathlib import Path
 from typing import Final
 
+from .kernel_features import KERNEL_CONFIG_CHECKS, KERNEL_FEATURES
+
+
+def _kernel_check(name: str) -> tuple[str, ...]:
+    """The settings and expectations of the inventory features that a kernel
+    configuration check requires, in inventory order and without repeats."""
+    members = KERNEL_CONFIG_CHECKS[name]
+    assignments: list[str] = []
+    for feature in KERNEL_FEATURES:
+        if feature.name in members:
+            for assignment in (*feature.settings, *feature.expects):
+                if assignment not in assignments:
+                    assignments.append(assignment)
+    return tuple(assignments)
+
 
 class BuildConstants:
     REPO_ROOT: Final = Path(__file__).resolve().parents[2]
@@ -36,8 +51,15 @@ class KernelBuildConstants:
     BUILD_STAMP_NAME: Final = ".nvx-build.json"
     BUILD_CONFIG_NAME: Final = ".config"
     INPUT_CONFIG: Final = Path("kernel") / "config-microvm"
+    # The record of every symbol that INPUT_CONFIG sets beyond the feature
+    # inventory, with the Kconfig rule that sets it.
+    DERIVED_CONFIG: Final = Path("kernel") / "config-microvm.derived"
     DEBUG_CONFIG_FRAGMENT: Final = Path("kernel") / "config-microvm-debug"
     PATCH_DIRECTORY: Final = Path("kernel") / "patches"
+    # The build directory in which the kernel build and `kernel-config`
+    # generate the configuration from the inventory, beside WORK_DIRECTORY_NAME.
+    INVENTORY_WORK_DIRECTORY_NAME: Final = "linux-inventory"
+    CONFIG_ARTIFACTS_DIRECTORY_NAME: Final = "kernel-config"
     BINARY_NAME: Final = "vmlinux"
     CONFIG_NAME: Final = f"{BINARY_NAME}.config"
     PROVENANCE_NAME: Final = "vmlinux.provenance.json"
@@ -46,70 +68,17 @@ class KernelBuildConstants:
     DEBUG_BINARY_NAME: Final = "vmlinux-debug"
     DEBUG_CONFIG_NAME: Final = f"{DEBUG_BINARY_NAME}.config"
     DEBUG_PROVENANCE_NAME: Final = f"{DEBUG_BINARY_NAME}.provenance.json"
-    REQUIRED_VIRTIO_CONSOLE_CONFIG: Final = (
-        "CONFIG_HVC_DRIVER=y",
-        "CONFIG_VIRTIO=y",
-        "CONFIG_VIRTIO_CONSOLE=y",
-        "CONFIG_VIRTIO_MMIO=y",
-        "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
-    )
-    REQUIRED_SHARED_STATUS_CONFIG: Final = ("CONFIG_VIRTIO_MMIO_SHARED_STATUS=y",)
-    REQUIRED_DIRECT_BOOT_CONFIG: Final = (
-        "# CONFIG_ACPI is not set",
-        "# CONFIG_PVH is not set",
-        "CONFIG_X86_MPPARSE=y",
-        "CONFIG_X86_LOCAL_APIC=y",
-        "CONFIG_X86_IO_APIC=y",
-        "CONFIG_VIRTIO_MMIO=y",
-        "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
-    )
-    REQUIRED_SANDBOX_CONFIG: Final = (
-        "CONFIG_BPF_SYSCALL=y",
-        "CONFIG_CGROUP_BPF=y",
-        "CONFIG_CGROUP_PIDS=y",
-        "CONFIG_EROFS_FS=y",
-        "CONFIG_EROFS_FS_ZIP=y",
-        "CONFIG_EROFS_FS_ZIP_ZSTD=y",
-        "CONFIG_EXT4_FS=y",
-        "CONFIG_MEMCG=y",
-        "CONFIG_NET_NS=y",
-        "CONFIG_OVERLAY_FS=y",
-        "# CONFIG_OVERLAY_FS_REDIRECT_ALWAYS_FOLLOW is not set",
-        "CONFIG_SECCOMP_FILTER=y",
-        "CONFIG_UNIX=y",
-        "CONFIG_VETH=y",
-        "CONFIG_VIRTIO_BLK=y",
-    )
-    # The portable network profile configures an IPv6 identity next to the
-    # IPv4 one. SIT would add an sit0 device that decapsulates IPv6 from IPv4.
-    REQUIRED_NETWORK_CONFIG: Final = (
-        "CONFIG_INET=y",
-        "CONFIG_IPV6=y",
-        "# CONFIG_IPV6_SIT is not set",
-        "CONFIG_VIRTIO_NET=y",
-    )
-    REQUIRED_TIME_ABI_CONFIG: Final = (
-        "CONFIG_HYPERVISOR_GUEST=y",
-        "CONFIG_PARAVIRT=y",
-        "# CONFIG_HYPERV is not set",
-        "# CONFIG_KVM_GUEST is not set",
-        "# CONFIG_CPU_FREQ is not set",
-    )
-    # x86 makes runtime-generated code, such as the ITS mitigation thunks,
-    # read-only only through STRICT_MODULE_RWX (ARCH_HAS_EXECMEM_ROX), which
-    # needs MODULES. No module is ever built or shipped: there is no autoload
-    # helper, no symbol is exported, and init disables module loading before
-    # anything else runs.
-    REQUIRED_HARDENING_CONFIG: Final = (
-        "CONFIG_STRICT_KERNEL_RWX=y",
-        "CONFIG_MODULES=y",
-        "CONFIG_STRICT_MODULE_RWX=y",
-        "CONFIG_ARCH_HAS_EXECMEM_ROX=y",
-        'CONFIG_MODPROBE_PATH=""',
-        "CONFIG_TRIM_UNUSED_KSYMS=y",
-        "CONFIG_MITIGATION_ITS=y",
-        "CONFIG_DEBUG_WX=y",
-    )
+    # The groups of settings that build-kernel, packaging, and `nvx.py verify`
+    # require, each the settings and expectations of the features of the
+    # inventory (kernel_features.py) that KERNEL_CONFIG_CHECKS names, where
+    # each feature's rationale says why NVX needs it.
+    REQUIRED_VIRTIO_CONSOLE_CONFIG: Final = _kernel_check("virtio-console")
+    REQUIRED_SHARED_STATUS_CONFIG: Final = _kernel_check("shared-status")
+    REQUIRED_DIRECT_BOOT_CONFIG: Final = _kernel_check("direct-boot")
+    REQUIRED_SANDBOX_CONFIG: Final = _kernel_check("sandbox")
+    REQUIRED_NETWORK_CONFIG: Final = _kernel_check("network")
+    REQUIRED_TIME_ABI_CONFIG: Final = _kernel_check("time-abi")
+    REQUIRED_HARDENING_CONFIG: Final = _kernel_check("hardening")
     DEBUG_WATCHDOG_CONFIG: Final = (
         "CONFIG_SOFTLOCKUP_DETECTOR=y",
         "CONFIG_DETECT_HUNG_TASK=y",
@@ -431,6 +400,7 @@ class DockerBuildConstants:
     AZURELINUX_INITRAMFS_TARGET: Final = "azurelinux-initramfs-artifacts"
     ALL_GUESTS_TARGET: Final = "all-guest-artifacts"
     DEBUG_KERNEL_TARGET: Final = "kernel-debug-artifacts"
+    KERNEL_CONFIG_TARGET: Final = "kernel-config-artifacts"
     LINUX_SOURCE_TARGET: Final = "linux-source-artifacts"
     OUTPUT_TYPE: Final = "local"
     DEBUG_KERNEL_ARTIFACT_NAMES: Final = (

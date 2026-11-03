@@ -91,7 +91,8 @@ nvx/
 |-- kernel/                      Linux configuration and NVX patch set
 |   |-- patches/                 Ordered patches applied to Linux
 |   |-- COPYING-LINUX            Linux copyright and license notice
-|   |-- config-microvm           MicroVM kernel configuration
+|   |-- config-microvm           MicroVM kernel configuration, generated from the feature inventory
+|   |-- config-microvm.derived   Rule that sets each symbol of config-microvm beyond the inventory
 |   `-- config-microvm-debug     CI debug-kernel fragment (watchdogs on)
 |-- nvx-rs/                      Rust crate `nvx` for the NVX mechanics
 |   |-- src/
@@ -134,6 +135,9 @@ nvx/
 |   |   |-- guests.py            Typed guest descriptors
 |   |   |-- host_telemetry.py    Benchmark host provenance and Windows capture storage telemetry
 |   |   |-- host_time_probe.rs   Host TSC probe that doctor builds and runs
+|   |   |-- kconfig.py           Kconfig reader that attributes a configuration's symbols to their rules
+|   |   |-- kernel_config.py     Generation and checks of the kernel configuration against its inventory
+|   |   |-- kernel_features.py   Kernel feature inventory: every setting of the configuration, with its rationale
 |   |   |-- managed_exec_tests.py Managed workload environment, directory, and timeout tests
 |   |   |-- merge_queue.py       Cancellation of the CI runs of superseded merge groups
 |   |   |-- microvm_durations.py Scenario duration report of the microVM tests
@@ -273,11 +277,15 @@ reproducible Linux environment.
 ### `kernel/`
 
 Inputs owned by NVX for producing the guest kernel. `config-microvm` defines the
-kernel build. `config-microvm-debug` is a fragment applied on top of it for the
+kernel build: `nvx.py kernel-config` generates it from the kernel feature
+inventory in `scripts/nvx_tools/kernel_features.py`, and records in
+`config-microvm.derived` the Kconfig rule that sets each of its other symbols.
+`config-microvm-debug` is a fragment applied on top of it for the
 CI debug kernel. Files in `patches/` are applied in name order to the pinned Linux
 source. `COPYING-LINUX` records the upstream Linux copyright and license
-notice. See the [build guide](build.md#building-the-packaged-linux-source) for
-kernel-specific details.
+notice. See the [build guide](build.md#kernel-configuration) for the
+configuration and [its packaged source](build.md#building-the-packaged-linux-source)
+for other kernel-specific details.
 
 ### `nvx-rs/`
 

@@ -56,6 +56,7 @@ from .guest_binaries import (
     guest_binary_source_files,
     pinned_guest_rust_toolchain,
 )
+from .kernel_config import configuration_problems
 from .ubuntu import converter_input_sha256, customization_files, package_lock_sha256
 
 GITHUB_API_VERSION = "2022-11-28"
@@ -1670,6 +1671,18 @@ def verify_source_tree() -> None:
         )
     config_path = BuildConstants.REPO_ROOT / "kernel" / "config-microvm"
     config = config_path.read_text(encoding="utf-8")
+    derived_path = require_file(
+        BuildConstants.REPO_ROOT / KernelBuildConstants.DERIVED_CONFIG,
+        "derived kernel configuration record",
+    )
+    inventory_problems = configuration_problems(
+        config, derived_path.read_text(encoding="utf-8")
+    )
+    if inventory_problems:
+        raise ScriptError(
+            "the kernel configuration does not match its feature inventory: "
+            + "; ".join(inventory_problems)
+        )
     for setting in (
         *KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,
         "CONFIG_HVC_XE9=y",

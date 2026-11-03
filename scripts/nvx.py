@@ -28,6 +28,8 @@ from nvx_tools.build import (
     build_kernel,
     build_openvmm,
     build_scratch_template,
+    generate_docker_kernel_config,
+    generate_kernel_config,
     materialize_kernel_provenance_inputs,
     record_openvmm_provenance,
     verify_guest_determinism,
@@ -89,6 +91,8 @@ from nvx_tools.guest_binaries import (
     test_guest_binaries,
 )
 from nvx_tools.guests import GUEST_NAMES, guest_descriptor
+from nvx_tools.kernel_config import configuration_problems
+from nvx_tools.kernel_config import summary as kernel_config_summary
 from nvx_tools.merge_queue import configure_parser as configure_merge_queue_parser
 from nvx_tools.microvm_tests import configure_parser as configure_microvm_test_parser
 from nvx_tools.microvm_tests import (
@@ -174,6 +178,30 @@ def command_build_kernel(args: argparse.Namespace) -> None:
         KernelBuildConfig.debug_variant()
         if getattr(args, "debug", False)
         else KernelBuildConfig()
+    )
+
+
+def command_kernel_config(args: argparse.Namespace) -> None:
+    if args.native:
+        generate_kernel_config(KernelBuildConfig(), check=args.check)
+    else:
+        generate_docker_kernel_config(DockerBuildConfig(), check=args.check)
+
+
+def command_check_kernel_config(_: argparse.Namespace) -> None:
+    root = BuildConstants.REPO_ROOT
+    config_text = (root / KernelBuildConstants.INPUT_CONFIG).read_text(encoding="utf-8")
+    derived_text = (root / KernelBuildConstants.DERIVED_CONFIG).read_text(
+        encoding="utf-8"
+    )
+    problems = configuration_problems(config_text, derived_text)
+    if problems:
+        raise ScriptError(
+            "the kernel configuration does not match its feature inventory:\n  "
+            + "\n  ".join(problems)
+        )
+    print(
+        f">> kernel configuration: {kernel_config_summary(config_text, derived_text)}"
     )
 
 
@@ -448,6 +476,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     kernel.set_defaults(handler=command_build_kernel)
+
+    kernel_config = subparsers.add_parser(
+        "kernel-config",
+        help=(
+            "generate kernel/config-microvm and its derived record from the "
+            "kernel feature inventory"
+        ),
+    )
+    kernel_config.add_argument(
+        "--native",
+        action="store_true",
+        help=(
+            "generate with this Linux host's toolchain instead of the Docker "
+            "build's, which builds CI's kernels"
+        ),
+    )
+    kernel_config.add_argument(
+        "--check",
+        action="store_true",
+        help="fail if the checked-in files differ instead of writing them",
+    )
+    kernel_config.set_defaults(handler=command_kernel_config)
+
+    check_kernel_config = subparsers.add_parser(
+        "check-kernel-config",
+        help=(
+            "check kernel/config-microvm and its derived record against the "
+            "kernel feature inventory, without a kernel source"
+        ),
+    )
+    check_kernel_config.set_defaults(handler=command_check_kernel_config)
 
     initramfs = subparsers.add_parser(
         "build-initramfs",

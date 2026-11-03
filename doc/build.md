@@ -243,8 +243,9 @@ rootfs SHA-256, and NVX guest-binary provenance.
 The kernel build, `build-kernel`, which the Docker build also runs, caches the
 verified and patched source under `.cache/linux`, uses `O=build/linux`, runs
 `olddefconfig`, stops unless the generated config passes the
-[kernel configuration checks](#kernel-configuration-checks), and exports it as
-`build/vmlinux.config`. The time-ABI settings keep `CONFIG_HYPERVISOR_GUEST`
+[kernel configuration checks](#kernel-configuration-checks) and is the one that
+the [kernel feature inventory](#kernel-configuration) generates, and exports it
+as `build/vmlinux.config`. The time-ABI settings keep `CONFIG_HYPERVISOR_GUEST`
 and `CONFIG_PARAVIRT` on and `CONFIG_HYPERV`, `CONFIG_KVM_GUEST`, and
 `CONFIG_CPU_FREQ` off. The guest identifies the
 hypervisor only through the time ABI's Hyper-V identity, so the KVM guest code,
@@ -276,33 +277,191 @@ takes one 2 MiB block of guest memory. `CONFIG_DEBUG_WX` audits the kernel page
 tables at boot, and the `nvx-time` boot check fails if the audit reports a
 writable and executable mapping.
 
+## Kernel configuration
+
+[`kernel/config-microvm`](../kernel/config-microvm) is generated, never edited
+by hand: it is `make allnoconfig` with the settings of the kernel feature
+inventory, [`kernel_features.py`](../scripts/nvx_tools/kernel_features.py), as
+its `KCONFIG_ALLCONFIG` fragment. Every symbol that a user could set is
+therefore off unless a feature of the inventory sets it, and each feature says
+why NVX needs it, which NVX components consume it, and which checks and
+scenarios exercise it. Kconfig sets every other symbol because of those
+settings, and [`kernel/config-microvm.derived`](../kernel/config-microvm.derived)
+records each one with the rule that sets it:
+
+| Rule | The symbol is set because |
+| --- | --- |
+| `selected by X, Y` | the enabled symbols `X` and `Y` select it |
+| `implied by X` | its prompt is hidden and the enabled `X` implies it |
+| `choice default` | it is the default member of its choice |
+| `default` | it is a value that keeps its default |
+| `default, prompt hidden by C` | its prompt is hidden while `C` does not hold, and its default holds |
+| `no prompt` | no user can set it: its architecture, its toolchain, or other symbols decide it |
+
+So every symbol that the configuration sets is either an inventory setting or
+derived from one by a Kconfig dependency or default, and every other feature is
+off. The inventory sets `CONFIG_EXPERT`, which turns the
+options that Linux otherwise forces on, such as the virtual terminal, the PC
+speaker, and obsolete system calls, into settings like any other; it selects
+`CONFIG_DEBUG_KERNEL`, which only shows the debug options, and every one that
+the inventory does not set stays off. The kernel build runs `make` without
+`ARCH`, so `ARCH` is `x86` and `CONFIG_64BIT` is one of the inventory's
+settings too.
+
+A symbol that only some toolchains offer stays as the inventory decides on
+every toolchain: when the toolchain that generates the configuration hides a
+symbol that the inventory keeps off, such as `CONFIG_GCC_PLUGINS`, which GCC
+offers where its plugin headers are installed, the generator appends its
+"is not set" line, which `olddefconfig` applies where another toolchain shows
+the symbol.
+
+### Checks
+
+Two checks keep the configuration and the inventory together:
+
+- `scripts/nvx.py check-kernel-config` needs no kernel source. It requires
+  every setting and expectation of the inventory to hold in
+  `kernel/config-microvm`, and every other symbol that the configuration sets
+  to be recorded in `kernel/config-microvm.derived` with the same value. A
+  newly enabled symbol that neither the inventory nor the record accounts for,
+  such as a line added by hand, fails it with a message that names the symbol.
+  CI's quality job runs it on every change, `scripts/nvx.py verify` runs it,
+  and so do the unit tests of
+  [`test_kernel_config.py`](../scripts/test_kernel_config.py).
+- The production kernel build generates the configuration again, from the
+  same source with the same toolchain, in `build/linux-inventory`, and requires
+  the configuration that `olddefconfig` resolved for the build to equal it, and
+  the derived record to match it. The record's first line names the toolchain
+  that generated it: the compiler's version text and the versions of the
+  assembler, the linker, and the other tools that Kconfig probes. Where the
+  build's toolchain is that one, as in CI's Docker build, the record must match
+  exactly; another toolchain may detect other capabilities, so there only the
+  entries of symbols with a prompt must match, and every other entry must name
+  a symbol without one. CI's kernel builds run it whenever a kernel input or
+  the inventory changes.
+
+### Changing the configuration
+
+To enable or disable a kernel feature:
+
+1. Add its settings to the feature of the inventory that needs it, or add a
+   feature, with a one-line summary, the rationale, the NVX consumers, and the
+   validation that exercises it. Set only symbols with a prompt; list a
+   derived symbol that the feature relies on under `expects`. To remove a
+   feature, remove its settings; the derived symbols that it pulled in go with
+   it.
+2. Regenerate both files:
+
+   ```bash
+   python3 scripts/nvx.py kernel-config            # in the Docker build's image
+   python3 scripts/nvx.py kernel-config --native   # on Linux, with this host's toolchain
+   ```
+
+   The default runs in the image that builds CI's kernels, so the files record
+   CI's toolchain. Generation fails if a setting's dependencies are unmet;
+   set them too.
+3. Review the diff of `kernel/config-microvm.derived`: every symbol that the
+   change adds or removes is there, with the rule that sets it.
+4. Run `python3 scripts/nvx.py check-kernel-config` and build the kernel, and
+   commit the inventory and both files together. The kernel configuration
+   checks below derive their groups from the inventory, so the build and
+   packaging check the new settings too.
+
+A kernel update regenerates both files the same way, and the record's diff
+shows what the new release derives.
+
+### What the inventory removed
+
+The guest kernel does not provide `/dev/kvm`: the inventory leaves
+`CONFIG_VIRTUALIZATION` off. Running nested VMs inside the guest is not a
+supported workload (#256). This is distinct from running NVX itself on a KVM
+host, which remains supported.
+
+The inventory was built from the configuration that CI's kernel build
+resolved before it existed, which set 1,131 symbols, 1,055 of them `y` and
+503 with a prompt: it keeps what an NVX component, contract, or workload
+needs, and leaves the rest off (#344). The generated configuration sets 769
+symbols: 175 inventory settings and 594 derived ones, 53 of which have a
+prompt. The checked-in file had also drifted from what `olddefconfig`
+resolved: it omitted 130 symbols that the build set, such as the wireless and
+Ethernet vendor menus, and listed four that the build never set, among them
+`CONFIG_SERIAL_EARLYCON`, which no symbol selects without a serial driver;
+`earlycon=xe9` therefore has no effect, and the xe9 console prints the boot
+log once its console initcall runs.
+
+| Removed | Why no NVX path needs it |
+| --- | --- |
+| Hardware that the [machine](design/2.4-interrupt-and-io-architecture.md#241-architectural-devices) lacks: PC Card, PS/2 keyboard and mouse, the input layer and `virtio-input`, the virtual terminal and VGA console, the PC speaker, the IOMMU, LEDs and backlight, the VIA RNG and the hardware RNG core, NVRAM, EEPROM, DMA engines, DMI, firmware maps and loading, Macintosh, Surface, and x86 platform drivers, Ethernet and wireless vendor menus, PTP and PPS | The microVM has only its allowlisted chipset and virtio-mmio devices |
+| Kexec, crash dumps, `/proc/vmcore`, `/proc/kcore`, KASLR (`RANDOMIZE_BASE`, `RANDOMIZE_MEMORY`) and the relocatable kernel | OpenVMM loads `vmlinux` at its link address and never sets `boot_params`' KASLR flag, so randomization never ran |
+| The crypto API, keyrings, X.509 and PKCS#7 parsers, the security module framework and integrity | No guest component uses them; the kernel's own users, such as module signing, are off |
+| Filesystems and formats: ISO 9660, autofs, quotas, hugetlbfs, NLS code pages, MBR partitions, EROFS's file backing and LZMA and DEFLATE decompression, FUSE's io_uring and passthrough, `binfmt_misc`, and every initramfs compression but gzip | NVX's layers are EROFS (LZ4 or Zstandard) on virtio-blk, raw or GPT, its scratch ext4, its shares virtio-fs, and its initramfses gzip |
+| Cgroup controllers and namespaces that the sandbox never enables: CPU, cpuset, cpuacct, devices v1, freezer v1, hugetlb, RDMA, misc, perf, and the I/O controller's policies, and the IPC and time namespaces | The sandbox enables memory and process-count limits and creates mount, PID, and UTS namespaces; workloads have no capabilities to create others |
+| Swap, the block layer's debugfs files, scheduler statistics, SLUB debugging, memory-init debugging, BIOS-corruption checks, process accounting, relayfs, `PM` and its debugging, the CPU idle framework, the I/O schedulers, `/dev/cpu/*/cpuid` | No guest runs swap or reads them; with no cpuidle driver the kernel idles with HLT either way, and virtio-blk uses no scheduler |
+| Obsolete interfaces: 16-bit UIDs, `sgetmask`, 16-bit segments, `TIOCSTI` for unprivileged users, line-discipline autoloading, writes to mounted block devices | No supported workload uses them |
+| CPU vendors other than Intel and AMD | CPU profiles serve Intel and AMD hosts |
+| x86 platform options without an effect on the microVM: extended platforms, IRQ rerouting quirks, bus-lock detection, the AMD uncore PMU, ISA DMA and its memory zone, CPU isolation, `devtmpfs` automounting, the firmware build options, the vhost menu, accelerated RFS, ethtool's netlink API, serial sysrq, runtime tests, the decompressor's verbose boot, and the version suffix from Git | Their hardware, boot path, or consumer is absent |
+
+The image, the span of guest memory that the kernel's loadable segments cover,
+`vmlinux`, and its main sections, of the kernels that CI's Docker toolchain
+built:
+
+| Kernel | Image | `vmlinux` | `.text` | `.rodata` | `.data` | `.bss` |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before the inventory | 20.2 MiB | 25,101,064 B | 9.95 MB | 2.12 MB | 1.32 MB | 0.70 MB |
+| The inventory's | 18.1 MiB | 21,593,672 B | 8.64 MB | 1.69 MB | 1.23 MB | 1.52 MB |
+
+An A/B measured the inventory while the kernel still built in KVM for nested
+virtualization (#256), which both kernels of the A/B had and which this
+configuration no longer has. It ran the e2e benchmark,
+`nvx.py benchmark --suite e2e --warmups 3 --runs 21 --skip-build`, with one
+OpenVMM build and one Alpine initramfs, booting the kernel with KVM from before
+the inventory and then the inventory's with KVM, in the order before, after,
+after, before. A default microVM cold-booted the inventory's kernel 12% to 25%
+faster, and its OpenVMM process peaked 7 to 8 MiB lower; its snapshots and
+restores took as long as before. KVM alone had cost a default microVM's cold
+boot about 3% to 5% and 4.7 MiB of peak RSS, so against the kernel before the
+inventory above, which never had KVM, the gain is smaller than these figures;
+the A/B has not run again without it:
+
+| Host | Cold boot p50, before | Cold boot p50, after | Peak RSS p50, before and after |
+| --- | --- | --- | --- |
+| Bare-metal KVM, Xeon Silver 4114 | 311.6 and 314.9 ms | 272.9 and 277.2 ms | 86.5 and 79.5 MiB |
+| KVM in an Azure VM, Xeon Platinum 8573C | 349.6 and 352.6 ms | 310.2 and 308.9 ms | 85.1 and 78.1 MiB |
+| MSHV in an Azure VM, Xeon Platinum 8573C | 251.1 and 253.8 ms | 219.6 and 222.1 ms | 87.7 and 79.7 MiB |
+| WHP in an Azure VM, Xeon Platinum 8370C | 520.4 and 528.3 ms | 390.5 and 395.3 ms | 82.5 and 74.5 MiB |
+
 ## Kernel configuration checks
 
 The kernel build checks the configuration that `olddefconfig` generates
 against fixed groups of settings, so a configuration or version change cannot
 silently drop a feature that the machine profile or a guest needs. The groups
 live in `KernelBuildConstants` in
-[`build_constants.py`](../scripts/nvx_tools/build_constants.py).
+[`build_constants.py`](../scripts/nvx_tools/build_constants.py), each the
+settings and expectations of the [inventory](#kernel-configuration) features
+that `KERNEL_CONFIG_CHECKS` in
+[`kernel_features.py`](../scripts/nvx_tools/kernel_features.py) names, whose
+rationales say why NVX needs them.
 
-| Group | Required settings | Purpose |
+| Group | Inventory features | Purpose |
 | --- | --- | --- |
-| Direct boot | ACPI and PVH off; MP-table parsing, local APIC, IOAPIC, and virtio-mmio devices from the command line | Boot through the [ACPI-free MP-table loader](design/5.1-boot-protocol.md#511-linux-direct-loader) |
-| Virtio console | Virtio console and HVC driver over virtio-mmio | Drive the [virtio consoles](design/3.3-consoles.md) |
-| Sandbox | virtio-blk; ext4; EROFS with zstd compression; overlayfs that does not always follow redirects; memory and PID cgroups; BPF and cgroup BPF; seccomp filters; Unix-domain sockets; network namespaces and veth | Layer EROFS over ext4 scratch and confine the workload in the [sandbox bootstrap](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root) |
-| Network | IPv4; IPv6 without the SIT tunnel driver; virtio-net | Configure the dual-stack NIC of the [portable network profile](design/3.5-network.md); SIT would add an `sit0` device that decapsulates IPv6 from IPv4 packets |
-| Shared interrupt status | `CONFIG_VIRTIO_MMIO_SHARED_STATUS` from the kernel patches | Read [shared virtio interrupt status](design/2.4-interrupt-and-io-architecture.md#244-shared-interrupt-status) |
-| Time ABI | Hypervisor-guest and paravirtualization support on; Hyper-V, KVM guest, and cpufreq off | Meet the [time ABI](design/3.2-clock-and-time.md), as described above |
-| Hardening | Strict kernel and module RWX with read-only executable memory, the ITS mitigation, an empty modprobe path, trimmed symbol exports, the boot-time W+X audit, and no option built as a module | Keep runtime code read-only, as described above |
+| Direct boot | `direct-boot`: ACPI, PVH, and PCI off; MP-table parsing, local APIC, IOAPIC, and virtio-mmio devices from the command line | Boot through the [ACPI-free MP-table loader](design/5.1-boot-protocol.md#511-linux-direct-loader) |
+| Virtio console | `virtio-console`: virtio console and HVC driver over virtio-mmio | Drive the [virtio consoles](design/3.3-consoles.md) |
+| Sandbox | `block-storage`, `sandbox-filesystems`, `sandbox-isolation`, `guest-internal-networking`, `unix-sockets`: virtio-blk with GPT partitions; ext4; EROFS with zstd compression; overlayfs that does not always follow redirects; tmpfs extended attributes; memory, PID, and writeback cgroups; BPF and cgroup BPF; seccomp filters; mount, PID, and UTS namespaces without user namespaces; Unix-domain sockets; network namespaces and veth | Layer EROFS over ext4 scratch and confine the workload in the [sandbox bootstrap](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root) |
+| Network | `network`: IPv4 with TCP socket diagnostics; IPv6 without the SIT tunnel driver; virtio-net | Configure the dual-stack NIC of the [portable network profile](design/3.5-network.md); SIT would add an `sit0` device that decapsulates IPv6 from IPv4 packets |
+| Shared interrupt status | `shared-interrupt-status`: `CONFIG_VIRTIO_MMIO_SHARED_STATUS` from the kernel patches | Read [shared virtio interrupt status](design/2.4-interrupt-and-io-architecture.md#244-shared-interrupt-status) |
+| Time ABI | `time-abi`: hypervisor-guest and paravirtualization support on; Hyper-V, KVM guest, and cpufreq off; tickless idle at 100 Hz with high-resolution timers; the RCU stall timeouts; a 256 KiB log buffer | Meet the [time ABI](design/3.2-clock-and-time.md), as described above |
+| Hardening | `hardening`: strict kernel and module RWX with read-only executable memory, the ITS mitigation, an empty modprobe path, trimmed symbol exports, the boot-time W+X audit, stack protection, and no option built as a module | Keep runtime code read-only, as described above |
 | Watchdogs | Soft-lockup and hung-task detectors off, or on in the [CI debug kernel](#ci-debug-kernel) | Keep the detectors out of production kernels |
 
 `build-kernel` runs every check, and packaging runs them again on the
-packaged config. `scripts/nvx.py verify` is a lighter source check. It looks
-for the fixed settings of the direct-boot, sandbox, network, time-ABI, and
-hardening groups, plus the xe9 console and virtio-fs, in the checked-in
-`kernel/config-microvm`. It does not reject options built as modules; only the
+packaged config. `scripts/nvx.py verify` is a lighter source check. It checks
+the checked-in `kernel/config-microvm` against the whole inventory, as
+[`check-kernel-config`](#checks) does, and looks for the settings of the
+direct-boot, sandbox, network, time-ABI, and hardening groups, plus the xe9
+console and virtio-fs. It does not reject options built as modules; only the
 build and packaging checks do. When `build/vmlinux.config` exists, `verify`
-also checks that file for the direct-boot, sandbox, and network groups plus
-the xe9 console.
+also checks that file for the direct-boot, sandbox, and network groups plus the
+xe9 console.
 
 ## CI debug kernel
 
@@ -317,10 +476,13 @@ python3 scripts/nvx.py build-kernel --debug   # native, Linux only
 The variant applies the
 [`kernel/config-microvm-debug`](../kernel/config-microvm-debug) fragment on top
 of `kernel/config-microvm`. Each assignment in the fragment replaces the
-matching base assignment before `olddefconfig`. It enables `DEBUG_KERNEL`, the
-soft-lockup and hung-task detectors, and extra RCU stall diagnostics. It pins
-the production RCU stall timeouts and turns off the debug options that
-`DEBUG_KERNEL` would otherwise enable by default. The build fails if the
+matching base assignment before `olddefconfig`. It enables the soft-lockup and
+hung-task detectors and extra RCU stall diagnostics. Production already builds
+`DEBUG_KERNEL`, which `CONFIG_EXPERT` selects, with every debug option that the
+inventory does not set off; the fragment repeats `DEBUG_KERNEL`, keeps off the
+debug options that it would otherwise enable by default, and pins the
+production RCU stall timeouts, so that it never depends on the inventory for
+them. The build fails if the
 detectors are missing from the generated config. CI can shorten the soft-lockup
 and hung-task thresholds for one boot with `watchdog_thresh=` and
 `sysctl.kernel.hung_task_timeout_secs=`. The RCU stall timeout stays at the

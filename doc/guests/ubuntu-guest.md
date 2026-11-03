@@ -38,15 +38,17 @@ what Ubuntu userland needs on this machine:
 - devtmpfs, procfs, sysfs, and tmpfs;
 - virtio-mmio block, network, console, and filesystem devices;
 - ext4, EROFS, and overlayfs; and
-- the cgroups and the PID, mount, UTS, IPC, and network namespaces that the
-  sandbox uses.
+- the memory and process-count cgroups and the PID, mount, and UTS namespaces
+  that the sandbox uses, and network namespaces for guest services.
 
 Its [patches](../../kernel/patches) add the xe9 early and interactive consoles
 and the shared virtio-mmio interrupt status, and keep the HVC console from
 losing input that its interrupt and its polling thread read concurrently. The
-[kernel configuration](../../kernel/config-microvm) omits PCI, user
-namespaces, fanotify, and SquashFS. It enables module support only so that
-strict module memory protection keeps runtime code read-only; NVX ships no
+[kernel configuration](../../kernel/config-microvm) enables only what the
+[kernel feature inventory](../build.md#kernel-configuration) sets and what
+Kconfig derives from it: it omits PCI, user, IPC, and time namespaces,
+fanotify, SquashFS, swap, and the crypto API. It enables module support only so
+that strict module memory protection keeps runtime code read-only; NVX ships no
 modules, and `/init` disables module loading before it starts any other
 process. Ubuntu support therefore means Ubuntu userland under the NVX kernel
 policy, not compatibility with every Ubuntu workload.

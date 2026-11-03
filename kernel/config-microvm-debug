@@ -3,12 +3,16 @@
 # `nvx.py build-kernel --debug` appends this fragment to kernel/config-microvm
 # before `olddefconfig`. It enables the watchdogs that production keeps off so
 # CI can prove that snapshot restores never trip them. Nothing else may differ
-# from production: DEBUG_KERNEL would otherwise default DEBUG_MISC, RCU_TRACE,
-# and X86_DEBUG_FPU on, and the RCU stall settings are pinned to the production
-# values. CI can shorten the soft-lockup and hung-task thresholds per boot with
-# `watchdog_thresh=` and `sysctl.kernel.hung_task_timeout_secs=` instead of
-# rebuilding. The RCU stall timeout stays at 21 s because the time ABI's
-# conformance check C8 requires it.
+# from production. Production already builds DEBUG_KERNEL, which EXPERT selects,
+# with every debug option that its feature inventory does not set off; the
+# fragment repeats DEBUG_KERNEL and keeps DEBUG_MISC, RCU_TRACE, and
+# X86_DEBUG_FPU off, which DEBUG_KERNEL would otherwise default on, so that it
+# never depends on the inventory for them. The RCU stall settings are pinned to
+# the production values. CI can shorten the soft-lockup and hung-task
+# thresholds per boot with `watchdog_thresh=` and
+# `sysctl.kernel.hung_task_timeout_secs=` instead of rebuilding. The RCU stall
+# timeout stays at 21 s because the time ABI's conformance check C8 requires
+# it.
 CONFIG_DEBUG_KERNEL=y
 # CONFIG_DEBUG_MISC is not set
 # CONFIG_RCU_TRACE is not set
