@@ -42,16 +42,16 @@
 //!   a program in a new process (`guest::spawn`), has the program enter an execution's
 //!   namespaces, view, root, and identity (`guest::entry`), collects the status of each child
 //!   that it names (`guest::process`), places, kills, and settles the processes of its
-//!   executions in cgroups (`guest::cgroup`), mounts host mappings beneath the descriptors of the
-//!   roots that it names, and keeps the account of a host's mapping table (`guest::mappings`),
-//!   drives each program as one execution, with its launch, bounded output, input, ending, and
-//!   outcome (`guest::exec`), alone or under the execution engine (`guest::exec::binding`),
-//!   bootstraps the guest for a layered root, assembles the root, mounts live shares and mappings
-//!   in it, and tears it down (`guest::root`), and reads the partition table of a GPT disk's block
-//!   device (`guest::gpt`), the typed calls through which it runs the time ABI's steps
-//!   (`guest::time`) and reseeds after a restore (`guest::reseed`) in its own process, and the
-//!   preparation of a template's guest for a capture before its root's assembly, and the repair
-//!   of its clones (`guest::clone`). The crate's `nvx-*` guest binaries run the programs.
+//!   executions in cgroups (`guest::cgroup`), describes host mappings and keeps the account of a
+//!   host's mapping table (`guest::mappings`), and drives each program as one execution, with its
+//!   launch, bounded output, input, ending, and outcome (`guest::exec`), alone or under the
+//!   execution engine (`guest::exec::binding`), the typed calls through which it runs the time
+//!   ABI's steps (`guest::time`) and reseeds after a restore (`guest::reseed`) in its own process,
+//!   and the preparation of a template's guest for a capture before its root's assembly, and the
+//!   repair of its clones (`guest::clone`). The crate's `nvx-*` guest binaries run the programs.
+//!   NVX's own guest space, which assembles a layered root, reads GPT disks, mounts host mappings,
+//!   and applies a clone's activation, is internal reference code: hidden, unstable, and
+//!   crate-private once nothing outside NVX uses it.
 //!
 //! # Example
 //!

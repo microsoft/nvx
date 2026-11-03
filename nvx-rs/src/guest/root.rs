@@ -2,10 +2,13 @@
 //! mappings in it, and the host export from which mappings come, and tear it down, for a guest
 //! init or agent, whether or not it is PID 1.
 //!
-//! - [`bootstrap`] prepares the guest once: it creates the agent's and the workload's sibling
-//!   cgroups of a [`Layout`](super::cgroup::Layout), moves every process of their parent into the
-//!   agent's, applies the agent's and the workload's resource values, and keeps user namespaces
-//!   unavailable.
+//! This module is NVX's internal reference code of the guest's space, hidden from the
+//! documentation and unstable: it becomes crate-private once nothing outside NVX uses it.
+//!
+//! - [`bootstrap`](fn@bootstrap) prepares the guest once: it creates the agent's and the
+//!   workload's sibling cgroups of a [`Layout`](super::cgroup::Layout), moves every process of
+//!   their parent into the agent's, applies the agent's and the workload's resource values, and
+//!   keeps user namespaces unavailable.
 //! - [`assemble`] finds the block devices of an [`Assembly`] by their MMIO windows, checks and
 //!   flushes them, and mounts the root: an overlay, mounted `nosuid,nodev` with the option set of
 //!   the caller's [`OverlayMode`], which it checks the kernel applied, of the read-only layers of
@@ -1476,7 +1479,7 @@ impl fmt::Display for Mount {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// A step of [`bootstrap`] failed.
+    /// A step of [`bootstrap`](fn@bootstrap) failed.
     Bootstrap {
         /// The step that failed.
         step: BootstrapStep,

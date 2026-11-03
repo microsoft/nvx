@@ -122,7 +122,7 @@
 //!    memory size that the repair reports, before anything has a side effect. An Activate whose
 //!    record the adapter's framing refused unread, as longer than a record can be, fails as a
 //!    record that long does;
-//! 3. activating: the adapter applies the accepted record with [`apply`](fn@apply), which
+//! 3. activating: the adapter applies the accepted record with `apply`, which
 //!    activates the root and the workload with its settings, as below, passes the activation
 //!    what the session received meanwhile, which came before Ready, then reports the result to
 //!    [`Activation::complete`];
@@ -146,12 +146,16 @@
 //! and its [`ActivationCause`], and which every later call returns again. The activation never
 //! powers the VM off: the adapter reports the failure, and ends the VM.
 //!
-//! [`apply`](fn@apply) activates the clone as at a cold boot. It assembles the root as
-//! [`root::assemble`] does, with the record's image, an EROFS image whose UUID it checks if the
+//! The activation's application, `apply` and its types, is NVX's internal reference code of the
+//! guest's space, hidden from this documentation and unstable: it becomes crate-private once
+//! nothing outside NVX uses it.
+//!
+//! `apply` activates the clone as at a cold boot. It assembles the root as
+//! `root::assemble` does, with the record's image, an EROFS image whose UUID it checks if the
 //! record expects one, or a GPT disk whose GUID it checks if the record expects one, its upper, a
 //! tmpfs or the scratch, with the record's journal policy, and its overlay mode, and with the
 //! inputs that the guest takes from its own configuration, which its template captured, a
-//! [`RootTemplate`]: the runtime directory, the block devices, the host filesystem device's
+//! `RootTemplate`: the runtime directory, the block devices, the host filesystem device's
 //! virtio-fs tag, the gateway of the template's NIC, if it has one, and how long the assembly waits
 //! for each block device, but never past the activation's deadline, which the adapter passes, so
 //! that the application ends by then. For a GPT disk, it first asks the kernel to reread the disk's
@@ -171,7 +175,7 @@
 //! [`MachineId::generate`](super::entry::MachineId::generate), after the repair's reseed, so that
 //! no two clones of a template share it, to [`MACHINE_ID_FILE`] in the template's runtime
 //! directory. If the record has an export, it mounts the host export through the template's
-//! filesystem device, with [`Root::mount_export`](root::Root::mount_export), read-write, at
+//! filesystem device, with `Root::mount_export`, read-write, at
 //! `hostfs/root` in the runtime directory, outside the root, where only the guest's root user
 //! reaches it: the record names no mode, and OpenVMM limits each of the export's children to its
 //! own access. If the record's network names a DNS server, it writes a resolver file that names
@@ -184,14 +188,14 @@
 //! the generated machine ID's file, read-only over the root's `/etc/machine-id`, and the
 //! resolver file, read-only over the root's `/etc/resolv.conf`, or, with neither, nothing. The
 //! entry checks the record's hostname first, which every execution's entry then takes. It returns
-//! the [`Applied`] root and workload, which the adapter keeps, with the export's root, from which
+//! the `Applied` root and workload, which the adapter keeps, with the export's root, from which
 //! the adapter maps the host's mapping table once the clone is ready, the network's proxy
 //! endpoint, which the adapter tells its workloads as at a cold boot, and the announcer, which the
 //! adapter watches, and must end the clone once the announcer ended: the gateway then keeps
 //! publishing the listeners that the announcer last announced until the VM ends, and learns of no
-//! later change of them. The [`teardown`](Applied::teardown) of the [`Applied`] stops the
+//! later change of them. The `teardown` of the `Applied` stops the
 //! announcer, closes the export's root, and removes the binds before it tears the root down. An
-//! application that fails returns an [`ApplyError`] instead, after which nothing that it mounted or
+//! application that fails returns an `ApplyError` instead, after which nothing that it mounted or
 //! bound stays mounted, unless the error holds the unmounts that failed, and no announcer that it
 //! started runs.
 //!
@@ -276,12 +280,12 @@
 //! as [strict mode](#strict-mode) tells, they never power the VM off, so a caller that is not
 //! PID 1 keeps its own reaping, transport, and shutdown. The activation needs no privilege, and
 //! makes no system call: of the clone, it changes only the caller's fence, which it opens. Its
-//! application, [`apply`](fn@apply), needs the guest's root user, in the guest's initial mount
-//! namespace, as [`root::assemble`] does: for a GPT disk, it asks the kernel to reread the disk's
+//! application, `apply`, needs the guest's root user, in the guest's initial mount
+//! namespace, as `root::assemble` does: for a GPT disk, it asks the kernel to reread the disk's
 //! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, reads the account databases
 //! below it, and, if it fails, tears it down. It starts no process but the announcer of a record
 //! whose network publishes the workload's listeners, whose socket it binds to a privileged source
-//! port, and whose status it collects through the [`Applied`], and it generates at most one ID, a
+//! port, and whose status it collects through the `Applied`, and it generates at most one ID, a
 //! machine ID that the record asks for. It mounts the host export of a record that has one, and
 //! writes the machine ID's and the resolver's files in the runtime directory, whose binds over
 //! the root's `/etc/machine-id` and `/etc/resolv.conf` need Linux 6.8 or later.
@@ -308,8 +312,11 @@ use super::time::{
 
 pub use self::activation::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
-    ActivationState, Applied, AppliedTeardownError, ApplyError, MACHINE_ID_FILE, NetworkError,
-    RESOLVER_FILE, RootTemplate, apply,
+    ActivationState, MACHINE_ID_FILE, RESOLVER_FILE,
+};
+#[doc(hidden)]
+pub use self::activation::{
+    Applied, AppliedTeardownError, ApplyError, NetworkError, RootTemplate, apply,
 };
 pub use self::mounts::{Mounted, Origin};
 pub use self::repair::{

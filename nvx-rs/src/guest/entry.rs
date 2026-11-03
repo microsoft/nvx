@@ -3,7 +3,7 @@
 //!
 //! An [`Entry`] describes how an adapter's executions enter its root:
 //!
-//! - the root: the path of a mount, such as a [`Root`](super::root::Root)'s;
+//! - the root: the path of a mount, such as a layered root's;
 //! - the [`Identity`]: the user and group IDs, the supplementary groups, the [`Capabilities`],
 //!   from an allowlist of 13, and the [`AccountMode`];
 //! - the hostname, `nvx-sandbox` unless the adapter names another;
@@ -23,7 +23,7 @@
 //! [`Entry::bind_runtime`] binds the file of a [generated](MachineId::Generated) machine ID over
 //! the root's `/etc/machine-id`, the time status's directory at the root's `/run/nvx/time`, and
 //! a [resolver](Entry::resolver) file, which names the guest's DNS servers, over the root's
-//! `/etc/resolv.conf`, through the walk and attach of [`mappings::bind`]: each is read-only,
+//! `/etc/resolv.conf`, through the walk and attach of the mapper's `bind`: each is read-only,
 //! `nosuid`, and `nodev` before anything sees it, and the walk creates what the root lacks only
 //! on the root's own mount, through no symbolic link, and refuses a target of another kind than
 //! its source. A symbolic link at `/etc/machine-id` or `/etc/resolv.conf` itself, which no bind
@@ -43,7 +43,7 @@
 //! which ends with it, and drop them. A bind that fails has the call remove the binds that it
 //! made before it, and an [`Error::Rollback`] names any of them that stays mounted. A bind that a
 //! rename moved while the walk ran, and that the attach failed to detach, fails the call, and
-//! stays mounted wherever it went, as [`mappings::bind`] describes.
+//! stays mounted wherever it went, as the mapper's `bind` does.
 //!
 //! # The execution
 //!

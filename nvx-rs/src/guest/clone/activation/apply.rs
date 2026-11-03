@@ -1,6 +1,10 @@
 //! The application of the record of the Activate that a clone's [`Activation`] accepted:
 //! [`apply`](fn@apply), which activates the clone's root and workload with the record's settings,
 //! as at a cold boot, as the [module](super::super#activation) describes.
+//!
+//! The application, `apply` and its types, is NVX's internal reference code of the guest's space,
+//! hidden from the documentation and unstable: it becomes crate-private once nothing outside NVX
+//! uses it.
 
 #[cfg(test)]
 mod tests;
@@ -29,14 +33,14 @@ use crate::guest::mappings::{self, Access, SourceRoot};
 use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownError};
 use crate::protocol::cmdline::write_resolver;
 
-/// The name of the file, in the template's [runtime directory](RootTemplate::runtime), to which
-/// [`apply`](fn@apply) writes the machine ID that it generates for a record that asks for one, as
-/// NVX's managed agent writes its own to `/run/nvx/workload-machine-id`.
+/// The name of the file, in the template's runtime directory, to which the activation's
+/// application writes the machine ID that it generates for a record that asks for one, as NVX's
+/// managed agent writes its own to `/run/nvx/workload-machine-id`.
 pub const MACHINE_ID_FILE: &str = "workload-machine-id";
 
-/// The name of the file, in the template's [runtime directory](RootTemplate::runtime), to which
-/// [`apply`](fn@apply) writes the resolver file that names the DNS server of a record's network,
-/// which every execution sees read-only at `/etc/resolv.conf`.
+/// The name of the file, in the template's runtime directory, to which the activation's
+/// application writes the resolver file that names the DNS server of a record's network, which
+/// every execution sees read-only at `/etc/resolv.conf`.
 pub const RESOLVER_FILE: &str = "resolv.conf";
 
 /// The mode of the resolver file, whatever the umask: every execution may read it.
@@ -48,6 +52,7 @@ const RESOLVER_MODE: u32 = 0o444;
 /// the assembly of the root waits for each, the host filesystem device, which its virtio-fs tag
 /// names, and the IPv4 gateway of the template's NIC, if it has one. [`apply`](fn@apply) takes
 /// the rest from the activation record.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RootTemplate {
     /// The runtime directory, below which the root is mounted, as [`Assembly::runtime`] tells,
@@ -94,6 +99,7 @@ pub struct RootTemplate {
 /// [`teardown`](Self::teardown) stops the announcer, closes the export's root, if the adapter did
 /// not take it, removes the binds, then tears the root down, and dropping it does the same,
 /// ignoring failures, as dropping a [`Root`] does.
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct Applied {
     /// The announcer of the workload's listeners, if the record's network publishes them, which a
@@ -265,6 +271,7 @@ impl Drop for Binds {
 /// Why [`Applied::teardown`] failed: the runtime's binds that it failed to remove, which stay
 /// mounted and keep the root's mount busy, and the unmounts of the root's teardown that failed,
 /// whose mounts stay. At least one of them failed.
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct AppliedTeardownError {
     /// The binds that stay mounted, if any.
@@ -392,6 +399,7 @@ impl std::error::Error for AppliedTeardownError {}
 /// It needs the guest's root user, in the guest's initial mount namespace, as
 /// [`root::assemble`] does, and the binds of a generated machine ID and of a resolver file need
 /// Linux 6.8 or later, as [`Entry::bind_runtime`] does.
+#[doc(hidden)]
 pub fn apply(
     record: &ActivationRecord,
     template: &RootTemplate,
@@ -415,6 +423,7 @@ pub fn apply(
 ///
 /// Nothing that the application mounted stays mounted, unless the error holds the unmounts that
 /// failed, whose mounts stay.
+#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ApplyError {
@@ -540,6 +549,7 @@ impl std::error::Error for ApplyError {
 
 /// Why the network settings of a record could not be applied, which an [`ApplyError::Network`]
 /// holds.
+#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum NetworkError {

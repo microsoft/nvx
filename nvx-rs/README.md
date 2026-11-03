@@ -135,7 +135,7 @@ changes only when the module's purpose does.
 | [`nvx::host::session`, `platform`, `report`](#nvxhostsession-platform-report) | The authenticated control session, Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
-| [`nvx::guest::mappings`](#nvxguestmappings) | `Mapper` and `MappingTable`: apply host mappings beneath the descriptors of their roots, and a host's mapping table, for any guest init or agent |
+| [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
 | [`nvx::guest::spawn`](#nvxguestspawn) | `Command`: starts a program in a new process, for any guest init or agent |
@@ -1113,6 +1113,12 @@ The programs that run in Linux guests; see [Guest binaries](#guest-binaries).
 
 ### `nvx::guest::mappings`
 
+The mapping values, `Mapping`, `Access`, `Kind`, `InvalidMapping`, and
+`MAX_PATH_BYTES`, and `MappingTable` are public. The mapper, in the hidden
+`mapper` module, whose items keep their paths here, hidden too, is NVX's
+internal reference code of the guest's space: unstable, and crate-private once
+nothing outside NVX uses it.
+
 `Mapper`: applies host mappings for any guest init or agent beneath the
 descriptor of a `TargetRoot`, the root of a mount of a whole file system, which
 `statmount` tells from a bind of a directory below it, such as a layered root's
@@ -1415,6 +1421,9 @@ which its template captured: the runtime directory, the block devices, the
 timeout, the host filesystem device's virtio-fs tag, and the gateway of the
 template's NIC, if it has one, but waits for no device past the activation's
 deadline, which the adapter passes, so that the application ends by then.
+`apply`, `RootTemplate`, `Applied`, `ApplyError`, `AppliedTeardownError`, and
+`NetworkError` are hidden: NVX's internal reference code of the guest's space,
+unstable, and crate-private once nothing outside NVX uses it.
 
 For a GPT disk, it first asks the kernel to reread the disk's partition table
 with `BLKRRPART`, since the kernel created the block devices of partitions for
@@ -1482,7 +1491,8 @@ cloned, and formats none of them. `nvx-reseed` runs them.
 ### `nvx::guest::root`
 
 The operations of a layered root, for a guest init or agent, whether or not it
-is PID 1.
+is PID 1. The module is hidden: NVX's internal reference code of the guest's
+space, unstable, and crate-private once nothing outside NVX uses it.
 
 `bootstrap`: the agent's and the workload's sibling cgroups of a `Layout`, with
 every process of their parent moved into the agent's, the agent's `memory.low`,
@@ -1549,6 +1559,10 @@ change neither the caller's root nor its credentials, start no async runtime,
 and never power the VM off.
 
 ### `nvx::guest::gpt`
+
+Hidden, like `nvx::guest::root`, which reads its disks through it: NVX's
+internal reference code of the guest's space, unstable, and crate-private once
+nothing outside NVX uses it.
 
 `read_disk`: the partition table of a GPT disk, read and checked with
 `nvx::gpt`'s `Disk::read` through the disk's block device, which the caller
@@ -2630,10 +2644,13 @@ agent serves its session, `spawn` starts a program in a new process, `entry`
 has the program enter an execution's namespaces, view, root, and identity,
 `process` collects the status of a child that the caller names, `cgroup`
 places, kills, and settles the processes of an execution, `exec` drives one
-program as an execution, `mappings` mounts host mappings beneath the
-descriptors of the roots that its caller names, and `root` bootstraps the
-guest for a layered root through `cgroup`, assembles the root, mounts live
-shares and mappings in it through `mappings`, and tears it down.
+program as an execution, and `mappings` describes host mappings and keeps the
+account of a host's mapping table. NVX's own guest space is internal reference
+code, hidden, unstable, and crate-private once nothing outside NVX uses it:
+the mapper of `mappings` mounts host mappings beneath the descriptors of the
+roots that its caller names, and `root` bootstraps the guest for a layered root
+through `cgroup`, assembles the root, mounts live shares and mappings in it
+through the mapper, and tears it down.
 `nvx-managed-agent` opens its control terminal, and launches, drives, collects,
 and settles its workloads, through them, has each sandbox workload enter its
 execution through `entry`, and applies its host mapping table through
@@ -2648,7 +2665,7 @@ and a template's guest prepares for a capture before its root's assembly through
 caller's fence of workload admission, and through which each clone repairs its
 restore: it activates the restore's memory target, reseeds the kernel's random
 number generator, and finishes the restore, as `nvx-snapshot` does.
-Nor is the `gpt` library a program: it reads the partition table of a GPT
+Nor is the hidden `gpt` module a program: it reads the partition table of a GPT
 disk's block device.
 
 | Binary | Program |

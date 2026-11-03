@@ -10,7 +10,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::guest::mappings::MAX_PATH_BYTES;
 use crate::guest::root::tests::{Call, FakeKernel, Operation, attach_calls};
+use crate::guest::sys::MountAttributes;
 
 mod privileged;
 
