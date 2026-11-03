@@ -7,6 +7,8 @@ use super::*;
 pub(crate) use super::entry::tests::Simulation;
 pub(crate) use super::fd::tests::{create_fifo, set_descriptor_limit};
 #[cfg(target_arch = "x86_64")]
+pub(crate) use super::kernel::tests::nice_of;
+#[cfg(target_arch = "x86_64")]
 pub(crate) use super::port::tests::PortBackend;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::process::tests::forbid_system_calls;
@@ -23,6 +25,8 @@ pub(crate) use super::sock_diag::tests::{encode_inet_diag_done, encode_inet_diag
 pub(crate) use super::spawn::tests::{
     CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, holds_capability,
 };
+#[cfg(target_arch = "x86_64")]
+pub(crate) use super::spawn::tests::{CAP_SYS_NICE, CAP_SYS_RESOURCE};
 
 /// A stream whose writes fail with a chosen `errno`.
 pub(crate) struct Failing(pub(crate) Errno);

@@ -33,6 +33,7 @@ fn binary(name: &str) -> PathBuf {
         "nvx-time-probe" => env!("CARGO_BIN_EXE_nvx-time-probe"),
         "nvx-exit" => env!("CARGO_BIN_EXE_nvx-exit"),
         "nvx-device-io" => env!("CARGO_BIN_EXE_nvx-device-io"),
+        "nvx-init" => env!("CARGO_BIN_EXE_nvx-init"),
         _ => panic!("no guest binary {name}"),
     })
 }
@@ -386,6 +387,23 @@ fn exit_fails_silently_without_dev_port() {
         assert_eq!(
             run("nvx-exit", arguments),
             (Some(1), Vec::new(), Vec::new()),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn init_runs_only_as_pid_1() {
+    // Elsewhere it takes no helper, changes no priority, and stops no VM, whatever its arguments.
+    for arguments in [&["42"][..], &[], &["42", "43", "44"]] {
+        assert_eq!(
+            run("nvx-init", arguments),
+            (
+                Some(2),
+                Vec::new(),
+                b"nvx-init: runs only as PID 1\n".to_vec()
+            ),
             "{arguments:?}"
         );
     }

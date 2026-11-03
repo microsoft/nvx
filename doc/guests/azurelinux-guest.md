@@ -61,7 +61,7 @@ The build then:
    `setpriv`, and BusyBox to be present;
 3. records the installed RPM inventory for the package manifest;
 4. installs the common NVX `/init`, the guest scripts it needs, and the same
-   nine static Rust binaries as Alpine and Ubuntu, so they do not depend on
+   ten static Rust binaries as Alpine and Ubuntu, so they do not depend on
    Azure Linux libraries;
 5. links the BusyBox applets that the shared guest scripts expect, including
    `/bin/sh`; every other command resolves to the Azure Linux packages;
@@ -100,7 +100,7 @@ The package manifest `initramfs-azurelinux.cpio.gz.packages.json` records the
 release, architecture, base image, input digest, and artifact SHA-256. Each
 package entry names the RPM's version, release, architecture, license, and
 source RPM. The manifest also records the shared aggregate Rust source digest
-and each of the nine installed guest-binary digests. The input digest is a
+and each of the ten installed guest-binary digests. The input digest is a
 domain-separated SHA-256 over the release, architecture, base image, and the
 checkout files that define the build: the Dockerfile, package lock, build
 modules, guest scripts, complete `nvx-rs` guest input set, and

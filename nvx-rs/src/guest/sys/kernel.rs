@@ -1,8 +1,9 @@
-//! The kernel's log, its auxiliary vector, and the procfs and sysfs files that the time tools
-//! read and write.
+//! The kernel's log, its auxiliary vector, the procfs and sysfs files that the time tools read
+//! and write, and the system-wide calls with which `nvx-init` runs as PID 1: the nice value of a
+//! process, and `sync`.
 //!
-//! `nix` wraps neither `syslog(2)`, which the C library calls `klogctl`, nor `getauxval`, so this
-//! module calls them through libc.
+//! `nix` wraps neither `syslog(2)`, which the C library calls `klogctl`, nor `getauxval`, nor
+//! `setpriority`, so this module calls them through libc.
 
 use std::ffi::{CStr, c_int};
 
@@ -91,5 +92,24 @@ pub(crate) fn has_vdso() -> bool {
     unsafe { nix::libc::getauxval(nix::libc::AT_SYSINFO_EHDR) != 0 }
 }
 
+/// Sets the nice value of `process`, or of the calling thread for `None`, to `nice`.
+///
+/// Linux applies `setpriority`'s `PRIO_PROCESS` to the one thread whose ID it names: for a
+/// process ID, the process's first thread, whose later threads and children start with its nice
+/// value. Lowering a nice value needs `CAP_SYS_NICE`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn set_nice(process: Option<super::ProcessId>, nice: c_int) -> Result<(), Errno> {
+    let process = process.map_or(0, |process| process.raw().unsigned_abs());
+    // SAFETY: `setpriority` reads only its integer arguments.
+    Errno::result(unsafe { nix::libc::setpriority(nix::libc::PRIO_PROCESS, process, nice) })
+        .map(drop)
+}
+
+/// Writes the modified data and metadata of every file system to its storage, as `sync(2)` does.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn sync() {
+    nix::unistd::sync();
+}
+
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

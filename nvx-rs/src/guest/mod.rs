@@ -30,7 +30,10 @@
 //! binds for it, as a clone's application does. The
 //! libraries need none of NVX's control protocol, managed agent, or workload identity, and NVX's
 //! managed agent opens its control terminal, applies its host mapping table, and starts, drives,
-//! collects, and settles its workloads through them.
+//! collects, and settles its workloads through them. On x86-64, the hidden `init` module holds
+//! `nvx-init`, a PID 1 for layered roots, which takes PID 1 over from their early boot with the
+//! guest's helpers, the time daemon and the announcer: it runs with them ahead of the workloads,
+//! collects every child's status, and ends the VM after `SIGTERM` or once either helper ends.
 //!
 //! The programs keep the command lines, exit statuses, and output of the C programs that they
 //! replace, except that numeric arguments are plain decimal, with a `-` sign where `nvx-time`'s
@@ -106,6 +109,9 @@ pub mod exec;
 pub mod exit;
 pub mod gpt;
 pub mod ingress;
+#[cfg(target_arch = "x86_64")]
+#[doc(hidden)]
+pub mod init;
 #[doc(hidden)]
 pub mod managed_agent;
 pub mod mappings;

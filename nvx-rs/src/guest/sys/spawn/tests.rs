@@ -22,6 +22,14 @@ pub(crate) const CAP_SYS_CHROOT: u32 = 18;
 /// Capability to mount, and to enter new namespaces, which an execution's entry needs.
 pub(crate) const CAP_SYS_ADMIN: u32 = 21;
 
+/// Capability to lower nice values.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const CAP_SYS_NICE: u32 = 23;
+
+/// Capability to override resource limits, and to lower an out-of-memory score adjustment.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const CAP_SYS_RESOURCE: u32 = 24;
+
 /// Returns whether the calling thread's effective set holds `capability`, because tests whose
 /// outcome depends on a privilege cannot infer it from the user ID: a root in a container may
 /// lack some capabilities.
