@@ -535,7 +535,7 @@ fn openvmms_platform_allowlist_admits_its_tokens_and_refuses_tenant_data() {
         "nr_cpus=8",
         "maxcpus=1",
         "nvx_control_tty=hvc2",
-        "virtio_mmio.device=0x1000@0xd0001000:6",
+        "virtio_mmio.device=0x1000@0xd0001000:17",
         "virtnet_ip=10.0.0.2",
         "virtnet_mask=255.255.255.0",
         "virtnet_gw=10.0.0.1",

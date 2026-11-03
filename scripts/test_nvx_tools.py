@@ -23148,7 +23148,7 @@ class BenchmarkTests(unittest.TestCase):
         network_script = benchmark.smp_probe_script(
             4,
             network_gateway="10.0.0.1",
-            ioapic_irq=10,
+            ioapic_irq=16,
         )
         self.assertIn('ping -c 2 -W 1 "10.0.0.1"', network_script)
         self.assertIn("SMP-IOAPIC-FAIL", network_script)
@@ -23186,7 +23186,7 @@ class BenchmarkTests(unittest.TestCase):
             4,
             teardown_mode="guest-exit",
             network_gateway="10.0.0.1",
-            ioapic_irq=10,
+            ioapic_irq=16,
         )
 
         self.assertTrue(
@@ -23680,23 +23680,28 @@ class BenchmarkTests(unittest.TestCase):
             "teardown_min_ms": 1.0,
             "teardown_max_ms": 1.0,
         }
-        with (
-            patch.object(benchmark, "run_guest_script") as probe,
-            patch.object(benchmark, "benchmark", return_value=result),
-            patch.object(benchmark, "capture_automatic_snapshot"),
-        ):
-            benchmark.benchmark_network_snapshot_workload(
-                args,
-                Path("openvmm"),
-                Path("vmlinux"),
-                Path("initrd"),
-                "kvm",
-            )
+        # The NIC interrupts on IOAPIC input 16 on every backend.
+        for backend in ("kvm", "mshv", "whp"):
+            with (
+                patch.object(benchmark, "run_guest_script") as probe,
+                patch.object(benchmark, "benchmark", return_value=result),
+                patch.object(benchmark, "capture_automatic_snapshot"),
+            ):
+                benchmark.benchmark_network_snapshot_workload(
+                    args,
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    backend,
+                )
 
-        self.assertEqual(probe.call_count, 1)
-        self.assertIn("--network-profile", probe.call_args.args[0])
-        self.assertIn("SMP-IOAPIC-OK", probe.call_args.args[1])
-        self.assertEqual(probe.call_args.args[2], benchmark.SMP_PROBE_COMPLETION_MARKER)
+            self.assertEqual(probe.call_count, 1)
+            self.assertIn("--network-profile", probe.call_args.args[0])
+            self.assertIn("SMP-IOAPIC-OK", probe.call_args.args[1])
+            self.assertIn("ioapic_irq=16\n", probe.call_args.args[1])
+            self.assertEqual(
+                probe.call_args.args[2], benchmark.SMP_PROBE_COMPLETION_MARKER
+            )
 
     def test_shell_snapshot_restore_suite_only_measures_restore(self):
         args = argparse.Namespace(

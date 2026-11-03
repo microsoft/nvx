@@ -9,16 +9,17 @@
 - Mapped fork tip: `82686c983907738d44a6eb9e3322589b573c0074`, position 144. The graph, PR
   summary, and commit mapping below cover positions 001-144 and the PR20 fixup at
   position 161.
-- NVX's pinned OpenVMM revision: `b9b1f8f6d41bcb7cc9b2d1ec7c836b30f5dc7718`, position 203. Positions
-  202 and 203, which microsoft/openvmm#4840 proposes for `feature/microvm/dev`, are two commits on
-  position 201, `d891dfd9d`, which microsoft/openvmm#4839 proposes, one commit on position 200,
+- NVX's pinned OpenVMM revision: `35e76265fa8b63922edead112fcd5a38c59445c8`, position 205. Positions
+  204 and 205, which microsoft/openvmm#4842 proposes for `feature/microvm/dev`, are two commits on
+  position 203, `b9b1f8f6d`, which microsoft/openvmm#4840 proposes as two commits on position 201,
+  `d891dfd9d`, which microsoft/openvmm#4839 proposes, one commit on position 200,
   `0ac254109`, the head of the `feature/microvm/release/v3.0` branch of microsoft/openvmm, to
   which `feature/microvm/dev` also points. The v3.0 reorganization regrouped the 385 commits of
   `feature/microvm/release/v2.4` that upstream had not landed into 200 commits: it folded
   fixups into the commits that they fix and combined the commits after the mapped tip into commits
   by concept, without changing what the chain adds to upstream; see
-  [The v3.0 reorganization](#the-v30-reorganization). The pin is 59 commits past the mapped tip
-  on the same first-parent chain. Positions 145-203, except the PR20 fixup at position
+  [The v3.0 reorganization](#the-v30-reorganization). The pin is 61 commits past the mapped tip
+  on the same first-parent chain. Positions 145-205, except the PR20 fixup at position
   161, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `b2676222b383bf50c7022f6a5983920421469a47` (2026-10-31), the fork base.
@@ -516,7 +517,8 @@ b2676222b
   -> network [195] -> device DMA [196-197]
   -> command lines [198] -> KVP test [199-200]
   -> sandbox block roles [201] -> virtio feature masks [202-203]
-  -> b9b1f8f6d (NVX pin)
+  -> IOAPIC interrupt lines [204-205]
+  -> 35e76265f (NVX pin)
 ```
 
 For upstream review, PR01-PR08 and PR14 can be rebased independently onto current upstream main,
@@ -532,10 +534,10 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 144 without merges. Of the 59 later
+The NVX pin extends the chain past position 144 without merges. Of the 61 later
 commits, position 161 is a PR20 fixup, and the others are not yet classified or assigned to
 PRs. Each of positions 145-200 combines the v2.4 commits that the table lists, which developed one
-concept; "(part)" marks a v2.4 fixup that split across commits. Positions 201-203 follow the
+concept; "(part)" marks a v2.4 fixup that split across commits. Positions 201-205 follow the
 reorganization, so they combine none.
 
 | Position | Commit | v2.4 positions | Topic |
@@ -599,6 +601,8 @@ reorganization, so they combine none.
 | 201 | `d891dfd9d` | - | microVM: remove the runtime and custom sandbox block roles (microsoft/openvmm#4839) |
 | 202 | `b0dda7fea` | - | microVM: give every virtio device class an exact feature mask (microsoft/openvmm#4840) |
 | 203 | `b9b1f8f6d` | - | microVM: drop access-platform and the console size in microVM ABI 3 (microsoft/openvmm#4840) |
+| 204 | `e13c1a644` | - | microVM: route every IOAPIC input in the MP table (microsoft/openvmm#4842) |
+| 205 | `35e76265f` | - | microVM: give each virtio slot its own IOAPIC input in ABI 3 (microsoft/openvmm#4842) |
 
 Some of these commits change mapped work rather than add to it. Position 160 removes the
 legacy microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest
@@ -615,7 +619,14 @@ names and layer counts of PR19's position 105's snapshot capture and restore. Po
 fall-through among them, and that PR18's positions 095, 096, and 100, PR19's position 104, and
 PR23's position 129 give the NIC, the filesystem, the sandbox blocks, and the consoles and record
 in the snapshot contract. Position 203 also moves the microVM ABI version of PR17's position 087
-to 3, which PR20's position 108 and PR25's position 137 check. Assigning the later
+to 3, which PR20's position 108 and PR25's position 137 check. Position 204 extends the MP table
+builder of PR14's position 065, which microsoft/openvmm#4554 proposes upstream, and its tests and
+those of PR14's positions 066 and 067, to route every IOAPIC input, and passes the microVM's 24
+inputs from the loader of PR15's position 075. Position 205 moves every virtio slot from the ISA
+IRQ that PR16's position 080 gives it, and the NIC from the backend-specific IRQ that PR18's
+position 096 selects, to the IOAPIC input of its window, which changes the interrupts and
+discovery tokens that PR17's position 087 records in the snapshot contract and that the slots of
+PR18, PR19, and PR23 use. Assigning the later
 commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 191, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -646,6 +657,11 @@ does not apply to upstream main and follows those PRs upstream. Positions 202 an
 change only the microVM profile, its worker's device configuration, its snapshot contract, and
 its management RPC profile, which PR16-PR20, PR23, and PR25 add, and their Guide pages: replaying
 them on `b2676222b` conflicts in all nine of their files, so they follow those PRs upstream.
+Positions 204 and 205 change the MP-table loader of PR14 and the microVM profile, worker, CLI, and
+snapshot contract of PR15-PR19 and PR23, and their Guide pages: replaying them on `b2676222b`
+conflicts in 16 of their 17 files, so they follow those PRs upstream. The 17th, the IOAPIC's
+`chipset` tests, which position 204 extends with a save and restore of the inputs past the ISA
+IRQs, applies to upstream main without conflicts.
 
 ## PR summary
 

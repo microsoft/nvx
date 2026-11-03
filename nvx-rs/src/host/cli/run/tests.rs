@@ -15,7 +15,7 @@ use crate::protocol::cmdline::{self, parameters, virtio_mmio_devices};
 fn effective_command_line(cmdline: &str) -> String {
     format!(
         "earlycon=xe9 console=hvc1 reboot=t panic=-1 {cmdline} \
-         virtio_mmio.device=0x1000@0xd0001000:6 virtio_mmio.device=0x1000@0xd0002000:7{}",
+         virtio_mmio.device=0x1000@0xd0001000:17 virtio_mmio.device=0x1000@0xd0002000:18{}",
         aggregate_command_line_fragment(&[MountAccess::ReadWrite])
     )
 }

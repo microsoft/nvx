@@ -605,11 +605,11 @@ pub(super) struct ManifestSpec {
 /// The kernel command line of the template of [`ManifestSpec::template`].
 const COMMAND_LINE: &str = "earlycon=xe9 console=hvc1 reboot=t panic=-1 nvx_sandbox=1 \
                             nvx_config=0xd0010000,65536 nr_cpus=2 nvx_snapshot_tier=platform \
-                            virtio_mmio.device=0x1000@0xd0001000:6 \
-                            virtio_mmio.device=0x1000@0xd0002000:7 \
-                            virtio_mmio.device=0x1000@0xd0003000:4 \
-                            virtio_mmio.device=0x1000@0xd0006000:11 \
-                            virtio_mmio.device=0x1000@0xd0007000:3 nvx_control_tty=hvc2";
+                            virtio_mmio.device=0x1000@0xd0001000:17 \
+                            virtio_mmio.device=0x1000@0xd0002000:18 \
+                            virtio_mmio.device=0x1000@0xd0003000:19 \
+                            virtio_mmio.device=0x1000@0xd0006000:22 \
+                            virtio_mmio.device=0x1000@0xd0007000:23 nvx_control_tty=hvc2";
 
 impl ManifestSpec {
     /// Returns the manifest of a template: a KVM microVM of 2 processors, all online at boot, and
@@ -679,7 +679,7 @@ impl ManifestSpec {
                     "virtio-fs",
                     "virtiofs",
                     0xd000_1000,
-                    6,
+                    17,
                     0x1_3000_0000,
                     2,
                 ),
@@ -688,7 +688,7 @@ impl ManifestSpec {
                     "virtio-console",
                     "virtio-console",
                     0xd000_2000,
-                    7,
+                    18,
                     0x1_3000_0000,
                     2,
                 ),
@@ -697,7 +697,7 @@ impl ManifestSpec {
                     "virtio-blk",
                     "virtio-blk",
                     0xd000_3000,
-                    4,
+                    19,
                     0x1_3000_0664,
                     1,
                 ),
@@ -706,7 +706,7 @@ impl ManifestSpec {
                     "virtio-blk",
                     "virtio-blk",
                     0xd000_6000,
-                    11,
+                    22,
                     0x1_3000_0644,
                     1,
                 ),
@@ -715,7 +715,7 @@ impl ManifestSpec {
                     "virtio-control-console",
                     "virtio-control-console",
                     0xd000_7000,
-                    3,
+                    23,
                     0x1_3000_0000,
                     2,
                 ),
@@ -832,7 +832,7 @@ impl ManifestSpec {
                 "virtio-net",
                 "virtio-net",
                 0xd000_0000,
-                10,
+                16,
                 0x1_0000_0020,
                 2,
             ),
@@ -842,8 +842,8 @@ impl ManifestSpec {
             .state_units
             .push("virtio-net-3489660928".to_owned());
         contract.command_line = contract.command_line.replacen(
-            "virtio_mmio.device=0x1000@0xd0001000:6",
-            "virtio_mmio.device=0x1000@0xd0000000:10 virtio_mmio.device=0x1000@0xd0001000:6",
+            "virtio_mmio.device=0x1000@0xd0001000:17",
+            "virtio_mmio.device=0x1000@0xd0000000:16 virtio_mmio.device=0x1000@0xd0001000:17",
             1,
         ) + " virtnet_ip=10.0.0.2 virtnet_mask=255.255.255.0 virtnet_gw=10.0.0.1 \
              virtnet_ip6=fd00::a00:2/120 virtnet_gw6=fd00::a00:1";

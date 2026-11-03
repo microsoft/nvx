@@ -967,8 +967,9 @@ fn vector_class(name: &str) -> CaptureClass {
 }
 
 /// Returns the manifest of the capture that the vectors call `name`, as microVM ABI 2 captured it:
-/// every virtio device but the NIC also offered access-platform (bit 33), and each console also
-/// offered its size (bit 0).
+/// every virtio device but the NIC also offered access-platform (bit 33), each console also
+/// offered its size (bit 0), and each virtio device interrupted on an ISA IRQ, which its discovery
+/// token named.
 fn vector_spec(name: &str) -> ManifestSpec {
     let mut spec = match name {
         "TEMPLATE" => ManifestSpec::template(),
@@ -980,12 +981,35 @@ fn vector_spec(name: &str) -> ManifestSpec {
         }
         _ => panic!("no capture is named {name}"),
     };
-    for device in &mut spec.contract().devices {
-        if device.transport == "virtio-mmio" && device.kind != "virtio-net" {
-            device.feature_banks[1] |= 1 << (33 - 32);
-            if device.kind.ends_with("console") {
-                device.feature_banks[0] |= 1;
+    // Each virtio device's MMIO base, interrupt in ABI 3, and ISA IRQ in ABI 2, on KVM.
+    const ISA_IRQS: [(u64, u32, u32); 6] = [
+        (0xd000_0000, 16, 10),
+        (0xd000_1000, 17, 6),
+        (0xd000_2000, 18, 7),
+        (0xd000_3000, 19, 4),
+        (0xd000_6000, 22, 11),
+        (0xd000_7000, 23, 3),
+    ];
+    let contract = spec.contract();
+    for device in &mut contract.devices {
+        if device.transport == "virtio-mmio" {
+            if device.kind != "virtio-net" {
+                device.feature_banks[1] |= 1 << (33 - 32);
+                if device.kind.ends_with("console") {
+                    device.feature_banks[0] |= 1;
+                }
             }
+            let (base, irq, isa_irq) = ISA_IRQS
+                .into_iter()
+                .find(|(base, ..)| device.ranges[0].1 == *base)
+                .expect("a virtio device has a fixed slot");
+            assert_eq!(device.irq, Some(irq), "{base:#x}");
+            device.irq = Some(isa_irq);
+            contract.command_line = contract.command_line.replacen(
+                &format!("virtio_mmio.device=0x1000@{base:#x}:{irq}"),
+                &format!("virtio_mmio.device=0x1000@{base:#x}:{isa_irq}"),
+                1,
+            );
         }
     }
     spec
