@@ -203,6 +203,8 @@ GUEST_SCRIPT_PATH = "/tmp/nvx-guest-script"
 GUEST_SCRIPT_DELIMITER = "NVX_GUEST_SCRIPT"
 GUEST_SCRIPT_START_MARKER = b"NVX-GUEST-SCRIPT-START"
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
+# A line of the kernel log as a console prints it, after printk's timestamp.
+KERNEL_LOG_LINE = re.compile(r"\[ *\d+\.\d{6}\] ")
 SANDBOX_BLOCKS_COMPLETION_MARKER = b"NVX-SANDBOX-BLOCKS-OK"
 VIRTIO_NET_COMPLETION_MARKER = b"NVX-VIRTIO-NET-OK"
 VIRTIO_FEATURES_COMPLETION_MARKER = b"NVX-VIRTIO-FEATURES-OK"
@@ -1181,6 +1183,20 @@ def run_guest_identity(
     )
 
 
+def check_quiet_console(text: str) -> None:
+    """Require that the console transcript ``text`` of a boot with
+    ``quiet loglevel=0`` holds no line of the kernel log. The early console,
+    ``earlycon=xe9``, registers before the kernel parses the options that
+    follow it, so it must apply their log level first: otherwise it prints
+    the kernel's first messages, at one VM exit per byte."""
+    line = KERNEL_LOG_LINE.search(text)
+    if line is not None:
+        printed = text[line.start() :].partition("\n")[0].rstrip("\r")
+        raise RuntimeError(
+            f"a boot with quiet loglevel=0 printed the kernel log line {printed!r}"
+        )
+
+
 def run_lifecycle(
     executable: Path,
     kernel: Path,
@@ -1199,13 +1215,14 @@ def run_lifecycle(
         memory_mib,
         "quiet loglevel=0",
     )
-    run_guest_script(
+    result = run_guest_script(
         command,
         _read_script("lifecycle.sh"),
         LIFECYCLE_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
     )
+    check_quiet_console(result["text"])
 
 
 def run_workload_identity(

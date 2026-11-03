@@ -1,43 +1,109 @@
-Add a Nanvix-style per-byte debug console on I/O port 0xE9 (earlycon=xe9).
+From: NVX maintainers
+Subject: [PATCH] x86/early_printk: add the OpenVMM microVM xe9 early console
 
-Redirects kernel log output to a single-outb-per-byte port, cheaper than the 8250
-UART (which polls the line-status register per byte). Used by the microvm VMM's 0xE9
-debug console. Apply with: patch -p1 < kernel/patches/0001-microvm-xe9-earlycon.patch
+Add a per-byte early console on I/O port 0xE9, the data port of the OpenVMM
+microVM's byte channel, for the machine profile's earlycon=xe9. Each character
+is a single outb, which the VMM turns into one host write, where the 8250 early
+console would also poll the line-status register before every byte.
 
---- forwarded from microvm ---
+Register it from the earlycon= early parameter as an x86 boot console, as
+earlyprintk= registers its consoles. The earlycon framework would need the
+serial core and SERIAL_EARLYCON, which only serial drivers select; without
+them, a framework console is never built, and the kernel passes earlycon=xe9,
+an unknown parameter, to init's environment. The kernel console, hvc0 or hvc1,
+replaces the early console when it registers.
 
---- a/arch/x86/kernel/early_printk.c	2026-07-04 04:44:22.000000000 -0700
-+++ b/arch/x86/kernel/early_printk.c	2026-07-07 06:13:47.278426485 -0700
+A boot console prints the messages that it missed when it registers, at the
+console log level, and early parameters take effect in their order on the
+command line, where the machine profile's earlycon=xe9 precedes the caller's
+quiet and loglevel=. Apply the command line's quiet, debug, and loglevel=
+before registering, in their order, so that a boot with quiet loglevel=0
+prints nothing on the byte channel rather than its first messages, at one VM
+exit per byte.
+
+--- a/arch/x86/kernel/early_printk.c
++++ b/arch/x86/kernel/early_printk.c
 @@ -21,6 +21,7 @@
  #include <linux/usb/xhci-dbgp.h>
  #include <asm/pci_x86.h>
  #include <linux/static_call.h>
-+#include <linux/serial_core.h>
++#include <linux/moduleparam.h>
  
  /* Simple VGA output */
  #define VGABASE		(__ISA_IO_base + 0xb8000)
-@@ -447,3 +448,24 @@
+@@ -447,3 +448,75 @@ static int __init setup_early_printk(char *buf)
  }
  
  early_param("earlyprintk", setup_early_printk);
 +
 +/*
-+ * microvm: Nanvix-style per-byte debug console on I/O port 0xE9.
++ * microvm: Nanvix-style per-byte early console on I/O port 0xE9, the data port
++ * of the OpenVMM microVM's byte channel, which its machine profile selects with
++ * "earlycon=xe9".
 + *
-+ * Each character is emitted with a single `outb` to port 0xE9, which the VMM turns into
-+ * one host write. This is cheaper than the 8250 earlycon, which additionally polls the
-+ * line-status register before every byte (two port accesses per character). Select it with
-+ * "earlycon=xe9" on the kernel command line.
++ * Each character is emitted with a single `outb` to port 0xE9, which the VMM
++ * turns into one host write. This is cheaper than the 8250 early console, which
++ * additionally polls the line-status register before every byte (two port
++ * accesses per character).
++ *
++ * The console registers from this early parameter as a boot console, as the
++ * consoles of earlyprintk= do, so it needs neither the serial core nor
++ * SERIAL_EARLYCON, which only serial drivers select. The kernel console, hvc0
++ * or hvc1, replaces it when it registers. A kernel with SERIAL_EARLYCON also
++ * parses earlycon=, finds no "xe9" console of its own, and ignores it.
 + */
-+static void early_xe9_write(struct console *console, const char *s, unsigned int count)
++static void early_xe9_write(struct console *con, const char *s, unsigned int count)
 +{
 +	while (count--)
 +		outb(*s++, 0xe9);
 +}
 +
-+static int __init early_xe9_setup(struct earlycon_device *device, const char *options)
++static struct console early_xe9_console = {
++	.name =		"earlyxe9",
++	.write =	early_xe9_write,
++	.flags =	CON_PRINTBUFFER,
++	.index =	-1,
++};
++
++/* A copy of the command line, which parse_args() takes apart. */
++static char early_xe9_cmdline[COMMAND_LINE_SIZE] __initdata;
++
++/*
++ * Sets the console log level that quiet, debug, or loglevel= requests, as
++ * their own early parameters do.
++ */
++static int __init early_xe9_loglevel(char *param, char *val,
++				     const char *unused, void *arg)
 +{
-+	device->con->write = early_xe9_write;
++	int level;
++
++	if (!strcmp(param, "quiet"))
++		console_loglevel = CONSOLE_LOGLEVEL_QUIET;
++	else if (!strcmp(param, "debug"))
++		console_loglevel = CONSOLE_LOGLEVEL_DEBUG;
++	else if (!strcmp(param, "loglevel") && val && get_option(&val, &level))
++		console_loglevel = level;
 +	return 0;
 +}
-+EARLYCON_DECLARE(xe9, early_xe9_setup);
++
++static int __init setup_early_xe9(char *buf)
++{
++	if (!buf || strcmp(buf, "xe9") || early_console)
++		return 0;
++
++	/*
++	 * The console prints the messages that it missed when it registers, at
++	 * the console log level. The machine profile's earlycon=xe9 precedes
++	 * the caller's options, whose early parameters set that level only after
++	 * this one, so apply their quiet, debug, and loglevel= first, in their
++	 * order, which parse_early_param() then applies again: a boot with
++	 * "quiet loglevel=0" prints nothing.
++	 */
++	strscpy(early_xe9_cmdline, boot_command_line, sizeof(early_xe9_cmdline));
++	parse_args("early xe9 console", early_xe9_cmdline, NULL, 0, 0, 0, NULL,
++		   early_xe9_loglevel);
++	early_console_register(&early_xe9_console, 0);
++	return 0;
++}
++
++early_param("earlycon", setup_early_xe9);

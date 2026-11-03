@@ -217,17 +217,27 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
     ),
     KernelFeature(
         name="byte-channel-console",
-        summary="The xe9 console on the byte channel, hvc0",
+        summary="The xe9 consoles on the byte channel, earlycon=xe9 and hvc0",
         rationale=(
-            "The machine profile's base command line selects the xe9 console "
-            "of kernel patch 0002, console=hvc0, and the xe9 early console of "
-            "patch 0001, which early_printk.c holds. The early console also "
-            "needs SERIAL_EARLYCON, which no symbol of this configuration "
-            "selects, so earlycon=xe9 has no effect and hvc0 prints the boot "
-            "log once its console initcall runs."
+            "The machine profile's base command line selects the xe9 early "
+            "console of kernel patch 0001, earlycon=xe9, and the xe9 console "
+            "of patch 0002, console=hvc0. Patch 0001 registers the early "
+            "console from early_printk.c, which EARLY_PRINTK builds, as an "
+            "x86 boot console, so it needs neither the serial core nor "
+            "SERIAL_EARLYCON, which only serial drivers select. It applies "
+            "the command line's quiet, debug, and loglevel= before it "
+            "registers, so that a quiet boot prints nothing, and it prints "
+            "the boot log from the early parameters until the kernel console, "
+            "hvc0 or hvc1, registers."
         ),
-        consumers=("the machine profile's console=hvc0", "guest/common/init"),
-        validation=("every microVM scenario's console markers",),
+        consumers=(
+            "the machine profile's earlycon=xe9 and console=hvc0",
+            "guest/common/init",
+        ),
+        validation=(
+            "every microVM scenario's console markers",
+            "the lifecycle scenario's early console and quiet console checks",
+        ),
         settings=(
             "CONFIG_TTY=y",
             "CONFIG_HVC_XE9=y",
