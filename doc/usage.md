@@ -822,10 +822,11 @@ The Linux-only check command adds the `x86_64-unknown-linux-musl` target to the
 Rust toolchain that `--toolchain` names, by default the exact
 `rust-toolchain.toml` pin. It then runs Clippy with warnings denied on every
 target of the `guest` feature, and the feature's musl tests, whose static test
-executables run on the host. It ignores an inherited `NVX_GUEST_BINARIES`, so
-that the integration tests run the binaries that Cargo builds from the
-checkout. The `nvx-rs` CI job runs it with the toolchain that its action
-selects, before it builds the binaries.
+executables run on the host, and does both for `nvx-sys`, the OS layer of the
+guest binaries, with all its features. It ignores an inherited
+`NVX_GUEST_BINARIES`, so that the integration tests run the binaries that
+Cargo builds from the checkout. The `nvx-rs` CI job runs it with the
+toolchain that its action selects, before it builds the binaries.
 
 ### `build-guest-binaries`
 

@@ -103,6 +103,8 @@ serde_json = { version = "1.0.120", optional = true }
 sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
+# The descriptor helpers of the guest modules' tests, at exactly nvx's version too.
+nvx-sys = { path = "../crates/nvx-sys", version = "=0.1.0-alpha.3", features = ["test-support"] }
 # The property tests of the protocol's codecs, which need none of the forking and timeouts of its
 # default features.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }

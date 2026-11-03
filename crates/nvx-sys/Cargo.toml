@@ -14,6 +14,11 @@ publish = ["crates-io"]
 [lints]
 workspace = true
 
+[features]
+# The helpers that the tests of nvx's guest modules use, which nvx enables as a development
+# dependency.
+test-support = []
+
 # The first modules that move here, the guest's descriptor and socket
 # primitives, call nix with these features.
 [target.'cfg(unix)'.dependencies]

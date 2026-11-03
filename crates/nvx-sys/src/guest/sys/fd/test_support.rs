@@ -5,7 +5,7 @@ use super::*;
 ///
 /// The crate does not enable `nix`'s resource limits, so this calls `getrlimit` and `setrlimit`
 /// through libc.
-pub(crate) fn set_descriptor_limit(limit: nix::libc::rlim_t) -> Result<nix::libc::rlim_t, Errno> {
+pub fn set_descriptor_limit(limit: nix::libc::rlim_t) -> Result<nix::libc::rlim_t, Errno> {
     let mut limits = nix::libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -21,13 +21,13 @@ pub(crate) fn set_descriptor_limit(limit: nix::libc::rlim_t) -> Result<nix::libc
 
 /// Creates `path` as a FIFO with `mode`, with which tests stand for a console, and keep their
 /// system calls in this module.
-pub(crate) fn create_fifo(path: &CStr, mode: Mode) -> Result<(), Errno> {
+pub fn create_fifo(path: &CStr, mode: Mode) -> Result<(), Errno> {
     nix::unistd::mkfifo(path, mode)
 }
 
 impl FileDescriptor {
     /// Returns whether this descriptor carries every seal that `seal_immutable` adds.
-    pub(crate) fn is_sealed_immutable(&self) -> Result<bool, Errno> {
+    pub fn is_sealed_immutable(&self) -> Result<bool, Errno> {
         let seals = fcntl(&self.0, FcntlArg::F_GET_SEALS).map(SealFlag::from_bits_retain)?;
         Ok(seals.contains(IMMUTABLE_SEALS))
     }

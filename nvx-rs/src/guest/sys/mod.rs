@@ -55,7 +55,6 @@
 mod clock;
 mod discipline;
 mod entry;
-mod fd;
 mod filesystem;
 mod ioctl;
 pub(crate) mod kernel;
@@ -70,7 +69,6 @@ mod scheduler;
 mod secret;
 mod signal;
 mod sock_diag;
-mod socket;
 mod spawn;
 mod terminal;
 mod timer;
@@ -80,6 +78,8 @@ pub(crate) mod x86;
 use std::ffi::CString;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStringExt;
+
+use nvx_sys::guest::sys::{fd, socket};
 
 pub(crate) use nix::errno::Errno;
 pub(crate) use nix::sys::signal::Signal;

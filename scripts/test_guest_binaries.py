@@ -959,12 +959,23 @@ class GuestBinaryCheckTests(unittest.TestCase):
             "--features",
             "guest",
         ]
+        # nvx-sys, the OS layer of the guest binaries, has tests of its own.
+        system = [
+            "--locked",
+            "--target",
+            target,
+            "--package",
+            "nvx-sys",
+            "--all-features",
+        ]
         self.assertEqual(
             [command for command, _, _ in calls],
             [
                 ["rustup", "target", "add", "--toolchain", toolchain, target],
                 [*cargo, "clippy", *guest, "--all-targets", "--", "-D", "warnings"],
                 [*cargo, "test", *guest],
+                [*cargo, "clippy", *system, "--all-targets", "--", "-D", "warnings"],
+                [*cargo, "test", *system],
             ],
         )
         for _, cwd, environment in calls:

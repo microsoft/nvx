@@ -7,6 +7,7 @@
 use std::ffi::{CStr, c_int};
 
 use super::Errno;
+pub(crate) use super::fd::NULL_DEVICE;
 
 /// The kernel's structured log: each read returns one record, and each write adds one.
 pub(crate) const KERNEL_LOG_DEVICE: &CStr = c"/dev/kmsg";
@@ -54,8 +55,6 @@ pub(crate) const WATCHDOG_THRESHOLD: &CStr = c"/proc/sys/kernel/watchdog_thresh"
 pub(crate) const HUNG_TASK_TIMEOUT: &CStr = c"/proc/sys/kernel/hung_task_timeout_secs";
 /// The calling process's adjustment of its out-of-memory score.
 pub(crate) const OOM_SCORE_ADJUSTMENT: &CStr = c"/proc/self/oom_score_adj";
-/// The null device.
-pub(crate) const NULL_DEVICE: &CStr = c"/dev/null";
 /// The console device.
 pub(crate) const CONSOLE_DEVICE: &CStr = c"/dev/console";
 

@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use super::*;
 
 pub(crate) use super::entry::tests::Simulation;
-pub(crate) use super::fd::tests::{create_fifo, set_descriptor_limit};
+pub(crate) use super::fd::test_support::{create_fifo, set_descriptor_limit};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::port::tests::PortBackend;
 #[cfg(target_arch = "x86_64")]

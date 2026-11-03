@@ -3,8 +3,10 @@
 `nvx-sys` is the OS layer that NVX's crates share, to which the OS modules of
 the [`nvx`](../../nvx-rs/README.md) crate move. It holds the error type of
 NVX's operations in its `error` module, which `nvx` re-exports as
-`nvx::Error`, `nvx::ErrorCode`, `nvx::ErrorKind`, and `nvx::Result`. The
-nightly CI run publishes it on crates.io before `nvx`, which requires it at
+`nvx::Error`, `nvx::ErrorCode`, `nvx::ErrorKind`, and `nvx::Result`. On Linux,
+its `guest` module holds the descriptor and socket primitives that `nvx`'s
+guest modules use, and its `test-support` feature adds helpers for their tests.
+The nightly CI run publishes it on crates.io before `nvx`, which requires it at
 exactly their shared version; see
 [crates.io releases](../../doc/ci.md#cratesio-releases). It makes no stability
 guarantee: its API can change in any release.

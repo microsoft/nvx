@@ -334,7 +334,7 @@ def _install_output(staging: Path, output: Path) -> None:
 
 
 def check_guest_binaries(toolchain: str | None = None) -> None:
-    """Lint and test the guest binaries for musl.
+    """Lint and test the guest binaries, and nvx-sys, their OS layer, for musl.
 
     ``toolchain`` names the Rust toolchain, by default the exact repository pin.
     The tests run static musl executables on the host.
@@ -353,9 +353,13 @@ def check_guest_binaries(toolchain: str | None = None) -> None:
         "--features",
         GuestRustBuildConstants.FEATURE,
     )
+    # nvx-sys has no guest feature: its guest module builds for every Linux target.
+    system = ("--locked", "--target", target, "--package", "nvx-sys", "--all-features")
     commands = (
         ("clippy", *guest, "--all-targets", "--", "-D", "warnings"),
         ("test", *guest),
+        ("clippy", *system, "--all-targets", "--", "-D", "warnings"),
+        ("test", *system),
     )
     # The integration tests must run the binaries that Cargo builds from this
     # checkout rather than a directory that the caller selected.

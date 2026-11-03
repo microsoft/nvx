@@ -13,7 +13,7 @@ use super::{Errno, FileDescriptor};
 ///
 /// Connecting fixes the destination of every `write` and the only source from which `read`
 /// receives, as the `socket` and `connect` calls of `nvx-device-io`'s C program did.
-pub(crate) fn connect_datagram(peer: SocketAddrV4) -> Result<FileDescriptor, Errno> {
+pub fn connect_datagram(peer: SocketAddrV4) -> Result<FileDescriptor, Errno> {
     let UdpSocket(socket) = UdpSocket::ipv4()?;
     nix::sys::socket::connect(socket.as_raw_fd(), &SockaddrIn::from(peer))?;
     Ok(FileDescriptor::from_owned(socket))
@@ -24,11 +24,11 @@ pub(crate) fn connect_datagram(peer: SocketAddrV4) -> Result<FileDescriptor, Err
 ///
 /// Dropping it closes the socket, which the C program left to its exit.
 #[derive(Debug)]
-pub(crate) struct UdpSocket(OwnedFd);
+pub struct UdpSocket(OwnedFd);
 
 impl UdpSocket {
     /// Creates the socket.
-    pub(crate) fn ipv4() -> Result<Self, Errno> {
+    pub fn ipv4() -> Result<Self, Errno> {
         nix::sys::socket::socket(
             AddressFamily::Inet,
             SockType::Datagram,
@@ -42,7 +42,7 @@ impl UdpSocket {
     /// standard input that `take_inherited_descriptor` returns, as an IPv4 datagram socket: a
     /// descriptor that is not a socket is `ENOTSOCK`, a socket of another type `EPROTOTYPE`, and
     /// a datagram socket of another address family `EAFNOSUPPORT`.
-    pub(crate) fn inherited(descriptor: FileDescriptor) -> Result<Self, Errno> {
+    pub fn inherited(descriptor: FileDescriptor) -> Result<Self, Errno> {
         let socket = OwnedFd::from(descriptor);
         if nix::sys::socket::getsockopt(&socket, sockopt::SockType)? != SockType::Datagram {
             return Err(Errno::EPROTOTYPE);
@@ -55,13 +55,13 @@ impl UdpSocket {
     }
 
     /// Returns the port to which the socket is bound, or 0 if it is bound to none.
-    pub(crate) fn port(&self) -> Result<u16, Errno> {
+    pub fn port(&self) -> Result<u16, Errno> {
         nix::sys::socket::getsockname::<SockaddrIn>(self.0.as_raw_fd())
             .map(|address| address.port())
     }
 
     /// Binds the socket to `port` on every local IPv4 address.
-    pub(crate) fn bind_any(&self, port: u16) -> Result<(), Errno> {
+    pub fn bind_any(&self, port: u16) -> Result<(), Errno> {
         nix::sys::socket::bind(
             self.0.as_raw_fd(),
             &SockaddrIn::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
@@ -69,7 +69,7 @@ impl UdpSocket {
     }
 
     /// Sends `payload` to `peer` in one datagram, and returns the number of bytes sent.
-    pub(crate) fn send_to(&self, peer: SocketAddrV4, payload: &[u8]) -> Result<usize, Errno> {
+    pub fn send_to(&self, peer: SocketAddrV4, payload: &[u8]) -> Result<usize, Errno> {
         nix::sys::socket::sendto(
             self.0.as_raw_fd(),
             payload,
@@ -79,7 +79,7 @@ impl UdpSocket {
     }
 }
 
-/// Gives up the socket to its new owner, which `crate::guest::spawn` hands to a child as one of
+/// Gives up the socket to its new owner, which `nvx::guest::spawn` hands to a child as one of
 /// its standard streams.
 impl From<UdpSocket> for OwnedFd {
     fn from(socket: UdpSocket) -> Self {

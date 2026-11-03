@@ -800,7 +800,8 @@ class ManifestTests(unittest.TestCase):
 
     def test_ci_publishes_nvx_sys_and_then_nvx_with_a_version_they_can_publish(self):
         # The repository's own crates: CI publishes nvx-sys, then nvx, which
-        # requires it by path and at exactly their version, whose counter the
+        # requires it, and its test support for nvx's tests, by path and at
+        # exactly their version, whose counter the
         # next release raises. A run that gives them the next version changes
         # only their versions, and nvx's requirement on nvx-sys, in their
         # manifests and in the lockfile of their workspace, at the repository's
@@ -831,7 +832,15 @@ class ManifestTests(unittest.TestCase):
                         "nvx-sys",
                         "nvx-sys",
                         "optional=False default-features=True features=[]",
-                    )
+                    ),
+                    (
+                        "",
+                        "dev-dependencies",
+                        "nvx-sys",
+                        "nvx-sys",
+                        "optional=False default-features=True "
+                        "features=['test-support']",
+                    ),
                 ],
             },
         )
@@ -843,6 +852,10 @@ class ManifestTests(unittest.TestCase):
         requirement = (
             f'nvx-sys = {{ path = "../crates/nvx-sys", version = "={following}" }}'
         ).encode()
+        test_support = (
+            f'nvx-sys = {{ path = "../crates/nvx-sys", version = "={following}", '
+            'features = ["test-support"] }'
+        ).encode()
         files = checkout.versioned(following)
         self.assertEqual(
             {
@@ -852,7 +865,7 @@ class ManifestTests(unittest.TestCase):
             {
                 "Cargo.lock": [version, version],
                 "crates/nvx-sys/Cargo.toml": [version],
-                "nvx-rs/Cargo.toml": [version, requirement],
+                "nvx-rs/Cargo.toml": [version, requirement, test_support],
             },
         )
 
