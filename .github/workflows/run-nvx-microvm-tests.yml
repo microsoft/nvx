@@ -36,8 +36,17 @@ on:
           Run the steps that follow the default suite instead of it, in a
           second job of the backend beside the default suite: the public
           managed sandbox acceptance, the Ubuntu and Azure Linux guest tests,
-          the Ubuntu sandbox steps, and the runtime adapter scenarios. Not for
-          the debug-kernel jobs, which skip these steps
+          and the Ubuntu sandbox steps. Not for the debug-kernel jobs, which
+          skip these steps
+        required: false
+        type: boolean
+        default: false
+      runtime-adapter:
+        description: >-
+          Run the runtime adapter scenarios instead of the default suite:
+          after the guest and sandbox steps with guests-and-sandboxes, or
+          alone, in a third job of the backend beside the other two. Not for
+          the debug-kernel jobs, which skip them
         required: false
         type: boolean
         default: false
@@ -95,9 +104,9 @@ jobs:
       # qualifies its runner with the kernel and the Alpine initramfs, the
       # shards of the default suite boot only those, and the debug-kernel jobs
       # run only Alpine scenarios on the debug kernel, so only the guest and
-      # sandbox steps take the Ubuntu and Azure Linux artifacts, and an
-      # unsharded default run the Ubuntu distro layer of its public sandbox
-      # scenarios.
+      # sandbox steps take the Ubuntu and Azure Linux artifacts, and the
+      # runtime adapter scenarios and an unsharded default run the Ubuntu
+      # distro layer of their layered roots and public sandbox scenarios.
       - name: Download guest kernel
         uses: actions/download-artifact@v8
         with:
@@ -134,7 +143,17 @@ jobs:
       # The layer, its manifest, and the sandbox scratch template, which the
       # public sandbox scenarios of an unsharded default run read.
       - name: Download Ubuntu distro layer for the whole default run
-        if: ${{ !inputs.guests-and-sandboxes && !inputs.debug-kernel && !inputs.shard }}
+        if: ${{ !inputs.guests-and-sandboxes && !inputs.runtime-adapter && !inputs.debug-kernel && !inputs.shard }}
+        uses: actions/download-artifact@v8
+        with:
+          name: guest-ubuntu-distro
+          path: build
+
+      # The layer, its manifest, and the sandbox scratch template, from which
+      # the layered runtime adapter scenarios boot their roots, in a job that
+      # runs the scenarios without the guest and sandbox steps.
+      - name: Download Ubuntu distro layer for the runtime adapter alone
+        if: ${{ inputs.runtime-adapter && !inputs.guests-and-sandboxes && !inputs.debug-kernel }}
         uses: actions/download-artifact@v8
         with:
           name: guest-ubuntu-distro
@@ -189,7 +208,7 @@ jobs:
       # the Linux steps exec the test harness, which can then stop OpenVMM and
       # remove its scratch directories (doc/ci.md#cancellation).
       - name: Run NVX microVM tests on Linux
-        if: runner.os != 'Windows' && !inputs.guests-and-sandboxes
+        if: runner.os != 'Windows' && !inputs.guests-and-sandboxes && !inputs.runtime-adapter
         shell: bash
         run: >-
           exec python3 scripts/nvx.py test-microvm
@@ -199,7 +218,7 @@ jobs:
           --output-dir "build/test-results/microvm-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}"
 
       - name: Run NVX microVM tests on Windows
-        if: runner.os == 'Windows' && !inputs.guests-and-sandboxes
+        if: runner.os == 'Windows' && !inputs.guests-and-sandboxes && !inputs.runtime-adapter
         shell: powershell
         run: >-
           python scripts\nvx.py test-microvm
@@ -1293,12 +1312,12 @@ jobs:
       # the host program reattach to a VM, as after a restart of the
       # orchestrator, and stop it. The layered scenarios boot the Ubuntu EROFS
       # image over a copy of the scratch template, from the guest artifacts, as
-      # the sandbox steps above do, and the guest agent's worker assembles the
-      # root outside PID 1. The guest agent is a static musl executable: Linux
+      # the sandbox steps do, and the guest agent's worker assembles the root
+      # outside PID 1. The guest agent is a static musl executable: Linux
       # builds it, and Windows takes the one that distro-artifacts builds on
-      # Linux, as it takes the Ubuntu and Azure Linux images.
+      # Linux, beside the Ubuntu distro layer.
       - name: Build the runtime adapter's guest agent on Linux
-        if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
+        if: runner.os != 'Windows' && inputs.runtime-adapter && !inputs.debug-kernel
         shell: bash
         working-directory: tests/runtime-adapter
         run: >-
@@ -1306,7 +1325,7 @@ jobs:
           --target x86_64-unknown-linux-musl --bin runtime-adapter-guest
 
       - name: Run runtime adapter scenarios on Linux
-        if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
+        if: runner.os != 'Windows' && inputs.runtime-adapter && !inputs.debug-kernel
         shell: bash
         run: >-
           python3 scripts/nvx.py test-runtime-adapter
@@ -1314,22 +1333,25 @@ jobs:
           --guest-agent tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest
 
       - name: Download the runtime adapter's guest agent on Windows
-        if: runner.os == 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
+        if: runner.os == 'Windows' && inputs.runtime-adapter && !inputs.debug-kernel
         uses: actions/download-artifact@v8
         with:
           name: runtime-adapter-guest
           path: build/runtime-adapter
 
       - name: Run runtime adapter scenarios on Windows
-        if: runner.os == 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
+        if: runner.os == 'Windows' && inputs.runtime-adapter && !inputs.debug-kernel
         shell: powershell
         run: >-
           python scripts\nvx.py test-runtime-adapter
           --backend "${{ inputs.backend }}"
           --guest-agent build\runtime-adapter\runtime-adapter-guest
 
+      # A job that runs the runtime adapter scenarios alone runs no
+      # test-microvm step, so it has neither result directories nor duration
+      # reports to keep.
       - name: Upload NVX microVM failure logs
-        if: failure()
+        if: failure() && (inputs.guests-and-sandboxes || !inputs.runtime-adapter)
         uses: actions/upload-artifact@v7
         with:
           name: nvx-microvm-tests-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}
@@ -1347,7 +1369,7 @@ jobs:
       # job passes, fails, or is cancelled; each shard of the default suite
       # keeps its own.
       - name: Upload NVX microVM scenario durations
-        if: always()
+        if: always() && (inputs.guests-and-sandboxes || !inputs.runtime-adapter)
         uses: actions/upload-artifact@v7
         with:
           name: nvx-microvm-durations-${{ runner.os }}-${{ inputs.backend }}-${{ inputs.debug-kernel && 'debug' || 'default' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}-${{ github.run_id }}-${{ github.run_attempt }}

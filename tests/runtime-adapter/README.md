@@ -3283,12 +3283,13 @@ configuration. A change to the adapter is a test input of CI's
 NVX microVM tests. Their
 [workflow](../../.github/workflows/run-nvx-microvm-tests.yml) builds the
 host-only configuration on each backend, in the jobs that run the guest and
-sandbox steps, and runs the adapter's consolidated suite, the
-[stage scenarios](#stage-scenarios), by name, with
+sandbox steps on KVM and MSHV, and in a job of its own on WHP, where the
+scenarios take about twice as long, and runs the adapter's consolidated suite,
+the [stage scenarios](#stage-scenarios), by name, with
 `nvx.py test-runtime-adapter`, which names the backend in `NVX_HYPERVISOR`, the
 checkout in `NVX_ARTIFACTS_DIR`, into which the job downloaded NVX's
 artifacts, their provenance, and the fixtures of the layered scenarios with
 the guest artifacts, as NVX's own layered scenarios take them, and the guest
 agent in `RUNTIME_ADAPTER_GUEST`. The Linux jobs build the guest agent
-first, and the Windows job takes the one that CI's `distro-artifacts` job
+first, and the WHP job takes the one that CI's `distro-artifacts` job
 builds on Linux.
