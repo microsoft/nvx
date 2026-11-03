@@ -9,7 +9,9 @@
 //!
 //! - [`MICROVM_ABI_VERSION`] is the microVM ABI of the pinned OpenVMM: the machine, its devices,
 //!   and their addresses, through which OpenVMM boots the guest and saves its state. It changes
-//!   only with an OpenVMM that changes that ABI, and the boot contract changes with it.
+//!   only with an OpenVMM that changes that ABI, and the boot contract changes with it. OpenVMM's
+//!   v4 microVM restarted this version and those of its snapshot format, time ABI, and restore
+//!   packet, so each names its contract only together with the boot contract.
 //! - [`BOOT_CONTRACT_VERSION`] is the contract between the host and the guests that it boots: the
 //!   microVM ABI, the kernel command-line tokens through which the host configures the guest, such
 //!   as the boot tokens of a layered root in [`protocol::root`](crate::protocol::root), and the
@@ -40,10 +42,7 @@
 //!   restored guest, and that the guest decodes. It changes with the packet's layout or meaning.
 //!
 //! Each of these four must match the pinned OpenVMM's, which the ignored test
-//! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule. So must
-//! [`RESTORE_PACKET_NETWORK_VERSION`], the version of the packet that OpenVMM gives instead at a
-//! restore that replaces the network policy of a snapshot without a tier, which the guest decodes
-//! too. No clone of a template is restored so, so the key does not hold it. The key
+//! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule. The key
 //! also holds the version of the activation contract,
 //! [`activation::VERSION`](crate::activation::VERSION), through which each clone receives the
 //! settings of its own launch.
@@ -53,16 +52,19 @@
 
 /// OpenVMM microVM ABI version this crate drives.
 ///
-/// Version 3 offers no device `VIRTIO_F_ACCESS_PLATFORM` and no console `VIRTIO_CONSOLE_F_SIZE`,
-/// which version 2 offered, and gives each virtio device an IOAPIC input of its own past the ISA
-/// IRQs, where version 2 used ISA IRQs, so OpenVMM and this crate refuse a template of version 2.
-pub const MICROVM_ABI_VERSION: u64 = 3;
+/// Version 1 of OpenVMM's v4 microVM offers no device `VIRTIO_F_ACCESS_PLATFORM` and no console
+/// `VIRTIO_CONSOLE_F_SIZE`, and gives each virtio device an IOAPIC input of its own past the ISA
+/// IRQs. OpenVMM and this crate refuse the template of an earlier OpenVMM by its
+/// [snapshot format](SNAPSHOT_FORMAT_VERSION).
+pub const MICROVM_ABI_VERSION: u64 = 1;
 /// Version of the boot contract this crate speaks; see the [module](self) for when it changes.
 ///
 /// Until version 3, the runtime identity recorded the microVM ABI version, 2, as the boot
 /// contract. Version 3 names the format of a layered root's image, `erofs` or `gpt`, in its boot
 /// token, and keeps the root's upper in RAM if asked. Version 4 boots guests on microVM ABI 3.
-pub const BOOT_CONTRACT_VERSION: u64 = 4;
+/// Version 5 boots them on OpenVMM's v4 microVM, whose restore packet and time samples the guest
+/// decodes at version 1.
+pub const BOOT_CONTRACT_VERSION: u64 = 5;
 /// Control-console broker protocol version this crate speaks.
 pub const CONTROL_SESSION_PROTOCOL_VERSION: u64 = 1;
 /// Control contract revision this crate speaks.
@@ -70,7 +72,7 @@ pub const CONTROL_CONTRACT_REVISION: &str = "nvx-microvm-v2-control-v2";
 /// Version of OpenVMM's snapshot format that this crate reads: the manifest of a capture, and the
 /// artifacts that it describes. It must match `MANIFEST_VERSION` in OpenVMM's
 /// `openvmm/openvmm_helpers/src/snapshot.rs`.
-pub const SNAPSHOT_FORMAT_VERSION: u64 = 6;
+pub const SNAPSHOT_FORMAT_VERSION: u64 = 2;
 /// Version of the schema of a snapshot's saved device state that this crate reads. It must match
 /// `SAVED_STATE_SCHEMA_VERSION` in OpenVMM's `openvmm/openvmm_helpers/src/snapshot/format.rs`.
 pub const DEVICE_STATE_SCHEMA_VERSION: u64 = 1;
@@ -78,22 +80,17 @@ pub const DEVICE_STATE_SCHEMA_VERSION: u64 = 1;
 /// after a restore. It must match `TIME_ABI_VERSION` in OpenVMM's
 /// `vmm_core/virt/src/time_abi/mod.rs`.
 ///
-/// Version 2 pairs each time sample's host UTC with the guest TSC on the host, and publishes the
+/// Version 1 pairs each time sample's host UTC with the guest TSC on the host, and publishes the
 /// host's clock correction with it, which the guest applies instead of estimating it.
-pub const TIME_ABI_VERSION: u64 = 2;
+pub const TIME_ABI_VERSION: u64 = 1;
 /// Version of the restore packet that OpenVMM gives a restored guest, and that this crate's guest
 /// decodes. It must match `RESTORE_PACKET_VERSION` in OpenVMM's
 /// `vm/devices/chipset_resources/src/microvm_time.rs`.
 ///
-/// Version 5 carries no host UTC: the guest takes a time sample to set its clock.
-pub const RESTORE_PACKET_VERSION: u64 = 5;
-/// Version of the restore packet that OpenVMM gives a restored guest in place of
-/// [`RESTORE_PACKET_VERSION`]'s at a restore that replaces the network policy of a snapshot
-/// without a tier: that version's packet, with the new policy's DNS server and whether the guest
-/// announces its listeners under it, which a guest that decodes only the other version refuses.
-/// This crate's guest decodes both. It must match `RESTORE_PACKET_NETWORK_VERSION` in OpenVMM's
-/// `vm/devices/chipset_resources/src/microvm_time.rs`.
-pub const RESTORE_PACKET_NETWORK_VERSION: u64 = 6;
+/// Version 1 carries no host UTC: the guest takes a time sample to set its clock. A restore that
+/// replaces the network policy of a snapshot without a tier flags the packet's network: the new
+/// policy's DNS server, and whether the guest announces its listeners under it.
+pub const RESTORE_PACKET_VERSION: u64 = 1;
 
 /// Returns how the `openvmm` section of an NVX `SOURCE-MANIFEST.json` departs from the contracts
 /// that this crate speaks: one `NAME: expected VALUE, found VALUE` entry, in JSON, for each field

@@ -34,7 +34,7 @@ const REPORT_ONLY_TOKEN: Token<'static> = Token {
     value: Some(b"report-only"),
 };
 
-/// The guest side of NVX time ABI version two: its cold-boot time step and the start of its time
+/// The guest side of NVX time ABI version one: its cold-boot time step and the start of its time
 /// daemon, its VM generation ID, the capture request with the repair of a restore, and the
 /// restore's finish, which run in the calling process.
 ///

@@ -91,7 +91,7 @@ pub(crate) fn sample_input(
 ) -> Vec<u32> {
     let unknown = |bound: Option<u32>| bound.unwrap_or(u32::MAX);
     let mut sample = [0_u8; SAMPLE_SIZE];
-    sample[..4].copy_from_slice(&[2, 0, host_status_byte(host.status), 0]);
+    sample[..4].copy_from_slice(&[1, 0, host_status_byte(host.status), 0]);
     sample[4..8].copy_from_slice(&generation.to_le_bytes());
     sample[8..16].copy_from_slice(&utc_ns.to_le_bytes());
     sample[16..24].copy_from_slice(&tsc.to_le_bytes());
@@ -211,13 +211,15 @@ fn port_reader_uses_one_four_byte_read_per_chunk() {
 }
 
 #[test]
-fn packet_without_ranges_costs_exactly_twenty_two_data_reads() {
-    let ops = FakeOps::new(0..22);
+fn packet_without_ranges_costs_exactly_twenty_six_data_reads() {
+    let ops = FakeOps::new(0..26);
     let ports = ops.open_ports().unwrap();
     let mut header = [0; decoders::PACKET_HEADER_SIZE];
     let mut entropy = [0; decoders::PACKET_ENTROPY_SIZE];
+    let mut dns_server = [0; decoders::PACKET_DNS_SIZE];
     portb_read(&ports, Port::PortbData, &mut header);
     portb_read(&ports, Port::PortbData, &mut entropy);
+    portb_read(&ports, Port::PortbData, &mut dns_server);
     ports.release().unwrap();
     assert!(ops.input.lock().unwrap().is_empty());
     // A time sample costs twelve.

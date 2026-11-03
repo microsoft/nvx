@@ -535,33 +535,33 @@ impl ContractSpec {
         for attachment in &self.attachments {
             message = message.message(10, attachment.encode());
         }
-        message = message.varint(16, self.boot_layout_version.into());
+        message = message.varint(13, self.boot_layout_version.into());
         if let Some(network) = &self.network {
-            message = message.message(18, network.encode());
+            message = message.message(14, network.encode());
         }
         if let Some(filesystem) = &self.filesystem {
-            message = message.always_bytes(19, filesystem);
+            message = message.always_bytes(15, filesystem);
         }
         for block in &self.blocks {
-            message = message.message(21, block.encode());
+            message = message.message(16, block.encode());
         }
         message = message
-            .varint(22, self.filesystem_slot_version.into())
-            .varint(23, self.boot_online_vp_count.into())
-            .text(24, &self.interrupt_mode)
-            .varint(25, self.status_page.0)
-            .varint(26, self.status_page.1)
-            .varint(27, self.expansion_version.into())
-            .varint(28, self.memory_capacity)
-            .varint(29, self.memory_block_size);
+            .varint(17, self.filesystem_slot_version.into())
+            .varint(18, self.boot_online_vp_count.into())
+            .text(19, &self.interrupt_mode)
+            .varint(20, self.status_page.0)
+            .varint(21, self.status_page.1)
+            .varint(22, self.expansion_version.into())
+            .varint(23, self.memory_capacity)
+            .varint(24, self.memory_block_size);
         for &(start, length) in &self.expansion_ranges {
-            message = message.message(30, Proto::default().varint(1, start).varint(2, length));
+            message = message.message(25, Proto::default().varint(1, start).varint(2, length));
         }
         if let Some(time) = &self.time {
-            message = message.message(31, time.encode());
+            message = message.message(11, time.encode());
         }
         if let Some(cpu) = &self.cpu {
-            message = message.message(32, cpu.encode());
+            message = message.message(12, cpu.encode());
         }
         message
     }
@@ -737,7 +737,7 @@ impl ManifestSpec {
                     b"/run/nvx/control.sock",
                 ),
             ],
-            boot_layout_version: 2,
+            boot_layout_version: 1,
             network: None,
             filesystem: None,
             blocks: vec![
@@ -802,7 +802,7 @@ impl ManifestSpec {
             }
         }
         Self {
-            version: 6,
+            version: 2,
             created_at: (1_761_300_000, 123_456_789),
             openvmm_version: "0.0.0".to_owned(),
             memory_size: 512 * MIB,
@@ -811,7 +811,7 @@ impl ManifestSpec {
             architecture: "x86_64".to_owned(),
             state_size: 65_536,
             contract: Some(contract),
-            magic: b"OPENVMM_SNAPSHOT_V6\0".to_vec(),
+            magic: b"OPENVMM_SNAPSHOT_V2\0".to_vec(),
             schema_version: 1,
             root_type: "openvmm.SavedState".to_owned(),
             tier: "platform".to_owned(),
@@ -873,7 +873,7 @@ impl ManifestSpec {
             policy_digest: vec![7; 32],
             policy_required: true,
             profile: "portable".to_owned(),
-            policy_encoding_version: 4,
+            policy_encoding_version: 1,
             ipv6: ipv6.to_vec(),
             ipv6_prefix_length: 120,
             ipv6_gateway: ipv6_gateway.to_vec(),
@@ -927,15 +927,15 @@ impl ManifestSpec {
             .text(7, &self.architecture)
             .varint(8, self.state_size);
         if let Some(contract) = &self.contract {
-            message = message.message(11, contract.encode());
+            message = message.message(9, contract.encode());
         }
         message
-            .bytes(12, &self.magic)
-            .varint(13, self.schema_version.into())
-            .text(14, &self.root_type)
-            .text(15, &self.tier)
-            .text(16, &self.restore_policy)
-            .varint(17, self.consumed_sections.into())
+            .bytes(10, &self.magic)
+            .varint(11, self.schema_version.into())
+            .text(12, &self.root_type)
+            .text(13, &self.tier)
+            .text(14, &self.restore_policy)
+            .varint(15, self.consumed_sections.into())
             .raw(&extra.finish())
             .finish()
     }

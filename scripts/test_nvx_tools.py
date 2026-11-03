@@ -95,8 +95,11 @@ from nvx_tools.time_abi import (  # noqa: E402
 from powershell_testing import run_powershell  # noqa: E402
 
 # The directory, under a platform's runs, of the benchmarks of the microVM ABI
-# that this checkout builds, which the benchmark actions name.
-MICROVM_RUN_DIRECTORY = f"microvm-v{OpenVMMBuildConstants.MICROVM_ABI_VERSION}"
+# series that this checkout's benchmarks record, which the benchmark actions
+# name.
+MICROVM_RUN_DIRECTORY = (
+    f"microvm-v{OpenVMMBuildConstants.MICROVM_PERFORMANCE_ABI_VERSION}"
+)
 
 
 def _workflow_job(workflow: str, job_name: str) -> str:
@@ -775,8 +778,8 @@ def _write_release_fixture(
         "distribution": {"name": "nvx", "version": "0.1.0"},
         "openvmm": {
             "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
-            "time_abi_version": 2,
-            "restore_packet_version": 5,
+            "time_abi_version": 1,
+            "restore_packet_version": 1,
             "control_session_protocol_version": 1,
             "control_contract_revision": "nvx-microvm-v2-control-v2",
         },
@@ -15688,8 +15691,8 @@ class BuildTests(unittest.TestCase):
             manifest["openvmm"],
             {
                 "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
-                "time_abi_version": 2,
-                "restore_packet_version": 5,
+                "time_abi_version": 1,
+                "restore_packet_version": 1,
                 "control_session_protocol_version": 1,
                 "control_contract_revision": "nvx-microvm-v2-control-v2",
             },
@@ -25640,7 +25643,7 @@ class ReleaseTests(unittest.TestCase):
             )
             self.assertEqual(
                 manifest["openvmm"]["microvm_abi_version"],
-                3,
+                1,
             )
             self.assertEqual(
                 manifest["openvmm"]["control_session_protocol_version"],

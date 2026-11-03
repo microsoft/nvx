@@ -238,7 +238,7 @@ fn the_boot_contract_version_names_these_tokens() {
             contract::BOOT_CONTRACT_VERSION,
             contract::MICROVM_ABI_VERSION
         ),
-        (4, 3),
+        (5, 1),
         "a change to the boot tokens of a layered root or to the microVM ABI changes the boot \
          contract: increment BOOT_CONTRACT_VERSION, and update this test with it"
     );

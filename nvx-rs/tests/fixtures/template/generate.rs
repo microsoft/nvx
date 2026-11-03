@@ -75,7 +75,6 @@ mod nvx_fixture {
             defs::append_microvm_virtio_discovery(
                 &mut command_line,
                 with_network.then(|| (&network, egress_policy.gateway_dns_server(), None)),
-                true,
                 &[],
                 true,
                 true,
@@ -158,7 +157,6 @@ mod nvx_fixture {
                         ),
                     )
                 }),
-                true,
                 None,
                 Some(attachment(
                     "console:microvm-virtio0",

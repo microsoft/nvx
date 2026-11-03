@@ -7,8 +7,8 @@ use super::*;
 use crate::ErrorKind;
 use crate::host::store::ArtifactIdentity;
 
-const COMPATIBLE_MANIFEST: &str = r#"{"openvmm":{"microvm_abi_version":3,
-        "time_abi_version":2,"restore_packet_version":5,
+const COMPATIBLE_MANIFEST: &str = r#"{"openvmm":{"microvm_abi_version":1,
+        "time_abi_version":1,"restore_packet_version":1,
         "control_session_protocol_version":1,
         "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#;
 
@@ -201,8 +201,8 @@ fn incompatible_manifests_are_unavailable() {
     let manifest = directory.path().join(MANIFEST_NAME);
     fs::write(
         &manifest,
-        r#"{"openvmm":{"microvm_abi_version":3,"time_abi_version":2,
-               "restore_packet_version":5,"control_session_protocol_version":2,
+        r#"{"openvmm":{"microvm_abi_version":1,"time_abi_version":1,
+               "restore_packet_version":1,"control_session_protocol_version":2,
                "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#,
     )
     .unwrap();
@@ -215,20 +215,21 @@ fn incompatible_manifests_are_unavailable() {
         "{}",
         error.message()
     );
-    // A release of microVM ABI 2, whose devices offered access-platform, declares every other
-    // contract of this crate, so the error names the ABI alone.
+    // A release of an earlier OpenVMM declares the current control contracts, so the error names
+    // the microVM ABI, time ABI, and restore packet versions that its microVM had.
     fs::write(
         &manifest,
-        r#"{"openvmm":{"microvm_abi_version":2,"time_abi_version":2,
+        r#"{"openvmm":{"microvm_abi_version":3,"time_abi_version":2,
                "restore_packet_version":5,"control_session_protocol_version":1,
                "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#,
     )
     .unwrap();
     let error = check_manifest(&manifest).unwrap_err();
     assert!(
-        error
-            .message()
-            .contains("(microvm_abi_version: expected 3, found 2)"),
+        error.message().contains(
+            "(microvm_abi_version: expected 1, found 3; time_abi_version: expected 1, found 2; \
+             restore_packet_version: expected 1, found 5)"
+        ),
         "{}",
         error.message()
     );
@@ -243,8 +244,8 @@ fn incompatible_manifests_are_unavailable() {
     let error = check_manifest(&manifest).unwrap_err();
     assert!(
         error.message().contains(
-            "(microvm_abi_version: expected 3, found 2; time_abi_version: expected 2, found \
-             none; restore_packet_version: expected 5, found none)"
+            "(microvm_abi_version: expected 1, found 2; time_abi_version: expected 1, found \
+             none; restore_packet_version: expected 1, found none)"
         ),
         "{}",
         error.message()

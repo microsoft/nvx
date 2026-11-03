@@ -6,32 +6,39 @@ use crate::protocol::cmdline::tests::model;
 /// A valid packet header without memory ranges, of generation 1.
 fn valid_header() -> [u8; PACKET_HEADER_SIZE] {
     let mut bytes = [0; PACKET_HEADER_SIZE];
-    bytes[..4].copy_from_slice(b"OVR\x05");
+    bytes[..4].copy_from_slice(b"OVR\x01");
     bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
     bytes
+}
+
+/// The body of a packet without memory ranges or network settings: `entropy`, and a DNS server
+/// of zeros.
+fn plain_body(entropy: &[u8]) -> Vec<u8> {
+    [entropy, &[0; PACKET_DNS_SIZE]].concat()
 }
 
 #[test]
 fn packets_decode_their_header_then_their_body() {
     let header = PacketHeader::parse(&valid_header()).unwrap();
     assert_eq!((header.generation, header.downtime_ns), (1, 0));
-    assert_eq!(header.body_size(), PACKET_ENTROPY_SIZE);
+    assert_eq!(header.body_size(), PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE);
     let entropy: Vec<u8> = (0..64).collect();
-    let packet = RestorePacket::parse(header, &entropy).unwrap();
+    let body = plain_body(&entropy);
+    let packet = RestorePacket::parse(header, &body).unwrap();
     assert_eq!(packet.entropy.bytes().as_slice(), entropy);
     assert_eq!(packet.generation_id(), &entropy[..GENERATION_ID_SIZE]);
     assert_eq!(
-        RestorePacket::parse(header, &entropy[1..]).unwrap_err(),
+        RestorePacket::parse(header, &body[1..]).unwrap_err(),
         PacketError::IncompleteBody
     );
     assert_eq!(
         PacketHeader::parse(&valid_header()[..23]),
         Err(PacketError::IncompleteHeader)
     );
-    // A packet of version 4, which carried host UTC, is refused.
+    // A packet of another version is refused.
     let mut bytes = valid_header();
-    bytes[3] = 4;
-    assert_eq!(PacketHeader::parse(&bytes), Err(PacketError::Version(4)));
+    bytes[3] = 5;
+    assert_eq!(PacketHeader::parse(&bytes), Err(PacketError::Version(5)));
 }
 
 #[test]
@@ -44,7 +51,7 @@ fn packet_errors_name_the_invalid_field() {
     bytes[4] = 0x02;
     bytes[6] = 1;
     let header = PacketHeader::parse(&bytes).unwrap();
-    let mut body = [0; PACKET_RANGE_SIZE + PACKET_ENTROPY_SIZE];
+    let mut body = [0; PACKET_RANGE_SIZE + PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE];
     body[..8].copy_from_slice(&u64::MAX.to_le_bytes());
     body[8..16].copy_from_slice(&1_u64.to_le_bytes());
     let error = RestorePacket::parse(header, &body).unwrap_err();
@@ -54,7 +61,7 @@ fn packet_errors_name_the_invalid_field() {
 /// A valid time sample of generation 4, as OpenVMM's `TimeSample::encode` writes it.
 fn valid_sample() -> [u8; SAMPLE_SIZE] {
     let mut bytes = [0; SAMPLE_SIZE];
-    bytes[..4].copy_from_slice(&[2, 8, 1, 0]);
+    bytes[..4].copy_from_slice(&[1, 8, 1, 0]);
     bytes[4..8].copy_from_slice(&4_u32.to_le_bytes());
     bytes[8..16].copy_from_slice(&1_790_841_600_123_456_789_u64.to_le_bytes());
     bytes[16..24].copy_from_slice(&123_456_789_u64.to_le_bytes());
@@ -66,17 +73,17 @@ fn valid_sample() -> [u8; SAMPLE_SIZE] {
     bytes
 }
 
-/// Returns a valid packet header of version 6 without memory ranges, of generation 1, with
-/// the network byte `network`.
+/// Returns a valid packet header that carries network settings, without memory ranges, of
+/// generation 1, with the network byte `network`.
 fn network_header(network: u8) -> [u8; PACKET_HEADER_SIZE] {
     let mut bytes = valid_header();
-    bytes[3] = PACKET_NETWORK_VERSION;
+    bytes[4] = PACKET_NETWORK;
     bytes[7] = network;
     bytes
 }
 
 #[test]
-fn version_6_packets_carry_their_network_settings() {
+fn network_packets_carry_their_network_settings() {
     let entropy: Vec<u8> = (0..64).collect();
     let ipv6: std::net::Ipv6Addr = "fd00::a00:1".parse().unwrap();
     for (network, dns_server, expected) in [
@@ -107,16 +114,17 @@ fn version_6_packets_carry_their_network_settings() {
         );
     }
 
-    // Version 5 has no network byte, and no DNS server after its entropy.
+    // Without the network flag, the network byte and the DNS server are zero, and the packet
+    // carries no network settings.
     let header = PacketHeader::parse(&valid_header()).unwrap();
     assert_eq!(header.network, None);
     assert!(!header.network_repair());
-    let packet = RestorePacket::parse(header, &entropy).unwrap();
+    let packet = RestorePacket::parse(header, &plain_body(&entropy)).unwrap();
     assert_eq!(packet.network, None);
 }
 
 #[test]
-fn version_6_refuses_malformed_network_settings() {
+fn packets_refuse_malformed_network_settings() {
     for (network, error) in [
         (0x08, "restore packet network byte 0x08 is invalid"),
         (0x03, "restore packet network byte 0x03 is invalid"),
@@ -132,8 +140,20 @@ fn version_6_refuses_malformed_network_settings() {
         PacketHeader::parse(&bytes),
         Err(PacketError::ReservedByte(1))
     );
+    assert_eq!(
+        PacketError::ReservedByte(1).to_string(),
+        "restore packet network byte is 1 without network settings"
+    );
     bytes[3] = 7;
     assert_eq!(PacketHeader::parse(&bytes), Err(PacketError::Version(7)));
+    // Without the network flag, a DNS server is refused.
+    let header = PacketHeader::parse(&valid_header()).unwrap();
+    let mut body = plain_body(&[0; PACKET_ENTROPY_SIZE]);
+    body[PACKET_ENTROPY_SIZE] = 10;
+    assert_eq!(
+        RestorePacket::parse(header, &body).unwrap_err(),
+        PacketError::DnsServer
+    );
 
     let ipv4 = [10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut padded = ipv4;
@@ -156,7 +176,7 @@ fn version_6_refuses_malformed_network_settings() {
 }
 
 #[test]
-fn samples_decode_every_field_of_version_two() {
+fn samples_decode_every_field() {
     assert_eq!(
         TimeSample::parse(&valid_sample()),
         Ok(TimeSample {
@@ -187,7 +207,7 @@ fn samples_check_their_version_flags_status_and_time() {
         sample[offset..offset + bytes.len()].copy_from_slice(bytes);
         TimeSample::parse(&sample).unwrap_err().to_string()
     };
-    assert_eq!(mutated(0, &[1]), "time sample version is 1");
+    assert_eq!(mutated(0, &[2]), "time sample version is 2");
     assert_eq!(mutated(1, &[1]), "time sample flags 0x01 or reserved 0x00");
     assert_eq!(mutated(3, &[1]), "time sample flags 0x08 or reserved 0x01");
     assert_eq!(mutated(2, &[4]), "time sample host status is 4");

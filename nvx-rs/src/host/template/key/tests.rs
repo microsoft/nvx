@@ -968,8 +968,8 @@ fn vector_class(name: &str) -> CaptureClass {
 
 /// Returns the manifest of the capture that the vectors call `name`, as microVM ABI 2 captured it:
 /// every virtio device but the NIC also offered access-platform (bit 33), each console also
-/// offered its size (bit 0), and each virtio device interrupted on an ISA IRQ, which its discovery
-/// token named.
+/// offered its size (bit 0), each virtio device interrupted on an ISA IRQ, which its discovery
+/// token named, and the digest of the NIC's policy had encoding version 4.
 fn vector_spec(name: &str) -> ManifestSpec {
     let mut spec = match name {
         "TEMPLATE" => ManifestSpec::template(),
@@ -981,6 +981,9 @@ fn vector_spec(name: &str) -> ManifestSpec {
         }
         _ => panic!("no capture is named {name}"),
     };
+    if let Some(network) = &mut spec.contract().network {
+        network.policy_encoding_version = 4;
+    }
     // Each virtio device's MMIO base, interrupt in ABI 3, and ISA IRQ in ABI 2, on KVM.
     const ISA_IRQS: [(u64, u32, u32); 6] = [
         (0xd000_0000, 16, 10),

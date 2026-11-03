@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::guest::sys::{ClockAdjustment, FrequencyHold};
-use crate::guest::time::decoders::HostClock;
+use crate::guest::time::decoders::{HostClock, PACKET_DNS_SIZE};
 use crate::guest::time::state::HostClockStatus;
 use crate::guest::time::system::PORTB_TIME_WINDOW;
 use crate::guest::time::system::tests::{FakeOps, sample_input, sample_tsc};
@@ -522,10 +522,10 @@ fn the_file_mode_writes_the_entropy_and_the_in_memory_mode_returns_it() {
 /// reads, and then port B's status, with the time window, and a time sample of the
 /// generation, within the bound.
 fn restore_input(generation: u32, entropy: &[u8; Seed::LENGTH]) -> Vec<u32> {
-    let mut packet = [0_u8; PACKET_HEADER_SIZE + Seed::LENGTH];
-    packet[..4].copy_from_slice(b"OVR\x05");
+    let mut packet = [0_u8; PACKET_HEADER_SIZE + Seed::LENGTH + PACKET_DNS_SIZE];
+    packet[..4].copy_from_slice(b"OVR\x01");
     packet[8..12].copy_from_slice(&generation.to_le_bytes());
-    packet[PACKET_HEADER_SIZE..].copy_from_slice(entropy);
+    packet[PACKET_HEADER_SIZE..][..Seed::LENGTH].copy_from_slice(entropy);
     let words = packet
         .chunks(size_of::<u32>())
         .map(|word| u32::from_ne_bytes(word.try_into().unwrap()));

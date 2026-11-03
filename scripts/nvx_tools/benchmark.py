@@ -4997,7 +4997,7 @@ def write_benchmark_metadata(
 ) -> Path:
     platform = _benchmark_platform(args, backend)
     device_io = args.suite == "device-io"
-    microvm_abi_version = OpenVMMBuildConstants.MICROVM_ABI_VERSION
+    microvm_abi_version = OpenVMMBuildConstants.MICROVM_PERFORMANCE_ABI_VERSION
     processors = 1 if device_io else args.processors
     effective_network = (
         args.net or "10.0.0.2/24"
@@ -5130,7 +5130,7 @@ def run_workload_benchmarks(
                 / "data"
                 / "runs"
                 / platform
-                / f"microvm-v{OpenVMMBuildConstants.MICROVM_ABI_VERSION}"
+                / f"microvm-v{OpenVMMBuildConstants.MICROVM_PERFORMANCE_ABI_VERSION}"
                 / "1vcpu"
                 / "device-io"
             )
@@ -5139,7 +5139,7 @@ def run_workload_benchmarks(
                 args.nvx_dir.resolve()
                 / "data"
                 / "runs"
-                / f"{platform}-microvm-v{OpenVMMBuildConstants.MICROVM_ABI_VERSION}-{args.processors}vcpu"
+                / f"{platform}-microvm-v{OpenVMMBuildConstants.MICROVM_PERFORMANCE_ABI_VERSION}-{args.processors}vcpu"
             )
     if args.suite == "device-restore-profile" and output_dir is None:
         raise ValueError("device-restore-profile requires --output-dir")
@@ -6476,7 +6476,7 @@ def result_document(
             "memory_mib": args.memory_mib,
             "platform": args.platform,
             "backend": backend or args.backend,
-            "microvm_abi_version": OpenVMMBuildConstants.MICROVM_ABI_VERSION,
+            "microvm_abi_version": OpenVMMBuildConstants.MICROVM_PERFORMANCE_ABI_VERSION,
             "processors": args.processors,
             "artifact_revisions": {
                 "nvx": _git_revision(args.nvx_dir.resolve()),

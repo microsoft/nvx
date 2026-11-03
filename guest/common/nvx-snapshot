@@ -461,10 +461,10 @@ export NVX_VM_GENERATION_ID="$generation_id"
 entropy=$runtime/restore-entropy
 
 # Guest repair steps 4 to 7 (doc/design/5.5-restore-protocol.md). nvx-time
-# capture has already read the restore packet, version 5 or 6, checked its
+# capture has already read the restore packet, version 1, checked its
 # generation, set the wall clock from a time sample, and written the entropy.
 # Its metadata is FLAGS, ONLINE_VP_COUNT, RANGE_COUNT, the new generation ID,
-# the DNS server of a version 6 packet's network settings, or "-" for none,
+# the DNS server of the packet's network settings, or "-" for none,
 # and 1 if they ask the guest to announce its listeners, or else 0, followed
 # by START and LENGTH for each memory range.
 post_restore() {

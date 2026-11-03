@@ -118,7 +118,12 @@ class OpenVMMBuildConstants:
     CACHE_DIRECTORY_NAME: Final = "openvmm-cache"
     PROVENANCE_NAME: Final = "openvmm.provenance.json"
     PROVENANCE_FORMAT: Final = 1
-    MICROVM_ABI_VERSION: Final = 3
+    MICROVM_ABI_VERSION: Final = 1
+    # The microVM ABI version under which benchmarks record their history.
+    # OpenVMM's v4 microVM restarted its ABI version at 1 without changing the
+    # machine that the benchmarks measure, so its results continue the series
+    # of ABI 3, and version 1 keeps naming the legacy unsuffixed history.
+    MICROVM_PERFORMANCE_ABI_VERSION: Final = 3
     CONTROL_SESSION_PROTOCOL_VERSION: Final = 1
     CONTROL_CONTRACT_REVISION: Final = "nvx-microvm-v2-control-v2"
 

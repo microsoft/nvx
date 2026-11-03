@@ -608,7 +608,7 @@ class PerformanceTests(unittest.TestCase):
         )
         # Above one vCPU, a series of the microVM ABI that this checkout builds
         # records only shell_snapshot_restore_512_mib.
-        abi = OpenVMMBuildConstants.MICROVM_ABI_VERSION
+        abi = OpenVMMBuildConstants.MICROVM_PERFORMANCE_ABI_VERSION
         per_series = one_vcpu + len(performance.MICROVM_PROCESSOR_COUNTS[abi] - {1})
         repository = Path(__file__).parents[1]
         series = re.findall(
