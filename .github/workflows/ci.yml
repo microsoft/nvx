@@ -1089,7 +1089,10 @@ jobs:
   # managed sandbox acceptance to the runtime adapter scenarios, depend on
   # none of its results, so a second job runs them beside it, on the same
   # runner pool. They alone read the Ubuntu and Azure Linux artifacts, so
-  # only this job waits for distro-artifacts.
+  # only the jobs that run them wait for distro-artifacts. WHP, whose runtime
+  # adapter scenarios take about twice as long as on KVM and MSHV, runs them
+  # in a third job beside the other two, so that its guest and sandbox job no
+  # longer ends last in most runs (doc/ci.md#job-graph-and-runner-capacity).
   nvx-microvm-guests-kvm:
     name: NVX microVM tests / Linux / KVM / Guests and sandboxes
     needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
@@ -1122,6 +1125,7 @@ jobs:
       openvmm-artifact: openvmm-linux-gnu
       nvx-rs-artifact: nvx-rs-linux-musl
       guests-and-sandboxes: true
+      runtime-adapter: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -1157,6 +1161,7 @@ jobs:
       openvmm-artifact: openvmm-linux-gnu
       nvx-rs-artifact: nvx-rs-linux-musl
       guests-and-sandboxes: true
+      runtime-adapter: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -1192,6 +1197,41 @@ jobs:
       openvmm-artifact: openvmm-windows-msvc
       nvx-rs-artifact: nvx-rs-windows-msvc
       guests-and-sandboxes: true
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-adapter-whp:
+    name: NVX microVM tests / Windows / WHP / Runtime adapter
+    needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, build-nvx-rs-windows-msvc, openvmm-changes]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.draft == false
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        ) &&
+        needs.artifacts.result == 'success' &&
+        needs.distro-artifacts.result == 'success' &&
+        needs.build-openvmm-windows-msvc.result == 'success' &&
+        needs.build-nvx-rs-windows-msvc.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: Windows / WHP / Runtime adapter
+      runner: '["self-hosted", "windows", "whp", "virtual-machine", "general"]'
+      backend: whp
+      openvmm-artifact: openvmm-windows-msvc
+      nvx-rs-artifact: nvx-rs-windows-msvc
+      runtime-adapter: true
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
@@ -1539,6 +1579,7 @@ jobs:
       - nvx-microvm-guests-kvm
       - nvx-microvm-guests-mshv
       - nvx-microvm-guests-whp
+      - nvx-microvm-adapter-whp
       - nvx-microvm-debug-kvm
       - nvx-microvm-debug-mshv
       - nvx-microvm-debug-whp
@@ -1594,6 +1635,10 @@ jobs:
         (
           needs.nvx-microvm-guests-whp.result == 'success' ||
           needs.nvx-microvm-guests-whp.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-adapter-whp.result == 'success' ||
+          needs.nvx-microvm-adapter-whp.result == 'skipped'
         ) &&
         (
           needs.nvx-microvm-debug-kvm.result == 'success' ||
@@ -1687,6 +1732,7 @@ jobs:
       - nvx-microvm-guests-kvm
       - nvx-microvm-guests-mshv
       - nvx-microvm-guests-whp
+      - nvx-microvm-adapter-whp
       - nvx-microvm-debug-kvm
       - nvx-microvm-debug-mshv
       - nvx-microvm-debug-whp
@@ -1741,6 +1787,7 @@ jobs:
           MICROVM_GUESTS_KVM_RESULT: ${{ needs.nvx-microvm-guests-kvm.result }}
           MICROVM_GUESTS_MSHV_RESULT: ${{ needs.nvx-microvm-guests-mshv.result }}
           MICROVM_GUESTS_WHP_RESULT: ${{ needs.nvx-microvm-guests-whp.result }}
+          MICROVM_ADAPTER_WHP_RESULT: ${{ needs.nvx-microvm-adapter-whp.result }}
           MICROVM_DEBUG_KVM_RESULT: ${{ needs.nvx-microvm-debug-kvm.result }}
           MICROVM_DEBUG_MSHV_RESULT: ${{ needs.nvx-microvm-debug-mshv.result }}
           MICROVM_DEBUG_WHP_RESULT: ${{ needs.nvx-microvm-debug-whp.result }}
@@ -1781,6 +1828,7 @@ jobs:
       - nvx-microvm-guests-kvm
       - nvx-microvm-guests-mshv
       - nvx-microvm-guests-whp
+      - nvx-microvm-adapter-whp
       - nvx-microvm-debug-kvm
       - nvx-microvm-debug-mshv
       - nvx-microvm-debug-whp
@@ -1834,6 +1882,10 @@ jobs:
         (
           needs.nvx-microvm-guests-whp.result == 'success' ||
           needs.nvx-microvm-guests-whp.result == 'skipped'
+        ) &&
+        (
+          needs.nvx-microvm-adapter-whp.result == 'success' ||
+          needs.nvx-microvm-adapter-whp.result == 'skipped'
         ) &&
         (
           needs.nvx-microvm-debug-kvm.result == 'success' ||
