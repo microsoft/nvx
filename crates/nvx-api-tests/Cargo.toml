@@ -1,0 +1,10 @@
+# The tests of nvx's public API: builds of each of its feature sets,
+# compile-only examples, and smoke tests on real VMs. They test the
+# repository's nvx, so Cargo never publishes them.
+[package]
+name = "nvx-api-tests"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true

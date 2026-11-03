@@ -1,0 +1,13 @@
+# NVX's test support: the fake OpenVMM, which NVX's integration tests run in
+# place of OpenVMM. Only NVX's tests use it, so Cargo never publishes it.
+[package]
+name = "nvx-testing"
+edition = "2024"
+publish = false
+
+[dependencies]
+nvx = { path = "../../nvx-rs", default-features = false }
+nvx-control = { path = "../nvx-control" }
+
+[lints]
+workspace = true

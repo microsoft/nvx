@@ -7536,11 +7536,13 @@ class CiConfigurationTests(unittest.TestCase):
         }
         members = [
             "nvx",
+            "nvx-api-tests",
             "nvx-cli",
             "nvx-control",
             "nvx-guest-tools",
             "nvx-init",
             "nvx-sys",
+            "nvx-testing",
         ]
         for directory, manifest, workspace, packages in (
             (root, None, root, members),

@@ -13,5 +13,9 @@ nvx = { path = "../../nvx-rs", features = ["host", "cli"] }
 nvx-control = { path = "../nvx-control", features = ["host"] }
 nvx-sys = { path = "../nvx-sys" }
 
+[dev-dependencies]
+# The fake OpenVMM, for the integration tests of the command-line interface.
+nvx-testing = { path = "../nvx-testing" }
+
 [lints]
 workspace = true

@@ -20,7 +20,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
 | `nvx-rs` | Rust crate `nvx`: the NVX mechanics |
-| `crates` | The Cargo workspace's other Rust crates: `nvx-sys`, the OS layer that NVX's crates share; `nvx-control`, NVX's control protocol; `nvx-guest-tools`, the helper programs of NVX's Linux guests; `nvx-init`, NVX's init for its Linux guests; and `nvx-cli`, NVX's command-line interface |
+| `crates` | The Cargo workspace's other Rust crates: `nvx-sys`, the OS layer that NVX's crates share; `nvx-control`, NVX's control protocol; `nvx-guest-tools`, the helper programs of NVX's Linux guests; `nvx-init`, NVX's init for its Linux guests; `nvx-cli`, NVX's command-line interface; `nvx-testing`, NVX's test support; and `nvx-api-tests`, the tests of `nvx`'s public API |
 | `tests/runtime-adapter` | Rust crate `runtime-adapter`: an independent adapter that CI builds against `nvx` through its public API |
 | `openvmm` | Public OpenVMM Git submodule from `microsoft/openvmm`, tracking its `feature/microvm/dev` branch |
 | `data` | Tracked performance history and generated benchmark data |
@@ -97,11 +97,13 @@ nvx/
 |   |-- config-microvm           MicroVM kernel configuration
 |   `-- config-microvm-debug     CI debug-kernel fragment (watchdogs on)
 |-- crates/                      The Cargo workspace's other Rust crates
+|   |-- nvx-api-tests/           Rust crate `nvx-api-tests`: the tests of `nvx`'s public API
 |   |-- nvx-cli/                 Rust crate `nvx-cli`: NVX's command-line interface
 |   |-- nvx-control/             Rust crate `nvx-control`: NVX's control protocol, between its host and its guests
 |   |-- nvx-guest-tools/         Rust crate `nvx-guest-tools`: the helper programs of NVX's Linux guests
 |   |-- nvx-init/                Rust crate `nvx-init`: NVX's init for its Linux guests
-|   `-- nvx-sys/                 Rust crate `nvx-sys`: the OS layer that NVX's crates share
+|   |-- nvx-sys/                 Rust crate `nvx-sys`: the OS layer that NVX's crates share
+|   `-- nvx-testing/             Rust crate `nvx-testing`: NVX's test support, the fake OpenVMM
 |-- nvx-rs/                      Rust crate `nvx` for the NVX mechanics
 |   |-- src/
 |   |   |-- protocol/            Control-console codec, NVXS session, and the guest targets that live shares may not take, shared by the host and the guest

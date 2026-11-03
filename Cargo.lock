@@ -198,12 +198,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvx-api-tests"
+version = "0.0.0"
+
+[[package]]
 name = "nvx-cli"
 version = "0.0.0"
 dependencies = [
  "nvx",
  "nvx-control",
  "nvx-sys",
+ "nvx-testing",
 ]
 
 [[package]]
@@ -229,6 +234,14 @@ version = "0.0.0"
 dependencies = [
  "nix",
  "tempfile",
+]
+
+[[package]]
+name = "nvx-testing"
+version = "0.0.0"
+dependencies = [
+ "nvx",
+ "nvx-control",
 ]
 
 [[package]]
