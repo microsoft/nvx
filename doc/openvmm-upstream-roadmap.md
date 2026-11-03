@@ -7,17 +7,18 @@
   `b2676222b383bf50c7022f6a5983920421469a47`; see [Upstream status](#upstream-status).
 - Mapped fork tip: `3cdf4fe3834cfb90b9ee685875493bc9bff1b7a4`, position 135. The graph, PR
   summary, and commit mapping below cover positions 001-135 and the PR20 fixup at position 152.
-- NVX's pinned OpenVMM revision: `eda13d80a85e49c16ed0500a9d4ae762ca810304`, position 210, the
-  head of the `feature/microvm/release/v4.0` branch of microsoft/openvmm, to which
-  `feature/microvm/dev` also points. The v4.0 reorganization moved the 205 commits of
-  `feature/microvm/release/v3.0` and NVX's previous pin, `35e76265f`, onto `c6d3da0ff`. It
-  dropped the eight commits whose changes upstream had landed or superseded, retired the fallible
-  device start that microsoft/nvx#1232 replaces with awaited device restoration, folded that
-  restoration into the commits that it changes, and added 14 commits that give each ABI that the
-  chain introduces a single version; see [The v4.0 reorganization](#the-v40-reorganization). The
-  pin is 75 commits past the mapped tip on the same first-parent chain. Positions 136-210, except
-  the PR20 fixup at position 152, are not yet assigned to PRs; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- NVX's pinned OpenVMM revision: `5aa8b028503237757b95f5629ebdbb4d56a67d51`, position 211.
+  Position 211, which microsoft/openvmm#4894 proposes for `feature/microvm/dev`, is one commit on
+  position 210, `eda13d80a`, the head of the `feature/microvm/release/v4.0` branch of
+  microsoft/openvmm, to which `feature/microvm/dev` also points. The v4.0 reorganization moved the
+  205 commits of `feature/microvm/release/v3.0` and the NVX pin before it, `35e76265f`, onto
+  `c6d3da0ff`. It dropped the eight commits whose changes upstream had landed or superseded,
+  retired the fallible device start that microsoft/nvx#1232 replaces with awaited device
+  restoration, folded that restoration into the commits that it changes, and added 14 commits that
+  give each ABI that the chain introduces a single version; see
+  [The v4.0 reorganization](#the-v40-reorganization). The pin is 76 commits past the mapped tip on
+  the same first-parent chain. Positions 136-211, except the PR20 fixup at position 152, are not
+  yet assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ca6b2b177da5e33ae1bcac72986b31d6b039811c` (2026-11-02), one commit past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -643,7 +644,8 @@ c6d3da0ff
   -> command lines [189] -> KVP test [190-191]
   -> sandbox block roles [192] -> virtio feature masks [193-194]
   -> IOAPIC interrupt lines [195-196] -> ABI restart [197-210]
-  -> eda13d80a (NVX pin)
+  -> boot console exit drain [211]
+  -> 5aa8b0285 (NVX pin)
 ```
 
 For upstream review, PR01-PR07 and PR14 can be rebased independently onto current upstream main,
@@ -659,12 +661,12 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 135 without merges. Of the 75 later commits, position
+The NVX pin extends the chain past position 135 without merges. Of the 76 later commits, position
 152 is a PR20 fixup, and the others are not yet classified or assigned to PRs. Each of positions
 136-191 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 192-196
-followed the v3.0 reorganization, and positions 197-210 are the ABI restart of the v4.0
-reorganization, so they combine none.
+followed the v3.0 reorganization, positions 197-210 are the ABI restart of the v4.0
+reorganization, and position 211 followed it, so they combine none.
 
 | Position | Commit | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | --- | --- |
@@ -743,6 +745,7 @@ reorganization, so they combine none.
 | 208 | `bec51b3ac` | - | - | vmservice: give the microVM fields upstream-compatible numbers |
 | 209 | `31d684ae0` | - | - | microVM: drop the history from the layout and snapshot helpers |
 | 210 | `eda13d80a` | - | - | openvmm_helpers: number the snapshot's fields without gaps |
+| 211 | `5aa8b0285` | - | - | microVM: drain the boot console's terminal output at guest exit (microsoft/openvmm#4894) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -769,7 +772,9 @@ inputs from the loader of PR15's position 066. Position 196 moves every virtio s
 IRQ that PR16's position 071 gives it, and the NIC from the backend-specific IRQ that PR18's
 position 087 selects, to the IOAPIC input of its window, which changes the interrupts and
 discovery tokens that PR17's position 078 records in the snapshot contract and that the slots of
-PR18, PR19, and PR23 use. Assigning the later
+PR18, PR19, and PR23 use. Position 211 extends the portb exit drain of PR24's position 123 to the
+relay that copies the boot console of PR16's position 071 to the terminal, and gives the
+management RPC's drain of PR25's position 128 no such relay. Assigning the later
 commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 182, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -810,6 +815,10 @@ the time ABI, its time samples and restore packet, the snapshot manifest and mac
 saved states of virtio-console, virtio-fs, and the RTC, the egress policy digest, the NIC's
 identity, the virtio-fs slot, and the management RPC's microVM fields, so they follow the PRs that
 introduce those ABIs upstream.
+
+Position 211 changes only the microVM CLI's output drain and host consoles, the anonymous serial
+pair that they use, and the CLI guide: replaying it on upstream main, `ca6b2b177`, conflicts in
+five of its seven files, four of which upstream main lacks, so it follows those PRs upstream.
 
 ## PR summary
 
