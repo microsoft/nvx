@@ -1,0 +1,14 @@
+# NVX's init for its Linux guests: the Rust PID 1 of layered roots, and the
+# managed agent. Only NVX's guests run it, so Cargo never publishes it.
+[package]
+name = "nvx-init"
+edition = "2024"
+publish = false
+
+[dependencies]
+nvx = { path = "../../nvx-rs", default-features = false }
+nvx-control = { path = "../nvx-control", features = ["guest"] }
+nvx-sys = { path = "../nvx-sys" }
+
+[lints]
+workspace = true

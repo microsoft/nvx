@@ -7405,8 +7405,16 @@ class CiConfigurationTests(unittest.TestCase):
     def test_nvx_rs_checks_every_crate_of_the_workspace(self):
         # Formatting, Clippy, the tests, rustdoc, and the minimum Rust version
         # and macOS checks select every package of the Cargo workspace, nvx and
-        # the crates in crates/, and none of them alone; all run on Linux and
-        # Windows but the macOS cross-check, which runs on Linux.
+        # the crates in crates/; all run on Linux and Windows but the macOS
+        # cross-check, which runs on Linux. The library's lint, build and tests
+        # without default features select nvx alone: across the workspace, Cargo
+        # would build nvx with the features that the crates that depend on it
+        # enable, as nvx-cli enables cli. Cargo compiles nvx, as each of them
+        # selects it, with no feature.
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            self.fail("the workspace check test runs Cargo, which is not on PATH")
+        isolated: list[list[str]] = []
         action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -7443,13 +7451,57 @@ class CiConfigurationTests(unittest.TestCase):
                     if line.startswith("cargo ")
                 ]
                 self.assertNotEqual(commands, [])
+                isolated += [
+                    command
+                    for command in commands
+                    if "--no-default-features" in command
+                ]
                 for command in commands:
                     self.assertEqual(command[1], "+toolchain")
-                    self.assertIn(
-                        "--all" if command[2] == "fmt" else "--workspace", command
+                    selection = [
+                        argument
+                        for previous, argument in zip(
+                            ["", *command[:-1]], command, strict=True
+                        )
+                        if argument
+                        in ("--all", "--workspace", "-p", "--package", "--exclude")
+                        or previous in ("-p", "--package", "--exclude")
+                    ]
+                    if "--no-default-features" in command:
+                        expected = ["-p", "nvx"]
+                    else:
+                        expected = ["--all" if command[2] == "fmt" else "--workspace"]
+                    self.assertEqual(selection, expected)
+        self.assertEqual(
+            [command[2] for command in isolated], ["clippy", "build", "test"]
+        )
+        with tempfile.TemporaryDirectory() as target:
+            for command in isolated:
+                with self.subTest(command=command[2]):
+                    arguments = command[3 : (command + ["--"]).index("--")]
+                    self.assertIn("--lib", arguments)
+                    # A check in the test profile builds what the tests build.
+                    profile = ["--profile", "test"] if command[2] == "test" else []
+                    result = subprocess.run(
+                        [cargo, "check", "--message-format=json", "--target-dir"]
+                        + [target, *arguments, *profile],
+                        cwd=BuildConstants.REPO_ROOT / "nvx-rs",
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
                     )
-                    for selection in ("-p", "--package", "--exclude"):
-                        self.assertNotIn(selection, command)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        [
+                            message["features"]
+                            for message in map(json.loads, result.stdout.splitlines())
+                            if message["reason"] == "compiler-artifact"
+                            and message["target"]["name"] == "nvx"
+                            and message["target"]["kind"] == ["lib"]
+                        ],
+                        [[]],
+                    )
 
     def test_cargo_keeps_each_workspace_in_its_target_directory(self):
         # Cargo reads its configuration from the directory in which it runs,
@@ -7469,7 +7521,14 @@ class CiConfigurationTests(unittest.TestCase):
             for name, value in os.environ.items()
             if name not in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR")
         }
-        members = ["nvx", "nvx-control", "nvx-guest-tools", "nvx-sys"]
+        members = [
+            "nvx",
+            "nvx-cli",
+            "nvx-control",
+            "nvx-guest-tools",
+            "nvx-init",
+            "nvx-sys",
+        ]
         for directory, manifest, workspace, packages in (
             (root, None, root, members),
             (root, root / "nvx-rs" / "Cargo.toml", root, members),
@@ -7503,6 +7562,36 @@ class CiConfigurationTests(unittest.TestCase):
                     sorted(package["name"] for package in metadata["packages"]),
                     packages,
                 )
+
+    def test_nvx_alone_builds_the_nvx_rs_executable(self):
+        # nvx builds the nvx-rs executable, from nvx-rs/src/bin/nvx-rs.rs, into
+        # the workspace's target directory, where CI, the scripts and the
+        # packages find it. No other package of the workspace builds an
+        # executable of that name, which would overwrite nvx's there, and
+        # nvx-cli, to which its source will move, builds no executable yet.
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            self.fail("the nvx-rs executable test runs Cargo, which is not on PATH")
+        root = BuildConstants.REPO_ROOT.resolve()
+        result = subprocess.run(
+            [cargo, "metadata", "--format-version", "1", "--no-deps", "--offline"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            {
+                (package["name"], target["name"], Path(target["src_path"]).resolve())
+                for package in json.loads(result.stdout)["packages"]
+                for target in package["targets"]
+                if "bin" in target["kind"]
+                and (target["name"] == "nvx-rs" or package["name"] == "nvx-cli")
+            },
+            {("nvx", "nvx-rs", root / "nvx-rs" / "src" / "bin" / "nvx-rs.rs")},
+        )
 
     def test_cargo_keeps_openvmm_in_its_target_directory(self):
         # Cargo also reads the repository's .cargo/config.toml in the OpenVMM

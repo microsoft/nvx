@@ -1,0 +1,17 @@
+# NVX's command-line interface: the nvx-rs executable and NVX's own state, which
+# NVX's release packages ship, so Cargo never publishes it. It holds no code yet,
+# so nvx still builds nvx-rs; the executable's source will move to
+# src/bin/nvx-rs.rs, where Cargo finds it without a [[bin]] section.
+[package]
+name = "nvx-cli"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The command-line interface is still nvx's, behind its cli feature.
+nvx = { path = "../../nvx-rs", features = ["host", "cli"] }
+nvx-control = { path = "../nvx-control", features = ["host"] }
+nvx-sys = { path = "../nvx-sys" }
+
+[lints]
+workspace = true
