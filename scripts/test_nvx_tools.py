@@ -7077,6 +7077,23 @@ class CiConfigurationTests(unittest.TestCase):
             header,
         )
 
+    def test_ci_runs_pull_requests_of_any_base(self):
+        # A pull request stacked on another's branch gets its own checks, and
+        # keeps them when GitHub retargets it to dev. GitHub reports a retarget
+        # as an `edited` event, like each edit of a title or a body, so a run
+        # for it would cancel the run in progress or replace its result with a
+        # placeholder (doc/ci.md#stacked-pull-requests).
+        workflow = yaml.safe_load(
+            (BuildConstants.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        # PyYAML reads the `on` key as true.
+        self.assertEqual(
+            workflow[True]["pull_request"],
+            {"types": ["opened", "synchronize", "reopened", "ready_for_review"]},
+        )
+
     def test_ci_runs_the_merge_groups_of_dev(self):
         # The merge queue waits for the required check of each of its groups,
         # which only a run of this workflow for the group reports
@@ -7091,7 +7108,6 @@ class CiConfigurationTests(unittest.TestCase):
             triggers["merge_group"],
             {"types": ["checks_requested"], "branches": ["dev"]},
         )
-        self.assertEqual(triggers["pull_request"]["branches"], ["dev"])
         self.assertEqual(triggers["push"]["branches"], ["dev"])
 
         # The detector compares a merge group's head with the commit on which
@@ -7211,21 +7227,26 @@ class CiConfigurationTests(unittest.TestCase):
         )
         repository = "microsoft/nvx"
 
-        def pull_request(full_name: str) -> dict[str, Any]:
+        def pull_request(full_name: str, base: str = "dev") -> dict[str, Any]:
             return {
                 "ref": "refs/pull/7/merge",
+                "base_ref": base,
                 "event": {
                     "pull_request": {
                         "number": 7,
                         "draft": False,
+                        "base": {"ref": base},
                         "head": {"repo": {"full_name": full_name}},
                     }
                 },
             }
 
+        # A pull request stacked on another's branch runs as one to dev does.
         scenarios: tuple[tuple[str, bool, dict[str, Any]], ...] = (
             ("pull_request", True, pull_request(repository)),
             ("pull_request", False, pull_request("contributor/nvx")),
+            ("pull_request", True, pull_request(repository, "feature")),
+            ("pull_request", False, pull_request("contributor/nvx", "feature")),
             (
                 "merge_group",
                 True,
