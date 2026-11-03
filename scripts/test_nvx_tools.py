@@ -6134,8 +6134,10 @@ class CiConfigurationTests(unittest.TestCase):
             "setup-cross-os-cache": set[str](),
             "verify": set[str](),
             "test-openvmm": kernel_alpine,
-            # The runtime adapter's VM scenarios boot what nvx finds.
-            "test-runtime-adapter": kernel_alpine,
+            # The runtime adapter's VM scenarios boot what nvx finds, and its
+            # layered scenarios boot the Ubuntu layer over a copy of the
+            # scratch template (tests/runtime-adapter/tests/common/mod.rs).
+            "test-runtime-adapter": kernel_alpine | workload,
             # A sandbox boots the Alpine control initramfs under its layers.
             "sandbox": kernel_alpine,
         }
