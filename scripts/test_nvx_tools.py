@@ -7406,15 +7406,17 @@ class CiConfigurationTests(unittest.TestCase):
         # Formatting, Clippy, the tests, rustdoc, and the minimum Rust version
         # and macOS checks select every package of the Cargo workspace, nvx and
         # the crates in crates/; all run on Linux and Windows but the macOS
-        # cross-check, which runs on Linux. The library's lint, build and tests
-        # without default features select nvx alone: across the workspace, Cargo
-        # would build nvx with the features that the crates that depend on it
-        # enable, as nvx-cli enables cli. Cargo compiles nvx, as each of them
-        # selects it, with no feature.
+        # cross-check, which runs on Linux. Across the workspace, Cargo builds
+        # nvx with the features that the crates that depend on it enable, as
+        # nvx-cli enables cli, so a lint or test command that selects nvx alone
+        # either disables its default features or repeats a command that
+        # selects the workspace. Cargo compiles nvx, as the lint and test
+        # commands select it, both with its default features, host and the
+        # serde that host enables, and without features.
         cargo = shutil.which("cargo")
         if cargo is None:
             self.fail("the workspace check test runs Cargo, which is not on PATH")
-        isolated: list[list[str]] = []
+        checked: list[list[str]] = []
         action = (
             BuildConstants.REPO_ROOT
             / ".github"
@@ -7451,11 +7453,12 @@ class CiConfigurationTests(unittest.TestCase):
                     if line.startswith("cargo ")
                 ]
                 self.assertNotEqual(commands, [])
-                isolated += [
-                    command
-                    for command in commands
-                    if "--no-default-features" in command
-                ]
+                if name in ("Lint", "Test"):
+                    checked += [
+                        command
+                        for command in commands
+                        if "--all-features" not in command
+                    ]
                 for command in commands:
                     self.assertEqual(command[1], "+toolchain")
                     selection = [
@@ -7467,19 +7470,24 @@ class CiConfigurationTests(unittest.TestCase):
                         in ("--all", "--workspace", "-p", "--package", "--exclude")
                         or previous in ("-p", "--package", "--exclude")
                     ]
-                    if "--no-default-features" in command:
-                        expected = ["-p", "nvx"]
+                    if selection == ["-p", "nvx"]:
+                        index = command.index("-p")
+                        self.assertTrue(
+                            "--no-default-features" in command
+                            or [*command[:index], "--workspace", *command[index + 2 :]]
+                            in commands,
+                            command,
+                        )
                     else:
-                        expected = ["--all" if command[2] == "fmt" else "--workspace"]
-                    self.assertEqual(selection, expected)
-        self.assertEqual(
-            [command[2] for command in isolated], ["clippy", "build", "test"]
-        )
+                        self.assertEqual(
+                            selection,
+                            ["--all" if command[2] == "fmt" else "--workspace"],
+                        )
+        compiled: dict[str, set[tuple[str, ...]]] = {}
         with tempfile.TemporaryDirectory() as target:
-            for command in isolated:
-                with self.subTest(command=command[2]):
+            for command in checked:
+                with self.subTest(command=" ".join(command[2:])):
                     arguments = command[3 : (command + ["--"]).index("--")]
-                    self.assertIn("--lib", arguments)
                     # A check in the test profile builds what the tests build.
                     profile = ["--profile", "test"] if command[2] == "test" else []
                     result = subprocess.run(
@@ -7492,16 +7500,21 @@ class CiConfigurationTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(
-                        [
-                            message["features"]
-                            for message in map(json.loads, result.stdout.splitlines())
-                            if message["reason"] == "compiler-artifact"
-                            and message["target"]["name"] == "nvx"
-                            and message["target"]["kind"] == ["lib"]
-                        ],
-                        [[]],
+                    compiled.setdefault(command[2], set()).update(
+                        tuple(message["features"])
+                        for message in map(json.loads, result.stdout.splitlines())
+                        if message["reason"] == "compiler-artifact"
+                        and message["target"]["name"] == "nvx"
+                        and message["target"]["kind"] == ["lib"]
                     )
+        default = ("default", "host", "serde")
+        for subcommand, configurations in (
+            ("clippy", {(), default}),
+            ("build", {()}),
+            ("test", {(), default}),
+        ):
+            with self.subTest(subcommand=subcommand):
+                self.assertLessEqual(configurations, compiled.get(subcommand, set()))
 
     def test_cargo_keeps_each_workspace_in_its_target_directory(self):
         # Cargo reads its configuration from the directory in which it runs,

@@ -2169,13 +2169,14 @@ through the [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml)
 action, on the Rust release that `rust-toolchain.toml` pins. For every crate of
 the workspace, it runs rustfmt, Clippy with warnings denied for all targets and
 features and for the library, the tests, rustdoc with warnings denied, the
-minimum Rust version check, and the macOS cross-check. For `nvx` alone, it also
-lints, builds and tests the library without default features: across the
-workspace, Cargo would build `nvx` with the features that the crates that
-depend on it enable. The tests of `nvx` are the unit, protocol conformance-vector
-and property, and fake-OpenVMM instance tests, and a test that the direct
-children of `nvx::host` depend on one another without cycles. The job also
-validates the bundled artifact staging of `nvx` with a fixture package. The action
+minimum Rust version check, and the macOS cross-check. Across the workspace,
+Cargo builds `nvx` with the features that the crates that depend on it enable,
+so for `nvx` alone, it also lints the library and runs the tests with default
+features, and lints, builds and tests the library without default features. The
+tests of `nvx` are the unit, protocol conformance-vector and property, and
+fake-OpenVMM instance tests, and a test that the direct children of `nvx::host`
+depend on one another without cycles. The job also validates the bundled
+artifact staging of `nvx` with a fixture package. The action
 sets `NVX_BUNDLE=skip` for `--all-features` builds, so that `bundled` stages
 nothing instead of downloading the pinned release.
 

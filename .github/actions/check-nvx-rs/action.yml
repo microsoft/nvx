@@ -35,10 +35,11 @@ runs:
         } >> "${GITHUB_OUTPUT}"
 
     # Formatting, Clippy, the tests, rustdoc, and the Rust version and macOS checks cover every
-    # crate of the Cargo workspace, but for the library checks without default features, which
-    # select nvx alone: across the workspace, Cargo would build nvx with the features that the
-    # crates that depend on it enable. The steps for the bundled artifacts and the guest binaries
-    # check nvx's features, and the last steps the runtime adapter, which the workspace excludes.
+    # crate of the Cargo workspace. Across the workspace, Cargo builds nvx with the features that
+    # the crates that depend on it enable, so the Lint and Test steps also select nvx alone, with
+    # its default features and, for its library, without features. The steps for the bundled
+    # artifacts and the guest binaries check nvx's features, and the last steps the runtime
+    # adapter, which the workspace excludes.
     - name: Check formatting
       shell: bash
       working-directory: nvx-rs
@@ -57,6 +58,8 @@ runs:
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --workspace --lib \
           -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked -p nvx --lib \
+          -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked -p nvx --lib \
           --no-default-features -- -D warnings
 
     - name: Test
@@ -69,6 +72,7 @@ runs:
         set -euo pipefail
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --workspace --all-features
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --workspace
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked -p nvx
         # Without features, nvx's library still holds the protocol and the execution engine.
         cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked -p nvx --lib \
           --no-default-features
