@@ -41,6 +41,9 @@
 //!   and [`sandbox::scratch`] binds and claims a scratch image. A
 //!   [`PreparedLaunch`](sandbox::PreparedLaunch) hands the VMM the files that those checks
 //!   opened, which it inherits through the [`supervisor`]'s allowlist.
+//! - [`error`] holds the errors of the host's domains, each with kinds of its own: a VM's
+//!   configuration, its launch, the transport to it, its snapshots and restores, and its outcome
+//!   report.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
@@ -63,6 +66,40 @@
 pub mod artifacts;
 #[cfg(feature = "cli")]
 pub mod cli;
+pub mod error {
+    //! The errors of the host's operations, one for each domain:
+    //!
+    //! - [`ConfigError`]: the checks of a VM's configuration and of the values in it, which read
+    //!   nothing on the host;
+    //! - [`LaunchError`]: a VM's launch, stop, verification, and reattachment, and the probe of
+    //!   its hypervisor;
+    //! - [`TransportError`]: the connection to a VM's control endpoint, and the session over it;
+    //! - [`SnapshotError`]: a snapshot's capture, opening, and acceptance of a VM;
+    //! - [`RestoreError`]: a VM's restore from a snapshot;
+    //! - [`ReportError`]: the reading of OpenVMM's outcome report of a VM.
+    //!
+    //! Each has a kind from a small enum of its own domain, such as [`ConfigErrorKind`], which its
+    //! `kind` method returns, a message, which it displays, and an optional source, which
+    //! [`source`](std::error::Error::source) returns. Each domain classifies only its own
+    //! failures, and its kinds are non-exhaustive, so that it can classify new ones. The host's
+    //! other operations return [`crate::Error`].
+    //!
+    //! The source of each error is a file of its own in this module's folder, `host/error/`.
+
+    mod config;
+    mod launch;
+    mod report;
+    mod restore;
+    mod snapshot;
+    mod transport;
+
+    pub use config::{ConfigError, ConfigErrorKind};
+    pub use launch::{LaunchError, LaunchErrorKind};
+    pub use report::{ReportError, ReportErrorKind};
+    pub use restore::{RestoreError, RestoreErrorKind};
+    pub use snapshot::{SnapshotError, SnapshotErrorKind};
+    pub use transport::{TransportError, TransportErrorKind};
+}
 pub mod filesystem;
 pub mod instance;
 pub mod launch;

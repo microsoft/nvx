@@ -45,10 +45,10 @@ nvx-rs/
 │   ├── error.rs     nvx::Error, its ErrorKind, and its stable ErrorCode
 │   ├── exec/        the execution engine: the streams, credit, and outcome of an execution's two
 │   │                sides, without I/O, threads, or features, for any framing and host
-│   ├── host/        feature `host` (default): artifacts, launch, network and egress policy files,
-│   │                filesystem, NVXS connection, session, process, platform, VM instances,
-│   │                sandbox stores, templates' manifests, compatibility keys, store, and leases,
-│   │                outcome reports, file seals, and the sandbox launch profile of
+│   ├── host/        feature `host` (default): per-domain errors, artifacts, launch, network and
+│   │                egress policy files, filesystem, NVXS connection, session, process, platform,
+│   │                VM instances, sandbox stores, templates' manifests, compatibility keys, store,
+│   │                and leases, outcome reports, file seals, and the sandbox launch profile of
 │   │                `nvx-rs sandbox`, its distro and scratch bindings, and its prepared launches;
 │   │                with feature `cli`, the `nvx-rs` CLI
 │   ├── testing/     feature `testing`: the fake OpenVMM
@@ -117,6 +117,7 @@ changes only when the module's purpose does.
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
+| [`nvx::host::error`](#nvxhosterror) | Per-domain errors of the host's operations, each with kinds of its own: configuration, launch, transport, snapshot, restore, and report |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -377,6 +378,27 @@ cancellation, or other execution, and both bound their memory.
 The adapter chooses one byte window per stream, or frames charged against one
 pool that stdout and stderr share, and the maximum chunk, in `Limits`; a `Key`'s
 generation tells stale messages from foreign ones.
+
+### `nvx::host::error`
+
+The errors of the host's operations, one for each domain, which share no
+classification with `nvx::Error` or with one another:
+
+| Error | Domain | Kinds |
+| --- | --- | --- |
+| `ConfigError` | The checks of a VM's configuration and of the values in it, which read nothing on the host | `Invalid`, `Unsupported` |
+| `LaunchError` | A VM's launch, stop, verification, and reattachment, and the probe of its hypervisor | `Unavailable`, `Refused`, `Io`, `Exited`, `RuntimeMismatch`, `StillRunning` |
+| `TransportError` | The connection to a VM's control endpoint, and the session over it | `TimedOut`, `Exited`, `Refused`, `Closed`, `Reset`, `Protocol`, `Io` |
+| `SnapshotError` | A snapshot's capture, opening, and acceptance of a VM | `Io`, `Malformed`, `Incompatible`, `CaptureFailed` |
+| `RestoreError` | A VM's restore from a snapshot | `OperationFailed`, `Expired`, `Cancelled`, `Exited`, `Protocol` |
+| `ReportError` | The reading of OpenVMM's outcome report of a VM | `Io`, `Malformed` |
+
+Each error has a kind from an enum of its own domain, such as
+`ConfigErrorKind`, which its `kind` method returns; a message that callers can
+show as is, which it displays; and an optional source, which
+`std::error::Error::source` returns. The kinds are non-exhaustive, so that each
+domain can classify new failures. The host's other operations return
+`nvx::Error`, as [Errors](#errors) describes.
 
 ### `nvx::host::artifacts`
 
@@ -2503,6 +2525,9 @@ optional cause.
 
 Messages call an instance `sandbox NAME`, after the name that `Instance::create`
 or `Instance::open` gives it.
+
+The per-domain errors of [`nvx::host::error`](#nvxhosterror) are separate: each
+has the kinds of its own domain, and none has a code.
 
 ### Error codes
 
