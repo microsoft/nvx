@@ -213,7 +213,7 @@ hypervisor identity, and runs the cross-vCPU warp test that the
 [time ABI](design/3.2-clock-and-time.md#327-cross-processor-consistency) uses to enforce its 1 µs
 skew bound. `nvx-time` implements the time ABI's
 [guest obligations](design/3.2-clock-and-time.md#3210-guest-obligations): the conformance
-checks, the violation watcher, the restore packet v5 and v6 and time-sample v2
+checks, the violation watcher, the restore packet v1 and time-sample v1
 parsers, the snapshot agent's time steps, and the wall-clock discipline, which
 applies the host's clock correction. Before shell-ready it only steps the
 clock to host UTC and sets its rate; the other boot checks run in
@@ -519,11 +519,11 @@ hashes for OpenVMM, Linux, the generated kernel config, each packaged guest
 initramfs and its package manifest, the Ubuntu distro layer and its manifest,
 and the sandbox scratch template, under `scratch_template_sha256` in its
 `ubuntu` section. Its `nvx_rs` section records the `nvx-rs` executable's
-SHA-256, the digest of the `nvx-rs` sources that built it, and the build's
-Rust release, target, and features. Its `guest_rust` section pins Rust 1.95.0
-and `x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes
-`nvx-rs` and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 3,
-control-session protocol 1, and contract
+SHA-256, the digest of the `nvx-rs` sources that built it, and the build's Rust
+release, target, and features. Its `guest_rust` section pins Rust 1.95.0 and
+`x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes `nvx-rs`
+and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 1, time
+ABI 1, restore packet 1, control-session protocol 1, and contract
 `nvx-microvm-v2-control-v2`; product guest-agent metadata is intentionally not
 part of this platform manifest.
 

@@ -1241,9 +1241,9 @@ fn time_packet(
     rate_deviation: i32,
     downtime_ns: u64,
 ) -> Vec<u8> {
-    let mut packet = Vec::with_capacity(24 + ranges.len() * 16 + 64);
+    let mut packet = Vec::with_capacity(24 + ranges.len() * 16 + 64 + 16);
     packet.extend_from_slice(b"OVR");
-    packet.extend_from_slice(&[5, flags, online, ranges.len() as u8, 0]);
+    packet.extend_from_slice(&[1, flags, online, ranges.len() as u8, 0]);
     packet.extend_from_slice(&generation.to_le_bytes());
     packet.extend_from_slice(&rate_deviation.to_le_bytes());
     packet.extend_from_slice(&downtime_ns.to_le_bytes());
@@ -1252,10 +1252,11 @@ fn time_packet(
         packet.extend_from_slice(&length.to_le_bytes());
     }
     packet.extend(0_u8..64);
+    packet.extend_from_slice(&[0; 16]);
     packet
 }
 
-/// Returns a time sample of version 2, as OpenVMM encodes it: of `generation`, at host UTC
+/// Returns a time sample of version 1, as OpenVMM encodes it: of `generation`, at host UTC
 /// `utc_ns`, with the test-hook flag, the version, flags, status, and reserved byte that
 /// `header` gives, guest TSC 123456789 paired within 640 ns, disruption 3, a correction of
 /// -6552945 scaled ppm bounded by 66, and no maximum error.
@@ -1369,7 +1370,7 @@ fn time_test_mode_decodes_packets_samples_and_arithmetic() {
     let sample = time_fixture(
         directory.path(),
         "sample",
-        time_sample([2, 8, 1, 0], 4, TIME_UTC_NS),
+        time_sample([1, 8, 1, 0], 4, TIME_UTC_NS),
     );
     assert_eq!(
         time_hook("sample", &sample, &["4"]),
@@ -1754,7 +1755,7 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
     };
     rejected.push(mutate(0, b"OVX"));
     rejected.push(mutate(3, &[3]));
-    rejected.push(mutate(4, &[0x10]));
+    rejected.push(mutate(4, &[0x20]));
     rejected.push(mutate(5, &[3]));
     rejected.push(mutate(6, &[1]));
     rejected.push(mutate(7, &[1]));
@@ -1765,8 +1766,8 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
         16,
         &(2_592_000_u64 * 1_000_000_000 + 1).to_le_bytes(),
     ));
-    // A packet of version 4, which carried host UTC, is refused.
-    rejected.push(mutate(3, &[4]));
+    // A packet of an earlier OpenVMM's version 5 is refused.
+    rejected.push(mutate(3, &[5]));
     rejected.push(time_packet(0x02, 0, &[(0, 0)], 1, 0, 0));
     rejected.push(time_packet(0x02, 0, &[(u64::MAX - 4095, 8192)], 1, 0, 0));
     for (index, packet) in rejected.iter().enumerate() {
@@ -1834,15 +1835,15 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
     let sample_path = |name: &str, header: [u8; 4], generation: u32, utc: u64| {
         time_fixture(directory.path(), name, time_sample(header, generation, utc))
     };
-    let good = sample_path("sample-good", [2, 8, 1, 0], 4, TIME_UTC_NS);
+    let good = sample_path("sample-good", [1, 8, 1, 0], 4, TIME_UTC_NS);
     assert_eq!(time_hook("sample", &good, &["4"]).1, TIME_SAMPLE_OUTPUT);
     for (index, path) in [
-        sample_path("sample-version", [1, 0, 0, 0], 0, TIME_UTC_NS),
-        sample_path("sample-flags", [2, 1, 0, 0], 0, TIME_UTC_NS),
-        sample_path("sample-status", [2, 0, 4, 0], 0, TIME_UTC_NS),
-        sample_path("sample-reserved", [2, 0, 0, 1], 0, TIME_UTC_NS),
-        sample_path("sample-utc", [2, 0, 0, 0], 0, 0),
-        sample_path("sample-generation", [2, 0, 0, 0], 3, TIME_UTC_NS),
+        sample_path("sample-version", [2, 0, 0, 0], 0, TIME_UTC_NS),
+        sample_path("sample-flags", [1, 1, 0, 0], 0, TIME_UTC_NS),
+        sample_path("sample-status", [1, 0, 4, 0], 0, TIME_UTC_NS),
+        sample_path("sample-reserved", [1, 0, 0, 1], 0, TIME_UTC_NS),
+        sample_path("sample-utc", [1, 0, 0, 0], 0, 0),
+        sample_path("sample-generation", [1, 0, 0, 0], 3, TIME_UTC_NS),
     ]
     .iter()
     .enumerate()
@@ -1856,19 +1857,21 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
     }
 }
 
-/// Returns `packet`, a version 5 packet of [`time_packet`], as version 6, with the network byte
-/// `network` and, after its entropy, the DNS server record `dns_server`.
+/// Returns `packet`, a packet of [`time_packet`] without network settings, as one that carries
+/// them: with the network flag, the network byte `network`, and, after its entropy, the DNS server
+/// record `dns_server`.
 #[cfg(target_arch = "x86_64")]
 fn time_network_packet(mut packet: Vec<u8>, network: u8, dns_server: [u8; 16]) -> Vec<u8> {
-    packet[3] = 6;
+    packet[4] |= 0x10;
     packet[7] = network;
-    packet.extend_from_slice(&dns_server);
+    let dns_server_offset = packet.len() - dns_server.len();
+    packet[dns_server_offset..].copy_from_slice(&dns_server);
     packet
 }
 
 #[test]
 #[cfg(target_arch = "x86_64")]
-fn time_test_mode_decodes_the_network_settings_of_version_6() {
+fn time_test_mode_decodes_the_network_settings() {
     let directory = tempfile::tempdir().unwrap();
     let previous = "ffffffffffffffffffffffffffffffff";
     let base = time_packet(0x04, 0, &[], 1, 0, 0);
@@ -1897,13 +1900,13 @@ fn time_test_mode_decodes_the_network_settings_of_version_6() {
         let text = String::from_utf8_lossy(&output.1);
         assert_eq!(output.0, Some(0), "case {index}: {text:?}");
         assert!(
-            text.starts_with("ok flags=4 ") && text.ends_with(expected),
+            text.starts_with("ok flags=20 ") && text.ends_with(expected),
             "case {index}: {text:?}"
         );
     }
-    // A version 5 packet carries no network settings, and prints none.
+    // A packet without the network flag carries no network settings, and prints none.
     assert!(
-        run_time_packet(directory.path(), "version-5", &base, "0", previous)
+        run_time_packet(directory.path(), "no-network", &base, "0", previous)
             .1
             .ends_with(b" generation_id=000102030405060708090a0b0c0d0e0f\n")
     );

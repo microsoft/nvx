@@ -29,8 +29,8 @@ pub const MANIFEST_NAME: &str = "manifest.bin";
 /// OpenVMM's own reader.
 pub const MAX_MANIFEST_LEN: u64 = 1024 * 1024;
 
-/// The magic that identifies a manifest of version 6 of OpenVMM's snapshot format.
-const FORMAT_MAGIC: &[u8] = b"OPENVMM_SNAPSHOT_V6\0";
+/// The magic that identifies a manifest of version 2 of OpenVMM's snapshot format.
+const FORMAT_MAGIC: &[u8] = b"OPENVMM_SNAPSHOT_V2\0";
 
 /// The type of the root of a snapshot's saved state.
 const SAVED_STATE_ROOT_TYPE: &str = "openvmm.SavedState";
@@ -45,7 +45,7 @@ const PAGE_SIZE: u32 = 4096;
 const MACHINE_PROFILE: &str = "microvm";
 
 /// Version of the boot layout of a microVM: OpenVMM's Linux-direct boot structures.
-const BOOT_LAYOUT_VERSION: u32 = 2;
+const BOOT_LAYOUT_VERSION: u32 = 1;
 
 /// Version of the dormant filesystem slot of a microVM.
 pub(super) const FILESYSTEM_SLOT_VERSION: u32 = 1;
@@ -176,7 +176,7 @@ pub struct TimeContract {
     /// restore of the snapshot increments.
     pub lineage: u32,
     /// The host's monotonic time from the cut of the saved VM time to the capture anchor, in
-    /// nanoseconds, if the capture recorded it.
+    /// nanoseconds, or `None` for zero, which the manifest's encoding omits.
     pub cut_to_anchor_ns: Option<u64>,
 }
 
@@ -873,7 +873,7 @@ fn check_format(bytes: &[u8]) -> Result<(), Problem> {
         // A field that appears twice is refused once the manifest is decoded.
         match field.number {
             1 => version = field.uint64().ok(),
-            12 => magic = field.bytes().ok(),
+            10 => magic = field.bytes().ok(),
             _ => {}
         }
     }
@@ -940,21 +940,21 @@ struct RawManifest {
     architecture: String,
     /// Field 8.
     state_size: u64,
-    /// Field 11.
+    /// Field 9.
     contract: Option<RawContract>,
-    /// Field 13.
+    /// Field 11.
     saved_state_schema_version: u32,
-    /// Field 14.
+    /// Field 12.
     saved_state_root_type: String,
-    /// Field 15.
+    /// Field 13.
     tier: String,
-    /// Field 16.
+    /// Field 14.
     restore_policy: String,
-    /// Field 17.
+    /// Field 15.
     consumed_sections: u32,
 }
 
-/// Decodes `openvmm.snapshot.SnapshotManifest`, whose version, field 1, and magic, field 12,
+/// Decodes `openvmm.snapshot.SnapshotManifest`, whose version, field 1, and magic, field 10,
 /// [`check_format`] checked.
 fn decode_manifest(data: &[u8]) -> Result<RawManifest, String> {
     let what = "it";
@@ -963,7 +963,7 @@ fn decode_manifest(data: &[u8]) -> Result<RawManifest, String> {
     decode(
         data,
         what,
-        &[1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17],
+        &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
         &[],
         |field| {
             match field.number {
@@ -977,15 +977,15 @@ fn decode_manifest(data: &[u8]) -> Result<RawManifest, String> {
                 6 => raw.page_size = field.uint32().map_err(&wire)?,
                 7 => raw.architecture = field.text().map_err(&wire)?.to_owned(),
                 8 => raw.state_size = field.uint64().map_err(&wire)?,
-                11 => raw.contract = Some(decode_contract(field.bytes().map_err(&wire)?)?),
-                12 => {
+                9 => raw.contract = Some(decode_contract(field.bytes().map_err(&wire)?)?),
+                10 => {
                     field.bytes().map_err(&wire)?;
                 }
-                13 => raw.saved_state_schema_version = field.uint32().map_err(&wire)?,
-                14 => raw.saved_state_root_type = field.text().map_err(&wire)?.to_owned(),
-                15 => raw.tier = field.text().map_err(&wire)?.to_owned(),
-                16 => raw.restore_policy = field.text().map_err(&wire)?.to_owned(),
-                17 => raw.consumed_sections = field.uint32().map_err(&wire)?,
+                11 => raw.saved_state_schema_version = field.uint32().map_err(&wire)?,
+                12 => raw.saved_state_root_type = field.text().map_err(&wire)?.to_owned(),
+                13 => raw.tier = field.text().map_err(&wire)?.to_owned(),
+                14 => raw.restore_policy = field.text().map_err(&wire)?.to_owned(),
+                15 => raw.consumed_sections = field.uint32().map_err(&wire)?,
                 _ => unreachable!("the message refuses unknown fields"),
             }
             Ok(())
@@ -1033,36 +1033,36 @@ struct RawContract {
     state_units: usize,
     /// Field 10: how many attachments it holds.
     attachments: usize,
-    /// Field 16.
-    boot_layout_version: u32,
-    /// Field 18.
-    network: Option<RawNetwork>,
-    /// Field 19: whether it is present.
-    filesystem: bool,
-    /// Field 21.
-    blocks: Vec<RawBlock>,
-    /// Field 22.
-    filesystem_slot_version: u32,
-    /// Field 23.
-    boot_online_vp_count: u32,
-    /// Field 24.
-    interrupt_mode: String,
-    /// Field 25.
-    status_page_start: u64,
-    /// Field 26.
-    status_page_length: u64,
-    /// Field 27.
-    expansion_version: u32,
-    /// Field 28.
-    memory_capacity: u64,
-    /// Field 29.
-    memory_block_size: u64,
-    /// Field 30.
-    expansion_ranges: Vec<MemoryRange>,
-    /// Field 31.
+    /// Field 11.
     time: Option<RawTime>,
-    /// Field 32.
+    /// Field 12.
     cpu_profile: Option<RawCpuProfile>,
+    /// Field 13.
+    boot_layout_version: u32,
+    /// Field 14.
+    network: Option<RawNetwork>,
+    /// Field 15: whether it is present.
+    filesystem: bool,
+    /// Field 16.
+    blocks: Vec<RawBlock>,
+    /// Field 17.
+    filesystem_slot_version: u32,
+    /// Field 18.
+    boot_online_vp_count: u32,
+    /// Field 19.
+    interrupt_mode: String,
+    /// Field 20.
+    status_page_start: u64,
+    /// Field 21.
+    status_page_length: u64,
+    /// Field 22.
+    expansion_version: u32,
+    /// Field 23.
+    memory_capacity: u64,
+    /// Field 24.
+    memory_block_size: u64,
+    /// Field 25.
+    expansion_ranges: Vec<MemoryRange>,
 }
 
 /// Decodes `openvmm.snapshot.SnapshotMachineContract`.
@@ -1074,9 +1074,9 @@ fn decode_contract(data: &[u8]) -> Result<RawContract, String> {
         data,
         what,
         &[
-            1, 2, 3, 4, 5, 7, 16, 18, 19, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32,
+            1, 2, 3, 4, 5, 7, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24,
         ],
-        &[6, 8, 9, 10, 21, 30],
+        &[6, 8, 9, 10, 16, 25],
         |field| {
             match field.number {
                 1 => raw.machine_profile = field.text().map_err(&wire)?.to_owned(),
@@ -1117,27 +1117,27 @@ fn decode_contract(data: &[u8]) -> Result<RawContract, String> {
                     }
                     raw.attachments += 1;
                 }
-                16 => raw.boot_layout_version = field.uint32().map_err(&wire)?,
-                18 => raw.network = Some(decode_network(field.bytes().map_err(&wire)?)?),
-                19 => {
+                13 => raw.boot_layout_version = field.uint32().map_err(&wire)?,
+                14 => raw.network = Some(decode_network(field.bytes().map_err(&wire)?)?),
+                15 => {
                     // A template's filesystem slot is dormant, so the policy of an attached
                     // filesystem is refused without its fields being read.
                     field.bytes().map_err(&wire)?;
                     raw.filesystem = true;
                 }
-                21 => {
+                16 => {
                     let block = decode_block(field.bytes().map_err(&wire)?)?;
                     push_bounded(&mut raw.blocks, block, MAX_BLOCKS, "its sandbox blocks")?;
                 }
-                22 => raw.filesystem_slot_version = field.uint32().map_err(&wire)?,
-                23 => raw.boot_online_vp_count = field.uint32().map_err(&wire)?,
-                24 => raw.interrupt_mode = field.text().map_err(&wire)?.to_owned(),
-                25 => raw.status_page_start = field.uint64().map_err(&wire)?,
-                26 => raw.status_page_length = field.uint64().map_err(&wire)?,
-                27 => raw.expansion_version = field.uint32().map_err(&wire)?,
-                28 => raw.memory_capacity = field.uint64().map_err(&wire)?,
-                29 => raw.memory_block_size = field.uint64().map_err(&wire)?,
-                30 => {
+                17 => raw.filesystem_slot_version = field.uint32().map_err(&wire)?,
+                18 => raw.boot_online_vp_count = field.uint32().map_err(&wire)?,
+                19 => raw.interrupt_mode = field.text().map_err(&wire)?.to_owned(),
+                20 => raw.status_page_start = field.uint64().map_err(&wire)?,
+                21 => raw.status_page_length = field.uint64().map_err(&wire)?,
+                22 => raw.expansion_version = field.uint32().map_err(&wire)?,
+                23 => raw.memory_capacity = field.uint64().map_err(&wire)?,
+                24 => raw.memory_block_size = field.uint64().map_err(&wire)?,
+                25 => {
                     let (start, length) = decode_expansion_range(field.bytes().map_err(&wire)?)?;
                     push_bounded(
                         &mut raw.expansion_ranges,
@@ -1146,8 +1146,8 @@ fn decode_contract(data: &[u8]) -> Result<RawContract, String> {
                         "its memory expansion ranges",
                     )?;
                 }
-                31 => raw.time = Some(decode_time(field.bytes().map_err(&wire)?)?),
-                32 => raw.cpu_profile = Some(decode_cpu_profile(field.bytes().map_err(&wire)?)?),
+                11 => raw.time = Some(decode_time(field.bytes().map_err(&wire)?)?),
+                12 => raw.cpu_profile = Some(decode_cpu_profile(field.bytes().map_err(&wire)?)?),
                 _ => unreachable!("the message refuses unknown fields"),
             }
             Ok(())

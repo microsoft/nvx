@@ -41,7 +41,7 @@ fn identity_constants_match_the_hyperv_leaves() {
     assert_eq!(HYPERV_MAXIMUM_LEAF, 0x4000_0005);
     assert_eq!(HYPERV_VENDOR, [0x7263_694d, 0x666f_736f, 0x7648_2074]);
     assert_eq!(HYPERV_INTERFACE, 0x3123_7648);
-    assert_eq!(HYPERV_BUILD, [0x0058_564e, 0x0002_0000]);
+    assert_eq!(HYPERV_BUILD, [0x0058_564e, 0x0001_0000]);
     assert_eq!(HYPERV_PRIVILEGES, 0x8860);
     assert_eq!(HYPERV_FEATURES, 0x100);
 }

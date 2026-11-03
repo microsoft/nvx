@@ -1,7 +1,7 @@
 # Template manifests
 
 Each directory holds the `manifest.bin` of a template's capture, as OpenVMM
-writes it: one `openvmm.snapshot.SnapshotManifest` of version 6 of OpenVMM's
+writes it: one `openvmm.snapshot.SnapshotManifest` of version 2 of OpenVMM's
 snapshot format, in the protobuf wire format of its `mesh`. The tests of
 `nvx::host::template` read them with `TemplateManifest::read`, so that the
 reader is checked against bytes that OpenVMM's own code wrote, rather than
@@ -12,18 +12,18 @@ against its own idea of them.
 | [`platform-kvm`](platform-kvm) | A KVM microVM of 2 processors and 512 MiB of RAM, of a capacity of 2 GiB, with a `distro` of 1 GiB, a fresh scratch of 64 MiB, the dormant filesystem slot, a console, a control console, and no NIC |
 | [`platform-mshv-network`](platform-mshv-network) | The same on MSHV, with a fixed NIC at `10.0.0.2/24`, its IPv6 identity, and an allow-list policy |
 
-Both are platform-tier captures for clones of microVM ABI version 3, whose
+Both are platform-tier captures for clones of microVM ABI version 1, whose
 devices offer no access-platform, whose consoles offer no size, and whose
 virtio devices interrupt on IOAPIC inputs past the ISA IRQs, after the
 invariant configuration alone, with OpenVMM's test records of the time
-contract, of time ABI version 2, and of the CPU profile `intel.icelake-sp.v1`.
+contract, of time ABI version 1, and of the CPU profile `intel.icelake-sp.v1`.
 
 ## How they were made
 
 [`generate.rs`](generate.rs) builds each manifest as a capture does, with
 `microvm_machine_contract` of OpenVMM's `openvmm_helpers`, checks it with
 OpenVMM's own validation, and encodes it with `mesh`. It wrote these files at
-OpenVMM commit `35e76265fa8b63922edead112fcd5a38c59445c8`.
+OpenVMM commit `eda13d80a85e49c16ed0500a9d4ae762ca810304`.
 
 To write them again, as when a new version of the snapshot format, the time
 ABI, or the microVM ABI retires these, append `generate.rs` to

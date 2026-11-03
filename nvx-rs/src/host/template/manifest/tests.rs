@@ -219,7 +219,7 @@ fn a_fixed_nic_is_read_with_the_identity_of_its_policy() {
                 mode: "allow-list".to_owned(),
                 digest: [7; 32],
                 required: true,
-                encoding_version: 4,
+                encoding_version: 1,
             },
         })
     );
@@ -232,12 +232,12 @@ fn the_fields_of_a_manifest_need_not_be_written_in_their_order() {
     // from the order of their numbers, as the network's profile, field 9, comes first.
     let mut spec = ManifestSpec::template();
     let reversed = Proto::default()
-        .varint(17, 1)
-        .text(16, "clone")
-        .text(15, "platform")
-        .text(14, "openvmm.SavedState")
-        .varint(13, 1)
-        .bytes(12, b"OPENVMM_SNAPSHOT_V6\0");
+        .varint(15, 1)
+        .text(14, "clone")
+        .text(13, "platform")
+        .text(12, "openvmm.SavedState")
+        .varint(11, 1)
+        .bytes(10, b"OPENVMM_SNAPSHOT_V2\0");
     spec.tier.clear();
     spec.restore_policy.clear();
     spec.root_type.clear();
@@ -254,7 +254,7 @@ fn the_fields_of_a_manifest_need_not_be_written_in_their_order() {
 #[test]
 fn other_versions_of_the_format_are_unsupported() {
     let unsupported = ErrorCode::FormatUnsupported;
-    for version in [0, 1, 5, 7, u32::MAX] {
+    for version in [0, 1, 3, 6, u32::MAX] {
         assert_refused(
             |spec| spec.version = version,
             unsupported,
@@ -265,7 +265,7 @@ fn other_versions_of_the_format_are_unsupported() {
         );
     }
     assert_refused(
-        |spec| spec.magic = b"OPENVMM_SNAPSHOT_V5\0".to_vec(),
+        |spec| spec.magic = b"OPENVMM_SNAPSHOT_V6\0".to_vec(),
         unsupported,
         "has another format magic than its version's",
     );
@@ -289,9 +289,8 @@ fn other_versions_of_the_format_are_unsupported() {
         unsupported,
         "describes a machine of profile \"standard\"",
     );
-    // A template of microVM ABI version 2, whose devices offered access-platform and used ISA
-    // IRQs and whose consoles offered their size, is refused, as are the versions around it.
-    for version in [1, 2, 4] {
+    // A machine of another microVM ABI version is refused.
+    for version in [0, 2, 3] {
         assert_refused(
             |spec| spec.contract().abi_version = version,
             unsupported,
@@ -299,13 +298,12 @@ fn other_versions_of_the_format_are_unsupported() {
         );
     }
     assert_refused(
-        |spec| spec.contract().boot_layout_version = 1,
+        |spec| spec.contract().boot_layout_version = 2,
         unsupported,
-        "boot layout version 1",
+        "boot layout version 2",
     );
-    // A time contract of another time ABI version, such as a snapshot of time ABI version 1,
-    // whose guest estimated the host's clock correction, is refused.
-    for version in [1, 3] {
+    // A time contract of another time ABI version is refused.
+    for version in [0, 2] {
         assert_refused(
             |spec| spec.time().abi_version = version,
             unsupported,
@@ -313,21 +311,21 @@ fn other_versions_of_the_format_are_unsupported() {
         );
     }
     // A manifest of another version is reported as such, even with fields that this build does
-    // not know, such as a field that version 6 retired.
+    // not know.
     let mut spec = ManifestSpec::template();
-    spec.version = 5;
+    spec.version = 6;
     let message = refusal(
-        &spec.encode_with(Proto::default().varint(9, 1).varint(40, 1)),
+        &spec.encode_with(Proto::default().varint(16, 1).varint(40, 1)),
         unsupported,
     );
-    assert!(message.contains("has format version 5"), "{message}");
+    assert!(message.contains("has format version 6"), "{message}");
 }
 
 #[test]
 fn fields_that_the_format_does_not_have_are_refused() {
     let template = ManifestSpec::template();
-    // Field 9 is retired, and field 18 does not exist yet.
-    for number in [9, 10, 18, 63, 64, 1000] {
+    // Fields 16 and later do not exist yet.
+    for number in [16, 17, 18, 63, 64, 1000] {
         let message = refusal(
             &template.encode_with(Proto::default().varint(number, 1)),
             ErrorCode::Io,
@@ -419,7 +417,7 @@ fn malformed_manifests_are_refused() {
             .some(3, offset)
             .finish();
         assert_eq!(
-            decode_contract(&Proto::default().always_bytes(30, &expansion).finish()).map(drop),
+            decode_contract(&Proto::default().always_bytes(25, &expansion).finish()).map(drop),
             Err("its memory expansion range holds the unknown field 3".to_owned())
         );
     }
@@ -472,7 +470,7 @@ fn bounded_lists_are_refused_past_their_bounds() {
     );
     let mut contract = Proto::default();
     for _ in 0..=MAX_BLOCKS {
-        contract = contract.message(21, Proto::default().text(1, "distro"));
+        contract = contract.message(16, Proto::default().text(1, "distro"));
     }
     assert_eq!(
         decode_contract(&contract.finish()).map(drop),

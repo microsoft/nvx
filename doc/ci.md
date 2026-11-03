@@ -251,11 +251,11 @@ under egress rules that admit DNS over IPv4 and one host service, with
 explicit host loopback and a forward under egress rules that admit DNS over
 IPv6 alone, and with private-network ingress and allowed egress. The
 template's guest learned no DNS server and runs no announcer of its listeners,
-so each restore's repair applies those of the restore's policy, which restore
-packet version 6 carries, before it acknowledges the restore: the guest's
-resolver must name exactly the policy's DNS server, and no gateway without
-one, and the announcer must run exactly when the policy publishes the guest's
-listeners. Each restore must reach through its gateway exactly the
+so each restore's repair applies those of the restore's policy, which the
+restore packet's network settings carry, before it acknowledges the restore:
+the guest's resolver must name exactly the policy's DNS server, and no gateway
+without one, and the announcer must run exactly when the policy publishes
+the guest's listeners. Each restore must reach through its gateway exactly the
 host-loopback services that its policy admits, which must receive no other
 request, and the host must reach the guest's server through the forward and
 through the port that the policy publishes: on host loopback alone, which no
@@ -434,10 +434,10 @@ device ID, and the features that its driver negotiated, which
 `/sys/bus/virtio/devices/*/features` lists. Each device must have negotiated
 exactly the features of its row, so a feature that a device offers besides its
 documented ones fails the scenario whenever Linux's driver takes it, as
-`VIRTIO_F_ACCESS_PLATFORM` and the console size of microVM ABI 2 would, and so
-does a documented feature that the guest lacks. A unit test checks that the
-scenario's devices are those of Tables 2.7 and 2.8, and OpenVMM's unit tests
-check the exact feature mask that each device offers.
+`VIRTIO_F_ACCESS_PLATFORM` and the console size of an earlier microVM would,
+and so does a documented feature that the guest lacks. A unit test checks that
+the scenario's devices are those of Tables 2.7 and 2.8, and OpenVMM's unit
+tests check the exact feature mask that each device offers.
 
 The `interrupt-map` scenario covers the interrupt map of
 [2.4.2](design/2.4-interrupt-and-io-architecture.md#242-interrupt-routing) and

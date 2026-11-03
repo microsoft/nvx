@@ -689,6 +689,12 @@ fn another_runtime_identity_is_mismatched() {
         |runtime| runtime.boot_contract = 3,
         IdentityPart::BootContract,
     );
+    // Builds of boot contract 4 booted guests on the microVM of an earlier OpenVMM, whose
+    // restore packets and time samples the guest decoded at other versions.
+    mismatched(
+        |runtime| runtime.boot_contract = 4,
+        IdentityPart::BootContract,
+    );
     mismatched(
         |runtime| runtime.control_contract.push_str("-next"),
         IdentityPart::ControlContract,

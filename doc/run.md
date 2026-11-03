@@ -373,8 +373,7 @@ Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
 Always include `--single-process`. When restoring, omit `--memory`, `--kernel`,
 `--initrd`, and `--net`, whose addresses the snapshot keeps; see
 [Networked snapshots](#networked-snapshots). Every restore gives the guest
-fresh entropy through the time ABI's restore packet, so `--restore-entropy` is
-no longer needed; OpenVMM still accepts it without effect. Do not pass
+fresh entropy through the time ABI's restore packet. Do not pass
 `--guest ubuntu` during restore; the captured RAM and machine contract already
 identify the restored guest. For example:
 
@@ -556,26 +555,25 @@ nvx-rs/target/release/nvx-rs run \
   --host-loopback-forward tcp:18080:8080
 ```
 
-OpenVMM validates the new policy as it validates a cold boot's, binds it to
-the NIC's captured addresses, which the restored guest keeps, and installs it,
-with its forwards, before any vCPU runs; a forward whose host port is busy
-fails the restore. A restore without connectivity passes the template's own
-deny-all. The template's guest booted under the deny-all, which names no DNS
-server and starts no `nvx-ingress`, so OpenVMM hands the guest the DNS server
-of the new policy, and whether to announce its listeners, in version 6 of the
-restore packet (see
-[Restore Packet](design/5.5-restore-protocol.md#555-restore-packet)). Before
-the host releases its input, the guest's repair names that server in
-`/etc/resolv.conf` and starts `nvx-ingress`, as the guest's init does at a
-cold boot under that policy; a failure of either fails the restore, and so
-does a guest that reads restore packet version 5 alone. Such a snapshot may
-hold a workload that has already run, but under the deny-all that workload had
-no connectivity, so nothing in the snapshot depends on the policy, and the
-restore grants it connectivity that it never had. OpenVMM rejects the option
-for a cold boot, for a snapshot without a NIC or whose NIC was captured with
-any other policy, and for a `workload-start` or `instance-checkpoint`
-snapshot, and `nvx-rs run` rejects it without `--restore-snapshot`. A
-[platform NIC template](#platform-nic-templates) takes the option too.
+OpenVMM validates the new policy as it validates a cold boot's, binds it to the
+NIC's captured addresses, which the restored guest keeps, and installs it, with
+its forwards, before any vCPU runs; a forward whose host port is busy fails the
+restore. A restore without connectivity passes the template's own deny-all. The
+template's guest booted under the deny-all, which names no DNS server and
+starts no `nvx-ingress`, so OpenVMM hands the guest the DNS server of the new
+policy, and whether to announce its listeners, in the network settings of the
+restore packet (see [Restore
+Packet](design/5.5-restore-protocol.md#555-restore-packet)). Before the host
+releases its input, the guest's repair names that server in `/etc/resolv.conf`
+and starts `nvx-ingress`, as the guest's init does at a cold boot under that
+policy; a failure of either fails the restore. Such a snapshot may hold a
+workload that has already run, but under the deny-all that workload had no
+connectivity, so nothing in the snapshot depends on the policy, and the restore
+grants it connectivity that it never had. OpenVMM rejects the option for a cold
+boot, for a snapshot without a NIC or whose NIC was captured with any other
+policy, and for a `workload-start` or `instance-checkpoint` snapshot, and
+`nvx-rs run` rejects it without `--restore-snapshot`. A [platform NIC
+template](#platform-nic-templates) takes the option too.
 
 ### Platform NIC templates
 
@@ -602,16 +600,16 @@ policy of its own with `--restore-network-policy`, for example:
 
 OpenVMM validates the restore's policy as it validates a cold boot's, binds it
 to the NIC's captured addresses, which the clone keeps, and installs it, with
-its forwards, before any vCPU runs; a forward whose host port is busy fails
-the restore. A clone without connectivity passes the template's own deny-all.
-The guest keeps its captured kernel command line, which under a deny-all
-policy names no DNS server and starts no `nvx-ingress`, so a clone learns its
-DNS server and whether to report its listeners from its activation after the
-restore, and its restore packet stays version 5. OpenVMM rejects the option
-for a cold boot, for a `workload-start` or `instance-checkpoint` snapshot or
-one without a NIC, and for a NIC captured with any other policy, and every
-restore without it requires the captured policy, as
-[Networked snapshots](#networked-snapshots) describes.
+its forwards, before any vCPU runs; a forward whose host port is busy fails the
+restore. A clone without connectivity passes the template's own deny-all. The
+guest keeps its captured kernel command line, which under a deny-all policy
+names no DNS server and starts no `nvx-ingress`, so a clone learns its DNS
+server and whether to report its listeners from its activation after the
+restore, and its restore packet carries no network settings. OpenVMM rejects
+the option for a cold boot, for a `workload-start` or `instance-checkpoint`
+snapshot or one without a NIC, and for a NIC captured with any other policy,
+and every restore without it requires the captured policy, as [Networked
+snapshots](#networked-snapshots) describes.
 
 ### Platform filesystem exports
 
@@ -646,28 +644,23 @@ binds only a `--mount`, and a snapshot captured with an export requires that
 export again. `nvx-rs run`, which passes no sandbox blocks, cannot restore a
 platform snapshot.
 
-## Migration from the retired profile
+## Snapshots of an earlier OpenVMM
 
-`microvm` is now the only selector and launches the contract previously named
-`microvm-v2`. The `microvm-v2` spelling, the former one-vCPU ABI-1 behavior,
-ABI-1 device-I/O control, TTRPC numeric value 1, ABI-1 snapshot restore, and
-boot-layout-1 snapshot restore are removed. Snapshot metadata and performance
-series use numeric ABI value 3 and boot-layout value 2.
-Use NVX commit `cb52bcd454b454cb241096c33ed42a1dcdc65347` with OpenVMM commit
-`1b70365613517a10718e00284a62bdffbd80e41c`, or an earlier compatible pair, to
-run retired ABI-1 guests or snapshots.
+OpenVMM's v4 microVM restarted the versions of its contracts: microVM ABI 1,
+boot layout 1, time ABI 1, restore packet 1, and snapshot manifest 2, whose
+version 1 is upstream OpenVMM's. It reads no snapshot of an earlier OpenVMM,
+whose manifest it refuses by its version with `E_SNAPSHOT_VERSION`, and
+`nvx-rs` refuses a template of an earlier OpenVMM by its snapshot format.
+Capture them again; to restore them as they are, use NVX commit
+`304f8e1686b4fba188ad2d9c8d932498a6ca2980` with the OpenVMM that it pins.
 
-ABI 3 offers no virtio device `VIRTIO_F_ACCESS_PLATFORM` and no console its
-size, which ABI 2 offered (see
+The machine is the one that the earlier OpenVMM called microVM ABI 3: no
+virtio device offers `VIRTIO_F_ACCESS_PLATFORM`, no console offers its size
+(see
 [Guest-Visible Capabilities](design/3.4-block-storage.md#342-guest-visible-capabilities)),
-and gives each virtio device an IOAPIC input of its own past the ISA IRQs, the
-same on every backend, where ABI 2 used ISA IRQs and another one for the NIC
-on WHP (see
-[Interrupt Routing](design/2.4-interrupt-and-io-architecture.md#242-interrupt-routing)),
-so OpenVMM refuses to restore a snapshot of ABI 2, with `snapshot microVM ABI
-version 2 is unsupported; this OpenVMM supports version 3`, and `nvx-rs`
-refuses a template of ABI 2. Capture them again; to restore them as they are,
-use an NVX commit from before ABI 3 with the OpenVMM that it pins.
+and each virtio device has an IOAPIC input of its own past the ISA IRQs, the
+same on every backend (see
+[Interrupt Routing](design/2.4-interrupt-and-io-architecture.md#242-interrupt-routing)).
 
 ## Snapshot restore readiness
 
