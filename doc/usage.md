@@ -418,6 +418,8 @@ is authorized for the organization when it enforces single sign-on.
 | `build-guest-binaries` | Build and digest the pinned Rust executables for Linux guests. |
 | `test-guest-binaries` | Run the musl integration tests against prebuilt Rust guest executables. |
 | `build-kernel` | Build the pinned and patched Linux kernel natively. |
+| `kernel-config` | Generate `kernel/config-microvm` and its derived record from the kernel feature inventory. |
+| `check-kernel-config` | Check `kernel/config-microvm` and its derived record against the kernel feature inventory. |
 | `build-initramfs` | Build the selected Alpine, Ubuntu, or Azure Linux initramfs. |
 | `build-distro-layer` | Build a deterministic Ubuntu EROFS distro layer. |
 | `build-scratch-template` | Format the reproducible ext4 sandbox scratch template. |
@@ -480,7 +482,9 @@ Initializes and recursively updates the OpenVMM Git submodule.
 python3 scripts/nvx.py verify
 ```
 
-Verifies the repository's pinned source inputs and submodule state.
+Verifies the repository's pinned source inputs and submodule state, and checks
+the kernel configuration against its feature inventory as
+[`check-kernel-config`](#check-kernel-config) does.
 
 ### `setup-cross-os-cache`
 
@@ -876,7 +880,36 @@ python3 scripts/nvx.py build-kernel [--debug]
 ```
 
 Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
-`--debug` builds the CI debug variant instead of the production kernel.
+`--debug` builds the CI debug variant instead of the production kernel. The
+production build also requires its configuration to be the one that the
+kernel feature inventory generates; see
+[Kernel configuration](build.md#kernel-configuration).
+
+### `kernel-config`
+
+```console
+python3 scripts/nvx.py kernel-config [--native] [--check]
+```
+
+Generates `kernel/config-microvm` and `kernel/config-microvm.derived` from the
+kernel feature inventory, `scripts/nvx_tools/kernel_features.py`: `make
+allnoconfig` with the inventory's settings, and the Kconfig rule that sets
+every other symbol. By default it generates them in the Docker build's image,
+whose toolchain builds CI's kernels; `--native` generates them on Linux with
+the host's toolchain. `--check` fails if the checked-in files differ instead of
+writing them. See [Kernel configuration](build.md#kernel-configuration).
+
+### `check-kernel-config`
+
+```console
+python3 scripts/nvx.py check-kernel-config
+```
+
+Checks, without a kernel source, that every setting of the kernel feature
+inventory holds in `kernel/config-microvm` and that every other symbol that it
+sets is recorded, with the same value, in `kernel/config-microvm.derived`. A
+newly enabled symbol that neither accounts for fails the check, which CI's
+quality job runs on every change and which `verify` runs too.
 
 ### `build-initramfs`
 

@@ -15529,6 +15529,7 @@ class BuildTests(unittest.TestCase):
                     return_value=(source, source_fingerprint),
                 ),
                 patch.object(build, "run_checked", side_effect=run_build),
+                patch.object(build, "check_build_configuration"),
                 self.assertRaisesRegex(
                     common.ScriptError,
                     "inputs changed during the build",

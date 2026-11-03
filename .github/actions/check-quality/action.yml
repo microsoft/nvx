@@ -77,6 +77,13 @@ runs:
       shell: bash
       run: python scripts/check_test_layout.py
 
+    # Every symbol that kernel/config-microvm sets is an inventory setting or
+    # recorded in kernel/config-microvm.derived (doc/build.md), so a newly
+    # enabled, untracked symbol fails here on every change.
+    - name: Check the kernel configuration against its feature inventory
+      shell: bash
+      run: python scripts/nvx.py check-kernel-config
+
     - name: Test Specula CI wiring
       shell: bash
       working-directory: .github/specula

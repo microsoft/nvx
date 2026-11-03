@@ -208,7 +208,7 @@ BENCHMARK_INPUT_PATHS = re.compile(
 OPENVMM_CI_CHECK_INPUT_PATHS = re.compile(
     r"^(openvmm($|/)|\.github/workflows/ci\.yml$|scripts/nvx\.py$|"
     r"scripts/nvx_tools/"
-    r"(__init__|build_constants|common|nightly_ci|openvmm_ci)\.py$)"
+    r"(__init__|build_constants|common|kernel_features|nightly_ci|openvmm_ci)\.py$)"
 )
 
 
