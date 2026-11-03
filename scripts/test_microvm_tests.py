@@ -5770,8 +5770,15 @@ class MicrovmTests(unittest.TestCase):
 
         self.assertEqual(capture.call_count, 2)
         self.assertEqual(process.call_count, 2)
-        for call, code in zip(capture.call_args_list, (0, 37), strict=True):
+        # The boot console carries the first run's output, and the byte channel
+        # the second's.
+        for call, (code, console) in zip(
+            capture.call_args_list, ((0, "hvc1"), (37, "hvc0")), strict=True
+        ):
             self.assertEqual(call.kwargs["processors"], 2)
+            self.assertIn(
+                f"\nexec >/dev/{console}\n", call.kwargs["post_restore_script"]
+            )
             self.assertIn("head -c 65536", call.kwargs["post_restore_script"])
             self.assertIn(
                 f"/sbin/nvx-exit {code}\n", call.kwargs["post_restore_script"]
@@ -5780,6 +5787,10 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(call.kwargs["output_read_delay"], 2.0)
             self.assertIn("--restore-snapshot", call.args[0])
             self.assertEqual(call.args[0][call.args[0].index("--processors") + 1], "2")
+        for call in (*capture.call_args_list, *process.call_args_list):
+            command = call.args[0]
+            self.assertEqual(command.count("--virtio-console"), 1)
+            self.assertEqual(command[command.index("--virtio-console") + 1], "console")
 
     def test_console_exit_rejects_truncation_even_if_marker_survives(self):
         marker = b"\n" + microvm_tests.CONSOLE_EXIT_COMPLETION_MARKER + b"\n"

@@ -348,6 +348,10 @@ CONSOLE_TX_DONE_MARKER = b"NVX-CONSOLE-TX-DONE"
 CONSOLE_EXIT_COMPLETION_MARKER = b"NVX-CONSOLE-EXIT-OK"
 CONSOLE_EXIT_PAYLOAD_BYTES = 64 * 1024
 CONSOLE_EXIT_READ_DELAY_SECONDS = 2.0
+# Each console-exit run's guest exit status and the console that carries its
+# payload: the boot console, on OpenVMM's standard output, or the byte channel,
+# on its standard error.
+CONSOLE_EXIT_RUNS = ((0, "hvc1"), (37, "hvc0"))
 ENDPOINT_POLICY = ("10.0.0.9:8443", "192.0.2.7:443", "10.0.0.9:443")
 ENDPOINT_POLICY_BEFORE_MARKER = b"NVX-ENDPOINT-POLICY-BEFORE"
 ENDPOINT_POLICY_AFTER_MARKER = b"NVX-ENDPOINT-POLICY-AFTER"
@@ -1606,6 +1610,13 @@ def run_console_exit(
     timeout: float,
     output_dir: Path,
 ) -> None:
+    """Check that a guest-requested exit keeps the guest's last output and its
+    exit status.
+
+    Each run restores a guest that writes a payload and a marker to one of its
+    consoles and then exits, while the host delays its reads, so that OpenVMM's
+    relay of that console lags behind the guest. The exit must write the whole
+    output of the boot console and of the byte channel alike."""
     expected = (
         b"x" * CONSOLE_EXIT_PAYLOAD_BYTES
         + b"\n"
@@ -1613,8 +1624,8 @@ def run_console_exit(
         + b"\n"
     )
     with tempfile.TemporaryDirectory(prefix="nvx-console-exit-") as temporary:
-        for exit_code in (0, 37):
-            name = f"console-exit-{processors}vcpu-status-{exit_code}"
+        for exit_code, console in CONSOLE_EXIT_RUNS:
+            name = f"console-exit-{processors}vcpu-{console}-status-{exit_code}"
             snapshot_path = Path(temporary) / f"snapshot-{exit_code}"
             boot_command = workload_boot_command(
                 executable,
@@ -1625,6 +1636,7 @@ def run_console_exit(
                 "quiet loglevel=0",
                 processors=processors,
             )
+            boot_command.extend(("--virtio-console", "console"))
             capture_snapshot(
                 [*boot_command, "--snapshot-destination", str(snapshot_path)],
                 snapshot_path,
@@ -1632,16 +1644,19 @@ def run_console_exit(
                 processors=processors,
                 post_restore_script=_render_script(
                     "console-exit.sh.in",
+                    CONSOLE=f"/dev/{console}",
                     PAYLOAD_BYTES=str(CONSOLE_EXIT_PAYLOAD_BYTES),
                     COMPLETION_MARKER=CONSOLE_EXIT_COMPLETION_MARKER.decode(),
                     EXIT_CODE=str(exit_code),
                 ),
                 log_path=output_dir / f"{name}-capture.log",
             )
+            restore_command = snapshot_restore_command(
+                executable, backend, snapshot_path, processors=processors
+            )
+            restore_command.extend(("--virtio-console", "console"))
             with OpenvmmProcess(
-                snapshot_restore_command(
-                    executable, backend, snapshot_path, processors=processors
-                ),
+                restore_command,
                 output_dir / f"{name}-restore.log",
                 output_read_delay=CONSOLE_EXIT_READ_DELAY_SECONDS,
             ) as process:
