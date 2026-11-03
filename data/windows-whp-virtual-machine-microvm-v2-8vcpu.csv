@@ -447,3 +447,10 @@ windows-whp-virtual-machine,2,8,ff84abda4382d302110b4fcf3a2d67da5ec9b17e,shell_s
 windows-whp-virtual-machine,2,8,4f9a3214f09b1474311ad1bdc957014828f7f03b,shell_snapshot_restore_512_mib,ms,lower,125.4
 windows-whp-virtual-machine,2,8,77d95aee0e44b7fe2c4b17582989ef79ee387bc6,shell_snapshot_restore_512_mib,ms,lower,129.8
 windows-whp-virtual-machine,2,8,e92bfb5762367cf36492408e5c8f275f0bcf3ce6,shell_snapshot_restore_512_mib,ms,lower,135.1
+windows-whp-virtual-machine,2,8,8fb0f1d64f2f67e0017a4f94693244297852ed1f,shell_snapshot_restore_512_mib,ms,lower,134.8
+windows-whp-virtual-machine,2,8,41cfa24cde4d45cdedf15b9884b1de8856443329,shell_snapshot_restore_512_mib,ms,lower,133.7
+windows-whp-virtual-machine,2,8,0ab27cf733b242baa7e2b1ad9cafb35866983c86,shell_snapshot_restore_512_mib,ms,lower,135.2
+windows-whp-virtual-machine,2,8,f2c607076dce5c7983430a7ca0e3bc75a7b71ea2,shell_snapshot_restore_512_mib,ms,lower,142.3
+windows-whp-virtual-machine,2,8,716324a60f41bf30f49bacb3a97b38a5b2cf9079,shell_snapshot_restore_512_mib,ms,lower,136
+windows-whp-virtual-machine,2,8,1a183b74fd6a44036b73a1756a6aca5401b56318,shell_snapshot_restore_512_mib,ms,lower,129.1
+windows-whp-virtual-machine,2,8,69badd4f9e71da5e957b020e47da6c06cd0cff45,shell_snapshot_restore_512_mib,ms,lower,140.9
