@@ -147,9 +147,13 @@ builds and tests.
 ## 4. Validate The Chain
 
 Check every commit of a reorganization, and at least each commit of a rebase that a conflict or a
-fixup changed. Check out each commit of `git rev-list --reverse <new-base>..HEAD` in a scratch
-worktree, on x86_64 Linux and x86_64 Windows, run these, and run `rustfmt --check --edition 2024`
-on each `.rs` file that the commit adds or changes:
+fixup changed, in a scratch worktree on x86_64 Linux and x86_64 Windows. Use
+`git rev-list --reverse <new-base>..HEAD` to enumerate the commits, and run
+`rustfmt --check --edition 2024` on each `.rs` file that the commit adds or changes.
+
+For a rebase, record any intermediate build failure caused by an upstream change together with
+the tip fixup that resolves it; require the head to pass. Every commit of a reorganization must
+pass. Run these checks at each selected commit:
 
 ```console
 cargo check --locked --workspace --all-targets
