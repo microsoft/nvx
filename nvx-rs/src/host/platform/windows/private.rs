@@ -30,7 +30,7 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::identity::handle_information;
-use super::{last_error, owned, raw, wide_path};
+use super::{last_error, owned, raw, refuse_nul, wide_path};
 
 /// Creates `path` if needed. The directory inherits the ACL of its parent, which is private to
 /// the user under the default state root.
@@ -120,6 +120,8 @@ impl CurrentUser {
 /// allows. An existing directory must already be private, as [`check_store_dir`] checks: one
 /// that allows others is not restricted, since a handle that they opened keeps its access.
 pub(crate) fn create_store_dir(path: &Path) -> io::Result<Option<String>> {
+    // A NUL is refused before the user's token is read, so that no other failure hides it.
+    refuse_nul(path)?;
     let user = CurrentUser::get()?;
     let name = wide_path(path)?;
     with_owner_only_attributes(

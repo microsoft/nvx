@@ -53,17 +53,23 @@ fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value.as_ref().encode_wide().chain([0]).collect()
 }
 
-/// Encodes a filesystem path for Win32, resolving it before adding an extended-length prefix
-/// when it reaches the legacy directory limit. Existing verbatim and device prefixes are preserved.
-fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
-    let path = std::path::absolute(path)?;
-    let name = wide(&path);
-    if name[..name.len() - 1].contains(&0) {
+/// Fails with [`io::ErrorKind::InvalidInput`] if `path` holds a NUL, at which Win32 would end it.
+fn refuse_nul(path: &Path) -> io::Result<()> {
+    if path.as_os_str().encode_wide().any(|unit| unit == 0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "filesystem path contains a NUL character",
         ));
     }
+    Ok(())
+}
+
+/// Encodes a filesystem path for Win32, resolving it before adding an extended-length prefix
+/// when it reaches the legacy directory limit. Existing verbatim and device prefixes are preserved.
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    let path = std::path::absolute(path)?;
+    refuse_nul(&path)?;
+    let name = wide(&path);
     if name.len() <= 248 {
         return Ok(name);
     }
