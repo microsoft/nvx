@@ -1140,7 +1140,11 @@ backend and splits the backend's suite into COUNT shards. The
 test hook, which makes OpenVMM's default CPU profile selection, `auto`, fall
 back to a host profile on a host that a built-in profile serves, checks the
 fallback's warning, captures the guest, and restores it on the snapshot's host
-profile. The `time-host-correction` scenario reads the host's own clock
+profile. The `run-console-restore` scenario captures a cold boot whose boot
+console is on OpenVMM's standard streams, restores the snapshot through
+[`nvx-rs run`](#run), which must attach that console to the terminal again, and
+types a script into the restored guest's shell. The `time-host-correction`
+scenario reads the host's own clock
 correction from a time sample of an unhooked cold boot, then cold boots with
 OpenVMM's `host-rate-offset-ppm` test hook. The harness composes the host and
 hook rates as OpenVMM does, checks Linux's correction after the TSC rate's kHz
