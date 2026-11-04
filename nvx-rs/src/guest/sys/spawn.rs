@@ -793,7 +793,7 @@ fn close_range(first: c_uint, last: c_uint) -> Result<(), Errno> {
 }
 
 /// Makes `root` the calling process's root directory and working directory.
-fn enter_root(root: &FileDescriptor) -> Result<(), Errno> {
+pub(crate) fn enter_root(root: &FileDescriptor) -> Result<(), Errno> {
     nix::unistd::fchdir(root.borrowed())?;
     nix::unistd::chroot(c".")
 }

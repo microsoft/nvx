@@ -1,17 +1,21 @@
-//! Tests of [`Root::mount_runtime`] with the kernel itself, which need the privilege to mount and
-//! Linux 6.8 or later, for the unique mount IDs. Each runs in a private mount namespace of its own
-//! thread, on a tmpfs root below a temporary directory, and they are ignored unless asked for:
-//! `cargo test --all-features -- --ignored guest::root::tests::privileged`, as root.
+//! Tests of [`Root::mount_runtime`] and [`Root::switch`] with the kernel itself, which need the
+//! privilege to mount and Linux 6.8 or later, for the unique mount IDs. Each runs in a private
+//! mount namespace of its own thread, on a tmpfs root below a temporary directory, and they are
+//! ignored unless asked for: `cargo test --all-features -- --ignored
+//! guest::root::tests::privileged`, as root.
 //!
 //! They cover what the fake kernel cannot: the runtime's file systems and their options, the
 //! device nodes, with their mode whatever the umask, and the links, the time status's read-only
 //! bind, the undo of a call that fails part of the way, a second call's refusal, the teardown's
 //! unmounts, and the order of the runtime and the mappings beneath `/run`: a call after a mapping
 //! is refused and leaves it reachable, and a mapping after the runtime is on the `/run` tmpfs.
+//! They also cover a switch into the root, in a thread with root and working directories of its
+//! own, after which the root's mounts stay and descriptors opened before it still map.
 
 use std::os::unix::fs::FileTypeExt;
 
 use super::*;
+use crate::guest::mappings::Reserved;
 
 /// The options of a mount that the tests check, as the kernel's mount table shows them.
 const CHECKED: [&str; 5] = ["ro", "rw", "nosuid", "nodev", "noexec"];
@@ -89,6 +93,7 @@ impl Scene {
             mapper: None,
             mapped: Vec::new(),
             latched: false,
+            switched: false,
             reservation: None,
         }
     }
@@ -385,4 +390,61 @@ fn mappings_beneath_run_after_the_runtime_are_on_its_tmpfs_and_go_with_it() {
             false,
         )
     );
+}
+
+#[test]
+#[ignore = "needs root and Linux 6.8 or later"]
+fn a_switched_root_keeps_its_mounts_and_maps_through_earlier_descriptors() {
+    let Some(scene) = Scene::new() else {
+        return;
+    };
+    let base = scene.path("root");
+    fs::write(base.join("marker"), b"the root").unwrap();
+    let source = scene.path("source");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(source.join("early")).unwrap();
+    fs::write(source.join("early/data"), b"early").unwrap();
+    fs::write(source.join("late"), b"late").unwrap();
+    let mut root = scene.root();
+    root.mount_runtime(None).unwrap();
+    // The root's own mapper, a target root, and a source root are opened before the switch.
+    let sources = SourceRoot::open(&source).unwrap();
+    let early = Mapping::new("early", "/srv/early", Access::ReadOnly).unwrap();
+    root.map(&sources, &[early]).unwrap();
+    let target = TargetRoot::open(&base).unwrap();
+
+    // The thread that switches has root and working directories of its own, so the test's
+    // thread still reaches the temporary directory afterwards.
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+            root.switch().unwrap();
+            assert_eq!(std::env::current_dir().unwrap(), Path::new("/"));
+            assert_eq!(fs::read("/marker").unwrap(), b"the root");
+            assert!(!source.exists());
+            assert_eq!(fs::read("/srv/early/data").unwrap(), b"early");
+
+            // A mapper maps beneath the target root, from the source root, which no path
+            // reaches any more.
+            let mut mapper = Mapper::new(target, Reserved::container_root());
+            let late = Mapping::new("late", "/srv/late", Access::ReadOnly).unwrap();
+            mapper.apply(&sources, &[late]).unwrap();
+            assert_eq!(fs::read("/srv/late").unwrap(), b"late");
+
+            // A second switch and the teardown are refused, and the drop that follows unmounts
+            // nothing: the runtime's mounts and the root's mapping stay.
+            let mounts = mounts_below(Path::new("/"));
+            for point in ["/proc", "/dev/pts", "/run", "/srv/early", "/srv/late"] {
+                assert!(
+                    mounts.contains(&PathBuf::from(point)),
+                    "{point}: {mounts:?}"
+                );
+            }
+            let error = root.switch().unwrap_err();
+            assert!(matches!(error, SwitchError::Switched), "{error:?}");
+            assert!(root.teardown().unwrap_err().is_switched());
+            assert_eq!(mounts_below(Path::new("/")), mounts);
+            assert_eq!(fs::read("/srv/early/data").unwrap(), b"early");
+        });
+    });
 }

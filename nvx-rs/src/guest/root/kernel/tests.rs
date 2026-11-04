@@ -64,6 +64,9 @@ pub(crate) enum Operation {
     Options,
     /// A new mount of a file system, which its type names.
     NewMount,
+    /// An entry into a directory as the root directory and the working directory, which the
+    /// directory names.
+    EnterRoot,
 }
 
 /// One operation that the fake kernel recorded, with its paths and options as text.
@@ -133,6 +136,9 @@ pub(crate) enum Call {
     RestrictTree(String),
     /// A creation of the device nodes and the links of a `/dev`, which its directory names.
     CreateDevices(String),
+    /// An entry into a directory as the root directory and the working directory, which the
+    /// directory names.
+    EnterRoot(String),
 }
 
 /// The type of the action that runs after each sleep.
@@ -732,6 +738,12 @@ impl Kernel for FakeKernel {
         let path = path_of(dev)?;
         let call = Call::CreateDevices(path.display().to_string());
         self.record(call, Operation::Create, &path)
+    }
+
+    fn enter_root(&mut self, root: &FileDescriptor) -> Result<(), Errno> {
+        let path = path_of(root)?;
+        let call = Call::EnterRoot(path.display().to_string());
+        self.record(call, Operation::EnterRoot, &path)
     }
 }
 
