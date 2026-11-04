@@ -866,6 +866,45 @@ fn run_refusals() -> Vec<Refusal> {
             ]),
             &["--restore-processors", "--processors"],
         ),
+        // A restore reads its snapshot's manifest, dry or not, to attach the boot console that
+        // the snapshot had, and refuses one that it cannot read, which OpenVMM could not restore.
+        refusal(
+            "run: restore of a missing snapshot",
+            "not-found",
+            run_dry(&["--restore-snapshot", "{root/missing}"]),
+            &["cannot read the snapshot manifest {root/missing/manifest.bin}: "],
+        ),
+        refusal(
+            "run: restore of a missing snapshot without a dry run",
+            "not-found",
+            ["run", "--restore-snapshot", "{root/missing}"],
+            &["cannot read the snapshot manifest {root/missing/manifest.bin}: "],
+        ),
+        refusal(
+            "run: restore of a snapshot without a manifest",
+            "not-found",
+            run_dry(&["--restore-snapshot", "{root/snapshot}"]),
+            &["cannot read the snapshot manifest {root/snapshot/manifest.bin}: "],
+        )
+        .with_file("snapshot/state.bin", Content::Text("state\n")),
+        refusal(
+            "run: restore of a malformed manifest",
+            "io",
+            run_dry(&["--restore-snapshot", "{root/snapshot}"]),
+            &["the snapshot manifest {root/snapshot/manifest.bin} is malformed: it is truncated"],
+        )
+        .with_file("snapshot/manifest.bin", Content::Bytes(&[1 << 3])),
+        refusal(
+            "run: restore of a manifest of another format",
+            "format-unsupported",
+            run_dry(&["--restore-snapshot", "{root/snapshot}"]),
+            &[
+                "the snapshot manifest {root/snapshot/manifest.bin} has format version 3, which \
+                 this build does not read; capture the snapshot again with the OpenVMM of this \
+                 build",
+            ],
+        )
+        .with_file("snapshot/manifest.bin", Content::Bytes(&[1 << 3, 3])),
         refusal(
             "run: policy file with allow rules",
             "unsupported",

@@ -373,6 +373,7 @@ Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
 | `--memory-capacity-mib N` | `--memory-capacity NM` on a fresh boot |
 | `--restore-memory-mib N` | `--restore-memory NM` |
 | A fresh boot | `--virtio-console console`, which attaches the guest's console, the boot console `hvc1`, to the terminal |
+| A restore of a snapshot whose boot console was on the terminal | `--virtio-console console`, which attaches that console to the terminal again |
 | `--dry-run` | No equivalent; this only prints the generated command |
 
 Always include `--single-process`. Include `--virtio-console console` to type
@@ -381,14 +382,17 @@ console is the byte channel, `hvc0`, which takes no input, so OpenVMM discards
 the terminal's keystrokes, though Ctrl-Q still opens its REPL. A restore keeps
 the console of its snapshot. OpenVMM requires `--virtio-console console` again
 to restore a snapshot of a boot that passed it, and refuses `--virtio-console`
-for a snapshot without a boot console. `nvx-rs run` passes the option to a
-fresh boot only, so it cannot yet restore a snapshot of a boot with it
-([#1254](https://github.com/microsoft/nvx/issues/1254)). When restoring, omit
-`--memory`, `--kernel`, `--initrd`, and `--net`, whose addresses the snapshot
-keeps; see [Networked snapshots](#networked-snapshots). Every restore gives the
-guest fresh entropy through the time ABI's restore packet. Do not pass
+for a snapshot without a boot console. `nvx-rs run` reads the snapshot's
+`manifest.bin`, even with `--dry-run`, and passes `--virtio-console console`
+to a restore exactly when the snapshot's boot console was on the terminal; it
+refuses a snapshot whose manifest it cannot read, which OpenVMM could not
+restore either. When restoring, omit `--memory`, `--kernel`, `--initrd`, and
+`--net`, whose addresses the snapshot keeps; see
+[Networked snapshots](#networked-snapshots). Every restore gives the guest
+fresh entropy through the time ABI's restore packet. Do not pass
 `--guest ubuntu` during restore; the captured RAM and machine contract already
-identify the restored guest. For example:
+identify the restored guest. For example, for a snapshot of a boot with
+`--virtio-console console`:
 
 ```bash
 ./bin/openvmm \
@@ -399,7 +403,8 @@ identify the restored guest. For example:
   --restore-snapshot /var/lib/nvx/snapshot \
   --restore-processors 4 \
   --restore-memory 1024M \
-  --restore-ready-path /run/nvx/restore-ready.sock
+  --restore-ready-path /run/nvx/restore-ready.sock \
+  --virtio-console console
 ```
 
 ### Private-network ingress

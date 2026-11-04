@@ -6,7 +6,10 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
 use crate::harness::{Content, Hosts, LAYER, OPENVMM, Outcome, Root, SCRATCH, in_parallel, native};
-use crate::openvmm::{Options, WORKLOAD, child, cold_boot, one_shot, restore, share_token};
+use crate::openvmm::{
+    DISCONNECTED_CONSOLE, NO_CONSOLE, Options, TERMINAL_CONSOLE, WORKLOAD, child, cold_boot,
+    one_shot, restore, share_token, snapshot,
+};
 
 /// An egress policy file with an allowed range, an exclusion, a port, and a denied protocol, which
 /// compiles into the rules [`COMPILED_ALLOW`] and [`COMPILED_DENY`].
@@ -40,7 +43,9 @@ struct DryRun {
     options: Options,
 }
 
-/// Returns the dry run `name` of `arguments`, which prints an OpenVMM command line of `options`.
+/// Returns the dry run `name` of `arguments`, which prints an OpenVMM command line of `options`,
+/// in a root that holds a snapshot without a boot console at `{root/snapshot}`, which a restore
+/// restores unless the case writes another manifest there.
 fn dry_run<S: ToString>(
     name: &'static str,
     arguments: impl IntoIterator<Item = S>,
@@ -49,7 +54,7 @@ fn dry_run<S: ToString>(
     DryRun {
         name,
         hosts: Hosts::Every,
-        files: Vec::new(),
+        files: vec![snapshot(&NO_CONSOLE)],
         removed: Vec::new(),
         arguments: arguments
             .into_iter()
@@ -64,6 +69,12 @@ impl DryRun {
     fn with_file(mut self, relative: &'static str, content: Content) -> Self {
         self.files.push((relative, content));
         self
+    }
+
+    /// Returns the case with `manifest` as the manifest of the snapshot `{root/snapshot}`.
+    fn with_snapshot(self, manifest: &'static [u8]) -> Self {
+        let (relative, content) = snapshot(manifest);
+        self.with_file(relative, content)
     }
 
     /// Returns the case with the file `relative` removed first.
@@ -551,6 +562,42 @@ fn run_dry_runs() -> Vec<DryRun> {
             run(&["--restore-snapshot", "{root/snapshot}"]),
             restore(),
         ),
+        // A restore reads its snapshot's manifest, dry or not, and attaches the boot console to
+        // the terminal again where the snapshot's capture did, as OpenVMM requires, with the
+        // other options of a restore.
+        dry_run(
+            "run: restore of a boot console on the terminal",
+            run(&["--restore-snapshot", "{root/snapshot}"]),
+            restore().with("--virtio-console", ["console"]),
+        )
+        .with_snapshot(&TERMINAL_CONSOLE),
+        dry_run(
+            "run: restore of a boot console on the terminal with every option",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--restore-processors",
+                "1",
+                "--restore-network-policy",
+                "--network-profile",
+                "portable",
+                "--outcome-report",
+                "{root/reports/restore.json}",
+            ]),
+            restore()
+                .with("--restore-processors", ["1"])
+                .flag("--restore-network-policy")
+                .with("--network-profile", ["portable"])
+                .with("--virtio-console", ["console"])
+                .with("--microvm-report", ["{root/reports/restore.json}"]),
+        )
+        .with_snapshot(&TERMINAL_CONSOLE),
+        dry_run(
+            "run: restore of a disconnected boot console",
+            run(&["--restore-snapshot", "{root/snapshot}"]),
+            restore(),
+        )
+        .with_snapshot(&DISCONNECTED_CONSOLE),
         // A restore needs no guest kernel or initramfs.
         dry_run(
             "run: restore without guest artifacts",

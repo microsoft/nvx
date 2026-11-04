@@ -192,10 +192,12 @@ unless `--dry-run` is given, runs OpenVMM with the standard streams. A cold
 boot attaches the guest's console, the boot console `hvc1`, to them, so that
 the terminal's input reaches the guest through it rather than through the byte
 channel, `hvc0`, whose output, such as the kernel's early messages, goes to
-standard error. A restore attaches no boot console to them, so it cannot yet
-restore a snapshot whose boot console was on the terminal, which OpenVMM
-restores only with that console attached again
-([#1254](https://github.com/microsoft/nvx/issues/1254)). It exits
+standard error. A restore attaches the boot console to them again when its
+snapshot's boot console was on the terminal, as the snapshot's `manifest.bin`
+records, since OpenVMM restores such a snapshot only with that console
+attached again, and attaches none otherwise. It reads the manifest even with
+`--dry-run`, and fails, before it downloads anything or starts OpenVMM, when it
+cannot read it. It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and

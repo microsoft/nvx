@@ -1,11 +1,14 @@
-//! The manifest of a template's capture, which [`TemplateManifest::read`] reads.
+//! The manifest of a snapshot: a template's capture, which [`TemplateManifest::read`] reads, and
+//! the host attachments of any microVM snapshot, which `read_attachments` reads for the restores
+//! of `nvx-rs run`.
 //!
 //! OpenVMM writes `manifest.bin` into the directory of a snapshot that it publishes: one message
 //! of the protobuf wire format, as its `mesh` encodes `openvmm.snapshot.SnapshotManifest`, of at
 //! most [`MAX_MANIFEST_LEN`] bytes. It describes the machine that the snapshot restores, its time
-//! contract and CPU profile, its sandbox blocks, and the lengths of its artifacts. Restore treats
-//! it as authoritative, and so does a template's [compatibility key](super::TemplateKey), which
-//! projects its machine. [`TemplateManifest`] describes what the reader refuses.
+//! contract and CPU profile, its sandbox blocks, the host attachments that a restore reconnects,
+//! and the lengths of its artifacts. Restore treats it as authoritative, and so does a template's
+//! [compatibility key](super::TemplateKey), which projects its machine. [`TemplateManifest`]
+//! describes what the reader refuses.
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -693,17 +696,7 @@ impl TemplateManifest {
     /// regular file of at most [`MAX_MANIFEST_LEN`] bytes, and otherwise as
     /// [`parse`](Self::parse) does.
     pub fn read(snapshot: &Path) -> Result<Self> {
-        let path = snapshot.join(MANIFEST_NAME);
-        let description = format!("the snapshot manifest {}", path.display());
-        let bytes = regular::open_regular(&path)
-            .and_then(|file| regular::read_at_most(file, MAX_MANIFEST_LEN, "a manifest"))
-            .map_err(|error| {
-                let code = match error.kind() {
-                    io::ErrorKind::NotFound => ErrorCode::NotFound,
-                    _ => ErrorCode::Io,
-                };
-                Error::new(code, format!("cannot read {description}")).with_source(error)
-            })?;
+        let (bytes, description) = read_manifest(snapshot)?;
         Self::parse_described(&bytes, &description)
     }
 
@@ -721,17 +714,8 @@ impl TemplateManifest {
 
     /// Implements [`parse`](Self::parse), with messages that call the manifest `description`.
     fn parse_described(bytes: &[u8], description: &str) -> Result<Self> {
-        if bytes.len() as u64 > MAX_MANIFEST_LEN {
-            return Err(Error::io(format!(
-                "{description} holds {} bytes, more than the {MAX_MANIFEST_LEN} that a manifest \
-                 may hold",
-                bytes.len()
-            )));
-        }
-        check_format(bytes).map_err(|problem| problem.into_error(description))?;
-        let raw = decode_manifest(bytes)
-            .map_err(|problem| Error::io(format!("{description} is malformed: {problem}")))?;
-        Self::from_raw(raw).map_err(|problem| problem.into_error(description))
+        let raw = decode_described(bytes, description, CAPTURE_TEMPLATE)?;
+        Self::from_raw(raw).map_err(|problem| problem.into_error(description, CAPTURE_TEMPLATE))
     }
 
     /// Returns when OpenVMM created the snapshot.
@@ -826,6 +810,80 @@ impl TemplateManifest {
     }
 }
 
+/// A host attachment of a snapshot's machine contract, `openvmm.snapshot.SnapshotAttachment`: an
+/// endpoint outside the VM, such as the backend of a console, which a restore reconnects, as far
+/// as `nvx-rs run` reads it to restore the snapshot.
+// A template's manifest checks the form of its attachments alone, so only the CLI reads what this
+// holds.
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Attachment {
+    /// The stable ID of the device that it attaches, such as `console:microvm-virtio0`.
+    pub(crate) stable_id: String,
+    /// How a restore reconnects it, such as `require-inherited-attachment`.
+    pub(crate) reconnect_policy: String,
+}
+
+/// Reads the host attachments of the snapshot in the directory `snapshot`, in the order of the
+/// machine contract of its manifest, [`MANIFEST_NAME`]: those of any microVM snapshot, a
+/// template's or not, which `nvx-rs run` restores.
+///
+/// It reads the manifest as [`TemplateManifest::read`] does, and checks its format and the form of
+/// its fields as [`TemplateManifest::parse`] does, but nothing that makes it a template's. A
+/// manifest without a machine contract holds no attachments.
+///
+/// Fails as [`TemplateManifest::read`] does, but for a manifest that is not a template's.
+#[cfg(feature = "cli")]
+pub(crate) fn read_attachments(snapshot: &Path) -> Result<Vec<Attachment>> {
+    let (bytes, description) = read_manifest(snapshot)?;
+    let raw = decode_described(
+        &bytes,
+        &description,
+        "the snapshot again with the OpenVMM of this build",
+    )?;
+    Ok(raw
+        .contract
+        .map(|contract| contract.attachments)
+        .unwrap_or_default())
+}
+
+/// What a template's capture mends of a manifest of a format that this build does not read.
+const CAPTURE_TEMPLATE: &str = "the template again with the runtime of this build";
+
+/// Reads the manifest of the snapshot in the directory `snapshot`, its [`MANIFEST_NAME`], as
+/// [`TemplateManifest::read`] describes, and returns its bytes, with the description that names
+/// it in messages.
+fn read_manifest(snapshot: &Path) -> Result<(Vec<u8>, String)> {
+    let path = snapshot.join(MANIFEST_NAME);
+    let description = format!("the snapshot manifest {}", path.display());
+    let bytes = regular::open_regular(&path)
+        .and_then(|file| regular::read_at_most(file, MAX_MANIFEST_LEN, "a manifest"))
+        .map_err(|error| {
+            let code = match error.kind() {
+                io::ErrorKind::NotFound => ErrorCode::NotFound,
+                _ => ErrorCode::Io,
+            };
+            Error::new(code, format!("cannot read {description}")).with_source(error)
+        })?;
+    Ok((bytes, description))
+}
+
+/// Checks the length and the format of the manifest `bytes`, with messages that call it
+/// `description`, and decodes it, as [`TemplateManifest::parse`] describes; a capture of `again`
+/// mends a format that this build does not read.
+fn decode_described(bytes: &[u8], description: &str, again: &str) -> Result<RawManifest> {
+    if bytes.len() as u64 > MAX_MANIFEST_LEN {
+        return Err(Error::io(format!(
+            "{description} holds {} bytes, more than the {MAX_MANIFEST_LEN} that a manifest may \
+             hold",
+            bytes.len()
+        )));
+    }
+    check_format(bytes).map_err(|problem| problem.into_error(description, again))?;
+    decode_manifest(bytes)
+        .map_err(|problem| Error::io(format!("{description} is malformed: {problem}")))
+}
+
 /// Why a manifest is refused: one of another format, or one that is not a template's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Problem {
@@ -836,15 +894,13 @@ enum Problem {
 }
 
 impl Problem {
-    /// Returns the error of the manifest that `description` names.
-    fn into_error(self, description: &str) -> Error {
+    /// Returns the error of the manifest that `description` names, whose format, if this build
+    /// does not read it, a capture of `again` mends.
+    fn into_error(self, description: &str, again: &str) -> Error {
         match self {
             Self::Format(problem) => Error::new(
                 ErrorCode::FormatUnsupported,
-                format!(
-                    "{description} {problem}, which this build does not read; capture the template \
-                     again with the runtime of this build"
-                ),
+                format!("{description} {problem}, which this build does not read; capture {again}"),
             ),
             Self::Invalid(problem) => Error::io(format!("{description} {problem}")),
         }
@@ -1031,8 +1087,8 @@ struct RawContract {
     devices: Vec<(Device, u32)>,
     /// Field 9: how many names it holds.
     state_units: usize,
-    /// Field 10: how many attachments it holds.
-    attachments: usize,
+    /// Field 10.
+    attachments: Vec<Attachment>,
     /// Field 11.
     time: Option<RawTime>,
     /// Field 12.
@@ -1109,13 +1165,14 @@ fn decode_contract(data: &[u8]) -> Result<RawContract, String> {
                     raw.state_units += 1;
                 }
                 10 => {
-                    decode_attachment(field.bytes().map_err(&wire)?, raw.attachments)?;
-                    if raw.attachments == MAX_ATTACHMENTS {
-                        return Err(format!(
-                            "its attachments hold more than {MAX_ATTACHMENTS} items"
-                        ));
-                    }
-                    raw.attachments += 1;
+                    let attachment =
+                        decode_attachment(field.bytes().map_err(&wire)?, raw.attachments.len())?;
+                    push_bounded(
+                        &mut raw.attachments,
+                        attachment,
+                        MAX_ATTACHMENTS,
+                        "its attachments",
+                    )?;
                 }
                 13 => raw.boot_layout_version = field.uint32().map_err(&wire)?,
                 14 => raw.network = Some(decode_network(field.bytes().map_err(&wire)?)?),
@@ -1279,14 +1336,18 @@ fn decode_device_range(data: &[u8], index: usize) -> Result<DeviceRange, String>
     Ok(range)
 }
 
-/// Decodes `openvmm.snapshot.SnapshotAttachment`, the host attachment at `index`, which a key
-/// does not hold, so that only its form is checked.
-fn decode_attachment(data: &[u8], index: usize) -> Result<(), String> {
+/// Decodes `openvmm.snapshot.SnapshotAttachment`, the host attachment at `index`, which a key does
+/// not hold, so that the form of each of its fields is checked, and returns what a restore reads
+/// of it.
+fn decode_attachment(data: &[u8], index: usize) -> Result<Attachment, String> {
     let what = format!("its attachment {index}");
     let wire = field_error(&what);
+    let mut attachment = Attachment::default();
     decode(data, &what, &[1, 2, 3, 4, 5, 6, 7, 8], &[], |field| {
         match field.number {
-            1 | 2 | 4 | 5 => {
+            1 => attachment.stable_id = field.text().map_err(&wire)?.to_owned(),
+            4 => attachment.reconnect_policy = field.text().map_err(&wire)?.to_owned(),
+            2 | 5 => {
                 field.text().map_err(&wire)?;
             }
             3 => {
@@ -1305,7 +1366,8 @@ fn decode_attachment(data: &[u8], index: usize) -> Result<(), String> {
             _ => unreachable!("the message refuses unknown fields"),
         }
         Ok(())
-    })
+    })?;
+    Ok(attachment)
 }
 
 /// The network of the machine contract, as its fields encode it.

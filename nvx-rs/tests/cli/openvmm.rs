@@ -1,14 +1,16 @@
 //! OpenVMM command lines: their options, each with its values, and the options with which the
 //! launches of `nvx-rs` start OpenVMM, as its documentation describes them, from which the tests
 //! derive what they expect, and the checks of the images that a launch hands OpenVMM, of the
-//! outcome reports that OpenVMM writes, and of the control endpoints of managed starts.
+//! outcome reports that OpenVMM writes, and of the control endpoints of managed starts. It also
+//! writes the manifests of the snapshots that `nvx-rs run` restores, as OpenVMM writes them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::sync::LazyLock;
 
 use serde_json::{Value, json};
 
-use crate::harness::{HYPERVISOR, Root, is_hex};
+use crate::harness::{Content, HYPERVISOR, Root, is_hex};
 
 /// The options of OpenVMM that take no value.
 const FLAGS: [&str; 3] = [
@@ -229,6 +231,95 @@ pub(crate) fn restore() -> Options {
         .with("--processors", ["1"])
         .with("--hypervisor", [HYPERVISOR])
         .with("--restore-snapshot", ["{root/snapshot}"])
+}
+
+/// The manifest of a snapshot whose boot console a capture attached to the terminal, with
+/// `--virtio-console console`, which OpenVMM restores only with that option again.
+pub(crate) static TERMINAL_CONSOLE: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    snapshot_manifest(Some((
+        true,
+        "require-inherited-attachment",
+        "provider",
+        "console",
+    )))
+});
+
+/// The manifest of a snapshot whose boot console a capture left disconnected, with
+/// `--virtio-console none`, as a template's.
+pub(crate) static DISCONNECTED_CONSOLE: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    snapshot_manifest(Some((
+        false,
+        "discard-while-disconnected",
+        "disconnected",
+        "discard",
+    )))
+});
+
+/// The manifest of a snapshot of a boot without a boot console, which OpenVMM restores only
+/// without `--virtio-console`.
+pub(crate) static NO_CONSOLE: LazyLock<Vec<u8>> = LazyLock::new(|| snapshot_manifest(None));
+
+/// Returns the file that holds `manifest` as the manifest of the snapshot `{root/snapshot}`.
+pub(crate) fn snapshot(manifest: &'static [u8]) -> (&'static str, Content) {
+    ("snapshot/manifest.bin", Content::Bytes(manifest))
+}
+
+/// Returns the manifest of a snapshot whose machine contract holds the attachment of the boot
+/// console that `console` describes, whether a restore requires it, its reconnect policy, the kind
+/// of its identity, and its identity, and the attachment of the control console of a managed VM,
+/// or the latter alone without `console`.
+///
+/// It holds what `nvx-rs run` reads, its format version and magic and its contract, which
+/// `openvmm.snapshot.SnapshotManifest`, `SnapshotMachineContract`, and `SnapshotAttachment` of
+/// OpenVMM's `openvmm_helpers` define, as `mesh` encodes them: each a protobuf message, which omits
+/// a field whose value is zero or empty.
+fn snapshot_manifest(console: Option<(bool, &str, &str, &str)>) -> Vec<u8> {
+    fn put_varint(bytes: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            bytes.push(value as u8 | 0x80);
+            value >>= 7;
+        }
+        bytes.push(value as u8);
+    }
+    fn bytes(message: &mut Vec<u8>, number: u64, value: &[u8]) {
+        put_varint(message, number << 3 | 2);
+        put_varint(message, value.len() as u64);
+        message.extend_from_slice(value);
+    }
+    fn attachment(stable_id: &str, kind: &str, fields: (bool, &str, &str, &str)) -> Vec<u8> {
+        let (required, policy, identity_kind, identity) = fields;
+        let mut message = Vec::new();
+        bytes(&mut message, 1, stable_id.as_bytes());
+        bytes(&mut message, 2, kind.as_bytes());
+        if required {
+            message.extend([3 << 3, 1]);
+        }
+        bytes(&mut message, 4, policy.as_bytes());
+        bytes(&mut message, 5, identity_kind.as_bytes());
+        bytes(&mut message, 6, identity.as_bytes());
+        message
+    }
+    let mut contract = Vec::new();
+    bytes(&mut contract, 1, b"microvm");
+    if let Some(console) = console {
+        let console = attachment("console:microvm-virtio0", "virtio-console", console);
+        bytes(&mut contract, 10, &console);
+    }
+    let control = attachment(
+        "console:microvm-control0",
+        "virtio-control-console",
+        (
+            false,
+            "broker-authenticated-listener",
+            "unix-socket",
+            "/run/nvx/control.sock",
+        ),
+    );
+    bytes(&mut contract, 10, &control);
+    let mut manifest = vec![1 << 3, 2];
+    bytes(&mut manifest, 9, &contract);
+    bytes(&mut manifest, 10, b"OPENVMM_SNAPSHOT_V2\0");
+    manifest
 }
 
 /// Returns the name of the aggregate child at `index` that the guest binds at `target`: the

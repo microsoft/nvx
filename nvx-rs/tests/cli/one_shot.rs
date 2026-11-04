@@ -5,13 +5,11 @@
 
 use crate::harness::{Content, LAYER, OPENVMM, Root, SCRATCH, in_parallel, native};
 use crate::openvmm::{
-    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
-    assert_opened_distro, assert_opened_images, assert_outcome_report, child, cold_boot, one_shot,
-    restore, share_token,
+    DISCONNECTED_CONSOLE, NO_CONSOLE, NO_NETWORK, NetworkPolicy, Options, TERMINAL_CONSOLE,
+    WORKLOAD, assert_checked_blocks, assert_checked_distro, assert_opened_distro,
+    assert_opened_images, assert_outcome_report, child, cold_boot, one_shot, restore, share_token,
+    snapshot,
 };
-
-/// The snapshot that a restore restores.
-const SNAPSHOT: (&str, Content) = ("snapshot/state.bin", Content::Text("snapshot\n"));
 
 /// The outcome report that OpenVMM writes for a run that asks for one.
 struct Report {
@@ -401,7 +399,7 @@ fn run_launches() -> Vec<Launch> {
             0,
             restored,
         )
-        .with_file(SNAPSHOT)
+        .with_file(snapshot(&NO_CONSOLE))
         .recorded_in(Some("fake-openvmm-.json")),
         launch(
             "run: restore without guest artifacts",
@@ -410,20 +408,29 @@ fn run_launches() -> Vec<Launch> {
             0,
             restored,
         )
-        .with_file(SNAPSHOT)
+        .with_file(snapshot(&NO_CONSOLE))
         .without("build/vmlinux")
         .without("build/initramfs.cpio.gz")
         .recorded_in(Some("fake-openvmm-.json")),
+        // A restore attaches the boot console to the terminal again where its capture did, as
+        // OpenVMM requires, and leaves any other boot console as its snapshot records it.
         launch(
-            "run: missing snapshot",
-            run(&["--restore-snapshot", "{root/missing}", "--cmdline", "quiet"]),
-            restore()
-                .with("--restore-snapshot", ["{root/missing}"])
-                .with("--cmdline", ["quiet"]),
-            1,
-            "",
+            "run: restore of a boot console on the terminal",
+            run(&["--restore-snapshot", "{root/snapshot}"]),
+            restore().with("--virtio-console", ["console"]),
+            0,
+            restored,
         )
-        .with_stderr("openvmm: cannot restore {root/missing}: no such snapshot directory\n")
+        .with_file(snapshot(&TERMINAL_CONSOLE))
+        .recorded_in(Some("fake-openvmm-.json")),
+        launch(
+            "run: restore of a disconnected boot console",
+            run(&["--restore-snapshot", "{root/snapshot}"]),
+            restore(),
+            0,
+            restored,
+        )
+        .with_file(snapshot(&DISCONNECTED_CONSOLE))
         .recorded_in(Some("fake-openvmm-.json")),
         launch(
             "run: outcome report",
@@ -455,7 +462,7 @@ fn run_launches() -> Vec<Launch> {
             4,
             restored,
         )
-        .with_file(SNAPSHOT)
+        .with_file(snapshot(&NO_CONSOLE))
         .recorded_in(Some("fake-openvmm-reports.json"))
         .reporting(Report {
             path: "reports/openvmm-run.json",
@@ -490,7 +497,7 @@ fn run_launches() -> Vec<Launch> {
             0,
             restored,
         )
-        .with_file(SNAPSHOT)
+        .with_file(snapshot(&NO_CONSOLE))
         .recorded_in(Some("fake-openvmm-reports.json"))
         .reporting(Report {
             path: "reports/openvmm-run.json",
@@ -533,7 +540,7 @@ fn run_launches() -> Vec<Launch> {
             0,
             restored,
         )
-        .with_file(SNAPSHOT)
+        .with_file(snapshot(&NO_CONSOLE))
         .recorded_in(Some("fake-openvmm-reports.json"))
         .reporting(Report {
             path: "reports/openvmm-run.json",

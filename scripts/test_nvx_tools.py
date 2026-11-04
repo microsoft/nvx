@@ -2573,6 +2573,14 @@ class NvxRsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             openvmm.chmod(0o755)
+            # nvx-rs run reads the snapshot's manifest before it starts
+            # OpenVMM, to attach the boot console that the snapshot recorded.
+            # This one, its format version and magic alone, records none.
+            snapshot = root / "snapshot"
+            snapshot.mkdir()
+            (snapshot / "manifest.bin").write_bytes(
+                b"\x08\x02\x52\x14OPENVMM_SNAPSHOT_V2\x00"
+            )
             primary, secondary = pty.openpty()
             try:
                 before = termios.tcgetattr(secondary)
@@ -2583,7 +2591,7 @@ class NvxRsTests(unittest.TestCase):
                         str(root),
                         "run",
                         "--restore-snapshot",
-                        str(root / "snapshot"),
+                        str(snapshot),
                     ],
                     stdin=secondary,
                     stdout=secondary,

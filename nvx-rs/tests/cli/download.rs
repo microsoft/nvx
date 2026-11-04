@@ -143,6 +143,25 @@ fn commands_download_nothing_for_options_that_they_refuse() {
 }
 
 #[test]
+fn restores_download_nothing_for_snapshots_that_they_cannot_read() {
+    // A restore reads its snapshot's manifest first, and one that it cannot read fails it as
+    // options that it refuses do: after the missing artifact, without the download that would
+    // provide it, and with the checkout as it was.
+    for arguments in [
+        vec!["run", "--restore-snapshot", "missing", "--dry-run"],
+        vec!["run", "--restore-snapshot", "missing"],
+    ] {
+        let root = checkout(&INSTALLED);
+        let before = root.snapshot();
+        let outcome = root.nvx_rs(&arguments);
+        outcome.assert_error("artifact-missing", &["OpenVMM"]);
+        let mut after = root.snapshot();
+        after.remove("build/.nvx-download.lock");
+        assert_eq!(after, before, "{arguments:?}");
+    }
+}
+
+#[test]
 fn provision_and_deprovision_need_no_artifact_root() {
     // A provision runs no artifact, and a deprovision of a sandbox that records no launch reads
     // none, so both succeed where nvx-rs finds no artifact root: from an executable outside any
