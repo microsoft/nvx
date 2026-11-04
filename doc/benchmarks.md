@@ -295,13 +295,15 @@ python3 scripts/nvx.py performance collect --platform linux-kvm-baremetal --comm
 
 Each benchmark boots the guest with a fixed kernel command line. Two bases recur below:
 
-- `BASE` = `earlycon=xe9 console=hvc0 reboot=t panic=-1`
-- `QUIET` = `earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1`
+- `BASE` = `earlycon=xe9 console=hvc1 reboot=t panic=-1`
+- `QUIET` = `earlycon=xe9 console=hvc1 quiet loglevel=0 reboot=t panic=-1`
 
 OpenVMM owns `BASE`; each `--cmdline` value below is appended to it. Restore phases do not pass a
-command line and resume the one captured in the snapshot. OpenVMM also appends device-discovery
-tokens (`virtio_mmio.device=...` for an attached mount or NIC) and may replace `console=hvc0` with
-`console=hvc1` when a virtio console is selected. It appends no clock token: under the
+command line and resume the one captured in the snapshot. Every benchmark below attaches the boot
+console (`--virtio-console console`), which carries the host's input to the guest's shell, so
+OpenVMM makes it, `hvc1`, the kernel console instead of the byte channel's `hvc0`. OpenVMM also
+appends device-discovery tokens (`virtio_mmio.device=...` for the boot console and an attached
+mount or NIC). It appends no clock token: under the
 [time ABI](design/3.2-clock-and-time.md#324-rates) the NVX kernel reads the TSC and LAPIC timer rates from the
 hypervisor identity's frequency MSRs and never calibrates either clock, and OpenVMM rejects a
 supplied `tsc_early_khz=` or `lapic_timer_hz=` token (`E_CMDLINE_CLOCK_TOKEN`). No benchmark
@@ -396,7 +398,7 @@ host sends the trigger. The controller always emits `NVX-SNAPSHOT-DISPATCHED` im
 executes the prequeued `nvx-exit 0` in guest-exit mode. Host-termination mode leaves the guest
 running until the host terminates it.
 
-The interrupt-less `hvc0` console polls even when the controller blocks in `read`. Its delivery
+The trigger reaches the controller over the boot console. Its delivery
 delay is retained in the non-gating `request_to_publication_*` JSON fields; a profiled capture
 also separates `console_command_round_trip` and host-observed `guest_dispatch_to_publication`.
 Neither observer interval is the generation metric. The canonical `samples_ms`/`p50_ms` and
@@ -986,7 +988,7 @@ exit kill OpenVMM (see [Cancellation](ci.md#cancellation)). On a Xeon Silver 411
 2.1 ms to the time until OpenVMM ran with Dash as `/bin/sh`, and 3.5 ms with Bash, which the Azure
 Linux runners use. Snapshot generation uses OpenVMM's monotonic
 process clock from the beginning of input gating, after the guest requests the snapshot, through
-atomic publication. It does not include delivery of `nvx-snapshot` over the polling console.
+atomic publication. It does not include delivery of `nvx-snapshot` over the boot console.
 Host request-to-publication and first publication observation (polled every 1 ms) remain diagnostics.
 
 After a cold-start marker, the host dispatches guest `nvx-exit 0` and measures
@@ -994,7 +996,7 @@ until the OpenVMM process exits successfully; cold-start teardown still includes
 delivery. Snapshot capture instead queues
 the restore marker and `nvx-exit 0` together after the capture boundary.
 Restore teardown therefore begins at the standalone marker line and does not
-depend on a second host-to-guest poll of the interrupt-less `hvc0` console.
+depend on a second delivery of host input over the boot console.
 It is a host-observed marker-to-exit interval, including remaining guest shutdown and observer
 scheduling, not a measurement of VMM-internal teardown alone.
 CI allows up to 15 seconds for process exit before rejecting a measured
@@ -1008,15 +1010,15 @@ shell-ready console substring appears. It therefore includes host process startu
 and guest execution. Every scenario suppresses routine kernel logging and captures console output
 without rendering it, so terminal rendering is not part of the measurement.
 
-The `earlycon=xe9` and `hvc0` paths use one `outb` per byte. They replace a 16550-style path that
-would normally require a line-status read plus a data write. The VMM scans each emitted byte
-synchronously for markers. `OPENVMM_LOG=off` suppresses VMM logs, while `quiet loglevel=0`
-suppresses most output in the guest.
+The `earlycon=xe9` path uses one `outb` per byte, which replaces a 16550-style path that would
+normally require a line-status read plus a data write, and the boot console carries the shell's
+output to the host in virtio buffers. `OPENVMM_LOG=off` suppresses VMM logs, while
+`quiet loglevel=0` suppresses most output in the guest.
 
 The baseline command line is:
 
 ```text
-earlycon=xe9 console=hvc0 quiet loglevel=0 reboot=t panic=-1
+earlycon=xe9 console=hvc1 quiet loglevel=0 reboot=t panic=-1
 ```
 
 Each other scenario appends only the parameter named in the metric table. This isolates that

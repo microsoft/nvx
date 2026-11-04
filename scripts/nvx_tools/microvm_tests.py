@@ -226,8 +226,8 @@ INTERRUPT_MAP_ERROR_COUNTS = ("err", "mis", "spu")
 INTERRUPT_MAP_NETWORK = "10.0.0.2/24"
 INTERRUPT_MAP_SHARE_SEED = "NVX-INTERRUPT-MAP-SHARE"
 # The devices of the interrupt-map scenario's snapshot, by the bases of their
-# windows: the NIC and the host filesystem with a share.
-INTERRUPT_MAP_SNAPSHOT_DEVICES = (0xD000_0000, 0xD000_1000)
+# windows: the NIC, the host filesystem with a share, and the boot console.
+INTERRUPT_MAP_SNAPSHOT_DEVICES = (0xD000_0000, 0xD000_1000, 0xD000_2000)
 
 
 class MicrovmVirtioDevice(NamedTuple):
@@ -343,6 +343,7 @@ SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
 CONSOLE_BINARY_MARKER = b"\0\r\n\x7f\xffNVX-CONSOLE-BINARY"
 CONSOLE_RX_READY_MARKER = b"NVX-CONSOLE-RX-READY"
 CONSOLE_RX_QUEUED_MARKER = b"NVX-CONSOLE-RX-QUEUED"
+CONSOLE_SNAPSHOT_TRIGGER = b"\x01"
 CONSOLE_RX_RESTORED_MARKER = b"NVX-CONSOLE-RX-RESTORED"
 CONSOLE_TX_DONE_MARKER = b"NVX-CONSOLE-TX-DONE"
 CONSOLE_EXIT_COMPLETION_MARKER = b"NVX-CONSOLE-EXIT-OK"
@@ -1043,13 +1044,17 @@ def _persist_console_log(
     return output
 
 
-def _send_console_rx_and_wait_until_queued(
+def _queue_console_rx_and_request_snapshot(
     console: TcpConsole,
     data: bytes,
     timeout: float,
 ) -> None:
+    """Send ``data`` to the guest's console, and once the guest has queued
+    it, request the snapshot with one more byte, which the guest counts
+    without reading."""
     console.send_bytes(data)
     console.wait_for_line(CONSOLE_RX_QUEUED_MARKER, timeout)
+    console.send_bytes(CONSOLE_SNAPSHOT_TRIGGER)
 
 
 def _console_snapshot_script(backend: str) -> tuple[str, int, bytes]:
@@ -1219,8 +1224,6 @@ def run_lifecycle(
         memory_mib,
         "quiet loglevel=0",
     )
-    # The boot console, hvc1, must replace the early console as hvc0 does.
-    command.extend(("--virtio-console", "console"))
     result = run_guest_script(
         command,
         _read_script("lifecycle.sh"),
@@ -1349,6 +1352,7 @@ def run_managed_lifecycle(
             initrd.resolve(),
             memory_mib,
             "quiet loglevel=0",
+            boot_console=False,
         )
         command.extend(
             (
@@ -1638,7 +1642,6 @@ def run_console_exit(
                 "quiet loglevel=0",
                 processors=processors,
             )
-            boot_command.extend(("--virtio-console", "console"))
             capture_snapshot(
                 [*boot_command, "--snapshot-destination", str(snapshot_path)],
                 snapshot_path,
@@ -1656,7 +1659,6 @@ def run_console_exit(
             restore_command = snapshot_restore_command(
                 executable, backend, snapshot_path, processors=processors
             )
-            restore_command.extend(("--virtio-console", "console"))
             with OpenvmmProcess(
                 restore_command,
                 output_dir / f"{name}-restore.log",
@@ -5160,14 +5162,7 @@ def run_virtio_features(
             "quiet loglevel=0",
             network=VIRTIO_FEATURES_NETWORK,
         )
-        command.extend(
-            (
-                "--virtio-console",
-                "console",
-                "--microvm-control-console",
-                "none",
-            )
-        )
+        command.extend(("--microvm-control-console", "none"))
         for role in ("distro", "scratch"):
             path = root / f"{role}.img"
             with path.open("wb") as disk:
@@ -5363,8 +5358,8 @@ def run_interrupt_map(
     its window, past the ISA IRQs, edge-triggered, with no other handler, and
     must have fired, and /proc/interrupts must count no APIC error, misrouted
     IOAPIC interrupt, or spurious interrupt. A snapshot of a microVM with the
-    NIC and the share then restores with the same interrupts, which fire
-    again after the restore."""
+    NIC, the share, and the boot console then restores with the same
+    interrupts, which fire again after the restore."""
     with tempfile.TemporaryDirectory(prefix="nvx-interrupt-map-") as temporary:
         root = Path(temporary)
         share = root / "share"
@@ -5381,14 +5376,7 @@ def run_interrupt_map(
             network=INTERRUPT_MAP_NETWORK,
             mount=mount,
         )
-        command.extend(
-            (
-                "--virtio-console",
-                "console",
-                "--microvm-control-console",
-                "none",
-            )
-        )
+        command.extend(("--microvm-control-console", "none"))
         for role in ("distro", "scratch"):
             path = root / f"{role}.img"
             with path.open("wb") as disk:
@@ -8304,6 +8292,7 @@ def run_console_snapshot(
                 initrd,
                 memory_mib,
                 "quiet loglevel=0",
+                boot_console=False,
             ),
             "--snapshot-destination",
             str(snapshot_path),
@@ -8334,8 +8323,7 @@ def run_console_snapshot(
                     + b"NVX_CONSOLE_SNAPSHOT\nsh /tmp/nvx-console-snapshot\n"
                 )
                 console.wait_for_line(CONSOLE_RX_READY_MARKER, timeout)
-                _send_console_rx_and_wait_until_queued(console, queued_rx, timeout)
-                process.send_bytes(b"\x01")
+                _queue_console_rx_and_request_snapshot(console, queued_rx, timeout)
                 source = process.wait(timeout)
                 source_console = console.finish()
                 console = None
@@ -8368,7 +8356,7 @@ def run_console_snapshot(
             restored_console = b""
             console = None
             restore_command = snapshot_restore_command(
-                executable, backend, snapshot_path
+                executable, backend, snapshot_path, boot_console=False
             )
             with OpenvmmProcess(
                 restore_command,
@@ -10175,6 +10163,7 @@ def _run_snapshot_tier(
             memory_mib,
             "" if platform else f"nvx_hostname=restored-{tier}",
             network="10.0.0.2/24",
+            boot_console=False,
         )
         capture_command.extend(
             (
@@ -10245,6 +10234,7 @@ def _run_snapshot_tier(
             backend,
             snapshot,
             network_profile="portable",
+            boot_console=False,
         )
         restore_command.extend(
             (

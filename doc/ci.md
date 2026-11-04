@@ -466,8 +466,9 @@ reports how many of each device's interrupts lately found no work for any
 handler (`unhandled` in `/proc/irq/<n>/spurious`), which the scenario does not
 check: a console's driver polls for its output's completion, so nearly every
 interrupt of a console finds no work, and the NIC's polling can leave one such
-interrupt too. A guest with the NIC and the share then captures a snapshot,
-whose restore must report the same interrupts and fire them again. A unit test
+interrupt too. A guest with the NIC, the share, and the boot console then
+captures a snapshot, whose restore must report the same interrupts and fire
+them again. A unit test
 checks that the scenario's interrupts are those of Table 2.7, and OpenVMM's
 unit tests check the MP table's routing and each slot's input.
 

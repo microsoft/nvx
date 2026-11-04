@@ -7332,7 +7332,8 @@ class MicrovmTests(unittest.TestCase):
         self.assertIn("nvx-console-pending /dev/hvc1", whp)
         self.assertIn(f'[ "$pending" -lt {len(whp_rx)} ]', whp)
         self.assertIn(f'[ "$pending" -lt {len(mshv_rx)} ]', mshv)
-        self.assertIn('while [ "$snapshot_now" = 0 ]; do', whp)
+        self.assertIn(f'[ "$pending" -eq $(({len(whp_rx)} + 1)) ] || fail 54', whp)
+        self.assertNotIn("/dev/port", whp)
         self.assertNotIn("sleep 1", whp)
 
     def test_console_snapshot_waits_until_rx_is_queued_before_snapshot(self):
@@ -7347,7 +7348,7 @@ class MicrovmTests(unittest.TestCase):
 
         console = cast(openvmm_process.TcpConsole, RecordingConsole())
         queued_rx = bytes((0, 1, 2, 127, 255))
-        microvm_tests._send_console_rx_and_wait_until_queued(
+        microvm_tests._queue_console_rx_and_request_snapshot(
             console,
             queued_rx,
             3.0,
@@ -7358,6 +7359,7 @@ class MicrovmTests(unittest.TestCase):
             [
                 ("send", queued_rx),
                 ("wait", microvm_tests.CONSOLE_RX_QUEUED_MARKER, 3.0),
+                ("send", microvm_tests.CONSOLE_SNAPSHOT_TRIGGER),
             ],
         )
 
@@ -7524,6 +7526,8 @@ class MicrovmTests(unittest.TestCase):
                 log_path=Path("lifecycle.log"),
             )
 
+        # The builder's default attaches the boot console, whose kernel console
+        # must replace the early console.
         boot_command.assert_called_once_with(
             Path("openvmm"),
             "kvm",
@@ -7532,10 +7536,7 @@ class MicrovmTests(unittest.TestCase):
             128,
             "quiet loglevel=0",
         )
-        self.assertEqual(
-            run_guest_script.call_args.args[0],
-            ["openvmm", "boot", "--virtio-console", "console"],
-        )
+        self.assertEqual(run_guest_script.call_args.args[0], ["openvmm", "boot"])
         script = run_guest_script.call_args.args[1]
         self.assertIn("NVX-LIFECYCLE-OK", script)
         self.assertIn("/^LOC:/", script)
@@ -9798,6 +9799,8 @@ class MicrovmTests(unittest.TestCase):
                     [
                         "--network-profile",
                         "portable",
+                        "--virtio-console",
+                        "console",
                         "--network-egress",
                         "deny",
                         "--network-egress-allow",
@@ -10308,10 +10311,8 @@ class MicrovmTests(unittest.TestCase):
             microvm_tests.VIRTIO_FEATURES_NETWORK,
         )
         command = run_guest_script.call_args.args[0]
-        self.assertEqual(
-            command[2:6],
-            ["--virtio-console", "console", "--microvm-control-console", "none"],
-        )
+        self.assertNotIn("boot_console", boot_command.call_args.kwargs)
+        self.assertEqual(command[2:4], ["--microvm-control-console", "none"])
         blocks = [
             command[index + 1]
             for index, value in enumerate(command)
@@ -10669,7 +10670,9 @@ class MicrovmTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "is reported twice after step boot"):
             microvm_tests.parse_interrupt_map(report + report)
 
-    def test_interrupt_map_boots_every_device_and_restores_the_nic_and_share(self):
+    def test_interrupt_map_boots_every_device_and_restores_the_nic_share_and_console(
+        self,
+    ):
         bases = microvm_tests.MICROVM_VIRTIO_DEVICES
         snapshot_bases = microvm_tests.INTERRUPT_MAP_SNAPSHOT_DEVICES
         cold = self._interrupt_report(
@@ -10747,12 +10750,13 @@ class MicrovmTests(unittest.TestCase):
         capture, restore = launched
         self.assertIn("--snapshot-destination", capture)
         self.assertNotIn("--microvm-sandbox-block", capture)
-        self.assertNotIn("--virtio-console", capture)
+        self.assertEqual(capture[capture.index("--virtio-console") + 1], "console")
+        self.assertEqual(restore[restore.index("--virtio-console") + 1], "console")
         self.assertEqual(
             restore[restore.index("--mount") + 1], capture[capture.index("--mount") + 1]
         )
         self.assertEqual(restore[restore.index("--network-profile") + 1], "portable")
-        self.assertIn('[ "$(bound_devices)" -eq 2 ]', staged[0])
+        self.assertIn('[ "$(bound_devices)" -eq 3 ]', staged[0])
         self.assertIn(
             "echo NVX-INTERRUPT-MAP-CAPTURE\nnvx-snapshot\nreport restore\n", staged[0]
         )

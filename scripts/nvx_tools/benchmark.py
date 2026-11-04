@@ -49,6 +49,9 @@ from .time_abi import TimeAbiFailure, TimeAbiMonitor, status_script
 
 BOOT_MARKER = b"ALPINE-MICROVM-BOOT-OK"
 RESTORE_MARKER = b"OPENVMM-SNAPSHOT-RESTORE-OK"
+# The OpenVMM options that make the boot console, on OpenVMM's standard
+# streams, the console of a guest into which the host types.
+BOOT_CONSOLE_ARGUMENTS = ("--virtio-console", "console")
 TEARDOWN_TIMEOUT_SECONDS = 15.0
 OUTPUT_DRAIN_TIMEOUT_SECONDS = 1.0
 OUTPUT_READER_STOP_TIMEOUT_SECONDS = 5.0
@@ -2477,7 +2480,15 @@ def workload_boot_command(
     mount: str | None = None,
     virtio_blk: Path | None = None,
     microvm_sandbox_block: Path | None = None,
+    boot_console: bool = True,
 ) -> list[str]:
+    """Return the OpenVMM command that cold-boots a workload guest.
+
+    With ``boot_console``, the guest's console is the boot console, ``hvc1``,
+    on OpenVMM's standard streams, which carries host input to the guest's
+    shell, and the byte channel, ``hvc0``, writes to OpenVMM's stderr.
+    Without it, the byte channel is the guest's console.
+    """
     command = [
         *command_prefix,
         str(executable),
@@ -2510,6 +2521,8 @@ def workload_boot_command(
                 f"scratch:file:{microvm_sandbox_block}",
             )
         )
+    if boot_console:
+        command.extend(BOOT_CONSOLE_ARGUMENTS)
     return command
 
 
@@ -2540,6 +2553,8 @@ def device_restore_commands(
                 "virtiofs restore profile directory must not contain a comma"
             )
         mount = f"/mnt/host,{host_directory},rw"
+    # The probes of the network and the host filesystem type nothing into the
+    # guest, so only the console's capture and restore need the boot console.
     boot = workload_boot_command(
         executable,
         backend,
@@ -2551,6 +2566,7 @@ def device_restore_commands(
         command_prefix=command_prefix,
         network=network if device == "net" else None,
         mount=mount,
+        boot_console=device == "console",
     )
     restore = [
         *command_prefix,
@@ -2560,12 +2576,10 @@ def device_restore_commands(
             snapshot_path,
             processors=1,
             network_profile="portable" if device == "net" else None,
+            boot_console=device == "console",
         ),
     ]
-    if device == "console":
-        boot.extend(("--virtio-console", "console"))
-        restore.extend(("--virtio-console", "console"))
-    elif mount is not None:
+    if mount is not None:
         restore.extend(("--mount", mount))
     return boot, restore
 
@@ -5706,7 +5720,14 @@ def snapshot_restore_command(
     restore_processors: int | None = None,
     restore_memory_mib: int | None = None,
     network_profile: str | None = None,
+    boot_console: bool = True,
 ) -> list[str]:
+    """Return the OpenVMM command that restores ``snapshot_path``.
+
+    ``boot_console`` reattaches a boot console that a
+    :func:`workload_boot_command` capture put on OpenVMM's standard streams;
+    a snapshot without one, or with another endpoint, refuses it.
+    """
     command = [
         str(executable),
         "--single-process",
@@ -5725,6 +5746,8 @@ def snapshot_restore_command(
         command.extend(("--restore-memory", f"{restore_memory_mib}M"))
     if network_profile is not None:
         command.extend(("--network-profile", network_profile))
+    if boot_console:
+        command.extend(BOOT_CONSOLE_ARGUMENTS)
     return command
 
 
@@ -6237,6 +6260,7 @@ def whp_command(
         str(initrd),
         "--cmdline",
         BASE_TUNING,
+        *BOOT_CONSOLE_ARGUMENTS,
     ]
     if network is not None:
         append_network_arguments(command, network)
@@ -6382,6 +6406,7 @@ def run_kvm_worker(args: argparse.Namespace) -> int:
         str(stage / AlpineBuildConstants.INITRAMFS_NAME),
         "--cmdline",
         BASE_TUNING,
+        *BOOT_CONSOLE_ARGUMENTS,
     ]
     if args.net is not None:
         append_network_arguments(boot_command, args.net, args.network_profile)
@@ -6669,6 +6694,7 @@ def run_native_linux(args: argparse.Namespace) -> int:
                 str(initrd),
                 "--cmdline",
                 BASE_TUNING,
+                *BOOT_CONSOLE_ARGUMENTS,
             ]
             if args.net is not None:
                 append_network_arguments(command, args.net, args.network_profile)
