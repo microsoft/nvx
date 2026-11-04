@@ -3,11 +3,29 @@ description: Prototype NFV PR reviewer — sandboxed foreground Dafny analysis, 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "**.[cC]"
+      - "**.[hH]"
+      - "**.[cC][cC]"
+      - "**.[cC][pP][pP]"
+      - "**.[cC][xX][xX]"
+      - "**.[hH][pP][pP]"
+      - "**.[jJ][aA][vV][aA]"
+      - "**.[cC][sS]"
+      - "**.[gG][oO]"
+      - "**.[jJ][sS]"
+      - "**.[jJ][sS][xX]"
+      - "**.[mM][jJ][sS]"
+      - "**.[tT][sS]"
+      - "**.[tT][sS][xX]"
+      - "**.[pP][yY]"
+      - "**.[rR][sS]"
 if: github.event.pull_request.draft == false
 permissions:
   contents: read
   pull-requests: read
   issues: read
+  copilot-requests: none
 engine:
   id: copilot
   model: ${{ vars.NFV_MODEL }}
@@ -32,6 +50,7 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
+      copilot-requests: none
     uses: ./.github/workflows/nfv-source-context.lock.yml
     secrets: inherit
   agent:
@@ -139,7 +158,7 @@ post-steps:
       name: nfv-evidence
       path: /tmp/gh-aw/sandbox/agent/logs/nfv
       if-no-files-found: warn
-source: microsoft/neuro-formal-verification/workflow@498aad98c39314a8c55c89dff42d771276b957d8
+source: microsoft/neuro-formal-verification/workflow@bc72561ffedf1ad59cc43c34a5265e4515c8341b
 ---
 
 # NFV PR reviewer
@@ -158,6 +177,11 @@ through `safeoutputs add_comment`, once, whether or not findings were accepted.
 Never edit, summarize, add to or regenerate the report. Incomplete extraction,
 audit errors and failed safe-output calls fail the process; never fabricate a
 report or publish incremental evidence. Evidence is retained even on failure.
+Completed analyses submit all four property outcomes, including resource
+exhaustion and property type-check/audit failures. These are report data, not
+infrastructure failures. The driver records attempt completion or infrastructure
+failure separately in `review-status.json`; it never fabricates a completed
+review after a failed pipeline stage.
 
 Findings are conditional MODEL refutations, never source-confirmed bugs.
 Verification applies only to the translated model under its stated assumptions.
