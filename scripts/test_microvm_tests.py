@@ -15443,6 +15443,7 @@ class TimeHostCorrectionTests(unittest.TestCase):
         epsilons: Sequence[int] | None = None,
         max_errors: Sequence[int | str] | None = None,
         host_status: str = "synchronized",
+        held_test_hooks: int | None = None,
         failures: Collection[int] = (),
         state_windows: Sequence[
             tuple[
@@ -15454,15 +15455,21 @@ class TimeHostCorrectionTests(unittest.TestCase):
         | None = None,
     ) -> str:
         """Return the console output of a guest report whose state holds
-        ``frequency_ppb`` for the host's ``correction_ppb``, and whose samples,
-        5 s of the guest TSC apart, read ``(theta_ns, correction)`` each, with
-        the uncertainties ``epsilons``, 700 ns by default, and the maximum
-        errors ``max_errors`` of host UTC, unknown by default, while host UTC,
-        whose status is ``host_status``, runs ``host_ppm`` against the TSC, or
-        in each window at the rate that a sequence gives. The samples whose
-        indices ``failures`` holds failed to pair, as ``nvx-time sample`` then
-        reports them."""
+        ``frequency_ppb`` for the host's ``correction_ppb``, from a sample that
+        carried the test-hook flag if ``held_test_hooks`` is 1, by default when
+        the report's samples carry it, and whose samples, 5 s of the guest TSC
+        apart, read ``(theta_ns, correction)`` each, with the uncertainties
+        ``epsilons``, 700 ns by default, and the maximum errors ``max_errors``
+        of host UTC, unknown by default, while host UTC, whose status is
+        ``host_status``, runs ``host_ppm`` against the TSC, or in each window
+        at the rate that a sequence gives. The samples whose indices
+        ``failures`` holds failed to pair, as ``nvx-time sample`` then reports
+        them."""
         tsc_hz = self.TSC_HZ if tsc_hz is None else tsc_hz
+        if held_test_hooks is None:
+            held_test_hooks = int(
+                int(flags, 16) & microvm_tests.TIME_SAMPLE_TEST_HOOKS != 0
+            )
         state: dict[str, str | int] = {
             "version": 1,
             "generation": 0,
@@ -15472,6 +15479,7 @@ class TimeHostCorrectionTests(unittest.TestCase):
             "host_status": host_status,
             "host_correction_ppb": correction_ppb,
             "host_correction_bound_ppb": 2,
+            "host_test_hooks": held_test_hooks,
             "discontinuities": 0,
             "last_step_realtime_ns": 0,
             "samples": 17,
@@ -16023,22 +16031,35 @@ class TimeHostCorrectionTests(unittest.TestCase):
             )
 
     def test_a_stale_held_correction_fails(self):
-        # A boot step or repair that kept the guest's old correction, here 0,
-        # runs the guest at it while the samples publish, and host UTC runs at,
-        # -150 ppm: both rate checks pass, but the held correction is stale.
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"holds the host's correction of 0 ppb, but its first stable sample publishes "
-            r"-150\.000 ppm, more than 75 ppm away: its boot step or restore repair "
-            "kept a stale correction",
-        ):
+        # A repair that kept the guest's old correction, here 0 from a capture
+        # that no hook altered, runs the guest at it while the samples publish,
+        # and host UTC runs at, -150 ppm: both rate checks pass, but the state
+        # shows that no hook altered the sample that the correction came from.
+        stale = (
+            r"the guest holds the host's correction of 0 ppb from a sample that "
+            r"OpenVMM's hook did not alter \(host_test_hooks=0\): its boot step or "
+            "restore repair kept a stale correction"
+        )
+        with self.assertRaisesRegex(RuntimeError, stale):
             self.check(
                 self.report(
                     frequency_ppb=0,
                     correction_ppb=0,
                     samples=((0, -9_830_400), (-750_000, -9_830_400)),
                     host_ppm=-150.0,
+                    held_test_hooks=0,
                 )
+            )
+        # So does a restore beyond Linux's limit that kept it.
+        with self.assertRaisesRegex(RuntimeError, stale):
+            self.check(
+                self.report(
+                    frequency_ppb=0,
+                    correction_ppb=0,
+                    samples=((0, 58_982_400),),
+                    held_test_hooks=0,
+                ),
+                limit=True,
             )
         # The host's own correction may have moved since the boot step or the
         # repair: here by 60 ppm, which the guest's discipline follows later.
@@ -16046,6 +16067,32 @@ class TimeHostCorrectionTests(unittest.TestCase):
             samples=((0, 17_039_360), (300_000, 17_039_360)), host_ppm=260.0
         )
         self.assertIn("guest_ppm=+200.000 host_ppm=+260.000", self.check(moved))
+        # A state that doesn't say where its correction came from is malformed.
+        with self.assertRaisesRegex(
+            RuntimeError, r"malformed guest report: KeyError\('host_test_hooks'\)"
+        ):
+            self.check(self.report().replace(" host_test_hooks=1", ""))
+
+    def test_the_slewed_restore_of_1229_holds_a_fresh_correction(self):
+        # #1229's restore on azure-kvm-1, in CI run 41552686892 of #1189's merge
+        # group: chronyd was slewing host UTC at the repair, whose sample
+        # published +29.715 ppm, the +151 ppm hook on the host's own -121.267
+        # ppm. The slew had ended by the first sample, 2.1 s later, which
+        # published +147.729 ppm, 118 ppm away, as did the second. The guest
+        # held the correction of the repair's sample, which the hook altered,
+        # and its clock ran at it.
+        report = self.report(
+            frequency_ppb=29_715,
+            correction_ppb=29_715,
+            tsc_hz=2_793_439_000,
+            samples=((141_060, 9_681_567), (732_482, 9_681_567)),
+            epsilons=(5_241, 5_225),
+            max_errors=(1_152, 3_652),
+            host_ppm=147.729,
+        )
+        self.assertIn(
+            "host_correction_ppb=29715 frequency_ppb=29715", self.check(report)
+        )
 
     def test_the_limit_holds_and_is_reported(self):
         limit = self.report(

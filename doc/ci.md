@@ -191,9 +191,12 @@ as on NVX's Linux runners, does so in most windows, so the checker still uses
 such a window when host UTC ran at its published correction. Every
 sample must carry the test-hook
 flag. The correction that the guest's boot
-step or restore repair took must lie within 75 ppm, half the 150 ppm of the
-smallest hook, of the one that the first stable sample publishes, so that it
-isn't a stale one. Between the stable pair, which pairs host UTC and
+step or restore repair took must come from a sample that the hook altered, as
+the guest's time state reports with `host_test_hooks=1`: the capture runs
+without the hook, so a restore whose repair kept the snapshot's correction
+holds one without it. The check doesn't compare that correction with a later
+sample's, since the host's time service may slew host UTC, and so change its
+correction, in between. Between the stable pair, which pairs host UTC and
 the guest's clock with the guest TSC, both must run at their corrections
 against the TSC counted at the declared rate. The guest's clock must run at the
 one that it holds, within 1 ppm beyond the uncertainty of its pairings; a guest

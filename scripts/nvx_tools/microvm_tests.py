@@ -580,11 +580,6 @@ TIME_HOST_CORRECTION_ATTEMPTS = 3
 # the hooks' corrections: two samples 5 s apart, each uncertain by 1 ms, would
 # allow 400 ppm. Such a window is retried instead.
 TIME_HOST_CORRECTION_SAMPLE_BOUND_NS = 100_000
-# How far, in ppm, the correction that the guest's boot step or restore repair
-# took may be from the one that its first sample publishes, as the host's time
-# service may change it in between: half the 150 ppm of the smallest hook, by
-# which a guest that kept a stale correction would miss it.
-TIME_HOST_CORRECTION_HELD_PPM = 75
 # How far, in ppm, the guest's clock may run from the host's correction that it
 # holds, against the guest TSC counted at the declared rate, beyond the
 # uncertainty of the samples' pairing of the guest's realtime clock with that
@@ -6115,10 +6110,12 @@ def check_time_host_correction(
     """Check the guest's report of the time-host-correction scenario in its
     console ``output``, and return a summary of it.
 
-    The correction that the guest's boot step or restore repair took must be
-    the one that its first sample publishes, give or take the host's own
-    changes, so that it isn't a stale one. With ``limit``, that correction must
-    exceed Linux's limit, and the guest must hold the limit and report it.
+    The correction that the guest's boot step or restore repair took must come
+    from a sample that OpenVMM's hook altered, as the time state's
+    ``host_test_hooks`` reports, so that it isn't a stale one: the capture runs
+    without the hook. Its value isn't compared with a later sample's, which the
+    host's time service may have slewed since. With ``limit``, that correction
+    must exceed Linux's limit, and the guest must hold the limit and report it.
     Otherwise it must lie within the limit, and the guest's frequency
     correction must be it, short of the kernel's kHz rounding of the TSC rate;
     between its two samples, the guest's clock must run at the correction that
@@ -6151,24 +6148,17 @@ def check_time_host_correction(
         frequency_ppb = int(state["frequency_ppb"])
         correction_ppb = int(state["host_correction_ppb"])
         limited = state["frequency_limited"] == "1"
-
-        def check_held(sample: dict[str, str]) -> float:
-            published = int(sample["correction"]) / 65_536
-            if abs(correction_ppb / 1000 - published) > TIME_HOST_CORRECTION_HELD_PPM:
-                raise RuntimeError(
-                    f"{context}: the guest holds the host's correction of "
-                    f"{correction_ppb} ppb, but its first stable sample publishes "
-                    f"{published:+.3f} ppm, more than "
-                    f"{TIME_HOST_CORRECTION_HELD_PPM} ppm away: its boot step or "
-                    "restore repair kept a stale correction"
-                )
-            return published
-
+        if state["host_test_hooks"] != "1":
+            raise RuntimeError(
+                f"{context}: the guest holds the host's correction of "
+                f"{correction_ppb} ppb from a sample that OpenVMM's hook did not "
+                f"alter (host_test_hooks={state['host_test_hooks']}): its boot "
+                "step or restore repair kept a stale correction"
+            )
         tsc_hz = int(state["tsc_hz"])
         required_ppm = time_host_correction_guest_ppm(correction_ppb / 1000, tsc_hz)
         beyond = abs(required_ppm) > LINUX_FREQUENCY_LIMIT_PPB / 1000
         if limit:
-            check_held(samples[0])
             if not beyond:
                 raise RuntimeError(
                     f"{context}: Linux's required correction of "
@@ -6200,7 +6190,6 @@ def check_time_host_correction(
                 "this phase cannot check the guest's rate"
             )
         first, second = samples
-        published_ppm = check_held(first)
         allowance_ppb = time_host_correction_frequency_allowance_ppb(
             tsc_hz, correction_ppb
         )
