@@ -1993,8 +1993,8 @@ outputs. Their `safe-outputs.github-token: ${{ secrets.GITHUB_TOKEN }}` setting 
 a shared `GH_AW_GITHUB_TOKEN` secret from overriding comment-publication
 credentials. The inference and private-release tokens are not publication
 credentials; no additional PAT is needed for comments in this repository.
-The generated `safe_outputs` and `conclusion` jobs retain their existing
-issue/PR write permissions; analysis remains read-only.
+The PR reviewer's generated `safe_outputs` and `conclusion` jobs retain
+their existing issue/PR write permissions; analysis remains read-only.
 
 For HTTP 401 **Bad credentials** in `Process Safe Outputs`, inspect its
 compiled token expression without printing token values. Recompile the
