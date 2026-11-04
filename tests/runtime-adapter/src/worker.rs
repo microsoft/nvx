@@ -82,10 +82,9 @@
 //!    `nvx::guest::clone::apply`: it assembles the root from the template's devices, with the
 //!    record's image, upper, and overlay mode, once the kernel reread the partition table of a
 //!    GPT disk, over a fresh upper, waiting for each device until the activation's deadline at the
-//!    latest, so that the application ends by then, and checks the account of the record's workload
-//!    identity, if it has one, in the assembled root, as the worker of a VM that boots cold does
-//!    for a root configuration. If the record asks for a generated machine ID, it then generates
-//!    one, once, after the repair's reseed. If the record has an export, it mounts the host export
+//!    latest, so that the application ends by then. It ignores the record's workload identity, if
+//!    it has one. If the record asks for a generated machine ID, it then generates one, once, after
+//!    the repair's reseed. If the record has an export, it mounts the host export
 //!    out of the root, through the template's host filesystem device, `capture::FILESYSTEM_TAG`, as
 //!    the worker of a VM that boots cold mounts the one that its command line names, and if the
 //!    record's network names a DNS server, it writes a resolver file that names it. If the record's
@@ -106,8 +105,8 @@
 //!    the start.
 //! 5. It then serves the host's order as after a cold boot: the mapping table that the record
 //!    announces, which it maps from the record's export, the start, the executions, the probes, and
-//!    the stop. The record's workload identity, if it has one, is the whole sandbox's, as a root
-//!    configuration's is, so that executions name none, every execution takes the record's
+//!    the stop. A clone has no workload identity of the whole sandbox: each execution names its
+//!    own, as in a sandbox whose root configuration names none. Every execution takes the record's
 //!    hostname, and a clone's executions run in the cgroups of the template's bootstrap. On the
 //!    stop, the worker stops the announcer, closes the export's root, and removes the binds of the
 //!    application before it tears the root down, since they keep the root's mounts busy, through
@@ -490,19 +489,18 @@ pub trait RootOperations: EntryOperations {
     /// [`map`](Self::map) maps the host's mapping table, and the announcer of the workload's
     /// listeners that it started, if the record's network publishes them, whose
     /// [pidfd](Self::announcer) the worker polls: in place of a root configuration's
-    /// [layout](Self::command_line), assembly, [export](Self::mount_export), and account check.
-    /// The template's VM [bootstrapped](Self::bootstrap) the guest before its capture.
+    /// [layout](Self::command_line), assembly, and [export](Self::mount_export). It ignores the
+    /// record's workload identity: each execution of a clone names its own. The template's VM
+    /// [bootstrapped](Self::bootstrap) the guest before its capture.
     ///
-    /// Returns the identity in which every execution runs, that of the record's workload identity,
-    /// whose account the application checked in the assembled root, if the record has one. Fails
-    /// as `nvx::guest::clone::apply` does, with an [`ApplyError`].
+    /// Fails as `nvx::guest::clone::apply` does, with an [`ApplyError`].
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
         record: &ActivationRecord,
         template: &RootTemplate,
         deadline: Option<Instant>,
-    ) -> Result<Option<Identity>, ApplyError>;
+    ) -> Result<(), ApplyError>;
 }
 
 /// A mapping that [`RootOperations::map`] refused or failed to apply, once it applied those before
@@ -1431,12 +1429,11 @@ impl RootOperations for LibraryRoot {
         record: &ActivationRecord,
         template: &RootTemplate,
         deadline: Option<Instant>,
-    ) -> Result<Option<Identity>, ApplyError> {
+    ) -> Result<(), ApplyError> {
         let mut applied = clone::apply(record, template, deadline)?;
-        let identity = applied.identity().cloned();
         self.export = applied.take_export();
         self.root = Some(Assembled::Clone(applied));
-        Ok(identity)
+        Ok(())
     }
 }
 

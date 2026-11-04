@@ -78,14 +78,14 @@ pub enum ReattachedClone<S> {
 /// - A VMM that runs under `runtime`, whose launch is the one that the clone's lease reserves, is
 ///   the clone's, which the reattach checks in a new session, as the restore sequence of the
 ///   clone's launch does, [`Restoring::activate`](super::Restoring::activate), sending the
-///   sandbox's activation record, byte for byte, which must still be the canonical encoding of a
-///   record of the restore of the lease's generation: the clone answers with the Ready that it
-///   answered once, and the reattach checks the transaction ID that it reports, which
-///   [`ReattachedClone::Live`] returns with the session. The clone's launch committed once the
-///   clone applied its mapping table, if it has one, and started its sandbox, so the reattach
-///   sends neither again, and no launch that it ends gets either. A check that fails, by the
-///   evidence that the restore sequence gives it, ends the VMM through its verified identity, as
-///   [`Vmm::terminate`] does within `bound`, and the clone fails at [`Stage::Reattach`].
+///   sandbox's activation record, byte for byte, which must still be the canonical encoding of the
+///   record of a restore: the clone answers with the Ready that it answered once, and the reattach
+///   checks the transaction ID that it reports, which [`ReattachedClone::Live`] returns with the
+///   session. The clone's launch committed once the clone applied its mapping table, if it has one,
+///   and started its sandbox, so the reattach sends neither again, and no launch that it ends gets
+///   either. A check that fails, by the evidence that the restore sequence gives it, ends the VMM
+///   through its verified identity, as [`Vmm::terminate`] does within `bound`, and the clone fails
+///   at [`Stage::Reattach`].
 /// - A VMM that runs under another runtime identity, which might not speak the caller's
 ///   protocol, is ended the same way, without a word to its guest, and the clone fails at
 ///   [`Stage::Reattach`] with [`Evidence::RuntimeMismatch`], and
@@ -257,7 +257,7 @@ pub(super) fn reattach_clone_syncing<C: CloneControl>(
     let uncertain = launched && !certain;
     let logged = logged.map(|logged| logged.progress);
     let progress = progress_of(&lease, journal.as_ref(), committed, logged);
-    let activation = read_activation(&locked.clone_activation_path(), &lease);
+    let activation = read_activation(&locked.clone_activation_path());
     // A failure that the reattach records has the transaction that the clone's activation record
     // names, while the record of an earlier failure keeps its own.
     let transaction = activation
@@ -473,13 +473,14 @@ fn exit_fault(
     Some((Fault::new(evidence, exited(progress, status)), status))
 }
 
-/// Reads the clone's activation record at `path`, which must be the canonical encoding of a
-/// record of the restore of the generation that `lease` holds, as the clone's launch wrote it,
-/// and returns its bytes and the record, or the fault, the host's, of one that is not.
-fn read_activation(
-    path: &Path,
-    lease: &Lease,
-) -> std::result::Result<(Vec<u8>, ActivationRecord), Fault> {
+/// Reads the clone's activation record at `path`, which must be the canonical encoding of the
+/// record of a restore, as the clone's launch wrote it, and returns its bytes and the record, or
+/// the fault, the host's, of one that is not.
+///
+/// It compares nothing of the record with the clone's lease: the reattach matches the clone's
+/// records with the lease as [`CloneRecords`](super::CloneRecords) does, through
+/// [`read_failure_of`], which refuses the record of the failure of another template's clone.
+fn read_activation(path: &Path) -> std::result::Result<(Vec<u8>, ActivationRecord), Fault> {
     let bytes = open_regular(path)
         .and_then(|file| read_at_most(file, MAX_RECORD_BYTES as u64, "an activation record"))
         .map_err(|error| {
@@ -506,16 +507,10 @@ fn read_activation(
             malformed("is not in its canonical encoding, in which the clone's launch wrote it"),
         ));
     }
-    if !record
-        .restore()
-        .is_some_and(|restore| restore.template == lease.template())
-    {
+    if record.restore().is_none() {
         return Err(Fault::new(
             Evidence::HostFailure,
-            malformed(&format!(
-                "does not restore the generation {} that the clone's lease holds",
-                lease.generation()
-            )),
+            malformed("is not the record of a restore"),
         ));
     }
     Ok((bytes, record))

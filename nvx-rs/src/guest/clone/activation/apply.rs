@@ -21,12 +21,8 @@ use std::time::{Duration, Instant};
 use super::super::Devices;
 #[cfg(doc)]
 use super::Activation;
-use crate::activation::{
-    self, ActivationRecord, Configuration, MachineIdMode, Publication, WorkloadIdentity,
-};
+use crate::activation::{self, ActivationRecord, Configuration, MachineIdMode, Publication};
 use crate::gpt::Expected;
-#[cfg(doc)]
-use crate::guest::entry::AccountMode;
 use crate::guest::entry::{self, Entry, Identity, MachineId, RuntimeBinds};
 use crate::guest::ingress::{Announcer, StartError};
 use crate::guest::mappings::{self, Access, SourceRoot};
@@ -81,13 +77,14 @@ pub struct RootTemplate {
 /// A clone's root and workload, which [`apply`](fn@apply) activated: the [`Root`] that it
 /// assembled, which owns the root's mounts, the host export's among them, the root of the host
 /// export, if the record has one, the runtime's binds that it made on the root, in the caller's
-/// mount namespace, the identity in which every execution runs, if the record has a workload
-/// identity, the workload's hostname and machine ID, the record's, the resolver file that names
-/// the DNS server of the record's network, if it names one, the endpoint of its proxy, if any, and
-/// the announcer of the workload's listeners, if the record's network publishes them.
+/// mount namespace, the workload's hostname and machine ID, the record's, the resolver file that
+/// names the DNS server of the record's network, if it names one, the endpoint of its proxy, if
+/// any, and the announcer of the workload's listeners, if the record's network publishes them.
 ///
-/// Without a workload identity, the adapter gives each execution its own identity, which
-/// [`Entry::check`] checks when the adapter prepares the execution's entry, as at a cold boot.
+/// It holds no identity in which the executions run: the adapter gives each execution the
+/// identity that the execution names, which [`Entry::check`] checks, and whose account
+/// [`Entry::prepare`] reads in existing-account mode, when the adapter prepares the execution's
+/// entry, as for a sandbox without a workload identity at a cold boot.
 /// Every execution's entry takes the [hostname](Self::hostname), through [`Entry::hostname`], and
 /// sees the [machine ID](Self::machine_id) and the [resolver file](Self::resolver) through the
 /// runtime's binds, which each execution's mount namespace copies from the caller's. The adapter
@@ -113,8 +110,6 @@ pub struct Applied {
     binds: Binds,
     /// The assembled root.
     root: Root,
-    /// The identity in which every execution runs, if the record has a workload identity.
-    identity: Option<Identity>,
     /// The hostname of every execution: the record's.
     hostname: Vec<u8>,
     /// The machine ID that every execution sees at `/etc/machine-id`.
@@ -136,14 +131,6 @@ impl Applied {
     /// Returns the assembled root, to mount live shares and mappings in it.
     pub fn root_mut(&mut self) -> &mut Root {
         &mut self.root
-    }
-
-    /// Returns the identity in which every execution runs: [`Identity::new`] of the record's
-    /// workload identity, without supplementary groups or capabilities, in existing-account mode,
-    /// whose account the root holds. Returns `None` if the record has no workload identity, so
-    /// that each execution names its own.
-    pub fn identity(&self) -> Option<&Identity> {
-        self.identity.as_ref()
     }
 
     /// Returns the hostname of every execution, the record's, which the adapter gives each
@@ -223,18 +210,16 @@ impl Applied {
         teardown_with(&mut LiveSystem, announcer, export, binds.take(), root)
     }
 
-    /// Returns the assembled root, the runtime's binds on it, and the identity in which every
-    /// execution runs, if any, for an adapter that keeps them apart: it then removes the binds
-    /// with [`RuntimeBinds::remove`] before it tears the root down, in the same mount namespace,
-    /// since dropping them leaves them mounted. It stops the announcer of the workload's
-    /// listeners, if the application started one, and closes the root of the host export, unless
-    /// the adapter [took](Self::take_export) it.
-    pub fn into_parts(self) -> (Root, RuntimeBinds, Option<Identity>) {
+    /// Returns the assembled root and the runtime's binds on it, for an adapter that keeps them
+    /// apart: it then removes the binds with [`RuntimeBinds::remove`] before it tears the root
+    /// down, in the same mount namespace, since dropping them leaves them mounted. It stops the
+    /// announcer of the workload's listeners, if the application started one, and closes the root
+    /// of the host export, unless the adapter [took](Self::take_export) it.
+    pub fn into_parts(self) -> (Root, RuntimeBinds) {
         let Self {
             export,
             mut binds,
             root,
-            identity,
             announcer,
             ..
         } = self;
@@ -242,7 +227,7 @@ impl Applied {
             let _ = announcer.stop();
         }
         drop(export);
-        (root, binds.take(), identity)
+        (root, binds.take())
     }
 }
 
@@ -319,7 +304,9 @@ impl std::error::Error for AppliedTeardownError {}
 ///    or the scratch, with the record's journal policy; and its overlay mode; and, from
 ///    `template`, the runtime directory, the devices, and the timeout. It takes the workload's
 ///    hostname and machine-ID mode, whether it has an export, and its network's DNS server,
-///    proxy endpoint, and publication of the workload's listeners from the record too;
+///    proxy endpoint, and publication of the workload's listeners from the record too. It takes
+///    no identity in which the executions run: the record's workload identity, if any, has no
+///    effect, and each execution names its own identity, which its entry checks;
 /// 2. for a GPT disk, asks the kernel to reread the disk's partition table, once the distro
 ///    device appeared, so that the block devices of the disk's partitions are those of the
 ///    clone's disk, rather than those of the template's placeholder, which the kernel created
@@ -338,19 +325,13 @@ impl std::error::Error for AppliedTeardownError {}
 ///    the assembly, as at its timeout, so that the application ends by the activation's
 ///    deadline, past which [`Activation::complete`] fails the activation as expired, whatever
 ///    the result;
-/// 4. if the record has a workload identity, checks its account in the assembled root, before
-///    Ready, as NVX's init checks it at boot: the identity is [`Identity::new`] of the record's
-///    user and group IDs, without supplementary groups or capabilities, in
-///    [existing-account](AccountMode::Existing) mode, whose account [`Entry::prepare`] reads and
-///    checks below the root. A refusal fails with [`ApplyError::Account`], once the application
-///    tore the root down;
-/// 5. if the record asks for a generated machine ID, generates it, once, with
+/// 4. if the record asks for a generated machine ID, generates it, once, with
 ///    [`MachineId::generate`], from the kernel's random number generator, which the clone's
 ///    repair reseeded before the activation accepted the record, so that no two clones of a
 ///    template share it, to [`MACHINE_ID_FILE`] in the template's runtime directory. A file there
 ///    already, as once a boot generated its ID, or one that cannot be created or written, fails
 ///    with [`ApplyError::MachineId`], once the application tore the root down;
-/// 6. if the record has an export, mounts the host export, through the template's host filesystem
+/// 5. if the record has an export, mounts the host export, through the template's host filesystem
 ///    device, which [`RootTemplate::filesystem_tag`] names, with [`Root::mount_export`], whatever
 ///    the export's shape: at `hostfs/root` in the runtime directory, outside the root, where only
 ///    the guest's root user reaches it, read-write. The record names no mode of the mount, and none
@@ -361,19 +342,19 @@ impl std::error::Error for AppliedTeardownError {}
 ///    inside a directory that a writable export of another sandbox or clone holds. A failure fails
 ///    with [`ApplyError::Export`], once the application tore the root down, which unmounts an
 ///    export that it mounted;
-/// 7. if the record's network names a DNS server, writes a resolver file that names it, as
+/// 6. if the record's network names a DNS server, writes a resolver file that names it, as
 ///    [`write_resolver`] writes one, to [`RESOLVER_FILE`] in the template's runtime directory: a
 ///    new file, of mode 0444, whatever the umask, so that every execution may read it. A file
 ///    there already, or one that cannot be created or written, fails with
 ///    [`ApplyError::Network`], once the application tore the root down;
-/// 8. if the record's network publishes the workload's listeners, starts their announcer, to
+/// 7. if the record's network publishes the workload's listeners, starts their announcer, to
 ///    the gateway of [`RootTemplate::gateway`], with [`Announcer::start`]: it binds a UDP socket
 ///    to a privileged source port, and spawns `/sbin/nvx-ingress inherit GATEWAY_IPV4` with the
 ///    socket as its standard input, and waits until the program runs, but for no announcement.
 ///    The template captured its NIC under a policy that publishes nothing, so no announcer ran
 ///    in it. A template without a gateway, a socket that cannot be bound, and a program that does
 ///    not run fail with [`ApplyError::Network`], once the application tore the root down;
-/// 9. binds the runtime's files into the root, for every execution, with one
+/// 8. binds the runtime's files into the root, for every execution, with one
 ///    [`Entry::bind_runtime`], in the caller's mount namespace, of which each execution's starts
 ///    as a copy: a generated machine ID's file, read-only over the root's `/etc/machine-id`, then
 ///    the resolver file, read-only over the root's `/etc/resolv.conf`, and, with the image's own
@@ -410,7 +391,6 @@ pub fn apply(
         export: activated.export,
         binds: Binds(Some(activated.binds)),
         root: activated.root,
-        identity: activated.identity,
         hostname: activated.hostname,
         machine_id: activated.machine_id,
         resolver: activated.resolver,
@@ -437,16 +417,6 @@ pub enum ApplyError {
     /// the error holds the unmounts that failed. It fails with [`root::Error::NotFresh`] if the
     /// upper's `upper` or `work` directory exists and is not empty.
     Assembly(AssemblyError),
-    /// Existing-account mode refused the record's workload identity in the assembled root, which
-    /// the application then tore down.
-    Account {
-        /// Why the identity was refused: the root holds no account of its user ID whose primary
-        /// group is its group ID, and which its group database holds, or its account databases
-        /// cannot be read.
-        error: entry::Error,
-        /// The unmounts of the root's teardown that failed, if any, whose mounts stay.
-        teardown: Option<TeardownError>,
-    },
     /// The machine ID that the record asks the guest to generate could not be written to
     /// [`MACHINE_ID_FILE`] in the template's runtime directory, as this error tells: a file is
     /// there already, as once a boot generated its ID, or the file cannot be created or written.
@@ -501,10 +471,6 @@ impl fmt::Display for ApplyError {
             Self::Assembly(error) => {
                 return write!(formatter, "the root's assembly failed: {error}");
             }
-            Self::Account { error, teardown } => {
-                write!(formatter, "the root refuses the workload identity: {error}")?;
-                teardown
-            }
             Self::MachineId { error, teardown } => {
                 write!(
                     formatter,
@@ -540,7 +506,7 @@ impl std::error::Error for ApplyError {
         match self {
             Self::Gpt(error) | Self::Export { error, .. } => Some(error),
             Self::Assembly(error) => Some(error),
-            Self::Account { error, .. } | Self::View { error, .. } => Some(error),
+            Self::View { error, .. } => Some(error),
             Self::MachineId { error, .. } => Some(error),
             Self::Network { error, .. } => Some(error),
         }
@@ -631,9 +597,6 @@ trait System {
         deadline: Option<Instant>,
     ) -> Result<Self::Root, AssemblyError>;
 
-    /// Reads and checks the account of `identity` in `root`, as [`check_account`] does.
-    fn account(&mut self, root: &Self::Root, identity: &Identity) -> Result<(), entry::Error>;
-
     /// Generates a machine ID, and writes it to a new file at `path`, as [`MachineId::generate`]
     /// does.
     fn generate(&mut self, path: &Path) -> io::Result<MachineId>;
@@ -698,10 +661,6 @@ impl System for LiveSystem {
         root::assemble_fresh(assembly, deadline)
     }
 
-    fn account(&mut self, root: &Root, identity: &Identity) -> Result<(), entry::Error> {
-        check_account(root.path(), identity)
-    }
-
     fn generate(&mut self, path: &Path) -> io::Result<MachineId> {
         MachineId::generate(path)
     }
@@ -745,14 +704,9 @@ impl System for LiveSystem {
 }
 
 /// The workload's view of its root, which the application sets for every execution: the
-/// identity of the entry through which it binds the runtime's files, the hostname, the machine
-/// ID, and the resolver file.
+/// hostname, the machine ID, and the resolver file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct View {
-    /// The identity of the entry that binds the runtime's files: the record's workload identity,
-    /// or, without one, the user and group ID 0, since the entry binds the same files whatever
-    /// its identity.
-    identity: Identity,
     /// The hostname of every execution: the record's.
     hostname: Vec<u8>,
     /// The machine ID that every execution sees.
@@ -764,9 +718,11 @@ struct View {
 
 impl View {
     /// Returns the entry into the root at `root` that binds the view's runtime files, and checks
-    /// its hostname, with [`Entry::bind_runtime`].
+    /// its hostname, with [`Entry::bind_runtime`]. The entry binds the same files whatever its
+    /// identity, and no execution runs through it, so it takes the user and group ID 0, which
+    /// it checks as it checks any identity.
     fn entry(&self, root: &Path) -> Entry {
-        let entry = Entry::new(root, self.identity.clone())
+        let entry = Entry::new(root, Identity::new(0, 0))
             .hostname(self.hostname.clone())
             .machine_id(self.machine_id.clone());
         match &self.resolver {
@@ -777,9 +733,9 @@ impl View {
 }
 
 /// What an application activated through a system, which an [`Applied`] holds in a VM: the
-/// root, the root of the host export, if any, the runtime's binds on the root, the identity in
-/// which every execution runs, if any, the workload's hostname and machine ID, the resolver file,
-/// if any, the proxy's endpoint, if any, and the announcer of the workload's listeners, if any.
+/// root, the root of the host export, if any, the runtime's binds on the root, the workload's
+/// hostname and machine ID, the resolver file, if any, the proxy's endpoint, if any, and the
+/// announcer of the workload's listeners, if any.
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 struct Activated<R, E, B, A> {
@@ -789,8 +745,6 @@ struct Activated<R, E, B, A> {
     export: Option<E>,
     /// The runtime's binds on the root.
     binds: B,
-    /// The identity in which every execution runs, if the record has a workload identity.
-    identity: Option<Identity>,
     /// The hostname of every execution.
     hostname: Vec<u8>,
     /// The machine ID that every execution sees.
@@ -822,7 +776,6 @@ fn apply_with<S: System>(
     let configuration = record.configuration();
     let assembly = assembly(template, configuration);
     let workload = &configuration.workload;
-    let identity = workload.identity.map(workload_identity);
     if let root::Image::Gpt { .. } = assembly.image {
         system
             .reread(assembly.distro, assembly.timeout, deadline)
@@ -831,12 +784,6 @@ fn apply_with<S: System>(
     let mut root = system
         .assemble(&assembly, deadline)
         .map_err(ApplyError::Assembly)?;
-    if let Some(identity) = &identity
-        && let Err(error) = system.account(&root, identity)
-    {
-        let teardown = system.teardown(root).err();
-        return Err(ApplyError::Account { error, teardown });
-    }
     let machine_id = match workload.machine_id {
         MachineIdMode::Image => MachineId::Image,
         MachineIdMode::Generated => {
@@ -893,7 +840,6 @@ fn apply_with<S: System>(
         None
     };
     let view = View {
-        identity: identity.clone().unwrap_or_else(|| Identity::new(0, 0)),
         hostname: workload.hostname.clone(),
         machine_id,
         resolver,
@@ -917,7 +863,6 @@ fn apply_with<S: System>(
         root,
         export,
         binds,
-        identity,
         hostname: view.hostname,
         machine_id: view.machine_id,
         resolver: view.resolver,
@@ -1032,17 +977,4 @@ fn assembly(template: &RootTemplate, configuration: &Configuration) -> Assembly 
         overlay,
         timeout: template.timeout,
     }
-}
-
-/// Returns the identity in which every execution of a workload with `identity` runs: its user
-/// and group IDs, without supplementary groups or capabilities, whose account an entry checks in
-/// existing-account mode.
-fn workload_identity(identity: WorkloadIdentity) -> Identity {
-    Identity::new(identity.uid, identity.gid)
-}
-
-/// Reads and checks the account of `identity` below the root at `root`, as an entry does in
-/// existing-account mode before each execution: through [`Entry::prepare`].
-fn check_account(root: &Path, identity: &Identity) -> Result<(), entry::Error> {
-    Entry::new(root, identity.clone()).prepare().map(drop)
 }

@@ -106,7 +106,7 @@ pub struct CloneRequest {
     /// expands the template's RAM in whole blocks.
     pub memory: u64,
     /// The view that the clone's workload has of its VM: its hostname, the machine ID that it
-    /// sees, and the identity in which every execution runs, unless the executions name their
+    /// sees, and a workload identity, which the clone's guest ignores: each execution names its
     /// own.
     pub workload: WorkloadView,
     /// The mode of the clone's overlay, which selects its options.

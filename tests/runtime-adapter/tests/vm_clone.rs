@@ -47,9 +47,9 @@
 //!   so that the store refuses a later start's selection of it, as ineligible.
 //! - A clone whose activation fails ends before it is ready, with the status of the failure's
 //!   class, which attributes the failure, and the VMM's exit: a scratch image that holds no ext4
-//!   file system, a journal that the clone's record forbids, a workload identity whose account the
-//!   image lacks, and a host that sends anything but the clone's Activate first, a ping, a start, or
-//!   an execution. The sandbox records the failure until the release of its lease.
+//!   file system, a journal that the clone's record forbids, and a host that sends anything but the
+//!   clone's Activate first, a ping, a start, or an execution. The sandbox records the failure
+//!   until the release of its lease.
 //! - A clone refuses a scratch image whose upper is not fresh, as an earlier clone left it, and
 //!   ends before it is ready.
 //! - Clones at once each keep a root of their own, and every execution of a clone sees its
@@ -79,9 +79,10 @@
 //!   the guest may write, that another directory replaced.
 //! - A clone whose guest fails a mapping of its table ends before its sandbox starts, nothing of
 //!   it runs, and the host's directory stays as it was.
-//! - A clone runs its executions as its record's workload identity, once it is ready: the repair
-//!   acknowledged the restore before the clone took its reset, the host's first message came
-//!   after that, and the clone's Ready, its start, and its first execution came in that order.
+//! - A clone runs the executions that name their identity, once it is ready, whatever workload
+//!   identity its record names, and refuses one that names none: the repair acknowledged the
+//!   restore before the clone took its reset, the host's first message came after that, and the
+//!   clone's Ready, its start, and its first execution came in that order.
 //! - OpenVMM reads none of the host's input until the clone's repair acknowledges its restore, as
 //!   the host sees it: a template whose initramfs delays each clone's repair, for tests, holds a
 //!   clone's restore unacknowledged for that long, and is of a class of its own, whose key names
@@ -114,10 +115,9 @@
 //!   `remove` retired.
 //! - A run runs one execution in its clone, then tears the clone down, in one command: its
 //!   preflight stages the clone's images, it starts the clone as a start does, runs the execution
-//!   in the clone's root, with the environment and the working directory that its start names, as
-//!   the clone's workload identity, whatever its program's status, and stops the clone, which
-//!   releases the lease. An execution that the guest refuses leaves the run to tear the clone down
-//!   as well.
+//!   in the clone's root, with the identity, the environment, and the working directory that its
+//!   start names, whatever its program's status, and stops the clone, which releases the lease. An
+//!   execution that the guest refuses leaves the run to tear the clone down as well.
 //! - A run whose clone does not start runs nothing: once the preflight staged the clone's images,
 //!   the store refuses a selection that names no template, or of a generation whose restore window
 //!   passed, without a lease, and a clone whose activation fails ends the run with the record of
@@ -279,10 +279,8 @@ const TEMPLATE_MEMORY: u64 = 256;
 const TEMPLATE_CAPACITY: u64 = 1024;
 /// The generation of each scenario's template store that its template is.
 const GENERATION: StoreGeneration = StoreGeneration::new(NonZeroU64::MIN);
-/// The workload identity of the clones that run as one: nobody's, in the Ubuntu image.
+/// Nobody's identity, whose account the Ubuntu image holds.
 const NOBODY: &str = "65534:65534";
-/// A workload identity whose account the Ubuntu image lacks.
-const STRANGER: &str = "4242:4242";
 /// Bytes in a sector of the guest's disks, which their statistics count.
 const SECTOR: u64 = 512;
 /// How long a clone's time may take to settle once the clone is ready.
@@ -3114,7 +3112,6 @@ fn a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts() {
 fn a_clone_whose_activation_fails_ends_before_it_is_ready() {
     let template = Template::create("cl-unready");
     let forbidden = ["--scratch-journal", "forbidden"];
-    let stranger = ["--workload-identity", STRANGER];
     let cases = [
         (
             StartOf {
@@ -3130,13 +3127,6 @@ fn a_clone_whose_activation_fails_ends_before_it_is_ready() {
                 ..StartOf::default()
             },
             ("unusable-root", status::ACTIVATION_ROOT),
-        ),
-        (
-            StartOf {
-                options: &stranger,
-                ..StartOf::default()
-            },
-            ("invalid-settings", status::ACTIVATION_WORKLOAD),
         ),
     ];
     for (start, (evidence, expected)) in cases {
@@ -3293,8 +3283,9 @@ fn a_clone_whose_view_cannot_be_set_ends_before_it_is_ready() {
 
 #[test]
 #[ignore = "boots VMs; see the module documentation for what they need"]
-fn a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready() {
+fn a_clone_runs_the_executions_that_name_their_identity_once_it_is_ready() {
     let template = Template::create("cl-ident");
+    // The clone's record names a workload identity, which its guest ignores.
     let options = ["--workload-identity", NOBODY];
     let start = StartOf {
         upper: Upper::Scratch,
@@ -3307,16 +3298,16 @@ fn a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready() {
     let events = assert_timeline(&facts);
     assert_eq!(facts["activation.execution"], "none", "{facts:?}");
 
-    // Every execution runs as the record's workload identity, and one that names its own is
-    // refused before its program starts.
-    let ran = cloned.exec(&["--", "/bin/sh", "-c", "id -u; id -g"]);
+    // An execution runs as the identity that it names, and one that names none is refused before
+    // its program starts.
+    let ran = cloned.exec(&["--identity", NOBODY, "--", "/bin/sh", "-c", "id -u; id -g"]);
     let facts = ["launch", "status", "stdout", "stderr"].map(|key| &ran[&format!("exec.1.{key}")]);
     assert_eq!(
         facts,
         ["started", "exit 0", "65534\\n65534\\n", ""],
         "{ran:?}"
     );
-    let refused = cloned.exec(&["--identity", "1000:1000", "--", "/bin/true"]);
+    let refused = cloned.exec(&["--", "/bin/true"]);
     let launch = format!("failed 0 {EINVAL}");
     assert_eq!(refused["exec.1.launch"], launch, "{refused:?}");
 
@@ -4187,17 +4178,18 @@ fn a_selection_that_names_no_template_leases_nothing() {
 #[ignore = "boots VMs; see the module documentation for what they need"]
 fn a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down() {
     let template = Template::create("cl-run");
-    // The execution's program, its arguments, its environment, and its working directory reach
-    // the guest in its start, and it runs in the clone's root, the Ubuntu image's, as the clone's
-    // workload identity. The run ends with success whatever the program's status.
-    let options = ["--workload-identity", NOBODY];
+    // The execution's program, its arguments, its identity, its environment, and its working
+    // directory reach the guest in its start, and it runs in the clone's root, the Ubuntu
+    // image's, as the identity that it names. The run ends with success whatever the program's
+    // status.
     let start = StartOf {
         upper: Upper::Scratch,
-        options: &options,
         ..StartOf::default()
     };
     let script = ". /etc/os-release; echo \"$GREETING $ID $(id -u) $(pwd)\"; echo done >&2; exit 3";
     let execution = [
+        "--identity",
+        NOBODY,
         "--env",
         "GREETING=hello",
         "--cwd",
@@ -4235,14 +4227,10 @@ fn a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down() {
     );
     assert!(template.leases().is_empty());
 
-    // An execution that the guest refuses before its program starts, one that names an identity
-    // in a clone that runs as its own, leaves the run to tear the clone down as well.
-    let start = StartOf {
-        options: &options,
-        ..StartOf::default()
-    };
-    let execution = ["--identity", "1000:1000", "--", "/bin/true"];
-    let ran = template.run("cl-r", start, &execution, 0);
+    // An execution that the guest refuses before its program starts, one that names no
+    // identity, leaves the run to tear the clone down as well.
+    let execution = ["--", "/bin/true"];
+    let ran = template.run("cl-r", StartOf::default(), &execution, 0);
     ran.assert_ran();
     let printed = &ran.started;
     let launch = format!("failed 0 {EINVAL}");

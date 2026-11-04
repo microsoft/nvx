@@ -1429,12 +1429,10 @@ For a GPT disk, it first asks the kernel to reread the disk's partition table
 with `BLKRRPART`, since the kernel created the block devices of partitions for
 the template's placeholder. Whatever the image, it requires a fresh upper, whose
 `upper` and `work` directories are missing or empty, in a bounded check that
-reads no file, while a cold sandbox's scratch keeps its upper across boots. With
-the record's workload identity, it checks its account in the assembled root
-before Ready, as NVX's init checks it at boot: `entry::Identity::new(uid, gid)`,
-without supplementary groups or capabilities, in existing-account mode, as which
-every execution runs, while without one each execution names its own identity,
-which `Entry::check` checks. With the record's generated machine ID, it then
+reads no file, while a cold sandbox's scratch keeps its upper across boots. It
+ignores the record's workload identity, if it has one: each execution names its
+own identity, which `Entry::check` checks, as in a sandbox without a workload
+identity at a cold boot. With the record's generated machine ID, it then
 generates one, once, with `MachineId::generate`, after the repair's reseed, so
 that no two clones share it, to `MACHINE_ID_FILE` in the template's runtime
 directory. With the record's export, it mounts the host export through that

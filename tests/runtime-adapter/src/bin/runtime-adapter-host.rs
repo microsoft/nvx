@@ -171,8 +171,8 @@
 //!   devices, through NVX's supervisor, as the launch that the lease reserves, and the restore
 //!   sequence of `nvx::host::template` activates the clone through the adapter's clone order,
 //!   `runtime_adapter::host::CloneOrder`, with the clone's activation record: the workload
-//!   identity UID:GID, if given, as which every execution runs, whose account the guest checks in
-//!   the clone's root before it is ready, the overlay mode MODE and the scratch's journal policy
+//!   identity UID:GID, if given, which the clone's guest ignores as it applies the record, since
+//!   each execution names its own identity, the overlay mode MODE and the scratch's journal policy
 //!   POLICY, as a launch takes them, for a GPT disk, the bound BYTES of its first partition, 64
 //!   KiB unless given, as a launch's guest takes it by default, the export, by the identity of
 //!   its plan, with the number of its mappings, and for a template with a NIC the clone's network:

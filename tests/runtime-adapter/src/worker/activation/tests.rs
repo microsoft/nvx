@@ -157,12 +157,6 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     let assembly = ApplyError::Assembly(root::assemble(&relative).unwrap_err());
     let root = activating().complete(now(), Err(assembly.into()));
     cases.push((failed(root), status::ACTIVATION_ROOT));
-    let refused = ApplyError::Account {
-        error: entry::Error::Root(io::Error::other("no account")),
-        teardown: None,
-    };
-    let workload = activating().complete(now(), Err(refused.into()));
-    cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
     let generated = ApplyError::MachineId {
         error: io::ErrorKind::AlreadyExists.into(),
         teardown: None,
