@@ -149,6 +149,7 @@ const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
 
 /// Runs `nvx-time` with the process's arguments. It exits with 0 on success, 1 when a command
 /// or a check fails, or 2 for an invalid command line.
+#[doc(hidden)]
 pub fn main() -> ExitCode {
     run_main(|args| run(args, &mut sys::Stdout::new(), &mut io::stderr()))
 }

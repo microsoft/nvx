@@ -205,6 +205,7 @@ struct UdpSocket {
 /// and exits with 1 when it cannot open or bind its socket, or take the one that it inherited, or
 /// with 2 for a usage error. `start` exits with 0 once the announcer runs, or with 1 when it does
 /// not start.
+#[doc(hidden)]
 pub fn main() -> ExitCode {
     run_main(|args| run(args, &mut sys::Stdout::new(), &mut io::stderr()))
 }

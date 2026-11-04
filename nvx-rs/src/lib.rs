@@ -36,8 +36,6 @@
 //!   platform primitives, the supervision of VM instances: starting, reattaching, executing
 //!   workloads, and stopping, the store of a sandbox's runtime records and launch journal, and the
 //!   manifests, compatibility keys, store, and leases of templates.
-//! - `testing` (feature `testing`): a fake OpenVMM that serves the control console without
-//!   running a VM.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
 //!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest
 //!   init or agent opens the terminal on which it serves its session (`guest::terminal`), starts
@@ -119,7 +117,10 @@
 //! - `bundled`: stages the OpenVMM executable, guest kernel, and control initramfs at build time;
 //!   see `Artifacts::bundled`. The build script downloads the release that `artifacts.json` pins,
 //!   or copies the release directory that `NVX_BUNDLE_DIR` names.
-//! - `testing`: the fake OpenVMM of `testing::fake_openvmm` and its `nvx-fake-openvmm` binary.
+//! - `testing`: NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM that serves the control
+//!   console without running a VM. It adds no API.
+//! - `cli`: NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and
+//!   sandboxes. It adds no API, and enables `host`.
 //! - `serde`: the serde form of [`Hypervisor`].
 //! - `guest`: the `guest` module and the guest binaries, which the `guest` profile builds as
 //!   static `x86_64-unknown-linux-musl` executables.
@@ -139,6 +140,7 @@ pub mod guest;
 #[cfg(feature = "host")]
 pub mod host;
 #[cfg(feature = "testing")]
+#[doc(hidden)]
 pub mod testing;
 #[cfg(test)]
 mod tests;
