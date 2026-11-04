@@ -23004,7 +23004,7 @@ class BenchmarkTests(unittest.TestCase):
         )
         self.assertIn("quiet loglevel=0 nokaslr", command)
         self.assertEqual(
-            command[-6:],
+            command[-8:],
             [
                 "--net",
                 "10.0.0.2/24",
@@ -23012,6 +23012,8 @@ class BenchmarkTests(unittest.TestCase):
                 "portable",
                 "--mount",
                 "/mnt/host,C:/work,rw",
+                "--virtio-console",
+                "console",
             ],
         )
 
@@ -23097,12 +23099,31 @@ class BenchmarkTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            command[-2:],
+            command[-4:],
             [
                 "--network-profile",
                 "portable",
+                "--virtio-console",
+                "console",
             ],
         )
+
+    def test_workload_commands_leave_out_the_boot_console_on_request(self):
+        boot = benchmark.workload_boot_command(
+            Path("openvmm"),
+            "kvm",
+            Path("vmlinux"),
+            Path("initrd"),
+            128,
+            "quiet loglevel=0",
+            boot_console=False,
+        )
+        restore = benchmark.snapshot_restore_command(
+            Path("openvmm"), "kvm", Path("snapshot"), boot_console=False
+        )
+
+        self.assertNotIn("--virtio-console", boot)
+        self.assertNotIn("--virtio-console", restore)
 
     def test_snapshot_restore_command_separates_capacity_from_online_target(self):
         command = benchmark.snapshot_restore_command(
@@ -24418,6 +24439,9 @@ class BenchmarkTests(unittest.TestCase):
         ):
             self.assertEqual(benchmark.run_kvm_worker(args), 0)
 
+        self.assertEqual(
+            capture.call_args.args[1][-2:], ["--virtio-console", "console"]
+        )
         retained = capture.call_args.kwargs["retained_snapshot_path"]
         self.assertIsInstance(retained, Path)
         self.assertEqual(restore.call_args.kwargs["snapshot_path"], retained)

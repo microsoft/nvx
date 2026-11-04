@@ -1174,8 +1174,8 @@ be the IOAPIC input of its device's window that
 [Table 2.7](design/2.5-device-topology-transport-and-discovery.md) lists,
 edge-triggered, unshared, and firing, and `/proc/interrupts` must count no APIC
 error, misrouted IOAPIC interrupt, or spurious interrupt. A snapshot of a guest
-with the NIC and the share must then restore with the same interrupts, which
-fire again. The scenarios that
+with the NIC, the share, and the boot console must then restore with the same
+interrupts, which fire again. The scenarios that
 run microVMs or sandboxes as the public commands do, or that compile egress
 policies, run [`nvx-rs`](#nvx-rs). The
 command requires `build/vmlinux` (with `--debug-kernel`, `build/vmlinux-debug`

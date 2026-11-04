@@ -235,7 +235,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "guest/common/init",
         ),
         validation=(
-            "every microVM scenario's console markers",
+            "the console-exit scenario's payload on hvc0",
             "the lifecycle scenario's early console and quiet console checks",
         ),
         settings=(
@@ -253,8 +253,15 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "managed lifecycle's control session runs on hvc2 "
             "(doc/design/3.3-consoles.md)."
         ),
-        consumers=("nvx-managed-agent", "nvx-init-agent", "nvx-rs sandbox"),
+        consumers=(
+            "nvx-managed-agent",
+            "nvx-init-agent",
+            "nvx-rs run",
+            "nvx-rs sandbox",
+            "the test-microvm and benchmark harnesses",
+        ),
         validation=(
+            "every microVM scenario's console markers",
             "the lifecycle scenario's early console check",
             "the managed and sandbox scenarios",
         ),
