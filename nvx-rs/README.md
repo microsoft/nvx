@@ -1700,6 +1700,14 @@ mount whose attachment fails and which cannot be detached keeps its mount
 descriptor, so rollback and teardown can retry cleanup without trusting its
 original path.
 
+`Root::switch`: the switch into the root, which an init makes once for its VM:
+it moves the root's mount onto `/`, then makes the root the caller's root
+directory with `chroot`, and its working directory with `chdir`. Once the mount
+is on `/`, the root has switched for good: a second switch and the teardown are
+refused, and dropping the root unmounts nothing, while descriptors opened before
+the switch, such as a `TargetRoot` and a `SourceRoot`, still map. A move that
+fails leaves the root where it was.
+
 `Root::teardown`: the shares and mappings in reverse order, a runtime mount whose
 attachment failed and which could not be detached, then the mounts of an
 aggregate, of the export, and of the runtime, the later first, the overlay,
@@ -1709,9 +1717,10 @@ ext4 scratch's file system is synced before its unmount, since a mount namespace
 that copied the root's mounts keeps them, unsynced, after this one unmounts
 them, and a scratch whose sync fails stays mounted.
 
-Each failure is a typed `Error`. The operations collect no child's status,
-change neither the caller's root nor its credentials, start no async runtime,
-and never power the VM off.
+Each failure is a typed `Error`, or a `SwitchError` for the switch. The
+operations collect no child's status, change the caller's root only by the
+switch and never its credentials, start no async runtime, and never power the VM
+off.
 
 ### `nvx::guest::gpt`
 
@@ -2987,11 +2996,13 @@ NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
   --ignored --exact guest::root::tests::a_thread_with_private_tables_finds_its_mount_points_and_options
 ```
 
-Ignored tests of `Root::mount_runtime` mount the runtime's file systems on a
-temporary tmpfs root, in a thread's private mount namespace, and check their
-options, device nodes, and time status, a call's undo, the teardown, and the
-order of the runtime and the mappings beneath `/run`. They need root and Linux
-6.8 or later; run them as root with:
+Ignored tests of `Root::mount_runtime` and `Root::switch` mount the runtime's
+file systems on a temporary tmpfs root, in a thread's private mount namespace,
+and check their options, device nodes, and time status, a call's undo, the
+teardown, and the order of the runtime and the mappings beneath `/run`. They
+also switch into the root from a thread with root and working directories of
+its own, and check the mounts that stay and a mapping through descriptors opened
+before the switch. They need root and Linux 6.8 or later; run them as root with:
 
 ```bash
 NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \

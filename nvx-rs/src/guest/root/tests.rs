@@ -19,6 +19,7 @@ use crate::guest::sys::MountAttributes;
 
 mod privileged;
 mod runtime;
+mod switch;
 
 /// The base address of the distro device's MMIO window.
 const DISTRO: u64 = 0xd000_0000;
