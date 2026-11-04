@@ -4,7 +4,10 @@
 # earlier PLL phase offset and waits out its cached tick length, then after its samples. A changed accepted-sample
 # count, disruption counter, held correction, or clock-step state makes the
 # script retry, as does a sample that fails to pair or whose uncertainty
-# exceeds the discipline's @SAMPLE_BOUND_NS@ ns bound. Linux's frequency limit needs only one sample. The first sample after
+# exceeds the discipline's @SAMPLE_BOUND_NS@ ns bound, or an update of host UTC
+# by the host's time service between the samples, which may begin a slew that
+# neither sample shows: the host's checker uses such a window only if host UTC
+# ran at its published correction. Linux's frequency limit needs only one sample. The first sample after
 # a restore can read the guest's clock late in its bracket while the restored
 # memory that it touches faults in, so the report discards one sample first.
 state=/run/nvx/time/state
@@ -22,6 +25,34 @@ within_bound() {
         '' | *[!0-9]*) return 1 ;;
     esac
     [ "$epsilon" -le @SAMPLE_BOUND_NS@ ]
+}
+# The value of the field $2 of the nvx-time sample report $1.
+sample_field() {
+    printf '%s\n' "$1" | sed -n "s/.*[[:space:]]$2=\([^ ]*\).*/\1/p"
+}
+# Whether the host's time service updated host UTC between the nvx-time sample
+# reports $1 and $2: while it synchronizes host UTC, Linux grows host UTC's
+# maximum error by @MAX_ERROR_GROWTH_US@ us each second, and the service sets
+# it at each update, so the second's grew by less over the whole seconds
+# between them. Windows reports no maximum error.
+updated_between() {
+    for report in "$1" "$2"; do
+        [ "$(sample_field "$report" status)" = synchronized ] || return 1
+        for name in max_error_us utc_ns; do
+            case $(sample_field "$report" "$name") in
+                '' | *[!0-9]*) return 1 ;;
+            esac
+        done
+    done
+    first_error=$(sample_field "$1" max_error_us)
+    second_error=$(sample_field "$2" max_error_us)
+    first_utc=$(sample_field "$1" utc_ns)
+    second_utc=$(sample_field "$2" utc_ns)
+    seconds=$(((second_utc - first_utc) / 1000000000))
+    if [ "$seconds" -lt 0 ]; then
+        seconds=0
+    fi
+    [ "$second_error" -lt $((first_error + @MAX_ERROR_GROWTH_US@ * seconds)) ]
 }
 nvx-time sample >/dev/null 2>&1 || true
 attempt=1
@@ -59,7 +90,7 @@ while [ "$attempt" -le @ATTEMPTS@ ]; do
     initial_signature=$(state_signature "$initial_state")
     before_signature=$(state_signature "$before_state")
     after_signature=$(state_signature "$after_state")
-    if [ -n "$first_disruption" ] && [ "$first_disruption" = "$second_disruption" ] && [ "$initial_signature" = "$before_signature" ] && [ "$before_signature" = "$after_signature" ] && within_bound "$first" && within_bound "$second"; then
+    if [ -n "$first_disruption" ] && [ "$first_disruption" = "$second_disruption" ] && [ "$initial_signature" = "$before_signature" ] && [ "$before_signature" = "$after_signature" ] && within_bound "$first" && within_bound "$second" && ! updated_between "$first" "$second"; then
         break
     fi
     attempt=$((attempt + 1))
