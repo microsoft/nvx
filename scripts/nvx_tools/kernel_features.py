@@ -254,7 +254,10 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "(doc/design/3.3-consoles.md)."
         ),
         consumers=("nvx-managed-agent", "nvx-init-agent", "nvx-rs sandbox"),
-        validation=("the managed and sandbox scenarios",),
+        validation=(
+            "the lifecycle scenario's early console check",
+            "the managed and sandbox scenarios",
+        ),
         settings=("CONFIG_VIRTIO_CONSOLE=y",),
         expects=(
             "CONFIG_HVC_DRIVER=y",

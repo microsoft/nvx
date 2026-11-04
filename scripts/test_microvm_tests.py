@@ -7580,6 +7580,10 @@ class MicrovmTests(unittest.TestCase):
             128,
             "quiet loglevel=0",
         )
+        self.assertEqual(
+            run_guest_script.call_args.args[0],
+            ["openvmm", "boot", "--virtio-console", "console"],
+        )
         script = run_guest_script.call_args.args[1]
         self.assertIn("NVX-LIFECYCLE-OK", script)
         self.assertIn("/^LOC:/", script)
