@@ -150,7 +150,7 @@ impl System for RealSystem {
             }
         };
         sys::write_number(&path, OOM_SCORE_ADJUSTMENT)?;
-        kernel::set_nice(process, NICE)
+        kernel::set_nice(Some(process.unwrap_or_else(sys::current_process)), NICE)
     }
 
     fn adopt(&mut self, process: ProcessId) -> Result<Option<ChildStatus>, Errno> {

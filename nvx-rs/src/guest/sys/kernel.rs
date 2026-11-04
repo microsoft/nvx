@@ -92,14 +92,15 @@ pub(crate) fn has_vdso() -> bool {
     unsafe { nix::libc::getauxval(nix::libc::AT_SYSINFO_EHDR) != 0 }
 }
 
-/// Sets the nice value of `process`, or of the calling thread for `None`, to `nice`.
+/// Sets the nice value of `process` to `nice`, or fails with `EINVAL` for `None` without a system
+/// call: `setpriority` would read the process ID 0 as the calling thread.
 ///
 /// Linux applies `setpriority`'s `PRIO_PROCESS` to the one thread whose ID it names: for a
 /// process ID, the process's first thread, whose later threads and children start with its nice
 /// value. Lowering a nice value needs `CAP_SYS_NICE`.
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn set_nice(process: Option<super::ProcessId>, nice: c_int) -> Result<(), Errno> {
-    let process = process.map_or(0, |process| process.raw().unsigned_abs());
+    let process = process.ok_or(Errno::EINVAL)?.raw().unsigned_abs();
     // SAFETY: `setpriority` reads only its integer arguments.
     Errno::result(unsafe { nix::libc::setpriority(nix::libc::PRIO_PROCESS, process, nice) })
         .map(drop)

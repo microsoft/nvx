@@ -46,6 +46,23 @@ fn a_nice_value_is_set_for_the_named_process() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
+fn a_nice_value_needs_a_named_process() {
+    // A `set_nice` that read `None` as the calling thread would change the test thread's nice
+    // value, so the test runs in a process of its own.
+    if crate::guest::managed_agent::tests::isolate_process_test(
+        "NVX_SET_NICE_TEST_CHILD",
+        "guest::sys::kernel::tests::a_nice_value_needs_a_named_process",
+    ) {
+        return;
+    }
+    let thread = crate::guest::sys::current_thread();
+    let nice = nice_of(thread);
+    assert_eq!(set_nice(None, 19), Err(Errno::EINVAL));
+    assert_eq!(nice_of(thread), nice);
+}
+
+#[test]
 fn the_kernel_log_reads_into_any_buffer() {
     // Containers and unprivileged users may not read the log.
     if let Ok(size) = kernel_log_size() {
