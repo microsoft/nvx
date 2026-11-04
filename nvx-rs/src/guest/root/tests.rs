@@ -224,6 +224,11 @@ fn upper_point(kind: UpperKind) -> &'static str {
     }
 }
 
+/// The tmpfs upper without a cap, at the kernel's default size.
+const TMPFS: Upper = Upper::Tmpfs {
+    max_memory_percent: None,
+};
+
 /// Returns the upper on the guest's scratch device, with `journal`.
 fn scratch_upper(journal: Journal) -> Upper {
     Upper::Scratch {
@@ -945,7 +950,7 @@ fn new_upper_and_work_directories_have_mode_0755_whatever_the_umask() {
     // So are a tmpfs upper's, which are always new.
     let guest = Guest::new();
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     guest.assemble(&assembly).unwrap().teardown().unwrap();
@@ -958,7 +963,7 @@ fn a_fresh_upper_s_directories_must_be_missing_or_empty() {
     let mode = |path: &Path| fs::metadata(path).unwrap().mode() & 0o7777;
     // A scratch or a tmpfs without the directories gets them, as any root's upper does, with no
     // other call than a cold root's.
-    for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+    for upper in [scratch_upper(Journal::Allowed), TMPFS] {
         let guest = Guest::new();
         let assembly = Assembly {
             upper,
@@ -1271,8 +1276,8 @@ fn a_runtime_directory_where_a_file_system_is_mounted_is_refused() {
 
     // So does an upper that a failed unmount left, whichever upper the next root mounts.
     for (first, second) in [
-        (scratch_upper(Journal::Allowed), Upper::Tmpfs),
-        (Upper::Tmpfs, scratch_upper(Journal::Allowed)),
+        (scratch_upper(Journal::Allowed), TMPFS),
+        (TMPFS, scratch_upper(Journal::Allowed)),
     ] {
         let guest = Guest::new();
         let left = guest.path(&format!("run/nvx/{}", upper_point(first.kind())));
@@ -1585,8 +1590,25 @@ fn a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first() {
 #[test]
 fn both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets() {
     let modes = [OverlayMode::TrustedLowers, OverlayMode::UntrustedLowers];
+    // Each upper with the options of its tmpfs, if it is one: a tmpfs with a cap takes its size.
+    let uppers = [
+        (scratch_upper(Journal::Allowed), None),
+        (TMPFS, Some("mode=0755")),
+        (
+            Upper::Tmpfs {
+                max_memory_percent: Some(1),
+            },
+            Some("mode=0755,size=1%"),
+        ),
+        (
+            Upper::Tmpfs {
+                max_memory_percent: Some(90),
+            },
+            Some("mode=0755,size=90%"),
+        ),
+    ];
     for gpt in [false, true] {
-        for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+        for (upper, tmpfs_options) in uppers {
             for mode in modes {
                 let case = format!("GPT {gpt}, {upper:?}, {mode:?}");
                 let guest = Guest::new();
@@ -1626,7 +1648,7 @@ fn both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets() {
                             &format!("{runtime}/tmpfs"),
                             Some("tmpfs"),
                             flags,
-                            Some("mode=0755"),
+                            tmpfs_options,
                         ),
                     ),
                 };
@@ -1676,13 +1698,24 @@ fn a_tmpfs_upper_needs_no_scratch_device() {
     let guest = Guest::bare();
     attach(&guest.base, 0, "vda", 4096);
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: Upper::Tmpfs {
+            max_memory_percent: Some(50),
+        },
         ..guest.assembly()
     };
     let root = guest.assemble(&assembly).unwrap();
     // The assembly waited for no other device, and made no mount point for a scratch.
     assert_eq!(guest.kernel.sleeps(), 0);
     assert!(!guest.path("run/nvx/scratch").exists());
+    // It mounted the tmpfs with its cap.
+    let tmpfs = mount_call(
+        Some("tmpfs"),
+        &guest.text("run/nvx/tmpfs"),
+        Some("tmpfs"),
+        MountFlags::MS_NOSUID | MountFlags::MS_NODEV,
+        Some("mode=0755,size=50%"),
+    );
+    assert!(guest.kernel.calls().contains(&tmpfs));
     root.teardown().unwrap();
     assert_eq!(
         guest.kernel.unmounts(),
@@ -1694,9 +1727,36 @@ fn a_tmpfs_upper_needs_no_scratch_device() {
 }
 
 #[test]
+fn a_tmpfs_upper_refuses_a_cap_that_is_not_1_to_90_percent() {
+    // The kernel reads a cap of 0 as none, and the boot tokens carry caps from 1 to 90 percent.
+    let guest = Guest::new();
+    for percent in [0, 91, u8::MAX] {
+        let assembly = Assembly {
+            upper: Upper::Tmpfs {
+                max_memory_percent: Some(percent),
+            },
+            ..guest.assembly()
+        };
+        let error = guest.assemble(&assembly).unwrap_err();
+        assert!(
+            matches!(error.error(), Error::TmpfsCap { percent: cap } if *cap == percent),
+            "{percent}: {error:?}"
+        );
+        assert!(error.cleanup().is_none());
+        assert_eq!(
+            error.to_string(),
+            format!("the tmpfs upper's cap of {percent}% of the guest's memory is not 1 to 90%")
+        );
+    }
+    // It refused them before it changed anything.
+    assert!(guest.kernel.calls().is_empty());
+    assert!(!guest.path("run/nvx/layers").exists());
+}
+
+#[test]
 fn a_refused_option_set_fails_without_a_fallback() {
     for mode in [OverlayMode::TrustedLowers, OverlayMode::UntrustedLowers] {
-        for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+        for upper in [scratch_upper(Journal::Allowed), TMPFS] {
             let guest = Guest::new();
             guest.kernel.fail(
                 Operation::Mount,
@@ -1752,7 +1812,7 @@ fn an_overlay_that_the_kernel_mounts_without_its_mode_in_effect_is_refused_and_u
     // Without failing the mount, the kernel drops `metacopy=on` for an upper that can't hold the
     // overlay's extended attributes. Its mount table then shows no `metacopy`, which is off by
     // default.
-    for upper in [scratch_upper(Journal::Allowed), Upper::Tmpfs] {
+    for upper in [scratch_upper(Journal::Allowed), TMPFS] {
         let guest = Guest::new();
         guest.show_overlay("rw", upper.kind(), "xino=on");
         let assembly = Assembly {
@@ -1809,7 +1869,7 @@ fn options_that_the_kernel_does_not_show_have_their_defaults() {
     // The kernel's mount table shows no option at its default, as for each option of the
     // untrusted lowers under the guest's kernel, whose defaults are off.
     let untrusted = |guest: &Guest| Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         overlay: OverlayMode::UntrustedLowers,
         ..guest.assembly()
     };
@@ -1904,7 +1964,7 @@ fn effective_options_that_cannot_be_read_fail_the_assembly() {
         }
         guest.show_overlay("rw", UpperKind::Tmpfs, "");
         let assembly = Assembly {
-            upper: Upper::Tmpfs,
+            upper: TMPFS,
             overlay: OverlayMode::UntrustedLowers,
             ..guest.assembly()
         };
@@ -1952,7 +2012,7 @@ fn overlay_options_that_a_mount_cannot_pass_are_refused_before_any_mount() {
     let runtime = guest.path(&format!("run/{}/nvx", [component.as_str(); 6].join("/")));
     let assembly = Assembly {
         runtime: runtime.clone(),
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     let error = guest.assemble(&assembly).unwrap_err();
@@ -2005,7 +2065,7 @@ fn up_to_195_layers_fit_in_the_overlay_s_options_below_run_nvx() {
     guest.insert(&GptDisk::new(b"configuration", 254));
     let mode = OverlayMode::UntrustedLowers;
     let error = guest
-        .assemble(&guest.gpt_assembly(Upper::Tmpfs, mode))
+        .assemble(&guest.gpt_assembly(TMPFS, mode))
         .unwrap_err();
     let layers: Vec<String> = (2..=255)
         .rev()
@@ -2164,7 +2224,7 @@ fn a_device_whose_access_mode_is_not_its_role_s_is_refused_before_it_is_flushed(
 fn a_tmpfs_upper_is_unmounted_last_and_every_failure_reported() {
     let guest = Guest::new();
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         overlay: OverlayMode::UntrustedLowers,
         ..guest.assembly()
     };
@@ -2225,7 +2285,7 @@ fn a_scratch_s_file_system_is_synced_right_before_its_unmount() {
     // A tmpfs upper has no device to sync to.
     let guest = Guest::new();
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     let root = guest.assemble(&assembly).unwrap();
@@ -2284,7 +2344,7 @@ fn a_gpt_disk_that_differs_from_the_expected_identities_is_refused_before_any_mo
     // The disk meets every expectation that the caller may set.
     let guest = Guest::new();
     guest.insert(&disk);
-    let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+    let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
     assembly.image = Image::Gpt {
         expected: Expected::new()
             .disk_guid(DISK_GUID)
@@ -2337,7 +2397,7 @@ fn a_gpt_disk_that_differs_from_the_expected_identities_is_refused_before_any_mo
     for (expected, failure) in cases {
         let guest = Guest::new();
         guest.insert(&disk);
-        let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+        let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
         assembly.image = Image::Gpt {
             expected,
             first_partition_bound: FIRST_PARTITION_BOUND,
@@ -2364,7 +2424,7 @@ fn a_gpt_disk_that_differs_from_the_expected_identities_is_refused_before_any_mo
 fn a_gpt_disk_without_a_layer_is_refused_before_any_mount() {
     let guest = Guest::new();
     guest.insert(&GptDisk::new(b"configuration", 0));
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(
@@ -2395,7 +2455,7 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     disk.layer_mut(2)[1024 + 0x5C] |= 0x04;
     let guest = Guest::new();
     guest.insert(&disk);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     guest.assemble(&assembly).unwrap().teardown().unwrap();
 
     // But not one that needs recovery, despite our `noload` or the superblock's own defaults.
@@ -2404,7 +2464,7 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     layer[1024 + 0x200..][..10].copy_from_slice(b"norecovery");
     let guest = Guest::new();
     guest.insert(&disk);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(error.error(), Error::Recovery { number: 3, device }
@@ -2426,7 +2486,7 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     disk.layer_mut(2)[1024 + 0x38] ^= 1;
     let guest = Guest::new();
     guest.insert(&disk);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(error.error(), Error::NotExt4Layer { number: 2, device }
@@ -2447,7 +2507,7 @@ fn a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_
     let guest = Guest::new();
     fs::write(guest.path("dev/vda"), disk.image()).unwrap();
     fs::create_dir(guest.path("dev/vda2")).unwrap();
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(
@@ -2473,7 +2533,7 @@ fn a_missing_partition_fails_at_once_before_any_mount() {
     let guest = Guest::new();
     fs::write(guest.path("dev/vda"), disk.image()).unwrap();
     write(&guest.path("dev/vda2"), disk.layer(2));
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(error.error(), Error::Partition { number: 3, node }
@@ -2747,7 +2807,7 @@ fn the_first_partition_is_returned_as_opaque_bytes_within_its_bound() {
         let guest = Guest::new();
         let disk = GptDisk::new(bytes, 1);
         guest.insert(&disk);
-        let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+        let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
         // The first partition may be as large as the bound.
         assembly.image = Image::Gpt {
             expected: Expected::new(),
@@ -2765,7 +2825,7 @@ fn the_first_partition_is_returned_as_opaque_bytes_within_its_bound() {
     // A first partition larger than the bound is refused before any mount.
     let guest = Guest::new();
     guest.insert(&GptDisk::new(&sector, 1));
-    let mut assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let mut assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     assembly.image = Image::Gpt {
         expected: Expected::new(),
         first_partition_bound: BLOCK - 1,
@@ -2799,7 +2859,7 @@ fn the_first_partition_is_returned_as_opaque_bytes_within_its_bound() {
 fn a_teardown_unmounts_the_layers_top_first_and_reports_every_failure() {
     let guest = Guest::new();
     guest.insert(&GptDisk::new(b"configuration", 3));
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
     let root = guest.assemble(&assembly).unwrap();
     for name in ["run/nvx/layers/p3", "run/nvx/tmpfs"] {
         guest
@@ -2845,7 +2905,7 @@ fn a_teardown_unmounts_the_layers_top_first_and_reports_every_failure() {
         guest.path("run/nvx/layers/p3"),
         Errno::EINVAL,
     );
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::UntrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::UntrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(
@@ -2871,12 +2931,12 @@ fn a_layer_that_a_failed_unmount_left_keeps_the_runtime_directory_occupied() {
     guest
         .kernel
         .fail(Operation::Unmount, top.clone(), Errno::EBUSY);
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     guest.assemble(&assembly).unwrap().teardown().unwrap_err();
     guest.insert(&GptDisk::new(b"configuration", 1));
     let (mounts, calls) = (guest.kernel.mounts().len(), guest.kernel.calls());
     let erofs = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     for assembly in [erofs, assembly] {
@@ -2896,13 +2956,13 @@ fn a_layer_that_a_failed_unmount_left_keeps_the_runtime_directory_occupied() {
         .kernel
         .fail(Operation::Unmount, distro.clone(), Errno::EBUSY);
     let assembly = Assembly {
-        upper: Upper::Tmpfs,
+        upper: TMPFS,
         ..guest.assembly()
     };
     guest.assemble(&assembly).unwrap().teardown().unwrap_err();
     guest.insert(&GptDisk::new(b"configuration", 1));
     let (mounts, calls) = (guest.kernel.mounts().len(), guest.kernel.calls());
-    let assembly = guest.gpt_assembly(Upper::Tmpfs, OverlayMode::TrustedLowers);
+    let assembly = guest.gpt_assembly(TMPFS, OverlayMode::TrustedLowers);
     let error = guest.assemble(&assembly).unwrap_err();
     assert!(
         matches!(error.error(), Error::Occupied { path } if *path == distro),
