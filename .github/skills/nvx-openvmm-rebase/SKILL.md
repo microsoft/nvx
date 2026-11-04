@@ -168,7 +168,10 @@ skill describes. Report each platform that you could not use as left to OpenVMM 
 
 When the user asks, push the head as the release branch, without force. Its push runs the OpenVMM
 CI workflow, whose push trigger covers `feature/microvm/**`, so the release needs no OpenVMM pull
-request, as none of v2.2-v4.0 had. Then wait for that run with the platform launcher:
+request, as none of v2.2-v4.0 had. After the push below, wait until
+`gh run list --repo microsoft/openvmm --commit <new-head>` lists the push's OpenVMM CI run before
+running the check with the full SHA of `<new-head>`. The check returns `missing` immediately
+while no run exists, even with `--wait-minutes`:
 
 ```console
 git -C <directory> push <remote> HEAD:refs/heads/feature/microvm/release/<version>
