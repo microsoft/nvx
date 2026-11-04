@@ -1,7 +1,7 @@
 //! Tests of the mapper with the kernel itself, which need the privilege to mount and Linux 6.8 or
 //! later, for the unique mount IDs. Each runs in a private mount namespace of its own thread, on
 //! tmpfs roots below a temporary directory, and they are ignored unless asked for:
-//! `cargo test --all-features -- --ignored guest::mappings::tests::privileged`, as root.
+//! `cargo test --all-features -- --ignored guest::mappings::mapper::tests::privileged`, as root.
 //!
 //! They cover what the fake kernel cannot: symbolic links and magic links at every component, a
 //! rename race during the walk, kinds, a target inside another mapping, reserved targets, the
@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use nix::sys::statvfs::{FsFlags, statvfs};
 
 use super::*;
+use crate::guest::sys::MountFlags;
 
 /// A target root, a source root, and a directory outside both, each a tmpfs below a temporary
 /// directory, in a private mount namespace of the calling thread.

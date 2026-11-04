@@ -1,5 +1,9 @@
 //! GPT disks that the guest's kernel attached as block devices.
 //!
+//! This module is NVX's internal reference code of the guest's space, hidden from the
+//! documentation and unstable: it becomes crate-private once nothing outside NVX uses it.
+//! [`crate::gpt`], which reads and checks the table, stays public.
+//!
 //! [`read_disk`] reads the partition table of a disk through the disk's block device, such as
 //! `/dev/vda`, that the caller opened. It asks the device for its logical block size and its
 //! size, as `blockdev --getss` and `blockdev --getsize64` do, and reads and checks the table at

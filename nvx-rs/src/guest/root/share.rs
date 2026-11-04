@@ -142,7 +142,7 @@ impl fmt::Display for ShareRefusal {
 
 impl From<ExportMode> for Access {
     /// Returns the access of the guest's mount of a host export of `mode`, which
-    /// [`Root::mount_export`] takes: read-only for `ro`, and read-write for `rw`.
+    /// `Root::mount_export` takes: read-only for `ro`, and read-write for `rw`.
     fn from(mode: ExportMode) -> Self {
         match mode {
             ExportMode::ReadOnly => Self::ReadOnly,

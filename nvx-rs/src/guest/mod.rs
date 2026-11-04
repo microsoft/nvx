@@ -4,22 +4,29 @@
 //! a program; [`entry`], through which a program that it starts enters an execution's
 //! namespaces, view, root, and identity; [`process`], through which it collects the status of
 //! each child that it names, and of no other; [`cgroup`], through which it places, accounts,
-//! kills, and settles the processes of its executions; [`mappings`], through which it mounts host
-//! mappings beneath the descriptors of the roots that it names, and keeps the account of a host's
-//! mapping table; [`exec`], which drives each program as one execution, with its launch, its
-//! bounded output and input, its ending, and its outcome, alone or, through its
-//! [`binding`](exec::binding), under the [execution engine](crate::exec); [`root`], through which
-//! it bootstraps the guest for a layered root, assembles the root, mounts live shares and mappings
-//! in it, and tears it down;
-//! [`gpt`], through which it reads the partition table of a GPT disk that the kernel attached as
-//! a block device; and, on x86-64, `clone`, through which a template's guest prepares for and
-//! requests a snapshot's capture before its root's assembly, behind the caller's fence of
-//! workload admission, with nothing mounted from the devices that its clones replace, and
-//! through which each clone that a restore of the snapshot starts repairs its restore: it
-//! activates the restore's memory target, reseeds the kernel's random number generator, and
-//! finishes the restore, with its acknowledgement, and then takes its own configuration from the
-//! host, in one Activate on a restricted control session, with which it assembles its root and
-//! checks its workload identity before it admits any execution.
+//! kills, and settles the processes of its executions; [`mappings`], the host mappings that it
+//! mounts, and its account of a host's mapping table; [`exec`], which drives each program as one
+//! execution, with its launch, its bounded output and input, its ending, and its outcome, alone
+//! or, through its [`binding`](exec::binding), under the [execution engine](crate::exec); and,
+//! on x86-64, `clone`, through which a template's guest prepares for and requests a snapshot's
+//! capture before its root's assembly, behind the caller's fence of workload admission, with
+//! nothing mounted from the devices that its clones replace, and through which each clone that a
+//! restore of the snapshot starts repairs its restore: it activates the restore's memory target,
+//! reseeds the kernel's random number generator, and finishes the restore, with its
+//! acknowledgement, and then takes its own configuration from the host, in one Activate on a
+//! restricted control session.
+//!
+//! The guest's space, the root that an init assembles and what it mounts in it, is each init's
+//! own. NVX's own space is internal reference code, which NVX's guest programs use: it is hidden
+//! from this documentation and unstable, and it becomes crate-private once nothing outside NVX
+//! uses it. It is `root`, which bootstraps the guest for a layered root, assembles the root,
+//! mounts live shares and mappings in it, and tears it down; `gpt`, which reads the partition
+//! table of a GPT disk that the kernel attached as a block device; the mapper of `mappings`, which
+//! mounts host mappings beneath the descriptors of the roots that it names; and the activation's
+//! application, `clone::apply` and its types, with which a clone assembles its root and checks
+//! its workload identity before it admits any execution. The contracts that every space reads
+//! stay public: the mapping values and [`MappingTable`](mappings::MappingTable), and the tokens
+//! and records of [`protocol`](crate::protocol) and [`activation`](crate::activation).
 //!
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
@@ -104,6 +111,7 @@ pub mod exec;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod exit;
+#[doc(hidden)]
 pub mod gpt;
 pub mod ingress;
 #[doc(hidden)]
@@ -115,6 +123,7 @@ pub mod mmio_write;
 pub mod nvxs;
 pub mod process;
 pub mod reseed;
+#[doc(hidden)]
 pub mod root;
 pub mod spawn;
 pub mod terminal;

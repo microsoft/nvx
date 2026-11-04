@@ -671,42 +671,42 @@ variant nvx::guest::clone::ActivationState::Started
 trait nvx::guest::clone::AdmissionFence
 method nvx::guest::clone::AdmissionFence::close
 method nvx::guest::clone::AdmissionFence::open
-struct nvx::guest::clone::Applied
-method nvx::guest::clone::Applied::announcer
-method nvx::guest::clone::Applied::announcer_mut
-method nvx::guest::clone::Applied::hostname
-method nvx::guest::clone::Applied::identity
-method nvx::guest::clone::Applied::into_parts
-method nvx::guest::clone::Applied::machine_id
-method nvx::guest::clone::Applied::proxy
-method nvx::guest::clone::Applied::resolver
-method nvx::guest::clone::Applied::root
-method nvx::guest::clone::Applied::root_mut
-method nvx::guest::clone::Applied::take_export
-method nvx::guest::clone::Applied::teardown
-struct nvx::guest::clone::AppliedTeardownError
-method nvx::guest::clone::AppliedTeardownError::binds
-method nvx::guest::clone::AppliedTeardownError::root
-enum nvx::guest::clone::ApplyError
-variant nvx::guest::clone::ApplyError::Account
-field nvx::guest::clone::ApplyError::Account::error
-field nvx::guest::clone::ApplyError::Account::teardown
-variant nvx::guest::clone::ApplyError::Assembly
-field nvx::guest::clone::ApplyError::Assembly::0
-variant nvx::guest::clone::ApplyError::Export
-field nvx::guest::clone::ApplyError::Export::error
-field nvx::guest::clone::ApplyError::Export::teardown
-variant nvx::guest::clone::ApplyError::Gpt
-field nvx::guest::clone::ApplyError::Gpt::0
-variant nvx::guest::clone::ApplyError::MachineId
-field nvx::guest::clone::ApplyError::MachineId::error
-field nvx::guest::clone::ApplyError::MachineId::teardown
-variant nvx::guest::clone::ApplyError::Network
-field nvx::guest::clone::ApplyError::Network::error
-field nvx::guest::clone::ApplyError::Network::teardown
-variant nvx::guest::clone::ApplyError::View
-field nvx::guest::clone::ApplyError::View::error
-field nvx::guest::clone::ApplyError::View::teardown
+struct nvx::guest::clone::Applied (hidden)
+method nvx::guest::clone::Applied::announcer (hidden)
+method nvx::guest::clone::Applied::announcer_mut (hidden)
+method nvx::guest::clone::Applied::hostname (hidden)
+method nvx::guest::clone::Applied::identity (hidden)
+method nvx::guest::clone::Applied::into_parts (hidden)
+method nvx::guest::clone::Applied::machine_id (hidden)
+method nvx::guest::clone::Applied::proxy (hidden)
+method nvx::guest::clone::Applied::resolver (hidden)
+method nvx::guest::clone::Applied::root (hidden)
+method nvx::guest::clone::Applied::root_mut (hidden)
+method nvx::guest::clone::Applied::take_export (hidden)
+method nvx::guest::clone::Applied::teardown (hidden)
+struct nvx::guest::clone::AppliedTeardownError (hidden)
+method nvx::guest::clone::AppliedTeardownError::binds (hidden)
+method nvx::guest::clone::AppliedTeardownError::root (hidden)
+enum nvx::guest::clone::ApplyError (hidden)
+variant nvx::guest::clone::ApplyError::Account (hidden)
+field nvx::guest::clone::ApplyError::Account::error (hidden)
+field nvx::guest::clone::ApplyError::Account::teardown (hidden)
+variant nvx::guest::clone::ApplyError::Assembly (hidden)
+field nvx::guest::clone::ApplyError::Assembly::0 (hidden)
+variant nvx::guest::clone::ApplyError::Export (hidden)
+field nvx::guest::clone::ApplyError::Export::error (hidden)
+field nvx::guest::clone::ApplyError::Export::teardown (hidden)
+variant nvx::guest::clone::ApplyError::Gpt (hidden)
+field nvx::guest::clone::ApplyError::Gpt::0 (hidden)
+variant nvx::guest::clone::ApplyError::MachineId (hidden)
+field nvx::guest::clone::ApplyError::MachineId::error (hidden)
+field nvx::guest::clone::ApplyError::MachineId::teardown (hidden)
+variant nvx::guest::clone::ApplyError::Network (hidden)
+field nvx::guest::clone::ApplyError::Network::error (hidden)
+field nvx::guest::clone::ApplyError::Network::teardown (hidden)
+variant nvx::guest::clone::ApplyError::View (hidden)
+field nvx::guest::clone::ApplyError::View::error (hidden)
+field nvx::guest::clone::ApplyError::View::teardown (hidden)
 struct nvx::guest::clone::CaptureBarrier
 method nvx::guest::clone::CaptureBarrier::cancel
 method nvx::guest::clone::CaptureBarrier::capture
@@ -747,14 +747,14 @@ const nvx::guest::clone::MOUNT_TABLE_LIMIT
 struct nvx::guest::clone::Mounted
 method nvx::guest::clone::Mounted::mount_point
 method nvx::guest::clone::Mounted::origin
-enum nvx::guest::clone::NetworkError
-variant nvx::guest::clone::NetworkError::Announcer
-field nvx::guest::clone::NetworkError::Announcer::0
-variant nvx::guest::clone::NetworkError::Bind
-field nvx::guest::clone::NetworkError::Bind::0
-variant nvx::guest::clone::NetworkError::Gateway
-variant nvx::guest::clone::NetworkError::Write
-field nvx::guest::clone::NetworkError::Write::0
+enum nvx::guest::clone::NetworkError (hidden)
+variant nvx::guest::clone::NetworkError::Announcer (hidden)
+field nvx::guest::clone::NetworkError::Announcer::0 (hidden)
+variant nvx::guest::clone::NetworkError::Bind (hidden)
+field nvx::guest::clone::NetworkError::Bind::0 (hidden)
+variant nvx::guest::clone::NetworkError::Gateway (hidden)
+variant nvx::guest::clone::NetworkError::Write (hidden)
+field nvx::guest::clone::NetworkError::Write::0 (hidden)
 enum nvx::guest::clone::Origin
 variant nvx::guest::clone::Origin::Distro
 variant nvx::guest::clone::Origin::Filesystem
@@ -824,14 +824,14 @@ method nvx::guest::clone::Repaired::memory
 struct nvx::guest::clone::Restored
 method nvx::guest::clone::Restored::into_parts
 method nvx::guest::clone::Restored::restore
-struct nvx::guest::clone::RootTemplate
-field nvx::guest::clone::RootTemplate::distro
-field nvx::guest::clone::RootTemplate::filesystem_tag
-field nvx::guest::clone::RootTemplate::gateway
-field nvx::guest::clone::RootTemplate::runtime
-field nvx::guest::clone::RootTemplate::scratch
-field nvx::guest::clone::RootTemplate::timeout
-fn nvx::guest::clone::apply
+struct nvx::guest::clone::RootTemplate (hidden)
+field nvx::guest::clone::RootTemplate::distro (hidden)
+field nvx::guest::clone::RootTemplate::filesystem_tag (hidden)
+field nvx::guest::clone::RootTemplate::gateway (hidden)
+field nvx::guest::clone::RootTemplate::runtime (hidden)
+field nvx::guest::clone::RootTemplate::scratch (hidden)
+field nvx::guest::clone::RootTemplate::timeout (hidden)
+fn nvx::guest::clone::apply (hidden)
 fn nvx::guest::clone::repair
 mod nvx::guest::console_pending (hidden)
 fn nvx::guest::console_pending::main (hidden)
@@ -1062,15 +1062,15 @@ variant nvx::guest::exec::binding::Event::SettlementFailed
 field nvx::guest::exec::binding::Event::SettlementFailed::0
 mod nvx::guest::exit (hidden)
 fn nvx::guest::exit::main (hidden)
-mod nvx::guest::gpt
-enum nvx::guest::gpt::DeviceError
-variant nvx::guest::gpt::DeviceError::LogicalBlockSize
-field nvx::guest::gpt::DeviceError::LogicalBlockSize::0
-variant nvx::guest::gpt::DeviceError::Size
-field nvx::guest::gpt::DeviceError::Size::0
-variant nvx::guest::gpt::DeviceError::Table
-field nvx::guest::gpt::DeviceError::Table::0
-fn nvx::guest::gpt::read_disk
+mod nvx::guest::gpt (hidden)
+enum nvx::guest::gpt::DeviceError (hidden)
+variant nvx::guest::gpt::DeviceError::LogicalBlockSize (hidden)
+field nvx::guest::gpt::DeviceError::LogicalBlockSize::0 (hidden)
+variant nvx::guest::gpt::DeviceError::Size (hidden)
+field nvx::guest::gpt::DeviceError::Size::0 (hidden)
+variant nvx::guest::gpt::DeviceError::Table (hidden)
+field nvx::guest::gpt::DeviceError::Table::0 (hidden)
+fn nvx::guest::gpt::read_disk (hidden)
 mod nvx::guest::ingress
 struct nvx::guest::ingress::Announcer
 method nvx::guest::ingress::Announcer::id
@@ -1096,9 +1096,9 @@ mod nvx::guest::mappings
 enum nvx::guest::mappings::Access
 variant nvx::guest::mappings::Access::ReadOnly
 variant nvx::guest::mappings::Access::ReadWrite
-struct nvx::guest::mappings::ApplyError
-method nvx::guest::mappings::ApplyError::entry
-method nvx::guest::mappings::ApplyError::error
+struct nvx::guest::mappings::ApplyError (hidden)
+method nvx::guest::mappings::ApplyError::entry (hidden)
+method nvx::guest::mappings::ApplyError::error (hidden)
 enum nvx::guest::mappings::InvalidMapping
 variant nvx::guest::mappings::InvalidMapping::Source
 variant nvx::guest::mappings::InvalidMapping::Target
@@ -1106,13 +1106,13 @@ enum nvx::guest::mappings::Kind
 variant nvx::guest::mappings::Kind::Directory
 variant nvx::guest::mappings::Kind::File
 const nvx::guest::mappings::MAX_PATH_BYTES
-struct nvx::guest::mappings::Mapper
-method nvx::guest::mappings::Mapper::apply
-method nvx::guest::mappings::Mapper::check
-method nvx::guest::mappings::Mapper::is_latched
-method nvx::guest::mappings::Mapper::new
-method nvx::guest::mappings::Mapper::targets
-method nvx::guest::mappings::Mapper::teardown
+struct nvx::guest::mappings::Mapper (hidden)
+method nvx::guest::mappings::Mapper::apply (hidden)
+method nvx::guest::mappings::Mapper::check (hidden)
+method nvx::guest::mappings::Mapper::is_latched (hidden)
+method nvx::guest::mappings::Mapper::new (hidden)
+method nvx::guest::mappings::Mapper::targets (hidden)
+method nvx::guest::mappings::Mapper::teardown (hidden)
 struct nvx::guest::mappings::Mapping
 method nvx::guest::mappings::Mapping::access
 method nvx::guest::mappings::Mapping::kind
@@ -1120,26 +1120,26 @@ method nvx::guest::mappings::Mapping::new
 method nvx::guest::mappings::Mapping::source
 method nvx::guest::mappings::Mapping::target
 method nvx::guest::mappings::Mapping::with_kind
-enum nvx::guest::mappings::MappingError
-variant nvx::guest::mappings::MappingError::Foreign
-field nvx::guest::mappings::MappingError::Foreign::path
-variant nvx::guest::mappings::MappingError::Latched
-variant nvx::guest::mappings::MappingError::Link
-field nvx::guest::mappings::MappingError::Link::path
-variant nvx::guest::mappings::MappingError::MountPoint
-variant nvx::guest::mappings::MappingError::Moved
-field nvx::guest::mappings::MappingError::Moved::mounted
-variant nvx::guest::mappings::MappingError::NotDirectory
-field nvx::guest::mappings::MappingError::NotDirectory::path
-variant nvx::guest::mappings::MappingError::Overlap
-field nvx::guest::mappings::MappingError::Overlap::mapped
-variant nvx::guest::mappings::MappingError::Reserved
-variant nvx::guest::mappings::MappingError::SourceKind
-variant nvx::guest::mappings::MappingError::System
-field nvx::guest::mappings::MappingError::System::error
-field nvx::guest::mappings::MappingError::System::step
-variant nvx::guest::mappings::MappingError::TargetKind
-method nvx::guest::mappings::MappingError::raw_os_error
+enum nvx::guest::mappings::MappingError (hidden)
+variant nvx::guest::mappings::MappingError::Foreign (hidden)
+field nvx::guest::mappings::MappingError::Foreign::path (hidden)
+variant nvx::guest::mappings::MappingError::Latched (hidden)
+variant nvx::guest::mappings::MappingError::Link (hidden)
+field nvx::guest::mappings::MappingError::Link::path (hidden)
+variant nvx::guest::mappings::MappingError::MountPoint (hidden)
+variant nvx::guest::mappings::MappingError::Moved (hidden)
+field nvx::guest::mappings::MappingError::Moved::mounted (hidden)
+variant nvx::guest::mappings::MappingError::NotDirectory (hidden)
+field nvx::guest::mappings::MappingError::NotDirectory::path (hidden)
+variant nvx::guest::mappings::MappingError::Overlap (hidden)
+field nvx::guest::mappings::MappingError::Overlap::mapped (hidden)
+variant nvx::guest::mappings::MappingError::Reserved (hidden)
+variant nvx::guest::mappings::MappingError::SourceKind (hidden)
+variant nvx::guest::mappings::MappingError::System (hidden)
+field nvx::guest::mappings::MappingError::System::error (hidden)
+field nvx::guest::mappings::MappingError::System::step (hidden)
+variant nvx::guest::mappings::MappingError::TargetKind (hidden)
+method nvx::guest::mappings::MappingError::raw_os_error (hidden)
 struct nvx::guest::mappings::MappingTable
 method nvx::guest::mappings::MappingTable::announced
 method nvx::guest::mappings::MappingTable::applied
@@ -1165,21 +1165,21 @@ field nvx::guest::mappings::Refusal::Mapping::error
 variant nvx::guest::mappings::Refusal::Order
 field nvx::guest::mappings::Refusal::Order::expected
 field nvx::guest::mappings::Refusal::Order::first
-struct nvx::guest::mappings::Reserved
-method nvx::guest::mappings::Reserved::container_root
-method nvx::guest::mappings::Reserved::new
-struct nvx::guest::mappings::SourceRoot
-method nvx::guest::mappings::SourceRoot::open
-enum nvx::guest::mappings::Step
-variant nvx::guest::mappings::Step::Attach
-variant nvx::guest::mappings::Step::Clone
-variant nvx::guest::mappings::Step::Create
-variant nvx::guest::mappings::Step::Locate
-variant nvx::guest::mappings::Step::Restrict
-variant nvx::guest::mappings::Step::Source
-variant nvx::guest::mappings::Step::Status
-variant nvx::guest::mappings::Step::Unmount
-variant nvx::guest::mappings::Step::Walk
+struct nvx::guest::mappings::Reserved (hidden)
+method nvx::guest::mappings::Reserved::container_root (hidden)
+method nvx::guest::mappings::Reserved::new (hidden)
+struct nvx::guest::mappings::SourceRoot (hidden)
+method nvx::guest::mappings::SourceRoot::open (hidden)
+enum nvx::guest::mappings::Step (hidden)
+variant nvx::guest::mappings::Step::Attach (hidden)
+variant nvx::guest::mappings::Step::Clone (hidden)
+variant nvx::guest::mappings::Step::Create (hidden)
+variant nvx::guest::mappings::Step::Locate (hidden)
+variant nvx::guest::mappings::Step::Restrict (hidden)
+variant nvx::guest::mappings::Step::Source (hidden)
+variant nvx::guest::mappings::Step::Status (hidden)
+variant nvx::guest::mappings::Step::Unmount (hidden)
+variant nvx::guest::mappings::Step::Walk (hidden)
 enum nvx::guest::mappings::TableError
 variant nvx::guest::mappings::TableError::Failed
 field nvx::guest::mappings::TableError::Failed::entry
@@ -1188,15 +1188,70 @@ variant nvx::guest::mappings::TableError::Refused
 field nvx::guest::mappings::TableError::Refused::entry
 field nvx::guest::mappings::TableError::Refused::refusal
 method nvx::guest::mappings::TableError::entry
-struct nvx::guest::mappings::TargetRoot
-method nvx::guest::mappings::TargetRoot::add_mount
-method nvx::guest::mappings::TargetRoot::open
-struct nvx::guest::mappings::TeardownError
-method nvx::guest::mappings::TeardownError::failures
-struct nvx::guest::mappings::UnmountFailure
-method nvx::guest::mappings::UnmountFailure::error
-method nvx::guest::mappings::UnmountFailure::target
-fn nvx::guest::mappings::bind
+struct nvx::guest::mappings::TargetRoot (hidden)
+method nvx::guest::mappings::TargetRoot::add_mount (hidden)
+method nvx::guest::mappings::TargetRoot::open (hidden)
+struct nvx::guest::mappings::TeardownError (hidden)
+method nvx::guest::mappings::TeardownError::failures (hidden)
+struct nvx::guest::mappings::UnmountFailure (hidden)
+method nvx::guest::mappings::UnmountFailure::error (hidden)
+method nvx::guest::mappings::UnmountFailure::target (hidden)
+fn nvx::guest::mappings::bind (hidden)
+mod nvx::guest::mappings::mapper (hidden)
+struct nvx::guest::mappings::mapper::ApplyError (hidden)
+method nvx::guest::mappings::mapper::ApplyError::entry (hidden)
+method nvx::guest::mappings::mapper::ApplyError::error (hidden)
+struct nvx::guest::mappings::mapper::Mapper (hidden)
+method nvx::guest::mappings::mapper::Mapper::apply (hidden)
+method nvx::guest::mappings::mapper::Mapper::check (hidden)
+method nvx::guest::mappings::mapper::Mapper::is_latched (hidden)
+method nvx::guest::mappings::mapper::Mapper::new (hidden)
+method nvx::guest::mappings::mapper::Mapper::targets (hidden)
+method nvx::guest::mappings::mapper::Mapper::teardown (hidden)
+enum nvx::guest::mappings::mapper::MappingError (hidden)
+variant nvx::guest::mappings::mapper::MappingError::Foreign (hidden)
+field nvx::guest::mappings::mapper::MappingError::Foreign::path (hidden)
+variant nvx::guest::mappings::mapper::MappingError::Latched (hidden)
+variant nvx::guest::mappings::mapper::MappingError::Link (hidden)
+field nvx::guest::mappings::mapper::MappingError::Link::path (hidden)
+variant nvx::guest::mappings::mapper::MappingError::MountPoint (hidden)
+variant nvx::guest::mappings::mapper::MappingError::Moved (hidden)
+field nvx::guest::mappings::mapper::MappingError::Moved::mounted (hidden)
+variant nvx::guest::mappings::mapper::MappingError::NotDirectory (hidden)
+field nvx::guest::mappings::mapper::MappingError::NotDirectory::path (hidden)
+variant nvx::guest::mappings::mapper::MappingError::Overlap (hidden)
+field nvx::guest::mappings::mapper::MappingError::Overlap::mapped (hidden)
+variant nvx::guest::mappings::mapper::MappingError::Reserved (hidden)
+variant nvx::guest::mappings::mapper::MappingError::SourceKind (hidden)
+variant nvx::guest::mappings::mapper::MappingError::System (hidden)
+field nvx::guest::mappings::mapper::MappingError::System::error (hidden)
+field nvx::guest::mappings::mapper::MappingError::System::step (hidden)
+variant nvx::guest::mappings::mapper::MappingError::TargetKind (hidden)
+method nvx::guest::mappings::mapper::MappingError::raw_os_error (hidden)
+struct nvx::guest::mappings::mapper::Reserved (hidden)
+method nvx::guest::mappings::mapper::Reserved::container_root (hidden)
+method nvx::guest::mappings::mapper::Reserved::new (hidden)
+struct nvx::guest::mappings::mapper::SourceRoot (hidden)
+method nvx::guest::mappings::mapper::SourceRoot::open (hidden)
+enum nvx::guest::mappings::mapper::Step (hidden)
+variant nvx::guest::mappings::mapper::Step::Attach (hidden)
+variant nvx::guest::mappings::mapper::Step::Clone (hidden)
+variant nvx::guest::mappings::mapper::Step::Create (hidden)
+variant nvx::guest::mappings::mapper::Step::Locate (hidden)
+variant nvx::guest::mappings::mapper::Step::Restrict (hidden)
+variant nvx::guest::mappings::mapper::Step::Source (hidden)
+variant nvx::guest::mappings::mapper::Step::Status (hidden)
+variant nvx::guest::mappings::mapper::Step::Unmount (hidden)
+variant nvx::guest::mappings::mapper::Step::Walk (hidden)
+struct nvx::guest::mappings::mapper::TargetRoot (hidden)
+method nvx::guest::mappings::mapper::TargetRoot::add_mount (hidden)
+method nvx::guest::mappings::mapper::TargetRoot::open (hidden)
+struct nvx::guest::mappings::mapper::TeardownError (hidden)
+method nvx::guest::mappings::mapper::TeardownError::failures (hidden)
+struct nvx::guest::mappings::mapper::UnmountFailure (hidden)
+method nvx::guest::mappings::mapper::UnmountFailure::error (hidden)
+method nvx::guest::mappings::mapper::UnmountFailure::target (hidden)
+fn nvx::guest::mappings::mapper::bind (hidden)
 mod nvx::guest::mmio_write (hidden)
 fn nvx::guest::mmio_write::main (hidden)
 mod nvx::guest::nvxs
@@ -1247,221 +1302,221 @@ method nvx::guest::reseed::Seed::generation_id
 method nvx::guest::reseed::Seed::read
 fn nvx::guest::reseed::main (hidden)
 fn nvx::guest::reseed::reseed
-mod nvx::guest::root
-struct nvx::guest::root::Assembly
-field nvx::guest::root::Assembly::distro
-field nvx::guest::root::Assembly::image
-field nvx::guest::root::Assembly::overlay
-field nvx::guest::root::Assembly::runtime
-field nvx::guest::root::Assembly::timeout
-field nvx::guest::root::Assembly::upper
-struct nvx::guest::root::AssemblyError
-method nvx::guest::root::AssemblyError::cleanup
-method nvx::guest::root::AssemblyError::error
-method nvx::guest::root::AssemblyError::into_parts
-struct nvx::guest::root::Bootstrap
-method nvx::guest::root::Bootstrap::layout
-method nvx::guest::root::Bootstrap::moved
-method nvx::guest::root::Bootstrap::workload
-enum nvx::guest::root::BootstrapStep
-variant nvx::guest::root::BootstrapStep::AgentCgroup
-variant nvx::guest::root::BootstrapStep::AgentMemoryLow
-variant nvx::guest::root::BootstrapStep::Hierarchy
-variant nvx::guest::root::BootstrapStep::Layout
-variant nvx::guest::root::BootstrapStep::Placement
-variant nvx::guest::root::BootstrapStep::UserNamespaces
-variant nvx::guest::root::BootstrapStep::WorkloadCgroup
-struct nvx::guest::root::Device
-field nvx::guest::root::Device::mmio
-field nvx::guest::root::Device::sectors
-enum nvx::guest::root::DeviceStep
-variant nvx::guest::root::DeviceStep::Access
-variant nvx::guest::root::DeviceStep::Flush
-variant nvx::guest::root::DeviceStep::Open
-variant nvx::guest::root::DeviceStep::Reread
-variant nvx::guest::root::DeviceStep::Size
-variant nvx::guest::root::DeviceStep::Status
-variant nvx::guest::root::DeviceStep::Superblock
-enum nvx::guest::root::Error
-variant nvx::guest::root::Error::Access
-field nvx::guest::root::Error::Access::device
-field nvx::guest::root::Error::Access::read_only
-field nvx::guest::root::Error::Access::role
-variant nvx::guest::root::Error::Bootstrap
-field nvx::guest::root::Error::Bootstrap::error
-field nvx::guest::root::Error::Bootstrap::step
-variant nvx::guest::root::Error::Device
-field nvx::guest::root::Error::Device::device
-field nvx::guest::root::Error::Device::error
-field nvx::guest::root::Error::Device::role
-field nvx::guest::root::Error::Device::step
-variant nvx::guest::root::Error::Disk
-field nvx::guest::root::Error::Disk::device
-field nvx::guest::root::Error::Disk::error
-variant nvx::guest::root::Error::FirstPartition
-field nvx::guest::root::Error::FirstPartition::device
-field nvx::guest::root::Error::FirstPartition::error
-variant nvx::guest::root::Error::Journal
-field nvx::guest::root::Error::Journal::device
-variant nvx::guest::root::Error::Lookup
-field nvx::guest::root::Error::Lookup::error
-field nvx::guest::root::Error::Lookup::mmio
-field nvx::guest::root::Error::Lookup::role
-variant nvx::guest::root::Error::Mapping
-field nvx::guest::root::Error::Mapping::error
-field nvx::guest::root::Error::Mapping::mount
-variant nvx::guest::root::Error::Missing
-field nvx::guest::root::Error::Missing::mmio
-field nvx::guest::root::Error::Missing::role
-variant nvx::guest::root::Error::Mount
-field nvx::guest::root::Error::Mount::error
-field nvx::guest::root::Error::Mount::mount
-variant nvx::guest::root::Error::MountPoint
-field nvx::guest::root::Error::MountPoint::error
-field nvx::guest::root::Error::MountPoint::path
-variant nvx::guest::root::Error::NotErofs
-field nvx::guest::root::Error::NotErofs::device
-variant nvx::guest::root::Error::NotExt4
-field nvx::guest::root::Error::NotExt4::device
-variant nvx::guest::root::Error::NotExt4Layer
-field nvx::guest::root::Error::NotExt4Layer::device
-field nvx::guest::root::Error::NotExt4Layer::number
-variant nvx::guest::root::Error::NotFresh
-field nvx::guest::root::Error::NotFresh::path
-variant nvx::guest::root::Error::Occupied
-field nvx::guest::root::Error::Occupied::path
-variant nvx::guest::root::Error::OverlayCheck
-field nvx::guest::root::Error::OverlayCheck::error
-field nvx::guest::root::Error::OverlayCheck::path
-variant nvx::guest::root::Error::OverlayFallback
-field nvx::guest::root::Error::OverlayFallback::effective
-field nvx::guest::root::Error::OverlayFallback::requested
-variant nvx::guest::root::Error::OverlayOptions
-field nvx::guest::root::Error::OverlayOptions::length
-variant nvx::guest::root::Error::Partition
-field nvx::guest::root::Error::Partition::node
-field nvx::guest::root::Error::Partition::number
-variant nvx::guest::root::Error::Recovery
-field nvx::guest::root::Error::Recovery::device
-field nvx::guest::root::Error::Recovery::number
-variant nvx::guest::root::Error::Reserved
-field nvx::guest::root::Error::Reserved::path
-variant nvx::guest::root::Error::Runtime
-field nvx::guest::root::Error::Runtime::path
-variant nvx::guest::root::Error::Share
-field nvx::guest::root::Error::Share::0
-variant nvx::guest::root::Error::Size
-field nvx::guest::root::Error::Size::actual
-field nvx::guest::root::Error::Size::device
-field nvx::guest::root::Error::Size::expected
-field nvx::guest::root::Error::Size::role
-variant nvx::guest::root::Error::Uuid
-field nvx::guest::root::Error::Uuid::actual
-field nvx::guest::root::Error::Uuid::expected
-enum nvx::guest::root::Image
-variant nvx::guest::root::Image::Erofs
-field nvx::guest::root::Image::Erofs::uuid
-variant nvx::guest::root::Image::Gpt
-field nvx::guest::root::Image::Gpt::expected
-field nvx::guest::root::Image::Gpt::first_partition_bound
-enum nvx::guest::root::Journal
-variant nvx::guest::root::Journal::Allowed
-variant nvx::guest::root::Journal::Forbidden
-struct nvx::guest::root::Lower
-method nvx::guest::root::Lower::device
-method nvx::guest::root::Lower::mount
-method nvx::guest::root::Lower::partition
-method nvx::guest::root::Lower::path
-const nvx::guest::root::MOUNT_OPTIONS_LIMIT
-enum nvx::guest::root::Mount
-variant nvx::guest::root::Mount::Aggregate
-field nvx::guest::root::Mount::Aggregate::tag
-variant nvx::guest::root::Mount::Child
-field nvx::guest::root::Mount::Child::name
-field nvx::guest::root::Mount::Child::target
-variant nvx::guest::root::Mount::Distro
-variant nvx::guest::root::Mount::Export
-field nvx::guest::root::Mount::Export::tag
-variant nvx::guest::root::Mount::Layer
-field nvx::guest::root::Mount::Layer::number
-variant nvx::guest::root::Mount::Mapping
-field nvx::guest::root::Mount::Mapping::target
-variant nvx::guest::root::Mount::Overlay
-variant nvx::guest::root::Mount::Scratch
-variant nvx::guest::root::Mount::Share
-field nvx::guest::root::Mount::Share::tag
-field nvx::guest::root::Mount::Share::target
-variant nvx::guest::root::Mount::Tmpfs
-enum nvx::guest::root::OverlayMode
-variant nvx::guest::root::OverlayMode::TrustedLowers
-variant nvx::guest::root::OverlayMode::UntrustedLowers
-method nvx::guest::root::OverlayMode::options
-struct nvx::guest::root::Resources
-field nvx::guest::root::Resources::agent_memory_low
-field nvx::guest::root::Resources::workload_memory_max
-field nvx::guest::root::Resources::workload_pids_max
-enum nvx::guest::root::Role
-variant nvx::guest::root::Role::Distro
-variant nvx::guest::root::Role::Scratch
-struct nvx::guest::root::Root
-method nvx::guest::root::Root::first_partition
-method nvx::guest::root::Root::is_latched
-method nvx::guest::root::Root::lowers
-method nvx::guest::root::Root::map
-method nvx::guest::root::Root::mount_aggregate
-method nvx::guest::root::Root::mount_export
-method nvx::guest::root::Root::mount_share
-method nvx::guest::root::Root::overlay
-method nvx::guest::root::Root::path
-method nvx::guest::root::Root::runtime
-method nvx::guest::root::Root::teardown
-method nvx::guest::root::Root::upper
-struct nvx::guest::root::ShareChild
-field nvx::guest::root::ShareChild::access
-field nvx::guest::root::ShareChild::kind
-field nvx::guest::root::ShareChild::name
-field nvx::guest::root::ShareChild::target
-enum nvx::guest::root::ShareKind
-variant nvx::guest::root::ShareKind::Directory
-variant nvx::guest::root::ShareKind::File
-enum nvx::guest::root::ShareRefusal
-variant nvx::guest::root::ShareRefusal::ChildName
-field nvx::guest::root::ShareRefusal::ChildName::0
-variant nvx::guest::root::ShareRefusal::DuplicateChild
-field nvx::guest::root::ShareRefusal::DuplicateChild::0
-variant nvx::guest::root::ShareRefusal::NoChildren
-variant nvx::guest::root::ShareRefusal::NotCanonical
-field nvx::guest::root::ShareRefusal::NotCanonical::0
-variant nvx::guest::root::ShareRefusal::Overlap
-field nvx::guest::root::ShareRefusal::Overlap::claimed
-field nvx::guest::root::ShareRefusal::Overlap::target
-variant nvx::guest::root::ShareRefusal::Relative
-field nvx::guest::root::ShareRefusal::Relative::0
-variant nvx::guest::root::ShareRefusal::Reserved
-field nvx::guest::root::ShareRefusal::Reserved::0
-variant nvx::guest::root::ShareRefusal::ReservedCharacter
-field nvx::guest::root::ShareRefusal::ReservedCharacter::0
-variant nvx::guest::root::ShareRefusal::SecondAggregate
-variant nvx::guest::root::ShareRefusal::SecondExport
-variant nvx::guest::root::ShareRefusal::Tag
-field nvx::guest::root::ShareRefusal::Tag::0
-struct nvx::guest::root::TeardownError
-method nvx::guest::root::TeardownError::failures
-struct nvx::guest::root::Unmount
-method nvx::guest::root::Unmount::error
-method nvx::guest::root::Unmount::mount
-method nvx::guest::root::Unmount::path
-enum nvx::guest::root::Upper
-variant nvx::guest::root::Upper::Scratch
-field nvx::guest::root::Upper::Scratch::device
-field nvx::guest::root::Upper::Scratch::journal
-variant nvx::guest::root::Upper::Tmpfs
-method nvx::guest::root::Upper::kind
-enum nvx::guest::root::UpperKind
-variant nvx::guest::root::UpperKind::Scratch
-variant nvx::guest::root::UpperKind::Tmpfs
-fn nvx::guest::root::assemble
-fn nvx::guest::root::bootstrap
+mod nvx::guest::root (hidden)
+struct nvx::guest::root::Assembly (hidden)
+field nvx::guest::root::Assembly::distro (hidden)
+field nvx::guest::root::Assembly::image (hidden)
+field nvx::guest::root::Assembly::overlay (hidden)
+field nvx::guest::root::Assembly::runtime (hidden)
+field nvx::guest::root::Assembly::timeout (hidden)
+field nvx::guest::root::Assembly::upper (hidden)
+struct nvx::guest::root::AssemblyError (hidden)
+method nvx::guest::root::AssemblyError::cleanup (hidden)
+method nvx::guest::root::AssemblyError::error (hidden)
+method nvx::guest::root::AssemblyError::into_parts (hidden)
+struct nvx::guest::root::Bootstrap (hidden)
+method nvx::guest::root::Bootstrap::layout (hidden)
+method nvx::guest::root::Bootstrap::moved (hidden)
+method nvx::guest::root::Bootstrap::workload (hidden)
+enum nvx::guest::root::BootstrapStep (hidden)
+variant nvx::guest::root::BootstrapStep::AgentCgroup (hidden)
+variant nvx::guest::root::BootstrapStep::AgentMemoryLow (hidden)
+variant nvx::guest::root::BootstrapStep::Hierarchy (hidden)
+variant nvx::guest::root::BootstrapStep::Layout (hidden)
+variant nvx::guest::root::BootstrapStep::Placement (hidden)
+variant nvx::guest::root::BootstrapStep::UserNamespaces (hidden)
+variant nvx::guest::root::BootstrapStep::WorkloadCgroup (hidden)
+struct nvx::guest::root::Device (hidden)
+field nvx::guest::root::Device::mmio (hidden)
+field nvx::guest::root::Device::sectors (hidden)
+enum nvx::guest::root::DeviceStep (hidden)
+variant nvx::guest::root::DeviceStep::Access (hidden)
+variant nvx::guest::root::DeviceStep::Flush (hidden)
+variant nvx::guest::root::DeviceStep::Open (hidden)
+variant nvx::guest::root::DeviceStep::Reread (hidden)
+variant nvx::guest::root::DeviceStep::Size (hidden)
+variant nvx::guest::root::DeviceStep::Status (hidden)
+variant nvx::guest::root::DeviceStep::Superblock (hidden)
+enum nvx::guest::root::Error (hidden)
+variant nvx::guest::root::Error::Access (hidden)
+field nvx::guest::root::Error::Access::device (hidden)
+field nvx::guest::root::Error::Access::read_only (hidden)
+field nvx::guest::root::Error::Access::role (hidden)
+variant nvx::guest::root::Error::Bootstrap (hidden)
+field nvx::guest::root::Error::Bootstrap::error (hidden)
+field nvx::guest::root::Error::Bootstrap::step (hidden)
+variant nvx::guest::root::Error::Device (hidden)
+field nvx::guest::root::Error::Device::device (hidden)
+field nvx::guest::root::Error::Device::error (hidden)
+field nvx::guest::root::Error::Device::role (hidden)
+field nvx::guest::root::Error::Device::step (hidden)
+variant nvx::guest::root::Error::Disk (hidden)
+field nvx::guest::root::Error::Disk::device (hidden)
+field nvx::guest::root::Error::Disk::error (hidden)
+variant nvx::guest::root::Error::FirstPartition (hidden)
+field nvx::guest::root::Error::FirstPartition::device (hidden)
+field nvx::guest::root::Error::FirstPartition::error (hidden)
+variant nvx::guest::root::Error::Journal (hidden)
+field nvx::guest::root::Error::Journal::device (hidden)
+variant nvx::guest::root::Error::Lookup (hidden)
+field nvx::guest::root::Error::Lookup::error (hidden)
+field nvx::guest::root::Error::Lookup::mmio (hidden)
+field nvx::guest::root::Error::Lookup::role (hidden)
+variant nvx::guest::root::Error::Mapping (hidden)
+field nvx::guest::root::Error::Mapping::error (hidden)
+field nvx::guest::root::Error::Mapping::mount (hidden)
+variant nvx::guest::root::Error::Missing (hidden)
+field nvx::guest::root::Error::Missing::mmio (hidden)
+field nvx::guest::root::Error::Missing::role (hidden)
+variant nvx::guest::root::Error::Mount (hidden)
+field nvx::guest::root::Error::Mount::error (hidden)
+field nvx::guest::root::Error::Mount::mount (hidden)
+variant nvx::guest::root::Error::MountPoint (hidden)
+field nvx::guest::root::Error::MountPoint::error (hidden)
+field nvx::guest::root::Error::MountPoint::path (hidden)
+variant nvx::guest::root::Error::NotErofs (hidden)
+field nvx::guest::root::Error::NotErofs::device (hidden)
+variant nvx::guest::root::Error::NotExt4 (hidden)
+field nvx::guest::root::Error::NotExt4::device (hidden)
+variant nvx::guest::root::Error::NotExt4Layer (hidden)
+field nvx::guest::root::Error::NotExt4Layer::device (hidden)
+field nvx::guest::root::Error::NotExt4Layer::number (hidden)
+variant nvx::guest::root::Error::NotFresh (hidden)
+field nvx::guest::root::Error::NotFresh::path (hidden)
+variant nvx::guest::root::Error::Occupied (hidden)
+field nvx::guest::root::Error::Occupied::path (hidden)
+variant nvx::guest::root::Error::OverlayCheck (hidden)
+field nvx::guest::root::Error::OverlayCheck::error (hidden)
+field nvx::guest::root::Error::OverlayCheck::path (hidden)
+variant nvx::guest::root::Error::OverlayFallback (hidden)
+field nvx::guest::root::Error::OverlayFallback::effective (hidden)
+field nvx::guest::root::Error::OverlayFallback::requested (hidden)
+variant nvx::guest::root::Error::OverlayOptions (hidden)
+field nvx::guest::root::Error::OverlayOptions::length (hidden)
+variant nvx::guest::root::Error::Partition (hidden)
+field nvx::guest::root::Error::Partition::node (hidden)
+field nvx::guest::root::Error::Partition::number (hidden)
+variant nvx::guest::root::Error::Recovery (hidden)
+field nvx::guest::root::Error::Recovery::device (hidden)
+field nvx::guest::root::Error::Recovery::number (hidden)
+variant nvx::guest::root::Error::Reserved (hidden)
+field nvx::guest::root::Error::Reserved::path (hidden)
+variant nvx::guest::root::Error::Runtime (hidden)
+field nvx::guest::root::Error::Runtime::path (hidden)
+variant nvx::guest::root::Error::Share (hidden)
+field nvx::guest::root::Error::Share::0 (hidden)
+variant nvx::guest::root::Error::Size (hidden)
+field nvx::guest::root::Error::Size::actual (hidden)
+field nvx::guest::root::Error::Size::device (hidden)
+field nvx::guest::root::Error::Size::expected (hidden)
+field nvx::guest::root::Error::Size::role (hidden)
+variant nvx::guest::root::Error::Uuid (hidden)
+field nvx::guest::root::Error::Uuid::actual (hidden)
+field nvx::guest::root::Error::Uuid::expected (hidden)
+enum nvx::guest::root::Image (hidden)
+variant nvx::guest::root::Image::Erofs (hidden)
+field nvx::guest::root::Image::Erofs::uuid (hidden)
+variant nvx::guest::root::Image::Gpt (hidden)
+field nvx::guest::root::Image::Gpt::expected (hidden)
+field nvx::guest::root::Image::Gpt::first_partition_bound (hidden)
+enum nvx::guest::root::Journal (hidden)
+variant nvx::guest::root::Journal::Allowed (hidden)
+variant nvx::guest::root::Journal::Forbidden (hidden)
+struct nvx::guest::root::Lower (hidden)
+method nvx::guest::root::Lower::device (hidden)
+method nvx::guest::root::Lower::mount (hidden)
+method nvx::guest::root::Lower::partition (hidden)
+method nvx::guest::root::Lower::path (hidden)
+const nvx::guest::root::MOUNT_OPTIONS_LIMIT (hidden)
+enum nvx::guest::root::Mount (hidden)
+variant nvx::guest::root::Mount::Aggregate (hidden)
+field nvx::guest::root::Mount::Aggregate::tag (hidden)
+variant nvx::guest::root::Mount::Child (hidden)
+field nvx::guest::root::Mount::Child::name (hidden)
+field nvx::guest::root::Mount::Child::target (hidden)
+variant nvx::guest::root::Mount::Distro (hidden)
+variant nvx::guest::root::Mount::Export (hidden)
+field nvx::guest::root::Mount::Export::tag (hidden)
+variant nvx::guest::root::Mount::Layer (hidden)
+field nvx::guest::root::Mount::Layer::number (hidden)
+variant nvx::guest::root::Mount::Mapping (hidden)
+field nvx::guest::root::Mount::Mapping::target (hidden)
+variant nvx::guest::root::Mount::Overlay (hidden)
+variant nvx::guest::root::Mount::Scratch (hidden)
+variant nvx::guest::root::Mount::Share (hidden)
+field nvx::guest::root::Mount::Share::tag (hidden)
+field nvx::guest::root::Mount::Share::target (hidden)
+variant nvx::guest::root::Mount::Tmpfs (hidden)
+enum nvx::guest::root::OverlayMode (hidden)
+variant nvx::guest::root::OverlayMode::TrustedLowers (hidden)
+variant nvx::guest::root::OverlayMode::UntrustedLowers (hidden)
+method nvx::guest::root::OverlayMode::options (hidden)
+struct nvx::guest::root::Resources (hidden)
+field nvx::guest::root::Resources::agent_memory_low (hidden)
+field nvx::guest::root::Resources::workload_memory_max (hidden)
+field nvx::guest::root::Resources::workload_pids_max (hidden)
+enum nvx::guest::root::Role (hidden)
+variant nvx::guest::root::Role::Distro (hidden)
+variant nvx::guest::root::Role::Scratch (hidden)
+struct nvx::guest::root::Root (hidden)
+method nvx::guest::root::Root::first_partition (hidden)
+method nvx::guest::root::Root::is_latched (hidden)
+method nvx::guest::root::Root::lowers (hidden)
+method nvx::guest::root::Root::map (hidden)
+method nvx::guest::root::Root::mount_aggregate (hidden)
+method nvx::guest::root::Root::mount_export (hidden)
+method nvx::guest::root::Root::mount_share (hidden)
+method nvx::guest::root::Root::overlay (hidden)
+method nvx::guest::root::Root::path (hidden)
+method nvx::guest::root::Root::runtime (hidden)
+method nvx::guest::root::Root::teardown (hidden)
+method nvx::guest::root::Root::upper (hidden)
+struct nvx::guest::root::ShareChild (hidden)
+field nvx::guest::root::ShareChild::access (hidden)
+field nvx::guest::root::ShareChild::kind (hidden)
+field nvx::guest::root::ShareChild::name (hidden)
+field nvx::guest::root::ShareChild::target (hidden)
+enum nvx::guest::root::ShareKind (hidden)
+variant nvx::guest::root::ShareKind::Directory (hidden)
+variant nvx::guest::root::ShareKind::File (hidden)
+enum nvx::guest::root::ShareRefusal (hidden)
+variant nvx::guest::root::ShareRefusal::ChildName (hidden)
+field nvx::guest::root::ShareRefusal::ChildName::0 (hidden)
+variant nvx::guest::root::ShareRefusal::DuplicateChild (hidden)
+field nvx::guest::root::ShareRefusal::DuplicateChild::0 (hidden)
+variant nvx::guest::root::ShareRefusal::NoChildren (hidden)
+variant nvx::guest::root::ShareRefusal::NotCanonical (hidden)
+field nvx::guest::root::ShareRefusal::NotCanonical::0 (hidden)
+variant nvx::guest::root::ShareRefusal::Overlap (hidden)
+field nvx::guest::root::ShareRefusal::Overlap::claimed (hidden)
+field nvx::guest::root::ShareRefusal::Overlap::target (hidden)
+variant nvx::guest::root::ShareRefusal::Relative (hidden)
+field nvx::guest::root::ShareRefusal::Relative::0 (hidden)
+variant nvx::guest::root::ShareRefusal::Reserved (hidden)
+field nvx::guest::root::ShareRefusal::Reserved::0 (hidden)
+variant nvx::guest::root::ShareRefusal::ReservedCharacter (hidden)
+field nvx::guest::root::ShareRefusal::ReservedCharacter::0 (hidden)
+variant nvx::guest::root::ShareRefusal::SecondAggregate (hidden)
+variant nvx::guest::root::ShareRefusal::SecondExport (hidden)
+variant nvx::guest::root::ShareRefusal::Tag (hidden)
+field nvx::guest::root::ShareRefusal::Tag::0 (hidden)
+struct nvx::guest::root::TeardownError (hidden)
+method nvx::guest::root::TeardownError::failures (hidden)
+struct nvx::guest::root::Unmount (hidden)
+method nvx::guest::root::Unmount::error (hidden)
+method nvx::guest::root::Unmount::mount (hidden)
+method nvx::guest::root::Unmount::path (hidden)
+enum nvx::guest::root::Upper (hidden)
+variant nvx::guest::root::Upper::Scratch (hidden)
+field nvx::guest::root::Upper::Scratch::device (hidden)
+field nvx::guest::root::Upper::Scratch::journal (hidden)
+variant nvx::guest::root::Upper::Tmpfs (hidden)
+method nvx::guest::root::Upper::kind (hidden)
+enum nvx::guest::root::UpperKind (hidden)
+variant nvx::guest::root::UpperKind::Scratch (hidden)
+variant nvx::guest::root::UpperKind::Tmpfs (hidden)
+fn nvx::guest::root::assemble (hidden)
+fn nvx::guest::root::bootstrap (hidden)
 mod nvx::guest::spawn
 struct nvx::guest::spawn::Barrier
 method nvx::guest::spawn::Barrier::release

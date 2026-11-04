@@ -21,9 +21,8 @@ use crate::protocol::{self, GuestHostMap, MAX_HOST_MAPPINGS, ProtocolError};
 /// parts, each a `MAPS` payload of consecutive entries, in order, which
 /// [`protocol::decode_guest_maps_payload`] reads. [`apply`](Self::apply) checks each part against
 /// the table, and hands its entries, as [`Mapping`]s, to the caller, which maps them beneath the
-/// root of its choice, from the host export: through a [`Mapper`](super::Mapper) beneath a
-/// guest's own `/` or a container's root, for example, or through a layered
-/// [`Root`](crate::guest::root::Root).
+/// root of its choice, from the host export: through a mapper beneath a guest's own `/` or a
+/// container's root, for example, or through a layered root.
 ///
 /// - The table refuses a part as a whole, and changes nothing, which [`TableError::Refused`]
 ///   reports with the entry that the table expects next and the [`Refusal`]: once a mapping
@@ -39,32 +38,26 @@ use crate::protocol::{self, GuestHostMap, MAX_HOST_MAPPINGS, ProtocolError};
 ///   mappings is complete at once, and its agent maps nothing.
 ///
 /// The root keeps the mappings, and its own teardown tears the table down, in reverse order, such
-/// as [`Mapper::teardown`](super::Mapper::teardown), which reports each mapping that stays mounted,
-/// or [`Root::teardown`](crate::guest::root::Root::teardown).
+/// as a mapper's teardown, which reports each mapping that stays mounted, or a layered root's.
 ///
 /// NVX's managed agent applies its table through one, beneath its own root, `/`, in direct mode,
 /// and beneath the container's assembled root in sandbox mode, with a mapper that it opens at the
 /// first part that the table hands it, so that a table of zero mappings opens nothing.
 ///
 /// ```no_run
-/// use std::path::Path;
-///
-/// use nvx::guest::mappings::{
-///     Mapper, MappingTable, Reserved, SourceRoot, TableError, TargetRoot,
-/// };
+/// use nvx::guest::mappings::{Mapping, MappingTable, TableError};
 ///
 /// # fn parts() -> Vec<Vec<u8>> { Vec::new() }
+/// # fn mount(_: &Mapping) -> std::io::Result<()> { Ok(()) }
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut table = MappingTable::announced(&std::fs::read("/proc/cmdline")?)?;
-/// let root = TargetRoot::open(Path::new("/newroot"))?;
-/// let mut mapper = Mapper::new(root, Reserved::container_root());
-/// let export = SourceRoot::open(Path::new("/run/nvx/hostfs/root"))?;
 /// // Each part of the table, in the order in which the host sends them.
 /// for part in parts() {
+///     // `mount` mounts one mapping beneath the agent's root, from the host export.
 ///     let applied = table.apply(&part, |mappings| {
-///         mapper
-///             .apply(&export, mappings)
-///             .map_err(|error| (error.entry(), error))
+///         mappings.iter().enumerate().try_for_each(|(index, mapping)| {
+///             mount(mapping).map_err(|error| (index, error))
+///         })
 ///     });
 ///     match applied {
 ///         Ok(()) => println!("{} of {} mappings applied", table.applied(), table.expected()),
@@ -73,9 +66,9 @@ use crate::protocol::{self, GuestHostMap, MAX_HOST_MAPPINGS, ProtocolError};
 ///         Err(error) => println!("{error}"),
 ///     }
 /// }
-/// // Start workloads only once the table is complete; then:
+/// // Start workloads only once the table is complete; the root keeps the mappings until its
+/// // teardown.
 /// assert!(table.is_complete());
-/// mapper.teardown()?;
 /// # Ok(())
 /// # }
 /// ```
