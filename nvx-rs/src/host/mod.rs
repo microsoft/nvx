@@ -62,6 +62,7 @@
 
 pub mod artifacts;
 #[cfg(feature = "cli")]
+#[doc(hidden)]
 pub mod cli;
 pub mod filesystem;
 pub mod instance;

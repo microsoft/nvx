@@ -669,8 +669,8 @@ const nvx::host::artifacts::PACKAGE_MANIFEST_SUFFIX
 fn nvx::host::artifacts::absolute
 fn nvx::host::artifacts::check_manifest
 fn nvx::host::artifacts::openvmm_executable
-mod nvx::host::cli
-fn nvx::host::cli::main
+mod nvx::host::cli (hidden)
+fn nvx::host::cli::main (hidden)
 mod nvx::host::filesystem
 struct nvx::host::filesystem::Bind
 field nvx::host::filesystem::Bind::child
@@ -2401,9 +2401,9 @@ const nvx::protocol::status::TIME_STATUSES
 const nvx::protocol::status::TIME_VIOLATION
 fn nvx::protocol::status::describe
 fn nvx::resolve_guest_path
-mod nvx::testing
-mod nvx::testing::fake_openvmm
-fn nvx::testing::fake_openvmm::main
+mod nvx::testing (hidden)
+mod nvx::testing::fake_openvmm (hidden)
+fn nvx::testing::fake_openvmm::main (hidden)
 mod nvx::uuid
 struct nvx::uuid::ParseUuidError
 struct nvx::uuid::Uuid

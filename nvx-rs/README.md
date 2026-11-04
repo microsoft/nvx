@@ -131,8 +131,6 @@ changes only when the module's purpose does.
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::session`, `platform`, `report`](#nvxhostsession-platform-report) | The authenticated control session, Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
-| [`nvx::testing::fake_openvmm`](#nvxtestingfake_openvmm) | A fake OpenVMM that serves the control console and runs scripted workloads without a VM |
-| [`nvx::host::cli`](#nvxhostcli) | Feature `cli`: the `nvx-rs` executable; see [The nvx-rs CLI](#the-nvx-rs-cli) |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapper` and `MappingTable`: apply host mappings beneath the descriptors of their roots, and a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
@@ -1067,17 +1065,6 @@ For an adapter's plan, `PreparedLaunch::adapter_arguments` renders the complete
 arguments of the launch: the plan's, those that export the adapter's shares,
 and those of the launch's `VmmLaunch`, and refuses a command line that Windows
 would not start OpenVMM with.
-
-### `nvx::testing::fake_openvmm`
-
-A fake OpenVMM that serves the control console and runs scripted workloads
-without a VM, for direct launches and for the managed and one-shot sandboxes of
-`nvx-rs sandbox`, and runs the VMs of templates' captures, which publish a
-snapshot, or fail, as a scenario asks.
-
-### `nvx::host::cli`
-
-Feature `cli`: the `nvx-rs` executable; see [The nvx-rs CLI](#the-nvx-rs-cli).
 
 ### `nvx::guest`
 
@@ -2356,7 +2343,7 @@ that its snapshot saved, a cold boot with `--network-profile` alone or with
 explicit `--host-loopback allow` without `--restore-network-policy`. Kernel
 command-line tokens make it fail: `fake_exit_on_start=STATUS`,
 `fake_exit_status=STATUS`, `fake_guest_features=MASK`, and
-`fake_legacy_guest=1`, among others; see `nvx::testing::fake_openvmm`. Like
+`fake_legacy_guest=1`, among others; see `src/testing/fake_openvmm.rs`. Like
 OpenVMM, it opens the sandbox's block devices at the paths that its options
 name and holds them until it exits, after `fake_block_delay_ms=MS` if asked,
 and records what each held in `fake-openvmm-TOKEN-blocks.json` next to the
@@ -2421,8 +2408,8 @@ caller owner.
 | --- | --- |
 | `host` (default) | The `host` module. It enables `serde`, and `sha2`, which names the children of a sandbox's aggregate share and hashes distro layers in their explicit verification |
 | `bundled` | Stages a release at build time; see [Bundled artifacts](#bundled-artifacts) |
-| `testing` | The fake OpenVMM and the `nvx-fake-openvmm` binary |
-| `cli` | The `nvx-rs` CLI of `host::cli` and its `nvx-rs` binary; it enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
+| `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
+| `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
 | `serde` | The serde form of `Hypervisor` |
 | `guest` | The `guest` module and the guest binaries; see [Guest binaries](#guest-binaries) |
 

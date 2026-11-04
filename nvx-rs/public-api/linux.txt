@@ -833,10 +833,10 @@ field nvx::guest::clone::RootTemplate::scratch
 field nvx::guest::clone::RootTemplate::timeout
 fn nvx::guest::clone::apply
 fn nvx::guest::clone::repair
-mod nvx::guest::console_pending
-fn nvx::guest::console_pending::main
-mod nvx::guest::device_io
-fn nvx::guest::device_io::main
+mod nvx::guest::console_pending (hidden)
+fn nvx::guest::console_pending::main (hidden)
+mod nvx::guest::device_io (hidden)
+fn nvx::guest::device_io::main (hidden)
 mod nvx::guest::entry
 struct nvx::guest::entry::Account
 method nvx::guest::entry::Account::home
@@ -1060,8 +1060,8 @@ variant nvx::guest::exec::binding::Event::Message
 field nvx::guest::exec::binding::Event::Message::0
 variant nvx::guest::exec::binding::Event::SettlementFailed
 field nvx::guest::exec::binding::Event::SettlementFailed::0
-mod nvx::guest::exit
-fn nvx::guest::exit::main
+mod nvx::guest::exit (hidden)
+fn nvx::guest::exit::main (hidden)
 mod nvx::guest::gpt
 enum nvx::guest::gpt::DeviceError
 variant nvx::guest::gpt::DeviceError::LogicalBlockSize
@@ -1089,9 +1089,9 @@ variant nvx::guest::ingress::StartError::Socket
 field nvx::guest::ingress::StartError::Socket::0
 variant nvx::guest::ingress::StartError::Spawn
 field nvx::guest::ingress::StartError::Spawn::0
-fn nvx::guest::ingress::main
-mod nvx::guest::managed_agent
-fn nvx::guest::managed_agent::main
+fn nvx::guest::ingress::main (hidden)
+mod nvx::guest::managed_agent (hidden)
+fn nvx::guest::managed_agent::main (hidden)
 mod nvx::guest::mappings
 enum nvx::guest::mappings::Access
 variant nvx::guest::mappings::Access::ReadOnly
@@ -1197,8 +1197,8 @@ struct nvx::guest::mappings::UnmountFailure
 method nvx::guest::mappings::UnmountFailure::error
 method nvx::guest::mappings::UnmountFailure::target
 fn nvx::guest::mappings::bind
-mod nvx::guest::mmio_write
-fn nvx::guest::mmio_write::main
+mod nvx::guest::mmio_write (hidden)
+fn nvx::guest::mmio_write::main (hidden)
 mod nvx::guest::nvxs
 struct nvx::guest::nvxs::GuestConnection
 method nvx::guest::nvxs::GuestConnection::acknowledge
@@ -1245,7 +1245,7 @@ const nvx::guest::reseed::Seed::LENGTH
 method nvx::guest::reseed::Seed::from_bytes
 method nvx::guest::reseed::Seed::generation_id
 method nvx::guest::reseed::Seed::read
-fn nvx::guest::reseed::main
+fn nvx::guest::reseed::main (hidden)
 fn nvx::guest::reseed::reseed
 mod nvx::guest::root
 struct nvx::guest::root::Assembly
@@ -1595,9 +1595,9 @@ struct nvx::guest::time::Violation
 method nvx::guest::time::Violation::code
 method nvx::guest::time::Violation::detail
 method nvx::guest::time::Violation::status
-fn nvx::guest::time::main
-mod nvx::guest::time_probe
-fn nvx::guest::time_probe::main
+fn nvx::guest::time::main (hidden)
+mod nvx::guest::time_probe (hidden)
+fn nvx::guest::time_probe::main (hidden)
 fn nvx::guest_path
 mod nvx::host
 mod nvx::host::artifacts
@@ -1678,8 +1678,8 @@ const nvx::host::artifacts::PACKAGE_MANIFEST_SUFFIX
 fn nvx::host::artifacts::absolute
 fn nvx::host::artifacts::check_manifest
 fn nvx::host::artifacts::openvmm_executable
-mod nvx::host::cli
-fn nvx::host::cli::main
+mod nvx::host::cli (hidden)
+fn nvx::host::cli::main (hidden)
 mod nvx::host::filesystem
 struct nvx::host::filesystem::Bind
 field nvx::host::filesystem::Bind::child
@@ -3411,9 +3411,9 @@ const nvx::protocol::status::TIME_STATUSES
 const nvx::protocol::status::TIME_VIOLATION
 fn nvx::protocol::status::describe
 fn nvx::resolve_guest_path
-mod nvx::testing
-mod nvx::testing::fake_openvmm
-fn nvx::testing::fake_openvmm::main
+mod nvx::testing (hidden)
+mod nvx::testing::fake_openvmm (hidden)
+fn nvx::testing::fake_openvmm::main (hidden)
 mod nvx::uuid
 struct nvx::uuid::ParseUuidError
 struct nvx::uuid::Uuid

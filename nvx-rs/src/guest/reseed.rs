@@ -254,6 +254,7 @@ fn reseed_through(random: &CStr, seed: &Seed) -> Result<(), ReseedError> {
 
 /// Runs `nvx-reseed` with the process's arguments. It exits with 0, 1 when an operation or a
 /// check fails, or 2 for a usage error.
+#[doc(hidden)]
 pub fn main() -> ExitCode {
     run_main(|args| {
         run(

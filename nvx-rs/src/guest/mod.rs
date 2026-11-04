@@ -94,18 +94,23 @@ pub use generation::GenerationId;
 pub mod cgroup;
 #[cfg(target_arch = "x86_64")]
 pub mod clone;
+#[doc(hidden)]
 pub mod console_pending;
 #[cfg(target_arch = "x86_64")]
+#[doc(hidden)]
 pub mod device_io;
 pub mod entry;
 pub mod exec;
 #[cfg(target_arch = "x86_64")]
+#[doc(hidden)]
 pub mod exit;
 pub mod gpt;
 pub mod ingress;
+#[doc(hidden)]
 pub mod managed_agent;
 pub mod mappings;
 #[cfg(target_arch = "x86_64")]
+#[doc(hidden)]
 pub mod mmio_write;
 pub mod nvxs;
 pub mod process;
@@ -116,4 +121,5 @@ pub mod terminal;
 #[cfg(target_arch = "x86_64")]
 pub mod time;
 #[cfg(target_arch = "x86_64")]
+#[doc(hidden)]
 pub mod time_probe;
