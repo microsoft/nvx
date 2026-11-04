@@ -85,6 +85,9 @@ OpenVMM limits, and recorded-plan checks and rendering. The
 lock-held lifecycle transitions, and workload execution. The CLI's
 [managed sandbox lifecycle](src/host/cli/sandbox/lifecycle/mod.rs) separates state
 directories, outcome reports, start and exec, and stop and deprovision. The
+CLI's own [store](src/host/cli/store/mod.rs) keeps the layout of a sandbox's
+state directory and its documentation, with private siblings for the names of
+its files and its lock. The
 [Linux](src/host/platform/linux/mod.rs) and
 [Windows](src/host/platform/windows/mod.rs) platform modules each separate
 processes, spawns, private directories and files, file identities, the claim of a
