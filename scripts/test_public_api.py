@@ -182,6 +182,10 @@ class ListingTests(unittest.TestCase):
         item = crate.struct("Item")
         helper = crate.add("function", "helper")
         nested = crate.module("nested", crate.add("function", "inner"))
+        ready = crate.add(
+            "variant", "Ready", {"kind": {"tuple": [crate.add("struct_field", "0")]}}
+        )
+        gone = crate.add("variant", "Gone", {"kind": "plain"}, hidden=True)
         open_ = crate.add("function", "open")
         shown = crate.module("shown", open_)
         root = crate.module(
@@ -190,6 +194,8 @@ class ListingTests(unittest.TestCase):
             crate.use("private::Item", item),
             crate.use("private::helper", helper, "assist"),
             crate.use("private::nested", nested),
+            crate.use("private::State::Ready", ready, "Alias"),
+            crate.use("private::State::Gone", gone),
             crate.use("shown::open", open_),
         )
 
@@ -197,6 +203,9 @@ class ListingTests(unittest.TestCase):
             public_api.api_lines(crate.document(root)),
             [
                 "mod demo",
+                "variant demo::Alias",
+                "field demo::Alias::0",
+                "variant demo::Gone (hidden)",
                 "struct demo::Item",
                 "fn demo::assist",
                 "mod demo::nested",

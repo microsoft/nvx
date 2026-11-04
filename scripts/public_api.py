@@ -161,12 +161,11 @@ class Lister:
         elif kind == "enum":
             self.add(path, kind, hidden)
             for variant_id in inner["variants"]:
-                variant = self.get(variant_id)
-                variant_path = f"{path}::{variant['name']}"
-                variant_hidden = hidden or HIDDEN in variant["attrs"]
-                self.add(variant_path, "variant", variant_hidden)
-                self.fields(variant["inner"]["variant"], variant_path, variant_hidden)
+                self.item(self.get(variant_id), path, None, hidden, modules)
             self.impls(inner["impls"], path, hidden)
+        elif kind == "variant":
+            self.add(path, kind, hidden)
+            self.fields(inner, path, hidden)
         elif kind == "trait":
             self.add(path, kind, hidden)
             self.associated(inner["items"], path, hidden)
