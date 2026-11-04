@@ -14,6 +14,45 @@ use super::*;
 use crate::host::platform::Transport;
 
 #[test]
+fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let transport = connect_endpoint(
+        path.to_str().unwrap(),
+        std::process::id(),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    drop(listener);
+    fs::remove_file(&path).unwrap();
+    // Neither dropping another duplicate nor removing the endpoint closes this connection.
+    drop(transport.try_clone_handle().unwrap().unwrap());
+    let handle = transport.try_clone_handle().unwrap().unwrap();
+    drop(transport);
+    let mut duplicate = UnixStream::from(handle);
+    let timeout = Some(Duration::from_secs(2));
+    duplicate.set_read_timeout(timeout).unwrap();
+    duplicate.set_write_timeout(timeout).unwrap();
+    peer.set_read_timeout(timeout).unwrap();
+    peer.set_write_timeout(timeout).unwrap();
+    duplicate.write_all(b"request").unwrap();
+    let mut request = [0; 7];
+    peer.read_exact(&mut request).unwrap();
+    assert_eq!(&request, b"request");
+    peer.write_all(b"response").unwrap();
+    let mut response = [0; 8];
+    duplicate.read_exact(&mut response).unwrap();
+    assert_eq!(&response, b"response");
+    drop(duplicate);
+    assert_eq!(peer.read(&mut response).unwrap(), 0);
+}
+
+#[test]
 fn a_wait_sleeps_a_remainder_below_a_millisecond_instead_of_polling_a_millisecond() {
     assert_eq!(wait_step(Duration::ZERO), (Duration::ZERO, Duration::ZERO));
     for remainder in [Duration::from_micros(300), Duration::from_micros(999)] {

@@ -989,6 +989,14 @@ which is zero once OpenVMM read everything. A named pipe tells its writer
 nothing of the kind, so on Windows, and for a transport that does not tell, it
 is `None`.
 
+On Linux and Windows, `Transport::try_clone_handle` optionally returns an
+owned native handle to the same peer-verified connection, not a reconnect:
+an `OwnedFd` for the Unix socket or an `OwnedHandle` for the overlapped pipe.
+An adapter must drop the blocking transport before using or registering the
+duplicate with an I/O runtime, or changing the shared blocking mode. The
+default is `Ok(None)`, so transports without native handles need not implement
+it, and NVX does not depend on an asynchronous I/O runtime.
+
 ### `nvx::host::sandbox`
 
 The launch profile of `nvx-rs sandbox`, with native input validation:
