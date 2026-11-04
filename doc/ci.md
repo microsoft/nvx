@@ -1918,7 +1918,10 @@ start the workflow, and a manually dispatched run notifies the person who
 started it.
 The job checks out the default branch, never the run's code. Its token can
 read the repository, the run's jobs and logs, and their check annotations,
-and write issues, and no other workflow can write issues; the
+and write issues. No other workflow can write issues, except the
+`safe_outputs` and `conclusion` jobs that gh-aw generates for the
+[NFV PR reviewer](../.github/workflows/nfv-pr-review.md), which comment on a
+pull request and report the reviewer's failures as issues; the
 [Test changes](#test-changes) workflow labels and comments on pull requests
 with a token that writes pull requests instead. The job runs one
 report at a time; a newer reporter can replace one that waits for its turn,
