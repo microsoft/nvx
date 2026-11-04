@@ -425,7 +425,9 @@ impl Store {
     ///
     /// - with [`ErrorKind::Unsupported`] for inputs that [`Capture`] does not admit, as
     ///   [`TemplatePlan::new`] refuses them, for a store whose path is too long for the control
-    ///   socket of a capture's VMM, on Linux, and for a store that holds
+    ///   socket of a capture's VMM, on Linux, for one whose capture transaction path exceeds
+    ///   258 UTF-16 code units on Windows, including any verbatim prefix and trailing separator,
+    ///   and for a store that holds
     ///   [`MAX_GENERATIONS`] generations;
     /// - with [`ErrorKind::Unavailable`] for a placeholder that its binding's check refuses, as
     ///   [`DistroBinding::check`] fails, that is a link, or on Windows any other reparse point,
@@ -925,8 +927,10 @@ impl Store {
     /// `class` in it, and returns the slot's store.
     fn open_slot(&self, class: ClassIdentity) -> Result<SandboxStore> {
         let captures = self.captures_dir();
+        let slot = captures.join(slot_name(class));
+        platform::check_working_dir(&slot.join(TRANSACTION_NAME))?;
         create_private_dir(&captures, CAPTURES_WHAT)?;
-        let slot = SandboxStore::create(captures.join(slot_name(class)))?;
+        let slot = SandboxStore::create(slot)?;
         // A capture's VM listens in its transaction, the sandbox store from which it launches.
         let socket = slot.dir().join(TRANSACTION_NAME).join(SOCKET_NAME);
         if cfg!(target_os = "linux") && socket.as_os_str().len() >= SOCKET_PATH_LIMIT {

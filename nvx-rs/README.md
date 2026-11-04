@@ -509,6 +509,14 @@ The store also owns the file in which the VMM stages its outcome report, which a
 VMM that is killed while it writes the report leaves, and removes it once no
 process of its launch runs.
 
+On Windows, directory creation and no-replace renames use extended-length paths
+when needed, so storage paths may exceed the legacy 248-character directory and
+260-character file limits without enabling a machine-wide long-path setting.
+The filesystem's component limits and Windows' extended-length path limit
+(about 32,767 UTF-16 code units, including the resolved root and internal file
+names) still apply. VM launches also have the working-directory limits
+described under `instance`, `supervisor`, and `template` below.
+
 ### `nvx::host::instance`
 
 `Instance`: a VM in a sandbox store of its own, which `nvx::host::store`,
@@ -530,6 +538,12 @@ instance, with the caller's files and its directory, through the store.
 
 `write_json` and `read_json` keep the configuration records that callers store
 beside an instance.
+
+On Windows, an instance's directory is also its VMM's working directory, whose
+absolute path may have at most 258 UTF-16 code units, including any verbatim
+prefix and trailing separator. `check_launch` checks this before the instance
+exists, and `LockedInstance::start` checks it before recording a launch; both
+return `Unsupported` with the limit in the top-level message.
 
 ### `nvx::host::nvxs`
 
@@ -584,6 +598,12 @@ the VMM inherits under their numbers, besides its standard streams, and it
 inherits nothing else of the caller's: on Linux, they must be close-on-exec, a
 flag that only the VMM's own process clears; on Windows, they join the VMM's
 explicit handle list.
+
+Windows' process-creation API separately limits `VmmCommand::working_dir` to
+258 UTF-16 code units in its absolute path, including any verbatim prefix and
+trailing separator. It may name a shorter directory than the store; a raw
+`spawn` refuses an overlong working directory with `InvalidInput`, rather than
+silently changing the requested directory.
 
 On Linux, the VMM starts with the caller's umask without the owner's bits,
 which only the VMM's own process clears. The umask still narrows the group's
@@ -961,6 +981,16 @@ by path, as it does a restore's. Once the VMM has exited, it checks the outcome
 report, the snapshot's manifest and artifacts, and the key, and publishes the
 transaction in two commits, a rename into `generations/` that replaces nothing,
 then the index.
+
+On Windows, capture preflight refuses a transaction path,
+`<template-store>\captures\<16-hex-slot>\transaction`, above 258 UTF-16 code
+units, including any verbatim prefix and trailing separator, before creating
+the slot or scratch. Without a trailing separator this leaves 220 units for
+the absolute template-store path, or 210 for a state root whose store is
+`<state>\templates`. A clone's sandbox directory is also its VMM's working
+directory, so `ClonePlan::launch` checks the same 258-unit limit before
+writing launch records. These refusals return `Unsupported` with the limit
+in the top-level message.
 
 A capture that fails publishes nothing, and `Store::recover_captures` ends the
 captures that a crash interrupted, publishing those that were checked, and

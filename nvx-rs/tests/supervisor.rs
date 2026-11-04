@@ -592,6 +592,75 @@ fn processes_can_be_shared_between_threads() {
 }
 
 #[test]
+#[cfg(windows)]
+fn long_stores_launch_with_a_short_working_directory() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let _spawns = serialized();
+    let root = tempfile::tempdir().unwrap();
+    let mut parent = root.path().to_path_buf();
+    while parent.as_os_str().encode_wide().count() < 320 {
+        parent.push("long-state-root-component");
+    }
+    fs::create_dir_all(&parent).unwrap();
+    let store = SandboxStore::create(parent.join("sandbox")).unwrap();
+    let log = File::create(parent.join("refused.log")).unwrap();
+    let error = supervisor::spawn(&vmm_command(&parent, false), &CAPABILITY, log).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("working directory"));
+    assert!(error.to_string().contains("258"));
+
+    let mut vmm = VmmDirectory::new();
+    let mut locked = store.lock(None).unwrap();
+    let running = launch_vmm(&mut locked, &mut vmm);
+    assert!(!running.process().wait(Instant::now() + SHORT_WAIT).unwrap());
+    let stopped = running
+        .stop(&mut locked, Instant::now() + TIMEOUT, None, |_, _| {
+            vmm.end();
+            Ok::<(), Infallible>(())
+        })
+        .unwrap();
+    assert_eq!(stopped.outcome, StopOutcome::Graceful);
+    assert!(stopped.graceful_error.is_none());
+    assert!(store.runtime().unwrap().is_none());
+}
+
+#[test]
+#[cfg(windows)]
+fn working_directory_limits_include_trailing_separators() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let _spawns = serialized();
+    let root = tempfile::tempdir().unwrap();
+    for (units, trailing, accepted) in [
+        (258, false, true),
+        (259, false, false),
+        (257, true, true),
+        (258, true, false),
+    ] {
+        let name = "w".repeat(units - root.path().as_os_str().encode_wide().count() - 1);
+        let directory = root.path().join(name);
+        fs::create_dir_all(&directory).unwrap();
+        let working = if trailing {
+            directory.join("")
+        } else {
+            directory.clone()
+        };
+        let log = File::create(directory.join(format!("vmm-{units}-{trailing}.log"))).unwrap();
+        let launched = supervisor::spawn(&vmm_command(&working, false), &CAPABILITY, log);
+        if accepted {
+            assert!(launched.unwrap().kill_and_wait());
+        } else {
+            let error = launched
+                .map(|launched| assert!(launched.kill_and_wait()))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("258"));
+        }
+    }
+}
+
+#[test]
 fn a_child_that_exits_wakes_its_waiter() {
     let _spawns = serialized();
     let mut vmm = VmmDirectory::new();

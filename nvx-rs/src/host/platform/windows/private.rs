@@ -30,7 +30,7 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::identity::handle_information;
-use super::{last_error, owned, raw, wide};
+use super::{last_error, owned, raw, wide_path};
 
 /// Creates `path` if needed. The directory inherits the ACL of its parent, which is private to
 /// the user under the default state root.
@@ -121,7 +121,7 @@ impl CurrentUser {
 /// that allows others is not restricted, since a handle that they opened keeps its access.
 pub(crate) fn create_store_dir(path: &Path) -> io::Result<Option<String>> {
     let user = CurrentUser::get()?;
-    let name = wide(path);
+    let name = wide_path(path)?;
     with_owner_only_attributes(
         &user,
         FILE_ALL_ACCESS,
@@ -431,7 +431,7 @@ pub(crate) fn make_sparse(file: &fs::File) -> io::Result<()> {
 /// Renames `from` to `to` unless `to` exists, which it leaves as it is, failing with
 /// [`io::ErrorKind::AlreadyExists`]: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
 pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
-    let (from, to) = (wide(from), wide(to));
+    let (from, to) = (wide_path(from)?, wide_path(to)?);
     // SAFETY: both names are NUL-terminated.
     if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
         return Err(io::Error::last_os_error());

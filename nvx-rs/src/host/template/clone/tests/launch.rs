@@ -1496,6 +1496,43 @@ fn a_clone_launches_only_as_the_launch_that_its_durable_binding_reserves() {
     vmm.reference = Some(restoring.starting().process().reference().clone());
 }
 
+#[cfg(windows)]
+#[test]
+fn working_directory_limits_are_checked_before_clone_launches() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let fixture = Fixture::new();
+    complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let request = tmpfs_request(&image, &binding);
+    let mut parent = fixture.path("sandboxes", "");
+    while parent.as_os_str().encode_wide().count() < 300 {
+        parent.push("long-state-root-component");
+        assert_eq!(platform::create_owner_only_dir(&parent).unwrap(), None);
+    }
+    let sandbox = parent.join("sandbox");
+    let mut acquired = fixture.acquire(sandbox.to_str().unwrap());
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let hooks = Hooks {
+        command: &never_spawned,
+        ..Hooks::LAUNCH
+    };
+    let (kind, message) = refused_at(
+        plan.launch_with(
+            &mut acquired,
+            Path::new(OPENVMM),
+            &runtime_of(&fixture),
+            hooks,
+        ),
+        Stage::Launch,
+        Evidence::HostFailure,
+    );
+    assert_eq!(kind, ErrorKind::Unsupported);
+    assert!(message.contains("working directory"));
+    assert!(message.contains("258"));
+    assert_unlaunched(&fixture, &acquired);
+}
+
 /// Returns OpenVMM's outcome report of a VM whose guest ended it with `status`.
 fn guest_exit(status: u8) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({

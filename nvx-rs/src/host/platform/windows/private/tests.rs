@@ -1,4 +1,81 @@
+use std::os::windows::ffi::OsStrExt;
+
+use super::super::wide;
 use super::*;
+
+fn long_directory() -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let mut parent = root.path().to_path_buf();
+    while parent.as_os_str().encode_wide().count() < 320 {
+        parent.push("long-state-root-component");
+    }
+    fs::create_dir_all(&parent).unwrap();
+    (root, parent)
+}
+
+#[test]
+fn private_directories_support_long_paths() {
+    let (_root, parent) = long_directory();
+    fs::create_dir(parent.join("child")).unwrap();
+    for (index, parent) in [
+        parent.clone(),
+        parent.join("child").join(".."),
+        fs::canonicalize(&parent).unwrap(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let directory = parent.join(format!("store-{index}-\u{1f600}"));
+        assert_eq!(create_store_dir(&directory).unwrap(), None);
+        assert_eq!(create_store_dir(&directory).unwrap(), None);
+        assert_eq!(check_store_dir(&directory).unwrap(), None);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join("record"))
+            .unwrap();
+        assert_eq!(private_file_problem(&file).unwrap(), None);
+    }
+}
+
+#[test]
+fn renames_support_long_paths_without_replacing_existing_files() {
+    let (_root, parent) = long_directory();
+    let source = parent.join("source");
+    let destination = parent.join("destination");
+    fs::write(&source, b"original").unwrap();
+    rename_no_replace(&source, &destination).unwrap();
+    assert!(!source.exists());
+    assert_eq!(fs::read(&destination).unwrap(), b"original");
+
+    fs::write(&source, b"replacement").unwrap();
+    assert_eq!(
+        rename_no_replace(&source, &destination).unwrap_err().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(fs::read(&source).unwrap(), b"replacement");
+    assert_eq!(fs::read(&destination).unwrap(), b"original");
+}
+
+#[test]
+fn invalid_paths_do_not_create_or_rename_their_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let invalid = root.path().join("store\0suffix");
+    assert_eq!(
+        create_store_dir(&invalid).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(!root.path().join("store").exists());
+
+    let source = root.path().join("source");
+    fs::write(&source, b"original").unwrap();
+    assert_eq!(
+        rename_no_replace(&source, &invalid).unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(fs::read(&source).unwrap(), b"original");
+    assert!(!root.path().join("store").exists());
+}
 
 /// Replaces the access control list of the file or directory `path` with the protected list of
 /// the descriptor `sddl`, in the security descriptor definition language.

@@ -8,8 +8,10 @@ mod process;
 mod spawn;
 
 use std::ffi::{OsStr, c_void};
+use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::path::{Component, Path, Prefix};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
@@ -49,6 +51,34 @@ pub const SUPPORTED: bool = true;
 /// Encodes `value` as a NUL-terminated UTF-16 string for Win32.
 fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value.as_ref().encode_wide().chain([0]).collect()
+}
+
+/// Encodes a filesystem path for Win32, resolving it before adding an extended-length prefix
+/// when it reaches the legacy directory limit. Existing verbatim and device prefixes are preserved.
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    let path = std::path::absolute(path)?;
+    let name = wide(&path);
+    if name[..name.len() - 1].contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "filesystem path contains a NUL character",
+        ));
+    }
+    if name.len() <= 248 {
+        return Ok(name);
+    }
+    let (prefix, skip) = match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) => (r"\\?\", 0),
+            Prefix::UNC(..) => (r"\\?\UNC\", 2),
+            _ => ("", 0),
+        },
+        _ => ("", 0),
+    };
+    Ok(prefix
+        .encode_utf16()
+        .chain(name.into_iter().skip(skip))
+        .collect())
 }
 
 /// Returns the calling thread's Win32 last-error code.
