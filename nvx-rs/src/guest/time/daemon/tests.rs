@@ -25,6 +25,7 @@ fn polled(disruption: u32) -> BestSample {
         },
         frequency: 6_553_600,
         limited: false,
+        test_hooks: false,
     }
 }
 

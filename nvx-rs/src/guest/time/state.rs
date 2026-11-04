@@ -205,6 +205,9 @@ pub(crate) struct TimeState {
     /// The disruption counter of the latest accepted sample, which changes when host UTC steps,
     /// the host resumes from a suspension, or the guest TSC's offset from the host's changes.
     pub(crate) host_disruption: u64,
+    /// Whether the latest accepted sample carried the test-hook flag: host overrides, which only
+    /// tests make, of the time that it published were active.
+    pub(crate) host_test_hooks: bool,
     /// Number of accepted time samples.
     pub(crate) samples: u64,
     /// Number of rejected time samples.
@@ -243,6 +246,7 @@ impl Default for TimeState {
             host_correction_bound_ppb: None,
             host_max_error_us: None,
             host_disruption: 0,
+            host_test_hooks: false,
             samples: 0,
             rejected_samples: 0,
             last_sample_error: SampleRejection::None,
@@ -254,7 +258,8 @@ impl Default for TimeState {
 impl TimeState {
     /// Records the accepted time sample `sample`: the wall clock's offset from host UTC and its
     /// uncertainty, the frequency correction that the discipline holds, whether Linux's limit
-    /// clamped it, and the discipline of host UTC that the sample published.
+    /// clamped it, the discipline of host UTC that the sample published, and whether host test
+    /// hooks altered it.
     pub(crate) fn record_sample(&mut self, sample: &BestSample) {
         let host = &sample.host;
         self.samples += 1;
@@ -267,6 +272,7 @@ impl TimeState {
         self.host_correction_bound_ppb = host.correction_bound.map(decoders::bound_to_ppb);
         self.host_max_error_us = host.max_error_us.map(u64::from);
         self.host_disruption = u64::from(host.disruption);
+        self.host_test_hooks = sample.test_hooks;
         self.last_sample_error = SampleRejection::None;
     }
 
@@ -335,6 +341,7 @@ impl TimeState {
             "host_correction_bound_ppb" => self.host_correction_bound_ppb = bound(value)?,
             "host_max_error_us" => self.host_max_error_us = bound(value)?,
             "host_disruption" => self.host_disruption = number(value)?,
+            "host_test_hooks" => self.host_test_hooks = number::<u64>(value)? != 0,
             "samples" => self.samples = number(value)?,
             "rejected_samples" => self.rejected_samples = number(value)?,
             "last_sample_error" => self.last_sample_error = SampleRejection::parse(value)?,
@@ -504,6 +511,11 @@ impl fmt::Display for TimeState {
             Bound(self.host_max_error_us)
         )?;
         writeln!(formatter, "host_disruption={}", self.host_disruption)?;
+        writeln!(
+            formatter,
+            "host_test_hooks={}",
+            u8::from(self.host_test_hooks)
+        )?;
         writeln!(formatter, "samples={}", self.samples)?;
         writeln!(formatter, "rejected_samples={}", self.rejected_samples)?;
         writeln!(formatter, "last_sample_error={}", self.last_sample_error)?;

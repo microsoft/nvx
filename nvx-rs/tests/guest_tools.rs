@@ -1499,7 +1499,7 @@ fn time_test_mode_checks_logs_timer_state_and_status() {
             "uncertainty_ns=1800\nfrequency_ppb=0\nfrequency_limited=0\n",
             "host_status=unknown\nhost_correction_ppb=0\n",
             "host_correction_bound_ppb=unknown\nhost_max_error_us=unknown\n",
-            "host_disruption=0\nsamples=0\n",
+            "host_disruption=0\nhost_test_hooks=0\nsamples=0\n",
             "rejected_samples=0\nlast_sample_error=none\nviolations=0\n"
         )
         .as_bytes()

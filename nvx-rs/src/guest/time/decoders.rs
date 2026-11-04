@@ -564,6 +564,12 @@ impl TimeSample {
             },
         })
     }
+
+    /// Returns whether the sample carries the test-hook flag, which mirrors the restore packet's:
+    /// host overrides, which only tests make, of the time that it publishes are active.
+    pub(crate) const fn test_hooks(&self) -> bool {
+        self.flags & SAMPLE_TEST_HOOKS != 0
+    }
 }
 
 /// The guest's reads around the latch of one time sample, with which it pairs the sample's

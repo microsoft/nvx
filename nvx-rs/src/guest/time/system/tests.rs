@@ -403,6 +403,7 @@ fn a_sample_pairs_its_guest_tsc_with_the_realtime_clock() {
             host: HOST,
             frequency: 6_553_600,
             limited: false,
+            test_hooks: false,
         }
     );
     // One transaction latched one sample, after the rate's MSR read and a query of the
@@ -416,6 +417,18 @@ fn a_sample_pairs_its_guest_tsc_with_the_realtime_clock() {
         ops.adjustments.lock().unwrap().as_slice(),
         [ClockAdjustment::Query]
     );
+}
+
+#[test]
+fn a_sample_reports_whether_host_test_hooks_altered_it() {
+    let utc_ns = FakeOps::REALTIME_NS as u64 + 1_000;
+    let mut hooked = sample_input(0, utc_ns, sample_tsc(0), 400, HOST);
+    // The sample's first word holds its version, flags, status, and reserved bytes.
+    hooked[0] |= u32::from_ne_bytes([0, 0x08, 0, 0]);
+    let ops = FakeOps::new(window_input([hooked]));
+    let runtime = Runtime::new(&ops, false);
+    let (result, sample) = best_sample(&runtime, 3, SAMPLE_BOUND_NS, 0).unwrap();
+    assert_eq!((result, sample.test_hooks), (SampleResult::Accepted, true));
 }
 
 #[test]
@@ -538,6 +551,7 @@ fn a_synchronization_steps_then_holds_the_host_frequency() {
         host: HOST,
         frequency: 6_553_600,
         limited: false,
+        test_hooks: false,
     };
     synchronize(&runtime, &sample).unwrap();
     assert_eq!(
