@@ -1,7 +1,6 @@
 ---
 name: commit-message
-description: Generate a repository-conformant commit message for the currently staged changes
-disable-model-invocation: true
+description: "Generate a repository-conformant commit message for the currently staged changes, and print it without staging or committing anything. Use when asked to write or suggest a commit message for staged changes."
 ---
 # Suggest a Commit Message
 

@@ -1,7 +1,6 @@
 ---
 name: create-pr
-description: Create PR with the current branch
-disable-model-invocation: true
+description: "Open a pull request in microsoft/nvx for the current branch: ask whether it should be Draft or Ready, push the branch without force, and write a title and a body with a Validation section that follow the repository's conventions. Use when asked to open, create, or submit a pull request for the current branch."
 argument-hint: "Optional: issue number or context for the pull request"
 ---
 Open a pull request for the current branch.

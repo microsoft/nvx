@@ -1,7 +1,6 @@
 ---
 name: review-changes
-description: Review current changes, address findings, and verify tests pass without committing
-disable-model-invocation: true
+description: "Review the staged, unstaged, and untracked changes, fix the findings in the working tree, and run the repository's validation gates, without staging or committing. Use when asked to review, self-review, or validate uncommitted changes, such as before committing or opening a pull request."
 argument-hint: "Optional: issue number this change should fix (e.g. 296)"
 ---
 Review the current changes (staged, unstaged, and untracked) in this repository.

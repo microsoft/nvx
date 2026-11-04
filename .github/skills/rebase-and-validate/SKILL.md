@@ -1,7 +1,6 @@
 ---
 name: rebase-and-validate
-description: Rebase the current branch onto a target branch, resolve conflicts safely, and validate the result
-disable-model-invocation: true
+description: "Rebase the current branch onto a target branch, origin/dev by default, resolve conflicts safely, and validate the result, without pushing. Use when an NVX branch needs rebasing onto dev or another branch, such as to resolve its pull request's conflicts or to pick up a fix."
 argument-hint: "[target=origin/dev]"
 ---
 Rebase the current Git branch onto the target branch supplied in the input, then ensure the

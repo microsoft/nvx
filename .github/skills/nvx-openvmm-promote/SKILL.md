@@ -189,7 +189,8 @@ from an older head of `feature/microvm/dev`: the roadmap stays valid, and the pu
 needs a rebase onto the pin and new OpenVMM CI before its promotion. If they are every
 commit of the chain, the chain itself was rebased, as onto a new upstream base: positions
 shift, and the whole roadmap needs remapping, as the `feature/microvm/release/v2.3`
-rebase did.
+rebase did. Promote such a release with
+[nvx-openvmm-rebase](../nvx-openvmm-rebase/SKILL.md) instead.
 
 The third command prints the pin's position, the fourth its distance from the mapped tip,
 and the fifth lists the new positions in order. Any commit's position is

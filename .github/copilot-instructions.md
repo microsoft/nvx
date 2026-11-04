@@ -12,7 +12,10 @@
   commit gitlink-only unless the task explicitly requires coordinated NVX
   changes, and map the pinned commits in
   [the OpenVMM upstream roadmap](../doc/openvmm-upstream-roadmap.md) in a
-  separate commit.
+  separate commit. To rebase or reorganize the microVM chain onto a newer
+  upstream `main` as a new `feature/microvm/release/vX.Y` branch, use the
+  `nvx-openvmm-rebase` skill, which fast-forwards the previous release branch to
+  `feature/microvm/dev` before it moves that branch to the new release.
 - Preserve dirty state in both repositories. Do not reset, clean, switch, update,
   or synchronize the submodule over uncommitted work.
 

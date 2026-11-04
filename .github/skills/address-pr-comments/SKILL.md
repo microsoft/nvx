@@ -1,7 +1,6 @@
 ---
 name: address-pr-comments
-description: Address unresolved PR comments
-disable-model-invocation: true
+description: "Address the unresolved review comments of a pull request: verify each claim against the code, fix the valid ones in the working tree and test the fixes, and reply to and resolve only the threads that the pull request's head already settles, without staging or committing. Use when asked to address, fix, answer, or resolve review comments or threads on an NVX pull request."
 argument-hint: "PR number or URL (defaults to the current branch's PR)"
 ---
 Address the unresolved review comments on the pull request identified by the input. If no pull
