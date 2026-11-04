@@ -257,9 +257,10 @@ class ListingTests(unittest.TestCase):
             public_api.api_lines(crate.document(root)),
             ["mod demo", "mod demo::cli", "fn demo::cli::main"],
         )
-        # The listing documents every feature but `bundled`.
+        # The listing documents every feature but `bundled`, which no default
+        # feature enables either.
         self.assertEqual(
-            public_api.selected_features(
+            public_api.feature_arguments(
                 {
                     "default": ["host"],
                     "host": ["serde"],
@@ -270,7 +271,7 @@ class ListingTests(unittest.TestCase):
                     "guest": [],
                 }
             ),
-            ["cli", "guest", "host", "serde", "testing"],
+            ["--no-default-features", "--features", "cli,guest,host,serde,testing"],
         )
 
     def test_refuses_another_format_version(self) -> None:

@@ -230,9 +230,15 @@ def api_lines(document: Any) -> list[str]:
     ]
 
 
-def selected_features(features: Mapping[str, object]) -> list[str]:
-    """Returns the features to document: every one but `bundled`."""
-    return sorted(set(features) - EXCLUDED_FEATURES)
+def feature_arguments(features: Mapping[str, object]) -> list[str]:
+    """Returns Cargo's arguments that enable every feature but `bundled`: no
+    default feature, which could enable `bundled`, and each other one by
+    name."""
+    return [
+        "--no-default-features",
+        "--features",
+        ",".join(sorted(set(features) - EXCLUDED_FEATURES)),
+    ]
 
 
 def platform_lines() -> dict[str, list[str]]:
@@ -250,7 +256,7 @@ def platform_lines() -> dict[str, list[str]]:
     require_success(result, "cargo metadata")
     metadata = json.loads(result.stdout)
     [package] = metadata["packages"]
-    features = ",".join(selected_features(package["features"]))
+    features = feature_arguments(package["features"])
     environment = {**os.environ, "RUSTC_BOOTSTRAP": "1"}
     listings: dict[str, list[str]] = {}
     for platform, target in TARGETS.items():
@@ -260,8 +266,7 @@ def platform_lines() -> dict[str, list[str]]:
                 "rustdoc",
                 "--locked",
                 "--lib",
-                "--features",
-                features,
+                *features,
                 "--target",
                 target,
                 "--",
