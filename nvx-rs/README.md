@@ -111,7 +111,7 @@ changes only when the module's purpose does.
 | [`nvx::protocol::cmdline`](#nvxprotocolcmdline) | The kernel command line as Linux and the guest's init read it, with the virtio-mmio devices and the guest's DNS server that it names |
 | [`nvx::protocol::export`](#nvxprotocolexport) | The boot tokens of the host export, the virtio-fs device from which a guest maps host paths, and the guest's parser of them |
 | [`nvx::protocol::nvxs`](#nvxprotocolnvxs) | The NVXS session, independent of any application protocol: its records and the state machines of its host and guest roles |
-| [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles and where the root keeps its upper |
+| [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles, where the root keeps its upper, and how the guest assembles them |
 | [`nvx::protocol::share`](#nvxprotocolshare) | The guest targets that a sandbox's live shares may not take, which the host and the guest both refuse |
 | [`nvx::protocol::status`](#nvxprotocolstatus) | The exit statuses with which a clone's guest ends its VM once it fails fast, and what each means |
 | [`nvx::activation`](#nvxactivation) | The activation record of a layered root, which a clone reads in place of its captured configuration, and what Ready reports |
@@ -239,16 +239,25 @@ reassembles it.
 The boot tokens of a layered root, which the host renders and guests parse by
 the same rules: a `RootLayout` is a `RootImage` on the `distro` block device, an
 EROFS filesystem or a GPT disk with the `nvx::uuid::Uuid` that the guest expects
-of it, if any, over a `RootUpper`, the ext4 scratch disk or RAM.
+of it, if any, over a `RootUpper`, the ext4 scratch disk or RAM, with the
+settings of the root's assembly that it names: the overlay's `OverlayMode` and
+a scratch's `Journal` policy, both of `nvx::activation`, a GPT disk's
+first-partition bound, and a RAM upper's cap, from 1 to 90 percent of the VM's
+memory. The guest takes its own default for a setting that the layout leaves
+out.
 
 `RootLayout::tokens` renders `nvx_layer=distro,0xd0003000,FORMAT[:IDENTITY]` and
-`nvx_scratch=0xd0006000,ext4` or `nvx_overlay_upper=ramfs`, and
+`nvx_scratch=0xd0006000,ext4` or `nvx_overlay_upper=ramfs`, then
+`nvx_overlay_mode=trusted-lowers` or `untrusted-lowers`,
+`nvx_scratch_journal=allowed` or `forbidden`, `nvx_first_partition_bound=BYTES`,
+and `nvx_ram_upper_percent=PERCENT` for the settings that it names, and
 `RootLayout::parse` reads them from a kernel command line, and refuses
-malformed, repeated, and conflicting tokens and the earlier form without a
-format, with no fallback that probes the devices. It reads the virtio-mmio
-devices of the command line with `nvx::protocol::cmdline`, to refuse a RAM upper
-beside one at the scratch base. `tests/fixtures/root-tokens.json` holds its
-cases, which the tests of the guest's shell init replay too.
+malformed, repeated, and conflicting tokens, a setting of an upper or a format
+that the layout lacks, and the earlier form without a format, with no fallback
+that probes the devices. It reads the virtio-mmio devices of the command line
+with `nvx::protocol::cmdline`, to refuse a RAM upper beside one at the scratch
+base. `tests/fixtures/root-tokens.json` holds its cases, which the tests of the
+guest's shell init replay too.
 
 ### `nvx::protocol::share`
 
@@ -1633,8 +1642,10 @@ option set of the caller's `OverlayMode`, `metacopy=on,xino=on` or, for lowers
 that may carry untrusted overlay xattrs, `metacopy=off,redirect_dir=nofollow`,
 with no fallback, whose upper and work directories are on the `Upper`: an ext4
 scratch mounted `nosuid,nodev`, whose superblock it checks for a journal that
-the caller's `Journal` policy forbids, or a tmpfs mounted `nosuid,nodev` at the
-kernel's default size. It refuses overlay options longer than
+the caller's `Journal` policy forbids, or a tmpfs mounted `nosuid,nodev` with
+`size=N%` for the caller's cap of N percent of the guest's memory, which it
+refuses outside 1 to 90 before anything changes, or else at the kernel's
+default size. It refuses overlay options longer than
 `MOUNT_OPTIONS_LIMIT`, the most that a mount passes, which, below `/run/nvx`,
 fit up to 195 layers of a GPT disk, and an overlay that the kernel's mount table
 shows read-only or without the mode's options in effect, since the kernel mounts
