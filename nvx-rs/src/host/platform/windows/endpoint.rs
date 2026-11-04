@@ -28,7 +28,7 @@ use windows_sys::Win32::System::Threading::{
 
 use super::private::{CurrentUser, with_owner_only_attributes};
 use super::{last_error, owned, raw, wide};
-use crate::host::platform::{Transport, time_left};
+use crate::host::platform::{Transport, TransportHandle, time_left};
 
 /// Returns a fresh named-pipe endpoint for OpenVMM to listen on.
 pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
@@ -332,6 +332,10 @@ fn completion_error(error: u32, transferred: usize, timed_out: bool) -> io::Resu
 }
 
 impl Transport for PipeTransport {
+    fn try_clone_handle(&self) -> io::Result<Option<TransportHandle>> {
+        self.pipe.try_clone().map(Some)
+    }
+
     fn read(&mut self, buffer: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
         let length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
         let data = buffer.as_mut_ptr();
@@ -361,3 +365,6 @@ impl Transport for PipeTransport {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

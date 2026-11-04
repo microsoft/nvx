@@ -45,6 +45,17 @@ pub fn probe_hypervisor(hypervisor: Hypervisor) -> Result<()> {
 
 /// Byte stream to an OpenVMM control endpoint.
 pub trait Transport: Send {
+    /// Duplicates the connected endpoint for an adapter that uses native asynchronous I/O.
+    ///
+    /// Returns `Ok(None)` by default for transports without a native handle. The duplicate
+    /// owns a handle to the same already peer-verified connection, not a new connection.
+    /// The caller must drop this transport before using the duplicate or registering it with
+    /// an I/O runtime, and must not change the shared blocking mode while this transport lives.
+    #[cfg(any(target_os = "linux", windows))]
+    fn try_clone_handle(&self) -> io::Result<Option<TransportHandle>> {
+        Ok(None)
+    }
+
     /// Reads at least one byte, waiting at most `timeout` (`None` waits indefinitely).
     ///
     /// Returns `Ok(0)` at end of stream and an [`io::ErrorKind::TimedOut`] error on timeout.
@@ -68,6 +79,14 @@ pub trait Transport: Send {
         Ok(None)
     }
 }
+
+/// An owned duplicate of a verified control socket connection.
+#[cfg(target_os = "linux")]
+pub type TransportHandle = std::os::fd::OwnedFd;
+
+/// An owned duplicate of a verified, overlapped control pipe connection.
+#[cfg(windows)]
+pub type TransportHandle = std::os::windows::io::OwnedHandle;
 
 /// Returns the time left until `deadline`, `None` without one, or an [`io::ErrorKind::TimedOut`]
 /// error once it has passed.

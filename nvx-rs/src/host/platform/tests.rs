@@ -8,6 +8,25 @@ use super::*;
 
 #[cfg(any(target_os = "linux", windows))]
 #[test]
+fn a_transport_without_a_native_handle_needs_no_clone_implementation() {
+    struct CustomTransport;
+
+    impl Transport for CustomTransport {
+        fn read(&mut self, _: &mut [u8], _: Option<Duration>) -> io::Result<usize> {
+            unreachable!("cloning a handle does not read the transport")
+        }
+
+        fn write_all(&mut self, _: &[u8], _: Option<Duration>) -> io::Result<()> {
+            unreachable!("cloning a handle does not write the transport")
+        }
+    }
+
+    let transport: Box<dyn Transport> = Box::new(CustomTransport);
+    assert!(transport.try_clone_handle().unwrap().is_none());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
 fn host_identities_are_read_as_openvmm_reads_them() {
     let id = [
         0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,

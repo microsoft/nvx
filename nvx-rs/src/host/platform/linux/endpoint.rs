@@ -10,7 +10,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::host::platform::{Transport, time_left};
+use crate::host::platform::{Transport, TransportHandle, time_left};
 use crate::host::sys;
 
 /// Returns the control endpoint OpenVMM should listen on for a sandbox.
@@ -236,6 +236,10 @@ fn map_timeout(error: io::Error) -> io::Error {
 }
 
 impl Transport for UnixTransport {
+    fn try_clone_handle(&self) -> io::Result<Option<TransportHandle>> {
+        self.stream.try_clone().map(|stream| Some(stream.into()))
+    }
+
     fn read(&mut self, buffer: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
         self.stream.set_read_timeout(socket_timeout(timeout))?;
         loop {
