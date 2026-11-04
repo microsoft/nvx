@@ -6,6 +6,9 @@
 //!   [`RuntimeIdentity`](runtime::RuntimeIdentity), the hypervisor, which
 //!   [`probe_hypervisor`](runtime::probe_hypervisor) checks, and the
 //!   [`LaunchOptions`](runtime::LaunchOptions).
+//! - [`config`] holds the configuration of a VM as one value, a [`VmConfig`](config::VmConfig),
+//!   which it checks without reading the host: the VM's processors and memory, its root, the view
+//!   that its workload has of it, its export, and its boot console.
 //! - [`launch`] builds OpenVMM's command line from a [`LaunchSpec`](launch::LaunchSpec): the
 //!   managed lifecycle, the workload identity, the kernel command line, and the network and
 //!   filesystem options.
@@ -70,6 +73,7 @@ pub mod artifacts;
 #[cfg(feature = "cli")]
 #[doc(hidden)]
 pub mod cli;
+pub mod config;
 pub mod filesystem;
 pub mod instance;
 pub mod launch;
