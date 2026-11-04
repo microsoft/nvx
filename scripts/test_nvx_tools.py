@@ -19910,7 +19910,8 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
 
     def _read(self, command_line: str) -> subprocess.CompletedProcess[str]:
         """Runs the agent's reader of the root's boot tokens on `command_line`,
-        and prints the UUID that it expects of the distro layer and the upper."""
+        and prints the UUID that it expects of the distro layer, the upper, and
+        the RAM upper's cap."""
         functions = "".join(
             _shell_function(self.source, name)
             for name in ("is_canonical_uuid", "read_layer_token", "read_root_tokens")
@@ -19927,7 +19928,7 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
                 'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
                 f"{functions}"
                 "read_root_tokens\n"
-                'echo "layer_uuid=$layer_uuid upper=$upper"\n'
+                'echo "layer_uuid=$layer_uuid upper=$upper ram_percent=$ram_percent"\n'
             ),
             text=True,
             capture_output=True,
@@ -19937,7 +19938,7 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
     def test_agent_reads_the_boot_tokens_as_nvx_rs_reads_them(self):
         cases = json.loads(self.FIXTURE.read_text(encoding="utf-8"))["cases"]
         accepted: set[str] = set()
-        devices = 0
+        capped = devices = 0
         for case in cases:
             with self.subTest(case=case["name"]):
                 result = self._read(case["command_line"])
@@ -19945,23 +19946,35 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
                 if case.get("error") == self.SCRATCH_DEVICE_ERROR:
                     self.assertNotIn("shell_error", case)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertRegex(result.stdout, r"\Alayer_uuid=\S* upper=ram\n\Z")
+                    self.assertRegex(
+                        result.stdout, r"\Alayer_uuid=\S* upper=ram ram_percent=\d*\n\Z"
+                    )
                     devices += 1
                     continue
-                if layout is not None and layout["format"] == "erofs":
+                # The shell init assembles an EROFS image for trusted lowers, and
+                # cannot check that a scratch has no journal.
+                if (
+                    layout is not None
+                    and layout["format"] == "erofs"
+                    and layout.get("overlay") != "untrusted-lowers"
+                    and layout.get("journal") != "forbidden"
+                ):
                     self.assertNotIn("shell_error", case)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     identity = layout["identity"] or ""
+                    cap = layout.get("max_memory_percent", "")
                     self.assertEqual(
                         result.stdout,
-                        f"layer_uuid={identity} upper={layout['upper']}\n",
+                        f"layer_uuid={identity} upper={layout['upper']} ram_percent={cap}\n",
                     )
                     accepted.add(layout["upper"])
+                    capped += cap != ""
                     continue
                 self.assertEqual(result.returncode, 125, result.stdout)
                 self.assertRegex(result.stderr, r"\AFATAL: [^\n]+\n\Z")
                 self.assertIn(case.get("shell_error", ""), result.stderr)
         self.assertEqual(accepted, {"scratch", "ram"})
+        self.assertGreater(capped, 0)
         self.assertGreater(devices, 0)
 
     def test_agent_explains_the_roots_that_it_cannot_assemble(self):
@@ -19975,6 +19988,83 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
                 f"nvx_layer=distro,0xd0003000,gpt:{self.UUID} nvx_overlay_upper=ramfs",
                 f"nvx_layer=distro,0xd0003000,gpt:{self.UUID} names a GPT image, "
                 "which this init cannot assemble: it assembles only an EROFS image",
+            ),
+            (
+                "nvx_overlay_mode=untrusted-lowers nvx_layer=distro,0xd0003000,erofs "
+                "nvx_overlay_upper=ramfs",
+                "nvx_overlay_mode=untrusted-lowers names untrusted lowers, which "
+                "this init cannot assemble: it mounts the overlay only for trusted "
+                "lowers, with metacopy=on,xino=on",
+            ),
+            (
+                "nvx_layer=distro,0xd0003000,erofs nvx_scratch=0xd0006000,ext4 "
+                "nvx_scratch_journal=forbidden",
+                "nvx_scratch_journal=forbidden forbids the scratch a journal, which "
+                "this init cannot check: it reads nothing of the scratch's superblock",
+            ),
+        ):
+            with self.subTest(command_line=command_line):
+                result = self._read(command_line)
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertEqual(result.stderr, f"FATAL: {message}\n")
+
+    def test_agent_refuses_the_settings_with_the_messages_of_nvx_rs(self):
+        scratch = "nvx_layer=distro,0xd0003000,erofs nvx_scratch=0xd0006000,ext4"
+        ram = "nvx_layer=distro,0xd0003000,erofs nvx_overlay_upper=ramfs"
+        number = "a decimal number from 1 to {}, without a sign or leading zeros"
+        percent, bound = number.format(90), number.format(2**64 - 1)
+        for command_line, message in (
+            (
+                f"{scratch} nvx_scratch_journal",
+                "the nvx_scratch_journal kernel parameter has no value",
+            ),
+            (
+                f"{ram} nvx_ram_upper_percent=5 nvx_ram_upper_percent=5",
+                "the nvx_ram_upper_percent kernel parameter is repeated",
+            ),
+            (
+                f"{scratch} nvx_overlay_mode=trusted",
+                "the nvx_overlay_mode kernel parameter must be trusted-lowers or "
+                "untrusted-lowers, not 'trusted'",
+            ),
+            (
+                f"{scratch} nvx_scratch_journal=",
+                "the nvx_scratch_journal kernel parameter must be allowed or "
+                "forbidden, not ''",
+            ),
+            (
+                f"{ram} nvx_ram_upper_percent=91",
+                f"the nvx_ram_upper_percent kernel parameter must be {percent}, not '91'",
+            ),
+            (
+                f"{ram} nvx_ram_upper_percent=09",
+                f"the nvx_ram_upper_percent kernel parameter must be {percent}, not '09'",
+            ),
+            (
+                f"nvx_first_partition_bound=-1 {scratch}",
+                f"the nvx_first_partition_bound kernel parameter must be {bound}, "
+                "not '-1'",
+            ),
+            (
+                f"{ram} nvx_scratch_journal=allowed",
+                "the nvx_scratch_journal kernel parameter needs a scratch upper, "
+                "nvx_scratch",
+            ),
+            (
+                f"{scratch} nvx_ram_upper_percent=50",
+                "the nvx_ram_upper_percent kernel parameter needs a RAM upper, "
+                "nvx_overlay_upper",
+            ),
+            (
+                f"{scratch} nvx_first_partition_bound=4096",
+                "the nvx_first_partition_bound kernel parameter needs a GPT image",
+            ),
+            # The parser's refusals come before those of what this init cannot
+            # assemble.
+            (
+                f"{scratch} nvx_overlay_mode=untrusted-lowers nvx_scratch_journal=no",
+                "the nvx_scratch_journal kernel parameter must be allowed or "
+                "forbidden, not 'no'",
             ),
         ):
             with self.subTest(command_line=command_line):
@@ -20076,9 +20166,10 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
     def test_agent_mounts_the_upper_that_the_tokens_name(self):
         runtime = (self.root / "run").as_posix()
         log = self.root / "commands.log"
-        for upper, commands, point, name in (
+        for upper, ram_percent, commands, point, name in (
             (
                 "scratch",
+                "",
                 [
                     f"mkdir -p {runtime}/scratch",
                     "resolve 0xd0006000",
@@ -20091,6 +20182,7 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
             ),
             (
                 "ram",
+                "",
                 [
                     f"mkdir -p {runtime}/tmpfs",
                     f"mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs {runtime}/tmpfs",
@@ -20099,14 +20191,34 @@ class SandboxRootTokenAgentTests(unittest.TestCase):
                 f"{runtime}/tmpfs",
                 "the tmpfs upper",
             ),
+            (
+                "ram",
+                "25",
+                [
+                    f"mkdir -p {runtime}/tmpfs",
+                    "mount -t tmpfs -o mode=0755,nosuid,nodev,size=25% tmpfs "
+                    f"{runtime}/tmpfs",
+                    f"mkdir -p {runtime}/tmpfs/upper {runtime}/tmpfs/work",
+                ],
+                f"{runtime}/tmpfs",
+                "the tmpfs upper",
+            ),
         ):
-            with self.subTest(upper=upper):
+            with self.subTest(upper=upper, ram_percent=ram_percent):
                 log.unlink(missing_ok=True)
                 result = subprocess.run(
-                    [self.shell, "-s", "--", runtime, log.as_posix(), upper],
+                    [
+                        self.shell,
+                        "-s",
+                        "--",
+                        runtime,
+                        log.as_posix(),
+                        upper,
+                        ram_percent,
+                    ],
                     input=(
                         "set -eu\n"
-                        "runtime=$1\nlog=$2\nupper=$3\n"
+                        "runtime=$1\nlog=$2\nupper=$3\nram_percent=$4\n"
                         "scratch=$runtime/scratch\ntmpfs=$runtime/tmpfs\n"
                         'fatal() { echo "FATAL: $*" >&2; exit 125; }\n'
                         'resolve_block_device() { echo "resolve $*" >>"$log"; '

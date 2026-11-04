@@ -1408,6 +1408,8 @@ field nvx::guest::root::Error::Size::actual (hidden)
 field nvx::guest::root::Error::Size::device (hidden)
 field nvx::guest::root::Error::Size::expected (hidden)
 field nvx::guest::root::Error::Size::role (hidden)
+variant nvx::guest::root::Error::TmpfsCap (hidden)
+field nvx::guest::root::Error::TmpfsCap::percent (hidden)
 variant nvx::guest::root::Error::Uuid (hidden)
 field nvx::guest::root::Error::Uuid::actual (hidden)
 field nvx::guest::root::Error::Uuid::expected (hidden)
@@ -1519,6 +1521,7 @@ variant nvx::guest::root::Upper::Scratch (hidden)
 field nvx::guest::root::Upper::Scratch::device (hidden)
 field nvx::guest::root::Upper::Scratch::journal (hidden)
 variant nvx::guest::root::Upper::Tmpfs (hidden)
+field nvx::guest::root::Upper::Tmpfs::max_memory_percent (hidden)
 method nvx::guest::root::Upper::kind (hidden)
 enum nvx::guest::root::UpperKind (hidden)
 variant nvx::guest::root::UpperKind::Scratch (hidden)
@@ -3565,12 +3568,15 @@ mod nvx::protocol::restore_ready
 fn nvx::protocol::restore_ready::parse_ready_event
 mod nvx::protocol::root
 const nvx::protocol::root::DISTRO_MMIO_BASE
+const nvx::protocol::root::FIRST_PARTITION_BOUND_TOKEN
 enum nvx::protocol::root::ImageFormat
 variant nvx::protocol::root::ImageFormat::Erofs
 variant nvx::protocol::root::ImageFormat::Gpt
 method nvx::protocol::root::ImageFormat::as_str
 method nvx::protocol::root::ImageFormat::from_name
 const nvx::protocol::root::LAYER_TOKEN
+const nvx::protocol::root::OVERLAY_MODE_TOKEN
+const nvx::protocol::root::RAM_UPPER_PERCENT_TOKEN
 const nvx::protocol::root::RAM_UPPER_TOKEN
 struct nvx::protocol::root::RootImage
 method nvx::protocol::root::RootImage::erofs
@@ -3578,7 +3584,11 @@ field nvx::protocol::root::RootImage::format
 method nvx::protocol::root::RootImage::gpt
 field nvx::protocol::root::RootImage::identity
 struct nvx::protocol::root::RootLayout
+field nvx::protocol::root::RootLayout::gpt_first_partition_bound
 field nvx::protocol::root::RootLayout::image
+field nvx::protocol::root::RootLayout::journal
+field nvx::protocol::root::RootLayout::max_memory_percent
+field nvx::protocol::root::RootLayout::overlay
 method nvx::protocol::root::RootLayout::parse
 method nvx::protocol::root::RootLayout::tokens
 field nvx::protocol::root::RootLayout::upper
@@ -3586,6 +3596,7 @@ enum nvx::protocol::root::RootUpper
 variant nvx::protocol::root::RootUpper::Ram
 variant nvx::protocol::root::RootUpper::Scratch
 method nvx::protocol::root::RootUpper::as_str
+const nvx::protocol::root::SCRATCH_JOURNAL_TOKEN
 const nvx::protocol::root::SCRATCH_MMIO_BASE
 const nvx::protocol::root::SCRATCH_TOKEN
 mod nvx::protocol::share
