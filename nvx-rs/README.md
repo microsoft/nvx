@@ -45,12 +45,13 @@ nvx-rs/
 │   ├── error.rs     nvx::Error, its ErrorKind, and its stable ErrorCode
 │   ├── exec/        the execution engine: the streams, credit, and outcome of an execution's two
 │   │                sides, without I/O, threads, or features, for any framing and host
-│   ├── host/        feature `host` (default): the runtime that every launch shares, VM directories,
-│   │                artifacts, launch, network and egress policy files, filesystem, NVXS connection,
-│   │                session, process, platform, VM instances, sandbox stores, templates' manifests,
-│   │                compatibility keys, store, and leases, outcome reports, file seals, and the
-│   │                sandbox launch profile of `nvx-rs sandbox`, its distro and scratch bindings,
-│   │                and its prepared launches; with feature `cli`, the `nvx-rs` CLI
+│   ├── host/        feature `host` (default): the runtime that every launch shares, VM
+│   │                directories and configurations, artifacts, launch, network and egress policy
+│   │                files, filesystem, NVXS connection, session, process, platform, VM instances,
+│   │                sandbox stores, templates' manifests, compatibility keys, store, and leases,
+│   │                outcome reports, file seals, and the sandbox launch profile of `nvx-rs sandbox`,
+│   │                its distro and scratch bindings, and its prepared launches; with feature
+│   │                `cli`, the `nvx-rs` CLI
 │   ├── testing/     feature `testing`: the fake OpenVMM
 │   ├── guest/       feature `guest`: the programs that run in Linux guests, the guest's NVXS
 │   │                connection, the libraries through which a guest init or agent opens the
@@ -122,6 +123,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
+| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: a VM's processors, memory, root, view, export, and boot console as one value, checked without reading the host |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -290,6 +292,10 @@ and a proxy endpoint without credentials; the `WorkloadView`, its hostname,
 and the `ExpectedResources`. The other inputs of the root's assembly are
 invariants of the template.
 
+`View` is the view that a VM's configuration, a [`VmConfig`](#nvxhostconfig),
+gives its workload: its hostname and `MachineIdMode`, without an identity, which
+each execution names.
+
 `ActivationRecord::new` refuses a configuration that `Configuration::check`
 finds past a public limit, `MAX_MAPPINGS`, `MAX_HOSTNAME_BYTES`, or
 `MAX_PROXY_ENDPOINT_BYTES`, which keep every record within `MAX_RECORD_BYTES`,
@@ -447,6 +453,30 @@ endpoint, and the optional boot-console endpoint. `Capability` holds the
 credential that the host presents at a VM's control endpoint: `as_bytes`
 returns it, and its `Debug` form hides it. The library never writes it to a
 file; a caller that reconnects after a restart keeps it.
+
+### `nvx::host::config`
+
+`VmConfig`: the configuration of a VM as one value, its processors, its memory
+in MiB, its `RootConfig`, the `View` that its workload has of it, the
+`ExportPlan` of the host paths that it exports, if any, and the
+`ConsoleAttachment` of its boot console, a `Listener` for a client or
+`Disconnected`; the console's device exists either way.
+
+A root is `Blockless`, the guest's own system from its initramfs, or `Layered`,
+a `LayeredRoot`: the path of an image and its `RootImage`, EROFS or a GPT disk,
+with the identity that the guest expects, an optional bound of a GPT disk's
+first partition, the `OverlayMode`, and the `UpperConfig` of the overlay's
+upper, a scratch image with its `Journal` policy, or RAM up to a cap of 1 to 90
+percent of the VM's memory, 50 when the caller has no other
+(`UpperConfig::DEFAULT_MAX_MEMORY_PERCENT`).
+
+`VmConfig::check` checks the whole value without reading the host: it opens no
+path and checks no support of the host. It fails with an `nvx::Error` of kind
+`Unsupported` that names the first refusal: no processor or no memory; a layered
+root without an image or a scratch path, with a bound of an EROFS image or of 0,
+or with a RAM upper's cap outside 1 to 90 percent; a hostname that an activation
+record refuses; or an export that `ExportPlan::check` refuses for the guest
+targets that the root reserves.
 
 ### `nvx::host::artifacts`
 
