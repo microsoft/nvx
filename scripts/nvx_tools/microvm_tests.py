@@ -6148,13 +6148,15 @@ def check_time_host_correction(
         frequency_ppb = int(state["frequency_ppb"])
         correction_ppb = int(state["host_correction_ppb"])
         limited = state["frequency_limited"] == "1"
-        if state["host_test_hooks"] != "1":
-            raise RuntimeError(
-                f"{context}: the guest holds the host's correction of "
-                f"{correction_ppb} ppb from a sample that OpenVMM's hook did not "
-                f"alter (host_test_hooks={state['host_test_hooks']}): its boot "
-                "step or restore repair kept a stale correction"
-            )
+        for held_state in (states[0], state):
+            if held_state["host_test_hooks"] != "1":
+                raise RuntimeError(
+                    f"{context}: the guest holds the host's correction of "
+                    f"{held_state['host_correction_ppb']} ppb from a sample that "
+                    f"OpenVMM's hook did not alter "
+                    f"(host_test_hooks={held_state['host_test_hooks']}): its boot "
+                    "step or restore repair kept a stale correction"
+                )
         tsc_hz = int(state["tsc_hz"])
         required_ppm = time_host_correction_guest_ppm(correction_ppb / 1000, tsc_hz)
         beyond = abs(required_ppm) > LINUX_FREQUENCY_LIMIT_PPB / 1000
