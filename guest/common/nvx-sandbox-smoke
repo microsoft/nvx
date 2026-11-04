@@ -334,11 +334,11 @@ check_limits() {
         2>/dev/null || memory_status=$?
     [ "$memory_status" -eq 137 ] ||
         fail "memory.max did not kill an allocation of $((memory_max * 2)) bytes: status $memory_status"
-    # `--pids-max N` admits N workload processes: the CLI sets the container
-    # cgroup's pids.max to N + 1 for the one-shot launcher's `unshare` parent,
-    # which waits outside the workload's PID namespace, and the init agent
-    # gives that process back for a managed sandbox, whose executions have no
-    # such parent. The probe and the subshell are two of the N, so the
+    # A process limit of N admits N workload processes: the host sets the
+    # container cgroup's pids.max to N + 1 for the one-shot launcher's `unshare`
+    # parent, which waits outside the workload's PID namespace, and the init
+    # agent gives that process back for a managed sandbox, whose executions
+    # have no such parent. The probe and the subshell are two of the N, so the
     # subshell can start $2 - 2 sleepers. The bound stops a subshell whose
     # forks the controller does not refuse.
     sleepers_record=/tmp/nvx-ubuntu-sandbox-sleepers

@@ -7,11 +7,10 @@ scratch image. It checks that the planner refuses `--upper ram` beside
 any state. A one-shot run attaches the distro layer alone, declares the RAM
 upper on the kernel command line, passes the smoke probe, which requires the
 overlay's upper on a tmpfs, and reports its success. A managed sandbox records
-the RAM upper without a scratch image, and passes the probe's managed and
-resource-limit checks. Its guest has one virtio block device and declares the
-RAM upper, a later request reads a file that an earlier one wrote, and a file
-in the upper counts against the workload's memory limit. Once the sandbox
-stops and starts again, the file is gone.
+the RAM upper without a scratch image, and passes the probe's managed checks.
+Its guest has one virtio block device and declares the RAM upper, and a later
+request reads a file that an earlier one wrote. Once the sandbox stops and
+starts again, the file is gone.
 """
 
 from __future__ import annotations
@@ -36,49 +35,23 @@ from .sandbox_lifecycle_tests import (
 )
 
 MEMORY_MIB = 256
-MEMORY_MAX = 32 * 1024 * 1024
-PIDS_MAX = 8
 RAM_UPPER_TOKEN = "nvx_overlay_upper=ramfs"
 SCRATCH_TOKEN = "nvx_scratch="
 # The outcome that OpenVMM reports for a one-shot run whose workload succeeded.
 RUN_SUCCESS = {"operation": "run", "category": "success", "status_code": 0}
 STATE_PATH = "/tmp/nvx-ram-upper-state"
 STATE_CONTENT = b"kept in RAM\n"
-# A file of FILL_MIB MiB in the RAM upper leaves too little of MEMORY_MAX for
-# an allocation of ALLOCATION_MIB MiB, which the memory controller then kills,
-# and the same allocation fits once the file is gone, since the guest has no
-# swap to which the upper's pages could go.
-FILL_MIB = 20
-ALLOCATION_MIB = 20
-CHARGE_MARKER = b"NVX-RAM-UPPER-CHARGED"
-CHARGE_SCRIPT = f"""\
-head -c {FILL_MIB}M /dev/zero >/tmp/nvx-ram-upper-fill || exit 10
-status=0
-{{ dd if=/dev/zero of=/dev/null bs={ALLOCATION_MIB}M count=1; }} 2>/dev/null ||
-    status=$?
-rm -f /tmp/nvx-ram-upper-fill
-[ "$status" -eq 137 ] || exit 11
-{{ dd if=/dev/zero of=/dev/null bs={ALLOCATION_MIB}M count=1; }} 2>/dev/null ||
-    exit 12
-echo {CHARGE_MARKER.decode()}
-"""
 # The guest's block devices, one per line, then its kernel command line.
 VIEW_SCRIPT = "ls /sys/block && cat /proc/cmdline"
 
 
 def probe_markers(*, entry: bool) -> tuple[bytes, ...]:
-    """Returns what the smoke probe reports when its profile, limit, and, for
-    a managed execution, `entry` checks pass."""
+    """Returns what the smoke probe reports when its profile and, for a managed
+    execution, `entry` checks pass."""
     markers = [b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534"]
     if entry:
         markers.append(b"NVX-UBUNTU-SANDBOX-ENTRY-OK")
-    markers.extend(
-        (
-            f"NVX-UBUNTU-SANDBOX-LIMITS-OK memory_max={MEMORY_MAX} "
-            f"pids_max={PIDS_MAX}".encode(),
-            b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534",
-        )
-    )
+    markers.append(b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534")
     return tuple(markers)
 
 
@@ -136,10 +109,6 @@ class RamUpperAcceptance(LifecycleAcceptance):
             "ram",
             "--memory-mib",
             str(MEMORY_MIB),
-            "--memory-max",
-            str(MEMORY_MAX),
-            "--pids-max",
-            str(PIDS_MAX),
         ]
 
     def run(self) -> None:
@@ -186,9 +155,6 @@ class RamUpperAcceptance(LifecycleAcceptance):
             str(report),
             "--entrypoint",
             PROBE,
-            "--arg=limits",
-            f"--arg={MEMORY_MAX}",
-            f"--arg={PIDS_MAX}",
             state=None,
         )
         console = result.stdout + result.stderr
@@ -237,13 +203,7 @@ class RamUpperAcceptance(LifecycleAcceptance):
         }:
             raise RuntimeError(f"provision recorded the RAM upper as {recorded!r}")
         self.start(description="first start")
-        result = self.exec(
-            PROBE,
-            "--arg=entry",
-            "--arg=limits",
-            f"--arg={MEMORY_MAX}",
-            f"--arg={PIDS_MAX}",
-        )
+        result = self.exec(PROBE, "--arg=entry")
         self.save_evidence("probe.log", result.stdout + result.stderr)
         for marker in probe_markers(entry=True):
             if marker not in result.stdout:
@@ -260,13 +220,6 @@ class RamUpperAcceptance(LifecycleAcceptance):
         self.require_output(result, b"", "the RAM upper's state-writing request")
         result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
         self.require_output(result, STATE_CONTENT, "the RAM upper's state")
-        result = self.exec(
-            "/bin/sh", "--arg=-c", f"--arg={CHARGE_SCRIPT}", expected=None
-        )
-        self.save_evidence("charge.log", result.stdout + result.stderr)
-        self.require_output(
-            result, CHARGE_MARKER + b"\n", "the memory charge of the RAM upper"
-        )
         self.stop_sandbox("first stop")
         # A new start begins with an empty upper.
         self.start(description="start after the stop")

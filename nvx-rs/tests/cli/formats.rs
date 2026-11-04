@@ -39,19 +39,12 @@ enum Start {
 
 /// Returns the options with which a start launches OpenVMM for the sandbox of `format-1.json` and
 /// `format-7-without-shares.json`, a reader without shares, from those of the minimal sandbox.
+/// The `memory_max` and `pids_max` that these records hold set no limit.
 fn reader(options: Options) -> Options {
     options
         .with("--microvm-workload-identity", ["2000:2000"])
         .with("--memory", ["320M"])
-        .sandbox_kernel(
-            "quiet",
-            &[
-                WORKLOAD[0],
-                "nvx_hostname=reader",
-                "nvx_memory_max=134217728",
-                "nvx_pids_max=33",
-            ],
-        )
+        .sandbox_kernel("quiet", &[WORKLOAD[0], "nvx_hostname=reader"])
 }
 
 /// The configurations of every format, as fixtures, and what a start does with each.

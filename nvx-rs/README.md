@@ -1792,9 +1792,9 @@ braces, a prefix, uppercase, and unhyphenated forms are refused.
 API change: `nvx::host::sandbox::{Int, IntError}` are no longer exported.
 `SandboxSettings::memory_max` is `Option<u64>` and `pids_max` is `Option<u32>`;
 `None` leaves the respective limit unset, and zero is refused. Persisted plans
-still encode these limits as canonical positive decimal strings, and CLI sandbox
-configuration records use JSON integers, so valid existing records keep their
-wire format. See [Specification tests](#specification-tests).
+still encode these limits as canonical positive decimal strings. The CLI's
+sandbox configuration records hold no limits: the VM is the limit of a
+sandbox's workload. See [Specification tests](#specification-tests).
 
 Managed exec environment files and distro manifests are strict UTF-8 JSON,
 read with `serde_json`; non-finite numbers, numbers beyond the range of a

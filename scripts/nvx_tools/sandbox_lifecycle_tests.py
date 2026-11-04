@@ -4,7 +4,7 @@ The scenario runs `nvx-rs sandbox` as subprocesses against the real kernel, the
 Alpine control initramfs, the Ubuntu EROFS layer, and ext4 scratch copies. It
 checks identity admission, fail-closed lifecycle transitions, that overlapping
 starts launch one VM, warm-guest state across exec requests and restarts, the
-guest security profile and resource limits, bounded output and outcome reports,
+guest security profile, bounded output and outcome reports,
 that the CLI of artifacts of another runtime identity drives no VM that these
 started and its stop terminates OpenVMM, and that stop, a crash, and
 deprovision leave no OpenVMM process, control endpoint, capability, or runtime
@@ -50,8 +50,6 @@ from .managed_exec_tests import (
 PROBE = "/sbin/nvx-sandbox-smoke"
 HOSTNAME = "nvx-lifecycle"
 MEMORY_MIB = 256
-MEMORY_MAX = 32 * 1024 * 1024
-PIDS_MAX = 8
 # An identity that the Ubuntu layer's user database lacks.
 UNAVAILABLE_IDENTITY = "4242:4242"
 # The guest agent forwards at most this much output for one exec request, and
@@ -670,10 +668,6 @@ class LifecycleAcceptance:
             *self.launch_options(self.scratch),
             "--hostname",
             HOSTNAME,
-            "--memory-max",
-            str(MEMORY_MAX),
-            "--pids-max",
-            str(PIDS_MAX),
         )
         self.invoke("provision", *options, state=self.state)
         self.require_entries(self.state, PROVISIONED_ENTRIES, "after provision")
@@ -786,19 +780,11 @@ class LifecycleAcceptance:
         # The earlier requests already entered their own namespaces, so the
         # probe's check that each container mount appears once also shows
         # that they did not mount into the agent's namespace.
-        result = self.exec(
-            PROBE,
-            "--arg=entry",
-            "--arg=limits",
-            f"--arg={MEMORY_MAX}",
-            f"--arg={PIDS_MAX}",
-        )
+        result = self.exec(PROBE, "--arg=entry")
         self.save_evidence("probe.log", result.stdout + result.stderr)
         for marker in (
             b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
             b"NVX-UBUNTU-SANDBOX-ENTRY-OK",
-            f"NVX-UBUNTU-SANDBOX-LIMITS-OK memory_max={MEMORY_MAX} "
-            f"pids_max={PIDS_MAX}".encode(),
             b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534",
         ):
             if marker not in result.stdout:

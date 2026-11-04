@@ -912,12 +912,12 @@ runtime mounts on those of earlier requests, so the single-mount check also
 covers repeated managed execs. With `--arg entry`, for a managed execution, it
 also requires every mount other than `/dev` and its devpts instance to be
 `nodev`, as the managed agent's execution entry makes them. With
-`--arg limits --arg MEMORY_MAX --arg PIDS_MAX`, for a sandbox started with the
-same `--memory-max` and
-`--pids-max`, it also requires the memory controller to kill an allocation of
+`--arg limits --arg MEMORY_MAX --arg PIDS_MAX`, for a workload whose cgroup has
+those limits, it also requires the memory controller to kill an allocation of
 twice `MEMORY_MAX` with `SIGKILL` while a 1 MiB allocation succeeds, and the
 pids controller to stop the workload at `PIDS_MAX` processes, itself included;
-keep twice `MEMORY_MAX` within the guest's free memory. With
+keep twice `MEMORY_MAX` within the guest's free memory. `nvx-rs sandbox` sets no
+such limit: the VM is the limit of its workload. With
 `--arg TARGET --arg ro|rw`, it also checks a live share at
 `TARGET` as described below, including symbolic links in an `rw` share; the
 share needs a host-created, world-writable `nvx-links` directory for them.
@@ -944,11 +944,9 @@ must be writable by every identity, so that only OpenVMM can refuse a write.
 
 The layer UUID is the EROFS superblock UUID, not a content digest. Give it in
 canonical lowercase hyphenated form; braces, a `urn:uuid:` prefix, uppercase,
-and unhyphenated UUIDs are refused. Workload UID/GID and resource limits use
-ASCII decimal digits only, without signs, whitespace, underscores, or Unicode
-digits. Each UID/GID is in `1..4294967294`, memory in
-`1..18446744073709551615` bytes, and the process limit in `1..4194303`
-(the guest adds init's process). The command
+and unhyphenated UUIDs are refused. The workload UID and GID use ASCII decimal
+digits only, without signs, whitespace, underscores, or Unicode digits, and each
+is in `1..4294967294`. The command
 validates the files before launch, orders roles independently of option order,
 attaches layers read-only, and reserves the writable slot for scratch, which a
 RAM upper leaves empty.
@@ -1002,19 +1000,17 @@ for `sandbox run` and `sandbox provision`:
 - `ram` keeps the upper in guest memory, with no scratch image or block device.
   The kernel command line declares `nvx_overlay_upper=ramfs`, and the guest
   mounts a tmpfs for the upper, `nosuid` and `nodev`, at the kernel's default
-  size, half of the guest's RAM, beyond which a write fails with `ENOSPC`. Its
-  pages are charged to the workload's memory cgroup, so they count against
-  `--memory-max`, and the kernel cannot reclaim them while the files exist,
-  since the guest has no swap. Nothing that the workload writes outlives its
-  VM: each `start` of a managed sandbox begins with an empty upper.
+  size, half of the guest's RAM, beyond which a write fails with `ENOSPC`. The
+  kernel cannot reclaim its pages while the files exist, since the guest has no
+  swap. Nothing that the workload writes outlives its VM: each `start` of a
+  managed sandbox begins with an empty upper.
 
 ```bash
 nvx-rs/target/release/nvx-rs sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --upper ram \
   --entrypoint /bin/sh \
-  --memory-mib 512 \
-  --memory-max 268435456
+  --memory-mib 512
 ```
 
 `--upper ram` refuses `--scratch`, and only `run` and `provision` take
@@ -1034,20 +1030,17 @@ refuses `--upper ram` beside `--scratch`, and `start` refuses `--upper`, before
 either creates any state. A one-shot `run` of `/sbin/nvx-sandbox-smoke` must
 print an OpenVMM command with one sandbox block device, the read-only distro
 layer, and `nvx_overlay_upper=ramfs` in place of the scratch token, and the
-probe must pass its profile and resource-limit checks over a tmpfs upper. The
-run's `--outcome-report`, under the scenario's temporary directory, must report
+probe must pass its profile checks over a tmpfs upper. The run's
+`--outcome-report`, under the scenario's temporary directory, must report
 success and a complete teardown, and also names its OpenVMM to the scenario's
 process checks and cleanup, which find VMs by that directory. A managed sandbox
-must record `ram` without a scratch image, pass the probe's managed and
-resource-limit checks, show its guest one virtio block device and the RAM
-upper's token, and read back a file that an earlier request wrote.
-Under a 32 MiB `--memory-max`, a 20 MiB file in its upper must leave no room
-for a 20 MiB allocation, which the memory controller kills, and which succeeds
-once the file is removed. After a `stop` and a new `start`, the file is gone.
-The scenario's evidence, with a `sandbox-ram-upper-` prefix, holds its bounded
-command observations, the runtime record, the output of the one-shot run, of
-the probe, of the guest's view, and of the memory check, and the outcome
-reports of the one-shot run and of both stops.
+must record `ram` without a scratch image, pass the probe's managed checks, show
+its guest one virtio block device and the RAM upper's token, and read back a
+file that an earlier request wrote. After a `stop` and a new `start`, the file
+is gone. The scenario's evidence, with a `sandbox-ram-upper-` prefix, holds its
+bounded command observations, the runtime record, the output of the one-shot
+run, of the probe, and of the guest's view, and the outcome reports of the
+one-shot run and of both stops.
 
 ### Live host shares
 
@@ -1637,9 +1630,8 @@ template, so it has the same artifact requirements. It checks that:
   newlines, a later request reads the file that an earlier one wrote, and the
   file survives `stop` and a new `start`, because the overlay's upper directory
   is on scratch;
-- `/sbin/nvx-sandbox-smoke` passes its security profile and resource-limit
-  checks in a sandbox provisioned with `--hostname`, `--memory-max`, and
-  `--pids-max`, after earlier requests;
+- `/sbin/nvx-sandbox-smoke` passes its security profile checks in a sandbox
+  provisioned with `--hostname`, after earlier requests;
 - a request that writes more than the 1 MiB output bound exits with status
   125 and an `output-limit` outcome report after the host has received more
   than 1 MiB less one 32 KiB read chunk and at most 1 MiB, and a request whose

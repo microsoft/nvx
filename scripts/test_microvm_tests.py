@@ -1284,13 +1284,11 @@ class _FakeSandboxCli:
                 returncode = 1
                 stderr = b"NVX-UBUNTU-SANDBOX-FAIL: the workload shares a namespace\n"
             else:
-                if arguments[:2] != ["entry", "limits"]:
+                if arguments != ["entry"]:
                     raise AssertionError(f"unexpected probe arguments {arguments}")
                 stdout = (
                     b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534\n"
                     + b"NVX-UBUNTU-SANDBOX-ENTRY-OK\n"
-                    + f"NVX-UBUNTU-SANDBOX-LIMITS-OK memory_max={arguments[2]} "
-                    f"pids_max={arguments[3]}\n".encode()
                     + b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534\n"
                 )
         elif entrypoint == "/usr/bin/head":
@@ -1630,7 +1628,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                 self.assertNotIn(capability, content)
                 self.assertNotIn(capability.hex().encode(), content)
         self.assertIn(
-            b"NVX-UBUNTU-SANDBOX-LIMITS-OK", evidence["sandbox-lifecycle-probe.log"]
+            b"NVX-UBUNTU-SANDBOX-ENTRY-OK", evidence["sandbox-lifecycle-probe.log"]
         )
 
     def test_acceptance_detects_lifecycle_regressions(self):
@@ -2630,9 +2628,6 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
 
     SMOKE_RUN = (
         b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534\n"
-        + f"NVX-UBUNTU-SANDBOX-LIMITS-OK "
-        f"memory_max={sandbox_ram_upper_tests.MEMORY_MAX} "
-        f"pids_max={sandbox_ram_upper_tests.PIDS_MAX}\n".encode()
         + b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534\n"
     )
 
@@ -2650,11 +2645,7 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
         assert state is None
         assert values["--upper"] == "ram"
         assert values["--entrypoint"] == sandbox_lifecycle_tests.PROBE
-        assert _ == [
-            "limits",
-            str(sandbox_ram_upper_tests.MEMORY_MAX),
-            str(sandbox_ram_upper_tests.PIDS_MAX),
-        ]
+        assert _ == []
         blocks = f"--microvm-sandbox-block distro:file:{values['--layer']},ro"
         if "attaches-scratch" in self.faults:
             blocks += " --microvm-sandbox-block scratch:file:scratch.ext4"
@@ -2738,10 +2729,6 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
                 sandbox_ram_upper_tests.STATE_CONTENT
             )
             return 0, b"", b""
-        if script == sandbox_ram_upper_tests.CHARGE_SCRIPT:
-            if "uncharged" in self.faults:
-                return 11, b"", b""
-            return 0, sandbox_ram_upper_tests.CHARGE_MARKER + b"\n", b""
         raise AssertionError(f"unexpected script {script!r}")
 
 
@@ -2753,11 +2740,10 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
         "start",
         # A one-shot run.
         "run",
-        # A managed sandbox: the probe, the guest's view, a written and a read
-        # file, and the memory charge of a file in the upper.
+        # A managed sandbox: the probe, the guest's view, and a written and a
+        # read file.
         "provision",
         "start",
-        "exec",
         "exec",
         "exec",
         "exec",
@@ -2848,7 +2834,6 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
                 "sandbox-ram-upper-run-outcome.json",
                 "sandbox-ram-upper-probe.log",
                 "sandbox-ram-upper-view.log",
-                "sandbox-ram-upper-charge.log",
                 "sandbox-ram-upper-first-stop-outcome.json",
                 "sandbox-ram-upper-second-stop-outcome.json",
             },
@@ -2882,7 +2867,6 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
             "incomplete-teardown": "the one-shot run's teardown is",
             "records-scratch": "provision recorded the RAM upper as",
             "has-scratch-device": "has the virtio block devices ['vda', 'vdb']",
-            "uncharged": "the memory charge of the RAM upper returned status 11",
             "keeps-state": "the restarted sandbox's empty upper returned status 1",
         }
         for fault, message in regressions.items():
@@ -2900,38 +2884,6 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
                 self.assertTrue(
                     (root / "results" / "sandbox-ram-upper-checks.json").is_file()
                 )
-
-    def test_charge_script_needs_a_kill_that_only_the_upper_file_causes(self):
-        shell = _posix_shell()
-        if shell is None:
-            self.skipTest("POSIX shell is unavailable")
-        # The stand-in dd is killed as the memory controller kills the real one:
-        # while the file holds the upper's pages, or always, or never.
-        for dd, expected in (
-            ('[ -e "$fill" ] && return 137; return 0', (0, "NVX-RAM-UPPER-CHARGED\n")),
-            ("return 0", (11, "")),
-            ("return 137", (12, "")),
-        ):
-            with self.subTest(dd=dd), tempfile.TemporaryDirectory() as temporary:
-                fill = f"{Path(temporary).as_posix()}/fill"
-                script = sandbox_ram_upper_tests.CHARGE_SCRIPT.replace(
-                    "/tmp/nvx-ram-upper-fill", fill
-                )
-                result = subprocess.run(
-                    [
-                        shell,
-                        "-c",
-                        f"fill='{fill}'\nhead() {{ :; }}\ndd() {{ {dd}; }}\n{script}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-                self.assertEqual(
-                    (result.returncode, result.stdout), expected, result.stderr
-                )
-                self.assertFalse(Path(fill).exists())
 
 
 class GuestIdentityScriptTests(unittest.TestCase):
