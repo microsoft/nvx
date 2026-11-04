@@ -188,7 +188,14 @@ nvx-rs/target/release/nvx-rs run
 | `--dry-run` | off | Print the generated OpenVMM command without running it. |
 
 `nvx-rs run` checks its options, prints the OpenVMM command after `>> `, and
-unless `--dry-run` is given, runs OpenVMM with the standard streams. It exits
+unless `--dry-run` is given, runs OpenVMM with the standard streams. A cold
+boot attaches the guest's console, the boot console `hvc1`, to them, so that
+the terminal's input reaches the guest through it rather than through the byte
+channel, `hvc0`, whose output, such as the kernel's early messages, goes to
+standard error. A restore attaches no boot console to them, so it cannot yet
+restore a snapshot whose boot console was on the terminal, which OpenVMM
+restores only with that console attached again
+([#1254](https://github.com/microsoft/nvx/issues/1254)). It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and
@@ -320,7 +327,10 @@ do, and their names cannot be abbreviated either.
 | `--dry-run` | off | For one-shot `run` only, print the generated OpenVMM microVM command without running it. Managed operations reject this option. |
 
 `run` and `start` install the release of a Git checkout that holds no
-artifacts before they launch, as `nvx-rs run` does.
+artifacts before they launch, as `nvx-rs run` does. A one-shot `run` runs
+OpenVMM with the standard streams, and attaches the guest's console, which
+carries its workload's output, to them through the boot console, as a cold
+boot of `nvx-rs run` does.
 
 See [Run](run.md) for artifact preparation, the security boundary, and current
 snapshot/configuration limitations.
