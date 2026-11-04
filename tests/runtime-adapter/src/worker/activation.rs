@@ -35,7 +35,7 @@ use nvx::guest::clone::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput, ApplyError,
     RootTemplate,
 };
-use nvx::guest::entry::{Identity, Publication};
+use nvx::guest::entry::Publication;
 use nvx::protocol::status;
 
 use super::capture::Admission;
@@ -78,8 +78,7 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///   is not fresh among its causes, or the kernel did not reread the partition table of the
 ///   record's GPT disk before it, as [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or
 ///   the application failed otherwise, as this build of the adapter does not know;
-/// - [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD): the image refuses the record's
-///   workload identity, as [`ApplyError::Account`] tells, the machine ID that the record asks the
+/// - [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD): the machine ID that the record asks the
 ///   guest to generate cannot be written, as [`ApplyError::MachineId`] tells, or the record's
 ///   hostname or that machine ID cannot be set for every execution, as [`ApplyError::View`]
 ///   tells;
@@ -105,9 +104,9 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
         ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
         ActivationCause::Failed(error) => match error.downcast_ref::<ApplyError>() {
             Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => status::ACTIVATION_ROOT,
-            Some(
-                ApplyError::Account { .. } | ApplyError::MachineId { .. } | ApplyError::View { .. },
-            ) => status::ACTIVATION_WORKLOAD,
+            Some(ApplyError::MachineId { .. } | ApplyError::View { .. }) => {
+                status::ACTIVATION_WORKLOAD
+            }
             Some(ApplyError::Export { .. }) => status::ACTIVATION_EXPORT,
             Some(ApplyError::Network { .. }) => status::ACTIVATION_NETWORK,
             // A failure of the application that this build does not know.
@@ -138,9 +137,8 @@ pub(super) struct CloneState {
 /// The application of the record of the Activate that a clone's activation accepted, which ran,
 /// and which awaits the activation's completion.
 struct Applied {
-    /// The identity in which every execution runs, if the record has a workload identity, or why
-    /// the application failed.
-    result: Result<Option<Identity>, ApplyError>,
+    /// Whether the application succeeded, or why it failed.
+    result: Result<(), ApplyError>,
     /// The number of mappings that the record announces.
     mappings: u32,
     /// The hostname of every execution: the record's.
@@ -330,26 +328,23 @@ impl CloneState {
     /// worker took what the session received while it ran, which comes before `Ready`, and
     /// returns the worker's step: `Ready`, which reports the activation, for the `Activate` and
     /// for each retry that joined its application, once the clone is ready, after which
-    /// `executions` run in the cgroups that the template's bootstrap prepared, as the record's
-    /// workload identity, if it has one, with the record's hostname and publication of listeners,
-    /// and the worker's order awaits the record's mappings; or the end, once the activation
-    /// failed.
+    /// `executions` run in the cgroups that the template's bootstrap prepared, each as the identity
+    /// that it names, with the record's hostname and publication of listeners, and the worker's
+    /// order awaits the record's mappings; or the end, once the activation failed.
     pub(super) fn settle(
         &mut self,
         operations: &mut dyn RootOperations,
         executions: &mut Executions,
     ) -> Option<Step<Worked>> {
         let applied = self.applied.take()?;
-        let (result, identity) = match applied.result {
-            Ok(identity) => (Ok(()), identity),
-            Err(error) => (Err(error.into()), None),
-        };
+        let result = applied.result.map_err(Into::into);
         Some(match self.activation.complete(Instant::now(), result) {
             Ok(activation) => {
                 self.timeline.ready = Some(Instant::now());
-                let identity = identity.map(|identity| (identity.uid(), identity.gid()));
+                // A clone has no workload identity of the whole sandbox: each execution names
+                // its own.
                 let sandbox =
-                    Sandbox::new(identity, applied.publication).with_hostname(applied.hostname);
+                    Sandbox::new(None, applied.publication).with_hostname(applied.hostname);
                 executions.run_in(operations.cgroups(), sandbox);
                 self.order = Some(Order::new(applied.mappings));
                 Step::Continue(vec![ready(activation); 1 + applied.joined])

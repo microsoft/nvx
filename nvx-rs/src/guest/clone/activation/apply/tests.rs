@@ -1,7 +1,7 @@
 //! Tests of the application of a clone's activation record, through a fake system, which records
 //! every call of the application, and whose assembly returns a temporary directory that stands
 //! for the root, the image's view through the overlay, whose account databases the application
-//! reads and checks for real, and which generates no machine ID, writes no resolver file, starts
+//! leaves alone, and which generates no machine ID, writes no resolver file, starts
 //! no announcer, and mounts, binds, and unmounts nothing; and, with the clone's activation,
 //! through an adapter of
 //! the tests' own, which takes what the host sends, applies the record of the Activate that the
@@ -28,13 +28,13 @@ use std::time::Instant;
 use super::*;
 use crate::activation::{
     ExpectedResources, Export, ExportKind, MachineIdMode, Network, Publication, ReadyActivation,
-    RestoreSection, StoreGeneration, TemplateReference, TransactionId, WorkloadView,
+    RestoreSection, StoreGeneration, TemplateReference, TransactionId, WorkloadIdentity,
+    WorkloadView,
 };
 use crate::guest::clone::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
     ActivationState, AdmissionFence,
 };
-use crate::guest::entry::{AccountError, AccountMode, Capabilities, Database};
 use crate::guest::mappings::MappingError;
 use crate::guest::sys::{self, Errno, Mode, MountFlags, OpenFlags};
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
@@ -82,9 +82,6 @@ const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 /// Returns whether a failure's cause is the one that a test expects.
 type Expected = fn(&ActivationCause) -> bool;
 
-/// Returns whether an account's refusal is the one that a test expects.
-type Refusal = fn(&AccountError) -> bool;
-
 /// Returns whether an application's failure is the one that a test expects.
 type Failed = fn(&ApplyError) -> bool;
 
@@ -97,9 +94,6 @@ enum Effect {
     Reread(Device),
     /// The application assembled the root of this assembly, with a fresh upper, which mounts it.
     Assemble(Assembly),
-    /// The application checked this identity's account in the root, which reads the image's
-    /// account databases.
-    Account(Identity),
     /// The application generated a machine ID, which it wrote to a new file at this path.
     Generate(PathBuf),
     /// The application mounted the host export, the virtio-fs device of this tag, with this
@@ -314,11 +308,6 @@ impl System for FakeSystem {
         Ok(self.root())
     }
 
-    fn account(&mut self, root: &PathBuf, identity: &Identity) -> Result<(), entry::Error> {
-        self.effects.push(Effect::Account(identity.clone()));
-        check_account(root, identity)
-    }
-
     fn generate(&mut self, path: &Path) -> io::Result<MachineId> {
         self.effects.push(Effect::Generate(path.to_owned()));
         match self.generating {
@@ -439,9 +428,8 @@ struct Adapter {
     /// The system through which the adapter applies the record, which records what the clone did.
     system: FakeSystem,
     /// What the application activated: the root, the export's root, if any, the runtime's binds
-    /// on the root, the identity in which every execution runs, if any, the workload's hostname
-    /// and machine ID, the resolver file, if any, the proxy's endpoint, if any, and the gateway of
-    /// the announcer of the workload's listeners, if any.
+    /// on the root, the workload's hostname and machine ID, the resolver file, if any, the proxy's
+    /// endpoint, if any, and the gateway of the announcer of the workload's listeners, if any.
     applied: Option<Activated<PathBuf, (), (), Ipv4Addr>>,
     /// What the adapter's latest Ready reported.
     ready: Option<ReadyActivation>,
@@ -582,9 +570,9 @@ fn scratch(journal: activation::Journal) -> activation::Upper {
     }
 }
 
-/// Returns the configuration of a root of `image` over `upper`, in `overlay` mode, whose workload
-/// runs as `identity`, if any, which expects the tests' clone's resources, without an export or
-/// a network.
+/// Returns the configuration of a root of `image` over `upper`, in `overlay` mode, which names
+/// the workload identity `identity`, if any, and expects the tests' clone's resources, without an
+/// export or a network.
 fn configuration(
     image: activation::Image,
     upper: activation::Upper,
@@ -623,7 +611,7 @@ fn clone_record(configuration: Configuration) -> ActivationRecord {
 }
 
 /// Returns the record of the tests' Activate: an EROFS image, whose UUID it expects, over a
-/// tmpfs, with untrusted lowers, whose workload runs as the tests' workload identity.
+/// tmpfs, with untrusted lowers, which names the tests' workload identity.
 fn accepted() -> ActivationRecord {
     clone_record(configuration(
         erofs(Some(IMAGE_UUID)),
@@ -648,11 +636,6 @@ fn accepted_assembly() -> Assembly {
         overlay: root::OverlayMode::UntrustedLowers,
         timeout: template.timeout,
     }
-}
-
-/// Returns the identity in which the executions of the tests' workload run.
-fn workload() -> Identity {
-    Identity::new(WORKLOAD.uid, WORKLOAD.gid)
 }
 
 /// Returns the record of the tests' Activate, as [`accepted`] returns it, but whose workload sees
@@ -718,38 +701,31 @@ fn resolver_path() -> PathBuf {
 }
 
 /// Returns the view that the application binds for a record of the tests' hostname, whose
-/// workload runs as `identity`, if any, and sees `machine_id`, without a resolver file.
-fn view(identity: Option<Identity>, machine_id: MachineId) -> View {
+/// workload sees `machine_id`, without a resolver file.
+fn view(machine_id: MachineId) -> View {
     View {
-        identity: identity.unwrap_or_else(|| Identity::new(0, 0)),
         hostname: HOSTNAME.to_vec(),
         machine_id,
         resolver: None,
     }
 }
 
-/// Returns the view that the application binds for [`with_everything`]'s record: of its
-/// workload identity, with the generated machine ID and the resolver file.
+/// Returns the view that the application binds for [`with_everything`]'s record: with the
+/// generated machine ID and the resolver file.
 fn full_view() -> View {
     View {
         resolver: Some(resolver_path()),
-        ..view(Some(workload()), generated_id())
+        ..view(generated_id())
     }
 }
 
 /// Returns what the application activates through `system` for a record of the tests' hostname,
-/// whose workload runs as `identity`, if any, and sees `machine_id`, without an export or a
-/// network.
-fn activated(
-    system: &FakeSystem,
-    identity: Option<Identity>,
-    machine_id: MachineId,
-) -> Activated<PathBuf, (), (), Ipv4Addr> {
+/// whose workload sees `machine_id`, without an export or a network.
+fn activated(system: &FakeSystem, machine_id: MachineId) -> Activated<PathBuf, (), (), Ipv4Addr> {
     Activated {
         root: system.root(),
         export: None,
         binds: (),
-        identity,
         hostname: HOSTNAME.to_vec(),
         machine_id,
         resolver: None,
@@ -763,7 +739,6 @@ fn activated(
 fn applied_everything() -> Vec<Effect> {
     vec![
         Effect::Assemble(accepted_assembly()),
-        Effect::Account(workload()),
         Effect::Generate(machine_id_path()),
         Effect::MountExport(TAG.to_owned(), Access::ReadWrite),
         Effect::Resolver(resolver_path(), DNS),
@@ -876,9 +851,9 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
         .unwrap_err();
     adapter.assert_untouched(&failure, |cause| matches!(cause, ActivationCause::Expired));
 
-    // Only a valid Activate mounts the root, reads its account databases, generates the machine
-    // ID, mounts the export, writes the resolver file, starts the announcer, and binds the
-    // runtime's files, before Ready, and an execution spawns only once Ready opened the fence.
+    // Only a valid Activate mounts the root, generates the machine ID, mounts the export, writes
+    // the resolver file, starts the announcer, and binds the runtime's files, before Ready, and
+    // an execution spawns only once Ready opened the fence.
     let mut adapter = Adapter::restricted(FakeSystem::new(), base);
     adapter.take(base, ActivationInput::Flow).unwrap();
     assert!(adapter.system.effects.is_empty());
@@ -899,9 +874,8 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
     adapter
         .take(base, ActivationInput::Activate(&record))
         .unwrap();
-    // The application assembled the root with the record's settings, and checked the workload
-    // identity's account in it, before Ready, which reports that the activation applied, with the
-    // record's transaction.
+    // The application assembled the root with the record's settings, before Ready, which reports
+    // that the activation applied, with the record's transaction.
     assert_eq!(adapter.activation.state(), ActivationState::Ready);
     assert_eq!(
         adapter.ready,
@@ -911,20 +885,9 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
     );
     assert_eq!(
         adapter.applied,
-        Some(activated(
-            &adapter.system,
-            Some(workload()),
-            MachineId::Image
-        ))
+        Some(activated(&adapter.system, MachineId::Image))
     );
     assert!(adapter.fence.is_open());
-    // Every execution runs as the workload identity, which has no supplementary groups or
-    // capabilities, and whose account an entry checks in existing-account mode.
-    let identity = workload();
-    assert_eq!((identity.uid(), identity.gid()), (1000, 1001));
-    assert!(identity.supplementary_groups().is_empty());
-    assert_eq!(identity.capability_set(), Capabilities::EMPTY);
-    assert_eq!(identity.account_mode(), AccountMode::Existing);
 
     // A later session, and a retry of the Activate in it, get the established activation
     // without applying the record again; requests spawn executions.
@@ -940,8 +903,7 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
         adapter.system.effects,
         [
             Effect::Assemble(accepted_assembly()),
-            Effect::Account(workload()),
-            Effect::Bind(view(Some(workload()), MachineId::Image)),
+            Effect::Bind(view(MachineId::Image)),
             Effect::Spawn,
             Effect::Spawn,
         ]
@@ -951,7 +913,7 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
 }
 
 #[test]
-fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
+fn assembly_inputs_are_taken_exactly_from_the_record() {
     let template = template();
     // Each image, with what the assembly expects of it, and whether the kernel rereads its
     // partition table first.
@@ -997,6 +959,8 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
     for (image, root_image, reread) in images {
         for (upper, root_upper) in uppers {
             for (overlay, root_overlay) in overlays {
+                // The record's workload identity, if any, is no input: each execution names
+                // its own.
                 for identity in [None, Some(WORKLOAD)] {
                     let record = clone_record(configuration(image, upper, overlay, identity));
                     let mut system = FakeSystem::new();
@@ -1009,16 +973,14 @@ fn assembly_and_identity_inputs_are_taken_exactly_from_the_record() {
                         overlay: root_overlay,
                         timeout: template.timeout,
                     };
-                    let identity = identity.map(|_| workload());
                     let mut effects = Vec::new();
                     if reread {
                         effects.push(Effect::Reread(template.distro));
                     }
                     effects.push(Effect::Assemble(assembly));
-                    effects.extend(identity.clone().map(Effect::Account));
-                    effects.push(Effect::Bind(view(identity.clone(), MachineId::Image)));
+                    effects.push(Effect::Bind(view(MachineId::Image)));
                     assert_eq!(system.effects, effects, "{record:?}");
-                    assert_eq!(applied, activated(&system, identity, MachineId::Image));
+                    assert_eq!(applied, activated(&system, MachineId::Image));
                 }
             }
         }
@@ -1093,8 +1055,7 @@ fn a_gpt_disk_s_partition_table_is_reread_before_its_root_is_assembled() {
         [
             Effect::Reread(template.distro),
             Effect::Assemble(assembly),
-            Effect::Account(workload()),
-            Effect::Bind(view(Some(workload()), MachineId::Image)),
+            Effect::Bind(view(MachineId::Image)),
         ]
     );
     // The reread waited for the distro device, and the assembly for each device, until the
@@ -1106,91 +1067,46 @@ fn a_gpt_disk_s_partition_table_is_reread_before_its_root_is_assembled() {
 }
 
 #[test]
-fn a_workload_identity_without_an_account_in_the_image_is_refused_before_ready() {
+fn the_application_checks_no_account_of_the_record_s_workload_identity() {
+    // The record's workload identity is no identity in which the executions run: each execution
+    // names its own, whose account the adapter's entry reads and checks before the execution
+    // runs, as in a sandbox without a workload identity at a cold boot. The application reads no
+    // account database, so a record that names a workload identity activates whether the image
+    // holds its account or not: one of its user ID whose primary group is its group ID, which the
+    // group database holds, and whose home is absolute.
     let base = Instant::now();
     let record = accepted().encode();
-    // Images that hold no account of the workload identity's user ID whose primary group is its
-    // group ID, which the group database holds, and whose home is absolute.
     let without_passwd = FakeSystem::new();
     fs::remove_file(without_passwd.image.path().join("etc/passwd")).unwrap();
-    let systems: [(FakeSystem, Refusal); 5] = [
-        (
-            FakeSystem::with(b"root:x:0:0:root:/root:/bin/sh\n", GROUP),
-            |error| matches!(error, AccountError::Missing),
-        ),
-        (
-            FakeSystem::with(b"workload:x:1000:1002::/home/workload:/bin/sh\n", GROUP),
-            |error| matches!(error, AccountError::PrimaryGroup(1002)),
-        ),
-        (FakeSystem::with(PASSWD, b"root:x:0:\n"), |error| {
-            matches!(error, AccountError::Group)
-        }),
-        (
-            FakeSystem::with(b"workload:x:1000:1001::home:/bin/sh\n", GROUP),
-            |error| matches!(error, AccountError::Home),
-        ),
-        (without_passwd, |error| {
-            matches!(error, AccountError::Read(Database::Passwd, _))
-        }),
+    let systems = [
+        FakeSystem::new(),
+        FakeSystem::with(b"root:x:0:0:root:/root:/bin/sh\n", GROUP),
+        FakeSystem::with(b"workload:x:1000:1002::/home/workload:/bin/sh\n", GROUP),
+        FakeSystem::with(PASSWD, b"root:x:0:\n"),
+        FakeSystem::with(b"workload:x:1000:1001::home:/bin/sh\n", GROUP),
+        FakeSystem::with(b"", b""),
+        without_passwd,
     ];
-    for (system, refusal) in systems {
+    for system in systems {
         let mut adapter = Adapter::restricted(system, base);
-        let failure = adapter
+        adapter
             .take(base, ActivationInput::Activate(&record))
-            .unwrap_err();
-        assert_eq!(failure.state(), ActivationState::Activating);
-        let ApplyError::Account {
-            error: entry::Error::Account(error),
-            teardown: None,
-        } = apply_error(&failure)
-        else {
-            panic!("{failure}");
-        };
-        assert!(refusal(error), "{error}");
-        // The root was assembled, its account databases read, and the root torn down, without
-        // a Ready, and behind the closed fence.
+            .unwrap();
+        assert_eq!(adapter.activation.state(), ActivationState::Ready);
+        assert_eq!(adapter.ready, Some(ReadyActivation::of(&accepted())));
+        assert_eq!(
+            adapter.applied,
+            Some(activated(&adapter.system, MachineId::Image))
+        );
         assert_eq!(
             adapter.system.effects,
             [
                 Effect::Assemble(accepted_assembly()),
-                Effect::Account(workload()),
-                Effect::Teardown,
+                Effect::Bind(view(MachineId::Image)),
             ]
         );
-        assert_eq!(adapter.activation.state(), ActivationState::Failed);
-        assert_eq!(adapter.applied, None);
-        assert_eq!(adapter.ready, None);
-        assert!(!adapter.fence.is_open());
-        // The failure is final: no retry applies the record again, and nothing is served.
-        for input in [
-            ActivationInput::Activate(&record),
-            ActivationInput::Request,
-            ActivationInput::Reset,
-        ] {
-            assert!(adapter.take(base, input).is_err());
-        }
-        assert_eq!(adapter.system.effects.len(), 3);
+        assert!(adapter.fence.is_open());
     }
-
-    // Without a workload identity, the application reads no account: each execution names its
-    // own identity, which the adapter's entry checks. The entry that binds the runtime's files
-    // binds the same files whatever its identity.
-    let anyone = clone_record(configuration(
-        erofs(Some(IMAGE_UUID)),
-        activation::Upper::Tmpfs,
-        activation::OverlayMode::UntrustedLowers,
-        None,
-    ));
-    let mut system = FakeSystem::with(b"", b"");
-    let applied = apply_with(&mut system, &anyone, &template(), None).unwrap();
-    assert_eq!(applied.identity, None);
-    assert_eq!(
-        system.effects,
-        [
-            Effect::Assemble(accepted_assembly()),
-            Effect::Bind(view(None, MachineId::Image)),
-        ]
-    );
 }
 
 #[test]
@@ -1227,8 +1143,8 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
 #[test]
 fn a_generated_machine_id_is_generated_once_after_the_gate_for_every_execution() {
     // The application generates the machine ID once the activation accepted the record, after
-    // the root's assembly and the account's check, in the template's runtime directory, and
-    // binds it for every execution, through the entry of the record's hostname.
+    // the root's assembly, in the template's runtime directory, and binds it for every
+    // execution, through the entry of the record's hostname.
     let base = Instant::now();
     let record = with_generated_id();
     let bytes = record.encode();
@@ -1238,14 +1154,13 @@ fn a_generated_machine_id_is_generated_once_after_the_gate_for_every_execution()
         .unwrap();
     let expected = [
         Effect::Assemble(accepted_assembly()),
-        Effect::Account(workload()),
         Effect::Generate(machine_id_path()),
-        Effect::Bind(view(Some(workload()), generated_id())),
+        Effect::Bind(view(generated_id())),
     ];
     assert_eq!(adapter.system.effects, expected);
     assert_eq!(
         adapter.applied,
-        Some(activated(&adapter.system, Some(workload()), generated_id()))
+        Some(activated(&adapter.system, generated_id()))
     );
     assert_eq!(adapter.ready, Some(ReadyActivation::of(&record)));
     assert_eq!(machine_id_path(), Path::new("/run/nvx/workload-machine-id"));
@@ -1274,10 +1189,7 @@ fn a_generated_machine_id_is_generated_once_after_the_gate_for_every_execution()
     let mut system = FakeSystem::new();
     let applied = apply_with(&mut system, &accepted(), &template(), None).unwrap();
     assert_eq!(system.generated(), 0);
-    assert_eq!(
-        applied,
-        activated(&system, Some(workload()), MachineId::Image)
-    );
+    assert_eq!(applied, activated(&system, MachineId::Image));
 }
 
 #[test]
@@ -1288,7 +1200,7 @@ fn the_view_s_entry_takes_the_record_s_hostname_and_machine_id() {
     let view_entry = |hostname: &[u8]| {
         let named = View {
             hostname: hostname.to_vec(),
-            ..view(None, MachineId::Image)
+            ..view(MachineId::Image)
         };
         named.entry(Path::new(RUNTIME))
     };
@@ -1305,13 +1217,13 @@ fn the_view_s_entry_takes_the_record_s_hostname_and_machine_id() {
     // machine ID without a resolver file: only the former open the root, which a temporary
     // directory, not the root of a mount, fails.
     let directory = tempfile::tempdir().unwrap();
-    let image = view(None, MachineId::Image).entry(directory.path());
+    let image = view(MachineId::Image).entry(directory.path());
     image.bind_runtime().unwrap().remove().unwrap();
     let resolver = View {
         resolver: Some(resolver_path()),
-        ..view(None, MachineId::Image)
+        ..view(MachineId::Image)
     };
-    for bound in [view(None, generated_id()), resolver, full_view()] {
+    for bound in [view(generated_id()), resolver, full_view()] {
         let error = bound.entry(directory.path()).bind_runtime().unwrap_err();
         assert!(matches!(error, entry::Error::Root(_)), "{bound:?}: {error}");
     }
@@ -1324,7 +1236,7 @@ fn a_machine_id_or_a_view_that_fails_fails_the_activation_once_the_root_is_torn_
     // A file at the machine ID's path already, as once a boot generated its ID, and a bind that
     // the image refuses, as one whose `/etc/machine-id` is a directory.
     let generation = Effect::Generate(machine_id_path());
-    let bind = Effect::Bind(view(Some(workload()), generated_id()));
+    let bind = Effect::Bind(view(generated_id()));
     let cases = [
         (
             FakeSystem::generating(io::ErrorKind::AlreadyExists),
@@ -1352,12 +1264,8 @@ fn a_machine_id_or_a_view_that_fails_fails_the_activation_once_the_root_is_torn_
             } => {}
             error => panic!("{error}"),
         }
-        // The root was assembled, its account checked, and the root torn down, without a Ready,
-        // and behind the closed fence.
-        let mut expected = vec![
-            Effect::Assemble(accepted_assembly()),
-            Effect::Account(workload()),
-        ];
+        // The root was assembled, then torn down, without a Ready, and behind the closed fence.
+        let mut expected = vec![Effect::Assemble(accepted_assembly())];
         expected.extend(effects);
         expected.push(Effect::Teardown);
         assert_eq!(adapter.system.effects, expected);
@@ -1429,8 +1337,8 @@ fn the_runtime_s_binds_are_removed_before_the_root_is_torn_down() {
 #[test]
 fn an_export_is_mounted_through_the_template_s_device_and_handed_to_the_adapter() {
     // A record's export, of either shape, is mounted once, before Ready, read-write, through the
-    // template's filesystem device, once the workload's identity was checked, and the adapter
-    // gets its root, to map the host's mapping table from.
+    // template's filesystem device, once the root was assembled, and the adapter gets its root,
+    // to map the host's mapping table from.
     let base = Instant::now();
     for kind in [ExportKind::Directory, ExportKind::Aggregate] {
         let mut configuration = accepted().configuration().clone();
@@ -1443,16 +1351,15 @@ fn an_export_is_mounted_through_the_template_s_device_and_handed_to_the_adapter(
             .unwrap();
         let expected = [
             Effect::Assemble(accepted_assembly()),
-            Effect::Account(workload()),
             Effect::MountExport(TAG.to_owned(), Access::ReadWrite),
-            Effect::Bind(view(Some(workload()), MachineId::Image)),
+            Effect::Bind(view(MachineId::Image)),
         ];
         assert_eq!(adapter.system.effects, expected, "{kind:?}");
         assert_eq!(
             adapter.applied,
             Some(Activated {
                 export: Some(()),
-                ..activated(&adapter.system, Some(workload()), MachineId::Image)
+                ..activated(&adapter.system, MachineId::Image)
             })
         );
         // A retry and an execution mount nothing again.
@@ -1491,11 +1398,10 @@ fn a_network_s_dns_server_is_written_to_a_resolver_file_that_every_execution_see
         let applied = apply_with(&mut system, &record, &template(), None).unwrap();
         let bound = View {
             resolver: Some(resolver_path()),
-            ..view(Some(workload()), MachineId::Image)
+            ..view(MachineId::Image)
         };
         let expected = [
             Effect::Assemble(accepted_assembly()),
-            Effect::Account(workload()),
             Effect::Resolver(resolver_path(), dns),
             Effect::Bind(bound),
         ];
@@ -1505,7 +1411,7 @@ fn a_network_s_dns_server_is_written_to_a_resolver_file_that_every_execution_see
             Activated {
                 resolver: Some(resolver_path()),
                 proxy: Some(PROXY.to_owned()),
-                ..activated(&system, Some(workload()), MachineId::Image)
+                ..activated(&system, MachineId::Image)
             }
         );
     }
@@ -1521,15 +1427,14 @@ fn a_network_s_dns_server_is_written_to_a_resolver_file_that_every_execution_see
         let applied = apply_with(&mut system, &record, &template(), None).unwrap();
         let expected = [
             Effect::Assemble(accepted_assembly()),
-            Effect::Account(workload()),
-            Effect::Bind(view(Some(workload()), MachineId::Image)),
+            Effect::Bind(view(MachineId::Image)),
         ];
         assert_eq!(system.effects, expected, "{proxy:?}");
         assert_eq!(
             applied,
             Activated {
                 proxy: proxy.map(str::to_owned),
-                ..activated(&system, Some(workload()), MachineId::Image)
+                ..activated(&system, MachineId::Image)
             }
         );
     }
@@ -1593,7 +1498,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
     let cases: [(FakeSystem, Vec<Effect>, Failed); 6] = [
         (
             FakeSystem::unmountable(),
-            failed(4, false, false),
+            failed(3, false, false),
             |error| {
                 matches!(
                     error,
@@ -1609,7 +1514,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
         ),
         (
             FakeSystem::unwritable(io::ErrorKind::AlreadyExists),
-            failed(5, false, true),
+            failed(4, false, true),
             |error| {
                 matches!(
                     error,
@@ -1622,7 +1527,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
         ),
         (
             FakeSystem::unannounced(|| StartError::NoPrivilegedPort),
-            failed(6, false, true),
+            failed(5, false, true),
             |error| {
                 matches!(
                     error,
@@ -1635,7 +1540,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
         ),
         (
             FakeSystem::unbindable(|| entry::Error::Resolver(MappingError::TargetKind)),
-            failed(7, true, true),
+            failed(6, true, true),
             |error| {
                 matches!(
                     error,
@@ -1652,7 +1557,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
                 error: Box::new(entry::Error::Resolver(MappingError::TargetKind)),
                 teardown: mappings::TeardownError::of("/etc/machine-id", MappingError::MountPoint),
             }),
-            failed(7, true, true),
+            failed(6, true, true),
             |error| {
                 matches!(
                     error,
@@ -1665,7 +1570,7 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
         ),
         (
             FakeSystem::unbindable(|| entry::Error::MachineId(MappingError::TargetKind)),
-            failed(7, true, true),
+            failed(6, true, true),
             |error| {
                 matches!(
                     error,
@@ -1703,11 +1608,8 @@ fn a_network_that_publishes_the_workload_s_listeners_starts_their_announcer_to_i
     let published = clone_record(configuration.clone());
     let mut system = FakeSystem::new();
     let applied = apply_with(&mut system, &published, &template(), None).unwrap();
-    let bound = Effect::Bind(view(Some(workload()), MachineId::Image));
-    let assembled = [
-        Effect::Assemble(accepted_assembly()),
-        Effect::Account(workload()),
-    ];
+    let bound = Effect::Bind(view(MachineId::Image));
+    let assembled = [Effect::Assemble(accepted_assembly())];
     assert_eq!(
         system.effects,
         [&assembled[..], &[Effect::Announce(GATEWAY), bound.clone()]].concat()
@@ -1717,7 +1619,7 @@ fn a_network_that_publishes_the_workload_s_listeners_starts_their_announcer_to_i
         Activated {
             proxy: Some(PROXY.to_owned()),
             announcer: Some(GATEWAY),
-            ..activated(&system, Some(workload()), MachineId::Image)
+            ..activated(&system, MachineId::Image)
         }
     );
     configuration.network = Some(unpublished(None, Some(PROXY)));
@@ -1858,7 +1760,7 @@ fn a_generated_machine_id_and_a_resolver_file_keep_the_root_busy_until_their_bin
     assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
     let bound = View {
         resolver: Some(resolver),
-        ..view(Some(workload()), machine_id)
+        ..view(machine_id)
     };
     let binds = bound.entry(&live.root).bind_runtime().unwrap();
     let targets = [
@@ -1969,21 +1871,6 @@ fn application_errors_name_their_cause() {
     );
     assert_eq!(error.source().unwrap().to_string(), refusal);
 
-    let error = ApplyError::Account {
-        error: entry::Error::Account(AccountError::Missing),
-        teardown: None,
-    };
-    assert_eq!(
-        error.to_string(),
-        "the root refuses the workload identity: the account is unavailable: no passwd entry has \
-         the user ID"
-    );
-    assert_eq!(
-        error.source().unwrap().to_string(),
-        "the account is unavailable: no passwd entry has the user ID"
-    );
-    assert!(format!("{error:?}").starts_with("Account { error: Account(Missing)"));
-
     let exists = io::Error::from(io::ErrorKind::AlreadyExists);
     let error = ApplyError::MachineId {
         error: io::ErrorKind::AlreadyExists.into(),
@@ -2088,15 +1975,20 @@ fn application_errors_name_their_cause() {
 
     // The adapter hands the error to the activation, whose failure names it.
     let base = Instant::now();
-    let mut adapter = Adapter::restricted(FakeSystem::with(b"", GROUP), base);
+    let generating = FakeSystem::generating(io::ErrorKind::AlreadyExists);
+    let mut adapter = Adapter::restricted(generating, base);
     let failure = adapter
-        .take(base, ActivationInput::Activate(&accepted().encode()))
+        .take(
+            base,
+            ActivationInput::Activate(&with_generated_id().encode()),
+        )
         .unwrap_err();
     assert_eq!(
         failure.to_string(),
-        "the activation failed in its activating state: the record's application failed: the \
-         root refuses the workload identity: the account is unavailable: no passwd entry has the \
-         user ID"
+        format!(
+            "the activation failed in its activating state: the record's application failed: the \
+             workload's machine ID cannot be generated: {exists}"
+        )
     );
     assert!(failure.source().unwrap().is::<ApplyError>());
 }

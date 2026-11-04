@@ -165,12 +165,10 @@
 //! at a cold boot. The upper must be fresh: the assembly refuses one whose `upper` or `work`
 //! directory exists and is not empty, since a clone's root starts as its image alone, while a cold
 //! sandbox's scratch keeps its upper across boots; the check reads at most one entry of each, and
-//! no file. If the record has a workload identity, it then checks its account in the assembled
-//! root, before Ready, as NVX's init checks it at boot: the identity is
-//! [`Identity::new`](super::entry::Identity::new) of the record's user and group IDs, without
-//! supplementary groups or capabilities, in existing-account mode, and every execution runs as it.
-//! Without one, the adapter gives each execution its own identity, which
-//! [`Entry::check`](super::entry::Entry::check) checks. If the record asks for a generated machine
+//! no file. It takes no identity in which the executions run from the record, whose workload
+//! identity, if any, has no effect: the adapter gives each execution the identity that the
+//! execution names, which [`Entry::check`](super::entry::Entry::check) checks, as for a sandbox
+//! without a workload identity at a cold boot. If the record asks for a generated machine
 //! ID, it then generates one, once, with
 //! [`MachineId::generate`](super::entry::MachineId::generate), after the repair's reseed, so that
 //! no two clones of a template share it, to [`MACHINE_ID_FILE`] in the template's runtime

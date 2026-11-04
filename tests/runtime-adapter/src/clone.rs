@@ -3,8 +3,8 @@
 //!
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
 //! layer or a GPT disk no longer than the template's placeholder, its upper, on an ext4 scratch
-//! image or in RAM, its processor and memory targets, the workload identity as which its
-//! executions run, its overlay mode, its scratch's journal policy, the bound of a GPT disk's
+//! image or in RAM, its processor and memory targets, the workload identity of its record, which
+//! its guest ignores, its overlay mode, its scratch's journal policy, the bound of a GPT disk's
 //! first partition, the machine ID that its executions see, the image's own or one that its
 //! guest generates, the host paths that it shares with its root, as a launch shares them,
 //! `sharing::HostFsSharing`, and its network, as a launch reads it, `layered::read_network`,
@@ -84,7 +84,8 @@ pub struct Request {
     pub processors: Option<u32>,
     /// The memory target, in bytes, or `None` for the template's RAM.
     pub memory: Option<u64>,
-    /// The workload identity as which every execution runs, if any: its user ID and its group ID.
+    /// The workload identity of the clone's record, if any: its user ID and its group ID. The
+    /// clone's guest ignores it: each execution names its own.
     pub workload_identity: Option<(u32, u32)>,
     /// The overlay's mode, or `None` for the guest's default, which trusts the lowers.
     pub overlay_mode: Option<OverlayMode>,

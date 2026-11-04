@@ -44,10 +44,8 @@
 //!   proxy, if any, which holds no credentials;
 //! - the [`WorkloadView`]: the hostname, the [`MachineIdMode`], the image's own machine ID or one
 //!   that the guest generates, and the [`WorkloadIdentity`], if any: a UID and a GID, neither 0
-//!   nor `u32::MAX`, whose account the image must hold, without supplementary groups or
-//!   capabilities, in which every execution runs, as each execution of a layered sandbox runs
-//!   today. An adapter whose executions name their own identity, as CRI containers do, leaves it
-//!   out;
+//!   nor `u32::MAX`, which the guest ignores as it applies the record, since each execution of a
+//!   clone names its own identity, as CRI containers do;
 //! - the root's settings: the [`OverlayMode`], the [`Journal`] policy of a scratch upper, and the
 //!   bound of a GPT disk's first partition;
 //! - the [`ExpectedResources`]: the CPU count and the memory size that the guest must have, as a
@@ -461,8 +459,8 @@ pub enum MachineIdMode {
     Generated,
 }
 
-/// The identity in which every execution of a workload runs: a UID and a GID, neither 0 nor
-/// `u32::MAX`, whose account the image must hold, without supplementary groups or capabilities.
+/// A workload identity that an activation record may carry: a UID and a GID, neither 0 nor
+/// `u32::MAX`. The guest ignores it as it applies the record: each execution names its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WorkloadIdentity {
     /// The user ID: neither 0 nor `u32::MAX`.
@@ -478,7 +476,8 @@ pub struct WorkloadView {
     pub hostname: Vec<u8>,
     /// The machine ID that the workload sees.
     pub machine_id: MachineIdMode,
-    /// The identity in which every execution runs, unless the executions name their own.
+    /// A workload identity, which the guest ignores as it applies the record: each execution
+    /// names its own.
     pub identity: Option<WorkloadIdentity>,
 }
 

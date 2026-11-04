@@ -837,10 +837,9 @@ after the repair's acknowledgement of the restore:
    NIC. The application assembles the root, an
    EROFS image or a GPT disk over a tmpfs or the scratch, in the record's
    overlay mode, waiting for each device until the activation's deadline at the
-   latest, so that it ends by then, and checks the account of the record's
-   workload identity, if it has one, in the assembled root, in existing-account
-   mode. For a GPT disk, it first asks the kernel to reread the disk's partition
-   table, so that the
+   latest, so that it ends by then. It ignores the record's workload identity,
+   if it has one: each execution names its own. For a GPT disk, it first asks
+   the kernel to reread the disk's partition table, so that the
    block devices of its partitions are the clone's disk's, not the template's
    placeholder's. The upper must be fresh: the assembly refuses one whose
    `upper` or `work` directory exists and is not empty. If the record asks for
@@ -874,9 +873,9 @@ after the repair's acknowledgement of the restore:
    waits for `Ready` before it sends the mapping table or the start.
 5. It then serves the host's order, as after a cold boot: the mapping table that
    the record announces, which it applies from the record's export, the start,
-   the executions, the probes, and the stop. The record's workload identity, if
-   it has one, is the whole sandbox's, as a root configuration's is: every
-   execution runs as it, and a start that names an identity is refused. Every
+   the executions, the probes, and the stop. A clone has no workload identity of
+   the whole sandbox: each execution names its own, and a start that names none
+   is refused, as in a sandbox whose root configuration names none. Every
    execution takes the record's hostname. The host tells the workloads the
    endpoint of the network's proxy, as after a cold boot: the host program's
    `exec` adds it to each execution's environment, so the worker leaves each
@@ -941,7 +940,7 @@ ends with one of these statuses, after a diagnostic on standard error:
 | 52 | The `Activate`'s record does not decode, breaks a limit, or is a cold boot's |
 | 53 | The record expects other resources than the clone has |
 | 54 | The root's assembly failed, its upper not fresh among its causes, or the kernel did not reread the partition table of the record's GPT disk before it |
-| 55 | The clone's workload cannot be activated: the image refuses the record's workload identity, as it holds no account of the identity, or not its group, or its account databases cannot be read, or the machine ID that the record asks for cannot be generated, or the record's hostname or that machine ID cannot be set for every execution |
+| 55 | The clone's workload cannot be activated: the machine ID that the record asks for cannot be generated, or the record's hostname or that machine ID cannot be set for every execution |
 | 56 | The record's host export cannot be mounted |
 | 57 | The record's network settings cannot be applied: the resolver file that names its DNS server cannot be written, or set for every execution, or the announcer of the listeners that its network publishes cannot start, as without the template's gateway; or that announcer ended |
 | 58 | The worker's own order misused the activation: it completed an activation that did not run, or started the sandbox before the clone was ready, or again |
@@ -1572,10 +1571,10 @@ library side, `clone`, holds what the command's options choose of the clone,
 `clone::Request`: its image, an EROFS layer or a GPT disk no longer than the
 template's placeholder, its upper, on an ext4 scratch image or in RAM, its
 processor target, the template's processors online at boot unless given, its
-memory target, the template's RAM unless given, the workload identity as which
-its executions run, its overlay mode, its scratch's journal policy, the bound
-of a GPT disk's first partition, the machine ID that its executions see,
-the host paths that it shares with its root, as a launch's
+memory target, the template's RAM unless given, the workload identity that its
+record holds, which its guest ignores, its overlay mode, its scratch's journal
+policy, the bound of a GPT disk's first partition, the machine ID that its
+executions see, the host paths that it shares with its root, as a launch's
 [shares](#shares), and its [network](#networks), as a launch reads it, which
 must be at the guest's address of the template's NIC, under a policy of its
 own.
@@ -1933,9 +1932,8 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   ext4 scratch image PATH, or RAM, with a processor target of N processors, the
   template's processors online at boot by default, a memory target of MIB
   mebibytes, the template's RAM by default, the workload identity UID:GID, if
-  given, as which every execution runs, and whose account the guest checks
-  before the clone is
-  ready, the overlay mode MODE and the scratch's journal policy POLICY, as a
+  given, which the clone's record holds and its guest ignores, the overlay mode
+  MODE and the scratch's journal policy POLICY, as a
   launch takes them, and for a GPT disk, the bound BYTES of its first
   partition, 64 KiB by default, as a launch's guest takes it. Every execution
   of the clone sees the hostname `runtime-adapter`, and the machine ID that
@@ -2427,9 +2425,8 @@ epoch of its broker's first reset, and the clone's activation,
 root applies each record as `nvx::guest::clone::apply` does, without a root: for
 a GPT disk, it stands for the kernel's reread of the disk's partition table,
 which a test may fail; it takes as long as a test asks, but no longer than until
-the activation's deadline, as the waits for the devices do, checks the account
-of the record's workload identity in the tests' directory of account databases,
-and stands for the generation of a machine ID that the record asks for, the
+the activation's deadline, as the waits for the devices do, and stands for the
+generation of a machine ID that the record asks for, the
 mount of the record's export, the write of the resolver file that names its
 network's DNS server, and the setting of the record's hostname and machine ID
 for every execution, each of which a test may fail. The tests cover:
@@ -2447,11 +2444,10 @@ for every execution, each of which a test may fail. The tests cover:
   nothing answered or applied;
 - a record that does not decode, a cold boot's, and one that expects other
   resources, which fail the activation with nothing applied, and a GPT disk
-  whose partition table the kernel does not reread, a workload identity whose
-  account or group the image lacks, a machine ID that cannot be generated, a
-  hostname or machine ID that cannot be set, an export that cannot be mounted,
-  and a resolver file that cannot be written, which fail its application, each
-  with the status of its class, and no `Ready`;
+  whose partition table the kernel does not reread, a machine ID that cannot be
+  generated, a hostname or machine ID that cannot be set, an export that cannot
+  be mounted, and a resolver file that cannot be written, which fail its
+  application, each with the status of its class, and no `Ready`;
 - an `Activate` whose header announces more than 1 KiB, which the framing
   refuses before it takes any byte of its body, and which fails the activation
   with the record's status, before the clone is ready and once it is;
@@ -2483,10 +2479,9 @@ for every execution, each of which a test may fail. The tests cover:
 - an `Activate` of another transaction, or of the same transaction with
   another record, once the clone is ready, or its sandbox started, which fails
   the activation with the status of the host's session;
-- the record's workload identity, as which every execution runs, while a start
-  that names an identity is refused with `EINVAL`, as is a start that names
-  none once the record has none, and the record's hostname, which every
-  execution's entry takes;
+- the identity that each start names, whether the record names a workload
+  identity or not, while a start that names none is refused with `EINVAL`, and
+  the record's hostname, which every execution's entry takes;
 - the `activation` probe, which the worker answers itself, with no root
   operation, executions running or not: the restore's reset, the host's first
   message, the clone's `Ready`, and its start, in that order, after the
@@ -2959,11 +2954,11 @@ directory that the starts authorize:
 | `a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with` | Of a template of 4 processors, 2 of them online at boot: a target of 1, then in turn one without a processor target, and one of 4 | Status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid targets; then each started, with CPUs 0 and 1 online by default, which the restore brought none of online, and all 4 online for the target of 4, of which the restore brought CPUs 2 and 3 online |
 | `one_generation_serves_clones_of_either_format_over_either_upper` | Of a template whose placeholder is a GPT disk of two layers, longer than the EROFS image, four at once, each image shorter than the placeholder: the EROFS image over a scratch image and in RAM, a GPT disk of one layer, of the EROFS image's length, in RAM, and one of three layers, as short as its layout allows, over a scratch image, with a bound that its first partition meets exactly; then the disk of one layer, with a bound one byte smaller than its first partition | Each started, with its upper and the overlay's options; the EROFS image's root, without a first partition; each GPT disk's layers, ext4 file systems mounted read-only once each, from the partitions that its own table names, stacked in order, and the bytes of its own first partition; the image's read-only disk at the placeholder's length, and the scratch device at the template's scratch length, each of which the guest reads to its end; for a clone in RAM, no file of its sandbox as long as the template's scratch, and on Linux `--restore-absent-scratch` and no `scratch` block device among its VMM's arguments, which name one over a scratch image; then status 8, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
 | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An EROFS image and a GPT disk 4 KiB longer, and an EROFS image 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for unstaged images, status 1, without a record; for the generation, status 10, with the record of a selection that names no template, which the store never published, without a lease; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that the store refuses a later start's selection, with status 10, as `ineligible`, by the evidence of its tombstone, without a lease |
-| `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, a workload identity whose account the image lacks, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or of invalid settings, with 55, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
+| `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
 | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | Over a scratch image, in whose root the `contents` probe writes a file, then over a copy of that scratch image once the first clone stopped | The first started; then status 8, since the copy's upper is not fresh, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
 | `clones_at_once_keep_their_own_uppers_and_machine_ids` | Three at once: over a scratch image and in RAM, each with a generated machine ID, and in RAM with the image's own; two executions in each, as user ID 0, that write a marker in the root, and try to write `/etc/machine-id` | In every execution, the hostname `runtime-adapter`, and no marker of another clone; a generated machine ID that differs between the clones, the same in each execution of a clone, held by one bind that is read-only, `nosuid`, and `nodev`, and that the write cannot change; with the image's own machine ID, none, since the image has none, no bind, and in the later execution, the ID that the first wrote; then each stop releases its lease |
 | `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | Of a template of the EROFS image, a GPT disk whose layer holds a regular file `etc`, with the image's own machine ID, then with a generated one | The first started, with the disk's root; then status 8, since no bind can hold the machine ID below a file, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of invalid settings, with the guest's status 55; nothing quarantined, and the lease released, with the records |
-| `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | Over a scratch image, as nobody | An execution that runs as nobody, one that names an identity refused with `EINVAL`, and the first execution after the clone's start |
+| `a_clone_runs_the_executions_that_name_their_identity_once_it_is_ready` | Over a scratch image, with the workload identity of nobody, which the guest ignores | An execution that names nobody's identity, which runs as nobody, one that names none refused with `EINVAL`, and the first execution after the clone's start |
 | `openvmm_reads_none_of_the_host_s_input_until_the_repair_acknowledges_the_restore` | Of a template whose clones wait 8 seconds before their repair, in RAM, which the host starts through NVX's public API, with the host program's clone order, over transports that watch their attachments, each of which they write a byte at a time; then a reattach through NVX's public API | The template's key, which names the delay; the attachment written within half the delay of the launch, the broker's first answer, and the attachment of the host, only after the delay; on Linux, `SIOCOUTQ` at the control socket risen by the same step with each byte that the host wrote, then as the write left it at every record before then, and zero once the broker answered, while a listener of the test's own process sees it fall once it read the first byte of such an attachment, and on Windows no record, since a named pipe tells its writer nothing; then the reattach's attachment answered within a quarter of the delay, and on Linux read whole by then; the guest's `repair-delay` of 8 seconds, and the events of its activation in order; and a stop that releases the lease |
 | `a_generation_is_eligible_by_the_clock_of_its_capture` | At the host's time, then with clock fixtures: UTC a day behind, another boot an hour after the capture by UTC, and the restore window passed by each clock, or UTC before the capture | The host's monotonic clock on the boot of the capture, whatever UTC says, UTC after a reboot, with the fixture's downtime, and, outside the window, status 10, with the record of the store's refusal of the selection, `expired` once the window passed, and `ineligible`, by the evidence `early`, before the capture, without a lease |
 | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, by the guest's statistics, and each disk's whole length once the guest read it to its end; on the host, the staging's count of the bytes that it read at least the image's length, which it hashed, the start's less than an eighth of it, and the VMM's less than an eighth of the disks whose files back the clone's, those of the image and of a scratch image, once the clone is ready; then, once the guest read each disk to its end, the VMM's count raised by at least what the guest asked of those files on Windows, and by less than an eighth of it on Linux, whose `rchar` misses OpenVMM's reads through io_uring |
@@ -2984,7 +2979,7 @@ directory that the starts authorize:
 | `a_clone_s_executions_find_the_proxy_of_its_policy` | Of a template of a network with egress allowed, one of a proxy-only network, with an execution as user ID 0 that runs `env`, then one that names its own `HTTPS_PROXY` | A record that names the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, and no DNS server; the first execution with its own entry, then the URL in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; the second with exactly its own environment; one network device, and the image's own `/etc/resolv.conf`, which no bind holds |
 | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | Of a template of a network with egress allowed, one with a generated machine ID, sharing a host directory read-write | Started, with one mapping, and a record that names the export and the gateway's DNS server; on Linux, the VMM's `--mount-aggregate`, with one `--mount-child`, read-write, and its `--restore-network-policy`, then the arguments of the clone's policy; below the root, the binds of the machine ID and of the resolver configuration, then the export's mapping; the export's directory, and a write through it, which the host's directory holds after the stop |
 | `a_selection_that_names_no_template_leases_nothing` | A start that names a template store that does not exist, then, once `remove` retired the generation, which no lease kept, a start of it | Status 10, with the record of a selection that names no template, by the evidence `no-store`, then `retired`, without a lease or a VM; and a store that indexes no generation |
-| `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | A run over a scratch image, as nobody, whose execution names its environment and its working directory, and ends with status 3, then a run in RAM, as nobody, whose execution names an identity of its own | Each with status 0, in one command: the preflight's `staged`, the clone started as a start starts one, the execution, and a stop that releases the lease, without a VM; the first execution's output, of the Ubuntu image's root, as nobody, in its working directory, with its environment, and its status; the second refused with `EINVAL`; no lease left, and the payload with nothing but the capture's files |
+| `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | A run over a scratch image, whose execution names nobody's identity, its environment, and its working directory, and ends with status 3, then a run in RAM, whose execution names no identity | Each with status 0, in one command: the preflight's `staged`, the clone started as a start starts one, the execution, and a stop that releases the lease, without a VM; the first execution's output, of the Ubuntu image's root, as nobody, in its working directory, with its environment, and its status; the second refused with `EINVAL`; no lease left, and the payload with nothing but the capture's files |
 | `a_run_whose_clone_does_not_start_runs_nothing` | A run that names a template store that does not exist, one with a clock fixture past the restore window, and one over a scratch image of zeros | Once the preflight staged the images, status 10, with the record of a selection that names no template, by the evidence `no-store`, then of an `expired` generation, without a lease or a VM; then status 8, with the record of a failure of the request at the activation, once the VM exited, the lease released, and no execution or stop |
 | `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | Of a template of a proxy-only network, a run of its network, whose execution, as user ID 0, runs `env` with an entry of its own, then a run of a network that lets nothing through | The first with status 0, its clone started and stopped as a run's, and the execution's own entry, then the proxy's URL, `http://192.0.2.1:PORT`, at the port of the proxy's listener, in `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`; then, once the preflight staged the images, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid settings, which quarantines nothing, the lease released, and no execution or stop |
 | `a_run_s_execution_finds_its_shares_beneath_the_root` | A run over a scratch image, sharing a host directory read-write, whose execution, as user ID 0, reads a file of the directory and writes another | Status 0, its clone started with one mapping and stopped as a run's; the file's contents in the execution's output; and the written file in the host's directory once the run tore the clone down |
@@ -3187,7 +3182,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | A clone of a template with a NIC maps its export below the binds of its machine ID and of its resolver configuration |
 | `vm_clone` | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | A clone's restore reads less than an eighth of each disk, before the guest reads each to its end, by the guest's statistics, and as the host counts the reads of the start, which hashes and copies nothing, and of the VMM, whose count on Windows rises by what the guest asked of the disks' files, and on Linux, where it misses io_uring's reads, does not |
 | `vm_clone` | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | A scratch image whose upper an earlier clone used ends the clone before it is ready, with status 54 |
-| `vm_clone` | `a_clone_runs_its_executions_as_its_workload_identity_once_it_is_ready` | A clone runs its executions as its record's workload identity once it is ready, and refuses one that names an identity with `EINVAL` |
+| `vm_clone` | `a_clone_runs_the_executions_that_name_their_identity_once_it_is_ready` | A clone runs the executions that name their identity once it is ready, whatever workload identity its record names, and refuses one that names none with `EINVAL` |
 | `vm_clone` | `a_clone_s_executions_find_the_proxy_of_its_policy` | The executions of a clone of a proxy-only network find its proxy's URL in their environment, and the clone keeps the image's own `/etc/resolv.conf` |
 | `vm_clone` | `a_clone_s_time_settles_after_it_is_ready` | A clone's time settles once it is ready, without a violation, after the downtime that the host's monotonic clock measured |
 | `vm_clone` | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A clone whose activation fails ends before it is ready, with the status of the failure's class and the failure's record, quarantines nothing, and releases its lease |
