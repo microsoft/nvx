@@ -53,6 +53,12 @@ runs:
           -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --no-default-features \
           -- -D warnings
+        # The cli and testing features alone, so that the compiler checks the private code that
+        # each feature set builds, which other features' code may otherwise use.
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
+          --features cli -- -D warnings
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
+          --no-default-features --features testing -- -D warnings
 
     - name: Test
       shell: bash
@@ -104,6 +110,15 @@ runs:
         NVX_BUNDLE: skip
         RUSTDOCFLAGS: -D warnings
       run: cargo "+${{ steps.toolchains.outputs.toolchain }}" doc --locked --no-deps --all-features
+
+    # The public API, hidden items marked, must match the snapshots in nvx-rs/public-api/, which
+    # `python3 scripts/public_api.py --update` rewrites. The script documents both platforms, on
+    # the pinned release, with their targets' standard libraries, so the Linux runner checks the
+    # Windows snapshot too.
+    - name: Check the public API
+      if: runner.os == 'Linux'
+      shell: bash
+      run: python3 scripts/public_api.py
 
     - name: Check the minimum supported Rust version
       shell: bash
