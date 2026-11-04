@@ -56,8 +56,11 @@ Then settle the prerequisites:
   `gh pr list --repo microsoft/openvmm --base feature/microvm/dev --state open`. Also list open
   pull requests based on each listed pull request's head branch, recursively, by repeating the
   command with `--base <head-branch>`. Land each one in dependency order, as nvx-openvmm-promote
-  describes, or agree with the user to carry its commits into the release. Record every layer
-  left open for rebasing onto the new release once `feature/microvm/dev` moves.
+  describes, or agree with the user to carry its commits into the release. Before pushing each
+  stacked pull request's head, ensure its parent has landed and its base is `feature/microvm/dev`:
+  retarget it with `gh pr edit <number> --repo microsoft/openvmm --base feature/microvm/dev` if
+  needed. If a native stack locks that base, unstack that layer before retargeting. Record only
+  layers whose commits have not landed as left open for rebasing after `feature/microvm/dev` moves.
 - Merge or close NVX's open pin promotions. Once `feature/microvm/dev` moves, a revision of the old
   chain is no longer on the branch that `.gitmodules` tracks.
 - Ask whether this is a rebase or a reorganization unless the user said so. Name the release after
