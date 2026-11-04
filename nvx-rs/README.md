@@ -482,6 +482,10 @@ out.
 
 Egress rules are lowered exactly into OpenVMM's IPv4 and IPv6 rules by the
 lowering of egress policy files, with at most 256 rules for each action.
+`NetworkPolicy::native_egress_rules` returns a policy's lowered rules, a
+`NativeEgressRules` of its allow and deny lists, without reading anything on
+the host, and fails with an `Unsupported` error for a malformed rule or for an
+action that needs more than 256 rules.
 
 ### `nvx::host::network::policy`
 
