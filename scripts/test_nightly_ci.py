@@ -2032,8 +2032,9 @@ class WorkflowTests(unittest.TestCase):
                 "issues": "write",
             },
         )
-        # Pull requests and pushes keep the permissions that they had: no other
-        # workflow or job can write issues.
+        # No other workflow or job can write issues, except the two jobs that
+        # gh-aw generates for the NFV PR reviewer to comment on the pull request
+        # and to report the reviewer's failures as issues.
         writers: list[str] = []
         for path in sorted(WORKFLOWS.glob("*.yml")):
             workflow = _workflow(path.name)
@@ -2046,7 +2047,14 @@ class WorkflowTests(unittest.TestCase):
                     and cast(dict[str, object], permissions).get("issues") == "write"
                 ):
                     writers.append(f"{path.name}:{name}")
-        self.assertEqual(writers, ["nightly-ci-report.yml:report"])
+        self.assertEqual(
+            writers,
+            [
+                "nfv-pr-review.lock.yml:conclusion",
+                "nfv-pr-review.lock.yml:safe_outputs",
+                "nightly-ci-report.yml:report",
+            ],
+        )
 
     def test_the_report_runs_the_default_branch_without_credentials(self):
         self.assertEqual(self.job["runs-on"], "ubuntu-latest")
