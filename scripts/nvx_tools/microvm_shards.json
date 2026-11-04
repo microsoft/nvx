@@ -62,6 +62,7 @@
         "smp": 21.2,
         "smp-snapshot": 26.1,
         "snapshot-core": 13.4,
+        "snapshot-rollback": 1.5,
         "snapshot-tiers": 6.8,
         "structured-outcome": 0.6,
         "time-abi-conformance": 0.7,
@@ -98,7 +99,7 @@
           ]
         },
         {
-          "seconds": 267.8,
+          "seconds": 269.3,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -122,6 +123,7 @@
             "sandbox-blocks",
             "scratch-snapshot",
             "smp",
+            "snapshot-rollback",
             "structured-outcome",
             "untiered-network-policy",
             "virtio-net",
@@ -170,6 +172,7 @@
         "smp": 22.6,
         "smp-snapshot": 28.5,
         "snapshot-core": 12.9,
+        "snapshot-rollback": 1.5,
         "snapshot-tiers": 6.3,
         "structured-outcome": 0.5,
         "time-abi-conformance": 0.8,
@@ -181,7 +184,7 @@
       },
       "shards": [
         {
-          "seconds": 248.8,
+          "seconds": 250.3,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
@@ -199,6 +202,7 @@
             "smp",
             "smp-snapshot",
             "snapshot-core",
+            "snapshot-rollback",
             "snapshot-tiers",
             "time-host-correction",
             "untiered-network-policy"
@@ -278,6 +282,7 @@
         "smp": 30.9,
         "smp-snapshot": 46.6,
         "snapshot-core": 17.2,
+        "snapshot-rollback": 1.5,
         "snapshot-tiers": 12.0,
         "structured-outcome": 0.8,
         "time-abi-conformance": 1.6,
@@ -313,7 +318,7 @@
           ]
         },
         {
-          "seconds": 356.0,
+          "seconds": 357.5,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -336,6 +341,7 @@
             "private-network-ingress",
             "sandbox-blocks",
             "snapshot-core",
+            "snapshot-rollback",
             "structured-outcome",
             "time-abi-conformance",
             "time-host-correction",

@@ -233,6 +233,16 @@ settings, and it must restore them when the request returns
 (`nvx-time cancel-capture`). Afterwards, `nvx-time status` must exit 0 with a
 passing boot line at generation 0 and no restore line, and
 `/sys/module/rcupdate/parameters/rcu_cpu_stall_suppress` must read 0.
+The `snapshot-rollback` scenario fails a capture after its quiesce. The
+guest's RAM has a file of its own, so the snapshot destination's parent holds
+nothing, and it disappears after boot: the capture quiesces and saves the VM,
+then fails to publish, and OpenVMM rolls it back. The request must return in
+the source with status 0, after OpenVMM's capture profile records exactly one
+quiesce and one save but no publication, and the source must pass the checks
+that `snapshot-core` runs after its released request. Once the parent is back,
+a second request of the same source must publish a snapshot and end the
+source with status 0, leaving only the snapshot in the parent, and the
+snapshot's restore must continue past that request exactly once.
 The `platform-zero-fill` scenario covers a platform restore whose `distro`
 image is shorter than the snapshot's and whose fresh scratch is absent. It
 captures a platform snapshot with a 1 MiB `distro` placeholder and a 1 MiB
