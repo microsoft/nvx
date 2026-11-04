@@ -2403,10 +2403,15 @@ status. It also runs the microVMs of `nvx-rs run`, without a guest: a cold
 boot, or the restore of a snapshot directory, prints that it booted or restored
 the microVM, writes an outcome report if asked, and exits with status 0, and a
 restore whose snapshot directory is missing fails with status 1. Like OpenVMM,
-it refuses with status 2 a restore with `--net`, whose NIC keeps the addressing
-that its snapshot saved, a cold boot with `--network-profile` alone or with
-`--restore-network-policy`, and a restore with `--network-ingress allow` or
-explicit `--host-loopback allow` without `--restore-network-policy`. Kernel
+a restore checks its `--virtio-console` against the attachment of the boot
+console that its snapshot's manifest records, which the fake decodes on its
+own, and fails with status 1 where OpenVMM would: without
+`--virtio-console console` for a boot console that was on the terminal, and
+with it for any other. Like OpenVMM, it refuses with status 2 a restore with
+`--net`, whose NIC keeps the addressing that its snapshot saved, a cold boot
+with `--network-profile` alone or with `--restore-network-policy`, and a
+restore with `--network-ingress allow` or explicit `--host-loopback allow`
+without `--restore-network-policy`. Kernel
 command-line tokens make it fail: `fake_exit_on_start=STATUS`,
 `fake_exit_status=STATUS`, `fake_guest_features=MASK`, and
 `fake_legacy_guest=1`, among others; see `src/testing/fake_openvmm.rs`. Like
