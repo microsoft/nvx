@@ -10,8 +10,9 @@
 //! As PID 1, `nvx-init`:
 //!
 //! - reads `SIGCHLD` and `SIGTERM` from a signal descriptor. `SIGCHLD` wakes it to collect the
-//!   children that ended, and `SIGTERM` asks it to end the VM. No other signal reaches it: the
-//!   kernel delivers to PID 1 only the signals that it handles or blocks;
+//!   children that ended, and `SIGTERM` asks it to end the VM, which it does once it collected
+//!   the children that ended before: a helper among them ends the VM as a failure. No other
+//!   signal reaches it: the kernel delivers to PID 1 only the signals that it handles or blocks;
 //! - gives itself and each helper an out-of-memory score adjustment of -1000, which exempts them
 //!   from the out-of-memory killer, and a nice value of -10, ahead of the workloads' 0;
 //! - registers exactly those helpers, and ends the VM when either ends, whatever its status: the
@@ -214,7 +215,7 @@ fn init(system: &mut impl System, arguments: &[CString]) {
 }
 
 /// Takes over as PID 1, and collects the status of every child that ends, until `SIGTERM` asks
-/// it to end the VM, or fails with what ends the VM otherwise.
+/// it to end the VM and no helper ended before, or fails with what ends the VM otherwise.
 fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> {
     system
         .listen()
@@ -242,15 +243,20 @@ fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> 
             )
         })?;
     }
+    let mut terminating = false;
     loop {
         while let Some((process, status)) = system.reap() {
             if let Some(name) = helpers.name(process) {
                 return Err(ended(name, process, status));
             }
         }
-        if system.wait_signal() == Some(Signal::SIGTERM) {
+        if terminating {
             return Ok(());
         }
+        // The descriptor returns the lower of two pending signals first, `SIGTERM` before
+        // `SIGCHLD`: a helper may have ended just before `SIGTERM` came, so PID 1 collects once
+        // more before it accepts `SIGTERM`.
+        terminating = system.wait_signal() == Some(Signal::SIGTERM);
     }
 }
 

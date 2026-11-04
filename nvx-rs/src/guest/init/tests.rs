@@ -105,10 +105,15 @@ impl System for Fake {
 }
 
 /// A system whose signals, children, and statuses are the real ones, which changes no priority,
-/// as that needs privileges, and which records the diagnostics and the end of the VM instead.
+/// as that needs privileges, and which records the diagnostics, the signals that PID 1 read, and
+/// the end of the VM instead.
 struct Subreaper {
     /// The real operations.
     real: RealSystem,
+    /// What happens before PID 1 first waits for a signal, if anything.
+    before_wait: Option<Box<dyn FnOnce()>>,
+    /// The signals that PID 1 read, in order.
+    signals: Vec<Signal>,
     /// The IDs of the children whose status PID 1 collected, in order.
     reaped: Vec<i32>,
     /// The diagnostics, concatenated.
@@ -124,6 +129,8 @@ impl Subreaper {
         nix::sys::prctl::set_child_subreaper(true).unwrap();
         Self {
             real: RealSystem { signals: None },
+            before_wait: None,
+            signals: Vec::new(),
             reaped: Vec::new(),
             reports: String::new(),
             status: None,
@@ -151,7 +158,12 @@ impl System for Subreaper {
     }
 
     fn wait_signal(&mut self) -> Option<Signal> {
-        self.real.wait_signal()
+        if let Some(before_wait) = self.before_wait.take() {
+            before_wait();
+        }
+        let signal = self.real.wait_signal();
+        self.signals.extend(signal);
+        signal
     }
 
     fn report(&mut self, line: &[u8]) {
@@ -308,7 +320,7 @@ fn pid_1_raises_its_own_priority_and_then_each_helpers() {
         ..Fake::default()
     };
     let mut expected = takeover(&[42, 7]);
-    expected.extend([Call::Reap, Call::Wait, Call::ShutDown(0)]);
+    expected.extend([Call::Reap, Call::Wait, Call::Reap, Call::ShutDown(0)]);
     assert_eq!(calls(system, &["42", "7"]), expected);
 }
 
@@ -321,7 +333,13 @@ fn without_an_announcer_only_the_time_daemon_is_a_helper() {
         ..Fake::default()
     };
     let mut expected = takeover(&[42]);
-    expected.extend([Call::Reap, Call::Reap, Call::Wait, Call::ShutDown(0)]);
+    expected.extend([
+        Call::Reap,
+        Call::Reap,
+        Call::Wait,
+        Call::Reap,
+        Call::ShutDown(0),
+    ]);
     assert_eq!(calls(system, &["42"]), expected);
 }
 
@@ -340,7 +358,8 @@ fn sigchld_has_pid_1_collect_every_child_that_ended_and_sigterm_ends_the_vm() {
     };
     let mut expected = takeover(&[42, 7]);
     expected.extend([
-        // The children that ended before PID 1 waited, and then those that each signal tells of.
+        // The children that ended before PID 1 waited, then those that each signal tells of, and
+        // after `SIGTERM` those that ended before it.
         Call::Reap,
         Call::Reap,
         Call::Reap,
@@ -350,9 +369,45 @@ fn sigchld_has_pid_1_collect_every_child_that_ended_and_sigterm_ends_the_vm() {
         Call::Wait,
         Call::Reap,
         Call::Wait,
+        Call::Reap,
         Call::ShutDown(0),
     ]);
     assert_eq!(calls(system, &["42", "7"]), expected);
+}
+
+#[test]
+fn sigterm_ends_the_vm_with_0_only_if_no_helper_ended_before_it() {
+    // A child ends just before `SIGTERM` comes, and the descriptor returns `SIGTERM` before that
+    // child's `SIGCHLD`. A helper's end ends the VM as a failure...
+    let system = Fake {
+        reaped: [None, Some((42, ChildStatus::Exited(7)))].into(),
+        signals: [Signal::SIGTERM, Signal::SIGCHLD].into(),
+        ..Fake::default()
+    };
+    let mut expected = takeover(&[42]);
+    expected.extend([
+        Call::Reap,
+        Call::Wait,
+        Call::Reap,
+        failure("the time daemon, process 42, exited with status 7"),
+        Call::ShutDown(FAILURE),
+    ]);
+    assert_eq!(calls(system, &["42"]), expected);
+    // ...but an orphan's end leaves it to end with 0.
+    let system = Fake {
+        reaped: [None, Some((50, ChildStatus::Exited(1)))].into(),
+        signals: [Signal::SIGTERM, Signal::SIGCHLD].into(),
+        ..Fake::default()
+    };
+    let mut expected = takeover(&[42]);
+    expected.extend([
+        Call::Reap,
+        Call::Wait,
+        Call::Reap,
+        Call::Reap,
+        Call::ShutDown(0),
+    ]);
+    assert_eq!(calls(system, &["42"]), expected);
 }
 
 #[test]
@@ -594,6 +649,40 @@ fn sigterm_ends_the_vm_with_status_0() {
         assert_eq!(system.reaped, Vec::<i32>::new());
         helper.kill().unwrap();
         assert_eq!(helper.wait().unwrap().signal(), Some(nix::libc::SIGKILL));
+    });
+}
+
+#[test]
+fn a_helper_that_ended_before_sigterm_ends_the_vm_as_a_failure() {
+    if isolate_process_test(
+        "NVX_INIT_HELPER_BEFORE_SIGTERM_TEST_CHILD",
+        "guest::init::tests::a_helper_that_ended_before_sigterm_ends_the_vm_as_a_failure",
+    ) {
+        return;
+    }
+    in_child(|| {
+        let mut system = Subreaper::new();
+        // PID 1 collects the helper's status, rather than the standard library's handle.
+        #[allow(clippy::zombie_processes)]
+        let helper = Command::new("sleep").arg("30").spawn().unwrap();
+        let helper = nix::unistd::Pid::from_raw(ProcessId::from_child(&helper).raw());
+        // Once PID 1 found that no child ended, and before it reads a signal, the helper ends,
+        // which leaves its status for PID 1 to collect, and then `SIGTERM` comes.
+        system.before_wait = Some(Box::new(move || {
+            nix::sys::signal::kill(helper, Signal::SIGKILL).unwrap();
+            let flags = nix::sys::wait::WaitPidFlag::WEXITED | nix::sys::wait::WaitPidFlag::WNOWAIT;
+            nix::sys::wait::waitid(nix::sys::wait::Id::Pid(helper), flags).unwrap();
+            nix::sys::signal::kill(nix::unistd::Pid::this(), Signal::SIGTERM).unwrap();
+        }));
+        init(&mut system, &arguments(&[&helper.to_string()]));
+        // PID 1 read `SIGTERM` first, and then collected the helper's status.
+        assert_eq!(system.signals, [Signal::SIGTERM]);
+        assert_eq!(
+            system.reports,
+            format!("NVX-INIT-ERROR: the time daemon, process {helper}, was killed by signal 9\n")
+        );
+        assert_eq!(system.status, Some(FAILURE));
+        assert_eq!(system.reaped, [helper.as_raw()]);
     });
 }
 
