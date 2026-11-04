@@ -88,8 +88,7 @@ comment, and ask the user to handle it under that policy.
 | Review threads | [address-pr-comments](../skills/address-pr-comments/SKILL.md) |
 | Rebases | [rebase-and-validate](../skills/rebase-and-validate/SKILL.md) |
 
-Load the `nvx-*` skills as skills. Only users can invoke the other five, so
-read their `SKILL.md` files.
+Load each of these skills as a skill.
 
 ## 1. Triage
 
