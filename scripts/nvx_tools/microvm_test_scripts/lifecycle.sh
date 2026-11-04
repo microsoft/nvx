@@ -19,8 +19,9 @@ sleep 1
 uptime_after="$(awk '{ print int($1); exit }' /proc/uptime)"
 [ $((uptime_after - uptime_before)) -ge 1 ] || fail 43
 # earlycon=xe9 starts the early console on the byte channel, and the kernel
-# console, hvc0, replaces it. The kernel knows earlycon=, so it does not pass it
-# to user space with the parameters that it does not know.
+# console, the boot console hvc1 here and hvc0 without one, replaces it. The
+# kernel knows earlycon=, so it does not pass it to user space with the
+# parameters that it does not know.
 check_early_console() {
     log="$(dmesg)"
     case "$log" in *'bootconsole [earlyxe90] enabled'*) ;; *) fail 44 ;; esac

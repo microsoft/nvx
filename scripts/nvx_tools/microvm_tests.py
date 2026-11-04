@@ -1219,6 +1219,8 @@ def run_lifecycle(
         memory_mib,
         "quiet loglevel=0",
     )
+    # The boot console, hvc1, must replace the early console as hvc0 does.
+    command.extend(("--virtio-console", "console"))
     result = run_guest_script(
         command,
         _read_script("lifecycle.sh"),
