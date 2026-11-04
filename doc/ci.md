@@ -414,8 +414,10 @@ pair instead.
 The `console-exit` scenario delays host console reads for two seconds after
 snapshot restore to exercise output backpressure. For each requested processor
 count it requires byte-exact delivery of a 64 KiB payload and the final marker,
-and preserves guest exit statuses 0 and 37. This checks both device and host-relay
-draining without adding sleeps to the measured benchmark workloads.
+which the guest writes to the boot console before it exits with status 0 and
+to the byte channel before it exits with status 37, and preserves both
+statuses. This checks the draining of both consoles' devices and host relays
+without adding sleeps to the measured benchmark workloads.
 The harness waits for the output reader's EOF notification even after the
 process exits, so delayed final output chunks cannot create a false failure.
 
