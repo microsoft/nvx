@@ -32,6 +32,10 @@ pub struct VmmCommand<'a> {
     /// The VMM's arguments, after the name of its executable.
     pub arguments: Vec<OsString>,
     /// The VMM's working directory.
+    ///
+    /// Windows permits at most 258 UTF-16 code units in its absolute path, including any verbatim
+    /// prefix and trailing separator. It may differ from the sandbox store, whose paths can be
+    /// longer.
     pub working_dir: PathBuf,
     /// Whether the VMM starts outside the caller's job object on Windows, which must permit
     /// breakaway, so that the VMM survives the job. Other hosts ignore it.
@@ -83,8 +87,11 @@ impl VmmCommand<'_> {
 /// [`Launch::record_process`](crate::host::store::Launch::record_process), as
 /// [`launch`](crate::host::supervisor::launch) does. Fails with [`io::ErrorKind::InvalidInput`] on
 /// Linux for a descriptor of a standard stream, 0 to 2, or one that is not close-on-exec, and on
-/// Windows for a batch file, which Windows would run through `cmd.exe` with arguments that it reads
-/// as shell syntax, and with [`io::ErrorKind::AlreadyExists`] on Windows if a job of the user takes
+/// Windows for a working directory whose absolute path exceeds 258 UTF-16 code units, including
+/// any verbatim prefix and trailing separator, or for a batch file, which Windows would run
+/// through `cmd.exe` with arguments that it reads as shell syntax, and with
+/// [`io::ErrorKind::AlreadyExists`] on Windows
+/// if a job of the user takes
 /// the name of the job of `log` already, as described below; and with
 /// [`io::ErrorKind::Unsupported`] for any descriptor or handle on hosts other than Linux and
 /// Windows.

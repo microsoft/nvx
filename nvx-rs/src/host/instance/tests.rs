@@ -212,4 +212,38 @@ mod store {
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
         assert!(!dir.exists());
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn working_directory_limits_are_checked_before_instance_launches() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut parent = directory.path().to_path_buf();
+        while parent.as_os_str().encode_wide().count() < 300 {
+            parent.push("long-state-root-component");
+        }
+        fs::create_dir_all(&parent).unwrap();
+        let dir = parent.join("vm");
+        let spec = LaunchSpec::new(
+            Artifacts::new("openvmm", "vmlinux", "initramfs.cpio.gz"),
+            crate::Hypervisor::Whp,
+        );
+        let error = check_launch(&dir, &spec).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(error.message().contains("working directory"));
+        assert!(error.message().contains("258"));
+        assert!(!dir.exists());
+
+        let instance = Instance::create(&dir, "test", CallerFiles::new(CONFIG).unwrap()).unwrap();
+        let mut locked = instance.lock(None).unwrap();
+        let error = locked
+            .start(&spec, &runtime(), Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(error.message().contains("working directory"));
+        assert!(error.message().contains("258"));
+        assert!(instance.store.journal().unwrap().is_none());
+        assert!(!dir.join(LOG_NAME).exists());
+    }
 }

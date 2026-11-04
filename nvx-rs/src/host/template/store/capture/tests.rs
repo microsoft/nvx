@@ -1408,3 +1408,26 @@ fn stores_too_deep_for_the_control_socket_of_a_capture_are_refused() {
     );
     assert_eq!(bench.runs.get(), 0);
 }
+
+#[cfg(windows)]
+#[test]
+fn working_directory_limits_are_checked_before_captures() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let bench = Bench::new();
+    let mut parent = bench._directory.path().to_path_buf();
+    while parent.as_os_str().encode_wide().count() < 300 {
+        parent.push("long-state-root-component");
+    }
+    fs::create_dir_all(&parent).unwrap();
+    let bench = Bench {
+        store: Store::create(parent.join("templates")).unwrap(),
+        ..bench
+    };
+    let error = bench.refresh(&Emulation::capture()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(error.message().contains("working directory"));
+    assert!(error.message().contains("258"));
+    assert_eq!(bench.runs.get(), 0);
+    assert!(!bench.store.captures_dir().exists());
+}

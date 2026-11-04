@@ -36,6 +36,7 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProces
 use super::process::refused_termination;
 use super::process::{ProcessHandle, creation_time};
 use super::{owned, raw, wide};
+use crate::host::platform::check_working_dir;
 use crate::host::platform::inherit::{Inherited, lock_spawns};
 
 /// An OpenVMM process launched by this caller, held through its process handle.
@@ -223,7 +224,8 @@ impl Drop for InheritableForSpawn {
 /// then decides the log's claim by the processes of the job, of which that process is none. The
 /// spawn closes its own handle of `job` before it returns.
 ///
-/// Fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
+/// Fails with [`io::ErrorKind::InvalidInput`] for a working directory beyond Windows' limit or
+/// for a batch file, as [`refuse_batch_file`] says.
 ///
 /// [`create_log_job`]: crate::host::platform::windows::create_log_job
 /// [`SpawnLock`]: crate::host::platform::inherit::SpawnLock
@@ -309,7 +311,7 @@ fn standard_handle(which: STD_HANDLE) -> io::Result<Option<OwnedHandle>> {
 /// the creation flags `flags`, the handles `stdio` as its standard handles, a missing one null,
 /// and the caller's handles `inherit`, and no other handle of the caller, in the job object
 /// `job`, if any, as [`spawn_detached`] describes. Fails with [`io::ErrorKind::InvalidInput`] for
-/// a batch file, as [`refuse_batch_file`] says.
+/// a working directory beyond Windows' limit or for a batch file, as [`refuse_batch_file`] says.
 fn spawn_listed(
     program: &Path,
     arguments: &[OsString],
@@ -322,7 +324,14 @@ fn spawn_listed(
     refuse_batch_file(program)?;
     let application = wide(program);
     let mut command_line = command_line(program.as_os_str(), arguments)?;
-    let directory = working_dir.map(wide);
+    let directory = working_dir
+        .map(|path| -> io::Result<Vec<u16>> {
+            let path = std::path::absolute(path)?;
+            check_working_dir(&path)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            Ok(wide(&path))
+        })
+        .transpose()?;
     // No handle may be inheritable for this spawn outside the lock. Locals are dropped in the
     // reverse of their order, so every return restores the handles `inherit`, closes the `stdio`
     // handles and then the job's, which it moves here for that, before it releases the lock.

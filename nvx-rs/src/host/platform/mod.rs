@@ -9,6 +9,7 @@
 //! it, so they reach that process and never another that reuses its ID.
 
 use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
@@ -41,6 +42,36 @@ pub use imp::{SUPPORTED, create_private_dir, file_identity, process_start_time};
 /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) otherwise.
 pub fn probe_hypervisor(hypervisor: Hypervisor) -> Result<()> {
     imp::probe_hypervisor(hypervisor).map_err(Error::unavailable)
+}
+
+/// Refuses a VMM working directory that exceeds Windows' process-creation limit, without
+/// accessing the filesystem. Other hosts have no such limit.
+pub(crate) fn check_working_dir(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::MAX_PATH;
+
+        let absolute = std::path::absolute(path).map_err(|error| {
+            Error::io(format!(
+                "cannot resolve VMM working directory {}",
+                path.display()
+            ))
+            .with_source(error)
+        })?;
+        // The bound is unchanged when the path already ends in a separator.
+        let limit = MAX_PATH as usize - 2;
+        if absolute.as_os_str().encode_wide().count() > limit {
+            return Err(Error::unsupported(format!(
+                "VMM working directory {} exceeds the Windows limit of {limit} UTF-16 code units, \
+                 including any verbatim prefix and trailing separator",
+                absolute.display()
+            )));
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    Ok(())
 }
 
 /// Byte stream to an OpenVMM control endpoint.

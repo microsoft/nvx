@@ -9,10 +9,10 @@ use super::{
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::launch::{LaunchSpec, timeout_problem};
 use crate::host::process::KILL_TIMEOUT;
-use crate::host::report;
 use crate::host::session::{self, ControlSession, SessionError};
 use crate::host::store::{LaunchId, LockedStore, RemovalError, RuntimeIdentity};
 use crate::host::supervisor::{self, Reattached, StopOutcome, VmmCommand};
+use crate::host::{platform, report};
 use crate::protocol::GuestFeatures;
 
 /// An instance whose lock this holds, through which its lifecycle transitions change its
@@ -94,7 +94,8 @@ impl LockedInstance {
     /// [`crate::ErrorKind::Unsupported`] when `timeout` is zero or
     /// longer than [`MAX_TIMEOUT`](crate::host::launch::MAX_TIMEOUT), when the export plan maps a
     /// read-only path that the host cannot keep read-only, when the specification fails
-    /// [`LaunchSpec::check`] or exceeds a limit, or when OpenVMM's command line would not fit
+    /// [`LaunchSpec::check`] or exceeds a limit, when the instance's directory exceeds Windows'
+    /// working-directory limit, or when OpenVMM's command line would not fit
     /// [`PROCESS_COMMAND_LINE_LIMIT`](crate::host::launch::PROCESS_COMMAND_LINE_LIMIT), which holds on
     /// every host; such a launch records nothing. Unlike [`crate::host::instance::check_launch`], start keeps no reserve.
     /// A launch that does not become ready is terminated through its verified process identity;
@@ -106,6 +107,7 @@ impl LockedInstance {
         timeout: Duration,
     ) -> Result<Started> {
         check_timeout("start timeout", timeout, true)?;
+        platform::check_working_dir(self.instance.dir())?;
         if let Some(plan) = &spec.filesystem {
             plan.verify()?;
         }

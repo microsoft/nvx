@@ -99,9 +99,9 @@ fn control_endpoint(socket: &Path) -> Result<String> {
         .map_err(|error| Error::io("cannot choose a control endpoint").with_source(error))
 }
 
-/// Fails with [`ErrorKind::Unsupported`] if OpenVMM's command line for `spec`, launched for an
-/// instance in the directory `dir`, would not fit the limit of a Windows process command line;
-/// see [`LaunchSpec::check_process_command_line`].
+/// Fails with [`ErrorKind::Unsupported`] if the working directory `dir` exceeds Windows' limit,
+/// or if OpenVMM's command line for `spec`, launched for an instance in `dir`, would not fit the
+/// limit of a Windows process command line; see [`LaunchSpec::check_process_command_line`].
 ///
 /// The directory need not exist yet, so that a caller can check a launch before it creates the
 /// instance. Every control endpoint of an instance has the same length.
@@ -110,6 +110,7 @@ pub fn check_launch(dir: &Path, spec: &LaunchSpec) -> Result<()> {
         "cannot resolve the instance directory {}",
         dir.display()
     )))?;
+    platform::check_working_dir(&dir)?;
     let endpoint = control_endpoint(&dir.join(SOCKET_NAME))?;
     spec.check_process_command_line(&endpoint, &dir.join(OUTCOME_NAME))
 }

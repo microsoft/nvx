@@ -193,7 +193,8 @@ impl ClonePlan {
     ///   [`Lease::of`] fails, or the record of a failure cannot be examined, the host's evidence;
     ///   with
     ///   [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a runtime identity other
-    ///   than the template's, [`Evidence::RuntimeMismatch`]; on Linux, with
+    ///   than the template's, [`Evidence::RuntimeMismatch`], or on Windows for a sandbox directory
+    ///   beyond the VMM working-directory limit, [`Evidence::HostFailure`]; on Linux, with
     ///   [`ErrorKind::Other`](crate::ErrorKind::Other) if the control socket that the lease
     ///   reserves is not beside the plan's snapshot, as for a plan and a lease that name the
     ///   template store by different directories, [`Evidence::HostFailure`], with
@@ -494,6 +495,7 @@ impl ClonePlan {
                 )),
             ));
         }
+        platform::check_working_dir(locked.dir()).map_err(Fault::host)?;
         if cfg!(target_os = "linux")
             && let Some(socket) = locked.reserved_socket()
         {

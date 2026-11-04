@@ -513,6 +513,14 @@ The store also owns the file in which the VMM stages its outcome report, which a
 VMM that is killed while it writes the report leaves, and removes it once no
 process of its launch runs.
 
+On Windows, directory creation and no-replace renames use extended-length paths
+when needed, so storage paths may exceed the legacy 248-character directory and
+260-character file limits without enabling a machine-wide long-path setting.
+The filesystem's component limits and Windows' extended-length path limit
+(about 32,767 UTF-16 code units, including the resolved root and internal file
+names) still apply. VM launches have a separate
+[working-directory limit](#windows-working-directory-limit).
+
 ### `nvx::host::instance`
 
 `Instance`: a VM in a sandbox store of its own, which `nvx::host::store`,
@@ -534,6 +542,11 @@ instance, with the caller's files and its directory, through the store.
 
 `write_json` and `read_json` keep the configuration records that callers store
 beside an instance.
+
+An instance's directory is also its VMM's working directory. `check_launch` and
+`LockedInstance::start` apply the
+[Windows working-directory limit](#windows-working-directory-limit) before
+instance creation or launch records, respectively.
 
 ### `nvx::host::nvxs`
 
@@ -633,6 +646,15 @@ sandbox's, which guards its clone binding and launch journal, then the scratch
 image's claim, and holds none for the VM's lifetime; its lease lasts through
 crashes and reattaches, until a release ends it once a stop, a termination, or a
 reattach has verified the VM's exit.
+
+#### Windows working-directory limit
+
+Windows' process-creation API limits `VmmCommand::working_dir` to 258 UTF-16
+code units in its absolute path, including any verbatim prefix and trailing
+separator. It may name a shorter directory than the store. A raw `spawn`
+refuses an overlong working directory with `InvalidInput`; high-level instance,
+capture, and clone preflight return `Unsupported` with the limit in the
+top-level message. Neither silently changes the requested directory.
 
 ### `nvx::host::template`
 
@@ -965,6 +987,14 @@ by path, as it does a restore's. Once the VMM has exited, it checks the outcome
 report, the snapshot's manifest and artifacts, and the key, and publishes the
 transaction in two commits, a rename into `generations/` that replaces nothing,
 then the index.
+
+Capture preflight applies the
+[Windows working-directory limit](#windows-working-directory-limit) to
+`<template-store>\captures\<16-hex-slot>\transaction` before creating the slot
+or scratch. Without a trailing separator this leaves 220 units for the absolute
+template-store path, or 210 for a state root whose store is `<state>\templates`.
+A clone's sandbox directory is also its VMM's working directory, which
+`ClonePlan::launch` checks before writing launch records.
 
 A capture that fails publishes nothing, and `Store::recover_captures` ends the
 captures that a crash interrupted, publishing those that were checked, and
