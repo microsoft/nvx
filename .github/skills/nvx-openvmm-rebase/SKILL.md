@@ -237,9 +237,12 @@ validation; and the landing order of section 7. Ask whether it should be Draft o
 Land the release in this order, pushing only when the user asks:
 
 1. OpenVMM CI passed NVX's required jobs on `<new-head>`.
-2. Fetch `feature/microvm/dev` again, and require it to still be `<old-head>`. If commits landed on
-   it meanwhile, carry them onto the release first, then validate it and wait for its OpenVMM CI
-   again.
+2. Fetch `feature/microvm/dev` again and resolve its current tip. If it differs from `<old-head>`,
+   require the recorded `<old-head>` to be its ancestor; otherwise stop and ask. Carry the new
+   commits onto the release, then record the fetched dev tip as `<old-head>` and the release tip
+   as `<new-head>`. Repeat sections 4–6, including publication, exact-head OpenVMM CI, and updating
+   and validating NVX's gitlink and roadmap. Restart this landing sequence and check again that
+   `feature/microvm/dev` still equals the refreshed `<old-head>` before proceeding.
 3. Fast-forward `<prev-release>` to `<old-head>`, so that it holds the whole old line, including
    every NVX pin after its cut, and require `ls-remote` to print `<old-head>`. Never force it: when
    `<prev-release-head>` is not an ancestor of `<old-head>`, stop and ask.
