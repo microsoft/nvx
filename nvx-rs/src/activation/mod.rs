@@ -45,7 +45,8 @@
 //! - the [`WorkloadView`]: the hostname, the [`MachineIdMode`], the image's own machine ID or one
 //!   that the guest generates, and the [`WorkloadIdentity`], if any: a UID and a GID, neither 0
 //!   nor `u32::MAX`, which the guest ignores as it applies the record, since each execution of a
-//!   clone names its own identity, as CRI containers do;
+//!   clone names its own identity, as CRI containers do. A VM's configuration names its hostname
+//!   and machine ID in a [`View`], which leaves the identity to each execution;
 //! - the root's settings: the [`OverlayMode`], the [`Journal`] policy of a scratch upper, and the
 //!   bound of a GPT disk's first partition;
 //! - the [`ExpectedResources`]: the CPU count and the memory size that the guest must have, as a
@@ -481,6 +482,16 @@ pub struct WorkloadView {
     pub identity: Option<WorkloadIdentity>,
 }
 
+/// The view that a VM's workload has of it: its hostname and its machine ID, without an identity
+/// of the executions, which each execution names.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct View {
+    /// The hostname: 1 to [`MAX_HOSTNAME_BYTES`] bytes, without a NUL.
+    pub hostname: Vec<u8>,
+    /// The machine ID that the workload sees.
+    pub machine_id: MachineIdMode,
+}
+
 /// The resources that the guest must have, as a clone's repair produces them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExpectedResources {
@@ -550,8 +561,7 @@ impl Configuration {
         {
             return Err(ActivationError::ProxyEndpoint);
         }
-        let hostname = &self.workload.hostname;
-        if hostname.is_empty() || hostname.len() > MAX_HOSTNAME_BYTES || hostname.contains(&0) {
+        if !is_hostname(&self.workload.hostname) {
             return Err(ActivationError::Hostname);
         }
         // The kernel reads `u32::MAX` as an unchanged ID, which the guest's entry refuses.
@@ -744,6 +754,12 @@ impl fmt::Display for ActivationError {
 }
 
 impl std::error::Error for ActivationError {}
+
+/// Returns whether `hostname` is a hostname that a record or a VM's [`View`] holds: 1 to
+/// [`MAX_HOSTNAME_BYTES`] bytes without a NUL, since the guest's entry sets any other.
+pub(crate) fn is_hostname(hostname: &[u8]) -> bool {
+    !hostname.is_empty() && hostname.len() <= MAX_HOSTNAME_BYTES && !hostname.contains(&0)
+}
 
 /// Returns whether `endpoint` is a proxy endpoint that a record holds: 1 to
 /// [`MAX_PROXY_ENDPOINT_BYTES`] visible ASCII characters, without an `@`, which would start a

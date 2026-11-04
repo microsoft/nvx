@@ -226,6 +226,9 @@ field nvx::activation::Upper::Scratch::binding
 field nvx::activation::Upper::Scratch::journal
 variant nvx::activation::Upper::Tmpfs
 const nvx::activation::VERSION
+struct nvx::activation::View
+field nvx::activation::View::hostname
+field nvx::activation::View::machine_id
 struct nvx::activation::WorkloadIdentity
 field nvx::activation::WorkloadIdentity::gid
 field nvx::activation::WorkloadIdentity::uid
@@ -672,6 +675,35 @@ fn nvx::host::artifacts::check_manifest
 fn nvx::host::artifacts::openvmm_executable
 mod nvx::host::cli (hidden)
 fn nvx::host::cli::main (hidden)
+mod nvx::host::config
+enum nvx::host::config::ConsoleAttachment
+variant nvx::host::config::ConsoleAttachment::Disconnected
+variant nvx::host::config::ConsoleAttachment::Listener
+struct nvx::host::config::LayeredRoot
+field nvx::host::config::LayeredRoot::format
+field nvx::host::config::LayeredRoot::gpt_first_partition_bound
+field nvx::host::config::LayeredRoot::image
+field nvx::host::config::LayeredRoot::overlay
+field nvx::host::config::LayeredRoot::upper
+enum nvx::host::config::RootConfig
+variant nvx::host::config::RootConfig::Blockless
+variant nvx::host::config::RootConfig::Layered
+field nvx::host::config::RootConfig::Layered::0
+enum nvx::host::config::UpperConfig
+const nvx::host::config::UpperConfig::DEFAULT_MAX_MEMORY_PERCENT
+variant nvx::host::config::UpperConfig::Ram
+field nvx::host::config::UpperConfig::Ram::max_memory_percent
+variant nvx::host::config::UpperConfig::Scratch
+field nvx::host::config::UpperConfig::Scratch::journal
+field nvx::host::config::UpperConfig::Scratch::path
+struct nvx::host::config::VmConfig
+method nvx::host::config::VmConfig::check
+field nvx::host::config::VmConfig::console
+field nvx::host::config::VmConfig::filesystem
+field nvx::host::config::VmConfig::memory_mib
+field nvx::host::config::VmConfig::processors
+field nvx::host::config::VmConfig::root
+field nvx::host::config::VmConfig::view
 mod nvx::host::filesystem
 struct nvx::host::filesystem::Bind
 field nvx::host::filesystem::Bind::child
