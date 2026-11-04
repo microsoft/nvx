@@ -377,11 +377,12 @@ Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
 
 Always include `--single-process`. Include `--virtio-console console` to type
 into the guest's shell on a fresh boot: without a boot console, the guest's
-console is the byte channel, `hvc0`. A restore keeps the console of its
-snapshot. OpenVMM requires `--virtio-console console` again to restore a
-snapshot of a boot that passed it, and refuses `--virtio-console` for a
-snapshot without a boot console. `nvx-rs run` passes the option to a fresh boot
-only, so it cannot yet restore a snapshot of a boot with it
+console is the byte channel, `hvc0`, which takes no input, so OpenVMM discards
+the terminal's keystrokes, though Ctrl-Q still opens its REPL. A restore keeps
+the console of its snapshot. OpenVMM requires `--virtio-console console` again
+to restore a snapshot of a boot that passed it, and refuses `--virtio-console`
+for a snapshot without a boot console. `nvx-rs run` passes the option to a
+fresh boot only, so it cannot yet restore a snapshot of a boot with it
 ([#1254](https://github.com/microsoft/nvx/issues/1254)). When restoring, omit
 `--memory`, `--kernel`, `--initrd`, and `--net`, whose addresses the snapshot
 keeps; see [Networked snapshots](#networked-snapshots). Every restore gives the
