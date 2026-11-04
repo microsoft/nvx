@@ -2690,6 +2690,77 @@ fn a_reattach_fails_a_clone_whose_sandbox_records_the_failure_of_another_clone()
 }
 
 #[test]
+fn a_reattach_fails_a_clone_whose_record_of_a_failure_is_of_another_template() {
+    // A clone whose sandbox records no failure is healthy: the reattach takes it over, and needs
+    // no record of a failure to match its lease.
+    let crashed = Crashed::at("committed");
+    let mut locked = crashed.lock();
+    let mut control = ReattachControl::answering(Some);
+    let vmm = match crashed.take_over(&mut locked, &crashed.runtime, &mut control) {
+        ReattachedClone::Live { vmm, .. } => vmm,
+        other => panic!("the reattach found {}", describe(&other)),
+    };
+    let records = CloneRecords::read(&locked).unwrap().unwrap();
+    assert_eq!(records.failure, None);
+    assert_eq!(
+        vmm.terminate(&mut locked, TIMEOUT).unwrap(),
+        StopOutcome::Forced
+    );
+    crashed.releases(&mut locked);
+    // A record of a failure of the clone's own store, lease, and launch, but of another template:
+    // of another generation, or of another key of the leased generation. It tells nothing of this
+    // clone, whose activation record the reattach no longer compares with the lease, so the
+    // reattach takes it as a record that it cannot read, as it takes another lease's.
+    let leased = crashed.lease.template();
+    let mut key = *leased.key.as_bytes();
+    key[0] ^= 0xff;
+    let cases = [
+        (
+            leased.generation.get().checked_add(1).unwrap(),
+            leased.key,
+            "the leased generation",
+        ),
+        (
+            leased.generation.get(),
+            crate::activation::Identity::from_bytes(key),
+            "the key of the leased generation",
+        ),
+    ];
+    for (generation, key, difference) in cases {
+        let crashed = Crashed::at("committed");
+        let mut locked = crashed.lock();
+        let lease = &crashed.lease;
+        let other = Lease::new(
+            lease.id(),
+            lease.store(),
+            StoreGeneration::new(generation),
+            key,
+            lease.sandbox().to_owned(),
+            lease.launch().clone(),
+        );
+        let defect = Error::io("the test's generation is malformed");
+        let at = ((Stage::Restore, Progress::Spawned), None);
+        let template = (Evidence::MalformedGeneration, Teardown::Exited);
+        record_earlier(&other, &locked, at, template, &defect);
+        let mut control = ReattachControl::answering(Some);
+        let failure = failed(crashed.take_over(&mut locked, &crashed.runtime, &mut control));
+        assert_eq!(failure.code(), ErrorCode::Io, "{difference}: {failure}");
+        let differs = format!("they differ in {difference};");
+        assert!(failure.message().contains(&differs), "{failure}");
+        let reattach = (Stage::Reattach, Progress::Committed);
+        let (host, terminated) = (Evidence::HostFailure, Teardown::Terminated);
+        assert_recorded(&failure, lease, &locked, reattach, host, terminated);
+        assert!(control.capabilities.is_empty(), "{difference}");
+        assert!(locked.runtime().unwrap().is_none(), "{difference}");
+        crashed.releases(&mut locked);
+        drop(locked);
+        let store = &crashed.fixture.store;
+        assert!(!failure.quarantine(store, None).unwrap());
+        assert!(store.tombstones().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn a_record_of_a_failure_that_cannot_be_read_is_a_failure_whatever_the_reattach_finds() {
     let reattach = (Stage::Reattach, Progress::Committed);
     // A VM that exited once its launch committed, with a status of the guest's that is evidence,
