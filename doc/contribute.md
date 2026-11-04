@@ -346,3 +346,18 @@ A pin promotion moves the `openvmm` gitlink to a reviewed OpenVMM revision:
 The [nvx-openvmm-promote](../.github/skills/nvx-openvmm-promote/SKILL.md)
 skill gives the complete procedure, including how to show that a replacement
 revision matches the reviewed one.
+
+### Chain rebases
+
+A rebase moves the microVM chain onto a newer upstream `main` and publishes it
+as a new `feature/microvm/release/vX.Y` branch of `microsoft/openvmm`: the next
+minor version for a rebase, which replays the commits, or the next major
+version for a reorganization, which also folds fixups into the commits that
+they fix. The release branch's push runs OpenVMM CI. Once it passes, the
+previous release branch is fast-forwarded to the head of `feature/microvm/dev`,
+so that it keeps every revision of the old line that NVX pinned, and only then
+does `feature/microvm/dev` move to the new release, by a push with a lease. The
+NVX pull request that pins the release remaps the whole
+[OpenVMM upstream roadmap](openvmm-upstream-roadmap.md). The
+[nvx-openvmm-rebase](../.github/skills/nvx-openvmm-rebase/SKILL.md) skill gives
+the complete procedure.
