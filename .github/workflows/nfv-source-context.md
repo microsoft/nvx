@@ -21,6 +21,8 @@ network:
 tools:
   edit:
 safe-outputs:
+  # Publication must not inherit a shared GH_AW_GITHUB_TOKEN override.
+  github-token: ${{ secrets.GITHUB_TOKEN }}
   noop:
     report-as-issue: false
   missing-data:
