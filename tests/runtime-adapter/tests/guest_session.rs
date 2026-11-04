@@ -1631,11 +1631,15 @@ impl Drop for Workload {
 }
 
 /// Returns a layout that the worker assembles: an EROFS image, with the identity that the guest
-/// expects of it, over an ext4 scratch.
+/// expects of it, over an ext4 scratch, with none of the root's settings.
 fn layout() -> RootLayout {
     RootLayout {
         image: RootImage::erofs(Uuid::parse("0a490905-41be-ed5f-984e-63eb7e5e20b1")),
         upper: RootUpper::Scratch,
+        overlay: None,
+        journal: None,
+        gpt_first_partition_bound: None,
+        max_memory_percent: None,
     }
 }
 
@@ -1815,8 +1819,10 @@ fn the_worker_assembles_the_root_serves_it_and_tears_it_down_on_stop() {
 
 #[test]
 fn the_worker_assembles_an_image_over_ram_in_the_overlay_mode_of_its_configuration() {
+    // The boot tokens cap the RAM upper, and the worker hands the cap to the root in the layout.
     let ram = RootLayout {
         upper: RootUpper::Ram,
+        max_memory_percent: Some(25),
         ..layout()
     };
     let config = RootConfig {
@@ -1843,7 +1849,7 @@ fn the_worker_assembles_an_image_over_ram_in_the_overlay_mode_of_its_configurati
 fn the_worker_assembles_a_gpt_disk_with_the_first_partition_bound_of_its_configuration() {
     let gpt = RootLayout {
         image: RootImage::gpt(Uuid::parse("6c1f5e0a-2b7d-4c39-9e81-3a5d0f7b2c64")),
-        upper: RootUpper::Scratch,
+        ..layout()
     };
     let config = RootConfig {
         first_partition_bound: Some(4096),

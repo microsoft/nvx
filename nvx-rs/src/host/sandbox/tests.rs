@@ -166,6 +166,10 @@ fn launch_contract_builds_agent_command_line() {
         RootLayout {
             image: RootImage::erofs(Uuid::parse("11111111-1111-1111-1111-111111111111")),
             upper: RootUpper::Scratch,
+            overlay: None,
+            journal: None,
+            gpt_first_partition_bound: None,
+            max_memory_percent: None,
         }
     );
     assert_eq!(

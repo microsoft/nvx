@@ -91,9 +91,11 @@ what the guest did.
 ### Root configurations
 
 The boot tokens of `nvx::protocol::root` carry what NVX's boot contract
-defines: the image's format, the identity that the guest expects of it, and
-the upper. A root configuration, `root::RootConfig`, carries the rest that the
-root needs, which only the adapter defines, once the host attaches. It is
+defines: the image's format, the identity that the guest expects of it, the
+upper, and the root's settings. The adapter's plan names none of the settings,
+and the worker reads only a RAM upper's cap from them. A root configuration,
+`root::RootConfig`, carries the rest that the root needs, which only the
+adapter defines, once the host attaches. It is
 UTF-8 text: one `NAME=VALUE` line per field, each ended by a newline, in any
 order, and each at most once. Numbers are decimal, without a sign or leading
 zeros:

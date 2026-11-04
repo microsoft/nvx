@@ -1236,11 +1236,11 @@ impl RootOperations for LibraryRoot {
     /// the EROFS image, with the identity that the boot tokens expect of it, or the GPT disk, with
     /// the disk GUID that they expect of it, whose first partition holds at most the
     /// configuration's bound, over the ext4 scratch, with the configuration's journal policy, or
-    /// over a tmpfs, in the configuration's overlay mode, with the configuration's runtime
-    /// directory, device sizes, and timeout. A bound, a policy, or a mode that the configuration
-    /// does not name is the guest's default: the first partition holds at most
-    /// [`DEFAULT_FIRST_PARTITION_BOUND`] bytes, a scratch may have a journal, and the overlay
-    /// trusts its lowers.
+    /// over a tmpfs, with the cap that the boot tokens name, if any, in the configuration's
+    /// overlay mode, with the configuration's runtime directory, device sizes, and timeout. A
+    /// bound, a policy, or a mode that the configuration does not name is the guest's default: the
+    /// first partition holds at most [`DEFAULT_FIRST_PARTITION_BOUND`] bytes, a scratch may have a
+    /// journal, and the overlay trusts its lowers.
     fn assemble(&mut self, config: &RootConfig, layout: &RootLayout) -> Result<(), String> {
         let image = match layout.image.format {
             ImageFormat::Erofs => Image::Erofs {
@@ -1274,7 +1274,9 @@ impl RootOperations for LibraryRoot {
                     Some(JournalPolicy::Forbidden) => Journal::Forbidden,
                 },
             },
-            RootUpper::Ram => Upper::Tmpfs,
+            RootUpper::Ram => Upper::Tmpfs {
+                max_memory_percent: layout.max_memory_percent,
+            },
         };
         let overlay = match config.overlay_mode {
             None => root::OverlayMode::default(),

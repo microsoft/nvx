@@ -150,7 +150,9 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
             sectors: None,
         },
         image: root::Image::Erofs { uuid: None },
-        upper: root::Upper::Tmpfs,
+        upper: root::Upper::Tmpfs {
+            max_memory_percent: None,
+        },
         overlay: root::OverlayMode::default(),
         timeout: Duration::ZERO,
     };

@@ -152,7 +152,7 @@
 //!         expected: Expected::new().disk_guid("8d2f3a4e-1c5b-4e7a-9f60-2b3c4d5e6f70".parse()?),
 //!         first_partition_bound: 64 * 1024,
 //!     },
-//!     upper: Upper::Tmpfs,
+//!     upper: Upper::Tmpfs { max_memory_percent: Some(50) },
 //!     overlay: OverlayMode::UntrustedLowers,
 //!     timeout: Duration::from_secs(30),
 //! })?;
@@ -194,6 +194,7 @@ use super::gpt::DeviceError;
 use super::mappings::{Kind, Mapper, MappingError, TargetRoot, below_its_root};
 use super::sys::{self, Errno, FileDescriptor, FileSystem, Mode, MountFlags, OpenFlags};
 use crate::gpt::{Expected, GptError, Partition};
+use crate::protocol::root::RAM_UPPER_CAPS;
 use crate::uuid::Uuid;
 
 pub(crate) use self::block::window_directories;
@@ -235,7 +236,8 @@ const WORK_DIRECTORY: &str = "work";
 /// root directory takes the upper's mode, and a workload that is not root must enter its root.
 const SCRATCH_DIRECTORY_MODE: u32 = 0o755;
 /// The tmpfs upper's options: the mode of its root directory, which an ext4 scratch's root has
-/// too, rather than tmpfs's world-writable default. Its size is the kernel's default.
+/// too, rather than tmpfs's world-writable default. An assembly adds the size of a tmpfs that has
+/// a cap, `size=N%`, and the kernel's default size is that of one that has none.
 const TMPFS_OPTIONS: &[u8] = b"mode=0755";
 /// Do not load a GPT layer's journal: even without `needs_recovery`, loading can scan a corrupt
 /// journal indefinitely. `check_layer` still refuses recovery-required layers. Override the
@@ -411,9 +413,13 @@ pub enum Upper {
         /// Whether the file system may have a journal.
         journal: Journal,
     },
-    /// A tmpfs at the kernel's default size, which an assembly mounts `nosuid,nodev` at `tmpfs`,
-    /// for a VM that has no scratch device.
-    Tmpfs,
+    /// A tmpfs, which an assembly mounts `nosuid,nodev` at `tmpfs`, for a VM that has no scratch
+    /// device.
+    Tmpfs {
+        /// The tmpfs's cap, in percent of the guest's memory, from 1 to 90, which an assembly
+        /// mounts it with as `size=N%`, or `None` for the kernel's default size, half of it.
+        max_memory_percent: Option<u8>,
+    },
 }
 
 impl Upper {
@@ -421,7 +427,7 @@ impl Upper {
     pub const fn kind(self) -> UpperKind {
         match self {
             Self::Scratch { .. } => UpperKind::Scratch,
-            Self::Tmpfs => UpperKind::Tmpfs,
+            Self::Tmpfs { .. } => UpperKind::Tmpfs,
         }
     }
 }
@@ -477,7 +483,8 @@ impl OverlayMode {
 /// Assembles the layered root of `assembly`, as the [module](self) describes, and returns the
 /// root that owns its mounts. It checks everything before it mounts anything. In order, it:
 ///
-/// 1. checks the runtime directory's path;
+/// 1. checks the runtime directory's path, and that a tmpfs upper's cap, if any, is from 1 to 90
+///    percent of the guest's memory, since the kernel reads a cap of 0 as none;
 /// 2. creates the runtime directory, as `mkdir -p` does, and refuses it if a symbolic link leads
 ///    through it;
 /// 3. creates the mount points of an EROFS image, `layers/distro`, of the upper, `scratch` or
@@ -504,7 +511,7 @@ impl OverlayMode {
 /// 8. mounts the layers: an EROFS image read-only, or a GPT disk's ext4 layers read-only with
 ///    `nosuid` and `nodev`;
 /// 9. mounts the upper with `nosuid` and `nodev`: the scratch's ext4 file system, or a tmpfs
-///    whose root directory has mode 0755;
+///    whose root directory has mode 0755, with the size of its cap, if any;
 /// 10. creates the upper's `upper` and `work` directories unless they exist, with mode 0755
 ///     whatever the process's umask, since the overlay's root directory takes the upper's mode;
 /// 11. mounts the overlay at `rootfs`, `nosuid` and `nodev`, with the layers as its lower
@@ -613,6 +620,16 @@ fn assemble_with(
             error: Error::Runtime {
                 path: assembly.runtime.clone(),
             },
+            cleanup: None,
+        });
+    }
+    if let Upper::Tmpfs {
+        max_memory_percent: Some(percent),
+    } = assembly.upper
+        && !RAM_UPPER_CAPS.contains(&percent)
+    {
+        return Err(AssemblyError {
+            error: Error::TmpfsCap { percent },
             cleanup: None,
         });
     }
@@ -1101,7 +1118,7 @@ impl Root {
                 }
                 Some(device)
             }
-            Upper::Tmpfs => None,
+            Upper::Tmpfs { .. } => None,
         };
         let upper = upper_point.join(UPPER_DIRECTORY);
         let work = upper_point.join(WORK_DIRECTORY);
@@ -1140,13 +1157,20 @@ impl Root {
                 Mount::Scratch
             }
             None => {
+                let mut options = TMPFS_OPTIONS.to_vec();
+                if let Upper::Tmpfs {
+                    max_memory_percent: Some(percent),
+                } = assembly.upper
+                {
+                    options.extend(format!(",size={percent}%").bytes());
+                }
                 self.mount_at(
                     &Mount::Tmpfs,
                     Some(b"tmpfs"),
                     &upper_point,
                     Some(b"tmpfs"),
                     flags,
-                    Some(TMPFS_OPTIONS),
+                    Some(&options),
                 )?;
                 Mount::Tmpfs
             }
@@ -1832,6 +1856,11 @@ pub enum Error {
         /// The runtime directory.
         path: PathBuf,
     },
+    /// A tmpfs upper's cap is not 1 to 90 percent of the guest's memory.
+    TmpfsCap {
+        /// The cap, in percent of the guest's memory.
+        percent: u8,
+    },
     /// A mount point or a directory below one could not be created or checked for a mount, or
     /// the runtime directory could not be locked.
     MountPoint {
@@ -2028,6 +2057,10 @@ impl fmt::Display for Error {
                 "the runtime directory is not a canonical absolute path without `,`, `:`, `\\`, \
                  `=`, or a symbolic link: {}",
                 path.display()
+            ),
+            Self::TmpfsCap { percent } => write!(
+                formatter,
+                "the tmpfs upper's cap of {percent}% of the guest's memory is not 1 to 90%"
             ),
             Self::MountPoint { path, error } => {
                 write!(formatter, "failed to prepare {}: {error}", path.display())

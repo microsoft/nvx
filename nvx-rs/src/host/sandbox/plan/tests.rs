@@ -172,11 +172,16 @@ fn every_format_and_upper_plans_and_renders() {
     for (image, upper, tokens) in cases {
         let (image, upper) = (images()[image], uppers()[upper].clone());
         let plan = plan(image, upper.clone(), settings.clone());
+        // The plan names none of the root's settings.
         assert_eq!(
             plan.layout(),
             RootLayout {
                 image,
-                upper: upper.kind()
+                upper: upper.kind(),
+                overlay: None,
+                journal: None,
+                gpt_first_partition_bound: None,
+                max_memory_percent: None,
             }
         );
         assert_eq!(
@@ -1367,15 +1372,12 @@ fn adapter_plans_render_their_root_and_devices_alone() {
             let plan = adapter(image, upper.clone());
             assert_eq!(plan.settings(), None);
             assert_eq!(plan.export(), None);
-            let [layer, upper_token] = plan.layout().tokens();
+            let tokens = plan.layout().tokens().join(" ");
             assert_eq!(
                 plan.kernel_command_line(user).unwrap(),
-                format!("{user} {layer} {upper_token}")
+                format!("{user} {tokens}")
             );
-            assert_eq!(
-                plan.kernel_command_line(" \t").unwrap(),
-                format!("{layer} {upper_token}")
-            );
+            assert_eq!(plan.kernel_command_line(" \t").unwrap(), tokens);
             // No workload identity and no shares: the block devices alone.
             let mut expected = vec![
                 "--machine".to_owned(),
@@ -1465,6 +1467,32 @@ fn adapter_plans_refuse_what_their_root_and_openvmm_own() {
         "an adapter's plan holds no export plan: the adapter attaches its shares itself"
     );
     assert_eq!(plan.clone().with_export(None).unwrap(), plan);
+}
+
+#[test]
+fn adapter_plans_refuse_the_settings_of_their_root_that_they_do_not_name() {
+    // An adapter's plan names none of its root's settings, and the guest reads a setting from the
+    // command line as the plan reads it back, so the plan refuses a setting that the adapter's
+    // command line names.
+    let ram = adapter(images()[3], SandboxUpper::RAM);
+    let scratch = adapter(images()[1], SandboxUpper::scratch("scratch.ext4"));
+    let hides = "the kernel command line of an adapter's plan hides the boot tokens of its root";
+    for (plan, user, refusal) in [
+        (&ram, "nvx_overlay_mode=untrusted-lowers", hides),
+        (&ram, "nvx_ram_upper_percent=5", hides),
+        (&ram, "x=\"y nvx_ram_upper_percent=5 z\"", hides),
+        (&ram, "nvx_first_partition_bound=4096", hides),
+        (&scratch, "nvx_scratch_journal=forbidden", hides),
+        (
+            &scratch,
+            "nvx_ram_upper_percent=0",
+            "the kernel command line of an adapter's plan conflicts with the boot tokens of its \
+             root: the nvx_ram_upper_percent kernel parameter must be a decimal number from 1 to \
+             90, without a sign or leading zeros, not '0'",
+        ),
+    ] {
+        assert_eq!(message(plan.kernel_command_line(user)), refusal, "{user}");
+    }
 }
 
 #[test]

@@ -956,7 +956,10 @@ fn assembly(template: &RootTemplate, configuration: &Configuration) -> Assembly 
         },
     };
     let upper = match configuration.upper {
-        activation::Upper::Tmpfs => root::Upper::Tmpfs,
+        // The record names no cap, so the tmpfs takes the kernel's default size.
+        activation::Upper::Tmpfs => root::Upper::Tmpfs {
+            max_memory_percent: None,
+        },
         activation::Upper::Scratch { journal, .. } => root::Upper::Scratch {
             device: template.scratch,
             journal: match journal {

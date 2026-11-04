@@ -547,14 +547,20 @@ fn openvmms_platform_allowlist_admits_its_tokens_and_refuses_tenant_data() {
     }
     // The tokens of a root, a workload, a share, a listener, and anything else that a tenant's
     // sandbox or another tier sets.
-    let [layer, upper] = adapter(None).layout().tokens();
-    let [_, ram] = adapter_with(gpt(), SandboxUpper::RAM, None)
+    let [layer, upper]: [String; 2] = adapter(None).layout().tokens().try_into().unwrap();
+    let [_, ram]: [String; 2] = adapter_with(gpt(), SandboxUpper::RAM, None)
         .layout()
-        .tokens();
+        .tokens()
+        .try_into()
+        .unwrap();
     for token in [
         layer.as_str(),
         upper.as_str(),
         ram.as_str(),
+        "nvx_overlay_mode=untrusted-lowers",
+        "nvx_scratch_journal=forbidden",
+        "nvx_first_partition_bound=4096",
+        "nvx_ram_upper_percent=50",
         "nvx_hostname=tenant-a",
         "hostname=tenant-a",
         "nvx_entrypoint=/bin/sh",

@@ -632,7 +632,9 @@ fn accepted_assembly() -> Assembly {
         image: root::Image::Erofs {
             uuid: Some(IMAGE_UUID),
         },
-        upper: root::Upper::Tmpfs,
+        upper: root::Upper::Tmpfs {
+            max_memory_percent: None,
+        },
         overlay: root::OverlayMode::UntrustedLowers,
         timeout: template.timeout,
     }
@@ -929,8 +931,14 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
         (gpt(None), gpt_image(None), true),
         (gpt(Some(DISK_GUID)), gpt_image(Some(DISK_GUID)), true),
     ];
+    // The record names no cap of a tmpfs, which then takes the kernel's default size.
     let uppers = [
-        (activation::Upper::Tmpfs, root::Upper::Tmpfs),
+        (
+            activation::Upper::Tmpfs,
+            root::Upper::Tmpfs {
+                max_memory_percent: None,
+            },
+        ),
         (
             scratch(activation::Journal::Allowed),
             root::Upper::Scratch {

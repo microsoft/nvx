@@ -259,6 +259,10 @@ fn a_layered_launch_plans_its_blocks_and_boot_tokens_with_the_adapters_plan() {
     let layout = RootLayout {
         image: RootImage::erofs(Some(identity())),
         upper: RootUpper::Scratch,
+        overlay: None,
+        journal: None,
+        gpt_first_partition_bound: None,
+        max_memory_percent: None,
     };
     assert_eq!(launch.plan.layout(), layout);
     // The adapter's plan holds none of the settings of NVX's sandbox profile.
