@@ -10,7 +10,7 @@
 //! a TCP and a UDP rule, destinations merge into the fewest networks that cover them, rules for
 //! every port of a protocol subsume narrower rules, and overlapping and adjacent port ranges
 //! merge. Each action emits at most [`MAX_RULES`] OpenVMM rules, sorted by family, address, prefix
-//! length, protocol, and ports.
+//! length, protocol, and ports, which [`NetworkPolicy::native_egress_rules`] returns.
 //!
 //! Host-loopback access is bidirectional: with it allowed, the guest reaches host loopback
 //! services through its gateway, and OpenVMM publishes the guest's listeners on host loopback.
@@ -45,6 +45,8 @@ pub(crate) use self::arguments::{dns_server, template_arguments};
 pub use self::loopback::{ForwardProtocol, HostLoopback, LoopbackForward};
 pub use self::proxy::{NetworkProxy, ProxyScheme};
 pub use self::rule::{Access, Destination, EgressRule, EgressRules, PortSelector, Protocol};
+
+use crate::error::Result;
 
 /// Largest number of allow rules, and of deny rules, that OpenVMM accepts.
 pub const MAX_RULES: usize = 256;
@@ -154,6 +156,45 @@ impl NetworkPolicy {
     pub fn publishes_listeners(&self) -> bool {
         self.ingress == Access::Allow || self.host_loopback == HostLoopback::Allow
     }
+
+    /// Returns the native rules that the `allow` and `deny` rules lower to, as
+    /// [`openvmm_arguments`] lowers them: destinations merged, exceptions subtracted, port ranges
+    /// merged, and each action's rules sorted, at most [`MAX_RULES`] of them. It reads nothing on
+    /// the host, and lowers the rules whatever the rest of the policy.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is
+    /// malformed, such as a destination that is not a CIDR, an exception outside its network, or
+    /// a port range that ends below its start, or when an action needs more than [`MAX_RULES`]
+    /// native rules. The allow rules are checked first, and messages name the rules as
+    /// [`openvmm_arguments`] names them.
+    pub fn native_egress_rules(&self) -> Result<NativeEgressRules> {
+        Ok(NativeEgressRules {
+            allow: native_rules(&self.allow)?,
+            deny: native_rules(&self.deny)?,
+        })
+    }
+}
+
+/// The native rules that the `allow` and `deny` rules of a [`NetworkPolicy`] lower to, which
+/// [`NetworkPolicy::native_egress_rules`] returns.
+///
+/// Each rule is the value of an `--network-egress-allow` or `--network-egress-deny` option of
+/// OpenVMM: `CIDR`, `CIDR:PROTOCOL`, `CIDR:PROTOCOL:PORT`, or `CIDR:PROTOCOL:FIRST-LAST`. Each
+/// list holds at most [`MAX_RULES`] rules, sorted by family, address, prefix length, protocol,
+/// and ports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEgressRules {
+    /// Rules of traffic to permit.
+    pub allow: Vec<String>,
+    /// Rules of traffic to block, which OpenVMM applies first.
+    pub deny: Vec<String>,
+}
+
+/// Lowers the rules of one action as [`NetworkPolicy::native_egress_rules`] does.
+fn native_rules(rules: &EgressRules) -> Result<Vec<String>> {
+    lowering::lower(&rule::parse_rules(rules)?.concat(), &rules.name)
 }
 
 #[cfg(test)]
