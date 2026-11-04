@@ -2,3 +2,13 @@ platform,microvm_abi_version,processors,commit,metric,unit,direction,p50
 linux-mshv-virtual-machine,3,2,630a7a5b9025c240bfc10562b573d92481f41f8e,shell_snapshot_restore_512_mib,ms,lower,48.2
 linux-mshv-virtual-machine,3,2,c473e70d2358dc5978565be001543ccdecd0fe33,shell_snapshot_restore_512_mib,ms,lower,47.7
 linux-mshv-virtual-machine,3,2,304f8e1686b4fba188ad2d9c8d932498a6ca2980,shell_snapshot_restore_512_mib,ms,lower,48.4
+linux-mshv-virtual-machine,3,2,1ca19f731d6ba7d90012fcaf86039293f71df434,shell_snapshot_restore_512_mib,ms,lower,48.3
+linux-mshv-virtual-machine,3,2,de5bfab30695d0d1524330feabb690a31fe6f51b,shell_snapshot_restore_512_mib,ms,lower,48.8
+linux-mshv-virtual-machine,3,2,7946c853ad300b36cbbad3ad9e1280846d8a837f,shell_snapshot_restore_512_mib,ms,lower,48.8
+linux-mshv-virtual-machine,3,2,014128cb8196ea843a477aea6c729a86af06fb58,shell_snapshot_restore_512_mib,ms,lower,48.9
+linux-mshv-virtual-machine,3,2,939983ad4544f42fba9c00795d3d6324cd83e148,shell_snapshot_restore_512_mib,ms,lower,51
+linux-mshv-virtual-machine,3,2,be78f17203280e1c95ec941792468d3e45ece3c7,shell_snapshot_restore_512_mib,ms,lower,48.9
+linux-mshv-virtual-machine,3,2,90ca215df998d97d64da8d2a2bea5d79bf2f8a48,shell_snapshot_restore_512_mib,ms,lower,46.6
+linux-mshv-virtual-machine,3,2,26e5db7cabd1a126202b5b7fb866835e46ffc864,shell_snapshot_restore_512_mib,ms,lower,47.7
+linux-mshv-virtual-machine,3,2,1f17baa3094b6a43816972960a3cff84da87c0b0,shell_snapshot_restore_512_mib,ms,lower,47.1
+linux-mshv-virtual-machine,3,2,76f282a0ddd783a560e79fc6aa30a06f240759fd,shell_snapshot_restore_512_mib,ms,lower,47.8
