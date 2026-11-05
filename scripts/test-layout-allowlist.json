@@ -7,6 +7,7 @@
     "nvx-rs/src/guest/entry.rs": 1,
     "nvx-rs/src/guest/exec.rs": 4,
     "nvx-rs/src/guest/reseed.rs": 1,
+    "nvx-rs/src/guest/root.rs": 1,
     "nvx-rs/src/guest/sys/entry.rs": 3,
     "nvx-rs/src/guest/sys/spawn.rs": 6,
     "nvx-rs/src/guest/time/system.rs": 3,
