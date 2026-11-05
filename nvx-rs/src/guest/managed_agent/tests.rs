@@ -1,6 +1,7 @@
 use super::seam::tests::TestSystem;
 use super::*;
 use crate::guest::entry::AccountMode;
+pub(crate) use crate::guest::sys::tests::isolate_process_test;
 
 #[cfg(feature = "host")]
 /// In-process host/broker/agent integration harness.
@@ -8,26 +9,6 @@ mod loopback;
 
 /// Serializes tests that temporarily alter process-global state.
 pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Runs a process-global agent test in a dedicated test-harness subprocess.
-///
-/// Returns `true` in the parent after the isolated run succeeds and `false` in the child that
-/// should execute the test body. Isolation prevents PID-1-style `waitpid(-1)` behavior from
-/// reaping children that unrelated parallel host tests own.
-pub(crate) fn isolate_process_test(marker: &str, test: &str) -> bool {
-    if std::env::var_os(marker).is_some() {
-        return false;
-    }
-    let status = std::process::Command::new(
-        std::env::current_exe().expect("the test executable has a path"),
-    )
-    .args(["--exact", test, "--nocapture"])
-    .env(marker, "1")
-    .status()
-    .expect("the isolated test process starts");
-    assert!(status.success(), "the isolated test process failed");
-    true
-}
 
 impl AgentConfig {
     /// Returns the configuration of a test agent of the workload `1000:1000`, named `workload`

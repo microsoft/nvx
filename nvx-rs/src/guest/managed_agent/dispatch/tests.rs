@@ -17,10 +17,10 @@ use super::super::seam::Paths;
 use super::super::seam::tests::{TestSystem, attach_calls};
 use super::*;
 use crate::guest::mappings::Access;
-use crate::guest::sys::FileDescriptor;
 use crate::guest::sys::tests::{
     CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SETGID, CAP_SETUID, holds_capability,
 };
+use crate::guest::sys::{self, FileDescriptor};
 
 const INSTANCE: [u8; 16] = [7; 16];
 
@@ -226,6 +226,20 @@ fn response(kind: u8, request_id: u64, status: i32, payload: &[u8]) -> Response 
     }
 }
 
+fn stdout_from(mut replies: Vec<Response>, request_id: u64, status: i32) -> Vec<u8> {
+    assert_eq!(
+        replies.pop(),
+        Some(response(APP_EXIT, request_id, status, b"exit"))
+    );
+    assert!(replies.iter().all(|reply| {
+        reply.kind == APP_STDOUT && reply.request_id == request_id && reply.status == 0
+    }));
+    replies
+        .into_iter()
+        .flat_map(|reply| reply.payload)
+        .collect()
+}
+
 fn exec_payload(cwd: Option<&str>) -> Vec<u8> {
     encode_exec_payload(&Workload {
         argv: vec!["/bin/true".to_owned()],
@@ -279,7 +293,11 @@ fn agent_advertises_the_control_features_of_its_mode_and_stops() {
             (response.kind, response.request_id, response.status),
             (APP_READY, 42, 0)
         );
-        assert_eq!(GuestFeatures::decode(&response.payload).unwrap(), expected);
+        let features = GuestFeatures::decode(&response.payload).unwrap();
+        assert_eq!(features, expected);
+        if direct {
+            assert!(!features.contains(GuestFeatures::EXEC_CGROUP));
+        }
         let system = harness.stop();
         assert_eq!(system.tty_drained, 1);
     }
@@ -300,57 +318,6 @@ fn agent_refuses_feature_payloads_and_unannounced_mapping_tables() {
         assert_eq!(response.payload, INVALID_REQUEST.as_bytes());
     }
     harness.stop();
-}
-
-#[test]
-fn containment_failures_refuse_consecutive_execs_until_verified_empty() {
-    if super::super::tests::isolate_process_test(
-        "NVX_DISPATCH_CONTAINMENT_TEST_CHILD",
-        "guest::managed_agent::dispatch::tests::containment_failures_refuse_consecutive_execs_until_verified_empty",
-    ) {
-        return;
-    }
-    let _process = super::super::tests::PROCESS_TEST_LOCK.lock().unwrap();
-    let payload = exec_payload(None);
-    for state in ["missing", "directory", "malformed", "charged"] {
-        let (_temporary, system) = TestSystem::with_cgroup();
-        let tasks = system.paths.cgroup_root.join("nvx-exec/pids.current");
-        match state {
-            "missing" => std::fs::remove_file(&tasks).unwrap(),
-            "directory" => {
-                std::fs::remove_file(&tasks).unwrap();
-                std::fs::create_dir(&tasks).unwrap();
-            }
-            "malformed" => std::fs::write(&tasks, b"max\n").unwrap(),
-            "charged" => std::fs::write(&tasks, b"1\n").unwrap(),
-            _ => unreachable!(),
-        }
-        let mut harness = Harness::with_system(true, system, 0);
-        for request_id in [42, 43] {
-            assert_eq!(
-                harness.request_all(request_id, APP_EXEC, &payload),
-                vec![response(APP_ERROR, request_id, 125, b"containment-failed")],
-                "{state}"
-            );
-        }
-
-        if state == "directory" {
-            std::fs::remove_dir(&tasks).unwrap();
-        }
-        std::fs::write(&tasks, b"0\n").unwrap();
-        assert_eq!(
-            harness.request_all(44, APP_EXEC, &payload),
-            vec![response(
-                APP_ERROR,
-                44,
-                125,
-                protocol::LAUNCH_FAILED.as_bytes()
-            )],
-            "{state}"
-        );
-        let system = harness.stop();
-        assert_eq!(system.spawn_calls, 1, "{state}");
-    }
 }
 
 #[test]
@@ -815,7 +782,6 @@ fn sandbox_launch_fails_on_its_entry_and_its_placement_without_running() -> Test
 
 #[test]
 fn direct_does_not_launch_when_identity_export_fails() {
-    // Direct mode verifies the exec cgroup first, which reaps any child of this process.
     if super::super::tests::isolate_process_test(
         "NVX_DISPATCH_HOME_EXPORT_TEST_CHILD",
         "guest::managed_agent::dispatch::tests::direct_does_not_launch_when_identity_export_fails",
@@ -823,7 +789,7 @@ fn direct_does_not_launch_when_identity_export_fails() {
         return;
     }
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock().unwrap();
-    let (_temporary, mut system) = TestSystem::with_cgroup();
+    let (_temporary, mut system) = TestSystem::with_direct();
     system.fail_environment = Some(b"HOME".to_vec());
     assert_environment_failure(
         Harness::with_system(true, system, 0),
@@ -833,7 +799,6 @@ fn direct_does_not_launch_when_identity_export_fails() {
 
 #[test]
 fn pwd_export_failures_refuse_launch_without_spawning() {
-    // Direct mode verifies the exec cgroup first, which reaps any child of this process.
     if super::super::tests::isolate_process_test(
         "NVX_DISPATCH_PWD_EXPORT_TEST_CHILD",
         "guest::managed_agent::dispatch::tests::pwd_export_failures_refuse_launch_without_spawning",
@@ -841,7 +806,7 @@ fn pwd_export_failures_refuse_launch_without_spawning() {
         return;
     }
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock().unwrap();
-    let (temporary, mut system) = TestSystem::with_cgroup();
+    let (temporary, mut system) = TestSystem::with_direct();
     system.fail_environment = Some(b"PWD".to_vec());
     let mut harness = Harness::with_system(true, system, 0);
     for (request_id, cwd) in [(42, None), (43, Some(temporary.path().to_str().unwrap()))] {
@@ -987,13 +952,165 @@ impl Drop for Unsearchable {
     }
 }
 
-/// Spawns a launch command with its real credential calls.
-fn spawn_with_real_credentials(
-    command: crate::guest::spawn::Command,
-) -> Result<crate::guest::spawn::Spawned, Errno> {
-    command
-        .spawn()
-        .map_err(|error| crate::guest::sys::errno_of(&error))
+/// Starts a native direct workload with its real credential calls.
+fn start_with_real_credentials(
+    request: crate::guest::init::ExecRequest,
+) -> Result<crate::guest::init::Exec, crate::guest::init::StartFailure> {
+    crate::guest::init::Exec::start(request)
+}
+
+fn start_after_pending_statuses_are_collected(
+    request: crate::guest::init::ExecRequest,
+) -> Result<crate::guest::init::Exec, crate::guest::init::StartFailure> {
+    let process =
+        sys::ProcessId::from_positive(request.arguments[1].to_str().unwrap().parse().unwrap())
+            .unwrap();
+    assert!(
+        !process.is_unreaped().unwrap(),
+        "a pending child status reached the next native start",
+    );
+    super::super::seam::tests::start_as_privileged(request)
+}
+
+#[test]
+fn direct_start_collects_pending_statuses_before_forking() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DISPATCH_PRESTART_REAP_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::direct_start_collects_pending_statuses_before_forking",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    sys::reset_child_signal();
+    let (_temporary, mut system) = TestSystem::with_direct();
+    system.direct_starter = Some(start_after_pending_statuses_are_collected);
+    let mut harness = Harness::with_system(true, system, 0);
+    let mut pending = std::process::Command::new("/bin/true").spawn()?;
+    let process = sys::ProcessId::from_child(&pending);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !sys::tests::has_exited(process)? {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the previous child did not exit",
+        );
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(process.is_unreaped()?);
+    assert_eq!(
+        harness.request_all(
+            42,
+            APP_EXEC,
+            &workload_payload(&["/bin/true", &pending.id().to_string()], None)?,
+        ),
+        vec![response(APP_EXIT, 42, 0, b"exit")],
+    );
+    assert_eq!(
+        pending.wait().unwrap_err().raw_os_error(),
+        Some(Errno::ECHILD as i32),
+    );
+    assert!(harness.stop().diagnostics.is_empty());
+    Ok(())
+}
+
+/// Fails the native post-fork setup and its cleanup, leaving the collector a live child.
+fn start_with_failed_pidfd_and_cleanup(
+    request: crate::guest::init::ExecRequest,
+) -> Result<crate::guest::init::Exec, crate::guest::init::StartFailure> {
+    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        request.arguments.last().unwrap().as_bytes(),
+    ));
+    sys::tests::deny_system_call(nix::libc::SYS_pidfd_open);
+    sys::tests::deny_system_call(nix::libc::SYS_kill);
+    let failure = crate::guest::init::Exec::start_simulated(request, None)
+        .err()
+        .expect("pidfd_open must fail after the fork");
+    let process = failure
+        .process
+        .expect("the failed start must own its child");
+    assert_eq!(failure.error.raw_os_error(), Some(Errno::EPERM as i32));
+    assert_eq!(failure.cleanup, Some(Errno::EPERM));
+    std::fs::write(path, process.line()).unwrap();
+    Err(failure)
+}
+
+#[test]
+fn failed_direct_starts_keep_their_child_until_collected_or_explicitly_lost() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DISPATCH_FAILED_START_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::failed_direct_starts_keep_their_child_until_collected_or_explicitly_lost",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            sys::reset_child_signal();
+        }
+    }
+    let _reset = Reset;
+    for automatic in [false, true] {
+        sys::reset_child_signal();
+        if automatic {
+            sys::tests::reap_children_automatically(true)?;
+        }
+        let (temporary, mut system) = TestSystem::with_direct();
+        system.direct_starter = Some(start_with_failed_pidfd_and_cleanup);
+        let marker = temporary.path().join("failed-child");
+        let mut harness = Harness::with_system(true, system, 0);
+        harness
+            .host
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        let mut diagnostics = Vec::new();
+        for request_id in 42..45 {
+            assert_eq!(
+                harness.request_all(
+                    request_id,
+                    APP_EXEC,
+                    &workload_payload(
+                        &["/bin/sh", "-c", "sleep 0.03; exit 19", "_", utf8(&marker)?],
+                        None,
+                    )?,
+                ),
+                vec![response(
+                    APP_ERROR,
+                    request_id,
+                    125,
+                    protocol::LAUNCH_FAILED.as_bytes()
+                )]
+            );
+            let process =
+                sys::ProcessId::from_positive(std::fs::read_to_string(&marker)?.trim().parse()?)
+                    .expect("the marker names this test's failed child");
+            assert!(
+                !process.is_unreaped()?,
+                "the agent returned idle before collection"
+            );
+            for stage in ["exec-launch", "exec-kill"] {
+                diagnostics.extend_from_slice(
+                    format!(
+                        "NVX-MANAGED-ERROR: stage={stage} status={}\n",
+                        Errno::EPERM as i32
+                    )
+                    .as_bytes(),
+                );
+            }
+            if automatic {
+                diagnostics.extend_from_slice(
+                    format!(
+                        "NVX-MANAGED-ERROR: stage=exec-wait status={}\n",
+                        Errno::ECHILD as i32
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+        assert_eq!(harness.request(APP_PING, &[]).kind, APP_READY);
+        let system = harness.stop();
+        assert_eq!(system.spawn_calls, 3);
+        assert_eq!(system.diagnostics, diagnostics);
+    }
+    Ok(())
 }
 
 #[test]
@@ -1005,7 +1122,7 @@ fn direct_launch_refuses_working_directories_that_the_workload_cannot_enter() ->
         return Ok(());
     }
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
-    let (temporary, mut system) = TestSystem::with_cgroup();
+    let (temporary, mut system) = TestSystem::with_direct();
     let root = temporary.path();
     // With the privilege to change credentials, the child takes the workload's real
     // identity, which must reach the directories. Otherwise its credential calls are
@@ -1015,13 +1132,12 @@ fn direct_launch_refuses_working_directories_that_the_workload_cannot_enter() ->
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755))?;
-        system.spawner = Some(spawn_with_real_credentials);
+        system.direct_starter = Some(start_with_real_credentials);
     } else if holds_capability(CAP_DAC_OVERRIDE)? || holds_capability(CAP_DAC_READ_SEARCH)? {
         return Ok(());
     } else {
-        system.spawner = Some(super::super::seam::tests::spawn_as_privileged);
+        system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
     }
-    system.paths.setpriv = super::super::seam::tests::setpriv_shim(root, ":");
     let file = root.join("file");
     std::fs::write(&file, b"")?;
     let unsearchable = Unsearchable::new(root.join("unsearchable"))?;
@@ -1067,9 +1183,8 @@ fn direct_launch_refuses_a_failed_identity_change_and_runs_nothing() -> TestResu
         return Ok(());
     }
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
-    let (temporary, mut system) = TestSystem::with_cgroup();
-    system.paths.setpriv = super::super::seam::tests::setpriv_shim(temporary.path(), ":");
-    system.spawner = Some(super::super::seam::tests::spawn_with_failing_credentials);
+    let (temporary, mut system) = TestSystem::with_direct();
+    system.direct_starter = Some(super::super::seam::tests::start_with_failing_credentials);
     let marker = temporary.path().join("ran");
     let payload = workload_payload(&["/bin/touch", utf8(&marker)?], None)?;
     let mut harness = Harness::with_system(true, system, 0);
@@ -1092,6 +1207,164 @@ fn direct_launch_refuses_a_failed_identity_change_and_runs_nothing() -> TestResu
         .as_bytes()
     );
     assert!(!marker.exists());
+    Ok(())
+}
+
+#[test]
+fn a_reset_does_not_wait_for_output_from_an_escaped_direct_descendant() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DISPATCH_RESET_OUTPUT_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::a_reset_does_not_wait_for_output_from_an_escaped_direct_descendant",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (temporary, mut harness) = direct_harness();
+    harness
+        .host
+        .set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
+    let exit = Gate::new(temporary.path().join("exit"))?;
+    let output = Gate::new(temporary.path().join("output"))?;
+    let escaped = temporary.path().join("escaped");
+    let payload = workload_payload(
+        &[
+            "/bin/sh",
+            "-c",
+            "exec 3<\"$0\" 4<\"$1\"; \
+             setsid sh -c 'echo $$ > \"$0\"; read -r line; echo late' \"$2\" <&4 & \
+             echo $$; read -r line <&3; exit 3",
+            utf8(&exit.path)?,
+            utf8(&output.path)?,
+            utf8(&escaped)?,
+        ],
+        None,
+    )?;
+    harness.send(42, APP_EXEC, &payload);
+    let leader = harness.next_response();
+    assert_eq!(
+        (leader.kind, leader.request_id, leader.status),
+        (APP_STDOUT, 42, 0)
+    );
+    let leader = std::str::from_utf8(&leader.payload)?
+        .trim()
+        .parse::<u32>()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !escaped.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "descendant did not leave the group"
+        );
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    drop(exit);
+    wait_for_process_exit(leader)?;
+    harness.reset(2, 17);
+    assert_eq!(
+        harness.request_all(43, APP_EXEC, &workload_payload(&["/bin/true"], None)?),
+        vec![response(APP_EXIT, 43, 0, b"exit")]
+    );
+    let descendant = std::fs::read_to_string(&escaped)?.trim().parse::<u32>()?;
+    drop(output);
+    wait_for_process_exit(descendant)?;
+    assert!(harness.stop().diagnostics.is_empty());
+    Ok(())
+}
+
+#[test]
+fn direct_endings_do_not_wait_for_an_escaped_descendant_to_close_output() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DISPATCH_ENDING_OUTPUT_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::direct_endings_do_not_wait_for_an_escaped_descendant_to_close_output",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (temporary, mut harness) = direct_harness();
+    harness
+        .host
+        .set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
+    for (request_id, ending, status) in [
+        (42, "cancelled", 137),
+        (43, "timeout", 124),
+        (44, "output-limit", 125),
+    ] {
+        let exit = Gate::new(temporary.path().join(format!("exit-{request_id}")))?;
+        let mut output = Some(Gate::new(
+            temporary.path().join(format!("output-{request_id}")),
+        )?);
+        let finish = Gate::new(temporary.path().join(format!("finish-{request_id}")))?;
+        let escaped = temporary.path().join(format!("escaped-{request_id}"));
+        // The finish gate ends only this escaped group, even after its readers have closed.
+        let payload = encode_exec_payload(&Workload {
+            argv: [
+                "/bin/sh",
+                "-c",
+                "exec 3<\"$0\" 4<\"$1\" 5<\"$2\"; \
+                 setsid sh -c 'echo $$ > \"$0\"; read -r line <&4; \
+                 if [ \"$1\" = output-limit ]; then \
+                 (read -r line <&5; kill -KILL -- -$$) >/dev/null 2>&1 & \
+                 trap \"\" PIPE; \
+                 for i in 1 2 3 4; do \
+                 (while :; do cat /dev/zero 2>/dev/null; done) & done; wait; fi; \
+                 read -r line <&5' \"$3\" \"$4\" & \
+                 echo $$; read -r line <&3",
+                utf8(&exit.path)?,
+                utf8(&output.as_ref().unwrap().path)?,
+                utf8(&finish.path)?,
+                utf8(&escaped)?,
+                ending,
+            ]
+            .map(str::to_owned)
+            .into(),
+            timeout_ms: if ending == "timeout" { 3000 } else { 0 },
+            cwd: None,
+            environment: WorkloadEnvironment::Default,
+        })?;
+        harness.send(request_id, APP_EXEC, &payload);
+        let leader = harness.next_response();
+        assert_eq!(
+            (leader.kind, leader.request_id, leader.status),
+            (APP_STDOUT, request_id, 0)
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !escaped.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "descendant did not leave the group"
+            );
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if ending == "cancelled" {
+            harness.send(request_id, APP_CANCEL, &[]);
+        } else if ending == "output-limit" {
+            drop(output.take());
+        }
+        let mut responses = harness.responses();
+        assert_eq!(
+            responses.pop(),
+            Some(response(APP_EXIT, request_id, status, ending.as_bytes()))
+        );
+        let forwarded: usize = responses
+            .iter()
+            .map(|response| {
+                assert_eq!(
+                    (response.kind, response.request_id, response.status),
+                    (APP_STDOUT, request_id, 0)
+                );
+                response.payload.len()
+            })
+            .sum();
+        assert!(forwarded + leader.payload.len() <= protocol::MAX_OUTPUT_BYTES);
+        if ending == "output-limit" {
+            assert!(forwarded > 0);
+        }
+        let descendant = std::fs::read_to_string(&escaped)?.trim().parse::<u32>()?;
+        drop(output);
+        drop(finish);
+        drop(exit);
+        wait_for_process_exit(descendant)?;
+    }
+    assert!(harness.stop().diagnostics.is_empty());
     Ok(())
 }
 
@@ -1149,6 +1422,88 @@ fn a_workload_status_that_the_agent_cannot_collect_still_ends_its_request() -> T
 }
 
 #[test]
+fn a_control_failure_after_a_lost_status_does_not_wait_again() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DISPATCH_LOST_CONTROL_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::a_control_failure_after_a_lost_status_does_not_wait_again",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (temporary, mut harness) = lost_status_harness()?;
+    let exit = Gate::new(temporary.path().join("exit"))?;
+    let output = Gate::new(temporary.path().join("output"))?;
+    let escaped = temporary.path().join("escaped");
+    let payload = workload_payload(
+        &[
+            "/bin/sh",
+            "-c",
+            "exec 3<\"$0\" 4<\"$1\"; \
+             setsid sh -c 'echo $$ > \"$0\"; read -r line' \"$2\" <&4 & \
+             echo $$; read -r line <&3; exit 3",
+            utf8(&exit.path)?,
+            utf8(&output.path)?,
+            utf8(&escaped)?,
+        ],
+        None,
+    )?;
+    harness.send(42, APP_EXEC, &payload);
+    let leader = harness.next_response();
+    assert_eq!(
+        (leader.kind, leader.request_id, leader.status),
+        (APP_STDOUT, 42, 0),
+    );
+    let leader = std::str::from_utf8(&leader.payload)?
+        .trim()
+        .parse::<u32>()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !escaped.exists() || std::fs::metadata(&escaped)?.len() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "descendant did not start"
+        );
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let descendant = std::fs::read_to_string(&escaped)?.trim().parse::<u32>()?;
+    drop(exit);
+    wait_for_process_exit(leader)?;
+    for _ in 0..2 {
+        assert_eq!(harness.request(APP_PING, &[]).status, Errno::EBUSY as i32);
+    }
+    harness.host.write_all(&encode_outer(
+        OUTER_WAIT,
+        &INSTANCE,
+        harness.epoch,
+        harness.host_sequence,
+        &[],
+    )?)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !harness.thread.is_finished() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let stopped_with_open_output = harness.thread.is_finished();
+    drop(output);
+    wait_for_process_exit(descendant)?;
+    assert!(
+        stopped_with_open_output,
+        "control failure waited again for a status already reported lost",
+    );
+    let (outcome, system) = harness.thread.join().unwrap();
+    assert_eq!(outcome.err(), Some(Errno::EPROTO));
+    let mut diagnostics = lost_status_diagnostics(1);
+    diagnostics.extend_from_slice(
+        format!(
+            "NVX-MANAGED-ERROR: stage=exec-record status={OUTER_WAIT}\n\
+             NVX-MANAGED-ERROR: stage=data status={}\n",
+            Errno::EPROTO as i32
+        )
+        .as_bytes(),
+    );
+    assert_eq!(system.diagnostics, diagnostics);
+    Ok(())
+}
+
+#[test]
 fn a_lost_status_keeps_its_outcome_through_a_later_cancellation_or_timeout() -> TestResult {
     if super::super::tests::isolate_process_test(
         "NVX_DISPATCH_LOST_OUTCOME_TEST_CHILD",
@@ -1158,7 +1513,6 @@ fn a_lost_status_keeps_its_outcome_through_a_later_cancellation_or_timeout() -> 
     }
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
     let (temporary, mut harness) = lost_status_harness()?;
-    let kill = temporary.path().join("cgroup/nvx-exec/cgroup.kill");
     let timeout_ms = 1000;
     let timeout = std::time::Duration::from_millis(u64::from(timeout_ms));
     // Each workload exits on its own once the test opens `exit`, while a descendant holds
@@ -1167,17 +1521,18 @@ fn a_lost_status_keeps_its_outcome_through_a_later_cancellation_or_timeout() -> 
     for (request_id, cancelled) in [(42, true), (43, false)] {
         let exit = Gate::new(temporary.path().join(format!("exit-{request_id}")))?;
         let output = Gate::new(temporary.path().join(format!("output-{request_id}")))?;
-        // The previous request's settlement killed the cgroup.
-        std::fs::write(&kill, b"")?;
+        let escaped = temporary.path().join(format!("escaped-{request_id}"));
         let payload = encode_exec_payload(&Workload {
             argv: vec![
                 "/bin/sh".to_owned(),
                 "-c".to_owned(),
-                "exec 3<\"$0\" 4<\"$1\"; echo ready; read -r line <&3; \
-                     (read -r line <&4; echo late) & exit 3"
+                "exec 3<\"$0\" 4<\"$1\"; \
+                     setsid sh -c 'echo escaped > \"$0\"; read -r line; echo late' \"$2\" <&4 & \
+                     echo $$; read -r line <&3; exit 3"
                     .to_owned(),
                 utf8(&exit.path)?.to_owned(),
                 utf8(&output.path)?.to_owned(),
+                utf8(&escaped)?.to_owned(),
             ],
             timeout_ms: if cancelled { 0 } else { timeout_ms },
             cwd: None,
@@ -1185,16 +1540,37 @@ fn a_lost_status_keeps_its_outcome_through_a_later_cancellation_or_timeout() -> 
         })?;
         let sent = std::time::Instant::now();
         harness.send(request_id, APP_EXEC, &payload);
+        let leader = harness.next_response();
         assert_eq!(
-            harness.next_response(),
-            response(APP_STDOUT, request_id, 0, b"ready\n")
+            (leader.kind, leader.request_id, leader.status),
+            (APP_STDOUT, request_id, 0)
         );
+        let leader = std::str::from_utf8(&leader.payload)?
+            .trim()
+            .parse::<u32>()?;
         let ready = std::time::Instant::now();
+        let deadline = ready + std::time::Duration::from_secs(20);
+        while !escaped.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "descendant did not leave the group"
+            );
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
         drop(exit);
-        // The `ECHILD` of the collection tells the agent that the workload ended with its
-        // output open, so it kills the cgroup, and then notes the lost status, before its
-        // next turn takes a record.
-        wait_for_cgroup_kill(&kill)?;
+        wait_for_process_exit(leader)?;
+        // Two completed loop turns ensure that the core has noticed the lost leader status.
+        for _ in 0..2 {
+            assert_eq!(
+                harness.request(APP_PING, &[]),
+                response(
+                    APP_ERROR,
+                    42,
+                    Errno::EBUSY as i32,
+                    protocol::BUSY.as_bytes()
+                ),
+            );
+        }
         if cancelled {
             // The credit tells that the agent took the cancellation, before the output
             // closes.
@@ -1224,11 +1600,10 @@ fn a_lost_status_keeps_its_outcome_through_a_later_cancellation_or_timeout() -> 
 
 /// Starts a direct agent in a process that ignores `SIGCHLD`, which applies to the whole
 /// process: the kernel collects every status of the agent's children itself. Returns the
-/// temporary directory that holds the agent's fake cgroup root, and the harness.
+/// temporary directory of the plain-process agent, and the harness.
 fn lost_status_harness() -> Result<(tempfile::TempDir, Harness), Box<dyn std::error::Error>> {
-    let (temporary, mut system) = TestSystem::with_cgroup();
-    system.paths.setpriv = super::super::seam::tests::setpriv_shim(temporary.path(), ":");
-    system.spawner = Some(super::super::seam::tests::spawn_as_privileged);
+    let (temporary, mut system) = TestSystem::with_direct();
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
     crate::guest::sys::ignore_signals(&[crate::guest::sys::Signal::SIGCHLD]);
     let harness = Harness::with_system(true, system, 0);
     // An agent that waited for a lost status would never answer.
@@ -1273,14 +1648,14 @@ impl Gate {
     }
 }
 
-/// Waits until the agent kills its fake execution cgroup through `kill`, the cgroup's
-/// `cgroup.kill` file, which the test emptied.
-fn wait_for_cgroup_kill(kill: &std::path::Path) -> TestResult {
+/// Waits until the kernel has auto-reaped the leader whose status the agent cannot collect.
+fn wait_for_process_exit(process: u32) -> TestResult {
+    let process = crate::guest::sys::ProcessId::from_positive(i64::from(process)).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while std::fs::read(kill)?.is_empty() {
+    while crate::guest::sys::process_exists(process) {
         assert!(
             std::time::Instant::now() < deadline,
-            "the agent never killed the cgroup"
+            "the leader did not exit"
         );
         thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -1296,7 +1671,7 @@ fn direct_launch_starts_the_workload_in_the_directory_that_it_checked() -> TestR
         return Ok(());
     }
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
-    let (temporary, mut system) = TestSystem::with_cgroup();
+    let (temporary, mut system) = TestSystem::with_direct();
     let root = std::fs::canonicalize(temporary.path())?;
     let checked = root.join("checked");
     let moved = root.join("moved");
@@ -1307,31 +1682,49 @@ fn direct_launch_starts_the_workload_in_the_directory_that_it_checked() -> TestR
         std::fs::create_dir(directory)?;
     }
     std::os::unix::fs::symlink(&first, &link)?;
-    // Between the check and the workload, the stand-in `setpriv` renames the checked
-    // directory and retargets the link.
-    system.paths.setpriv = super::super::seam::tests::setpriv_shim(
-        &root,
-        &format!(
-            "if [ -d '{checked}' ]; then mv '{checked}' '{moved}'; fi\nln -sfn '{second}' '{link}'",
-            checked = checked.display(),
-            moved = moved.display(),
-            second = second.display(),
-            link = link.display(),
-        ),
-    );
-    system.spawner = Some(super::super::seam::tests::spawn_as_privileged);
+    let script = "if [ -d \"$1\" ]; then mv \"$1\" \"$2\"; fi; ln -sfn \"$4\" \"$3\"; pwd -P";
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
     let mut harness = Harness::with_system(true, system, 0);
     let renamed = harness.request_all(
         42,
         APP_EXEC,
-        &workload_payload(&["/bin/sh", "-c", "pwd -P"], Some(utf8(&checked)?))?,
+        &workload_payload(
+            &[
+                "/bin/sh",
+                "-c",
+                script,
+                "sh",
+                utf8(&checked)?,
+                utf8(&moved)?,
+                utf8(&link)?,
+                utf8(&second)?,
+            ],
+            Some(utf8(&checked)?),
+        )?,
     );
     std::fs::remove_file(&link)?;
     std::os::unix::fs::symlink(&first, &link)?;
     let retargeted = harness.request_all(
         43,
         APP_EXEC,
-        &workload_payload(&["/bin/sh", "-c", "pwd -P"], Some(utf8(&link)?))?,
+        &workload_payload(
+            &[
+                "/bin/sh",
+                "-c",
+                script,
+                "sh",
+                utf8(&checked)?,
+                utf8(&moved)?,
+                utf8(&link)?,
+                utf8(&second)?,
+            ],
+            Some(utf8(&link)?),
+        )?,
+    );
+    let proc_link = harness.request_all(
+        44,
+        APP_EXEC,
+        &workload_payload(&["/bin/pwd", "-P"], Some("/proc/self/cwd"))?,
     );
     let system = harness.stop();
     let line = |path: &std::path::Path| [path.as_os_str().as_bytes(), b"\n"].concat();
@@ -1349,18 +1742,157 @@ fn direct_launch_starts_the_workload_in_the_directory_that_it_checked() -> TestR
             response(APP_EXIT, 43, 0, b"exit"),
         ]
     );
+    assert_eq!(
+        stdout_from(proc_link, 44, 0),
+        line(&std::fs::canonicalize(std::env::current_dir()?)?),
+    );
     assert!(system.diagnostics.is_empty());
     Ok(())
 }
 
-/// Prepares a direct agent whose stand-in `setpriv` runs each workload in the test's own
-/// identity, in a fake execution cgroup, and returns it with the temporary directory that
-/// holds them.
+/// Returns a direct agent using the plain-process core with simulated credentials.
 fn direct_harness() -> (tempfile::TempDir, Harness) {
-    let (temporary, mut system) = TestSystem::with_cgroup();
-    system.paths.setpriv = super::super::seam::tests::setpriv_shim(temporary.path(), ":");
-    system.spawner = Some(super::super::seam::tests::spawn_as_privileged);
+    let (temporary, mut system) = TestSystem::with_direct();
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
     (temporary, Harness::with_system(true, system, 0))
+}
+
+#[test]
+fn direct_core_applies_inherited_exact_and_layered_environments() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DIRECT_ENVIRONMENT_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::direct_core_applies_inherited_exact_and_layered_environments",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (_temporary, mut harness) = direct_harness();
+    let defaults = workload_payload(
+        &[
+            "/bin/sh",
+            "-c",
+            "printf '%s|%s|%s|%s|%s' \"$HOME\" \"$USER\" \"$LOGNAME\" \"$PWD\" \"$NVX_DIRECT_ENVIRONMENT_TEST_CHILD\"",
+        ],
+        None,
+    )?;
+    assert_eq!(
+        stdout_from(harness.request_all(42, APP_EXEC, &defaults), 42, 0),
+        b"/home/workload|workload|workload|/|1",
+    );
+    let environment = ["EMPTY=", "VALUE=a=b", "PWD=/explicit"].map(str::to_owned);
+    let replaced = encode_exec_payload(&Workload {
+        argv: vec!["/usr/bin/env".to_owned()],
+        timeout_ms: 0,
+        cwd: Some("/tmp/../tmp"),
+        environment: WorkloadEnvironment::Replaced(&environment),
+    })?;
+    assert_eq!(
+        stdout_from(harness.request_all(43, APP_EXEC, &replaced), 43, 0),
+        b"EMPTY=\nVALUE=a=b\nPWD=/explicit\n",
+    );
+    let empty = encode_exec_payload(&Workload {
+        argv: vec!["/usr/bin/env".to_owned()],
+        timeout_ms: 0,
+        cwd: None,
+        environment: WorkloadEnvironment::Replaced(&[]),
+    })?;
+    assert_eq!(
+        stdout_from(harness.request_all(44, APP_EXEC, &empty), 44, 0),
+        b""
+    );
+    let entries = ["HOME=/layered", "ADDED=last"].map(str::to_owned);
+    let layered = encode_exec_payload(&Workload {
+        argv: vec!["/bin/sh".to_owned(), "-c".to_owned(), "printf '%s|%s|%s|%s' \"$HOME\" \"$PWD\" \"$ADDED\" \"$NVX_DIRECT_ENVIRONMENT_TEST_CHILD\"".to_owned()],
+        timeout_ms: 0,
+        cwd: Some("/tmp/../tmp"),
+        environment: WorkloadEnvironment::Layered(&entries),
+    })?;
+    assert_eq!(
+        stdout_from(harness.request_all(45, APP_EXEC, &layered), 45, 0),
+        b"/layered|/tmp|last|1",
+    );
+    let system = harness.stop();
+    assert!(!system.paths.cgroup_root.exists());
+    assert!(system.diagnostics.is_empty());
+    Ok(())
+}
+
+#[test]
+fn direct_core_accepts_large_exact_environments() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DIRECT_LARGE_ENVIRONMENT_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::direct_core_accepts_large_exact_environments",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (_temporary, mut harness) = direct_harness();
+    let entries: Vec<_> = (0..12)
+        .map(|index| format!("KEY{index}={}", "x".repeat(4000)))
+        .collect();
+    let payload = encode_exec_payload(&Workload {
+        argv: vec!["/usr/bin/env".to_owned()],
+        timeout_ms: 0,
+        cwd: None,
+        environment: WorkloadEnvironment::Replaced(&entries),
+    })?;
+    let output = stdout_from(harness.request_all(42, APP_EXEC, &payload), 42, 0);
+    assert_eq!(output, format!("{}\n", entries.join("\n")).into_bytes());
+    assert!(harness.stop().diagnostics.is_empty());
+    Ok(())
+}
+
+#[test]
+fn direct_core_reports_exec_failures_without_a_helper() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DIRECT_EXEC_FAILURE_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::direct_core_reports_exec_failures_without_a_helper",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (temporary, mut harness) = direct_harness();
+    let missing = temporary.path().join("missing");
+    let diagnostic = super::super::diagnostics::with_description(
+        b"nvx-managed-agent: cannot execute workload: ",
+        Errno::ENOENT,
+    );
+    assert_eq!(
+        harness.request_all(42, APP_EXEC, &workload_payload(&[utf8(&missing)?], None)?),
+        vec![
+            response(APP_STDERR, 42, 0, &diagnostic),
+            response(APP_EXIT, 42, 125, b"exit")
+        ],
+    );
+    assert!(harness.stop().diagnostics.is_empty());
+    Ok(())
+}
+
+#[test]
+fn normal_completion_kills_the_direct_process_group() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_DIRECT_GROUP_COMPLETION_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::normal_completion_kills_the_direct_process_group",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (_temporary, mut harness) = direct_harness();
+    let mut replies = harness.request_all(
+        42,
+        APP_EXEC,
+        &workload_payload(&["/bin/sh", "-c", "sleep 30 & echo $!; exit 7"], None)?,
+    );
+    assert_eq!(replies.pop(), Some(response(APP_EXIT, 42, 7, b"exit")));
+    let bytes: Vec<_> = replies
+        .into_iter()
+        .flat_map(|reply| reply.payload)
+        .collect();
+    let process = std::str::from_utf8(&bytes)?.trim().parse::<i64>()?;
+    let process = crate::guest::sys::ProcessId::from_positive(process).unwrap();
+    assert!(!crate::guest::sys::ProcessId::live_userspace()?.contains(&process));
+    assert!(harness.stop().diagnostics.is_empty());
+    Ok(())
 }
 
 #[test]
