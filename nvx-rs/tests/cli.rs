@@ -2635,6 +2635,7 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
     // refuses, its usage errors, and the help print none.
     let snapshot = root.path.join("snapshot");
     fs::create_dir(&snapshot).unwrap();
+    fs::write(snapshot.join("manifest.bin"), &*openvmm::NO_CONSOLE).unwrap();
     let snapshot = snapshot.to_str().unwrap();
     for (options, status) in [
         (&[][..], 0),

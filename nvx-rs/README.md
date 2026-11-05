@@ -682,7 +682,10 @@ capture, at most `MAX_MANIFEST_LEN` bytes of a regular file that is not a link
 or other reparse point, and refuses another snapshot format version, an unknown,
 mistyped, or repeated field, truncated bytes, and a capture that is not a
 template's: a platform-tier capture for clones, with a read-only `distro` whose
-identity is unbound, a fresh scratch, and the dormant filesystem slot.
+identity is unbound, a fresh scratch, and the dormant filesystem slot. The
+restores of [`run`](#run) read the host attachments of the machine contract of
+any microVM snapshot's manifest through the same reader, with every check but
+those that make a manifest a template's.
 
 `CaptureClass` holds the invariant inputs of a capture, known before it: the
 runtime, the guest's build, the backend, the requested CPU profile, the
@@ -2094,10 +2097,15 @@ status.
   terminal with `--virtio-console console`, so that the terminal's input
   reaches the guest through it, not through the byte channel, `hvc0`, whose
   output, such as the kernel's early messages, goes to standard error. A
-  restore passes no `--virtio-console`, which OpenVMM requires of a snapshot
-  without a boot console, so it cannot yet restore one whose boot console was
-  on the terminal, which needs `--virtio-console console` again
-  ([microsoft/nvx#1254](https://github.com/microsoft/nvx/issues/1254)).
+  restore reads its snapshot's `manifest.bin`, dry run or not, and passes
+  `--virtio-console console` when the manifest's machine contract holds the
+  attachment of the boot console, `console:microvm-virtio0`, with the reconnect
+  policy `require-inherited-attachment`, which a capture with
+  `--virtio-console console` records, and which OpenVMM restores only with that
+  option again. It passes no `--virtio-console` otherwise, which OpenVMM
+  requires of a snapshot without a boot console. A manifest that it cannot read
+  fails the restore before OpenVMM starts, and before anything is downloaded,
+  as options that it refuses do.
 - A cold boot takes `--net` and `--network-profile` together. A restore takes
   the addressing of its NIC from the snapshot, as OpenVMM does, so it refuses
   `--net`, and passes `--network-profile` alone, which OpenVMM requires, with
@@ -2391,6 +2399,10 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   `--restore-network-policy`, so that a restore of a NIC template installs the
   policy of its network options; see
   [Networked snapshots](../doc/run.md#networked-snapshots).
+- `run --restore-snapshot` reads the snapshot's `manifest.bin`, dry run or not,
+  to attach the boot console as the snapshot had it, and fails when it cannot
+  read it, where `nvx.py run` read nothing of the snapshot and left its checks
+  to OpenVMM.
 
 ### Test hooks
 
@@ -2403,10 +2415,15 @@ status. It also runs the microVMs of `nvx-rs run`, without a guest: a cold
 boot, or the restore of a snapshot directory, prints that it booted or restored
 the microVM, writes an outcome report if asked, and exits with status 0, and a
 restore whose snapshot directory is missing fails with status 1. Like OpenVMM,
-it refuses with status 2 a restore with `--net`, whose NIC keeps the addressing
-that its snapshot saved, a cold boot with `--network-profile` alone or with
-`--restore-network-policy`, and a restore with `--network-ingress allow` or
-explicit `--host-loopback allow` without `--restore-network-policy`. Kernel
+a restore checks its `--virtio-console` against the attachment of the boot
+console that its snapshot's manifest records, which the fake decodes on its
+own, and fails with status 1 where OpenVMM would: without
+`--virtio-console console` for a boot console that was on the terminal, and
+with it for any other. Like OpenVMM, it refuses with status 2 a restore with
+`--net`, whose NIC keeps the addressing that its snapshot saved, a cold boot
+with `--network-profile` alone or with `--restore-network-policy`, and a
+restore with `--network-ingress allow` or explicit `--host-loopback allow`
+without `--restore-network-policy`. Kernel
 command-line tokens make it fail: `fake_exit_on_start=STATUS`,
 `fake_exit_status=STATUS`, `fake_guest_features=MASK`, and
 `fake_legacy_guest=1`, among others; see `src/testing/fake_openvmm.rs`. Like

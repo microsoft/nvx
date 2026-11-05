@@ -192,10 +192,12 @@ unless `--dry-run` is given, runs OpenVMM with the standard streams. A cold
 boot attaches the guest's console, the boot console `hvc1`, to them, so that
 the terminal's input reaches the guest through it rather than through the byte
 channel, `hvc0`, whose output, such as the kernel's early messages, goes to
-standard error. A restore attaches no boot console to them, so it cannot yet
-restore a snapshot whose boot console was on the terminal, which OpenVMM
-restores only with that console attached again
-([#1254](https://github.com/microsoft/nvx/issues/1254)). It exits
+standard error. A restore attaches the boot console to them again when its
+snapshot's boot console was on the terminal, as the snapshot's `manifest.bin`
+records, since OpenVMM restores such a snapshot only with that console
+attached again, and attaches none otherwise. It reads the manifest even with
+`--dry-run`, and fails, before it downloads anything or starts OpenVMM, when it
+cannot read it. It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and
@@ -1138,7 +1140,11 @@ backend and splits the backend's suite into COUNT shards. The
 test hook, which makes OpenVMM's default CPU profile selection, `auto`, fall
 back to a host profile on a host that a built-in profile serves, checks the
 fallback's warning, captures the guest, and restores it on the snapshot's host
-profile. The `time-host-correction` scenario reads the host's own clock
+profile. The `run-console-restore` scenario captures a cold boot whose boot
+console is on OpenVMM's standard streams, restores the snapshot through
+[`nvx-rs run`](#run), which must attach that console to the terminal again, and
+types a script into the restored guest's shell. The `time-host-correction`
+scenario reads the host's own clock
 correction from a time sample of an unhooked cold boot, then cold boots with
 OpenVMM's `host-rate-offset-ppm` test hook. The harness composes the host and
 hook rates as OpenVMM does, checks Linux's correction after the TSC rate's kHz

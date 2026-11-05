@@ -10,9 +10,16 @@
 //! A cold boot attaches the guest's console, the boot console `hvc1`, to the terminal with
 //! `--virtio-console console`, so that the terminal's input reaches the guest through it rather
 //! than through the byte channel, `hvc0`, whose output, such as the kernel's early messages, goes
-//! to standard error. A restore passes no `--virtio-console`, which OpenVMM requires of a snapshot
-//! without a boot console, so it cannot yet restore one whose boot console was on the terminal,
-//! which needs `--virtio-console console` again (microsoft/nvx#1254).
+//! to standard error. A restore attaches the boot console as its snapshot had it: it reads the
+//! snapshot's manifest, `manifest.bin` in the snapshot's directory, dry run or not, and passes
+//! `--virtio-console console` when the manifest's machine contract holds the attachment of the
+//! boot console, `console:microvm-virtio0`, with the reconnect policy
+//! `require-inherited-attachment`, which a capture with `--virtio-console console` records, and
+//! which OpenVMM restores only with that option again. It passes no console option otherwise, which
+//! OpenVMM requires of a snapshot without a boot console, and which leaves any other boot console
+//! the attachment that its snapshot records. A manifest that it cannot read fails the restore
+//! before OpenVMM starts, and before anything is downloaded, since OpenVMM could not restore the
+//! snapshot either; the failure follows that of a missing OpenVMM, as the shares' do.
 //!
 //! A cold boot takes `--net` and `--network-profile` together. A restore takes the addressing of
 //! its NIC from the snapshot, as OpenVMM does, so it refuses `--net`, and passes
@@ -43,7 +50,8 @@ use super::cpu_profile::{self, HostCpu};
 use super::download;
 use super::network::{NativeRules, NetworkOptions};
 use super::sandbox::{
-    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, hypervisor, path_string, path_text, run_openvmm,
+    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, error_with_cause, hypervisor, path_string,
+    path_text, run_openvmm,
 };
 use super::shell::format_command;
 use super::{Exit, Result, check_interrupt, output};
@@ -57,6 +65,7 @@ use crate::host::sandbox::mount::{
 };
 use crate::host::sandbox::options::validate_run_share_targets;
 use crate::host::sandbox::{SANDBOX_COMMAND_LINE_MAX_SIZE, has_kernel_separator};
+use crate::host::template::read_attachments;
 
 /// The usage and help of the parser.
 pub(super) const SYNTAX: Syntax = Syntax {
@@ -140,6 +149,14 @@ const MACHINES: [&str; 1] = ["microvm"];
 /// The choices of `--processors` and `--restore-processors`, the processor counts that a microVM
 /// takes.
 const PROCESSORS: [&str; 4] = ["1", "2", "4", "8"];
+
+/// The stable ID of the attachment of a microVM's boot console, `hvc1`, in a snapshot's machine
+/// contract.
+const BOOT_CONSOLE: &str = "console:microvm-virtio0";
+
+/// The reconnect policy of a boot console that a capture attached to the terminal with
+/// `--virtio-console console`, which OpenVMM restores only with `--virtio-console console` again.
+const INHERITED_ATTACHMENT: &str = "require-inherited-attachment";
 
 /// The options of `nvx-rs run`, which parse with the defaults of the former `nvx.py run`.
 pub(super) const OPTIONS: [Spec; 30] = [
@@ -365,17 +382,39 @@ fn memory_mib(options: &Options) -> u64 {
         .unwrap_or_else(|| u64::from(options.guest.default_memory_mib()))
 }
 
+/// Returns whether the restore of the snapshot in the directory `snapshot` attaches the boot
+/// console to the terminal: whether the machine contract of the snapshot's manifest holds the
+/// attachment of the boot console with the reconnect policy of one that a capture attached to the
+/// terminal. OpenVMM restores such a console only with `--virtio-console console` again, and
+/// refuses that option for any other snapshot.
+fn restores_terminal_console(snapshot: &str) -> Result<bool> {
+    let attachments =
+        read_attachments(Path::new(&path_text(snapshot))).map_err(error_with_cause)?;
+    // OpenVMM restores the first attachment of the boot console.
+    Ok(attachments
+        .iter()
+        .find(|attachment| attachment.stable_id == BOOT_CONSOLE)
+        .is_some_and(|attachment| attachment.reconnect_policy == INHERITED_ATTACHMENT))
+}
+
 /// Runs the microVM of `options`, as `command_run` did, once the release of a checkout without
 /// artifacts is downloaded, as [`download::ensure`] decides, unless the options are refused.
 pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     check(&options)?;
     let rules = options.network.egress_rules()?;
+    // A restore's console depends on its snapshot's manifest, which a restore that cannot read it
+    // reports after a missing artifact, as the refusals of the shares and the network below are.
+    let terminal_console = options
+        .restore_snapshot
+        .as_deref()
+        .map(restores_terminal_console);
     // The shares and the network follow the artifacts on the command line, and a missing artifact
     // is reported before them, as `command_run` did, but a command that they refuse downloads
     // nothing, though it reads the artifacts under the lock of downloads all the same. Their
     // arguments are built again once the artifacts are in place, as a share's kind depends on what
     // its host path holds, which a download may install.
-    let refused = extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err();
+    let refused = terminal_console.as_ref().is_some_and(Result::is_err)
+        || extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err();
     let located = locate(root)?;
     // A restore boots no kernel or initramfs: the snapshot holds the guest.
     let guest = options.restore_snapshot.is_none().then_some(options.guest);
@@ -407,6 +446,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         if options.restore_network_policy {
             command.push("--restore-network-policy".to_owned());
         }
+        if terminal_console.transpose()? == Some(true) {
+            push(&mut command, "--virtio-console", "console");
+        }
     } else {
         let kernel = dir.require_kernel()?;
         let initrd = dir.require_initramfs(options.guest)?;
@@ -420,8 +462,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         if let Some(capacity) = &options.memory_capacity_mib {
             push(&mut command, "--memory-capacity", format!("{capacity}M"));
         }
-        // The guest's console takes the terminal. A restore passes no console option, as a
-        // snapshot without a boot console requires (microsoft/nvx#1254).
+        // The guest's console takes the terminal.
         push(&mut command, "--virtio-console", "console");
     }
     if let Some(profile) = &options.cpu_profile {

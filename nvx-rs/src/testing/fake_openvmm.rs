@@ -88,15 +88,26 @@
 //! children of an aggregate at `/run/nvx/shares`, whose relative policy paths name paths in the
 //! only share, as OpenVMM resolves them, and either boots a guest, with `--memory`, an optional
 //! `--memory-capacity`, an existing `--kernel` and `--initrd`, and `--virtio-console console`, or
-//! restores a snapshot, with `--restore-snapshot` and optional `--restore-processors`,
-//! `--restore-memory`, and `--restore-ready-path`, and without `--virtio-console`, which
-//! `nvx-rs run` gives a cold boot only. It runs no guest: after `fake_boot_delay_ms=MS`, it prints
+//! restores a snapshot, with `--restore-snapshot`, optional `--restore-processors`,
+//! `--restore-memory`, and `--restore-ready-path`, and at most one `--virtio-console`, `console`
+//! or `none`. It runs no guest: after `fake_boot_delay_ms=MS`, it prints
 //! that it booted or restored the microVM on standard output, writes an outcome report of
 //! operation `run` if `--microvm-report` asks for one, and exits with 0, or with `STATUS` if the
 //! kernel command line, which such a command line may omit, has `fake_exit_status=STATUS`. A
 //! restore whose snapshot directory does not exist fails with status 1 and writes no report. A
 //! restore records its command line next to its snapshot, since it has no kernel. The outcome
 //! reports of sandboxes and of these runs take the form of OpenVMM's.
+//!
+//! As OpenVMM does, a restore checks its `--virtio-console` against the attachment of the boot
+//! console, `console:microvm-virtio0`, that the machine contract of the snapshot's manifest holds,
+//! which the fake decodes on its own: it requires `--virtio-console console` of a snapshot whose
+//! boot console was on the terminal, whose attachment has the reconnect policy
+//! `require-inherited-attachment`, and refuses it of any other, takes `--virtio-console none` of a
+//! snapshot whose boot console was disconnected, with the policy `discard-while-disconnected`, and
+//! refuses any `--virtio-console` of a snapshot without a boot console. A restore that fails the
+//! check, or whose manifest it cannot decode, fails with status 1, with OpenVMM's message, and
+//! writes no report. Since it restores no saved state, the fake takes a snapshot directory without
+//! a manifest for one without a boot console.
 //!
 //! The fake also runs the VMs of templates' captures, whose command lines have no
 //! `--microvm-lifecycle`, a `distro` layer and a `scratch` disk on sandbox block devices and no
@@ -210,6 +221,15 @@ const SNAPSHOT_MEMORY: &str = "memory.bin";
 /// Name of the saved state of a snapshot.
 const SNAPSHOT_STATE: &str = "state.bin";
 
+/// The stable ID of the attachment of the boot console in a snapshot's machine contract.
+const BOOT_CONSOLE: &str = "console:microvm-virtio0";
+/// The reconnect policy of a boot console that a capture attached to the terminal, with
+/// `--virtio-console console`.
+const INHERITED_ATTACHMENT: &str = "require-inherited-attachment";
+/// The reconnect policy of a boot console that a capture left disconnected, with
+/// `--virtio-console none`.
+const DISCONNECTED_ATTACHMENT: &str = "discard-while-disconnected";
+
 /// `NAME=VALUE` variables in the order in which a workload's `environ` lists them.
 type Environment = Vec<(String, String)>;
 
@@ -304,6 +324,8 @@ struct Options {
     sandbox: bool,
     /// The snapshot directory that a run restores, or `None` for a cold boot.
     restore: Option<PathBuf>,
+    /// The `--virtio-console` of a run's restore, which the restore checks against its snapshot.
+    restore_console: Option<String>,
     /// Control endpoint at which the fake accepts host sessions; empty for a one-shot run.
     endpoint: String,
     /// Path to the synthetic OpenVMM outcome report, which a one-shot run may omit.
@@ -714,7 +736,8 @@ fn run_one_shot(options: &Options) -> i32 {
 /// microVM`, and the restore of an existing snapshot directory `PROGRAM: restored the microVM`,
 /// on standard output; then the run writes its outcome report and ends with 0, or with the status
 /// of the `fake_exit_status=STATUS` token. A restore without its snapshot directory fails with 1,
-/// as OpenVMM fails a restore that it cannot read, and writes no report.
+/// as OpenVMM fails a restore that it cannot read, and so does one whose console
+/// [`check_restored_console`] refuses; neither writes a report.
 fn run_microvm(options: &Options) -> i32 {
     thread::sleep(options.boot_delay);
     match &options.restore {
@@ -726,7 +749,15 @@ fn run_microvm(options: &Options) -> i32 {
             );
             return 1;
         }
-        Some(_) => println!("{}: restored the microVM", options.program),
+        Some(snapshot) => {
+            if let Err(message) =
+                check_restored_console(snapshot, options.restore_console.as_deref())
+            {
+                eprintln!("{}: {message}", options.program);
+                return 1;
+            }
+            println!("{}: restored the microVM", options.program);
+        }
         None => println!("{}: booted the microVM", options.program),
     }
     let status = options.exit_status.unwrap_or(0);
@@ -737,6 +768,112 @@ fn run_microvm(options: &Options) -> i32 {
     };
     write_report(options, "run", category, status_code);
     status
+}
+
+/// Checks `requested`, the `--virtio-console` of the restore of the snapshot in the directory
+/// `snapshot`, against the attachment of the snapshot's boot console, as OpenVMM checks it, and
+/// fails with OpenVMM's message.
+fn check_restored_console(snapshot: &Path, requested: Option<&str>) -> Result<(), String> {
+    let refused = |message: &str| Err(message.to_owned());
+    match (boot_console_policy(snapshot)?.as_deref(), requested) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => {
+            refused("a restore-time virtio-console cannot be added to a snapshot without one")
+        }
+        (Some(INHERITED_ATTACHMENT), Some("console")) => Ok(()),
+        (Some(INHERITED_ATTACHMENT), None) => {
+            refused("snapshot requires --virtio-console console as a replacement attachment")
+        }
+        (Some(INHERITED_ATTACHMENT), Some(_)) => {
+            refused("snapshot microVM console identity is not canonical")
+        }
+        // The fake takes the attachments that it does not model, such as a listener's, as OpenVMM
+        // takes a listener's: without a replacement.
+        (Some(DISCONNECTED_ATTACHMENT), Some("none")) | (Some(_), None) => Ok(()),
+        (Some(_), Some(_)) => {
+            refused("restore-time virtio-console does not match the snapshot attachment")
+        }
+    }
+}
+
+/// Returns the reconnect policy of the boot console of the snapshot in the directory `snapshot`,
+/// from the first attachment of the boot console that the machine contract of the snapshot's
+/// manifest holds, or `None` for a snapshot without one, or without a manifest.
+///
+/// It decodes no more of the manifest than that, with a reader of its own: the manifest's field 9
+/// is its machine contract, whose fields 10 are its attachments, each with the stable ID of its
+/// device in field 1, and its reconnect policy in field 4.
+fn boot_console_policy(snapshot: &Path) -> Result<Option<String>, String> {
+    let path = snapshot.join(SNAPSHOT_MANIFEST);
+    let manifest = match fs::read(&path) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let malformed = |problem: String| format!("{} is malformed: {problem}", path.display());
+    let text = |message: &[u8], number| {
+        let value = length_delimited(message, number)
+            .map_err(malformed)?
+            .last()
+            .copied()
+            .unwrap_or_default();
+        String::from_utf8(value.to_vec())
+            .map_err(|_| malformed("it holds a text that is not UTF-8".to_owned()))
+    };
+    for contract in length_delimited(&manifest, 9).map_err(malformed)? {
+        for attachment in length_delimited(contract, 10).map_err(malformed)? {
+            if text(attachment, 1)? == BOOT_CONSOLE {
+                return text(attachment, 4).map(Some);
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Returns the values of the length-delimited fields numbered `number` of the protobuf message
+/// `message`, in their order, and skips its other fields.
+fn length_delimited(message: &[u8], number: u64) -> Result<Vec<&[u8]>, String> {
+    let mut values = Vec::new();
+    let mut rest = message;
+    while !rest.is_empty() {
+        let key = read_varint(&mut rest)?;
+        let length = match key & 7 {
+            0 => {
+                read_varint(&mut rest)?;
+                continue;
+            }
+            1 => 8,
+            2 => usize::try_from(read_varint(&mut rest)?)
+                .map_err(|_| "it holds a field longer than memory".to_owned())?,
+            5 => 4,
+            wire_type => return Err(format!("it holds a field of wire type {wire_type}")),
+        };
+        if length > rest.len() {
+            return Err("it is truncated".to_owned());
+        }
+        let (value, tail) = rest.split_at(length);
+        if key & 7 == 2 && key >> 3 == number {
+            values.push(value);
+        }
+        rest = tail;
+    }
+    Ok(values)
+}
+
+/// Reads a varint at the start of `bytes`, and moves `bytes` past it.
+fn read_varint(bytes: &mut &[u8]) -> Result<u64, String> {
+    let mut value = 0;
+    for shift in (0..64).step_by(7) {
+        let (&byte, rest) = bytes
+            .split_first()
+            .ok_or_else(|| "it is truncated".to_owned())?;
+        *bytes = rest;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+    }
+    Err("it holds an integer longer than 64 bits".to_owned())
 }
 
 /// The scenario of a template's capture, `fake-openvmm-capture.json` next to the kernel, as the
@@ -1143,11 +1280,16 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             } else {
                 "a one-shot run"
             };
-            // The boot console gives the guest the terminal, but `nvx-rs run` passes it to a cold
-            // boot only (microsoft/nvx#1254).
+            // A cold boot gives the guest's boot console the terminal, which a restore attaches
+            // again only if its snapshot's boot console was there, as `run_microvm` checks.
             if values.contains_key("--restore-snapshot") {
-                if values.contains_key("--virtio-console") {
-                    return Err(format!("the restore of {kind} takes no --virtio-console"));
+                match at_most_once(&values, "--virtio-console")? {
+                    None | Some("console" | "none") => {}
+                    Some(other) => {
+                        return Err(format!(
+                            "--virtio-console must be console or none, not {other}"
+                        ));
+                    }
                 }
             } else {
                 expect("--virtio-console", "console")?;
@@ -1438,11 +1580,17 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     } else {
         GUEST_FEATURES
     };
+    let restore_console = restore
+        .as_ref()
+        .and_then(|_| values.get("--virtio-console"))
+        .and_then(|given| given.first())
+        .map(|given| (*given).to_owned());
     Ok(Options {
         program: program.to_owned(),
         lifecycle,
         sandbox,
         restore,
+        restore_console,
         endpoint,
         args_dump: anchor.with_file_name(format!("fake-openvmm-{token}.json")),
         maps_dump: anchor.with_file_name(format!("fake-openvmm-{token}-maps.json")),

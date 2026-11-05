@@ -1,4 +1,5 @@
-//! Tests of [`TemplateManifest`]: what it reads of a template's manifest, and what it refuses.
+//! Tests of [`TemplateManifest`]: what it reads of a template's manifest, and what it refuses, and
+//! of `read_attachments`, which reads the host attachments of any snapshot's manifest for the CLI.
 
 use std::fs;
 use std::path::Path;
@@ -347,7 +348,7 @@ fn fields_that_the_format_does_not_have_are_refused() {
             decode_device_range(&unknown, 2).map(drop),
             "a range of its device 2",
         ),
-        (decode_attachment(&unknown, 1), "its attachment 1"),
+        (decode_attachment(&unknown, 1).map(drop), "its attachment 1"),
         (decode_memory_range(&unknown).map(drop), "its memory range"),
         (
             decode_expansion_range(&unknown).map(drop),
@@ -480,7 +481,7 @@ fn bounded_lists_are_refused_past_their_bounds() {
     );
     let identity = vec![1; MAX_ATTACHMENT_IDENTITY_LEN + 1];
     assert_eq!(
-        decode_attachment(&Proto::default().bytes(6, &identity).finish(), 0),
+        decode_attachment(&Proto::default().bytes(6, &identity).finish(), 0).map(drop),
         Err(format!(
             "its attachment 0 has an identity of more than {MAX_ATTACHMENT_IDENTITY_LEN} bytes"
         ))
@@ -891,6 +892,141 @@ fn the_manifests_that_openvmm_writes_are_read() {
         }
         assert_eq!(manifest, parse(&spec), "{name}");
     }
+}
+
+/// Returns what a restore reads of the attachment of the device `stable_id`, which `policy`
+/// reconnects.
+#[cfg(feature = "cli")]
+fn attachment(stable_id: &str, policy: &str) -> Attachment {
+    Attachment {
+        stable_id: stable_id.to_owned(),
+        reconnect_policy: policy.to_owned(),
+    }
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn the_attachments_that_openvmm_writes_are_read_in_their_order() {
+    // OpenVMM writes the attachment of the NIC, if there is one, and then those of the consoles.
+    let consoles = [
+        attachment("console:microvm-virtio0", "discard-while-disconnected"),
+        attachment("console:microvm-control0", "broker-authenticated-listener"),
+    ];
+    assert_eq!(
+        read_attachments(&fixture("platform-kvm")).unwrap(),
+        consoles
+    );
+    let mut networked = vec![attachment("net:microvm0", "recreate-endpoint")];
+    networked.extend(consoles);
+    assert_eq!(
+        read_attachments(&fixture("platform-mshv-network")).unwrap(),
+        networked
+    );
+}
+
+/// Returns the manifest of a snapshot that is no template's: a capture at no tier, of a boot whose
+/// boot console was on the terminal, as `--virtio-console console` records it.
+#[cfg(feature = "cli")]
+fn terminal_console_snapshot() -> ManifestSpec {
+    let mut spec = ManifestSpec::template();
+    spec.tier.clear();
+    spec.restore_policy.clear();
+    spec.consumed_sections = 0;
+    let console = &mut spec.contract().attachments[0];
+    assert_eq!(console.stable_id, "console:microvm-virtio0");
+    console.required = true;
+    console.reconnect_policy = "require-inherited-attachment".to_owned();
+    console.identity_kind = "provider".to_owned();
+    console.identity = b"console".to_vec();
+    spec
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn the_attachments_of_any_snapshot_are_read() {
+    let spec = terminal_console_snapshot();
+    let directory = snapshot(&spec.encode());
+    let (message, _) = read_refusal(directory.path(), ErrorCode::Io);
+    assert!(message.contains("is not a template's"), "{message}");
+    assert_eq!(
+        read_attachments(directory.path()).unwrap(),
+        [
+            attachment("console:microvm-virtio0", "require-inherited-attachment"),
+            attachment("console:microvm-control0", "broker-authenticated-listener"),
+        ]
+    );
+    // A machine without attachments, or without a contract, has none.
+    let mut bare = spec.clone();
+    bare.contract().attachments.clear();
+    let directory = snapshot(&bare.encode());
+    assert!(read_attachments(directory.path()).unwrap().is_empty());
+    bare.contract = None;
+    let directory = snapshot(&bare.encode());
+    assert!(read_attachments(directory.path()).unwrap().is_empty());
+    // The contract holds at most its bound of attachments.
+    let mut crowded = spec;
+    let control = crowded.contract().attachments[1].clone();
+    crowded
+        .contract()
+        .attachments
+        .resize(MAX_ATTACHMENTS + 1, control);
+    let directory = snapshot(&crowded.encode());
+    let path = directory.path().join(MANIFEST_NAME);
+    let error = read_attachments(directory.path()).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::Io, "{error}");
+    assert_eq!(
+        error.message(),
+        format!(
+            "the snapshot manifest {} is malformed: its attachments hold more than \
+             {MAX_ATTACHMENTS} items",
+            path.display()
+        )
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn the_attachments_of_unreadable_manifests_are_refused() {
+    // A missing manifest is not found, as a template's is.
+    let directory = tempfile::tempdir().unwrap();
+    let error = read_attachments(directory.path()).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::NotFound, "{error}");
+    let path = directory.path().join(MANIFEST_NAME);
+    assert_eq!(
+        error.message(),
+        format!("cannot read the snapshot manifest {}", path.display())
+    );
+    assert!(std::error::Error::source(&error).is_some());
+    // A manifest of another format asks for a capture of the snapshot, not of a template.
+    let mut spec = terminal_console_snapshot();
+    spec.version = 3;
+    let directory = snapshot(&spec.encode());
+    let error = read_attachments(directory.path()).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::FormatUnsupported, "{error}");
+    assert_eq!(
+        error.message(),
+        format!(
+            "the snapshot manifest {} has format version 3, which this build does not read; \
+             capture the snapshot again with the OpenVMM of this build",
+            directory.path().join(MANIFEST_NAME).display()
+        )
+    );
+    // A malformed field is refused anywhere in the manifest, as a template's is.
+    let directory =
+        snapshot(&terminal_console_snapshot().encode_with(Proto::default().varint(5, 2)));
+    let error = read_attachments(directory.path()).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::Io, "{error}");
+    assert!(
+        error
+            .message()
+            .ends_with("is malformed: it holds field 5 more than once"),
+        "{error}"
+    );
+    let attachment = Proto::default().bytes(1, &[0xff]).finish();
+    assert_eq!(
+        decode_attachment(&attachment, 0),
+        Err("its attachment 0 holds field 1, which is not UTF-8".to_owned())
+    );
 }
 
 /// Returns the message of the refusal of the manifest of the snapshot directory `directory`,

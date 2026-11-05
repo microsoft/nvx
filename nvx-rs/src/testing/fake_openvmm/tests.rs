@@ -332,8 +332,8 @@ fn runs_refuse_what_their_boot_or_restore_does_not_take() {
             boot(&["--microvm-workload-identity", "1000:1000"]),
             "a microVM run takes no --microvm-workload-identity",
         ),
-        // A cold boot gives the guest's boot console the terminal, which a restore's snapshot
-        // already has or not.
+        // A cold boot gives the guest's boot console the terminal, which a restore attaches again
+        // only if its snapshot's was there, as the restore checks.
         (
             run_with(&[&["--memory", "128M"][..], &KERNEL[..]].concat()),
             "--virtio-console must be given exactly once",
@@ -350,8 +350,12 @@ fn runs_refuse_what_their_boot_or_restore_does_not_take() {
             "--virtio-console must be console, not none",
         ),
         (
-            restore(&CONSOLE),
-            "the restore of a microVM run takes no --virtio-console",
+            restore(&["--virtio-console", "stdio"]),
+            "--virtio-console must be console or none, not stdio",
+        ),
+        (
+            restore(&[&CONSOLE[..], &CONSOLE[..]].concat()),
+            "--virtio-console must be given at most once",
         ),
         (
             boot(&["--mount", "/data,{dir}/share,ro", "--mount-deny", "missing"]),
@@ -374,6 +378,105 @@ fn runs_refuse_what_their_boot_or_restore_does_not_take() {
     assert_eq!(
         options.err().as_deref(),
         Some("--processors must be given exactly once")
+    );
+}
+
+/// Returns the manifest of a snapshot whose machine contract holds `attachments`, each the stable
+/// ID of its device and its reconnect policy, as `mesh` encodes them, with fields of each wire
+/// type that a manifest and its contract hold besides.
+fn manifest(attachments: &[(&str, &str)]) -> Vec<u8> {
+    fn put_varint(bytes: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            bytes.push(value as u8 | 0x80);
+            value >>= 7;
+        }
+        bytes.push(value as u8);
+    }
+    fn field(number: u64, value: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        put_varint(&mut bytes, number << 3 | 2);
+        put_varint(&mut bytes, value.len() as u64);
+        bytes.extend_from_slice(value);
+        bytes
+    }
+    // A device, the time ABI version of the time contract, and a fixed 64-bit and 32-bit integer.
+    let mut contract = field(8, &field(1, b"console:microvm-virtio0"));
+    contract.extend(field(11, &[0x08, 0x01]));
+    contract.extend([0x09, 1, 2, 3, 4, 5, 6, 7, 8, 0x15, 1, 2, 3, 4]);
+    for (stable_id, policy) in attachments {
+        let mut attachment = field(1, stable_id.as_bytes());
+        attachment.extend(field(2, b"virtio-console"));
+        attachment.extend([0x18, 0x01]);
+        attachment.extend(field(4, policy.as_bytes()));
+        contract.extend(field(10, &attachment));
+    }
+    let mut manifest = vec![0x08, 0x02];
+    manifest.extend(field(9, &contract));
+    manifest.extend(field(10, b"OPENVMM_SNAPSHOT_V2\0"));
+    manifest
+}
+
+#[test]
+fn restores_take_the_boot_console_that_their_snapshots_had() {
+    let temporary = tempfile::tempdir().unwrap();
+    let snapshot = temporary.path();
+    let check = |manifest: Option<Vec<u8>>, requested: Option<&str>| {
+        match manifest {
+            Some(manifest) => fs::write(snapshot.join(SNAPSHOT_MANIFEST), manifest).unwrap(),
+            None => {
+                let _ = fs::remove_file(snapshot.join(SNAPSHOT_MANIFEST));
+            }
+        }
+        check_restored_console(snapshot, requested)
+    };
+    let refused = |message: &str| Err(message.to_owned());
+    let control = ("console:microvm-control0", "broker-authenticated-listener");
+    let inherited = ("console:microvm-virtio0", "require-inherited-attachment");
+    let disconnected = ("console:microvm-virtio0", "discard-while-disconnected");
+    let listener = ("console:microvm-virtio0", "recreate-listener");
+    // A snapshot without a boot console, or without a manifest, takes no console.
+    let without =
+        refused("a restore-time virtio-console cannot be added to a snapshot without one");
+    for manifest in [None, Some(manifest(&[])), Some(manifest(&[control]))] {
+        assert_eq!(check(manifest.clone(), None), Ok(()));
+        assert_eq!(check(manifest.clone(), Some("console")), without);
+        assert_eq!(check(manifest, Some("none")), without);
+    }
+    // One whose boot console was on the terminal takes it there again, and only there.
+    let terminal = manifest(&[control, inherited]);
+    assert_eq!(check(Some(terminal.clone()), Some("console")), Ok(()));
+    assert_eq!(
+        check(Some(terminal.clone()), None),
+        refused("snapshot requires --virtio-console console as a replacement attachment")
+    );
+    assert_eq!(
+        check(Some(terminal), Some("none")),
+        refused("snapshot microVM console identity is not canonical")
+    );
+    // One whose boot console was disconnected, or listened, keeps its attachment, and refuses the
+    // terminal.
+    let mismatch = refused("restore-time virtio-console does not match the snapshot attachment");
+    let disconnected = manifest(&[disconnected]);
+    assert_eq!(check(Some(disconnected.clone()), None), Ok(()));
+    assert_eq!(check(Some(disconnected.clone()), Some("none")), Ok(()));
+    assert_eq!(check(Some(disconnected), Some("console")), mismatch);
+    assert_eq!(check(Some(manifest(&[listener])), None), Ok(()));
+    assert_eq!(
+        check(Some(manifest(&[listener])), Some("console")),
+        mismatch
+    );
+    // OpenVMM reads the first attachment of the boot console.
+    assert_eq!(
+        check(Some(manifest(&[inherited, listener])), Some("console")),
+        Ok(())
+    );
+    // A manifest that the fake cannot decode fails the restore.
+    let mut truncated = manifest(&[inherited]);
+    truncated.pop();
+    let path = snapshot.join(SNAPSHOT_MANIFEST);
+    assert_eq!(
+        check(Some(truncated), None),
+        Err(format!("{} is malformed: it is truncated", path.display()))
     );
 }
 
