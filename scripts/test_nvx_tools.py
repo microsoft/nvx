@@ -20822,6 +20822,60 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
                 )
 
 
+class _TwoStreamInteraction:
+    """An OpenVMM that prints the boot marker, waits for the guest's script,
+    then writes each of ``steps``, a chunk or the end of its stream, to its
+    console or to its stderr, and exits with ``status``.
+
+    Its stderr shares the console stream, as InteractiveProcess's does by
+    default, unless ``separate_stderr``, so that the same steps show what
+    reaches the harness either way.
+    """
+
+    containment = None
+
+    def __init__(
+        self,
+        steps: Sequence[tuple[benchmark.OutputStream, bytes | None]],
+        status: int = 0,
+        *,
+        separate_stderr: bool,
+    ) -> None:
+        self.process = MagicMock(pid=123)
+        self.process.poll.return_value = status
+        self.process.wait.return_value = status
+        self._steps = steps
+        self._separate_stderr = separate_stderr
+        self._stderr: benchmark.ChunkSink | None = None
+        self._stderr_ready = threading.Event()
+        self._typed = threading.Event()
+
+    def read_stderr(self, chunks: benchmark.ChunkSink) -> None:
+        self._stderr = chunks
+        self._stderr_ready.set()
+
+    def read_output(self, chunks: benchmark.ChunkSink) -> None:
+        stderr = chunks
+        if self._separate_stderr:
+            self._stderr_ready.wait(5)
+            assert self._stderr is not None
+            stderr = self._stderr
+        chunks.put(benchmark.BOOT_MARKER + b"\r\n")
+        self._typed.wait(5)
+        for stream, chunk in self._steps:
+            # The shared stream ends once, after both of its writers.
+            if chunk is not None or stderr is not chunks:
+                (chunks if stream == "console" else stderr).put(chunk)
+        if stderr is chunks:
+            chunks.put(None)
+
+    def write_input(self, _data: bytes) -> None:
+        self._typed.set()
+
+    def close(self) -> None:
+        pass
+
+
 class BenchmarkTests(unittest.TestCase):
     def test_kvm_worker_result_decoding(self):
         completed = subprocess.CompletedProcess(
@@ -22714,6 +22768,106 @@ class BenchmarkTests(unittest.TestCase):
         # The interruption ends the run once OpenVMM is ended and its console closed.
         self.assertEqual(events, ["killed", "closed"])
         self.assertIsInstance(raised.exception.__context__, TimeoutError)
+
+    def test_guest_runner_keeps_stderr_out_of_console_lines_on_request(self):
+        # In CI run 41973357177, OpenVMM's stderr delivered the byte channel's
+        # bytes around the console's marker, whose line they split on the
+        # shared stream (#1290).
+        steps: list[tuple[benchmark.OutputStream, bytes | None]] = [
+            ("console", b"NVX-GUEST-SCRIPT-START\r\n"),
+            ("stderr", b"\x00\r\n\x7f\xff"),
+            ("console", b"NVX-LIFECYCLE-OK\r\n"),
+            ("stderr", b"\n"),
+            ("console", None),
+            ("stderr", None),
+        ]
+        boot = benchmark.BOOT_MARKER + b"\r\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "guest.log"
+            shared = _TwoStreamInteraction(steps, separate_stderr=False)
+            with (
+                patch.object(
+                    benchmark, "InteractiveProcess", return_value=shared
+                ) as spawn,
+                patch.object(benchmark, "_try_peak_rss", return_value=1024),
+                patch.object(benchmark, "terminate"),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "^guest exited without completion marker 'NVX-LIFECYCLE-OK'",
+                ),
+            ):
+                benchmark.run_guest_script(
+                    ["openvmm"],
+                    "lifecycle\n",
+                    b"NVX-LIFECYCLE-OK",
+                    timeout=5,
+                    log_path=log_path,
+                )
+            self.assertIs(spawn.call_args.kwargs["separate_stderr"], False)
+            self.assertTrue(
+                log_path.read_bytes().endswith(b"\x7f\xffNVX-LIFECYCLE-OK\r\n\n")
+            )
+
+            separate = _TwoStreamInteraction(steps, separate_stderr=True)
+            stderr = bytearray()
+            with (
+                patch.object(
+                    benchmark, "InteractiveProcess", return_value=separate
+                ) as spawn,
+                patch.object(benchmark, "_try_peak_rss", return_value=1024),
+            ):
+                result = benchmark.run_guest_script(
+                    ["openvmm"],
+                    "lifecycle\n",
+                    b"NVX-LIFECYCLE-OK",
+                    timeout=5,
+                    log_path=log_path,
+                    on_stderr=stderr.extend,
+                )
+            self.assertIs(spawn.call_args.kwargs["separate_stderr"], True)
+            self.assertEqual(
+                result["text"],
+                (boot + b"NVX-GUEST-SCRIPT-START\r\nNVX-LIFECYCLE-OK\r\n").decode(),
+            )
+            self.assertEqual(bytes(stderr), b"\x00\r\n\x7f\xff\n")
+            # The log keeps both streams, interleaved by whole lines.
+            self.assertEqual(
+                log_path.read_bytes(),
+                boot
+                + b"NVX-GUEST-SCRIPT-START\r\n\x00\r\nNVX-LIFECYCLE-OK\r\n\x7f\xff\n",
+            )
+
+    def test_guest_runner_reads_a_separate_stderr_to_its_end(self):
+        # OpenVMM writes a fatal error to stderr after its console has ended.
+        fatal = b"fatal error: failed to launch vm worker\n"
+        steps: list[tuple[benchmark.OutputStream, bytes | None]] = [
+            ("console", None),
+            ("stderr", fatal),
+            ("stderr", None),
+        ]
+        interaction = _TwoStreamInteraction(steps, 1, separate_stderr=True)
+        stderr = bytearray()
+        with (
+            patch.object(benchmark, "InteractiveProcess", return_value=interaction),
+            patch.object(benchmark, "_try_peak_rss", return_value=1024),
+            patch.object(benchmark, "terminate"),
+            self.assertRaisesRegex(
+                RuntimeError, "^OpenVMM exited with status 1"
+            ) as raised,
+        ):
+            benchmark.run_guest_script(
+                ["openvmm"], "true\n", b"DONE", timeout=5, on_stderr=stderr.extend
+            )
+
+        self.assertEqual(bytes(stderr), fatal)
+        # The error report keeps both streams.
+        self.assertTrue(
+            str(raised.exception).endswith(
+                "\n--- OpenVMM output ---\n"
+                f"{benchmark.BOOT_MARKER.decode()}\r\n{fatal.decode()}"
+            ),
+            str(raised.exception),
+        )
 
     def test_device_io_host_state_describes_files_processes_and_volume(self):
         from datetime import datetime, timezone

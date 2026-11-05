@@ -2029,6 +2029,38 @@ class SeparatedOutput:
         return self.contents()[-size:].decode("utf-8", "replace")
 
 
+class MergedOutput:
+    """Reads OpenVMM's console stream, which its stderr shares, as
+    ``SeparatedOutput`` reads the two streams. ``console`` and ``contents()``
+    keep the whole stream, in the order in which it arrived."""
+
+    def __init__(self, interaction: InteractiveProcess) -> None:
+        self.console = bytearray()
+        self.closed = False
+        self._chunks: queue.Queue[bytes | None] = queue.Queue()
+        threading.Thread(
+            target=interaction.read_output, args=(self._chunks,), daemon=True
+        ).start()
+
+    def get(self, timeout: float) -> tuple[OutputStream, bytes | None]:
+        """Records and returns the next chunk, or ``None`` when the stream ends.
+
+        Raises ``queue.Empty`` when no chunk arrives within ``timeout`` seconds.
+        """
+        chunk = self._chunks.get(timeout=timeout)
+        if chunk is None:
+            self.closed = True
+        else:
+            self.console.extend(chunk)
+        return "console", chunk
+
+    def contents(self) -> bytes:
+        return bytes(self.console)
+
+    def tail(self, size: int = 4096) -> str:
+        return self.console[-size:].decode("utf-8", "replace")
+
+
 def record_adversarial_openvmm_pid(
     pid: int,
     environment: dict[str, str],
@@ -2800,6 +2832,7 @@ def run_guest_script(
     contain_process_tree: bool = False,
     time_abi_status: bool = False,
     host_state_on_timeout: Callable[[subprocess.Popen[bytes]], str] | None = None,
+    on_stderr: Callable[[bytes], None] | None = None,
 ) -> GuestCommandResult:
     """Run ``script`` once the guest boots and wait for ``completion_marker``.
 
@@ -2810,6 +2843,15 @@ def run_guest_script(
 
     When the workload times out, ``host_state_on_timeout`` describes the host
     while OpenVMM still runs, and the failure includes its description.
+
+    OpenVMM writes its stderr, such as the byte channel's output beside the
+    boot console, with no order against the console, so on the console
+    stream, which stderr shares by default, a stderr write can split a console
+    line (#1290). With ``on_stderr``, stderr has a pipe of its own, whose
+    chunks go to ``on_stderr``, and the run reads both streams to their end:
+    the markers and the time ABI lines match only the console, which ``text``
+    then holds alone, and the log and the error reports interleave the two
+    streams by whole lines. ``SeparatedOutput`` keeps the last MiB of each.
     """
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
@@ -2818,6 +2860,7 @@ def run_guest_script(
         command,
         environment,
         contain_process_tree=contain_process_tree,
+        separate_stderr=on_stderr is not None,
     )
     process = interaction.process
     monitor = TimeAbiMonitor(command)
@@ -2825,12 +2868,10 @@ def run_guest_script(
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
 
-    chunks: queue.Queue[bytes | None] = queue.Queue()
-    threading.Thread(
-        target=interaction.read_output, args=(chunks,), daemon=True
-    ).start()
+    output = (
+        MergedOutput(interaction) if on_stderr is None else SeparatedOutput(interaction)
+    )
     deadline = time.monotonic() + timeout
-    output = bytearray()
     status_sent = False
     input_sent = False
     completed = False
@@ -2839,12 +2880,12 @@ def run_guest_script(
     primary_error: BaseException | None = None
     cleanup_errors: list[BaseException] = []
     try:
-        while True:
+        while not output.closed:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(f"guest workload did not finish within {timeout:g}s")
             try:
-                chunk = chunks.get(timeout=min(remaining, 0.1))
+                stream, chunk = output.get(timeout=min(remaining, 0.1))
             except queue.Empty:
                 peak_bytes = _try_peak_rss(process, peak_bytes)
                 if process.poll() is not None:
@@ -2853,21 +2894,25 @@ def run_guest_script(
                     continue
                 continue
             if chunk is None:
-                break
-            output.extend(chunk)
+                continue
+            if stream == "stderr":
+                if on_stderr is not None:
+                    on_stderr(chunk)
+                continue
             monitor.feed(chunk)
             peak_bytes = _try_peak_rss(process, peak_bytes)
-            if query_status and not status_sent and boot_marker in output:
+            console = output.console
+            if query_status and not status_sent and boot_marker in console:
                 interaction.write_input(status_script().encode("utf-8"))
                 status_sent = True
             if (
                 not input_sent
-                and boot_marker in output
+                and boot_marker in console
                 and (not query_status or monitor.status_queries > 0)
             ):
                 interaction.write_input(script.encode("utf-8"))
                 input_sent = True
-            if input_sent and contains_output_line(output, completion_marker):
+            if input_sent and contains_output_line(console, completion_marker):
                 completed = True
                 if teardown_mode != "guest-exit" and process.poll() is None:
                     process.terminate()
@@ -2890,7 +2935,7 @@ def run_guest_script(
                 f"guest exited without completion marker {completion_marker.decode()!r}"
             )
         result = {
-            "text": output.decode("utf-8", "replace"),
+            "text": output.console.decode("utf-8", "replace"),
             "wall_ms": (time.perf_counter_ns() - started_ns) / 1_000_000,
             "peak_rss_bytes": peak_bytes,
         }
@@ -2915,7 +2960,7 @@ def run_guest_script(
         if interruption is not None:
             primary_error = interruption
         elif isinstance(error, Exception):
-            tail = output[-4096:].decode("utf-8", "replace")
+            tail = output.tail()
             sections = [str(error)]
             if host_state is not None:
                 sections.append(f"--- host state at the timeout ---\n{host_state}")
@@ -2933,7 +2978,7 @@ def run_guest_script(
     if log_path is not None:
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.write_bytes(output)
+            log_path.write_bytes(output.contents())
         except BaseException as cleanup_error:
             cleanup_errors.append(cleanup_error)
     try:
