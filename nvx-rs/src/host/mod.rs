@@ -52,6 +52,8 @@
 //!   opened, which it inherits through the [`supervisor`]'s allowlist.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
 //!   its files and endpoints, and its control credential, which the library never writes.
+//! - [`restore`] listens for OpenVMM's restore-ready event and verifies its client against the
+//!   held VM process.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
@@ -85,6 +87,7 @@ pub(crate) mod paths;
 pub mod platform;
 pub mod process;
 pub mod report;
+pub mod restore;
 pub mod runtime;
 pub mod sandbox;
 pub mod seal;

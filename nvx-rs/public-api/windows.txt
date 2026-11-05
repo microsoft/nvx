@@ -1058,6 +1058,9 @@ field nvx::host::report::Report::category
 field nvx::host::report::Report::status_code
 field nvx::host::report::Report::teardown_complete
 fn nvx::host::report::read
+mod nvx::host::restore
+struct nvx::host::restore::ReadyListener
+method nvx::host::restore::ReadyListener::into_std
 mod nvx::host::runtime
 struct nvx::host::runtime::ArtifactIdentity
 method nvx::host::runtime::ArtifactIdentity::as_str
@@ -2480,6 +2483,8 @@ field nvx::protocol::nvxs::SessionError::Window::outstanding
 field nvx::protocol::nvxs::SessionError::Window::window
 fn nvx::protocol::nvxs::encode_record
 fn nvx::protocol::parse_host_mapping_count
+mod nvx::protocol::restore_ready
+fn nvx::protocol::restore_ready::parse_ready_event
 mod nvx::protocol::root
 const nvx::protocol::root::DISTRO_MMIO_BASE
 enum nvx::protocol::root::ImageFormat
