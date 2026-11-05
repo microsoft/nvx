@@ -10,7 +10,8 @@ use crate::gpt::{Disk, Expected};
 use crate::guest::gpt::DeviceError;
 use crate::guest::mappings::{Access, Kernel as MappingKernel};
 use crate::guest::sys::{
-    self, Errno, FileDescriptor, FileKind, FileStatus, Mode, MountAttributes, MountFlags, OpenFlags,
+    self, Errno, FileDescriptor, FileKind, FileStatus, FileSystem, Mode, MountAttributes,
+    MountFlags, OpenFlags,
 };
 
 /// The unique ID of the mount that every path is on that none of the fake kernel's mounts
@@ -61,6 +62,8 @@ pub(crate) enum Operation {
     Detach,
     /// A read of a mount's options, which its mount point names.
     Options,
+    /// A new mount of a file system, which its type names.
+    NewMount,
 }
 
 /// One operation that the fake kernel recorded, with its paths and options as text.
@@ -116,6 +119,20 @@ pub(crate) enum Call {
     },
     /// A detachment of a tree from its mount point, as a lazy unmount does.
     Detach(String),
+    /// A new mount of a file system, detached.
+    NewMount {
+        /// The file system's type.
+        kind: String,
+        /// The file system's parameters, each as `key=value`.
+        parameters: Vec<String>,
+        /// The mount's attributes, `MOUNT_ATTR_*`.
+        attributes: u64,
+    },
+    /// A restriction of a directory's mount and every mount below it to `nosuid` and `nodev`,
+    /// which the directory names.
+    RestrictTree(String),
+    /// A creation of the device nodes and the links of a `/dev`, which its directory names.
+    CreateDevices(String),
 }
 
 /// The type of the action that runs after each sleep.
@@ -125,10 +142,11 @@ type MoveAction = Box<dyn FnMut(&Path) + Send>;
 /// The type of the action that runs after each creation of a file, with its path.
 type CreateAction = Box<dyn FnMut(&Path) + Send>;
 
-/// A mount that `open_tree` returned a descriptor of.
+/// A mount that `open_tree` or a new mount returned a descriptor of.
 #[derive(Clone, Debug)]
 struct Tree {
-    /// The path of the file whose mount the tree is, or copies.
+    /// The path of the file whose mount the tree is, or copies, or a new mount's file system
+    /// type.
     source: PathBuf,
     /// The kind of that file.
     kind: FileKind,
@@ -475,6 +493,14 @@ fn path(path: &CStr) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(path.to_bytes()))
 }
 
+/// Returns a memory file that stands for the tree of number `number`.
+fn tree_file(number: usize) -> Result<FileDescriptor, Errno> {
+    let name = format!("nvx-fake-tree-{number}");
+    let flags = nix::sys::memfd::MFdFlags::MFD_CLOEXEC;
+    let file = nix::sys::memfd::memfd_create(name.as_str(), flags)?;
+    Ok(FileDescriptor::from_owned(file))
+}
+
 /// Returns the path that leads to the file that `descriptor` opened now, from the calling
 /// thread's descriptors in procfs.
 fn path_of(descriptor: &FileDescriptor) -> Result<PathBuf, Errno> {
@@ -670,6 +696,43 @@ impl Kernel for FakeKernel {
             }
         });
     }
+
+    fn new_mount(&mut self, file_system: &FileSystem) -> Result<FileDescriptor, Errno> {
+        let kind = text(file_system.kind);
+        let parameters = file_system
+            .parameters
+            .iter()
+            .map(|(key, value)| format!("{}={}", text(key), text(value)))
+            .collect();
+        let call = Call::NewMount {
+            kind: kind.clone(),
+            parameters,
+            attributes: file_system.attributes,
+        };
+        self.record(call, Operation::NewMount, Path::new(&kind))?;
+        let number = self.with(|state| {
+            let mount = state.next_mount();
+            state.trees.push(Tree {
+                source: PathBuf::from(kind),
+                kind: FileKind::Directory,
+                mount,
+            });
+            state.trees.len() - 1
+        });
+        tree_file(number)
+    }
+
+    fn restrict_tree(&mut self, directory: &FileDescriptor) -> Result<(), Errno> {
+        let path = path_of(directory)?;
+        let call = Call::RestrictTree(path.display().to_string());
+        self.record(call, Operation::SetAttributes, &path)
+    }
+
+    fn create_devices(&mut self, dev: &FileDescriptor) -> Result<(), Errno> {
+        let path = path_of(dev)?;
+        let call = Call::CreateDevices(path.display().to_string());
+        self.record(call, Operation::Create, &path)
+    }
 }
 
 impl MappingKernel for FakeKernel {
@@ -776,10 +839,7 @@ impl MappingKernel for FakeKernel {
             });
             state.trees.len() - 1
         });
-        let name = format!("nvx-fake-tree-{number}");
-        let flags = nix::sys::memfd::MFdFlags::MFD_CLOEXEC;
-        let file = nix::sys::memfd::memfd_create(name.as_str(), flags)?;
-        Ok(FileDescriptor::from_owned(file))
+        tree_file(number)
     }
 
     fn set_attributes(

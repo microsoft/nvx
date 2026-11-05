@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     AGGREGATE_DIRECTORY, EXPORT_DIRECTORY, Error, HOSTFS_DIRECTORY, HOSTFS_DIRECTORY_MODE, Mount,
-    Root, STAGING_DIRECTORY,
+    Root, RuntimeMounts, STAGING_DIRECTORY,
 };
 use crate::guest::mappings::{
     self, Access, Kernel as MappingKernel, Kind, Mapper, Mapping, MappingError, Reserved,
@@ -159,8 +159,8 @@ impl Root {
     /// the targets of the root's other shares and mappings; nothing is mounted for a refused one.
     /// The device is mounted at `staging` in the runtime directory, which may not be a mount
     /// point already, with its flags, then the root's mapper moves it onto the target, which it
-    /// creates on the overlay if it is missing. The mount belongs to the root, which unmounts it
-    /// first when it is torn down.
+    /// creates on the overlay, or on the runtime's `/run` tmpfs, if it is missing. The mount
+    /// belongs to the root, which unmounts it first when it is torn down.
     ///
     /// A failure once the target passed its checks latches the root, and unmounts the device from
     /// `staging`, or leaves it there for the teardown if that unmount fails too.
@@ -190,11 +190,12 @@ impl Root {
     /// Every child is checked first: its name, which no other child has, and its target, as the
     /// [module](super#live-shares-and-mappings) describes, against the other children's and the
     /// root's other shares' and mappings' targets. Nothing is mounted unless every child passes.
-    /// Each target is created on the overlay if it is missing. A child whose entry in the
-    /// aggregate is missing, or is not of the child's kind, fails to mount, and latches the root,
-    /// as any failure once the children passed their checks does. The mounts belong to the root,
-    /// which unmounts them first when it is torn down, the bound children in reverse order, then
-    /// the aggregate, those of an aggregate that failed part of the way included.
+    /// Each target is created on the overlay, or on the runtime's `/run` tmpfs, if it is missing.
+    /// A child whose entry in the aggregate is missing, or is not of the child's kind, fails to
+    /// mount, and latches the root, as any failure once the children passed their checks does.
+    /// The mounts belong to the root, which unmounts them first when it is torn down, the bound
+    /// children in reverse order, then the aggregate, those of an aggregate that failed part of
+    /// the way included.
     ///
     /// A root has one aggregate at most, since every aggregate is mounted at the same place: once
     /// the root has mounted one, whether or not its children were all bound, another is refused.
@@ -496,7 +497,9 @@ impl Root {
     }
 
     /// Returns the kernel and the root's mapper, which it opens beneath the overlay, with NVX's
-    /// container root's reserved targets, unless the root has one already.
+    /// container root's reserved targets, unless the root has one already. The mapper's own
+    /// mounts, on which it creates what a target lacks, are the overlay and, if the root holds
+    /// it, the runtime's `/run` tmpfs, as a guest's mapper owns its `/tmp`.
     fn mapper(&mut self) -> Result<(&mut dyn MappingKernel, &mut Mapper), Error> {
         let mapper = match self.mapper.take() {
             Some(mapper) => mapper,
@@ -508,11 +511,24 @@ impl Root {
                             error,
                         }
                     })?;
-                Mapper::new(root, Reserved::container_root())
+                Mapper::new(self.add_run(root)?, Reserved::container_root())
             }
         };
         let mapper = self.mapper.insert(mapper);
         Ok((self.kernel.as_mut(), mapper))
+    }
+
+    /// Adds the runtime's `/run` tmpfs, if the root holds it, to `root`'s own mounts.
+    fn add_run(&mut self, mut root: TargetRoot) -> Result<TargetRoot, Error> {
+        let run = Mount::Runtime(RuntimeMounts::Run);
+        if let Some((_, path)) = self.shares.iter().find(|(mount, _)| *mount == run) {
+            root.add_mount_with(self.kernel.as_mut(), path)
+                .map_err(|error| Error::MountPoint {
+                    path: path.clone(),
+                    error,
+                })?;
+        }
+        Ok(root)
     }
 
     /// Refuses `mount` if a share or a mapping failed before.
@@ -562,7 +578,7 @@ fn mapping_mount(mapping: &Mapping) -> Mount {
 }
 
 /// Opens the mount point `path` with `O_PATH`, not through a final symbolic link.
-fn open_mount_point(path: &Path) -> Result<FileDescriptor, Errno> {
+pub(super) fn open_mount_point(path: &Path) -> Result<FileDescriptor, Errno> {
     let flags =
         OpenFlags::O_PATH | OpenFlags::O_DIRECTORY | OpenFlags::O_NOFOLLOW | OpenFlags::O_CLOEXEC;
     sys::open(&sys::path_c_string(path)?, flags, Mode::empty())

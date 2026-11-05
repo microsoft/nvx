@@ -23,11 +23,16 @@
 //!   the root, [`Root::mount_export`] mounts the host export out of the root, and [`Root::map`]
 //!   applies a caller's host mappings in the root, from the export or another source, through the
 //!   root's [`Mapper`], as [live shares and mappings](#live-shares-and-mappings) describes.
+//! - `Root::mount_runtime`, which is crate-private, mounts the runtime's file systems in the root,
+//!   as an init does once for its VM, before the root's first live share or mapping: it makes
+//!   every mount of the root's tree `nosuid` and `nodev`, then mounts `/proc`, `/sys`, `/dev` with
+//!   `/dev/pts` and `/dev/shm`, and `/run`, and binds the guest's time status at `/run/nvx/time`.
 //! - [`Root::teardown`] unmounts, in order, the live shares and mappings in reverse order, the
-//!   mounts of an aggregate live share and of the host export, the later first, the overlay, the
-//!   layers from the top down, and the upper, whose file system it syncs first if the upper is an
-//!   ext4 scratch. It attempts each, whatever failed before, and reports every sync or unmount
-//!   that failed. A root that is dropped tears down the same way, but ignores failures.
+//!   mounts of an aggregate live share, of the host export, and of the runtime, the later first,
+//!   the overlay, the layers from the top down, and the upper, whose file system it syncs first
+//!   if the upper is an ext4 scratch. It attempts each, whatever failed before, and reports every
+//!   sync or unmount that failed. A root that is dropped tears down the same way, but ignores
+//!   failures.
 //!
 //! A failure is an [`Error`] that names what failed. The operations need the guest's root user,
 //! in the guest's initial mount and cgroup namespaces. They never collect a child's status,
@@ -92,12 +97,12 @@
 //! [`mappings`](super::mappings) describes, with NVX's container root's reserved targets,
 //! [`Reserved::container_root`](super::mappings::Reserved::container_root): it walks to each
 //! target through no symbolic link or magic link; creates each missing component only on the
-//! overlay, a directory with mode 0755, or a file child's file with mode 0644, whatever the
-//! umask or a default ACL; checks that the target is a directory, or a regular file for a child
-//! that is a host file; and attaches each mount with its [`Access`](super::mappings::Access),
-//! `nosuid`, and `nodev` set already. The root mounts a share's device at `staging`, with them,
-//! then moves it onto its target, and mounts an aggregate's device at `shares`, then attaches a
-//! copy of each child's entry there.
+//! overlay, or on the runtime's `/run` tmpfs once the root has mounted it, a directory with mode
+//! 0755, or a file child's file with mode 0644, whatever the umask or a default ACL; checks that
+//! the target is a directory, or a regular file for a child that is a host file; and attaches
+//! each mount with its [`Access`](super::mappings::Access), `nosuid`, and `nodev` set already.
+//! The root mounts a share's device at `staging`, with them, then moves it onto its target, and
+//! mounts an aggregate's device at `shares`, then attaches a copy of each child's entry there.
 //! [`Root::map`] applies a caller's host [`Mapping`](super::mappings::Mapping)s beneath the
 //! overlay the same way, from the caller's [`SourceRoot`](super::mappings::SourceRoot).
 //!
@@ -169,6 +174,7 @@ mod share;
 #[cfg(test)]
 pub(crate) mod tests;
 
+use std::ffi::CStr;
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
@@ -178,9 +184,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use self::kernel::{Kernel, SystemKernel};
+use super::entry::{self, TIME_STATUS_TARGET};
 use super::gpt::DeviceError;
-use super::mappings::{Mapper, MappingError, below_its_root};
-use super::sys::{self, Errno, MountFlags};
+use super::mappings::{Kind, Mapper, MappingError, TargetRoot, below_its_root};
+use super::sys::{self, Errno, FileDescriptor, FileSystem, Mode, MountFlags, OpenFlags};
 use crate::gpt::{Expected, GptError, Partition};
 use crate::uuid::Uuid;
 
@@ -235,6 +242,19 @@ const RUNTIME_RESERVED: &[u8] = b",:\\=\0";
 /// The directory of the overlay module's parameters, below sysfs, which hold the defaults of the
 /// overlay's options.
 const OVERLAY_PARAMETERS: &str = "module/overlay/parameters";
+/// The runtime's file systems, in the order of [`Root::mount_runtime`]'s mounts, each with its
+/// directory's name: in the root, or in its `/dev` for `/dev/pts` and `/dev/shm`.
+const RUNTIME_FILE_SYSTEMS: [(RuntimeMounts, &CStr, &FileSystem); 6] = [
+    (RuntimeMounts::Proc, c"proc", &sys::PROC),
+    (RuntimeMounts::Sys, c"sys", &sys::SYS),
+    (RuntimeMounts::Dev, c"dev", &sys::DEV),
+    (RuntimeMounts::DevPts, c"pts", &sys::DEV_PTS),
+    (RuntimeMounts::DevShm, c"shm", &sys::DEV_SHM),
+    (RuntimeMounts::Run, c"run", &sys::RUN),
+];
+/// The mode of a directory that [`Root::mount_runtime`] creates for a mount, but for what the
+/// umask withholds, as an execution's entry creates it.
+const RUNTIME_DIRECTORY_MODE: u32 = 0o755;
 
 /// The most bytes of options that `mount(2)` passes a file system whole: one 4 KiB page, the
 /// smallest into which Linux copies them, less the NUL that ends them. Linux cuts longer options
@@ -602,6 +622,7 @@ fn assemble_with(
         overlay_mode: assembly.overlay,
         first_partition: None,
         shares: Vec::new(),
+        runtime_stray: None,
         mapper: None,
         mapped: Vec::new(),
         latched: false,
@@ -679,11 +700,15 @@ pub struct Root {
     overlay_mode: OverlayMode,
     /// The bytes of a GPT disk's first partition, without their trailing padding.
     first_partition: Option<Vec<u8>>,
-    /// The mounts of live shares and of the host export that the root unmounts by path, and their
-    /// mount points, in mount order: an aggregate's, the export's, and a share's that stays at
-    /// `staging` because its unmount failed.
+    /// The mounts that the root unmounts by path, and their mount points, in mount order: an
+    /// aggregate live share's, the host export's, a share's that stays at `staging` because its
+    /// unmount failed, and the runtime's in the root.
     shares: Vec<(Mount, PathBuf)>,
-    /// The mapper of the live shares and mappings in the root, once the root has mounted one.
+    /// A runtime mount whose attachment failed and which could not be detached during setup or
+    /// its rollback.
+    runtime_stray: Option<(RuntimeMounts, FileDescriptor)>,
+    /// The mapper of the live shares and mappings in the root, once the root has mounted one, whose
+    /// own mounts are the overlay and the runtime's `/run` tmpfs, if the root held it then.
     mapper: Option<Mapper>,
     /// What each of the mapper's mappings mounts, in the mapper's order, then what the one that
     /// a rename moved and that the mapper failed to detach mounts, if any.
@@ -740,11 +765,12 @@ impl Root {
 
     /// Unmounts the root's mounts, in order: a live share or a mapping that a rename moved and
     /// that its mapper failed to detach, which the mapper detaches, the live shares and mappings
-    /// in reverse order, the mounts of an aggregate live share and of the host export, the later
+    /// in reverse order, a runtime mount whose attachment failed and which could not be detached,
+    /// the mounts of an aggregate live share, of the host export, and of the runtime, the later
     /// first, the overlay, the layers from the top down, and the upper.
     ///
-    /// Each unmount is attempted, whatever failed before, without detaching a busy mount but the
-    /// moved one, and every one that failed is reported, with the mount that it leaves in place.
+    /// Each unmount is attempted, whatever failed before, without detaching a busy mount except
+    /// one retained after a failed attachment, and every failure names the mount it leaves in place.
     /// A [`SourceRoot`](super::mappings::SourceRoot) of the export that the caller still holds
     /// keeps the export busy.
     ///
@@ -757,6 +783,159 @@ impl Root {
     /// failure is reported as its own.
     pub fn teardown(mut self) -> Result<(), TeardownError> {
         self.unmount()
+    }
+
+    /// Mounts the runtime's file systems in the root, as an init does once for its VM before it
+    /// switches into the root. It first makes every mount of the root's tree `nosuid` and `nodev`,
+    /// then mounts, in order, an execution's file systems, with an execution's options:
+    ///
+    /// - procfs at `/proc`, `nosuid`, `nodev`, and `noexec`;
+    /// - sysfs at `/sys`, read-only, `nosuid`, `nodev`, and `noexec`;
+    /// - a tmpfs at `/dev`, `nosuid`, with mode 0755, which holds the device nodes `null`, `zero`,
+    ///   `full`, `random`, `urandom`, and `tty`, with mode 0666 whatever the umask, and the links
+    ///   `ptmx`, `fd`, `stdin`, `stdout`, and `stderr`;
+    /// - devpts at `/dev/pts`, an instance of its own, `nosuid` and `noexec`;
+    /// - a tmpfs at `/dev/shm`, `nosuid` and `nodev`, with mode 1777;
+    /// - and a tmpfs at `/run`, `nosuid` and `nodev`, with mode 0755.
+    ///
+    /// With a `time_status`, the directory that holds the guest's time status, it then binds that
+    /// directory read-only, `nosuid`, and `nodev` at `/run/nvx/time`, creating `/run/nvx` and
+    /// `/run/nvx/time` on the `/run` tmpfs with mode 0755, as an execution's
+    /// [`Entry::bind_runtime`](super::entry::Entry::bind_runtime) binds it. Without one, it binds
+    /// nothing there.
+    ///
+    /// It opens each mount point beneath the root, through no symbolic link, and creates one that
+    /// is missing with mode 0755, but for what the umask withholds. A mount point where something
+    /// is mounted already is refused as [`Error::Occupied`]. So is a call while the root holds a
+    /// runtime mount, before it changes anything, since restricting the tree again would make an
+    /// earlier call's `/dev` and `/dev/pts` `nodev`: a second call changes nothing. So is a call
+    /// while the root holds a live share or a mapping, before it changes anything too, since the
+    /// `/run` tmpfs would hide one beneath `/run` from the teardown: the runtime comes first. A
+    /// later share or mapping beneath `/run` is on the `/run` tmpfs, where the root's mapper
+    /// creates what its target lacks, and the teardown unmounts it before the tmpfs.
+    /// The mounts belong to the root, which unmounts them, the later first, when it is torn down.
+    /// If one fails, the call unmounts those that it made, the later first, and returns the
+    /// failure; one that fails to unmount stays for the teardown. The tree stays `nosuid` and
+    /// `nodev`. Each attachment is checked at its named target before it is recorded. A runtime
+    /// mount whose attachment fails and which cannot be detached keeps its mount descriptor,
+    /// so rollback and teardown can retry the detach without relying on its original path.
+    #[cfg_attr(not(test), expect(dead_code, reason = "nvx-init calls it (#1115)"))]
+    pub(crate) fn mount_runtime(&mut self, time_status: Option<&Path>) -> Result<(), Error> {
+        if let Some((runtime, _)) = &self.runtime_stray {
+            return Err(Error::Occupied {
+                path: self.path.join(&runtime.target()[1..]),
+            });
+        }
+        let made = self.shares.len();
+        let mounted = self.mount_runtime_at(time_status);
+        if mounted.is_err() {
+            if let Some((runtime, tree)) = self.runtime_stray.take()
+                && self.kernel.detach(&tree).is_err()
+            {
+                self.runtime_stray = Some((runtime, tree));
+            }
+            let mut kept = Vec::new();
+            for (mount, path) in self.shares.split_off(made).into_iter().rev() {
+                let unmounted =
+                    sys::path_c_string(&path).and_then(|target| self.kernel.unmount(&target));
+                if unmounted.is_err() {
+                    kept.push((mount, path));
+                }
+            }
+            self.shares.extend(kept.into_iter().rev());
+        }
+        mounted
+    }
+
+    /// Makes [`mount_runtime`](Self::mount_runtime)'s mounts, and records each, until one fails.
+    fn mount_runtime_at(&mut self, time_status: Option<&Path>) -> Result<(), Error> {
+        // Restricting the tree again would make an earlier call's `/dev` and `/dev/pts` `nodev`.
+        if let Some((_, path)) = self
+            .shares
+            .iter()
+            .find(|(mount, _)| matches!(mount, Mount::Runtime(_)))
+        {
+            return Err(Error::Occupied { path: path.clone() });
+        }
+        // The `/run` tmpfs would hide a share or a mapping beneath `/run` from the teardown.
+        if let Some(
+            Mount::Share { target, .. } | Mount::Child { target, .. } | Mount::Mapping { target },
+        ) = self.mapped.first()
+        {
+            let path = self.path.join(target.strip_prefix("/").unwrap_or(target));
+            return Err(Error::Occupied { path });
+        }
+        let root = share::open_mount_point(&self.path).map_err(|error| Error::MountPoint {
+            path: self.path.clone(),
+            error: error.into(),
+        })?;
+        self.kernel
+            .restrict_tree(&root)
+            .map_err(|error| Error::Restrict {
+                error: error.into(),
+            })?;
+        let mut dev = None;
+        for (runtime, name, file_system) in RUNTIME_FILE_SYSTEMS {
+            let mount = Mount::Runtime(runtime);
+            let path = self.path.join(&runtime.target()[1..]);
+            let parent = match (&dev, runtime) {
+                (Some(dev), RuntimeMounts::DevPts | RuntimeMounts::DevShm) => dev,
+                _ => &root,
+            };
+            let target = runtime_target(self.kernel.as_mut(), parent, name, &path)?;
+            let failed = |error: Errno| Error::Mount {
+                mount: mount.clone(),
+                error: error.into(),
+            };
+            let tree = self.kernel.new_mount(file_system).map_err(failed)?;
+            self.kernel.move_mount(&tree, &target).map_err(failed)?;
+            let opened = match attached(self.kernel.as_mut(), parent, name, &tree) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    if self.kernel.detach(&tree).is_err() {
+                        self.runtime_stray = Some((runtime, tree));
+                    }
+                    return Err(failed(error));
+                }
+            };
+            self.shares.push((mount.clone(), path));
+            if runtime == RuntimeMounts::Dev {
+                self.kernel.create_devices(&opened).map_err(failed)?;
+                dev = Some(opened);
+            }
+        }
+        if let Some(source) = time_status {
+            let mount = Mount::Runtime(RuntimeMounts::TimeStatus);
+            let run = self.path.join("run");
+            let mut target =
+                TargetRoot::open_with(self.kernel.as_mut(), &self.path).map_err(|error| {
+                    Error::MountPoint {
+                        path: self.path.clone(),
+                        error,
+                    }
+                })?;
+            // The mount points that the bind lacks are created on the `/run` tmpfs.
+            target
+                .add_mount_with(self.kernel.as_mut(), &run)
+                .map_err(|error| Error::MountPoint { path: run, error })?;
+            let bound = entry::bind_runtime_file_retained(
+                self.kernel.as_mut(),
+                &target,
+                source,
+                TIME_STATUS_TARGET,
+                Kind::Directory,
+            );
+            if let Err(failure) = bound {
+                self.runtime_stray = failure.stray.map(|tree| (RuntimeMounts::TimeStatus, tree));
+                return Err(Error::Mount {
+                    mount,
+                    error: share::io_error(&failure.error),
+                });
+            }
+            let path = self.path.join(&TIME_STATUS_TARGET[1..]);
+            self.shares.push((mount, path));
+        }
+        Ok(())
     }
 
     /// Implements [`assemble`]'s steps after the first, waiting for each device until `deadline`
@@ -1121,6 +1300,16 @@ impl Root {
                 });
             }
         }
+        if let Some((runtime, tree)) = self.runtime_stray.take()
+            && let Err(error) = self.kernel.detach(&tree)
+        {
+            failures.push(Unmount {
+                mount: Mount::Runtime(runtime),
+                path: self.path.join(&runtime.target()[1..]),
+                step: Step::Unmount,
+                error: error.into(),
+            });
+        }
         let mut mounts: Vec<(Mount, PathBuf)> = self.shares.drain(..).rev().collect();
         mounts.extend(self.overlay.take().map(|path| (Mount::Overlay, path)));
         mounts.extend(
@@ -1183,10 +1372,62 @@ impl fmt::Debug for Root {
                 &self.first_partition.as_ref().map(Vec::len),
             )
             .field("shares", &self.shares)
+            .field("runtime_stray", &self.runtime_stray)
             .field("mapped", &self.mapped)
             .field("latched", &self.latched)
             .finish_non_exhaustive()
     }
+}
+
+/// Opens the directory `name` beneath `directory`, on its mount and through no symbolic link, as
+/// a mount point of [`Root::mount_runtime`] at `path`, and creates it if it is missing.
+fn runtime_target(
+    kernel: &mut dyn Kernel,
+    directory: &FileDescriptor,
+    name: &CStr,
+    path: &Path,
+) -> Result<FileDescriptor, Error> {
+    let flags = OpenFlags::O_PATH | OpenFlags::O_DIRECTORY;
+    let open =
+        |kernel: &mut dyn Kernel| kernel.open_beneath(directory, name, flags, Mode::empty(), false);
+    let opened = match open(kernel) {
+        Err(Errno::ENOENT) => {
+            let mode = Mode::from_bits_truncate(RUNTIME_DIRECTORY_MODE);
+            match kernel.create_directory(directory, name, mode) {
+                Ok(()) | Err(Errno::EEXIST) => open(kernel),
+                Err(error) => Err(error),
+            }
+        }
+        opened => opened,
+    };
+    opened.map_err(|error| match error {
+        // Something is mounted there already.
+        Errno::EXDEV => Error::Occupied {
+            path: path.to_owned(),
+        },
+        error => Error::MountPoint {
+            path: path.to_owned(),
+            error: error.into(),
+        },
+    })
+}
+
+/// Opens the directory `name` beneath `directory`, into the mount there, which must be the one
+/// whose root `tree` refers to.
+fn attached(
+    kernel: &mut dyn Kernel,
+    directory: &FileDescriptor,
+    name: &CStr,
+    tree: &FileDescriptor,
+) -> Result<FileDescriptor, Errno> {
+    let mount = kernel.status(tree)?.mount;
+    let flags = OpenFlags::O_PATH | OpenFlags::O_DIRECTORY;
+    let opened = kernel.open_beneath(directory, name, flags, Mode::empty(), true)?;
+    let status = kernel.status(&opened)?;
+    if status.mount != mount || !status.mount_root {
+        return Err(Errno::EBUSY);
+    }
+    Ok(opened)
 }
 
 /// Checks the EROFS image on the distro device `device` for the UUID `expected`, if the caller
@@ -1448,6 +1689,8 @@ pub enum Mount {
         /// The mapping's target in the root.
         target: PathBuf,
     },
+    /// One of the runtime's mounts in the root, which `Root::mount_runtime` makes.
+    Runtime(RuntimeMounts),
 }
 
 impl fmt::Display for Mount {
@@ -1471,6 +1714,43 @@ impl fmt::Display for Mount {
                 )
             }
             Self::Mapping { target } => write!(formatter, "the mapping at {}", target.display()),
+            Self::Runtime(mount) => write!(formatter, "the runtime's {}", mount.target()),
+        }
+    }
+}
+
+/// Names one of the runtime's fixed mounts, which `Root::mount_runtime` makes in the root in the
+/// order of these variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RuntimeMounts {
+    /// procfs, at `/proc`.
+    Proc,
+    /// sysfs, at `/sys`.
+    Sys,
+    /// The tmpfs of the device nodes, at `/dev`.
+    Dev,
+    /// devpts, at `/dev/pts`.
+    DevPts,
+    /// The tmpfs of shared memory, at `/dev/shm`.
+    DevShm,
+    /// The tmpfs of the runtime's state, at `/run`.
+    Run,
+    /// The bind of the guest's time status, at `/run/nvx/time`.
+    TimeStatus,
+}
+
+impl RuntimeMounts {
+    /// Returns the mount's target in the root.
+    pub(crate) const fn target(self) -> &'static str {
+        match self {
+            Self::Proc => "/proc",
+            Self::Sys => "/sys",
+            Self::Dev => "/dev",
+            Self::DevPts => "/dev/pts",
+            Self::DevShm => "/dev/shm",
+            Self::Run => "/run",
+            Self::TimeStatus => TIME_STATUS_TARGET,
         }
     }
 }
@@ -1659,6 +1939,12 @@ pub enum Error {
         /// The error.
         error: io::Error,
     },
+    /// The mounts of the root's tree could not be made `nosuid` and `nodev`, before
+    /// `Root::mount_runtime` mounted anything.
+    Restrict {
+        /// The error.
+        error: io::Error,
+    },
     /// A live share, a child of an aggregate live share, or a mapping was refused or failed to
     /// attach at its target in the root, once the root had checked its request; nothing of it
     /// stays mounted, unless the error is a moved mapping that stays mounted. The root refuses
@@ -1809,6 +2095,10 @@ impl fmt::Display for Error {
                 path.display()
             ),
             Self::Mount { mount, error } => write!(formatter, "failed to mount {mount}: {error}"),
+            Self::Restrict { error } => write!(
+                formatter,
+                "failed to make the root's mounts nosuid and nodev: {error}"
+            ),
             Self::Mapping { mount, error } => write!(formatter, "failed to mount {mount}: {error}"),
             Self::Share(refusal) => refusal.fmt(formatter),
         }

@@ -800,6 +800,16 @@ pub(crate) fn bind_with(
     source: &SourceRoot,
     mapping: &Mapping,
 ) -> Result<Mapped, MappingError> {
+    bind_retained_with(kernel, root, source, mapping).map_err(|failure| failure.error)
+}
+
+/// Implements [`bind_with`], retaining a moved mount that could not be detached for its caller.
+pub(crate) fn bind_retained_with(
+    kernel: &mut dyn Kernel,
+    root: &TargetRoot,
+    source: &SourceRoot,
+    mapping: &Mapping,
+) -> Result<Mapped, AttachFailure> {
     attach(
         kernel,
         root,
@@ -813,7 +823,6 @@ pub(crate) fn bind_with(
         target: mapping.target().to_path_buf(),
         mount,
     })
-    .map_err(|failure| failure.error)
 }
 
 /// Unmounts `binds`, which [`bind_with`] made beneath `root`, in reverse order, with `kernel`, as a
@@ -852,11 +861,11 @@ enum Source<'a> {
 /// Why an attach failed, with the descriptor of the mapping's mount if a rename moved it and
 /// detaching it failed too, so that it stays mounted wherever it went.
 #[derive(Debug)]
-struct AttachFailure {
+pub(crate) struct AttachFailure {
     /// Why it failed.
-    error: MappingError,
+    pub(crate) error: MappingError,
     /// The descriptor of the mapping's mount, if it stays mounted.
-    stray: Option<FileDescriptor>,
+    pub(crate) stray: Option<FileDescriptor>,
 }
 
 impl From<MappingError> for AttachFailure {
