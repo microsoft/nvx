@@ -58,8 +58,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use self::json::ReadError;
-use super::address::{Family, Interval, Network};
-use super::lowering::{self, PortValue, Rule, RuleProtocol, Selector, invalid};
+use super::{Access, Destination, EgressRule, EgressRules, NetworkPolicy, PortSelector, Protocol};
 use crate::error::{Error, Result};
 
 /// Largest number of native rules that one action, allow or deny, compiles to: the number of
@@ -135,14 +134,15 @@ pub fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
 pub fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledEgressPolicy> {
     let path = path.display();
     if data.len() > MAX_POLICY_FILE_SIZE {
-        return Err(invalid(format!(
+        return Err(Error::unsupported(format!(
             "egress policy file exceeds {MAX_POLICY_FILE_SIZE}-byte limit: {path}"
         )));
     }
-    let text = std::str::from_utf8(data)
-        .map_err(|error| invalid(format!("egress policy file {path} is not UTF-8: {error}")))?;
+    let text = std::str::from_utf8(data).map_err(|error| {
+        Error::unsupported(format!("egress policy file {path} is not UTF-8: {error}"))
+    })?;
     let value = json::read(text).map_err(|error| {
-        invalid(match error {
+        Error::unsupported(match error {
             ReadError::Syntax(error) => {
                 format!("egress policy file {path} is not valid JSON: {error}")
             }
@@ -215,7 +215,9 @@ impl<'a> Object<'a> {
             .filter(|name| !names.contains(&name.as_str()))
             .min();
         match unknown {
-            Some(name) => Err(invalid(format!("{description} has unknown field {name:?}"))),
+            Some(name) => Err(Error::unsupported(format!(
+                "{description} has unknown field {name:?}"
+            ))),
             None => Ok(()),
         }
     }
@@ -225,7 +227,9 @@ impl<'a> Object<'a> {
 fn object<'a>(value: &'a Value, description: &str) -> Result<Object<'a>> {
     match value {
         Value::Object(fields) => Ok(Object { fields }),
-        _ => Err(invalid(format!("{description} must be an object"))),
+        _ => Err(Error::unsupported(format!(
+            "{description} must be an object"
+        ))),
     }
 }
 
@@ -233,183 +237,284 @@ fn object<'a>(value: &'a Value, description: &str) -> Result<Object<'a>> {
 fn array<'a>(value: &'a Value, description: &str) -> Result<&'a [Value]> {
     match value {
         Value::Array(elements) => Ok(elements),
-        _ => Err(invalid(format!("{description} must be an array"))),
+        _ => Err(Error::unsupported(format!(
+            "{description} must be an array"
+        ))),
     }
 }
 
 /// Returns the value of a field that should be a port number.
-fn port_value(value: &Value) -> PortValue {
+fn port_value(value: &Value, description: &str) -> Result<u16> {
+    let not_integer = || Error::unsupported(format!("{description} must be an integer"));
+    let out_of_range = || Error::unsupported(format!("{description} must be between 1 and 65535"));
     let Value::Number(number) = value else {
-        return PortValue::Other;
+        return Err(not_integer());
     };
     if let Some(port) = number.as_u64() {
-        return PortValue::Integer(port.into());
-    }
-    if let Some(port) = number.as_i64() {
-        return PortValue::Integer(port.into());
+        return u16::try_from(port)
+            .ok()
+            .filter(|&port| port != 0)
+            .ok_or_else(out_of_range);
     }
     // `serde_json` reads an integer beyond 64 bits as a double, which is out of range either way,
     // as it reads a number with a fraction or an exponent, or `-0`, which are not integers.
     const BEYOND_64_BITS: f64 = 9_223_372_036_854_775_808.0;
-    match number.as_f64() {
-        Some(double) if double >= BEYOND_64_BITS => PortValue::Integer(i128::MAX),
-        Some(double) if double <= -BEYOND_64_BITS => PortValue::Integer(i128::MIN),
-        _ => PortValue::Other,
+    if number.as_i64().is_some()
+        || number
+            .as_f64()
+            .is_some_and(|double| double >= BEYOND_64_BITS || double <= -BEYOND_64_BITS)
+    {
+        Err(out_of_range())
+    } else {
+        Err(not_integer())
     }
 }
 
 /// Returns the protocol of the field `value`, as the policy reader checks it.
-fn protocol(value: &Value, description: &str) -> Result<RuleProtocol> {
-    value.as_str().and_then(RuleProtocol::parse).ok_or_else(|| {
-        invalid(format!(
+fn protocol(value: &Value, description: &str) -> Result<Protocol> {
+    match value.as_str() {
+        Some("tcp") => Ok(Protocol::Tcp),
+        Some("udp") => Ok(Protocol::Udp),
+        Some("icmp") => Ok(Protocol::Icmp),
+        Some("any") => Ok(Protocol::Any),
+        _ => Err(Error::unsupported(format!(
             "{description}.protocol must be tcp, udp, icmp, or any"
-        ))
-    })
+        ))),
+    }
 }
 
 /// Compiles the rules of one action, which a policy without the field does not have, as
 /// `_compile_category` does: every rule is checked before any is lowered.
 fn compile_category(value: Option<&Value>, category: &str) -> Result<Vec<String>> {
-    lowering::lower(&parse_category(value, category)?, category)
+    native_category(parse_category(value, category)?, value, category)
+}
+
+/// Compiles public rules, retaining the field paths of legacy flat rules in refusals.
+fn native_category(
+    rules: Vec<EgressRule>,
+    value: Option<&Value>,
+    category: &str,
+) -> Result<Vec<String>> {
+    let mut policy = NetworkPolicy::new(Access::Deny);
+    let action = if category == "allow" {
+        &mut policy.allow
+    } else {
+        &mut policy.deny
+    };
+    *action = EgressRules {
+        name: category.to_owned(),
+        rules,
+    };
+    let native = policy.native_egress_rules().map_err(|error| {
+        if let Some(elements) = value.and_then(Value::as_array) {
+            for (index, element) in elements.iter().enumerate() {
+                if element.get("cidr").is_some() {
+                    let path = format!("{category}[{index}]");
+                    if let Some(rest) = error.message().strip_prefix(&format!("{path}.to[0]")) {
+                        return Error::unsupported(format!("{path}{rest}"));
+                    }
+                }
+            }
+        }
+        error
+    })?;
+    Ok(if category == "allow" {
+        native.allow
+    } else {
+        native.deny
+    })
 }
 
 /// Parses the rules of one action, which a policy without the field does not have.
-fn parse_category(value: Option<&Value>, category: &str) -> Result<Vec<Rule>> {
+fn parse_category(value: Option<&Value>, category: &str) -> Result<Vec<EgressRule>> {
     let elements = match value {
         Some(value) => array(value, category)?,
         None => &[],
     };
     let mut rules = Vec::new();
     for (index, element) in elements.iter().enumerate() {
-        rules.extend(parse_rule(element, &format!("{category}[{index}]"))?);
+        let mut rule = EgressRule::default();
+        let parsed = parse_rule(element, &format!("{category}[{index}]"), &mut rule);
+        rules.push(rule);
+        if let Err(error) = parsed {
+            // Earlier CIDRs still precede this JSON error, but native budgets follow parsing.
+            if let Err(earlier) = native_category(rules, value, category)
+                && earlier.message()
+                    != format!("{category} emits at most {MAX_RULES_PER_ACTION} native rules")
+            {
+                return Err(earlier);
+            }
+            return Err(error);
+        }
     }
     Ok(rules)
 }
 
 /// Parses a rule of either form, as `_parse_rule` does.
-fn parse_rule(value: &Value, description: &str) -> Result<Vec<Rule>> {
+fn parse_rule(value: &Value, description: &str, parsed: &mut EgressRule) -> Result<()> {
     let rule = object(value, description)?;
     if rule.has_any(LEGACY_RULE_FIELDS) {
         if rule.has_any(MXC_RULE_FIELDS) {
-            return Err(invalid(format!(
+            return Err(Error::unsupported(format!(
                 "{description} cannot mix MXC to/ports fields with legacy flat fields"
             )));
         }
-        return parse_legacy_rule(&rule, description);
+        return parse_legacy_rule(&rule, description, parsed);
     }
-    parse_mxc_rule(&rule, description)
+    parse_mxc_rule(&rule, description, parsed)
 }
 
 /// Parses a destination network and its exceptions, the required `cidr` and optional `except`
 /// fields of `description`, as the rest of `_parse_peer` does.
-fn parse_peer_fields(object: &Object<'_>, description: &str) -> Result<(Family, Vec<Interval>)> {
+fn parse_peer_fields(
+    object: &Object<'_>,
+    description: &str,
+    destinations: &mut Vec<Destination>,
+) -> Result<()> {
     let Some(cidr) = object.get("cidr") else {
-        return Err(invalid(format!("{description}.cidr is required")));
+        return Err(Error::unsupported(format!(
+            "{description}.cidr is required"
+        )));
     };
-    let parent = parse_network(cidr, &format!("{description}.cidr"))?;
+    let index = destinations.len();
+    destinations.push(Destination::new(cidr_string(
+        cidr,
+        &format!("{description}.cidr"),
+    )?));
+    let destination = &mut destinations[index];
     let exceptions = match object.get("except") {
         Some(except) => array(except, &format!("{description}.except"))?,
         None => &[],
     };
-    lowering::destination(
-        parent,
-        exceptions.iter().enumerate().map(|(index, exception)| {
-            parse_network(exception, &format!("{description}.except[{index}]"))
-        }),
-        description,
-    )
+    for (index, exception) in exceptions.iter().enumerate() {
+        destination.except.push(cidr_string(
+            exception,
+            &format!("{description}.except[{index}]"),
+        )?);
+    }
+    Ok(())
 }
 
-/// Parses the CIDR value of a field, as `_network` does.
-fn parse_network(value: &Value, description: &str) -> Result<Network> {
+/// Reads a CIDR string, whose address syntax the public rule compiler checks.
+fn cidr_string(value: &Value, description: &str) -> Result<String> {
     match value {
-        Value::String(text) => lowering::network(text, description),
-        _ => Err(lowering::not_a_cidr_string(description)),
+        Value::String(text) => Ok(text.clone()),
+        _ => Err(Error::unsupported(format!(
+            "{description} must be an IPv4 or IPv6 CIDR string"
+        ))),
     }
 }
 
 /// Parses a destination of an MXC rule, as `_parse_peer` does.
-fn parse_peer(value: &Value, description: &str) -> Result<(Family, Vec<Interval>)> {
+fn parse_peer(value: &Value, description: &str, destinations: &mut Vec<Destination>) -> Result<()> {
     let peer = object(value, description)?;
     peer.check_fields(PEER_FIELDS, description)?;
-    parse_peer_fields(&peer, description)
+    parse_peer_fields(&peer, description, destinations)
 }
 
 /// Parses a legacy flat rule, as `_parse_legacy_rule` does.
-fn parse_legacy_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> {
+fn parse_legacy_rule(rule: &Object<'_>, description: &str, parsed: &mut EgressRule) -> Result<()> {
     rule.check_fields(LEGACY_RULE_FIELDS, description)?;
-    let destinations = Some(vec![parse_peer_fields(rule, description)?]);
+    parse_peer_fields(rule, description, &mut parsed.to)?;
     let port = rule.get("port");
     let end_port = rule.get("endPort");
     if end_port.is_some() && port.is_none() {
-        return Err(invalid(format!("{description}.endPort requires port")));
+        return Err(Error::unsupported(format!(
+            "{description}.endPort requires port"
+        )));
     }
     let Some(protocol) = rule.get("protocol") else {
         if port.is_some() {
-            return Err(invalid(format!("{description}.port requires protocol")));
+            return Err(Error::unsupported(format!(
+                "{description}.port requires protocol"
+            )));
         }
-        return Ok(lowering::combine(destinations, None));
+        return Ok(());
     };
     let protocol = self::protocol(protocol, description)?;
-    let selectors = lowering::port_selectors(
-        protocol,
-        port.map(port_value),
-        end_port.map(port_value),
-        description,
-    )?;
-    Ok(lowering::combine(destinations, Some(selectors)))
+    parsed
+        .ports
+        .push(port_selector(rule, protocol, description)?);
+    Ok(())
 }
 
 /// Parses a port selector of an MXC rule, as `_parse_mxc_port` does.
-fn parse_mxc_port(value: &Value, description: &str) -> Result<Vec<Selector>> {
+fn parse_mxc_port(value: &Value, description: &str) -> Result<PortSelector> {
     let port = object(value, description)?;
     port.check_fields(PORT_FIELDS, description)?;
     let protocol = match port.get("protocol") {
         Some(protocol) => self::protocol(protocol, description)?,
-        None => RuleProtocol::Any,
+        None => Protocol::Any,
     };
-    lowering::port_selectors(
+    port_selector(&port, protocol, description)
+}
+
+/// Reads the JSON ports into the public selector without losing their type diagnostics.
+fn port_selector(
+    fields: &Object<'_>,
+    protocol: Protocol,
+    description: &str,
+) -> Result<PortSelector> {
+    let port = fields.get("port");
+    let end_port = fields.get("endPort");
+    if end_port.is_some() && port.is_none() {
+        return Err(Error::unsupported(format!(
+            "{description}.endPort requires port"
+        )));
+    }
+    if port.is_some() && protocol == Protocol::Icmp {
+        return Err(Error::unsupported(format!(
+            "{description}.port is not supported with icmp"
+        )));
+    }
+    let port = port
+        .map(|value| port_value(value, &format!("{description}.port")))
+        .transpose()?;
+    let end_port = end_port
+        .map(|value| port_value(value, &format!("{description}.endPort")))
+        .transpose()?;
+    if let (Some(start), Some(end)) = (port, end_port)
+        && end < start
+    {
+        return Err(Error::unsupported(format!(
+            "{description}.endPort {end} cannot be below port {start}"
+        )));
+    }
+    Ok(PortSelector {
         protocol,
-        port.get("port").map(port_value),
-        port.get("endPort").map(port_value),
-        description,
-    )
+        port,
+        end_port,
+    })
 }
 
 /// Parses an MXC rule, as `_parse_mxc_rule` does.
-fn parse_mxc_rule(rule: &Object<'_>, description: &str) -> Result<Vec<Rule>> {
+fn parse_mxc_rule(rule: &Object<'_>, description: &str, parsed: &mut EgressRule) -> Result<()> {
     rule.check_fields(MXC_RULE_FIELDS, description)?;
-    let mut destinations = None;
     if let Some(to) = rule.get("to") {
         let description = format!("{description}.to");
         let peers = array(to, &description)?;
         if peers.is_empty() {
-            return Err(invalid(format!(
+            return Err(Error::unsupported(format!(
                 "{description} must contain at least one destination"
             )));
         }
-        let mut parsed = Vec::with_capacity(peers.len());
         for (index, peer) in peers.iter().enumerate() {
-            parsed.push(parse_peer(peer, &format!("{description}[{index}]"))?);
+            parse_peer(peer, &format!("{description}[{index}]"), &mut parsed.to)?;
         }
-        // A native rule names one family, so the peers of each family form their own
-        // destination set.
-        destinations = Some(lowering::group_destinations(&parsed));
     }
-    let mut selectors = None;
     if let Some(ports) = rule.get("ports") {
         let description = format!("{description}.ports");
         let ports = array(ports, &description)?;
         if ports.is_empty() {
-            return Err(invalid(format!(
+            return Err(Error::unsupported(format!(
                 "{description} must contain at least one selector"
             )));
         }
-        let mut parsed = Vec::new();
         for (index, port) in ports.iter().enumerate() {
-            parsed.extend(parse_mxc_port(port, &format!("{description}[{index}]"))?);
+            parsed
+                .ports
+                .push(parse_mxc_port(port, &format!("{description}[{index}]"))?);
         }
-        selectors = Some(parsed);
     }
-    Ok(lowering::combine(destinations, selectors))
+    Ok(())
 }

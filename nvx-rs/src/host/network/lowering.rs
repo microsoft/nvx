@@ -64,17 +64,6 @@ pub(crate) enum RuleProtocol {
 }
 
 impl RuleProtocol {
-    /// Parses one of `tcp`, `udp`, `icmp`, and `any`, which must be lowercase.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        match text {
-            "tcp" => Some(Self::Tcp),
-            "udp" => Some(Self::Udp),
-            "icmp" => Some(Self::Icmp),
-            "any" => Some(Self::Any),
-            _ => None,
-        }
-    }
-
     /// Returns the native protocol, or `None` for `any`.
     pub(crate) fn native(self) -> Option<NativeProtocol> {
         match self {
@@ -109,9 +98,6 @@ pub(crate) type Selector = (Option<NativeProtocol>, Option<PortRange>);
 pub(crate) enum PortValue {
     /// An integer, saturated to the range of `i128`.
     Integer(i128),
-    /// Anything else, including a Boolean, which Python's `_port` refuses although `bool` is a
-    /// subclass of `int`.
-    Other,
 }
 
 /// A rule of one action, as the compiler lowers it.
@@ -148,11 +134,6 @@ pub(crate) fn network(value: &str, description: &str) -> Result<Network> {
             }
         })
     })
-}
-
-/// Returns the error for a CIDR field whose value is not a string.
-pub(crate) fn not_a_cidr_string(description: &str) -> Error {
-    invalid(format!("{description} must be an IPv4 or IPv6 CIDR string"))
 }
 
 /// Returns the family of the destination `description`, whose network is `parent`, and the
@@ -202,7 +183,6 @@ pub(crate) fn group_destinations(
 /// Checks the port `value` of the field `description`, as `_port` does.
 fn port(value: PortValue, description: &str) -> Result<u16> {
     match value {
-        PortValue::Other => Err(invalid(format!("{description} must be an integer"))),
         PortValue::Integer(port) => u16::try_from(port)
             .ok()
             .filter(|&port| port != 0)

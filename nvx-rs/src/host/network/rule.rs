@@ -279,7 +279,11 @@ fn parse_rule(rule: &EgressRule, description: &str) -> Result<Vec<Rule>> {
                 &description,
             )?);
         }
-        destinations = Some(lowering::group_destinations(&parsed));
+        destinations = Some(if parsed.len() == 1 {
+            parsed
+        } else {
+            lowering::group_destinations(&parsed)
+        });
     }
     let mut selectors = None;
     if !rule.ports.is_empty() {

@@ -28,7 +28,7 @@ use crate::host::network::policy::{
 };
 use crate::host::network::{
     Access, Destination, EgressRule, EgressRules, NetworkPolicy, PortSelector, Protocol,
-    openvmm_arguments,
+    openvmm_arguments, rule,
 };
 
 /// The result of a check.
@@ -128,7 +128,13 @@ fn action_rules_mut<'a>(policy: &'a mut NetworkPolicy, category: &str) -> &'a mu
 fn lower_lifted(value: &Value, category: &str) -> Outcome {
     let lowered = object(value, "egress policy")
         .and_then(|root| parse_category(root.get(category), category))
-        .and_then(|rules| lowering::lower_within(&rules, category, LIFTED_LIMIT));
+        .and_then(|rules| {
+            rule::parse_rules(&EgressRules {
+                name: category.to_owned(),
+                rules,
+            })
+        })
+        .and_then(|rules| lowering::lower_within(&rules.concat(), category, LIFTED_LIMIT));
     outcome(lowered.map(|rules| {
         let mut compiled = CompiledEgressPolicy::default();
         *action_mut(&mut compiled, category) = rules;
