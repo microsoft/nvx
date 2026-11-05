@@ -13,10 +13,11 @@ use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GENERIC_ALL, GENERIC_
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
     AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-    GetAclInformation, GetKernelObjectSecurity, GetLengthSid, GetSecurityDescriptorDacl,
-    GetSecurityDescriptorOwner, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
-    IsWellKnownSid, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+    GetAclInformation, GetKernelObjectSecurity, GetLengthSid, GetSecurityDescriptorControl,
+    GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, INHERIT_ONLY_ACE,
+    InitializeAcl, InitializeSecurityDescriptor, IsWellKnownSid, NO_PROPAGATE_INHERIT_ACE,
+    OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
     WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinCreatorOwnerSid, WinLocalSystemSid,
 };
@@ -248,6 +249,120 @@ fn plain_dir_problem(
 /// already stops anyone else from creating a file in it.
 pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
     plain_dir_problem(path, &CurrentUser::get()?, Required::Private)
+}
+
+/// Creates an owner-only VM directory, or checks an existing one without changing it.
+pub(crate) fn create_vm_dir(path: &Path) -> io::Result<Option<String>> {
+    create_store_dir(path)?;
+    check_vm_dir(path)
+}
+
+/// Checks a VM directory's ownership, protected DACL and full, inheritable owner-only access.
+/// Unlike a store, a VM directory trusts neither SYSTEM nor the Administrators or owner aliases.
+pub(crate) fn check_vm_dir(path: &Path) -> io::Result<Option<String>> {
+    let directory = OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let handle = directory.as_raw_handle() as HANDLE;
+    let attributes = handle_information(handle)?.dwFileAttributes;
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Ok(Some("is not a plain directory".to_owned()));
+    }
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut len = 0;
+    // SAFETY: an empty buffer asks for the descriptor's length.
+    unsafe { GetKernelObjectSecurity(handle, information, ptr::null_mut(), 0, &mut len) };
+    let mut buffer = vec![0u64; (len as usize).div_ceil(mem::size_of::<u64>())];
+    let descriptor: PSECURITY_DESCRIPTOR = buffer.as_mut_ptr().cast();
+    // SAFETY: the handle has read-control access, and the aligned buffer holds `len` bytes.
+    if unsafe { GetKernelObjectSecurity(handle, information, descriptor, len, &mut len) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    vm_dir_problem(descriptor, &CurrentUser::get()?)
+}
+
+/// Checks a VM directory's security descriptor against its current-user-only contract.
+fn vm_dir_problem(
+    descriptor: PSECURITY_DESCRIPTOR,
+    user: &CurrentUser,
+) -> io::Result<Option<String>> {
+    let mut owner = ptr::null_mut();
+    let mut present = 0;
+    let mut acl = ptr::null_mut();
+    let mut defaulted = 0;
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: the descriptor and output pointers are valid. The returned pointers borrow it.
+    let read = unsafe {
+        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) != 0
+            && GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) != 0
+            && GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) != 0
+    };
+    if !read {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both identifiers are valid.
+    if owner.is_null() || unsafe { EqualSid(owner, user.sid()) } == 0 {
+        return Ok(Some("belongs to another user".to_owned()));
+    }
+    if present == 0 || acl.is_null() {
+        return Ok(Some("allows every user".to_owned()));
+    }
+    if control & SE_DACL_PROTECTED == 0 {
+        return Ok(Some(
+            "inherits access control entries from its parent".to_owned(),
+        ));
+    }
+    // SAFETY: ACL_SIZE_INFORMATION is plain data with a valid all-zero representation.
+    let mut size: ACL_SIZE_INFORMATION = unsafe { mem::zeroed() };
+    // SAFETY: the list is valid, and the output holds an ACL_SIZE_INFORMATION.
+    if unsafe {
+        GetAclInformation(
+            acl,
+            (&raw mut size).cast(),
+            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let inherited = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+    let mut full_access = false;
+    for index in 0..size.AceCount {
+        let mut ace = ptr::null_mut();
+        // SAFETY: the index is within the list, and the output pointer is valid.
+        if unsafe { GetAce(acl, index, &mut ace) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: each entry starts with an ACE_HEADER.
+        let header = unsafe { *ace.cast::<ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+            return Ok(Some(format!(
+                "has an access control entry of type {}, not one that allows access",
+                header.AceType
+            )));
+        }
+        let entry = ace.cast::<ACCESS_ALLOWED_ACE>();
+        // SAFETY: an allowed ACE holds its mask and its SID from SidStart onward.
+        let (mask, sid): (u32, PSID) =
+            unsafe { ((*entry).Mask, (&raw mut (*entry).SidStart).cast()) };
+        // SAFETY: both identifiers are valid.
+        if unsafe { EqualSid(sid, user.sid()) } == 0 {
+            return Ok(Some("allows others than the current user".to_owned()));
+        }
+        let flags = u32::from(header.AceFlags);
+        full_access |= ((mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS || mask & GENERIC_ALL != 0)
+            && flags & inherited == inherited
+            && flags & (INHERIT_ONLY_ACE | NO_PROPAGATE_INHERIT_ACE) == 0;
+    }
+    Ok((!full_access).then(|| {
+        "does not allow the current user full access that the files and directories created \
+         in it inherit"
+            .to_owned()
+    }))
 }
 
 /// Returns why the file that `file` holds open, the lock, a record, or the capability of a

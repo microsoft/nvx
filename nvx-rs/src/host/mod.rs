@@ -45,6 +45,8 @@
 //!   and [`sandbox::scratch`] binds and claims a scratch image. A
 //!   [`PreparedLaunch`](sandbox::PreparedLaunch) hands the VMM the files that those checks
 //!   opened, which it inherits through the [`supervisor`]'s allowlist.
+//! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
+//!   its files and endpoints, and its control credential, which the library never writes.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
@@ -90,3 +92,4 @@ mod sys;
 pub mod template;
 #[cfg(test)]
 pub(crate) mod tests;
+pub mod vm;

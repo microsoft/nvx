@@ -22,6 +22,7 @@ use windows_sys::Win32::System::Threading::{
 use super::identity::status_error;
 use super::log_claim::{local_directory, log_job_id, log_job_name, log_job_processes, object_name};
 pub(crate) use super::private::tests::set_access;
+pub(crate) use super::private::tests::{access, user_sid};
 use super::process::{end_process, wait_step};
 use super::spawn::command_line;
 use super::*;
