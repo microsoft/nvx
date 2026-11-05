@@ -732,17 +732,24 @@ class GuestBinaryBuildTests(unittest.TestCase):
             for binary in GuestRustBuildConstants.BINARIES
             if binary not in GuestRustBuildConstants.ADDED_BINARIES
         )
-        latest = GuestRustBuildConstants.ADDED_BINARIES[-2:]
-        # The time tools arrived together, so the immediate predecessor lacks both.
-        self.assertEqual(latest, ("nvx-time", "nvx-time-probe"))
+        latest = GuestRustBuildConstants.ADDED_BINARIES[-1:]
+        # nvx-init arrived alone, so the immediate predecessor lacks only it.
+        self.assertEqual(latest, ("nvx-init",))
         predecessor = tuple(
             binary
             for binary in GuestRustBuildConstants.BINARIES
             if binary not in latest
         )
+        # The time tools arrived together before it, so the build before them lacks all three.
+        time_tools = ("nvx-time", "nvx-time-probe")
+        self.assertEqual(GuestRustBuildConstants.ADDED_BINARIES[-3:-1], time_tools)
+        before_time_tools = tuple(
+            binary for binary in predecessor if binary not in time_tools
+        )
         for case, previous in (
             ("build without the added executables", earlier),
-            ("build without the latest added executables", predecessor),
+            ("build without the latest added executable", predecessor),
+            ("build without the time tools", before_time_tools),
             ("build from before nvx-port-io retired", (*earlier, "nvx-port-io")),
         ):
             with (

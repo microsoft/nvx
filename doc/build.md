@@ -42,7 +42,7 @@ The routine takes the exact toolchain from `rust-toolchain.toml`, the
 `x86_64-unknown-linux-musl` target, and the `guest` profile and feature. It
 uses `--locked`, a fresh target directory, disabled incremental compilation,
 stable source and Cargo-home path remapping, and no linker build IDs. One
-Cargo invocation builds all nine programs, and every result must pass
+Cargo invocation builds all ten programs, and every result must pass
 `check-static-elf`. The output's `manifest.json` binds the exact build pins,
 one digest over the `nvx` crate, the shared Python build recipe, and
 `rust-toolchain.toml`, and each binary SHA-256.
@@ -197,8 +197,8 @@ Both commands need the standard guest build outputs above. The second writes
 complete per-scenario logs under
 `build/test-results/microvm` by default.
 
-All three initramfses install the same nine Rust executables under `/sbin`:
-`nvx-console-pending`, `nvx-device-io`, `nvx-exit`, `nvx-ingress`,
+All three initramfses install the same ten Rust executables under `/sbin`:
+`nvx-console-pending`, `nvx-device-io`, `nvx-exit`, `nvx-ingress`, `nvx-init`,
 `nvx-managed-agent`, `nvx-mmio-write`, `nvx-reseed`, `nvx-time`, and
 `nvx-time-probe`. Docker builds them once in a Rust
 1.95.0 image pinned by digest and copies the identical bytes into Alpine,
@@ -227,7 +227,7 @@ executable mapping. `nvx-time exhaustive` runs the CI-only exhaustive check
 boots never run it. The
 `--report-only` flag (or the `nvx_time_abi=report-only` kernel command-line
 token) reports violations without powering off, for runs against VMMs that
-predate the ABI. All nine executables link the musl supplied by the pinned
+predate the ABI. All ten executables link the musl supplied by the pinned
 Rust target. Every package manifest records the shared Rust source digest and
 each installed binary digest. The
 [kernel configuration checks](#kernel-configuration-checks) cover the kernel

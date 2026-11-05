@@ -168,6 +168,7 @@ class GuestRustBuildConstants:
         "nvx-ingress",
         "nvx-time",
         "nvx-time-probe",
+        "nvx-init",
     )
     # Executables that earlier builds produced. A build removes them from the output
     # of an earlier build whose manifest records them.
@@ -179,6 +180,7 @@ class GuestRustBuildConstants:
         "nvx-ingress",
         "nvx-time",
         "nvx-time-probe",
+        "nvx-init",
     )
     # Matches the path, relative to a checkout's root, of every input of the guest
     # executables: SOURCE_FILES, the Cargo configuration, and every source file

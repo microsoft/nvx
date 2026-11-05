@@ -2653,7 +2653,7 @@ and can ship it next to their executables as `nvx/`.
 
 The `guest` feature adds the programs that run in NVX's Linux guests: the
 `nvx::guest` module and one binary per program. The Alpine, Ubuntu, and Azure
-Linux images ship all nine at their established `/sbin/nvx-*` paths. The
+Linux images ship all ten at their established `/sbin/nvx-*` paths. The
 module's libraries are not programs: `terminal` opens the terminal on which an
 agent serves its session, `spawn` starts a program in a new process, `entry`
 has the program enter an execution's namespaces, view, root, and identity,
@@ -2694,6 +2694,7 @@ disk's block device.
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
+| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends or 0 on `SIGTERM`; elsewhere it exits with 2 (x86_64) |
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each

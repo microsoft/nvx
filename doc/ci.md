@@ -516,7 +516,7 @@ and the test modules, which are the `tests.rs` files and the `tests`
 directories; and the two Python modules that
 define the build. `GuestRustBuildConstants` in
 [`build_constants.py`](../scripts/nvx_tools/build_constants.py) selects them,
-and every guest build fails when Cargo's dep-info for the nine executables
+and every guest build fails when Cargo's dep-info for the ten executables
 lists another file, such as a host module that guest code starts to compile.
 A change to the host side or a test of `nvx-rs` therefore rebuilds no guest
 image, and a change to any file that a guest binary compiles rebuilds them
@@ -2311,7 +2311,7 @@ path-remapped build, static-ELF check, and digest manifest to
 [`nvx.py build-guest-binaries`](usage.md#build-guest-binaries),
 and the prebuilt-binary integration run to
 `nvx.py test-guest-binaries`. The same shared routine supplies every native
-and Docker guest build, and Alpine, Ubuntu, and Azure Linux ship its nine
+and Docker guest build, and Alpine, Ubuntu, and Azure Linux ship its ten
 executables.
 
 The `nvx-rs` job also checks the

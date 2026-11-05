@@ -1086,6 +1086,8 @@ field nvx::guest::ingress::StartError::Socket::0
 variant nvx::guest::ingress::StartError::Spawn
 field nvx::guest::ingress::StartError::Spawn::0
 fn nvx::guest::ingress::main (hidden)
+mod nvx::guest::init (hidden)
+fn nvx::guest::init::main (hidden)
 mod nvx::guest::managed_agent (hidden)
 fn nvx::guest::managed_agent::main (hidden)
 mod nvx::guest::mappings

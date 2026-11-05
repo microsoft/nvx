@@ -196,6 +196,13 @@ required-features = ["guest"]
 doc = false
 test = false
 
+[[bin]]
+name = "nvx-init"
+path = "src/bin/nvx-init.rs"
+required-features = ["guest"]
+doc = false
+test = false
+
 # The guest binaries: small, static, and stripped.
 [profile.guest]
 inherits = "release"
