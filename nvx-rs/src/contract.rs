@@ -2,10 +2,10 @@
 //! compatibility of NVX releases with them.
 //!
 //! The store records the boot contract, control contract, and control session versions of the
-//! build that started a VM in the VM's runtime identity, `nvx::host::store::RuntimeIdentity`, and a
-//! build drives only the VMs whose runtime identity is its own. So each version changes whenever a
-//! guest that a build of the earlier version started could not be driven as one that a build of
-//! the later version starts:
+//! build that started a VM in the VM's runtime identity, `nvx::host::runtime::RuntimeIdentity`,
+//! and a build drives only the VMs whose runtime identity is its own. So each version changes
+//! whenever a guest that a build of the earlier version started could not be driven as one that a
+//! build of the later version starts:
 //!
 //! - [`MICROVM_ABI_VERSION`] is the microVM ABI of the pinned OpenVMM: the machine, its devices,
 //!   and their addresses, through which OpenVMM boots the guest and saves its state. It changes

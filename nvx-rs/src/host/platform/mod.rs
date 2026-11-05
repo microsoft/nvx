@@ -12,8 +12,9 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::error::{Error, Result};
-use crate::hypervisor::Hypervisor;
+#[cfg(windows)]
+use crate::error::Error;
+use crate::error::Result;
 
 pub(crate) mod inherit;
 #[cfg(target_os = "linux")]
@@ -35,14 +36,6 @@ use windows as imp;
 
 pub(crate) use imp::*;
 pub use imp::{SUPPORTED, create_private_dir, file_identity, process_start_time};
-
-/// Checks that `hypervisor` is present and accessible on this host: its device on Linux, and the
-/// Windows Hypervisor Platform on Windows.
-///
-/// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) otherwise.
-pub fn probe_hypervisor(hypervisor: Hypervisor) -> Result<()> {
-    imp::probe_hypervisor(hypervisor).map_err(Error::unavailable)
-}
 
 /// Refuses a VMM working directory that exceeds Windows' process-creation limit, without
 /// accessing the filesystem. Other hosts have no such limit.

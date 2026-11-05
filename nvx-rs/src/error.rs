@@ -13,8 +13,9 @@ pub enum ErrorKind {
     /// guest image without the control contract or features that this crate needs, or a host
     /// that NVX does not support.
     Unavailable,
-    /// The request is well formed, but NVX cannot represent or enforce it, for example because it
-    /// exceeds a limit of OpenVMM or the guest agent.
+    /// NVX refuses the request: a value that it does not accept, such as a malformed or
+    /// out-of-range one, options that it cannot combine, or a request that it cannot represent or
+    /// enforce, for example because it exceeds a limit of OpenVMM or the guest agent.
     Unsupported,
     /// The OpenVMM process of a VM exited.
     Exited,
@@ -29,6 +30,9 @@ pub enum ErrorKind {
     Protocol,
     /// A deadline passed.
     TimedOut,
+    /// A VM runs under another runtime identity than the artifacts', so NVX does not drive it:
+    /// only a stop, which terminates it, applies.
+    RuntimeMismatch,
     /// Any other failure.
     Other,
 }
@@ -44,6 +48,7 @@ impl ErrorKind {
             Self::NotFound => "not-found",
             Self::Protocol => "protocol",
             Self::TimedOut => "timed-out",
+            Self::RuntimeMismatch => "runtime-mismatch",
             Self::Other => "other",
         }
     }
@@ -160,7 +165,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// Every code of this release, the codes of the kinds first.
+    /// Every code of this release.
     pub const ALL: &'static [ErrorCode] = &[
         Self::Unavailable,
         Self::Unsupported,
@@ -216,7 +221,7 @@ impl ErrorCode {
             Self::SandboxRunning => "sandbox-running",
             Self::SandboxExited => "sandbox-exited",
             Self::SandboxBusy => "sandbox-busy",
-            Self::RuntimeMismatch => "runtime-mismatch",
+            Self::RuntimeMismatch => ErrorKind::RuntimeMismatch.as_str(),
             Self::VmmIndeterminate => "vmm-indeterminate",
             Self::FormatUnsupported => "format-unsupported",
             Self::ForeignFiles => "foreign-files",
@@ -247,11 +252,11 @@ impl ErrorCode {
             Self::NotFound | Self::SandboxNotProvisioned => ErrorKind::NotFound,
             Self::Protocol | Self::ExecRefused | Self::EndpointClosed => ErrorKind::Protocol,
             Self::TimedOut | Self::SandboxBusy | Self::ScratchClaimed => ErrorKind::TimedOut,
+            Self::RuntimeMismatch => ErrorKind::RuntimeMismatch,
             Self::Other
             | Self::SandboxProvisioned
             | Self::SandboxNotRunning
             | Self::SandboxRunning
-            | Self::RuntimeMismatch
             | Self::VmmIndeterminate
             | Self::ForeignFiles
             | Self::OutcomeReportExists
@@ -277,6 +282,7 @@ impl From<ErrorKind> for ErrorCode {
             ErrorKind::NotFound => Self::NotFound,
             ErrorKind::Protocol => Self::Protocol,
             ErrorKind::TimedOut => Self::TimedOut,
+            ErrorKind::RuntimeMismatch => Self::RuntimeMismatch,
             ErrorKind::Other => Self::Other,
         }
     }
