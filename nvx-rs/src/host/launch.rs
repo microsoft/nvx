@@ -29,6 +29,8 @@ use crate::net::{is_valid_guest_network, is_valid_hostname};
 use crate::protocol::WORKLOAD_ACCOUNT_TOKEN;
 use crate::protocol::cmdline::{self, Parameter};
 
+pub use super::config::DEFAULT_GUEST_NETWORK;
+
 /// Bytes of the x86 kernel command line available to caller tokens, including the NUL.
 pub const COMMAND_LINE_BUDGET: usize = 1024;
 /// Longest Windows process command line, in UTF-16 code units, including the terminating NUL.
@@ -49,8 +51,6 @@ pub const MAX_TIMEOUT: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 pub const DEFAULT_MEMORY_MIB: u32 = 256;
 /// Default workload hostname.
 pub const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
-/// Default guest network address.
-pub const DEFAULT_GUEST_NETWORK: &str = "10.0.0.2/24";
 /// The name of the kernel parameter that sets the workload hostname, which follows the extra
 /// kernel parameters on every command line.
 const HOSTNAME_PARAMETER: &str = "hostname";

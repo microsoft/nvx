@@ -44,7 +44,7 @@ testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:nix", "dep:windo
 # NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and sandboxes,
 # compiles egress policies, looks up artifacts, and downloads releases. It adds no API.
 cli = ["host"]
-# The serde form of `Hypervisor`. The `host` feature enables it.
+# The serde forms of `Hypervisor` and `net::Ipv4Cidr`. The `host` feature enables it.
 serde = ["dep:serde"]
 # The programs that run in Linux guests: the `guest` module and the `nvx-*` guest binaries. Build
 # them with `--no-default-features --features guest` and the `guest` profile; see README.md.

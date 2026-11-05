@@ -121,7 +121,7 @@
 //!   console without running a VM. It adds no API.
 //! - `cli`: NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and
 //!   sandboxes. It adds no API, and enables `host`.
-//! - `serde`: the serde form of [`Hypervisor`].
+//! - `serde`: the serde forms of [`Hypervisor`] and [`net::Ipv4Cidr`].
 //! - `guest`: the `guest` module and the guest binaries, which the `guest` profile builds as
 //!   static `x86_64-unknown-linux-musl` executables.
 

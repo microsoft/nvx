@@ -1,14 +1,21 @@
 //! The configuration of a VM, as one value that [`VmConfig::check`] checks without reading the
 //! host: the VM's processors and memory, its [`RootConfig`], the [`View`] that its workload has
-//! of it, the host paths that it exports, and its [`ConsoleAttachment`].
+//! of it, its [`NetworkConfig`], the host paths that it exports, its [`ConsoleAttachment`], and
+//! what only its cold boot takes, a [`Boot`].
 
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use super::filesystem::{ExportPlan, ReservedTargets};
+use super::network::NetworkPolicy;
 use crate::activation::{self, Journal, MAX_HOSTNAME_BYTES, OverlayMode, View};
 use crate::error::{Error, Result};
+use crate::net::Ipv4Cidr;
 use crate::protocol::root::{ImageFormat, RootImage};
+
+/// The guest address of a VM's NIC at a cold boot whose configuration names none, in the form
+/// that [`Ipv4Cidr::parse`] reads.
+pub const DEFAULT_GUEST_NETWORK: &str = "10.0.0.2/24";
 
 /// The caps of a RAM upper that [`VmConfig::check`] accepts, in percent of the VM's memory.
 const RAM_UPPER_CAPS: RangeInclusive<u8> = 1..=90;
@@ -24,10 +31,15 @@ pub struct VmConfig {
     pub root: RootConfig,
     /// The view that the VM's workload has of it.
     pub view: View,
+    /// The VM's network, if it has a NIC.
+    pub network: Option<NetworkConfig>,
     /// The host paths that the VM exports to its guest, if any.
     pub filesystem: Option<ExportPlan>,
     /// Where the output of the VM's boot console goes.
     pub console: ConsoleAttachment,
+    /// What only a cold boot takes: a VM that boots needs it, and one that a snapshot restores
+    /// takes none.
+    pub boot: Option<Boot>,
 }
 
 /// The root of a VM.
@@ -86,6 +98,30 @@ pub enum ConsoleAttachment {
     Disconnected,
 }
 
+/// The network of a VM: the address of its NIC, and the policy that OpenVMM enforces on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkConfig {
+    /// The NIC's static address, if the caller names one. Without one, a cold boot takes
+    /// [`DEFAULT_GUEST_NETWORK`], and a restore the snapshot's.
+    pub guest_network: Option<Ipv4Cidr>,
+    /// The policy that OpenVMM enforces on the VM's traffic.
+    pub policy: NetworkPolicy,
+}
+
+/// The NIC that a VM has, with the static address that it settled on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NicConfig {
+    /// The NIC's static address.
+    pub guest_network: Ipv4Cidr,
+}
+
+/// What only a VM's cold boot takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Boot {
+    /// The caller's own kernel command-line tokens, to which NVX adds those of what it lowers.
+    pub command_line: String,
+}
+
 impl VmConfig {
     /// Checks the whole configuration without reading the host: it opens no path, and checks no
     /// support of the host.
@@ -96,6 +132,9 @@ impl VmConfig {
     /// without a path, or with a RAM upper whose cap is not 1 to 90 percent; a hostname that is
     /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; and an export that
     /// [`ExportPlan::check`] refuses for the root, whose error is the source.
+    ///
+    /// The NIC's address is checked when it is built. The network's policy and the boot's command
+    /// line are checked where they are lowered, with the guest's address and NVX's own tokens.
     pub fn check(&self) -> Result<()> {
         if self.processors == 0 {
             return Err(Error::unsupported("a VM needs at least one processor"));

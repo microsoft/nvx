@@ -7,6 +7,7 @@ use super::*;
 use crate::ErrorKind;
 use crate::activation::MachineIdMode;
 use crate::host::filesystem::{Bind, ExportChild, Owner};
+use crate::host::network::Access;
 use crate::uuid::Uuid;
 
 /// Returns the path of `name` in a directory that doesn't exist.
@@ -24,8 +25,10 @@ fn blockless() -> VmConfig {
             hostname: b"box".to_vec(),
             machine_id: MachineIdMode::Image,
         },
+        network: None,
         filesystem: None,
         console: ConsoleAttachment::Listener,
+        boot: None,
     }
 }
 
@@ -101,6 +104,42 @@ fn blockless_and_layered_configurations_pass_with_either_console() {
                 ..config.clone()
             };
             config.check().unwrap();
+        }
+    }
+}
+
+#[test]
+fn configurations_pass_with_or_without_a_nic_address_and_a_boot() {
+    let networks = [
+        None,
+        Some(NetworkConfig {
+            guest_network: None,
+            policy: NetworkPolicy::new(Access::Deny),
+        }),
+        Some(NetworkConfig {
+            guest_network: Some(Ipv4Cidr::parse(DEFAULT_GUEST_NETWORK).unwrap()),
+            policy: NetworkPolicy::new(Access::Allow),
+        }),
+    ];
+    let boots = [
+        None,
+        Some(Boot {
+            command_line: String::new(),
+        }),
+        Some(Boot {
+            command_line: "quiet loglevel=0".to_owned(),
+        }),
+    ];
+    for config in [blockless(), layered(erofs())] {
+        for network in &networks {
+            for boot in &boots {
+                let config = VmConfig {
+                    network: network.clone(),
+                    boot: boot.clone(),
+                    ..config.clone()
+                };
+                config.check().unwrap();
+            }
         }
     }
 }
