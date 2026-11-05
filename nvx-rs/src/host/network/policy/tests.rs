@@ -1012,6 +1012,109 @@ fn test_partial_address_only_canonicalization_does_not_bridge_gaps() {
 // Tests of the port that the Python tests do not have.
 
 #[test]
+fn both_forms_build_public_rules() {
+    let rules = json!([
+        {
+            "cidr": "192.0.2.7/255.255.255.0",
+            "except": ["192.0.2.128/25"],
+            "protocol": "any",
+            "port": 8000,
+            "endPort": 8002,
+        },
+        {
+            "to": [{"cidr": "2001:db8::1/32", "except": ["2001:db8::/33"]}],
+            "ports": [{"protocol": "icmp"}, {"protocol": "udp", "port": 53}],
+        },
+        {},
+    ]);
+    assert_eq!(
+        parse_category(Some(&rules), "allow").unwrap(),
+        [
+            EgressRule {
+                to: vec![Destination {
+                    cidr: "192.0.2.7/255.255.255.0".to_owned(),
+                    except: vec!["192.0.2.128/25".to_owned()],
+                }],
+                ports: vec![PortSelector {
+                    protocol: Protocol::Any,
+                    port: Some(8000),
+                    end_port: Some(8002),
+                }],
+            },
+            EgressRule {
+                to: vec![Destination {
+                    cidr: "2001:db8::1/32".to_owned(),
+                    except: vec!["2001:db8::/33".to_owned()],
+                }],
+                ports: vec![
+                    PortSelector {
+                        protocol: Protocol::Icmp,
+                        port: None,
+                        end_port: None,
+                    },
+                    PortSelector {
+                        protocol: Protocol::Udp,
+                        port: Some(53),
+                        end_port: None,
+                    },
+                ],
+            },
+            EgressRule::default(),
+        ]
+    );
+}
+
+#[test]
+fn cidr_errors_precede_later_json_errors() {
+    for (rules, expected) in [
+        (
+            json!([{"cidr": "invalid", "except": null}]),
+            "allow[0].cidr is not a valid IPv4 or IPv6 CIDR: \"invalid\"",
+        ),
+        (
+            json!([{"to": [{"cidr": "invalid"}], "ports": []}]),
+            "allow[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: \"invalid\"",
+        ),
+        (
+            json!([{"cidr": "invalid"}, {"unknown": true}]),
+            "allow[0].cidr is not a valid IPv4 or IPv6 CIDR: \"invalid\"",
+        ),
+        (
+            json!([{
+                "cidr": "192.0.2.7/24",
+                "except": ["198.51.100.0/24", null],
+            }]),
+            "allow[0].except[0] must be contained in 192.0.2.0/24",
+        ),
+        (
+            json!([{
+                "to": [{"cidr": "::/0", "except": ["invalid"]}],
+                "ports": [{"protocol": "unknown"}],
+            }]),
+            "allow[0].to[0].except[0] is not a valid IPv4 or IPv6 CIDR: \"invalid\"",
+        ),
+    ] {
+        assert_eq!(message(compile(json!({"allow": rules}))), expected);
+    }
+}
+
+#[test]
+fn parsing_precedes_native_budgets_and_allow_precedes_deny() {
+    let mut rules: Vec<Value> = (0..=MAX_RULES_PER_ACTION)
+        .map(|index| json!({"cidr": "192.0.2.1", "protocol": "tcp", "port": 2 * index + 1}))
+        .collect();
+    assert_eq!(
+        message(compile(json!({"allow": rules, "deny": null}))),
+        "allow emits at most 256 native rules"
+    );
+    rules.push(json!({"cidr": "198.51.100.1", "protocol": "tcp", "port": true}));
+    assert_eq!(
+        message(compile(json!({"allow": rules, "deny": null}))),
+        "allow[257].port must be an integer"
+    );
+}
+
+#[test]
 fn rules_share_their_destinations_among_their_selectors() {
     // 8192 destinations, none adjacent to another, for 8192 selectors: copying the destinations
     // for each selector would take 2 GiB. Python 3.14 compiles each policy as asserted here.
