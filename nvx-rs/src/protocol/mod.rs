@@ -47,6 +47,7 @@ mod features;
 mod maps;
 pub mod nvxs;
 mod outer;
+pub mod restore_ready;
 pub mod root;
 pub mod share;
 pub mod status;
