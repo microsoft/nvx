@@ -111,6 +111,7 @@ changes only when the module's purpose does.
 | [`nvx::protocol::cmdline`](#nvxprotocolcmdline) | The kernel command line as Linux and the guest's init read it, with the virtio-mmio devices and the guest's DNS server that it names |
 | [`nvx::protocol::export`](#nvxprotocolexport) | The boot tokens of the host export, the virtio-fs device from which a guest maps host paths, and the guest's parser of them |
 | [`nvx::protocol::nvxs`](#nvxprotocolnvxs) | The NVXS session, independent of any application protocol: its records and the state machines of its host and guest roles |
+| [`nvx::protocol::restore_ready`](#nvxprotocolrestore_ready) | The exact parser of OpenVMM's restore-ready event, including its terminating newline |
 | [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles and where the root keeps its upper |
 | [`nvx::protocol::share`](#nvxprotocolshare) | The guest targets that a sandbox's live shares may not take, which the host and the guest both refuse |
 | [`nvx::protocol::status`](#nvxprotocolstatus) | The exit statuses with which a clone's guest ends its VM once it fails fast, and what each means |
@@ -124,6 +125,7 @@ changes only when the module's purpose does.
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig`, a VM's configuration as one value, and `CaptureConfig`, what a capture adds and the identity of its snapshots, checked without reading the host |
+| [`nvx::host::restore`](#nvxhostrestore) | The restore-ready listener, with native ownership transfer for a caller's own I/O |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -233,6 +235,12 @@ number, and the guest's receive window and credits, without I/O.
 
 An application message may span DATA records, and the application's own framing
 reassembles it.
+
+### `nvx::protocol::restore_ready`
+
+`parse_ready_event` accepts only `OPENVMM_RESTORE_READY_V1\n`, byte for byte,
+including the newline. Truncated events, another version, CRLF endings, and
+trailing bytes fail with `ProtocolError`.
 
 ### `nvx::protocol::root`
 
@@ -530,6 +538,23 @@ names none, its console attachment, whether it exports host paths, and its
 boot's command line. No path, launch option, view, network policy, or anything
 of the VM's root is part of it, nor the VM's own processors and memory, for
 which the capture's count.
+
+### `nvx::host::restore`
+
+`ReadyListener` owns a restore-ready endpoint: a mode-0600 Unix socket in the
+private VM directory on Linux, or a fresh first-instance named pipe with an
+owner-only protected access control list on Windows. The library's receiver
+checks the connecting client's process ID against the held VM process, and
+refuses an exited process even if its ID has been reused.
+
+`into_std()` transfers the same nonblocking `UnixListener` on Linux, or the
+same overlapped first pipe instance as an `OwnedHandle` on Windows, without
+reopening or duplicating it. Transfer precedes acceptance; transferring after
+the receiver accepted a client fails with `ErrorKind::Unsupported`. A caller
+that drives the native object owns its I/O and checks the client's peer
+credentials or named-pipe client process ID against its held VM process
+before reading the event. Listener construction remains internal until
+restore launch preparation supplies it.
 
 ### `nvx::host::artifacts`
 

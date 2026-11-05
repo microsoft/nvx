@@ -114,10 +114,6 @@ impl VmDir {
     }
 
     /// Returns a restore-ready endpoint without listening on it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "SL2.17's ReadyListener calls it (#1099)")
-    )]
     pub(crate) fn restore_ready_endpoint(&self) -> Result<String> {
         self.endpoint(RESTORE_READY, RESTORE_READY_PIPE)
     }

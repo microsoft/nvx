@@ -63,36 +63,55 @@ pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyList
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
     let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     let endpoint = format!("//./pipe/nvx-restore-ready-{suffix}");
-    let name = wide(endpoint.replace('/', "\\"));
-    let pipe =
-        with_owner_only_attributes(&CurrentUser::get()?, FILE_ALL_ACCESS, 0, |attributes| {
-            // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    name.as_ptr(),
-                    PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                    1,
-                    0,
-                    READY_BUFFER_LEN,
-                    0,
-                    attributes,
-                )
-            };
-            owned(handle).ok_or_else(io::Error::last_os_error)
-        })??;
-    // SAFETY: creates an unnamed manual-reset event with default security.
-    let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) })
-        .ok_or_else(io::Error::last_os_error)?;
-    let listener = ReadyListener {
-        pipe,
-        event,
-        connected: false,
-    };
+    let listener = ReadyListener::bind(&endpoint)?;
     Ok((endpoint, listener))
 }
 
 impl ReadyListener {
+    /// Binds the first instance of the fresh endpoint that the VM directory selected.
+    pub(crate) fn bind(endpoint: &str) -> io::Result<Self> {
+        let name = wide(endpoint.replace('/', "\\"));
+        let pipe =
+            with_owner_only_attributes(&CurrentUser::get()?, FILE_ALL_ACCESS, 0, |attributes| {
+                // SAFETY: the name is NUL-terminated, and the attributes hold a valid descriptor.
+                let handle = unsafe {
+                    CreateNamedPipeW(
+                        name.as_ptr(),
+                        PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+                        PIPE_TYPE_BYTE
+                            | PIPE_READMODE_BYTE
+                            | PIPE_WAIT
+                            | PIPE_REJECT_REMOTE_CLIENTS,
+                        1,
+                        0,
+                        READY_BUFFER_LEN,
+                        0,
+                        attributes,
+                    )
+                };
+                owned(handle).ok_or_else(io::Error::last_os_error)
+            })??;
+        // SAFETY: creates an unnamed manual-reset event with default security.
+        let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) })
+            .ok_or_else(io::Error::last_os_error)?;
+        Ok(Self {
+            pipe,
+            event,
+            connected: false,
+        })
+    }
+
+    /// Transfers the overlapped first pipe instance only before acceptance.
+    pub(crate) fn into_std(self) -> io::Result<OwnedHandle> {
+        if self.connected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the restore-ready listener already accepted a client",
+            ));
+        }
+        Ok(self.pipe)
+    }
+
     /// Waits at most `timeout` for what the VMM, the process `pid`, sends to the endpoint, and
     /// appends it to `received`, which then holds at most `limit` bytes. Returns whether more may
     /// arrive: `false` once the VMM closed its end of the pipe.

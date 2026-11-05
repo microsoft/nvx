@@ -60,6 +60,17 @@ pub(crate) fn listen_ready(socket_path: &Path) -> io::Result<(String, ReadyListe
 }
 
 impl ReadyListener {
+    /// Transfers the listening socket only while no receive has accepted a client.
+    pub(crate) fn into_std(self) -> io::Result<UnixListener> {
+        if self.connection.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the restore-ready listener already accepted a client",
+            ));
+        }
+        Ok(self.socket)
+    }
+
     /// Waits at most `timeout` for what the VMM, the process `pid`, sends to the endpoint, and
     /// appends it to `received`, which then holds at most `limit` bytes. Returns whether more may
     /// arrive: `false` once the VMM closed its end of the connection.
