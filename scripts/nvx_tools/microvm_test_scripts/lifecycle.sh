@@ -32,7 +32,9 @@ check_early_console() {
     fi
 }
 check_early_console
-# The last byte ends the debug port's line, so that the marker starts one.
+# OpenVMM relays the byte channel to its stderr beside the boot console, where
+# the scenario requires these bytes unchanged and in order. The last one ends
+# their line in the scenario's log, which interleaves stderr and the console.
 for octal in 000 015 012 177 377 012; do
     printf "\\$octal" | dd of=/dev/port bs=1 seek=233 count=1 conv=notrunc 2>/dev/null
 done

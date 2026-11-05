@@ -91,6 +91,15 @@ the script's output, that line first prints `NVX-GUEST-SCRIPT-START` and then
 sources the script into the shell, and the scenario reads only what follows.
 A staged script that waits for a line from the host turns the terminal's
 echo off before it announces that it waits.
+OpenVMM relays the byte channel to its stderr while the boot console is the
+guest's console, with no order against the console on its stdout, so where
+the test runners read stderr on the console's stream, a byte channel write can
+land inside a console line (#1290). The `lifecycle` scenario, whose script
+writes six bytes to the byte channel just before it prints its marker, reads
+stderr through a pipe of its own: it matches its markers only on the console,
+requires the six bytes on stderr, in order, and checks both streams for
+kernel log lines, which the early console prints on the byte channel. Its log
+interleaves the two streams by whole lines.
 The `smp`, `smp-snapshot`, and `restore-processors` scenarios run the guest
 warp probe, `/sbin/nvx-time-probe warp --bound-ns 1000`, over every pair of
 online CPUs after each boot or restore, in two rounds with all vCPUs halted
