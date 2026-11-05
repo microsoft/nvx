@@ -29,6 +29,17 @@ pub(crate) fn released(mut free: impl FnMut() -> bool) -> bool {
     true
 }
 
+/// Spawns `command` under a `SpawnLock`, which it releases once the process exists, so that on
+/// Windows the process inherits no handle of a VMM that a concurrent test spawns, such as the
+/// VMM's log, which it would hold until it exits.
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) fn spawn_locked(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let _lock = super::platform::inherit::lock_spawns();
+    command.spawn()
+}
+
 /// Makes `link` a junction to the directory `target`, which any user may create, with `cmd`'s
 /// `mklink /J`, quoting both paths, since `cmd` splits its arguments at commas and semicolons.
 ///
@@ -39,8 +50,6 @@ pub(crate) fn junction(link: &Path, target: &Path) {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    use super::platform::inherit::spawn_command;
-
     let mut command = Command::new("cmd");
     command
         .raw_arg(format!(
@@ -49,6 +58,6 @@ pub(crate) fn junction(link: &Path, target: &Path) {
             target.display()
         ))
         .stdout(Stdio::null());
-    let status = spawn_command(&mut command).unwrap().wait().unwrap();
+    let status = spawn_locked(&mut command).unwrap().wait().unwrap();
     assert!(status.success(), "cannot link {}", link.display());
 }
