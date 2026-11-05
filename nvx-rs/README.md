@@ -553,7 +553,9 @@ reopening or duplicating it. Transfer precedes acceptance; transferring after
 the receiver accepted a client fails with `ErrorKind::Unsupported`. A caller
 that drives the native object owns its I/O and checks the client's peer
 credentials or named-pipe client process ID against its held VM process
-before reading the event. Listener construction remains internal until
+before reading the event. After matching the PID, it checks
+`Process::has_exited` and refuses an exited process: a Linux pidfd does not
+reserve a reaped process's numeric PID. Listener construction remains internal until
 restore launch preparation supplies it.
 
 ### `nvx::host::artifacts`
