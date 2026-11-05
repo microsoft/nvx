@@ -45,9 +45,9 @@ nvx-rs/
 │   ├── error.rs     nvx::Error, its ErrorKind, and its stable ErrorCode
 │   ├── exec/        the execution engine: the streams, credit, and outcome of an execution's two
 │   │                sides, without I/O, threads, or features, for any framing and host
-│   ├── host/        feature `host` (default): the runtime that every launch shares, artifacts,
-│   │                launch, network and egress policy files, filesystem, NVXS connection, session,
-│   │                process, platform, VM instances, sandbox stores, templates' manifests,
+│   ├── host/        feature `host` (default): the runtime that every launch shares, VM directories,
+│   │                artifacts, launch, network and egress policy files, filesystem, NVXS connection,
+│   │                session, process, platform, VM instances, sandbox stores, templates' manifests,
 │   │                compatibility keys, store, and leases, outcome reports, file seals, and the
 │   │                sandbox launch profile of `nvx-rs sandbox`, its distro and scratch bindings,
 │   │                and its prepared launches; with feature `cli`, the `nvx-rs` CLI
@@ -121,6 +121,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
+| [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -399,6 +400,46 @@ differ. The sandbox store records it with each VM, and re-exports its types.
 
 `probe_hypervisor` checks that the host has the hypervisor: its device on Linux,
 and the Windows Hypervisor Platform on Windows.
+
+### `nvx::host::vm`
+
+The directory of a VM, which its caller creates and owns, one for each VM.
+`create_private_dir` creates it private to the current user, and `VmDir::open`
+opens an existing one only if it is private: on Linux, it belongs to the user
+with mode 0700, which OpenVMM requires of the directory of its control socket;
+on Windows, it belongs to the user, and its protected access control list holds
+only entries that allow the user access, one of which allows full access, which
+the files and directories created in it inherit at every depth. Neither changes
+an existing directory: one that others may access fails with `ErrorKind::Io`
+rather than being restricted, since they could still hold its files open.
+Symbolic links and other reparse points are refused, including paths with
+trailing separators or `.` components.
+
+The library reserves these names in the directory, and every name that starts
+with `.openvmm`, which OpenVMM gives its temporary files, such as
+`.openvmm.staging-*`. The caller may keep files of its own under other names.
+
+| Name | What it holds |
+| --- | --- |
+| `openvmm.log` | OpenVMM's log of a launch |
+| `outcome.json` | OpenVMM's outcome report of a launch |
+| `control.sock` | The control endpoint at which OpenVMM listens, on Linux |
+| `console.sock` | The guest's boot console, on Linux, for a launch that listens on it |
+| `restore-ready.sock` | The endpoint at which a restore awaits OpenVMM's restore-ready event, on Linux |
+| `openvmm/` | OpenVMM's snapshot files: a capture's destination, and a restore's view of its snapshot |
+| `key.bin`, `snapshot.json` | A finished capture's key and description, which form its snapshot with `openvmm/` |
+| `capture-image.raw`, `capture-scratch.raw` | The sparse placeholder image and the dormant scratch that a capture VM attaches |
+
+On Windows, where OpenVMM listens on named pipes, the control and console
+endpoints are fresh pipes, `//./pipe/openvmm-microvm-` and 32 random
+hexadecimal digits, the prefix that OpenVMM requires of the pipe of a console,
+and a restore awaits its event at a fresh `//./pipe/nvx-restore-ready-` pipe.
+
+`VmOutputs` holds the paths of OpenVMM's log and outcome report, its control
+endpoint, and the optional boot-console endpoint. `Capability` holds the
+credential that the host presents at a VM's control endpoint: `as_bytes`
+returns it, and its `Debug` form hides it. The library never writes it to a
+file; a caller that reconnects after a restart keeps it.
 
 ### `nvx::host::artifacts`
 

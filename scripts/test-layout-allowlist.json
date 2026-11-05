@@ -13,6 +13,7 @@
     "nvx-rs/src/host/cli/store/mod.rs": 1,
     "nvx-rs/src/host/network/address.rs": 2,
     "nvx-rs/src/host/platform/windows/spawn.rs": 1,
-    "nvx-rs/src/host/sandbox/plan.rs": 5
+    "nvx-rs/src/host/sandbox/plan.rs": 5,
+    "nvx-rs/src/host/vm.rs": 7
   }
 }
