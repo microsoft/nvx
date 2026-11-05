@@ -41,7 +41,6 @@ impl GuestFeatures {
     pub const DIRECT_AGENT: Self = Self(
         Self::CANCEL.0
             | Self::WORKLOAD_ACCOUNT.0
-            | Self::EXEC_CGROUP.0
             | Self::EXEC_ENVIRONMENT.0
             | Self::EXEC_CWD.0
             | Self::HOST_MAPPING_TABLE.0,
