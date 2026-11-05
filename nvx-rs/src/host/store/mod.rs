@@ -260,7 +260,24 @@
 
 mod caller;
 pub(crate) mod files;
-mod identity;
+/// The identities of runtimes, which [`crate::host::runtime`] defines, and how the one of a record
+/// compares with the current one.
+mod identity {
+    pub use crate::host::runtime::{
+        ArtifactIdentity, IdentityPart, MAX_IDENTITY_LEN, RuntimeIdentity,
+    };
+
+    /// How the runtime identity of a record compares with the current one.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum IdentityCheck {
+        /// The identities are equal: the host may reattach to the VM and keep it running.
+        Matches,
+        /// The identities differ in the parts that this lists, as
+        /// [`RuntimeIdentity::differences`] returns them: the VM must be stopped, and only through
+        /// its verified process identity.
+        Mismatched(Vec<IdentityPart>),
+    }
+}
 mod launch;
 pub(crate) mod lease;
 mod lifecycle;

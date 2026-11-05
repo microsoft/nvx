@@ -45,12 +45,12 @@ nvx-rs/
 │   ├── error.rs     nvx::Error, its ErrorKind, and its stable ErrorCode
 │   ├── exec/        the execution engine: the streams, credit, and outcome of an execution's two
 │   │                sides, without I/O, threads, or features, for any framing and host
-│   ├── host/        feature `host` (default): artifacts, launch, network and egress policy files,
-│   │                filesystem, NVXS connection, session, process, platform, VM instances,
-│   │                sandbox stores, templates' manifests, compatibility keys, store, and leases,
-│   │                outcome reports, file seals, and the sandbox launch profile of
-│   │                `nvx-rs sandbox`, its distro and scratch bindings, and its prepared launches;
-│   │                with feature `cli`, the `nvx-rs` CLI
+│   ├── host/        feature `host` (default): the runtime that every launch shares, artifacts,
+│   │                launch, network and egress policy files, filesystem, NVXS connection, session,
+│   │                process, platform, VM instances, sandbox stores, templates' manifests,
+│   │                compatibility keys, store, and leases, outcome reports, file seals, and the
+│   │                sandbox launch profile of `nvx-rs sandbox`, its distro and scratch bindings,
+│   │                and its prepared launches; with feature `cli`, the `nvx-rs` CLI
 │   ├── testing/     feature `testing`: the fake OpenVMM
 │   ├── guest/       feature `guest`: the programs that run in Linux guests, the guest's NVXS
 │   │                connection, the libraries through which a guest init or agent opens the
@@ -120,6 +120,7 @@ changes only when the module's purpose does.
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
+| [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -385,6 +386,26 @@ cancellation, or other execution, and both bound their memory.
 The adapter chooses one byte window per stream, or frames charged against one
 pool that stdout and stderr share, and the maximum chunk, in `Limits`; a `Key`'s
 generation tells stale messages from foreign ones.
+
+### `nvx::host::runtime`
+
+`Runtime`: what every launch shares, the paths of the OpenVMM executable, guest
+kernel, and guest initramfs, their `RuntimeIdentity`, the hypervisor, an
+optional CPU profile, whether OpenVMM breaks away from the caller's Windows job
+object, and the `LaunchOptions`. Those are what OpenVMM does when the guest
+powers off, a `GuestPowerAction`, by default `Exit`, which ends the VM, or
+`Halt` or `Reset`, and how long OpenVMM waits for the host to authenticate on
+the control console. The boot console is not among them: each VM attaches its
+own.
+
+`RuntimeIdentity` labels the three files with the `ArtifactIdentity` tokens that
+their install or staging metadata gives, such as `sha256:` and a digest, which
+NVX compares and never computes, and adds the versions of the contracts that the
+crate speaks; `differences` names the `IdentityPart`s in which two identities
+differ. The sandbox store records it with each VM, and re-exports its types.
+
+`probe_hypervisor` checks that the host has the hypervisor: its device on Linux,
+and the Windows Hypervisor Platform on Windows.
 
 ### `nvx::host::artifacts`
 
@@ -2631,12 +2652,13 @@ optional cause.
 | `ErrorKind` | Meaning |
 | --- | --- |
 | `Unavailable` | A missing or unusable artifact, hypervisor, or release, a guest image without a required control feature, or an unsupported host |
-| `Unsupported` | A well-formed request that NVX cannot represent or enforce, such as a policy beyond a limit of OpenVMM or the guest agent |
+| `Unsupported` | A request that NVX refuses: a value that it does not accept, such as a malformed or out-of-range one, options that it cannot combine, or a request that it cannot represent or enforce, such as a policy beyond a limit of OpenVMM or the guest agent |
 | `Exited` | The VM's OpenVMM process exited |
 | `Io` | A host I/O failure, or state that NVX recorded on the host and cannot read |
 | `NotFound` | State that an operation names and that does not exist on the host, such as the store of a sandbox that was never created or that a removal deleted |
 | `Protocol` | A control session that failed, or a request that the guest agent refused |
 | `TimedOut` | A deadline that passed |
+| `RuntimeMismatch` | A VM that runs under another runtime identity than the artifacts', which NVX does not drive: only a stop, which terminates it, applies |
 | `Other` | Any other failure |
 
 Messages call an instance `sandbox NAME`, after the name that `Instance::create`
@@ -2680,7 +2702,7 @@ usage errors, which no library error has.
 | `sandbox-running` | `Other` | The operation needs a stopped sandbox, but its VM, or a launch of it, may still run |
 | `sandbox-exited` | `Exited` | The sandbox's VM exited without a stop: the transition that finds it clears its runtime record, and a start launches it again |
 | `sandbox-busy` | `TimedOut` | Another lifecycle transition of the sandbox held its lock until the deadline passed |
-| `runtime-mismatch` | `Other` | The sandbox's VM runs under another runtime identity than the artifacts', whose differing parts the message names, so only a stop, which terminates it, applies |
+| `runtime-mismatch` | `RuntimeMismatch` | The sandbox's VM runs under another runtime identity than the artifacts', whose differing parts the message names, so only a stop, which terminates it, applies |
 | `vmm-indeterminate` | `Other` | Whether the OpenVMM process of the sandbox runs cannot be determined, so its records remain for a later attempt |
 | `format-unsupported` | `Io` | A record or report has a format or schema version that this build does not read, such as the state of a sandbox that another build provisioned or started |
 | `foreign-files` | `Other` | A directory of NVX's state, such as a sandbox's state directory or a template store, holds files that NVX does not own, which the message names and NVX keeps |

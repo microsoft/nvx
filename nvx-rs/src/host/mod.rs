@@ -2,6 +2,10 @@
 //!
 //! - [`artifacts`] locates the OpenVMM executable and the guest kernel and initramfs, and every
 //!   artifact of the guests that `nvx.py` runs, in a repository checkout or a release.
+//! - [`runtime`] holds what every launch shares: the paths of those three files and their
+//!   [`RuntimeIdentity`](runtime::RuntimeIdentity), the hypervisor, which
+//!   [`probe_hypervisor`](runtime::probe_hypervisor) checks, and the
+//!   [`LaunchOptions`](runtime::LaunchOptions).
 //! - [`launch`] builds OpenVMM's command line from a [`LaunchSpec`](launch::LaunchSpec): the
 //!   managed lifecycle, the workload identity, the kernel command line, and the network and
 //!   filesystem options.
@@ -73,6 +77,7 @@ pub(crate) mod paths;
 pub mod platform;
 pub mod process;
 pub mod report;
+pub mod runtime;
 pub mod sandbox;
 pub mod seal;
 pub mod session;
