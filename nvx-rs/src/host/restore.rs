@@ -39,7 +39,7 @@ impl ReadyListener {
     /// if binding fails or the directory is no longer private, and with
     /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) on unsupported hosts.
     #[cfg_attr(
-        not(test),
+        not(all(test, any(target_os = "linux", windows))),
         expect(dead_code, reason = "SL2.16 binds a restore's endpoint (#1103)")
     )]
     pub(crate) fn bind(directory: &VmDir) -> Result<Self> {
@@ -58,7 +58,7 @@ impl ReadyListener {
 
     /// Returns the endpoint for OpenVMM's `--restore-ready-path`.
     #[cfg_attr(
-        not(test),
+        not(all(test, any(target_os = "linux", windows))),
         expect(dead_code, reason = "SL2.16 renders the restore endpoint (#1103)")
     )]
     pub(crate) fn endpoint(&self) -> &str {
@@ -73,7 +73,7 @@ impl ReadyListener {
     /// [`ErrorKind::Protocol`](crate::ErrorKind::Protocol). An exited held process fails with
     /// [`ErrorKind::Exited`](crate::ErrorKind::Exited), even if its PID has been reused.
     #[cfg_attr(
-        not(test),
+        not(all(test, any(target_os = "linux", windows))),
         expect(
             dead_code,
             reason = "SL4.3's blocking driver receives the restore-ready event"
@@ -111,6 +111,8 @@ impl ReadyListener {
     /// Call before a receive accepts a client; otherwise fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). The caller must verify each
     /// accepted stream's peer credentials against the held VM process before reading its event.
+    /// After matching the PID, check [`Process::has_exited`] and refuse an exited process:
+    /// holding a Linux pidfd does not reserve a reaped process's numeric PID.
     #[cfg(target_os = "linux")]
     pub fn into_std(self) -> Result<std::os::unix::net::UnixListener> {
         self.listener.into_std().map_err(transfer_error)
@@ -122,6 +124,7 @@ impl ReadyListener {
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). The caller completes
     /// `ConnectNamedPipe`, checks its client process ID against the held VM process before
     /// reading its event, and owns completion or cancellation of its overlapped operations.
+    /// After matching the PID, check [`Process::has_exited`] and refuse an exited process.
     #[cfg(windows)]
     pub fn into_std(self) -> Result<std::os::windows::io::OwnedHandle> {
         self.listener.into_std().map_err(transfer_error)
