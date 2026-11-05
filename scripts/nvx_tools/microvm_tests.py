@@ -204,6 +204,9 @@ GUEST_SCRIPT_PATH = "/tmp/nvx-guest-script"
 GUEST_SCRIPT_DELIMITER = "NVX_GUEST_SCRIPT"
 GUEST_SCRIPT_START_MARKER = b"NVX-GUEST-SCRIPT-START"
 LIFECYCLE_COMPLETION_MARKER = b"NVX-LIFECYCLE-OK"
+# What lifecycle.sh writes to the byte channel, one byte at a time, and
+# OpenVMM relays to its stderr beside the boot console.
+LIFECYCLE_BYTE_CHANNEL_OUTPUT = b"\x00\r\n\x7f\xff\n"
 # A line of the kernel log as a console prints it, after printk's timestamp.
 KERNEL_LOG_LINE = re.compile(r"\[ *\d+\.\d{6}\] ")
 SANDBOX_BLOCKS_COMPLETION_MARKER = b"NVX-SANDBOX-BLOCKS-OK"
@@ -778,6 +781,7 @@ def run_guest_script(
     log_path: Path | None = None,
     contain_process_tree: bool = False,
     boot_marker: bytes = BOOT_MARKER,
+    on_stderr: Callable[[bytes], None] | None = None,
 ) -> GuestScriptResult:
     """Run ``script`` in the shell of the guest that ``command`` boots, and
     require it to print the line ``completion_marker``.
@@ -792,7 +796,9 @@ def run_guest_script(
     that line, ``output``, is thus the script's own, and ``completion_marker``
     must be one of its lines. The console types the script once the guest
     prints ``boot_marker``: its boot marker, or for a restore, a marker that
-    the restored guest prints.
+    the restored guest prints. With ``on_stderr``, OpenVMM's stderr reaches it
+    rather than the console, so that ``text`` and ``output`` hold only what
+    the console printed, as benchmark.run_guest_script describes.
     """
     result = _run_guest_script(
         command,
@@ -811,6 +817,7 @@ def run_guest_script(
         boot_marker=boot_marker,
         contain_process_tree=contain_process_tree,
         time_abi_status=True,
+        on_stderr=on_stderr,
     )
     output = _guest_script_output(result["text"])
     if not contains_output_line(output.encode("utf-8"), completion_marker):
@@ -1224,6 +1231,15 @@ def run_lifecycle(
     timeout: float,
     log_path: Path,
 ) -> None:
+    """Run lifecycle.sh in a quiet boot with the boot console.
+
+    The script writes LIFECYCLE_BYTE_CHANNEL_OUTPUT to the byte channel just
+    before it prints its marker on the boot console. OpenVMM relays the one
+    to its stderr and the other to its stdout, with no order between them,
+    so the scenario reads stderr apart from the console, which alone carries
+    the markers (#1290), and requires the bytes there, in order. Both streams
+    must be quiet, since the early console prints on the byte channel.
+    """
     command = workload_boot_command(
         executable,
         backend,
@@ -1232,14 +1248,23 @@ def run_lifecycle(
         memory_mib,
         "quiet loglevel=0",
     )
+    stderr = bytearray()
     result = run_guest_script(
         command,
         _read_script("lifecycle.sh"),
         LIFECYCLE_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
+        on_stderr=stderr.extend,
     )
+    check_quiet_console(stderr.decode("utf-8", "replace"))
     check_quiet_console(result["text"])
+    if LIFECYCLE_BYTE_CHANNEL_OUTPUT not in stderr:
+        raise RuntimeError(
+            "OpenVMM's stderr lacks the byte channel's bytes "
+            f"{LIFECYCLE_BYTE_CHANNEL_OUTPUT.hex(' ')}, in order; it ends with "
+            f"{bytes(stderr[-256:])!r}"
+        )
 
 
 def run_workload_identity(

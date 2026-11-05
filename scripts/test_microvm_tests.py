@@ -2502,6 +2502,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
             boot_marker=microvm_tests.BOOT_MARKER,
             contain_process_tree=True,
             time_abi_status=True,
+            on_stderr=None,
         )
         self.assertEqual(result["output"], "NVX-OUT none\r\nNVX-DONE\r\n")
         self.assertEqual(result["text"], transcript)
@@ -4129,6 +4130,81 @@ class _EphemeralPortSockets:
         endpoint.getsockname.return_value = ("127.0.0.1", port)
         self.created.append(endpoint)
         return endpoint
+
+
+class _ByteChannelGuest:
+    """An OpenVMM whose guest ends lifecycle.sh: once it gets its script, it
+    writes the byte channel's bytes, which OpenVMM relays to its stderr, and
+    prints the marker on the boot console, but stderr delivers only the first
+    ``split`` bytes before the marker. In CI run 41973357177, it delivered 5
+    (#1290).
+
+    Its stderr shares the console stream, as InteractiveProcess's does by
+    default, unless ``separate_stderr`` gives it a pipe of its own.
+    """
+
+    containment = None
+
+    def __init__(
+        self,
+        split: int,
+        *_args: object,
+        separate_stderr: bool = False,
+        **_kwargs: object,
+    ) -> None:
+        self.process = _ExitingProcess()
+        self._split = split
+        self._separate_stderr = separate_stderr
+        self._stderr: benchmark.ChunkSink | None = None
+        self._stderr_ready = threading.Event()
+        self._typed = threading.Event()
+
+    def read_stderr(self, chunks: benchmark.ChunkSink) -> None:
+        self._stderr = chunks
+        self._stderr_ready.set()
+
+    def read_output(self, chunks: benchmark.ChunkSink) -> None:
+        stderr = chunks
+        if self._separate_stderr:
+            self._stderr_ready.wait(5)
+            assert self._stderr is not None
+            stderr = self._stderr
+        chunks.put(b"NVX-GUEST-BOOT-OK: alpine\r\n")
+        self._typed.wait(5)
+        written = microvm_tests.LIFECYCLE_BYTE_CHANNEL_OUTPUT
+        for sink, chunk in (
+            (chunks, b"NVX-GUEST-SCRIPT-START\r\n"),
+            (stderr, written[: self._split]),
+            (chunks, microvm_tests.LIFECYCLE_COMPLETION_MARKER + b"\r\n"),
+            (stderr, written[self._split :]),
+        ):
+            if chunk:
+                sink.put(chunk)
+        self.process.exited = True
+        if stderr is not chunks:
+            stderr.put(None)
+        chunks.put(None)
+
+    def write_input(self, _data: bytes) -> None:
+        self._typed.set()
+
+    def close(self) -> None:
+        pass
+
+
+def _lifecycle_run(
+    text: str, stderr: bytes = microvm_tests.LIFECYCLE_BYTE_CHANNEL_OUTPUT
+) -> Callable[..., dict[str, str]]:
+    """Return a fake of run_guest_script for lifecycle.sh, whose console
+    printed ``text`` while OpenVMM wrote ``stderr``."""
+
+    def run(
+        *_args: object, on_stderr: Callable[[bytes], None], **_kwargs: object
+    ) -> dict[str, str]:
+        on_stderr(stderr)
+        return {"text": text, "output": "NVX-LIFECYCLE-OK\n"}
+
+    return run
 
 
 class MicrovmTests(unittest.TestCase):
@@ -7633,10 +7709,9 @@ class MicrovmTests(unittest.TestCase):
             patch.object(
                 microvm_tests,
                 "run_guest_script",
-                return_value={
-                    "text": "NVX-GUEST-BOOT-OK: alpine\nNVX-LIFECYCLE-OK\n",
-                    "output": "NVX-LIFECYCLE-OK\n",
-                },
+                side_effect=_lifecycle_run(
+                    "NVX-GUEST-BOOT-OK: alpine\nNVX-LIFECYCLE-OK\n"
+                ),
             ) as run_guest_script,
         ):
             microvm_tests.run_lifecycle(
@@ -7684,11 +7759,14 @@ class MicrovmTests(unittest.TestCase):
         )
         microvm_tests.check_quiet_console(quiet)
         printed = "[    0.000000] Linux version 6.18.38 (root@buildkitsandbox)\r\n"
-        for text in (
-            printed + quiet,
-            quiet.replace("NVX-GUEST", printed + "NVX-GUEST"),
+        written = microvm_tests.LIFECYCLE_BYTE_CHANNEL_OUTPUT
+        for text, stderr in (
+            (printed + quiet, written),
+            (quiet.replace("NVX-GUEST", printed + "NVX-GUEST"), written),
+            # The early console prints on the byte channel, on OpenVMM's stderr.
+            (quiet, printed.encode() + written),
         ):
-            with self.subTest(text=text):
+            with self.subTest(text=text, stderr=stderr):
                 with (
                     patch.object(
                         microvm_tests, "workload_boot_command", return_value=["vmm"]
@@ -7696,7 +7774,7 @@ class MicrovmTests(unittest.TestCase):
                     patch.object(
                         microvm_tests,
                         "run_guest_script",
-                        return_value={"text": text, "output": "NVX-LIFECYCLE-OK\n"},
+                        side_effect=_lifecycle_run(text, stderr),
                     ),
                     self.assertRaisesRegex(
                         RuntimeError,
@@ -7714,6 +7792,87 @@ class MicrovmTests(unittest.TestCase):
                         timeout=45,
                         log_path=Path("lifecycle.log"),
                     )
+
+    def test_lifecycle_finds_its_marker_whatever_order_its_streams_arrive_in(self):
+        # OpenVMM relays the byte channel and the boot console with no order
+        # between them, so the byte channel's bytes can reach the harness on
+        # either side of the marker, which in CI run 41973357177 split them
+        # after 5 of 6 (#1290).
+        written = microvm_tests.LIFECYCLE_BYTE_CHANNEL_OUTPUT
+        for split in range(len(written) + 1):
+            with (
+                self.subTest(split=split),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(
+                    microvm_tests, "workload_boot_command", return_value=["vmm"]
+                ),
+                patch.object(
+                    benchmark,
+                    "InteractiveProcess",
+                    side_effect=functools.partial(_ByteChannelGuest, split),
+                ) as spawn,
+                patch.object(benchmark, "_try_peak_rss", return_value=1024),
+            ):
+                log_path = Path(temporary) / "lifecycle.log"
+                microvm_tests.run_lifecycle(
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "whp",
+                    memory_mib=128,
+                    timeout=5,
+                    log_path=log_path,
+                )
+                self.assertIs(spawn.call_args.kwargs["separate_stderr"], True)
+                # The log holds the byte channel's lines whole, where each
+                # one ended.
+                before = written[: written.rfind(b"\n", 0, split) + 1]
+                self.assertEqual(
+                    log_path.read_bytes(),
+                    b"NVX-GUEST-BOOT-OK: alpine\r\nNVX-GUEST-SCRIPT-START\r\n"
+                    + before
+                    + b"NVX-LIFECYCLE-OK\r\n"
+                    + written[len(before) :],
+                )
+
+    def test_lifecycle_requires_the_byte_channels_bytes_in_order(self):
+        written = microvm_tests.LIFECYCLE_BYTE_CHANNEL_OUTPUT
+        console = "NVX-GUEST-BOOT-OK: alpine\r\nNVX-LIFECYCLE-OK\r\n"
+        for stderr, passes in (
+            # OpenVMM writes its own warnings to stderr too.
+            (FALLBACK_WARNING + written, True),
+            (b"", False),
+            # A terminal's output processing ends each line with CR LF.
+            (written.replace(b"\n", b"\r\n"), False),
+            (written[3:] + written[:3], False),
+        ):
+            with (
+                self.subTest(stderr=stderr),
+                patch.object(
+                    microvm_tests, "workload_boot_command", return_value=["vmm"]
+                ),
+                patch.object(
+                    microvm_tests,
+                    "run_guest_script",
+                    side_effect=_lifecycle_run(console, stderr),
+                ),
+                nullcontext()
+                if passes
+                else self.assertRaisesRegex(
+                    RuntimeError,
+                    "^OpenVMM's stderr lacks the byte channel's bytes "
+                    "00 0d 0a 7f ff 0a, in order; it ends with ",
+                ),
+            ):
+                microvm_tests.run_lifecycle(
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initrd"),
+                    "kvm",
+                    memory_mib=128,
+                    timeout=45,
+                    log_path=Path("lifecycle.log"),
+                )
 
     def test_lifecycle_script_exits_on_unexpected_command_failure(self):
         shell = _posix_shell()
@@ -7743,14 +7902,14 @@ class MicrovmTests(unittest.TestCase):
             ["NVX-LIFECYCLE-FAIL code=1", "NVX-EXIT 1"],
         )
 
-    def test_lifecycle_script_ends_its_debug_port_line(self):
+    def test_lifecycle_script_writes_the_bytes_that_the_scenario_checks(self):
         shell = _posix_shell()
         if shell is None:
             self.skipTest("POSIX shell is unavailable")
         script = microvm_tests._read_script("lifecycle.sh")
         tail = script[script.index("for octal in") : script.index("nvx-exit 0")]
-        # OpenVMM prints the debug port's bytes in the console stream, where
-        # the staged script prints its marker right after them.
+        # With dd as cat, the bytes that the script writes to the byte
+        # channel reach stdout, before its marker.
         result = subprocess.run(
             [shell],
             input=b"dd() { cat; }\n" + tail.encode(),
@@ -7759,11 +7918,11 @@ class MicrovmTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(
-            microvm_tests.contains_output_line(
-                result.stdout, microvm_tests.LIFECYCLE_COMPLETION_MARKER
-            ),
+        self.assertEqual(
             result.stdout,
+            microvm_tests.LIFECYCLE_BYTE_CHANNEL_OUTPUT
+            + microvm_tests.LIFECYCLE_COMPLETION_MARKER
+            + b"\n",
         )
 
     def test_lifecycle_script_checks_the_early_console(self):
