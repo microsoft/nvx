@@ -12,3 +12,17 @@ linux-mshv-virtual-machine,3,2,90ca215df998d97d64da8d2a2bea5d79bf2f8a48,shell_sn
 linux-mshv-virtual-machine,3,2,26e5db7cabd1a126202b5b7fb866835e46ffc864,shell_snapshot_restore_512_mib,ms,lower,47.7
 linux-mshv-virtual-machine,3,2,1f17baa3094b6a43816972960a3cff84da87c0b0,shell_snapshot_restore_512_mib,ms,lower,47.1
 linux-mshv-virtual-machine,3,2,76f282a0ddd783a560e79fc6aa30a06f240759fd,shell_snapshot_restore_512_mib,ms,lower,47.8
+linux-mshv-virtual-machine,3,2,580786a002eaefe2b4e8e782197ab9835970125b,shell_snapshot_restore_512_mib,ms,lower,47.5
+linux-mshv-virtual-machine,3,2,607a3938ca642080ce6e3751c86c37b99e6dbfab,shell_snapshot_restore_512_mib,ms,lower,45.7
+linux-mshv-virtual-machine,3,2,a6a8c70992bc013a2ac93ff95e9a00b13a86ccca,shell_snapshot_restore_512_mib,ms,lower,43
+linux-mshv-virtual-machine,3,2,3d7f7f65e6cafbb1204d18572ea5c626a07f6abd,shell_snapshot_restore_512_mib,ms,lower,49.9
+linux-mshv-virtual-machine,3,2,fa7997877053abdd43fcaa1b9164c9d1f1541c77,shell_snapshot_restore_512_mib,ms,lower,46.5
+linux-mshv-virtual-machine,3,2,d6a8aec279229064484bbf0926948ec86ef4b4ef,shell_snapshot_restore_512_mib,ms,lower,45
+linux-mshv-virtual-machine,3,2,4ed0cf08572e836a972a8ebfbc4895ac313cd3fe,shell_snapshot_restore_512_mib,ms,lower,48.8
+linux-mshv-virtual-machine,3,2,586ccf8826f9ad8ce6d753f630bcdb0c585a45e8,shell_snapshot_restore_512_mib,ms,lower,48.8
+linux-mshv-virtual-machine,3,2,6bcb68fce00e2b9bf29d35cc4bc9f2a2b57c1f19,shell_snapshot_restore_512_mib,ms,lower,47.2
+linux-mshv-virtual-machine,3,2,eade2977e9edaf1439db68f1a45e0c990b62eea2,shell_snapshot_restore_512_mib,ms,lower,48
+linux-mshv-virtual-machine,3,2,cc6152ca87d9ac28d61a216d73d569889010e078,shell_snapshot_restore_512_mib,ms,lower,44.6
+linux-mshv-virtual-machine,3,2,1556e2c1eca186b3c47a14ca00b2d32e52810ae9,shell_snapshot_restore_512_mib,ms,lower,43.4
+linux-mshv-virtual-machine,3,2,8ba333a8a649fcc436d3fc311e6c58f51030a1df,shell_snapshot_restore_512_mib,ms,lower,48.2
+linux-mshv-virtual-machine,3,2,7e1e2fc99684e7473ca8e706f90f8421127e531f,shell_snapshot_restore_512_mib,ms,lower,44.9
