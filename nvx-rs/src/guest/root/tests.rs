@@ -17,6 +17,9 @@ use crate::guest::cgroup::Layout;
 use crate::guest::mappings::{Access, Mapping, SourceRoot};
 use crate::guest::sys::MountAttributes;
 
+mod privileged;
+mod runtime;
+
 /// The base address of the distro device's MMIO window.
 const DISTRO: u64 = 0xd000_0000;
 /// The base address of the scratch device's MMIO window.

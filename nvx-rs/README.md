@@ -1548,9 +1548,29 @@ the caller's mappings.
 `Root::map`: a caller's host mappings, through the same mapper. A share, a
 child, the export, or a mapping that fails latches the root.
 
-`Root::teardown`: the shares and mappings in reverse order, then the mounts of
-an aggregate and of the export, the later first, the overlay, the layers from
-the top down, and the upper, with every failed sync or unmount reported. An
+`Root::mount_runtime`: the runtime's file systems, which an init mounts once
+for its VM, before the root's first live share or mapping, after it makes every
+mount of the root's tree `nosuid,nodev`: procfs at `/proc`, sysfs at `/sys`,
+read-only, a tmpfs at `/dev` with an execution's device nodes and links, devpts
+at `/dev/pts`, and tmpfs at `/dev/shm` and `/run`, with an execution's options,
+then the time status's directory, when the caller names one, bound read-only at
+`/run/nvx/time`. It refuses a mount point that leads through a symbolic link or
+where something is mounted already, and, before it changes anything, a call
+while the root holds the runtime's mounts, whose `/dev` and `/dev/pts` a second
+restriction would make `nodev`, or a live share or mapping, since the `/run`
+tmpfs would hide one beneath `/run` from the teardown. A call that fails
+unmounts what it mounted. A later share or mapping beneath `/run` is on that
+tmpfs, which the root's mapper owns, as a guest's mapper owns its `/tmp`.
+Each attachment is checked at its named target before it is recorded. A runtime
+mount whose attachment fails and which cannot be detached keeps its mount
+descriptor, so rollback and teardown can retry cleanup without trusting its
+original path.
+
+`Root::teardown`: the shares and mappings in reverse order, a runtime mount whose
+attachment failed and which could not be detached, then the mounts of an
+aggregate, of the export, and of the runtime, the later first, the overlay,
+the layers from the top down, and the upper, with every failed sync or unmount
+reported. An
 ext4 scratch's file system is synced before its unmount, since a mount namespace
 that copied the root's mounts keeps them, unsynced, after this one unmounts
 them, and a scratch whose sync fails stays mounted.
@@ -2824,6 +2844,17 @@ run it as root with:
 ```bash
 NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
   --ignored --exact guest::root::tests::a_thread_with_private_tables_finds_its_mount_points_and_options
+```
+
+Ignored tests of `Root::mount_runtime` mount the runtime's file systems on a
+temporary tmpfs root, in a thread's private mount namespace, and check their
+options, device nodes, and time status, a call's undo, the teardown, and the
+order of the runtime and the mappings beneath `/run`. They need root and Linux
+6.8 or later; run them as root with:
+
+```bash
+NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
+  --ignored guest::root::tests::privileged
 ```
 
 `tests/openvmm_vectors.rs` is an ignored test that compares the copies of
