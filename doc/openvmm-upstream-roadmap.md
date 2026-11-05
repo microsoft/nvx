@@ -7,18 +7,18 @@
   `b2676222b383bf50c7022f6a5983920421469a47`; see [Upstream status](#upstream-status).
 - Mapped fork tip: `3cdf4fe3834cfb90b9ee685875493bc9bff1b7a4`, position 135. The graph, PR
   summary, and commit mapping below cover positions 001-135 and the PR20 fixup at position 152.
-- NVX's pinned OpenVMM revision: `4713c539ac989c5760415f8441bdb85ae9be3e82`, position 213.
-  Position 213, which microsoft/openvmm#4887 proposes for `feature/microvm/dev`, is one commit on
-  position 212, `de29849a4`, which microsoft/openvmm#4886 proposes as one commit on position 211,
-  `5aa8b0285`, which microsoft/openvmm#4894 proposes as one commit on position 210, `eda13d80a`,
-  the head of the `feature/microvm/release/v4.0` branch of microsoft/openvmm, to which
-  `feature/microvm/dev` also points. The v4.0 reorganization moved the 205 commits of
+- NVX's pinned OpenVMM revision: `9cec2b89245f41f2126f9a787c5e43a0d84b7154`, position 214.
+  Position 214, which microsoft/openvmm#4916 proposes for `feature/microvm/dev`, is one commit on
+  position 213, `4713c539a`, the head of `feature/microvm/dev`. microsoft/openvmm#4894,
+  microsoft/openvmm#4886, and microsoft/openvmm#4887 landed positions 211-213 there by
+  fast-forward, on position 210, `eda13d80a`, the head of the `feature/microvm/release/v4.0`
+  branch of microsoft/openvmm. The v4.0 reorganization moved the 205 commits of
   `feature/microvm/release/v3.0` and the NVX pin before it, `35e76265f`, onto `c6d3da0ff`. It
   dropped the eight commits whose changes upstream had landed or superseded, retired the fallible
   device start that microsoft/nvx#1232 replaces with awaited device restoration, folded that
   restoration into the commits that it changes, and added 14 commits that give each ABI that the
   chain introduces a single version; see [The v4.0 reorganization](#the-v40-reorganization). The
-  pin is 78 commits past the mapped tip on the same first-parent chain. Positions 136-213, except
+  pin is 79 commits past the mapped tip on the same first-parent chain. Positions 136-214, except
   the PR20 fixup at position 152, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ca6b2b177da5e33ae1bcac72986b31d6b039811c` (2026-11-02), one commit past the
@@ -647,7 +647,8 @@ c6d3da0ff
   -> sandbox block roles [192] -> virtio feature masks [193-194]
   -> IOAPIC interrupt lines [195-196] -> ABI restart [197-210]
   -> boot console exit drain [211] -> portb without host input [212-213]
-  -> 4713c539a (NVX pin)
+  -> long Windows paths [214]
+  -> 9cec2b892 (NVX pin)
 ```
 
 For upstream review, PR01-PR07 and PR14 can be rebased independently onto current upstream main,
@@ -663,12 +664,12 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 135 without merges. Of the 78 later commits, position
+The NVX pin extends the chain past position 135 without merges. Of the 79 later commits, position
 152 is a PR20 fixup, and the others are not yet classified or assigned to PRs. Each of positions
 136-191 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 192-196
 followed the v3.0 reorganization, positions 197-210 are the ABI restart of the v4.0
-reorganization, and positions 211-213 followed it, so they combine none.
+reorganization, and positions 211-214 followed it, so they combine none.
 
 | Position | Commit | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | --- | --- |
@@ -750,6 +751,7 @@ reorganization, and positions 211-213 followed it, so they combine none.
 | 211 | `5aa8b0285` | - | - | microVM: drain the boot console's terminal output at guest exit (microsoft/openvmm#4894) |
 | 212 | `de29849a4` | - | - | vmm_tests: drive the microVM guests without portb input (microsoft/openvmm#4886) |
 | 213 | `4713c539a` | - | - | microVM: remove portb's host input (microsoft/openvmm#4887) |
+| 214 | `9cec2b892` | - | - | pal: support long paths in secure file and directory creation (microsoft/openvmm#4916) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -834,6 +836,15 @@ five of its seven files, four of which upstream main lacks, so it follows those 
 Positions 212 and 213 change only the microVM portb device, its CLI and test harness, the VMM tests
 of PR15, PR17, and PR25, and their Guide pages: replaying them on upstream main conflicts in all
 nine of their files, six of which upstream main lacks, so they follow those PRs upstream.
+
+Position 214 makes the secure file and directory creation of `pal`, which upstream main has, take
+long Windows paths, and adds tests of it to `pal` and to the snapshot publication of
+`openvmm_helpers`. PR04's position 010 also changes that `pal` file, and PR11's positions 036-038,
+PR17's position 080, PR19's position 096, and positions 143, 151, and 171 that publication file,
+but position 214 changes nothing that they add. Replaying it on upstream main conflicts only in the
+publication file, whose new tests use the paired scratch of PR19's position 096 and the exact-file
+RAM of PR11's position 038. Its `pal` change alone applies to upstream main without conflicts, and
+`pal` builds there and passes its tests on Windows, so that change can go upstream on its own.
 
 ## PR summary
 
