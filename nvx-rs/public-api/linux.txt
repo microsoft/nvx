@@ -1954,6 +1954,9 @@ field nvx::host::network::LoopbackForward::protocol
 const nvx::host::network::MAX_HOST_LOOPBACK_PREFIX
 const nvx::host::network::MAX_LOOPBACK_FORWARDS
 const nvx::host::network::MAX_RULES
+struct nvx::host::network::NativeEgressRules
+field nvx::host::network::NativeEgressRules::allow
+field nvx::host::network::NativeEgressRules::deny
 struct nvx::host::network::NetworkPolicy
 field nvx::host::network::NetworkPolicy::allow
 field nvx::host::network::NetworkPolicy::deny
@@ -1961,6 +1964,7 @@ field nvx::host::network::NetworkPolicy::egress
 field nvx::host::network::NetworkPolicy::host_loopback
 field nvx::host::network::NetworkPolicy::host_loopback_forwards
 field nvx::host::network::NetworkPolicy::ingress
+method nvx::host::network::NetworkPolicy::native_egress_rules
 method nvx::host::network::NetworkPolicy::new
 field nvx::host::network::NetworkPolicy::proxy
 method nvx::host::network::NetworkPolicy::proxy_only
