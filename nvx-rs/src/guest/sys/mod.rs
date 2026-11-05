@@ -96,9 +96,8 @@ pub(crate) use entry::{
 #[cfg(target_arch = "x86_64")]
 pub(crate) use fd::close_inherited_descriptors;
 pub(crate) use fd::{
-    CreatedFile, FileDescriptor, FileLock, Mode, OpenFlags, create_directory, create_memfd,
-    create_pipe, create_socket_pair, lock_file, open, open_at, page_size, try_lock_directory,
-    unlink,
+    CreatedFile, FileDescriptor, FileLock, Mode, OpenFlags, create_directory, create_pipe,
+    create_socket_pair, lock_file, open, open_at, page_size, try_lock_directory, unlink,
 };
 pub(crate) use filesystem::{
     MountFlags, PATH_MAX, ScratchDirectory, TmpfsMount, check_exists, chmod, chown,

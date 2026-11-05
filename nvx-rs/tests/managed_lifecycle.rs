@@ -522,14 +522,12 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
         after_timeout.printed("still-usable"),
         "the guest was not usable after a timeout: {after_timeout:?}"
     );
-    // A workload that leaves a descendant in a session of its own, outside the workload's process
-    // group, which keeps the workload's output open, ends at once with its own status: the guest
-    // finds the descendant in the workload's cgroup and ends it. The next workload runs, which the
-    // guest allows only once that cgroup is settled.
+    // The core ends descendants in the original process group when its leader exits, so their
+    // output closes and the next request can run without waiting for the descendant's sleep.
     let started = Instant::now();
     let detached = guest.exec(
         &mut session,
-        &["/bin/sh", "-c", "setsid sleep 30 & printf started"],
+        &["/bin/sh", "-c", "sleep 30 & printf started"],
         5_000,
         None,
         WorkloadEnvironment::Default,
@@ -548,7 +546,7 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
     );
     assert!(
         after_detached.printed("still-usable"),
-        "the guest did not settle a workload's descendant: {after_detached:?}"
+        "the guest did not end a workload's process group: {after_detached:?}"
     );
     // The guest refuses a working directory that the workload cannot enter, with its error
     // number and a diagnostic that names it, before anything of the workload runs.
