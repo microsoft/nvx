@@ -182,7 +182,7 @@ fn sleeper() -> std::process::Command {
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn polling_follows_a_real_process_until_it_exits() {
-    let mut child = platform::inherit::spawn_command(&mut sleeper()).unwrap();
+    let mut child = crate::host::tests::spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let start_time = platform::process_start_time(pid).unwrap().unwrap();
     let runs = || -> io::Result<bool> { Ok(platform::open_process(pid, start_time)?.is_some()) };
@@ -197,7 +197,7 @@ fn polling_follows_a_real_process_until_it_exits() {
 #[cfg(target_os = "linux")]
 #[test]
 fn hosts_without_pidfds_poll_and_never_signal() {
-    let mut child = platform::inherit::spawn_command(&mut sleeper()).unwrap();
+    let mut child = crate::host::tests::spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let process = Process {
         reference: ProcessRef {
@@ -276,7 +276,7 @@ fn processes_count_the_bytes_that_their_read_calls_read() {
     assert!(own_bytes_read().unwrap() >= before + read.len() as u64);
 
     // Another process counts what it read once it says so, while it runs.
-    let mut child = platform::inherit::spawn_command(&mut reader(&path)).unwrap();
+    let mut child = crate::host::tests::spawn_locked(&mut reader(&path)).unwrap();
     let mut said = String::new();
     let stdout = child.stdout.take().unwrap();
     BufReader::new(stdout).read_line(&mut said).unwrap();
