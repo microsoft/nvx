@@ -123,7 +123,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
-| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: a VM's processors, memory, root, view, export, and boot console as one value, checked without reading the host |
+| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: a VM's processors, memory, root, view, network, export, boot console, and cold-boot settings as one value, checked without reading the host |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -339,6 +339,11 @@ an egress rule; `is_valid_hostname` and `is_valid_guest_network`, the forms of a
 VM's hostname and guest address, and `guest_gateway`, the gateway of a guest
 address.
 
+`Ipv4Cidr`: a guest address, checked when it is built, which `Ipv4Cidr::new` and
+`Ipv4Cidr::parse` refuse unless OpenVMM accepts it, as `is_valid_guest_network`
+does; it displays and parses as `ADDRESS/PREFIX`, such as `10.0.0.2/24`, and
+with the `serde` feature it serializes as that text.
+
 ### `nvx::gpt`
 
 `Disk::read`: the protective MBR, primary header, and primary partition entry
@@ -457,10 +462,11 @@ file; a caller that reconnects after a restart keeps it.
 ### `nvx::host::config`
 
 `VmConfig`: the configuration of a VM as one value, its processors, its memory
-in MiB, its `RootConfig`, the `View` that its workload has of it, the
-`ExportPlan` of the host paths that it exports, if any, and the
-`ConsoleAttachment` of its boot console, a `Listener` for a client or
-`Disconnected`; the console's device exists either way.
+in MiB, its `RootConfig`, the `View` that its workload has of it, its
+`NetworkConfig` if it has a NIC, the `ExportPlan` of the host paths that it
+exports, if any, the `ConsoleAttachment` of its boot console, a `Listener` for a
+client or `Disconnected`, whose device exists either way, and a `Boot`, what
+only a cold boot takes.
 
 A root is `Blockless`, the guest's own system from its initramfs, or `Layered`,
 a `LayeredRoot`: the path of an image and its `RootImage`, EROFS or a GPT disk,
@@ -470,13 +476,23 @@ upper, a scratch image with its `Journal` policy, or RAM up to a cap of 1 to 90
 percent of the VM's memory, 50 when the caller has no other
 (`UpperConfig::DEFAULT_MAX_MEMORY_PERCENT`).
 
+A `NetworkConfig` holds the `NetworkPolicy` that OpenVMM enforces and the NIC's
+address, an `nvx::net::Ipv4Cidr`, if the caller names one: without one, a cold
+boot takes `DEFAULT_GUEST_NETWORK`, `10.0.0.2/24`, which `nvx::host::launch`
+also exports, and a restore the snapshot's. A `NicConfig` is the NIC that a VM
+settled on, with its address. A `Boot` holds the caller's own kernel
+command-line tokens, to which NVX adds those of what it lowers: a VM that boots
+needs one, and a VM that a snapshot restores takes none.
+
 `VmConfig::check` checks the whole value without reading the host: it opens no
 path and checks no support of the host. It fails with an `nvx::Error` of kind
 `Unsupported` that names the first refusal: no processor or no memory; a layered
 root without an image or a scratch path, with a bound of an EROFS image or of 0,
 or with a RAM upper's cap outside 1 to 90 percent; a hostname that an activation
 record refuses; or an export that `ExportPlan::check` refuses for the guest
-targets that the root reserves.
+targets that the root reserves. The network's policy and the boot's command line
+are checked where they are lowered, with the guest's address and NVX's own
+tokens.
 
 ### `nvx::host::artifacts`
 
@@ -2686,7 +2702,7 @@ caller owner.
 | `bundled` | Stages a release at build time; see [Bundled artifacts](#bundled-artifacts) |
 | `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
 | `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
-| `serde` | The serde form of `Hypervisor` |
+| `serde` | The serde forms of `Hypervisor` and `net::Ipv4Cidr` |
 | `guest` | The `guest` module and the guest binaries; see [Guest binaries](#guest-binaries) |
 
 Without default features, the crate has only `protocol`, `activation`, `exec`,
