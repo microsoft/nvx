@@ -180,11 +180,23 @@ count,
 held correction, clock-step state, or sample disruption counter discards and
 retries the window, as does a sample that fails to pair or whose uncertainty
 exceeds the 100 µs that the guest's discipline accepts, since `nvx-time sample`
-reports one beyond it too. Every sample must carry the test-hook
+reports one beyond it too. The script also retries a window between whose
+samples the host's time service updated host UTC, since the update may begin
+a slew that neither sample shows. Linux grows host UTC's maximum error by
+500 µs a second while a time service synchronizes host UTC, and the service
+sets it at each update, so a second sample whose maximum error grew by less
+over the whole seconds between the samples' host UTC follows an update;
+Windows reports no maximum error. A chronyd that updates host UTC every 8 s,
+as on NVX's Linux runners, does so in most windows, so the checker still uses
+such a window when host UTC ran at its published correction. Every
+sample must carry the test-hook
 flag. The correction that the guest's boot
-step or restore repair took must lie within 75 ppm, half the 150 ppm of the
-smallest hook, of the one that the first stable sample publishes, so that it
-isn't a stale one. Between the stable pair, which pairs host UTC and
+step or restore repair took must come from a sample that the hook altered, as
+the guest's time state reports with `host_test_hooks=1`: the capture runs
+without the hook, so a restore whose repair kept the snapshot's correction
+holds one without it. The check doesn't compare that correction with a later
+sample's, since the host's time service may slew host UTC, and so change its
+correction, in between. Between the stable pair, which pairs host UTC and
 the guest's clock with the guest TSC, both must run at their corrections
 against the TSC counted at the declared rate. The guest's clock must run at the
 one that it holds, within 1 ppm beyond the uncertainty of its pairings; a guest
@@ -193,9 +205,13 @@ allowance, at most 41 ppm for two samples 5 s apart within the bound, must stay
 below half the held correction, or the check fails as inconclusive. Host
 UTC must run at its published one, within 75 ppm beyond half that correction's
 change and the pairing bounds, so that the hook skewed both alike: 75 ppm is
-half the 150 ppm that a hook that skewed only one of them would leave, and the
-host's time service may slew host UTC between two samples, by up to 25 ppm on
-the test VMs measured so far. The 900 ppm restore exceeds Linux's limit
+half the 150 ppm that a hook that skewed only one of them would leave. A slew
+that the host's time service began before the first sample shows in that
+sample's correction, which half the change covers if the slew ends before the
+second, and one that it begins between the samples follows an update, after
+which a window whose host UTC ran off its correction is retried. A hook that
+skewed host UTC or its correction alone fails every window. The 900 ppm
+restore exceeds Linux's limit
 whatever the host's own correction, and the guest must hold the limit and
 report `frequency_limited=1`. Both restores must also pass the warp probe and
 their restore checks.

@@ -219,6 +219,14 @@ fn samples_check_their_version_flags_status_and_time() {
 }
 
 #[test]
+fn the_test_hook_flag_reports_host_overrides() {
+    let mut sample = valid_sample();
+    assert!(TimeSample::parse(&sample).unwrap().test_hooks());
+    sample[1] = 0;
+    assert!(!TimeSample::parse(&sample).unwrap().test_hooks());
+}
+
+#[test]
 fn the_host_error_counts_only_while_a_time_service_synchronizes_the_host() {
     let host = |status, max_error_us| HostClock {
         status,

@@ -570,7 +570,8 @@ TIME_HOST_CORRECTION_SPACING_SECONDS = 5
 # Seconds after clearing the PLL phase offset: longer than one kernel second even at Linux's
 # slowest allowed correction, so the tick length no longer carries the cached phase correction.
 TIME_HOST_CORRECTION_PHASE_SETTLE_SECONDS = 2
-# The most measurement windows retried after host UTC reports a disruption.
+# The most measurement windows that the guest's report takes, retrying one that
+# the discipline, host UTC, or an unpaired or uncertain sample left unusable.
 TIME_HOST_CORRECTION_ATTEMPTS = 3
 # The largest uncertainty, in ns, of a time sample that a measurement window
 # pairs: the bound of the guest's discipline (SAMPLE_BOUND_NS in
@@ -579,11 +580,6 @@ TIME_HOST_CORRECTION_ATTEMPTS = 3
 # the hooks' corrections: two samples 5 s apart, each uncertain by 1 ms, would
 # allow 400 ppm. Such a window is retried instead.
 TIME_HOST_CORRECTION_SAMPLE_BOUND_NS = 100_000
-# How far, in ppm, the correction that the guest's boot step or restore repair
-# took may be from the one that its first sample publishes, as the host's time
-# service may change it in between: half the 150 ppm of the smallest hook, by
-# which a guest that kept a stale correction would miss it.
-TIME_HOST_CORRECTION_HELD_PPM = 75
 # How far, in ppm, the guest's clock may run from the host's correction that it
 # holds, against the guest TSC counted at the declared rate, beyond the
 # uncertainty of the samples' pairing of the guest's realtime clock with that
@@ -594,9 +590,12 @@ TIME_HOST_CORRECTION_GUEST_PPM = 1
 # same TSC, beyond half the correction's change between the samples and their
 # pairing bounds: half the 150 ppm of the smallest hook that two samples
 # bracket, which a hook that skewed host UTC or its correction alone would
-# leave between them. The host's time service may slew host UTC between two
-# samples, by up to 25 ppm on the test VMs measured so far, which the guest's
-# discipline absorbs at its next poll.
+# leave between them. The host's time service slews host UTC from an update:
+# a slew under way at the first sample shows in its correction, which half the
+# change covers when it ends before the second, and a window between whose
+# samples an update began one that ran host UTC off its correction is retried,
+# as Linux's maximum error shows the update. The guest's discipline absorbs
+# such slews at its next poll.
 TIME_HOST_CORRECTION_HOST_PPM = 75
 TIME_HOST_CORRECTION_STATE_PREFIX = "NVX-TIME-HOST-CORRECTION-STATE: "
 TIME_HOST_CORRECTION_SAMPLE_PREFIX = "NVX-TIME-HOST-CORRECTION-SAMPLE: "
@@ -612,6 +611,10 @@ TIME_HOST_CORRECTION_DISCIPLINE_FIELDS = (
 TIME_HOST_CORRECTION_COMPLETION_MARKER = b"NVX-TIME-HOST-CORRECTION-OK"
 # Linux's limit of the frequency correction, in ppb.
 LINUX_FREQUENCY_LIMIT_PPB = 500_000
+# How much, in us, Linux grows the maximum error of host UTC each second while
+# a time service synchronizes it: MAXFREQ, 500 ppm. The service sets the
+# maximum error at each update of host UTC.
+LINUX_MAX_ERROR_GROWTH_US = 500
 # The flag of a time sample that a test hook altered.
 TIME_SAMPLE_TEST_HOOKS = 0x08
 # The guest finishes a restore after the RCU grace-period release, which gives
@@ -5726,9 +5729,10 @@ def time_host_correction_script(
     """Return the guest's report of the time-host-correction scenario: its time
     state, then up to ``TIME_HOST_CORRECTION_ATTEMPTS`` pairs of samples
     ``spacing_seconds`` apart until host UTC's disruption counter and the
-    discipline are stable and both samples lie within
-    ``TIME_HOST_CORRECTION_SAMPLE_BOUND_NS``, unless Linux's limit holds its
-    frequency correction."""
+    discipline are stable, both samples lie within
+    ``TIME_HOST_CORRECTION_SAMPLE_BOUND_NS``, and the host's time service did
+    not update host UTC between them, unless Linux's limit holds its frequency
+    correction."""
     return _render_script(
         "time-host-correction.sh.in",
         STATE_PREFIX=TIME_HOST_CORRECTION_STATE_PREFIX,
@@ -5737,6 +5741,7 @@ def time_host_correction_script(
         PHASE_SETTLE_SECONDS=str(settle_seconds),
         ATTEMPTS=str(TIME_HOST_CORRECTION_ATTEMPTS),
         SAMPLE_BOUND_NS=str(TIME_HOST_CORRECTION_SAMPLE_BOUND_NS),
+        MAX_ERROR_GROWTH_US=str(LINUX_MAX_ERROR_GROWTH_US),
     )
 
 
@@ -5773,6 +5778,98 @@ def _failed_sample(sample: dict[str, str]) -> str | None:
     return " ".join(f"{key}={value}" for key, value in sample.items())
 
 
+def _time_service_update(first: dict[str, str], second: dict[str, str]) -> str | None:
+    """Return how two time samples show that the host's time service updated
+    host UTC between them, which may begin a slew of host UTC that neither
+    sample's correction shows, or None if they don't.
+
+    While a time service synchronizes host UTC, Linux grows host UTC's maximum
+    error by ``LINUX_MAX_ERROR_GROWTH_US`` each second, and the service sets it
+    at each update, so the second sample's grew by less over the whole seconds
+    between their host UTC. Windows reports no maximum error, so its samples
+    show no update. The guest's script applies the same rule.
+    """
+    if any(sample.get("status") != "synchronized" for sample in (first, second)):
+        return None
+    try:
+        first_error, second_error = (
+            int(sample["max_error_us"]) for sample in (first, second)
+        )
+        utc_ns = int(second["utc_ns"]) - int(first["utc_ns"])
+    except (KeyError, ValueError):
+        return None
+    seconds = max(0, utc_ns // 1_000_000_000)
+    least = first_error + LINUX_MAX_ERROR_GROWTH_US * seconds
+    if second_error >= least:
+        return None
+    return (
+        "the host's time service updated host UTC between the samples: its "
+        f"maximum error went from {first_error} to {second_error} us in "
+        f"{seconds} whole seconds, not to at least {least} us"
+    )
+
+
+class _HostRate(NamedTuple):
+    """How host UTC ran against the guest TSC between two time samples."""
+
+    # Host UTC's rate against the guest TSC counted at the declared rate.
+    host_ppm: float
+    # The average of the two samples' published corrections.
+    published_ppm: float
+    # How far the rate may be from that average.
+    limit_ppm: float
+    # The guest TSC's seconds between the samples.
+    seconds: float
+
+    def failure(self) -> str | None:
+        """Return how host UTC did not run at its published correction, or
+        None if it did."""
+        if abs(self.host_ppm - self.published_ppm) <= self.limit_ppm:
+            return None
+        return (
+            f"host UTC ran at {self.host_ppm:+.3f} ppm against the guest TSC in "
+            f"{self.seconds:.1f} s, not at its published correction of "
+            f"{self.published_ppm:+.3f} ppm, within {self.limit_ppm:.3f} ppm"
+        )
+
+
+def _host_rate(
+    first: dict[str, str],
+    second: dict[str, str],
+    state: dict[str, str],
+    *,
+    context: str,
+) -> _HostRate:
+    """Return how host UTC, which the samples ``first`` and ``second`` pair with
+    the guest TSC, ran against that TSC counted at ``state``'s declared rate,
+    and how far it may run from the samples' published corrections:
+    ``TIME_HOST_CORRECTION_HOST_PPM`` beyond half the correction's change
+    between them and their pairing bounds."""
+    try:
+        elapsed_ns = (
+            (int(second["tsc"]) - int(first["tsc"])) * 1e9 / int(state["tsc_hz"])
+        )
+        utc_ns = int(second["utc_ns"]) - int(first["utc_ns"])
+        pairing_error_ns = int(first["pairing_ns"]) + int(second["pairing_ns"])
+        first_ppm, second_ppm = (
+            int(sample["correction"]) / 65_536 for sample in (first, second)
+        )
+    except (KeyError, ValueError, ZeroDivisionError) as error:
+        raise RuntimeError(f"{context}: malformed guest report: {error!r}") from error
+    if elapsed_ns <= 0:
+        raise RuntimeError(
+            f"{context}: the guest TSC did not advance between the samples"
+        )
+    return _HostRate(
+        host_ppm=(utc_ns / elapsed_ns - 1) * 1e6,
+        published_ppm=(first_ppm + second_ppm) / 2,
+        limit_ppm=TIME_HOST_CORRECTION_HOST_PPM
+        + abs(second_ppm - first_ppm) / 2
+        + pairing_error_ns / elapsed_ns * 1e6,
+        seconds=elapsed_ns / 1e9,
+    )
+
+
 def _time_host_correction_window(
     states: list[dict[str, str]],
     samples: list[dict[str, str]],
@@ -5785,9 +5882,12 @@ def _time_host_correction_window(
 
     Each window's states must keep the accepted-sample count, held correction,
     and clock-step fields, and its samples the host disruption counter, and
-    each sample must pair within ``TIME_HOST_CORRECTION_SAMPLE_BOUND_NS``.
-    Another window is retried, up to ``TIME_HOST_CORRECTION_ATTEMPTS`` times;
-    the limited phase, which takes one sample, is not.
+    each sample must pair within ``TIME_HOST_CORRECTION_SAMPLE_BOUND_NS``. A
+    window between whose samples the host's time service updated host UTC must
+    also show host UTC running at its published correction: the update may
+    begin a slew that neither sample's correction shows. Another window is
+    retried, up to ``TIME_HOST_CORRECTION_ATTEMPTS`` times; the limited phase,
+    which takes one sample, is not.
     """
     if len(states) % 3:
         raise RuntimeError(
@@ -5881,6 +5981,10 @@ def _time_host_correction_window(
                 f"window {window + 1}: a sample's uncertainty of {uncertainty_ns} ns "
                 f"exceeds the {TIME_HOST_CORRECTION_SAMPLE_BOUND_NS} ns bound"
             )
+        elif (update := _time_service_update(first, second)) is not None and (
+            slewed := _host_rate(first, second, after, context=context).failure()
+        ) is not None:
+            reasons.append(f"window {window + 1}: {update}, and {slewed}")
         else:
             return after, [first, second]
     raise RuntimeError(
@@ -6006,10 +6110,12 @@ def check_time_host_correction(
     """Check the guest's report of the time-host-correction scenario in its
     console ``output``, and return a summary of it.
 
-    The correction that the guest's boot step or restore repair took must be
-    the one that its first sample publishes, give or take the host's own
-    changes, so that it isn't a stale one. With ``limit``, that correction must
-    exceed Linux's limit, and the guest must hold the limit and report it.
+    The correction that the guest's boot step or restore repair took must come
+    from a sample that OpenVMM's hook altered, as the time state's
+    ``host_test_hooks`` reports, so that it isn't a stale one: the capture runs
+    without the hook. Its value isn't compared with a later sample's, which the
+    host's time service may have slewed since. With ``limit``, that correction
+    must exceed Linux's limit, and the guest must hold the limit and report it.
     Otherwise it must lie within the limit, and the guest's frequency
     correction must be it, short of the kernel's kHz rounding of the TSC rate;
     between its two samples, the guest's clock must run at the correction that
@@ -6018,10 +6124,11 @@ def check_time_host_correction(
     correction, and host UTC, which each sample pairs with
     the same TSC, at its published correction, give or take the slews of the
     host's time service, so that the hook skewed both alike. A pair whose
-    disruption counter changes, or whose samples failed to pair or are
-    uncertain beyond the discipline's bound, is discarded in favor of one of
-    the bounded retry windows. Every sample must carry OpenVMM's test-hook
-    flag, so that the hook reached it."""
+    disruption counter changes, whose samples failed to pair or are uncertain
+    beyond the discipline's bound, or between whose samples the host's time
+    service updated host UTC, which then ran off its published correction, is
+    discarded in favor of one of the bounded retry windows. Every sample must
+    carry OpenVMM's test-hook flag, so that the hook reached it."""
     states, samples = _time_host_correction_report(output, context=context)
     state, samples = _time_host_correction_window(
         states, samples, context=context, limit=limit
@@ -6041,24 +6148,19 @@ def check_time_host_correction(
         frequency_ppb = int(state["frequency_ppb"])
         correction_ppb = int(state["host_correction_ppb"])
         limited = state["frequency_limited"] == "1"
-
-        def check_held(sample: dict[str, str]) -> float:
-            published = int(sample["correction"]) / 65_536
-            if abs(correction_ppb / 1000 - published) > TIME_HOST_CORRECTION_HELD_PPM:
+        for held_state in (states[0], state):
+            if held_state["host_test_hooks"] != "1":
                 raise RuntimeError(
                     f"{context}: the guest holds the host's correction of "
-                    f"{correction_ppb} ppb, but its first stable sample publishes "
-                    f"{published:+.3f} ppm, more than "
-                    f"{TIME_HOST_CORRECTION_HELD_PPM} ppm away: its boot step or "
-                    "restore repair kept a stale correction"
+                    f"{held_state['host_correction_ppb']} ppb from a sample that "
+                    f"OpenVMM's hook did not alter "
+                    f"(host_test_hooks={held_state['host_test_hooks']}): its boot "
+                    "step or restore repair kept a stale correction"
                 )
-            return published
-
         tsc_hz = int(state["tsc_hz"])
         required_ppm = time_host_correction_guest_ppm(correction_ppb / 1000, tsc_hz)
         beyond = abs(required_ppm) > LINUX_FREQUENCY_LIMIT_PPB / 1000
         if limit:
-            check_held(samples[0])
             if not beyond:
                 raise RuntimeError(
                     f"{context}: Linux's required correction of "
@@ -6090,7 +6192,6 @@ def check_time_host_correction(
                 "this phase cannot check the guest's rate"
             )
         first, second = samples
-        published_ppm = check_held(first)
         allowance_ppb = time_host_correction_frequency_allowance_ppb(
             tsc_hz, correction_ppb
         )
@@ -6110,16 +6211,13 @@ def check_time_host_correction(
         realtime_error_ns = sum(
             int(sample["epsilon_ns"]) - int(sample["pairing_ns"]) for sample in samples
         )
-        pairing_error_ns = sum(int(sample["pairing_ns"]) for sample in samples)
-        first_ppm, second_ppm = (
-            int(sample["correction"]) / 65_536 for sample in samples
-        )
     except (KeyError, ValueError, ZeroDivisionError) as error:
         raise RuntimeError(f"{context}: malformed guest report: {error!r}") from error
     if elapsed_ns <= 0:
         raise RuntimeError(
             f"{context}: the guest TSC did not advance between the samples"
         )
+    host = _host_rate(first, second, state, context=context)
     seconds = elapsed_ns / 1e9
     held_ppm = correction_ppb / 1000
     guest_ppm = (realtime_ns / elapsed_ns - 1) * 1e6
@@ -6141,23 +6239,12 @@ def check_time_host_correction(
             f"TSC in {seconds:.1f} s, not at the host's correction of "
             f"{held_ppm:+.3f} ppm that it holds, within {guest_limit:.3f} ppm"
         )
-    host_ppm = (utc_ns / elapsed_ns - 1) * 1e6
-    published_ppm = (first_ppm + second_ppm) / 2
-    host_limit = (
-        TIME_HOST_CORRECTION_HOST_PPM
-        + abs(second_ppm - first_ppm) / 2
-        + pairing_error_ns / elapsed_ns * 1e6
-    )
-    if abs(host_ppm - published_ppm) > host_limit:
-        raise RuntimeError(
-            f"{context}: host UTC ran at {host_ppm:+.3f} ppm against the guest TSC "
-            f"in {seconds:.1f} s, not at its published correction of "
-            f"{published_ppm:+.3f} ppm, within {host_limit:.3f} ppm"
-        )
+    if (failure := host.failure()) is not None:
+        raise RuntimeError(f"{context}: {failure}")
     return (
         f"{context}: host_correction_ppb={correction_ppb} frequency_ppb={frequency_ppb} "
-        f"guest_ppm={guest_ppm:+.3f} host_ppm={host_ppm:+.3f} "
-        f"published_ppm={published_ppm:+.3f} in {seconds:.1f} s"
+        f"guest_ppm={guest_ppm:+.3f} host_ppm={host.host_ppm:+.3f} "
+        f"published_ppm={host.published_ppm:+.3f} in {seconds:.1f} s"
     )
 
 

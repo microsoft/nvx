@@ -742,6 +742,16 @@ fn cold_boot_in_strict_and_report_only_mode() {
             Some(16_000_000)
         )
     );
+    assert!(!state.host_test_hooks);
+    // The state says when host test hooks altered the initial sample.
+    let mut hooked = window(400);
+    // The sample's first word, after port B's status, holds its version, flags, status, and
+    // reserved bytes.
+    hooked[1] |= u32::from_ne_bytes([0, 0x08, 0, 0]);
+    let ops = FakeOps::new(hooked);
+    let boot = super::cold_boot(&Runtime::new(&ops, false).strict()).unwrap();
+    assert!(boot.synchronized());
+    assert!(state_load().unwrap().host_test_hooks);
 }
 
 #[test]

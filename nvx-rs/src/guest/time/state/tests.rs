@@ -35,6 +35,7 @@ const ROUND_TRIP_STATE: &str = concat!(
     "host_correction_bound_ppb=2\n",
     "host_max_error_us=12500\n",
     "host_disruption=1\n",
+    "host_test_hooks=0\n",
     "samples=17\n",
     "rejected_samples=1\n",
     "last_sample_error=none\n",
@@ -103,6 +104,7 @@ fn malformed_known_values_fail_but_unknown_keys_do_not() {
         b"host_status=synced\n",
         b"host_max_error_us=-1\n",
         b"host_correction_bound_ppb=none\n",
+        b"host_test_hooks=yes\n",
         b"last_sample_error=G_SAMPLE_LATE\n",
     ] {
         assert_eq!(TimeState::parse(text), None, "{}", text.escape_ascii());
@@ -144,7 +146,7 @@ fn an_accepted_sample_records_the_host_discipline() {
         last_sample_error: SampleRejection::Uncertain,
         ..TimeState::default()
     };
-    state.record_sample(&BestSample {
+    let sample = BestSample {
         theta: -42,
         epsilon: 1_800,
         host: decoders::HostClock {
@@ -156,7 +158,9 @@ fn an_accepted_sample_records_the_host_discipline() {
         },
         frequency: 32_768_000,
         limited: true,
-    });
+        test_hooks: true,
+    };
+    state.record_sample(&sample);
     assert_eq!(
         (
             state.samples,
@@ -184,6 +188,16 @@ fn an_accepted_sample_records_the_host_discipline() {
         )
     );
     assert_eq!(state.last_sample_error, SampleRejection::None);
+    // The state says whether host test hooks altered the latest accepted sample, and so
+    // whether a later sample that none altered replaced it.
+    assert!(state.host_test_hooks);
+    assert!(state.to_string().contains("\nhost_test_hooks=1\n"));
+    state.record_sample(&BestSample {
+        test_hooks: false,
+        ..sample
+    });
+    assert!(!state.host_test_hooks);
+    assert!(state.to_string().contains("\nhost_test_hooks=0\n"));
 }
 
 #[test]
@@ -211,8 +225,8 @@ fn records_round_trip_with_their_tokens() {
                     synchronized=1\noffset_ns=-8\nuncertainty_ns=9\nfrequency_ppb=-10\n\
                     frequency_limited=0\nhost_status=unknown\nhost_correction_ppb=-11\n\
                     host_correction_bound_ppb=unknown\nhost_max_error_us=14\nhost_disruption=15\n\
-                    samples=11\nrejected_samples=12\nlast_sample_error=G_SAMPLE_UNCERTAIN\n\
-                    violations=13\n";
+                    host_test_hooks=1\nsamples=11\nrejected_samples=12\n\
+                    last_sample_error=G_SAMPLE_UNCERTAIN\nviolations=13\n";
     let state = TimeState::parse(text.as_bytes()).unwrap();
     assert_eq!(state.to_string(), text);
     assert!(!state.pending(false) && !state.checks_ok());

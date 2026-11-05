@@ -762,6 +762,9 @@ pub(crate) struct BestSample {
     pub(crate) frequency: i64,
     /// Whether Linux's ±500 ppm limit clamped `frequency`.
     pub(crate) limited: bool,
+    /// Whether the sample carried the test-hook flag: host overrides, which only tests make, of
+    /// the time that it published were active.
+    pub(crate) test_hooks: bool,
 }
 
 /// Whether the selected sample satisfied the requested uncertainty bound.
@@ -904,6 +907,7 @@ pub(crate) fn select_sample(
             host: sample.host,
             frequency,
             limited,
+            test_hooks: sample.test_hooks(),
         };
         if best.is_none_or(|best| epsilon < best.epsilon) {
             best = Some(candidate);
