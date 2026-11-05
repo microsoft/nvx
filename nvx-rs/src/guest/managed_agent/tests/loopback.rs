@@ -11,7 +11,7 @@ use crate::protocol::{
     OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, OuterHeader,
 };
 
-use super::seam::tests::{TestSystem, setpriv_shim, spawn_as_privileged};
+use super::seam::tests::{TestSystem, start_as_privileged};
 
 struct BrokerCore {
     guest: UnixStream,

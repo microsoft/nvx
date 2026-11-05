@@ -531,7 +531,7 @@ fn a_machine_id_is_generated_once_per_file() {
 #[test]
 fn a_generated_machine_id_has_mode_0444_whatever_the_umask() {
     // The umask is the process's, so the test runs alone in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_ENTRY_UMASK_TEST_CHILD",
         "guest::entry::tests::a_generated_machine_id_has_mode_0444_whatever_the_umask",
     ) {
@@ -948,7 +948,7 @@ fn each_entry_stage_reports_its_own_failure_and_runs_nothing() {
 fn a_denied_umask_fails_the_proc_stage_and_runs_nothing() {
     // A seccomp filter lasts as long as the thread that installs it, and passes to the processes
     // that the thread starts, so the test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_ENTRY_DENIED_UMASK_TEST_CHILD",
         "guest::entry::tests::a_denied_umask_fails_the_proc_stage_and_runs_nothing",
     ) {
@@ -1034,7 +1034,7 @@ fn check_signals(prepared: Prepared) {
 #[test]
 fn an_entered_program_ignores_and_blocks_no_signal_of_its_caller_s() {
     // Ignoring a signal changes the whole process, so the test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_ENTRY_SIGNALS_TEST_CHILD",
         "guest::entry::tests::an_entered_program_ignores_and_blocks_no_signal_of_its_caller_s",
     ) {
@@ -1472,7 +1472,7 @@ fn check_search(entry: &Entry, root: &Path) {
 
 #[test]
 fn privileged_entries_see_their_own_view_and_identity() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_ENTRY_PRIVILEGED_TEST_CHILD",
         "guest::entry::tests::privileged_entries_see_their_own_view_and_identity",
     ) {
@@ -1601,7 +1601,7 @@ fn privileged_entries_see_their_own_view_and_identity() {
 
 #[test]
 fn privileged_runtime_binds_are_removed_before_a_teardown() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_ENTRY_TEARDOWN_TEST_CHILD",
         "guest::entry::tests::privileged_runtime_binds_are_removed_before_a_teardown",
     ) {

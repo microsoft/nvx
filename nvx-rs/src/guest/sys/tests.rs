@@ -13,7 +13,7 @@ pub(crate) use super::kernel::tests::nice_of;
 pub(crate) use super::port::tests::PortBackend;
 pub(crate) use super::process::tests::{
     BEFORE_LINUX_6_16, continue_traced, deny_system_call, fork_isolated_test, has_exited,
-    spawn_child_without_exit_signal, spawn_traced_child,
+    isolate_process_test, spawn_child_without_exit_signal, spawn_traced_child,
 };
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::process::tests::{deny_group_kill, exit_main_thread, forbid_system_calls};

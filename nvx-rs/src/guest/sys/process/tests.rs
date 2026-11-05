@@ -39,6 +39,26 @@ fn process_group_exists(process: ProcessId) -> bool {
     signal_process_group(process, 0) != Err(Errno::ESRCH)
 }
 
+/// Runs a process-global test in a dedicated test-harness subprocess.
+///
+/// Returns `true` in the parent after the isolated run succeeds and `false` in the child that
+/// should execute the test body. Isolation prevents PID-1-style `waitpid(-1)` behavior from
+/// reaping children that unrelated parallel host tests own.
+pub(crate) fn isolate_process_test(marker: &str, test: &str) -> bool {
+    if std::env::var_os(marker).is_some() {
+        return false;
+    }
+    let status = std::process::Command::new(
+        std::env::current_exe().expect("the test executable has a path"),
+    )
+    .args(["--exact", test, "--nocapture"])
+    .env(marker, "1")
+    .status()
+    .expect("the isolated test process starts");
+    assert!(status.success(), "the isolated test process failed");
+    true
+}
+
 #[test]
 fn process_stats_distinguish_live_userspace_kernel_threads_and_zombies() {
     for (state, flags, threads, live) in [

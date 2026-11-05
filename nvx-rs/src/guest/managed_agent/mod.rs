@@ -3,7 +3,7 @@
 //! time as `UID` and `GID`.
 //!
 //! With `ROOTFS` `-`, the direct agent runs as PID 1: it applies the host mapping table beneath
-//! its own root, `/`, launches each workload in its own cgroup and process group, reaps orphaned
+//! its own root, `/`, launches each workload through nvx-init's plain-process core, reaps orphaned
 //! processes, and powers the VM off after `STOP`. Otherwise the sandbox agent applies the host
 //! mapping table beneath `ROOTFS`, the container's assembled root, has each workload enter
 //! `ROOTFS` as an [`entry`](crate::guest::entry) execution, as `UID` and `GID` with their existing
@@ -15,47 +15,40 @@
 //! is complete, and both keep the C agent's command lines, wire behavior, status and error
 //! categories, 1 MiB output and receive windows, and timeout and cancellation behavior.
 //!
-//! `nvx-managed-agent --exec-config-fd FD -- WORKLOAD...` is the direct agent's internal
-//! execution helper. The launch runs it once the workload's identity applies, and it applies the
-//! environment of the sealed configuration in descriptor `FD`, then executes the workload. The
-//! agent and the helper exit with 0, or with 125 when they fail.
+//! The agent exits with 0, or with 125 when it fails.
 //!
 //! # Structure
 //!
 //! The submodules divide the agent by concern. Mounts, ownership and mode changes, the diagnostic
-//! port, TTY operations, the helper's inherited descriptor and `exec`, the workload launch, the
+//! port, TTY operations, VM shutdown, the workload launch, the
 //! preparation of each sandbox execution, the kernel of the host mapping table's
 //! [mapper](crate::guest::mappings), and the production paths are behind a system seam.
 //! Production implements it with the safe `sys` wrappers; tests substitute temporary directories
 //! and recording operations, including failures of mount, environment export, and `exec`, the
 //! root operations' fake kernel for the mapper, and spawn workloads through the real launch with
-//! its credential calls replaced and a stand-in `setpriv`, or with the stages of the sandbox
+//! its credential calls replaced, or with the stages of the sandbox
 //! agent's entry simulated. The agent keeps the table's account in a
 //! [`MappingTable`](crate::guest::mappings::MappingTable), as any guest agent may, which checks
 //! each part that the host sends and hands its mappings to the agent's mapper.
 //!
-//! The agent launches each workload as one caller of [`spawn`](crate::guest::spawn): it builds
-//! the workload's command, with the complete `argv` and `envp`, its descriptors, in direct mode
-//! its working-directory check and cgroup, and in sandbox mode its entry and barrier, and the
-//! spawned child performs no allocation or Rust cleanup before `execve` or `_exit`. It then drives
-//! the workload as one [`exec::Execution`](crate::guest::exec::Execution), its NVXC adapter: the
-//! execution reads the workload's output, ends it, and reports its launch and outcome, and the
+//! The direct agent uses [`init`](crate::guest::init)'s child builder and execution driver.
+//! The sandbox agent keeps its entry, barrier, and [`exec::Execution`](crate::guest::exec::Execution).
+//! Both build complete `argv` and `envp` before the child starts; the child performs no allocation
+//! or Rust cleanup before `execve` or `_exit`. The execution reads the workload's output,
+//! ends it, and reports its launch and outcome, and the
 //! agent forwards the output as NVXC frames, serves the control session while the workload runs,
 //! and reports the outcome. The agent keeps its own policy: the null device as the workload's
-//! standard input, the identity, the direct agent's `setpriv` and helper stages, the output cap,
+//! standard input, the identity, the output cap,
 //! the timeout, the precedence of a cancellation, a timeout, and the cap over the workload's own
-//! status, and the outcome that it reports for a failed launch stage. The sandbox agent and the
-//! direct agent's helper build the workload's environment in memory, as C's environment
-//! functions changed the helper's own, and pass it to `execve`, so that no process changes its
+//! status, and the outcome that it reports for a failed launch stage. Both build the workload's
+//! environment in memory, as C's environment functions changed it, and pass it to `execve`, so
+//! that no process changes its
 //! environment.
 //!
 //! The agent is its process's one status collector, as the direct agent must be as PID 1: its own
 //! `waitpid(-1)` loop collects every child's status and hands the workload's to the workload's
-//! execution, which otherwise collects it by its pidfd. Its cgroups are a
-//! [`cgroup::Layout`](crate::guest::cgroup::Layout): the direct agent runs in the hierarchy's
-//! root and its workloads in `nvx-exec`, which it kills and settles whole through an
-//! [`ExecutionCgroup`](crate::guest::cgroup::ExecutionCgroup), and which each execution kills
-//! when it ends its workload, and the sandbox agent places each workload in the `container`
+//! execution. The direct core kills each workload's process group, including on normal completion.
+//! The sandbox agent places each workload in the `container`
 //! cgroup that the init agent prepared, and ends only the workload, whose end ends every process
 //! of its PID namespace, and its process group.
 //!
@@ -71,21 +64,17 @@ use super::entry::{Entry, Identity, MachineId};
 use super::status::{CommandError, ExitStatus};
 use super::sys::{self, Errno};
 
-/// Direct-mode cgroup preparation and workload cleanup.
+/// Legacy sandbox workload placement.
 mod cgroup;
 /// C-compatible diagnostics.
 mod diagnostics;
 /// Long-lived control request dispatcher.
 mod dispatch;
-/// Environments that the agent and its helper build for `execve`.
+/// Environments that the agent builds for `execve`.
 mod environment;
 /// The NVXC adapter, which runs each workload as an execution, and its output cap, cancellation,
 /// and timeout.
 mod exec;
-/// Sealed private configuration of the direct agent's helper.
-mod exec_config;
-/// Short-lived post-privilege-drop helper mode of the direct agent.
-mod helper;
 /// Direct and sandbox launch commands.
 mod launch;
 /// Ordered host-filesystem mapping application.
@@ -123,21 +112,15 @@ pub(crate) struct AgentConfig {
 }
 
 /// Runs `nvx-managed-agent` with the process's arguments. It exits with 0, or 125 when the agent
-/// or its execution helper fails.
+/// fails.
 pub fn main() -> ExitCode {
     sys::restore_sigpipe();
     let mut system = RealSystem::new(Paths::default());
     ExitStatus::from(run(&mut system, &sys::args())).into()
 }
 
-/// Dispatches the executable's helper or long-lived agent mode.
+/// Runs the long-lived agent.
 fn run(system: &mut impl System, arguments: &[CString]) -> Result<(), CommandError> {
-    if arguments
-        .get(1)
-        .is_some_and(|argument| argument.as_bytes() == b"--exec-config-fd")
-    {
-        return helper::run(system, arguments);
-    }
     if arguments.len() != 8 {
         return Err(CommandError::Agent);
     }

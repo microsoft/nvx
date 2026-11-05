@@ -2,14 +2,15 @@ use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 
 use crate::guest::entry::{self, Entry, Prepared};
+use crate::guest::init;
 use crate::guest::mappings::{Kernel as MappingKernel, SystemKernel};
 use crate::guest::spawn::{Command, Spawned};
-use crate::guest::sys::{self, Errno, FileDescriptor, Mode, MountFlags, OpenFlags};
+use crate::guest::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
 
 /// Production paths used by the managed agent and replaceable paths used by tests.
 #[derive(Clone, Debug)]
 pub(crate) struct Paths {
-    /// Unified cgroup-v2 root, which holds the agent's cgroup and its workloads' in each mode.
+    /// Unified cgroup-v2 root of the legacy sandbox agent and its workloads.
     pub(crate) cgroup_root: PathBuf,
     /// Parent of OpenVMM's aggregate host-filesystem exports.
     pub(crate) hostfs_dir: PathBuf,
@@ -23,12 +24,8 @@ pub(crate) struct Paths {
     pub(crate) machine_id: PathBuf,
     /// The guest's time status, which the sandbox agent binds for its executions.
     pub(crate) time_status: PathBuf,
-    /// Managed-agent helper executable.
-    pub(crate) helper: PathBuf,
     /// VM exit helper.
     pub(crate) exit: PathBuf,
-    /// Privilege-dropping launcher used in direct mode.
-    pub(crate) setpriv: PathBuf,
 }
 
 impl Default for Paths {
@@ -42,9 +39,7 @@ impl Default for Paths {
             null_device: "/dev/null".into(),
             machine_id: "/run/nvx/workload-machine-id".into(),
             time_status: "/run/nvx/time".into(),
-            helper: "/sbin/nvx-managed-agent".into(),
             exit: "/sbin/nvx-exit".into(),
-            setpriv: "/bin/setpriv".into(),
         }
     }
 }
@@ -53,15 +48,6 @@ impl Default for Paths {
 pub(crate) trait System {
     /// Returns the production or test path set.
     fn paths(&self) -> &Paths;
-
-    /// Performs one mount or bind-remount operation.
-    fn mount(
-        &mut self,
-        source: Option<&CStr>,
-        target: &CStr,
-        filesystem: Option<&CStr>,
-        flags: MountFlags,
-    ) -> Result<(), Errno>;
 
     /// Returns the kernel through which the host mapping table's mapper opens, creates, and
     /// mounts.
@@ -77,9 +63,6 @@ pub(crate) trait System {
     fn drain_tty(&mut self, descriptor: &FileDescriptor) -> Result<(), Errno>;
     /// Writes one diagnostic line through port 0xE9.
     fn write_diagnostic(&mut self, message: &[u8]) -> Result<(), Errno>;
-    /// Returns an owned duplicate of the helper's inherited configuration descriptor, which then
-    /// closes on `exec`.
-    fn take_inherited_descriptor(&mut self, text: &CStr) -> Result<FileDescriptor, Errno>;
     /// Validates one variable that an environment receives, without setting it.
     ///
     /// Production accepts every variable: building an environment in memory cannot fail where C's
@@ -94,6 +77,13 @@ pub(crate) trait System {
     ) -> Result<(), Errno>;
     /// Spawns one workload's launch command.
     fn spawn(&mut self, command: Command) -> Result<Spawned, Errno>;
+    /// Starts a direct workload through init's native plain-process core.
+    fn start_direct(
+        &mut self,
+        request: init::ExecRequest,
+    ) -> Result<init::Exec, init::StartFailure> {
+        init::Exec::start(request)
+    }
     /// Prepares one execution of the sandbox agent's `entry`.
     fn prepare_entry(&mut self, entry: &Entry) -> Result<Prepared, entry::Error>;
     /// Moves the sandbox agent into a mount namespace of its own, and binds `entry`'s runtime
@@ -125,16 +115,6 @@ impl System for RealSystem {
         &self.paths
     }
 
-    fn mount(
-        &mut self,
-        source: Option<&CStr>,
-        target: &CStr,
-        filesystem: Option<&CStr>,
-        flags: MountFlags,
-    ) -> Result<(), Errno> {
-        sys::mount(source, target, filesystem, flags, None)
-    }
-
     fn kernel(&mut self) -> &mut dyn MappingKernel {
         &mut self.kernel
     }
@@ -163,10 +143,6 @@ impl System for RealSystem {
             Mode::empty(),
         )?;
         sys::write_port_diagnostic(&descriptor, message)
-    }
-
-    fn take_inherited_descriptor(&mut self, text: &CStr) -> Result<FileDescriptor, Errno> {
-        sys::take_inherited_descriptor(text)
     }
 
     fn validate_environment(&mut self, _name: &CStr, _value: &CStr) -> Result<(), Errno> {

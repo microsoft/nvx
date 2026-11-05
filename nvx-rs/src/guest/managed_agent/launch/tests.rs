@@ -42,29 +42,21 @@ fn request<'a>(config: &'a AgentConfig, execution: &'a GuestExecPayload) -> Laun
     }
 }
 
-/// Returns a direct agent's paths, whose cgroup root, in `directory`, holds `nvx-exec`.
+/// Returns a direct agent's paths with no cgroup hierarchy.
 fn direct_paths(directory: &std::path::Path) -> Paths {
-    std::fs::create_dir(directory.join("nvx-exec")).unwrap();
-    std::fs::write(directory.join("nvx-exec/cgroup.procs"), b"").unwrap();
     Paths {
-        cgroup_root: directory.to_owned(),
-        setpriv: "/test/setpriv".into(),
-        helper: "/test/nvx-managed-agent".into(),
+        cgroup_root: directory.join("absent-cgroup"),
         ..Paths::default()
     }
 }
 
-/// Prepares the child that launches `execution` with the direct agent's `config`, and
-/// returns it with the number of its sealed configuration descriptor.
+/// Prepares the direct agent's plain-process child without starting it.
 fn prepare_direct(
-    paths: &Paths,
+    _paths: &Paths,
     config: &AgentConfig,
     execution: &GuestExecPayload,
-) -> (PreparedChild, CString) {
-    let config_fd = descriptor();
-    let argument = config_fd.argument();
-    let command = direct_command(paths, request(config, execution), config_fd).unwrap();
-    (command.prepare(), argument)
+) -> ExecRequest {
+    direct_request(config, execution).unwrap()
 }
 
 /// Prepares the child that launches `execution` with the sandbox agent's configuration.
@@ -81,35 +73,15 @@ fn strings(strings: &[CString]) -> Vec<&[u8]> {
 }
 
 #[test]
-fn direct_launch_uses_setpriv_and_clears_every_capability_set() {
+fn direct_launch_uses_the_plain_process_core_without_a_helper_or_cgroup() {
     let temporary = tempfile::tempdir().unwrap();
     let paths = direct_paths(temporary.path());
     let config = config(true);
     let execution = execution();
-    let (plan, descriptor_argument) = prepare_direct(&paths, &config, &execution);
-    assert_eq!(
-        strings(plan.arguments()),
-        [
-            b"setpriv".as_slice(),
-            b"--reuid",
-            b"1000",
-            b"--regid",
-            b"1001",
-            b"--clear-groups",
-            b"--no-new-privs",
-            b"--bounding-set=-all",
-            b"--inh-caps=-all",
-            b"--ambient-caps=-all",
-            b"/test/nvx-managed-agent",
-            b"--exec-config-fd",
-            descriptor_argument.as_bytes(),
-            b"--",
-            b"/bin/echo",
-            b"ok",
-        ]
-    );
-    assert_eq!(plan.program().as_bytes(), b"/test/setpriv");
-    let environment = strings(plan.environment());
+    let plan = prepare_direct(&paths, &config, &execution);
+    assert_eq!(strings(&plan.arguments), [b"/bin/echo".as_slice(), b"ok"]);
+    assert_eq!(plan.program.as_bytes(), b"/bin/echo");
+    let environment = strings(&plan.environment);
     for expected in [
         b"HOME=/home/workload".as_slice(),
         b"USER=workload",
@@ -118,8 +90,162 @@ fn direct_launch_uses_setpriv_and_clears_every_capability_set() {
     ] {
         assert!(environment.contains(&expected), "{expected:?}");
     }
-    assert!(plan.has_cgroup());
-    assert_eq!(plan.barrier_entry_and_session(), (false, false, false));
+    assert!(!paths.cgroup_root.exists());
+    assert!(!plan.input);
+    assert_eq!(plan.account, AccountMode::Numeric);
+}
+
+#[test]
+fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
+    let paths = Paths::default();
+    let config = config(true);
+    let exact = GuestExecPayload {
+        environment: Some(vec![
+            b"EMPTY=".to_vec(),
+            b"VALUE=a=b".to_vec(),
+            b"VALUE=last".to_vec(),
+        ]),
+        ..execution()
+    };
+    let plan = prepare_direct(&paths, &config, &exact);
+    assert_eq!(
+        strings(&plan.environment),
+        [b"EMPTY=".as_slice(), b"VALUE=last"]
+    );
+    assert!(!plan.physical_pwd);
+
+    let empty = GuestExecPayload {
+        environment: Some(Vec::new()),
+        ..execution()
+    };
+    assert!(
+        prepare_direct(&paths, &config, &empty)
+            .environment
+            .is_empty()
+    );
+    let layered = GuestExecPayload {
+        environment: Some(vec![
+            b"HOME=/layered".to_vec(),
+            b"ADDED=1".to_vec(),
+            b"ADDED=2".to_vec(),
+        ]),
+        inherit_default_env: true,
+        ..execution()
+    };
+    let defaults = prepare_direct(&paths, &config, &execution());
+    let mut expected = strings(&defaults.environment);
+    let home = expected
+        .iter()
+        .position(|entry| *entry == b"HOME=/home/workload")
+        .unwrap();
+    expected[home] = b"HOME=/layered";
+    expected.push(b"ADDED=2");
+    assert_eq!(
+        strings(&prepare_direct(&paths, &config, &layered).environment),
+        expected
+    );
+}
+
+#[test]
+#[ignore = "requires a guest's root credentials and priority capabilities"]
+fn privileged_direct_launch_hardens_credentials_and_resets_priority() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+
+    use crate::guest::init::{Event, Exec, Stream};
+
+    let name = "guest::managed_agent::launch::tests::privileged_direct_launch_hardens_credentials_and_resets_priority";
+    if std::env::var_os("NVX_DIRECT_CREDENTIAL_TEST_CHILD").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--ignored", "--nocapture"])
+            .env("NVX_DIRECT_CREDENTIAL_TEST_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    sys::write_number(sys::kernel::OOM_SCORE_ADJUSTMENT, -1000).unwrap();
+    sys::kernel::set_nice(Some(sys::current_process()), -10).unwrap();
+    let config = config(true);
+    let execution = GuestExecPayload {
+        argv: vec![
+            b"/bin/sh".to_vec(),
+            b"-c".to_vec(),
+            b"cat /proc/self/status; printf 'oom='; cat /proc/self/oom_score_adj; \
+              printf 'nice='; cut -d ' ' -f 19 /proc/self/stat; \
+              if (printf '%s\\n' -1000 > /proc/self/oom_score_adj) 2>/dev/null; \
+              then exit 99; fi; printf 'floor=locked\\n'"
+                .to_vec(),
+        ],
+        cwd: None,
+        ..execution()
+    };
+    let mut workload = Exec::start(direct_request(&config, &execution).unwrap()).unwrap();
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let mut buffer = [0; 4096];
+    let started = Instant::now();
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "direct child stalled"
+        );
+        while let Some(reaped) = sys::reap_any_nonblocking() {
+            workload.observe(
+                reaped.process.raw().unsigned_abs(),
+                std::process::ExitStatus::from_raw(reaped.wait_status),
+            );
+        }
+        match workload.next_event(&mut buffer).unwrap() {
+            Some(Event::Launch(report)) => assert!(report.unwrap().is_none()),
+            Some(Event::Output(Stream::Stdout, bytes)) => output.extend_from_slice(bytes),
+            Some(Event::Output(Stream::Stderr, bytes)) => errors.extend_from_slice(bytes),
+            Some(Event::Ended(outcome)) => {
+                assert_eq!(outcome.status.code(), Some(0));
+                break;
+            }
+            Some(Event::ReadFailed(_, error) | Event::KillFailed(_, error)) => {
+                panic!("{error}");
+            }
+            Some(_) => {}
+            None => {
+                let descriptors = workload.descriptors().map(|(_, fd)| fd).collect::<Vec<_>>();
+                sys::readable_or_hung_up(&descriptors, 25).unwrap();
+            }
+        }
+    }
+    let output = String::from_utf8(output).unwrap();
+    for expected in [
+        "Uid:\t1000\t1000\t1000\t1000\n",
+        "Gid:\t1001\t1001\t1001\t1001\n",
+        "NoNewPrivs:\t1\n",
+        "SigBlk:\t0000000000000000\n",
+        "SigIgn:\t0000000000000000\n",
+        "oom=0\n",
+        "nice=0\n",
+        "floor=locked\n",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing {expected:?} in {output}"
+        );
+    }
+    assert!(
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("Groups:"))
+            .unwrap()
+            .trim()
+            .is_empty()
+    );
+    for set in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+        assert!(
+            output.contains(&format!("{set}:\t0000000000000000\n")),
+            "{output}"
+        );
+    }
+    assert!(errors.is_empty(), "{errors:?}");
+    sys::write_standard_error(format!("NVX-DIRECT-CREDENTIAL-CONTROL\n{output}").as_bytes());
 }
 
 #[test]
@@ -266,15 +392,12 @@ fn direct_pwd_is_deferred_only_for_noncanonical_names() {
             cwd: Some(cwd.to_vec()),
             ..execution()
         };
-        let (plan, _) = prepare_direct(&paths, &config, &execution);
-        let slot = plan.physical_pwd().expect("PWD is deferred");
-        assert_eq!(&slot[..4], b"PWD=");
-        assert!(slot[4..].iter().all(|&byte| byte == 0));
-        assert!(plan.physical_pwd_index().is_some());
+        let plan = prepare_direct(&paths, &config, &execution);
+        assert!(plan.physical_pwd, "PWD is deferred");
         assert!(
-            strings(plan.environment())
+            strings(&plan.environment)
                 .iter()
-                .all(|entry| !entry.starts_with(b"PWD=")),
+                .any(|entry| entry.strip_prefix(b"PWD=") == Some(cwd)),
             "{cwd:?}"
         );
     }
@@ -282,8 +405,7 @@ fn direct_pwd_is_deferred_only_for_noncanonical_names() {
         cwd: Some(b"/symlinked/component".to_vec()),
         ..execution()
     };
-    let (plan, _) = prepare_direct(&paths, &config, &execution);
-    assert!(plan.physical_pwd().is_none());
-    assert!(strings(plan.environment()).contains(&b"PWD=/symlinked/component".as_slice()));
-    assert!(plan.has_cgroup());
+    let plan = prepare_direct(&paths, &config, &execution);
+    assert!(!plan.physical_pwd);
+    assert!(strings(&plan.environment).contains(&b"PWD=/symlinked/component".as_slice()));
 }

@@ -4,8 +4,8 @@
 //! A [`Layout`] names the two cgroups that a caller uses: the agent's, which holds the caller
 //! itself, and the workload cgroup, in which or below which its executions run. The library fixes
 //! neither, and refuses a workload cgroup that holds the agent's, so that ending a workload's
-//! processes never ends the agent. NVX's managed agent, for example, runs as PID 1 in the
-//! hierarchy's root, and runs its workloads in the root's `nvx-exec`.
+//! processes never ends the agent. NVX's legacy sandbox, for example, keeps its agents in the
+//! `nvx` cgroup and its workloads in the sibling `container` cgroup.
 //!
 //! An [`ExecutionCgroup`] is the handle of one execution's cgroup: the workload cgroup itself,
 //! for a caller that runs one execution at a time, or a child cgroup of it, for one that runs

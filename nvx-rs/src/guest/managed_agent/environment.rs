@@ -1,4 +1,4 @@
-//! Environments that the agent and its helper build in memory and pass to `execve`.
+//! Environments that the agent builds in memory and passes to `execve`.
 //!
 //! An environment changes as C's own did under musl's environment functions: setting a variable,
 //! as `setenv` and `putenv` do, replaces its first entry in place or appends one.

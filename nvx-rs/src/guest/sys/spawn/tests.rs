@@ -222,7 +222,7 @@ fn invalid_specs_are_refused_before_forking() {
 
 #[test]
 fn stream_sources_below_the_standard_streams_are_raised_and_kept_from_the_program() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_LOW_STREAM_TEST_CHILD",
         "guest::sys::spawn::tests::stream_sources_below_the_standard_streams_are_raised_and_kept_from_the_program",
     ) {
@@ -257,7 +257,7 @@ fn stream_sources_below_the_standard_streams_are_raised_and_kept_from_the_progra
 
 #[test]
 fn the_report_writer_is_raised_above_the_standard_streams() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_LOW_REPORT_TEST_CHILD",
         "guest::sys::spawn::tests::the_report_writer_is_raised_above_the_standard_streams",
     ) {
@@ -355,7 +355,7 @@ fn inherited_physical_pwd() -> ChildSpec {
 
 #[test]
 fn a_physical_path_longer_than_the_entry_fails_its_stage() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_LONG_PHYSICAL_PWD_TEST_CHILD",
         "guest::sys::spawn::tests::a_physical_path_longer_than_the_entry_fails_its_stage",
     ) {
@@ -392,7 +392,7 @@ fn a_physical_path_longer_than_the_entry_fails_its_stage() {
 
 #[test]
 fn a_working_directory_outside_the_root_has_no_physical_path() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_UNREACHABLE_PWD_TEST_CHILD",
         "guest::sys::spawn::tests::a_working_directory_outside_the_root_has_no_physical_path",
     ) {
@@ -563,7 +563,7 @@ fn the_kernel_refuses_every_path_that_a_search_s_buffer_cannot_hold() {
 
 #[test]
 fn an_entry_leads_a_session_and_keeps_its_barrier_from_the_program() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_ENTRY_BARRIER_TEST_CHILD",
         "guest::sys::spawn::tests::an_entry_leads_a_session_and_keeps_its_barrier_from_the_program",
     ) {

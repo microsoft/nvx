@@ -911,7 +911,7 @@ fn a_root_mounts_nothing_through_a_symbolic_link() {
 #[test]
 fn new_upper_and_work_directories_have_mode_0755_whatever_the_umask() {
     // The umask is the process's, so the test runs alone in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_ROOT_UMASK_TEST_CHILD",
         "guest::root::tests::new_upper_and_work_directories_have_mode_0755_whatever_the_umask",
     ) {

@@ -1,4 +1,13 @@
+use std::ffi::CString;
+
 use super::*;
+
+impl FileDescriptor {
+    /// Formats the descriptor number for inherited-descriptor tests.
+    pub(crate) fn argument(&self) -> CString {
+        CString::new(self.0.as_raw_fd().to_string()).expect("a decimal descriptor has no NUL")
+    }
+}
 
 /// Sets the soft limit of the process's open descriptors to `limit`, and returns the limit that
 /// it replaced, for a test that runs out of descriptors in a process of its own.
@@ -23,12 +32,4 @@ pub(crate) fn set_descriptor_limit(limit: nix::libc::rlim_t) -> Result<nix::libc
 /// system calls in this module.
 pub(crate) fn create_fifo(path: &CStr, mode: Mode) -> Result<(), Errno> {
     nix::unistd::mkfifo(path, mode)
-}
-
-impl FileDescriptor {
-    /// Returns whether this descriptor carries every seal that `seal_immutable` adds.
-    pub(crate) fn is_sealed_immutable(&self) -> Result<bool, Errno> {
-        let seals = fcntl(&self.0, FcntlArg::F_GET_SEALS).map(SealFlag::from_bits_retain)?;
-        Ok(seals.contains(IMMUTABLE_SEALS))
-    }
 }

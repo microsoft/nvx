@@ -56,19 +56,20 @@ fn environment_failures_stop_direct_and_sandbox_launches_before_exec() {
         let failure = validate(direct, b"PWD", &execution(None)).unwrap_err();
         assert!(matches!(failure, EnvironmentFailure::Launch(Errno::ENOMEM)));
     }
-    // The sandbox agent applies the request's entries itself, and the direct agent's helper
-    // applies them after the launch.
     let layered = execution(Some(vec![b"LAYERED=value".to_vec()]));
-    assert!(validate(true, b"LAYERED", &layered).is_ok());
-    let failure = validate(false, b"LAYERED", &layered).unwrap_err();
-    assert!(matches!(
-        failure,
-        EnvironmentFailure::Child(Errno::ENOMEM, ENVIRONMENT_DIAGNOSTIC)
-    ));
+    for direct in [true, false] {
+        let failure = validate(direct, b"LAYERED", &layered).unwrap_err();
+        assert!(matches!(
+            failure,
+            EnvironmentFailure::Child(Errno::ENOMEM, ENVIRONMENT_DIAGNOSTIC)
+        ));
+    }
     // An exact environment replaces the workload's `PWD`, so none is validated.
     let exact = GuestExecPayload {
         inherit_default_env: false,
         ..execution(Some(Vec::new()))
     };
-    assert!(validate(false, b"PWD", &exact).is_ok());
+    for direct in [true, false] {
+        assert!(validate(direct, b"PWD", &exact).is_ok());
+    }
 }

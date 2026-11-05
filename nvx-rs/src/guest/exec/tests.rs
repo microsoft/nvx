@@ -426,7 +426,7 @@ fn stdin_eof_follows_every_byte_that_a_write_took() {
 fn a_program_that_closes_its_input_ends_the_writes_without_sigpipe() {
     // A `SIGPIPE` would end this process under its default disposition, so the test runs in a
     // process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_EXEC_SIGPIPE_TEST_CHILD",
         "guest::exec::tests::a_program_that_closes_its_input_ends_the_writes_without_sigpipe",
     ) {
@@ -457,7 +457,7 @@ fn a_program_that_closes_its_input_ends_the_writes_without_sigpipe() {
 
 #[test]
 fn concurrent_writers_meet_closed_inputs_without_sigpipe() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_EXEC_SIGPIPE_THREADS_TEST_CHILD",
         "guest::exec::tests::concurrent_writers_meet_closed_inputs_without_sigpipe",
     ) {
@@ -1013,7 +1013,7 @@ fn a_kill_never_reaches_a_cgroup_that_took_the_path_later() {
 fn a_failed_start_ends_the_program_and_its_cgroup_even_without_descriptors() {
     // Other tests could open nothing under the lowered descriptor limit, so this test runs in a
     // process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_EXEC_DESCRIPTOR_LIMIT_TEST_CHILD",
         "guest::exec::tests::a_failed_start_ends_the_program_and_its_cgroup_even_without_descriptors",
     ) {
@@ -1071,10 +1071,7 @@ fn a_failed_start_ends_a_program_that_joined_another_process_group() {
         return;
     }
     // As the test above, it lowers the descriptor limit, so it runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
-        "NVX_EXEC_GROUP_JOINER_TEST_CHILD",
-        TEST,
-    ) {
+    if crate::guest::sys::tests::isolate_process_test("NVX_EXEC_GROUP_JOINER_TEST_CHILD", TEST) {
         return;
     }
     let temporary = tempfile::tempdir().unwrap();
@@ -1357,7 +1354,7 @@ fn adopting_a_program_whose_status_another_collector_took_ends_nothing_by_id() {
 #[test]
 fn a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors() {
     // As for a failed start, the lowered descriptor limit runs this test in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_EXEC_ADOPT_DESCRIPTOR_LIMIT_TEST_CHILD",
         "guest::exec::tests::a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors",
     ) {
@@ -1390,7 +1387,7 @@ fn a_failed_adoption_ends_the_program_and_its_cgroup_without_descriptors() {
 fn adopted_ends_are_pipe_ends_that_go_the_way_of_their_streams() {
     // For a moment the caller's ends are inheritable, and a child that another test's thread
     // started meanwhile could keep them, so this test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_EXEC_ADOPTED_ENDS_TEST_CHILD",
         "guest::exec::tests::adopted_ends_are_pipe_ends_that_go_the_way_of_their_streams",
     ) {
@@ -1765,7 +1762,7 @@ fn signal_once_a_collector_took_the_status(
 fn a_failed_group_lookup_is_an_error_that_sends_no_second_signal() {
     // A seccomp filter lasts as long as the thread that installs it, and passes to the processes
     // that the thread starts, so the test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_EXEC_DENIED_GETPGID_TEST_CHILD",
         "guest::exec::tests::a_failed_group_lookup_is_an_error_that_sends_no_second_signal",
     ) {

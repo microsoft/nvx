@@ -1,25 +1,18 @@
 //! Owned file descriptors and safe file-oriented system operations.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 pub(crate) use nix::fcntl::OFlag as OpenFlags;
-use nix::fcntl::{FcntlArg, FdFlag, Flock, FlockArg, SealFlag, fcntl};
+use nix::fcntl::{FcntlArg, FdFlag, Flock, FlockArg, fcntl};
 use nix::poll::{PollFd, PollFlags};
-use nix::sys::memfd::{MFdFlags, memfd_create};
 use nix::sys::socket::{AddressFamily, Shutdown, SockFlag, SockType, shutdown, socketpair};
 pub(crate) use nix::sys::stat::Mode;
 use nix::sys::stat::SFlag;
 use nix::unistd::Whence;
 
 use super::Errno;
-
-/// The seals that make an execution configuration immutable.
-const IMMUTABLE_SEALS: SealFlag = SealFlag::F_SEAL_WRITE
-    .union(SealFlag::F_SEAL_GROW)
-    .union(SealFlag::F_SEAL_SHRINK)
-    .union(SealFlag::F_SEAL_SEAL);
 
 /// An owned file descriptor.
 ///
@@ -38,11 +31,6 @@ impl FileDescriptor {
     pub(super) unsafe fn from_raw(descriptor: RawFd) -> Self {
         // SAFETY: the caller guarantees that the descriptor is open and has no other owner.
         Self(unsafe { OwnedFd::from_raw_fd(descriptor) })
-    }
-
-    /// Formats the descriptor number as a NUL-terminated decimal argument.
-    pub(crate) fn argument(&self) -> CString {
-        CString::new(self.0.as_raw_fd().to_string()).expect("a decimal descriptor has no NUL")
     }
 
     /// Reads bytes once, without retrying an interrupted call.
@@ -168,20 +156,10 @@ impl FileDescriptor {
         fcntl(&self.0, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map(|_| ())
     }
 
-    /// Rewinds this descriptor to byte zero.
-    pub(crate) fn rewind(&self) -> Result<(), Errno> {
-        nix::unistd::lseek(&self.0, 0, Whence::SeekSet).map(|_| ())
-    }
-
     /// Moves this descriptor to the end of its file. On the kernel log device, it skips the
     /// records already written, so that reads return only later ones.
     pub(crate) fn seek_end(&self) -> Result<(), Errno> {
         nix::unistd::lseek(&self.0, 0, Whence::SeekEnd).map(|_| ())
-    }
-
-    /// Adds the complete immutable-file seal set used by execution configurations.
-    pub(crate) fn seal_immutable(&self) -> Result<(), Errno> {
-        fcntl(&self.0, FcntlArg::F_ADD_SEALS(IMMUTABLE_SEALS)).map(|_| ())
     }
 
     /// Closes this descriptor and returns an error if the kernel reports one.
@@ -252,11 +230,6 @@ pub(crate) fn open_at(
     mode: Mode,
 ) -> Result<FileDescriptor, Errno> {
     nix::fcntl::openat(&directory.0, name, flags, mode).map(FileDescriptor)
-}
-
-/// Creates an anonymous close-on-exec file that permits seals.
-pub(crate) fn create_memfd(name: &CStr) -> Result<FileDescriptor, Errno> {
-    memfd_create(name, MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING).map(FileDescriptor)
 }
 
 /// Creates a close-on-exec pipe and returns its owned read and write ends.
