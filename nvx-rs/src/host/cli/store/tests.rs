@@ -28,6 +28,13 @@ fn released(mut free: impl FnMut() -> bool) -> bool {
     true
 }
 
+/// Keeps process creation outside another thread's window of inheritable VMM handles.
+#[cfg(windows)]
+fn spawn_locked(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    let _lock = platform::inherit::lock_spawns();
+    command.spawn()
+}
+
 /// Makes `link` a junction to the directory `target`, which any user may create, with `cmd`'s
 /// `mklink /J`, quoting both paths, since `cmd` splits its arguments at commas and semicolons.
 ///
@@ -46,10 +53,7 @@ fn junction(link: &Path, target: &Path) {
             target.display()
         ))
         .stdout(Stdio::null());
-    let status = platform::inherit::spawn_command(&mut command)
-        .unwrap()
-        .wait()
-        .unwrap();
+    let status = spawn_locked(&mut command).unwrap().wait().unwrap();
     assert!(status.success(), "cannot link {}", link.display());
 }
 
@@ -66,10 +70,7 @@ fn allow_everyone(path: &Path, inheritance: &str) {
         .arg("/grant")
         .arg(format!("*S-1-1-0:{inheritance}(F)"))
         .stdout(Stdio::null());
-    let status = platform::inherit::spawn_command(&mut command)
-        .unwrap()
-        .wait()
-        .unwrap();
+    let status = spawn_locked(&mut command).unwrap().wait().unwrap();
     assert!(status.success(), "cannot share {}", path.display());
 }
 
