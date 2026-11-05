@@ -146,7 +146,7 @@ impl Artifacts {
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) otherwise, with the
     /// code [`ErrorCode::ArtifactMissing`] for a missing file. It does not check the hypervisor;
-    /// [`probe_hypervisor`](super::platform::probe_hypervisor) does.
+    /// [`probe_hypervisor`](super::runtime::probe_hypervisor) does.
     pub fn probe(&self) -> Result<()> {
         if !platform::SUPPORTED {
             return Err(Error::unavailable(
