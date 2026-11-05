@@ -24,9 +24,20 @@ fn codes_determine_kinds() {
     assert_eq!(error.code(), ErrorCode::SandboxExited);
     assert_eq!(error.kind(), ErrorKind::Exited);
     assert_eq!(error.into_parts().0, ErrorKind::Exited);
+    let mismatch = Error::new(ErrorCode::RuntimeMismatch, "another runtime");
+    assert_eq!(mismatch.code(), ErrorCode::RuntimeMismatch);
+    assert_eq!(mismatch.kind(), ErrorKind::RuntimeMismatch);
+    let (kind, message, source) = mismatch.into_parts();
+    assert_eq!(kind, ErrorKind::RuntimeMismatch);
+    assert_eq!(message, "another runtime");
+    assert!(source.is_none());
     assert_eq!(
         Error::new(ErrorKind::TimedOut, "late").code(),
         ErrorCode::TimedOut
+    );
+    assert_eq!(
+        Error::new(ErrorKind::RuntimeMismatch, "elsewhere").code(),
+        ErrorCode::RuntimeMismatch
     );
     assert_eq!(Error::unsupported("no").code(), ErrorCode::Unsupported);
     assert_eq!(
@@ -45,6 +56,7 @@ fn every_kind_has_a_code_of_its_own_spelling() {
         ErrorKind::NotFound,
         ErrorKind::Protocol,
         ErrorKind::TimedOut,
+        ErrorKind::RuntimeMismatch,
         ErrorKind::Other,
     ] {
         let code = ErrorCode::from(kind);

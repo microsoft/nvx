@@ -1,12 +1,78 @@
-//! The runtime identity of a VM: the identities of its VMM, kernel, and initramfs, and the
-//! versions of the contracts between its host, its VMM, and its guest.
+//! What every launch shares: a [`Runtime`], the OpenVMM executable, guest kernel, and guest
+//! initramfs that it runs, with their [`RuntimeIdentity`], the hypervisor, which
+//! [`probe_hypervisor`] checks, and the [`LaunchOptions`].
+//!
+//! The runtime identity of a VM is the identities of its VMM, kernel, and initramfs, and the
+//! versions of the contracts between its host, its VMM, and its guest. The sandbox
+//! [`store`](crate::host::store) records it, and re-exports its types.
 
 use std::fmt;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::platform;
 use crate::contract;
 use crate::error::{Error, Result};
+use crate::hypervisor::Hypervisor;
+
+/// What every launch shares: the runtime's files and their identity, the hypervisor, and the
+/// options of OpenVMM that do not depend on the VM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Runtime {
+    /// The OpenVMM executable.
+    pub openvmm: PathBuf,
+    /// The guest kernel.
+    pub kernel: PathBuf,
+    /// The guest initramfs.
+    pub initramfs: PathBuf,
+    /// The identity of the three files and of the contracts that they speak, which the caller
+    /// takes from their install or staging metadata: NVX compares identities and never reads the
+    /// files.
+    pub identity: RuntimeIdentity,
+    /// The hypervisor that OpenVMM runs the VM on.
+    pub hypervisor: Hypervisor,
+    /// The CPU profile that OpenVMM presents to the guest, by OpenVMM's name for it, or `None`
+    /// for OpenVMM's default.
+    pub cpu_profile: Option<String>,
+    /// Windows only: start OpenVMM outside the caller's job object, so that the VM survives the
+    /// caller. The job must permit breakaway.
+    pub windows_breakaway: bool,
+    /// The options of OpenVMM that every launch shares.
+    pub options: LaunchOptions,
+}
+
+/// The options of OpenVMM that every launch shares. The boot console is not one of them: each VM
+/// attaches its own.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LaunchOptions {
+    /// What OpenVMM does when the guest powers off.
+    pub guest_shutdown: GuestPowerAction,
+    /// How long OpenVMM waits for the host to authenticate on the control console, or `None` for
+    /// OpenVMM's default.
+    pub control_auth_timeout: Option<Duration>,
+}
+
+/// What OpenVMM does when the guest powers off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum GuestPowerAction {
+    /// OpenVMM exits, which ends the VM: the default, on which stopping a VM relies.
+    #[default]
+    Exit,
+    /// OpenVMM halts the VM and keeps running.
+    Halt,
+    /// OpenVMM restarts the guest.
+    Reset,
+}
+
+/// Checks that `hypervisor` is present and accessible on this host: its device on Linux, and the
+/// Windows Hypervisor Platform on Windows.
+///
+/// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) otherwise.
+pub fn probe_hypervisor(hypervisor: Hypervisor) -> Result<()> {
+    platform::probe_hypervisor(hypervisor).map_err(Error::unavailable)
+}
 
 /// Longest [`ArtifactIdentity`] and control contract revision, in bytes.
 pub const MAX_IDENTITY_LEN: usize = 128;
@@ -159,7 +225,7 @@ impl fmt::Display for IdentityPart {
 /// build of the host's own code keeps the VM running and reattaches to it. A different runtime
 /// identity would drive the VM through artifacts or contracts that did not start it, so the VM
 /// must be stopped instead, through its verified process identity; see
-/// [`RuntimeRecord::check_identity`](super::RuntimeRecord::check_identity).
+/// [`RuntimeRecord::check_identity`](crate::host::store::RuntimeRecord::check_identity).
 ///
 /// The caller takes the artifact identities from install or staging metadata, and
 /// [`RuntimeIdentity::new`] adds the contract versions that this crate speaks.
@@ -233,13 +299,5 @@ impl RuntimeIdentity {
     }
 }
 
-/// How the runtime identity of a record compares with the current one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IdentityCheck {
-    /// The identities are equal: the host may reattach to the VM and keep it running.
-    Matches,
-    /// The identities differ in the parts that this lists, as
-    /// [`RuntimeIdentity::differences`] returns them: the VM must be stopped, and only through
-    /// its verified process identity.
-    Mismatched(Vec<IdentityPart>),
-}
+#[cfg(test)]
+mod tests;

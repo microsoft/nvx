@@ -1,5 +1,5 @@
-//! Tests of the store's identities, records, lock, and launch bookkeeping. The launches of real
-//! processes and the recovery of interrupted ones are tested in `tests/store.rs`.
+//! Tests of the store's records, lock, and launch bookkeeping. The launches of real processes and
+//! the recovery of interrupted ones are tested in `tests/store.rs`.
 
 use std::fs;
 use std::sync::mpsc;
@@ -44,93 +44,6 @@ fn store() -> (tempfile::TempDir, SandboxStore) {
 /// Writes `value` as the file `name` of `store`.
 fn write(store: &SandboxStore, name: &str, value: &serde_json::Value) {
     fs::write(store.path(name), serde_json::to_vec(value).unwrap()).unwrap();
-}
-
-#[test]
-fn artifact_identities_are_printable_tokens() {
-    assert_eq!(
-        ArtifactIdentity::new("openvmm-1.2+build.7")
-            .unwrap()
-            .as_str(),
-        "openvmm-1.2+build.7"
-    );
-    for invalid in [
-        String::new(),
-        "with space".to_owned(),
-        "tab\there".to_owned(),
-        "caf\u{e9}".to_owned(),
-        "x".repeat(MAX_IDENTITY_LEN + 1),
-    ] {
-        let error = ArtifactIdentity::new(invalid.clone()).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unsupported, "{invalid:?}");
-    }
-    assert!(ArtifactIdentity::new("x".repeat(MAX_IDENTITY_LEN)).is_ok());
-
-    let digest = "AB".repeat(32);
-    assert_eq!(
-        ArtifactIdentity::sha256(&digest).unwrap().to_string(),
-        format!("sha256:{}", "ab".repeat(32))
-    );
-    for invalid in ["ab".repeat(31), "g".repeat(64), "ab".repeat(33)] {
-        assert_eq!(
-            ArtifactIdentity::sha256(&invalid).unwrap_err().kind(),
-            ErrorKind::Unsupported
-        );
-    }
-    // The serde form checks the token too.
-    assert!(serde_json::from_value::<ArtifactIdentity>(serde_json::json!("a b")).is_err());
-}
-
-#[test]
-fn runtime_identities_bind_this_crates_contracts() {
-    let identity = runtime();
-    assert_eq!(identity.boot_contract, contract::BOOT_CONTRACT_VERSION);
-    assert_eq!(
-        identity.control_contract,
-        contract::CONTROL_CONTRACT_REVISION
-    );
-    assert_eq!(
-        identity.control_session,
-        contract::CONTROL_SESSION_PROTOCOL_VERSION
-    );
-    identity.check().unwrap();
-    assert!(identity.differences(&runtime()).is_empty());
-
-    let mut other = runtime();
-    other.kernel = artifact('d');
-    other.control_session += 1;
-    assert_eq!(
-        identity.differences(&other),
-        [IdentityPart::Kernel, IdentityPart::ControlSession]
-    );
-    other = RuntimeIdentity::new(artifact('e'), artifact('b'), artifact('f'));
-    other.boot_contract += 1;
-    other.control_contract = "another-revision".to_owned();
-    assert_eq!(
-        identity.differences(&other),
-        [
-            IdentityPart::OpenVmm,
-            IdentityPart::Initramfs,
-            IdentityPart::BootContract,
-            IdentityPart::ControlContract
-        ]
-    );
-    let names: Vec<_> = IdentityPart::ALL.iter().map(ToString::to_string).collect();
-    assert_eq!(
-        names,
-        [
-            "OpenVMM",
-            "kernel",
-            "initramfs",
-            "boot contract",
-            "control contract",
-            "control session"
-        ]
-    );
-    for invalid in ["", "two words"] {
-        other.control_contract = invalid.to_owned();
-        assert_eq!(other.check().unwrap_err().kind(), ErrorKind::Unsupported);
-    }
 }
 
 #[test]
