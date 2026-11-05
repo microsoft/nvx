@@ -2883,9 +2883,13 @@ the mapper of `mappings` mounts host mappings beneath the descriptors of the
 roots that its caller names, and `root` bootstraps the guest for a layered root
 through `cgroup`, assembles the root, mounts live shares and mappings in it
 through the mapper, and tears it down.
-`nvx-managed-agent` opens its control terminal, and launches, drives, collects,
-and settles its workloads, through them, has each sandbox workload enter its
-execution through `entry`, and applies its host mapping table through
+`nvx-managed-agent` opens its control terminal and runs direct workloads through
+nvx-init's plain-process core: each child resets its priority, drops its
+credentials and capabilities, and enters its working directory before exec.
+Each execution ends its process group, including on normal completion, without
+cgroups, namespaces, limits, or a privilege-dropping helper. The legacy sandbox
+mode keeps its root entry, launch barrier, and cgroup placement. Both apply
+their host mapping table through
 `mappings`, from its mount of the host's export, beneath `/` in direct mode and
 beneath the container's assembled root in sandbox mode, where it unmounts the
 table before it returns to the init agent, and any other guest init or agent
@@ -2907,7 +2911,7 @@ disk's block device.
 | `nvx-reseed [--generation-only] SEED_FILE [PREVIOUS]`, `nvx-reseed --sample` | Reseeds the kernel's random number generator from a seed file and checks its VM generation ID, or prints a random sample |
 | `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
 | `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
-| `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is the direct agent's internal launch helper |
+| `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads (x86_64) |
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |

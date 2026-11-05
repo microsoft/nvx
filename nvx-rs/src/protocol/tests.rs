@@ -292,16 +292,13 @@ fn the_host_requires_every_feature() {
     assert_eq!(
         GuestFeatures::CANCEL
             | GuestFeatures::WORKLOAD_ACCOUNT
-            | GuestFeatures::EXEC_CGROUP
             | GuestFeatures::EXEC_ENVIRONMENT
             | GuestFeatures::EXEC_CWD
             | GuestFeatures::HOST_MAPPING_TABLE,
         GuestFeatures::REQUIRED
     );
-    assert_eq!(
-        GuestFeatures::REQUIRED.encode()[..],
-        vector(NVXC_V1, "FEATURES", "ALL").bytes
-    );
+    assert!(!GuestFeatures::DIRECT_AGENT.contains(GuestFeatures::EXEC_CGROUP));
+    assert!(!GuestFeatures::REQUIRED.contains(GuestFeatures::EXEC_CGROUP));
 }
 
 #[test]
@@ -565,7 +562,6 @@ fn guest_features_report_what_a_guest_lacks() {
         cancel_only.missing(required),
         [
             "workload accounts",
-            "workload containment",
             "per-execution environments",
             "working directories",
             "host path mapping tables",
@@ -937,7 +933,7 @@ fn host_mapping_count_splits_the_command_line_as_the_guest_init_does() {
 
 #[test]
 fn both_agent_modes_announce_the_host_mapping_table() {
-    assert_eq!(GuestFeatures::DIRECT_AGENT.bits(), 0x7d);
+    assert_eq!(GuestFeatures::DIRECT_AGENT.bits(), 0x75);
     // The layered root creates no account, so it announces no workload accounts (bit 2).
     assert_eq!(GuestFeatures::SANDBOX_AGENT.bits(), 0x51);
     assert!(!GuestFeatures::SANDBOX_AGENT.contains(GuestFeatures::WORKLOAD_ACCOUNT));

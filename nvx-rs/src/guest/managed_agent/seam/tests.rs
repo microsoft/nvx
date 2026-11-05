@@ -7,8 +7,6 @@ pub(crate) type RecordedExec = (Vec<u8>, Vec<Vec<u8>>, Option<Vec<Vec<u8>>>);
 
 pub(crate) struct TestSystem {
     pub(crate) paths: Paths,
-    pub(crate) mounts: Vec<(Option<Vec<u8>>, Vec<u8>, MountFlags)>,
-    pub(crate) fail_mount_call: Option<usize>,
     /// The root operations' fake kernel, through which the host mapping table's mapper works in
     /// the test's temporary directories, and which records its mounts.
     pub(crate) kernel: crate::guest::root::tests::FakeKernel,
@@ -18,10 +16,10 @@ pub(crate) struct TestSystem {
     pub(crate) spawn_calls: usize,
     /// Spawns each workload's launch command when set; `spawn` otherwise fails with `ENOSYS`.
     pub(crate) spawner: Option<fn(Command) -> Result<Spawned, Errno>>,
+    pub(crate) direct_starter:
+        Option<fn(init::ExecRequest) -> Result<init::Exec, init::StartFailure>>,
     pub(crate) tty_configured: usize,
     pub(crate) tty_drained: usize,
-    /// Owned descriptors awaiting a simulated helper-entry transfer.
-    pub(crate) inherited_descriptors: Vec<(Vec<u8>, FileDescriptor)>,
     /// The sandbox executions that `prepare_entry` prepared, each simulated, without
     /// privileges: see [`Prepared::simulated`].
     pub(crate) entries_prepared: usize,
@@ -39,17 +37,15 @@ impl TestSystem {
     pub(crate) fn new(paths: Paths) -> Self {
         Self {
             paths,
-            mounts: Vec::new(),
-            fail_mount_call: None,
             kernel: crate::guest::root::tests::FakeKernel::default(),
             diagnostics: Vec::new(),
             fail_environment: None,
             execs: Vec::new(),
             spawn_calls: 0,
             spawner: None,
+            direct_starter: None,
             tty_configured: 0,
             tty_drained: 0,
-            inherited_descriptors: Vec::new(),
             entries_prepared: 0,
             entry_failure: None,
             refuse_entry: false,
@@ -58,18 +54,10 @@ impl TestSystem {
         }
     }
 
-    /// Returns a system whose cgroup root, in a new temporary directory that the caller keeps,
-    /// holds empty membership and controller files and an `nvx-exec` cgroup without tasks.
-    pub(crate) fn with_cgroup() -> (tempfile::TempDir, Self) {
+    /// Returns a direct agent with no cgroup hierarchy in its temporary directory.
+    pub(crate) fn with_direct() -> (tempfile::TempDir, Self) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("cgroup");
-        let execution = root.join("nvx-exec");
-        std::fs::create_dir_all(&execution).unwrap();
-        std::fs::write(root.join("cgroup.procs"), b"").unwrap();
-        std::fs::write(root.join("cgroup.subtree_control"), b"").unwrap();
-        std::fs::write(execution.join("pids.current"), b"0\n").unwrap();
-        std::fs::write(execution.join("cgroup.kill"), b"").unwrap();
-        std::fs::write(execution.join("cgroup.procs"), b"").unwrap();
         let paths = Paths {
             cgroup_root: root,
             ..Paths::default()
@@ -110,38 +98,11 @@ impl TestSystem {
         };
         (temporary, Self::new(paths))
     }
-
-    /// Registers one owned descriptor and returns its simulated inherited argument.
-    pub(crate) fn transfer_inherited_descriptor(&mut self, descriptor: FileDescriptor) -> CString {
-        let argument = descriptor.argument();
-        self.inherited_descriptors
-            .push((argument.as_bytes().to_vec(), descriptor));
-        argument
-    }
 }
 
 impl System for TestSystem {
     fn paths(&self) -> &Paths {
         &self.paths
-    }
-
-    fn mount(
-        &mut self,
-        source: Option<&CStr>,
-        target: &CStr,
-        _filesystem: Option<&CStr>,
-        flags: MountFlags,
-    ) -> Result<(), Errno> {
-        self.mounts.push((
-            source.map(|source| source.to_bytes().to_vec()),
-            target.to_bytes().to_vec(),
-            flags,
-        ));
-        if self.fail_mount_call == Some(self.mounts.len()) {
-            Err(Errno::ENOENT)
-        } else {
-            Ok(())
-        }
     }
 
     fn kernel(&mut self) -> &mut dyn MappingKernel {
@@ -169,15 +130,6 @@ impl System for TestSystem {
     fn write_diagnostic(&mut self, message: &[u8]) -> Result<(), Errno> {
         self.diagnostics.extend_from_slice(message);
         Ok(())
-    }
-
-    fn take_inherited_descriptor(&mut self, text: &CStr) -> Result<FileDescriptor, Errno> {
-        let index = self
-            .inherited_descriptors
-            .iter()
-            .position(|(argument, _)| argument == text.to_bytes())
-            .ok_or(Errno::EBADF)?;
-        Ok(self.inherited_descriptors.swap_remove(index).1)
     }
 
     fn validate_environment(&mut self, name: &CStr, _value: &CStr) -> Result<(), Errno> {
@@ -220,6 +172,17 @@ impl System for TestSystem {
         }
     }
 
+    fn start_direct(
+        &mut self,
+        request: init::ExecRequest,
+    ) -> Result<init::Exec, init::StartFailure> {
+        self.spawn_calls += 1;
+        match self.direct_starter {
+            Some(start) => start(request),
+            None => Err(Errno::ENOSYS.into()),
+        }
+    }
+
     fn prepare_entry(&mut self, _entry: &Entry) -> Result<Prepared, entry::Error> {
         self.entries_prepared += 1;
         if self.refuse_entry {
@@ -234,39 +197,18 @@ impl System for TestSystem {
     }
 }
 
-/// Spawns a launch command as the privileged agent does, without privileges: the child's
+/// Starts a native direct workload as the privileged agent does, without privileges: the child's
 /// credential calls are replaced and succeed, and it enters the working directory with the test's
 /// own credentials.
-pub(crate) fn spawn_as_privileged(command: Command) -> Result<Spawned, Errno> {
-    command
-        .simulate_credentials(None)
-        .spawn()
-        .map_err(|error| sys::errno_of(&error))
+pub(crate) fn start_as_privileged(
+    request: init::ExecRequest,
+) -> Result<init::Exec, init::StartFailure> {
+    init::Exec::start_simulated(request, None)
 }
 
-/// Spawns a launch command whose replaced credential calls fail with `EPERM`, as `setgroups`
-/// does without privileges.
-pub(crate) fn spawn_with_failing_credentials(command: Command) -> Result<Spawned, Errno> {
-    command
-        .simulate_credentials(Some(Errno::EPERM))
-        .spawn()
-        .map_err(|error| sys::errno_of(&error))
-}
-
-/// Writes an executable stand-in for `setpriv` in `directory` and returns its path.
-///
-/// The stand-in runs the shell command `action`, then executes the workload that follows the
-/// helper's `--` separator, without changing credentials and without the helper. `action` runs
-/// after the direct child has entered its working directory and before the workload runs.
-pub(crate) fn setpriv_shim(directory: &Path, action: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = directory.join("setpriv");
-    let script = format!(
-        "#!/bin/sh\nset -e\n{action}\nwhile [ \"$#\" -gt 0 ]; do\n    argument=$1\n    shift\n    \
-         if [ \"$argument\" = -- ]; then\n        break\n    fi\ndone\nexec \"$@\"\n"
-    );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
+/// Starts a native direct workload whose simulated identity stage fails with `EPERM`.
+pub(crate) fn start_with_failing_credentials(
+    request: init::ExecRequest,
+) -> Result<init::Exec, init::StartFailure> {
+    init::Exec::start_simulated(request, Some(Errno::EPERM))
 }

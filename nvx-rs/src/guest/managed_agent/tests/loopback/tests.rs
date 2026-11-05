@@ -43,13 +43,11 @@ fn control_session_broker_and_real_agent_loop_back() {
         return;
     }
     let _process = super::super::PROCESS_TEST_LOCK.lock().unwrap();
-    let (temporary, mut system) = TestSystem::with_cgroup();
+    let (temporary, mut system) = TestSystem::with_direct();
     system.paths.hostfs_dir = temporary.path().join("hostfs");
     std::fs::create_dir_all(system.paths.hostfs_dir.join("root/0/source")).unwrap();
-    // The workloads run through the agent's real direct launch, whose credential calls are
-    // replaced and whose `setpriv` executes each workload unchanged.
-    system.paths.setpriv = setpriv_shim(temporary.path(), ":");
-    system.spawner = Some(spawn_as_privileged);
+    // The workloads use the plain-process core with simulated credential calls.
+    system.direct_starter = Some(start_as_privileged);
     let target = temporary.path().canonicalize().unwrap().join("mapped");
     let (broker_guest, agent) = UnixStream::pair().unwrap();
     let agent_descriptor = FileDescriptor::from_owned(agent.into());
@@ -188,13 +186,11 @@ fn output_limit_forwards_nothing_after_the_cap() {
         return;
     }
     let _process = super::super::PROCESS_TEST_LOCK.lock().unwrap();
-    let (temporary, mut system) = TestSystem::with_cgroup();
+    let (temporary, mut system) = TestSystem::with_direct();
     system.paths.hostfs_dir = temporary.path().join("hostfs");
     std::fs::create_dir_all(system.paths.hostfs_dir.join("root/0/source")).unwrap();
-    // The workload runs through the agent's real direct launch, whose credential calls are
-    // replaced and whose `setpriv` executes each workload unchanged.
-    system.paths.setpriv = setpriv_shim(temporary.path(), ":");
-    system.spawner = Some(spawn_as_privileged);
+    // The workload uses the plain-process core with simulated credential calls.
+    system.direct_starter = Some(start_as_privileged);
     let target = temporary.path().canonicalize().unwrap().join("mapped");
     let (broker_guest, agent) = UnixStream::pair().unwrap();
     let agent_descriptor = FileDescriptor::from_owned(agent.into());

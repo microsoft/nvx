@@ -315,7 +315,7 @@ fn peak_resident_kib() -> u64 {
 
 #[test]
 fn a_search_s_memory_is_bounded_whatever_its_name_and_path() {
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_BOUNDED_SEARCH_TEST_CHILD",
         "guest::spawn::tests::a_search_s_memory_is_bounded_whatever_its_name_and_path",
     ) {
@@ -666,7 +666,7 @@ fn another_childs_pipes_hang_up_while_a_child_waits_at_its_barrier() {
 fn releasing_the_barrier_of_an_ended_child_fails() {
     // Another test's child holds a copy of every descriptor of this process from its fork to
     // its `exec`, which would read the release, so the test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_ENDED_BARRIER_TEST_CHILD",
         "guest::spawn::tests::releasing_the_barrier_of_an_ended_child_fails",
     ) {
@@ -727,7 +727,7 @@ fn ignored_and_blocked(status: &[u8]) -> (u64, u64) {
 #[test]
 fn a_program_keeps_its_caller_s_ignored_and_blocked_signals_unless_its_command_resets_them() {
     // Ignoring a signal changes the whole process, so the test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_SIGNALS_TEST_CHILD",
         "guest::spawn::tests::a_program_keeps_its_caller_s_ignored_and_blocked_signals_unless_its_command_resets_them",
     ) {
@@ -757,7 +757,7 @@ fn a_program_keeps_its_caller_s_ignored_and_blocked_signals_unless_its_command_r
 fn a_child_whose_report_has_no_reader_still_exits_with_the_launch_failure_status() {
     // Another test's child holds a copy of every descriptor of this process from its fork to
     // its `exec`, the report's reader too, so the test runs in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
+    if crate::guest::sys::tests::isolate_process_test(
         "NVX_SPAWN_UNREAD_REPORT_TEST_CHILD",
         "guest::spawn::tests::a_child_whose_report_has_no_reader_still_exits_with_the_launch_failure_status",
     ) {
