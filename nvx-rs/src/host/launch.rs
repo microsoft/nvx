@@ -55,17 +55,7 @@ pub const DEFAULT_GUEST_NETWORK: &str = "10.0.0.2/24";
 /// kernel parameters on every command line.
 const HOSTNAME_PARAMETER: &str = "hostname";
 
-/// The identity that workloads run as: a non-root user and group ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorkloadIdentity {
-    /// User ID.
-    pub uid: u32,
-    /// Primary group ID.
-    pub gid: u32,
-    /// Whether the guest creates an account for the IDs if its image lacks a usable one,
-    /// replacing an image account for the UID whose primary group or home does not fit.
-    pub create_account: bool,
-}
+pub use crate::protocol::workload::WorkloadIdentity;
 
 impl WorkloadIdentity {
     /// Alpine's `nobody`, which every guest image has.
