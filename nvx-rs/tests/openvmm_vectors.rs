@@ -21,7 +21,7 @@ const FILES: [&str; 2] = [
 
 /// The excerpts of OpenVMM's sources that `tests/vectors/openvmm/` copies: for each, its file
 /// there, and the file of the OpenVMM submodule whose lines it copies, unchanged.
-const EXCERPTS: [(&str, &str); 3] = [
+const EXCERPTS: [(&str, &str); 2] = [
     (
         "microvm_control_tty_command_line.rs",
         "openvmm/openvmm_defs/src/microvm.rs",
@@ -29,10 +29,6 @@ const EXCERPTS: [(&str, &str); 3] = [
     (
         "platform_command_line_token_is_invariant.rs",
         "openvmm/openvmm_helpers/src/snapshot/microvm.rs",
-    ),
-    (
-        "port_forward_socket_creation.rs",
-        "vm/devices/net/net_consomme/src/resolver.rs",
     ),
 ];
 

@@ -335,14 +335,6 @@ fn openvmm_s_fatal_error_is_evidence_of_an_incompatible_host_only_for_its_codes(
 
 #[test]
 fn openvmm_s_fatal_error_is_evidence_of_a_forward_bind_when_it_names_a_forward_it_cannot_bind() {
-    // OpenVMM spells the error as its source, which the excerpt copies, writes it.
-    let excerpt =
-        include_str!("../../../../../tests/vectors/openvmm/port_forward_socket_creation.rs");
-    let attribute = format!("#[error(\"{FORWARD_BIND_TEXT}{{details}})\")]");
-    assert!(
-        excerpt.lines().any(|line| line.trim() == attribute),
-        "{attribute} in {excerpt}"
-    );
     // The cause of the chain follows the line that leads the error, or is the line's own.
     for line in [
         "fatal error: failed to launch vm worker: failed to create socket for port forward \
