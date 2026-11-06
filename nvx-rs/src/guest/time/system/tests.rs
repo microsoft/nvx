@@ -967,10 +967,12 @@ fn a_deadline_during_suppression_keeps_the_record_when_rollback_cannot_finish() 
     let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
     let detectors = test.detectors();
     let suppression = test.suppression(&detectors);
-    let deadline = Instant::now() + Duration::from_millis(20);
+    let deadline = Instant::now() + Duration::from_secs(2);
     let result = suppression.save_until(Some(deadline), |path, value| {
         sys::write_number(path, value)?;
-        thread::sleep(Duration::from_millis(40));
+        thread::sleep(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+        );
         Ok(())
     });
     assert_eq!(result, Err(SaveError::Kept(Errno::ETIMEDOUT)));
