@@ -76,7 +76,7 @@ impl AgentConfig {
 /// Terminal outcome of the long-lived dispatch loop.
 #[derive(Debug)]
 pub(crate) enum Outcome {
-    /// The host requested and acknowledged an orderly stop.
+    /// The host requested STOP, or init accepted an orderly termination.
     Stopped,
 }
 

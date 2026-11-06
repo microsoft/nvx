@@ -212,14 +212,20 @@ impl Harness {
     }
 
     fn read_outer(&mut self) -> (OuterHeader, Vec<u8>) {
-        let mut header = [0u8; OUTER_HEADER_LEN];
-        self.host.read_exact(&mut header).unwrap();
-        let header = decode_outer_header(&header).unwrap();
-        let mut payload = vec![0; header.length];
-        self.host.read_exact(&mut payload).unwrap();
-        (header, payload)
+        read_outer(&mut self.host)
     }
 }
+
+fn read_outer(host: &mut UnixStream) -> (OuterHeader, Vec<u8>) {
+    let mut header = [0u8; OUTER_HEADER_LEN];
+    host.read_exact(&mut header).unwrap();
+    let header = decode_outer_header(&header).unwrap();
+    let mut payload = vec![0; header.length];
+    host.read_exact(&mut payload).unwrap();
+    (header, payload)
+}
+
+mod runtime;
 
 fn response(kind: u8, request_id: u64, status: i32, payload: &[u8]) -> Response {
     Response {

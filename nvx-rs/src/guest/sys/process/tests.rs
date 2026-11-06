@@ -51,7 +51,7 @@ pub(crate) fn isolate_process_test(marker: &str, test: &str) -> bool {
     let status = std::process::Command::new(
         std::env::current_exe().expect("the test executable has a path"),
     )
-    .args(["--exact", test, "--nocapture"])
+    .args(["--exact", test, "--nocapture", "--include-ignored"])
     .env(marker, "1")
     .status()
     .expect("the isolated test process starts");
