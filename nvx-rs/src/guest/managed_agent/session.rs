@@ -33,7 +33,7 @@ impl Control<'_> {
             return Err(Errno::ECHILD);
         }
         if let Some(runtime) = &self.runtime {
-            self.outcome.replace(runtime.borrow_mut().service(observed));
+            *self.outcome.borrow_mut() = runtime.borrow_mut().service(observed);
         } else {
             super::exec::collect(observed);
         }
