@@ -6,6 +6,31 @@
 //! of their request.
 
 use super::{ProtocolError, array, violation};
+use crate::activation::ActivationRecord;
+
+use self::workload::WorkloadIdentity;
+
+/// Shared identity data; host-side selection remains in the host module.
+#[cfg_attr(
+    not(any(test, feature = "host")),
+    expect(
+        dead_code,
+        reason = "SL7.7b gives nvx-init the restored workload identity"
+    )
+)]
+pub(crate) mod workload {
+    /// The identity that workloads run as: a non-root user and group ID.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct WorkloadIdentity {
+        /// User ID.
+        pub uid: u32,
+        /// Primary group ID.
+        pub gid: u32,
+        /// Whether the guest creates an account for the IDs if its image lacks a usable one,
+        /// replacing an image account for the UID whose primary group or home does not fit.
+        pub create_account: bool,
+    }
+}
 
 /// Magic of every application frame.
 pub const APP_MAGIC: [u8; 4] = *b"NVXC";
@@ -34,6 +59,15 @@ pub const APP_MAPS: u8 = 6;
     expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
 )]
 pub(crate) const APP_CAPTURE: u8 = 7;
+/// Request that nvx-init activate a restored VM with its record and workload identity.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SL4.3 sends activation requests to nvx-init in SL7.7b"
+    )
+)]
+pub(crate) const APP_ACTIVATE: u8 = 8;
 /// Response that acknowledges a request.
 pub const APP_READY: u8 = 0x81;
 /// Response that carries a chunk of a workload's standard output.
@@ -140,6 +174,75 @@ pub(crate) fn decode_capture_payload(payload: &[u8]) -> Result<bool, ProtocolErr
             "the capture request must contain one kill-executions flag",
         )),
     }
+}
+
+/// Encodes the persistent workload identity, then the existing activation record.
+///
+/// The prefix is the UID and GID as little-endian `u32`s, then the account-creation flag as
+/// exactly 0 or 1. The remainder is the activation record's unchanged encoding.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "SL4.3 encodes activation requests")
+)]
+pub(crate) fn encode_activate_payload(
+    record: &ActivationRecord,
+    workload: &WorkloadIdentity,
+) -> Result<Vec<u8>, ProtocolError> {
+    check_workload_identity(workload)?;
+    let record = record.encode();
+    let mut payload = Vec::with_capacity(9 + record.len());
+    payload.extend_from_slice(&workload.uid.to_le_bytes());
+    payload.extend_from_slice(&workload.gid.to_le_bytes());
+    payload.push(u8::from(workload.create_account));
+    payload.extend_from_slice(&record);
+    Ok(payload)
+}
+
+/// Decodes the persistent workload identity and the activation record that follows it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "SL7.7b makes nvx-init decode activation requests")
+)]
+pub(crate) fn decode_activate_payload(
+    payload: &[u8],
+) -> Result<(ActivationRecord, WorkloadIdentity), ProtocolError> {
+    let prefix = payload
+        .get(..9)
+        .ok_or_else(|| violation("the activate request is truncated"))?;
+    let workload = WorkloadIdentity {
+        uid: u32::from_le_bytes(array(&prefix[..4])),
+        gid: u32::from_le_bytes(array(&prefix[4..8])),
+        create_account: match prefix[8] {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(violation(
+                    "the activate request has an invalid account flag",
+                ));
+            }
+        },
+    };
+    check_workload_identity(&workload)?;
+    let record = ActivationRecord::decode(&payload[9..])
+        .map_err(|error| violation(format!("invalid activation record: {error}")))?;
+    Ok((record, workload))
+}
+
+/// Matches the guest's non-root credential range, excluding the unchanged-ID sentinel.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SL4.3 and nvx-init in SL7.7b exchange workload identities"
+    )
+)]
+fn check_workload_identity(workload: &WorkloadIdentity) -> Result<(), ProtocolError> {
+    if matches!(workload.uid, 0 | u32::MAX) || matches!(workload.gid, 0 | u32::MAX) {
+        return Err(violation(
+            "activation workload requires a non-root UID and GID below u32::MAX",
+        ));
+    }
+    Ok(())
 }
 
 /// Exit category reported by the guest agent, the payload of an [`APP_EXIT`] response.
