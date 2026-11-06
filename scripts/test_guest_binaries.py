@@ -434,7 +434,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             self.assertEqual(len(commands), 1)
             self.assertEqual(inspected, result)
             [command] = commands
-            self.assertEqual(command[:3], ["cargo", "+1.95.0", "build"])
+            self.assertEqual(command[:3], ["cargo", "+1.97.1", "build"])
             self.assertEqual(
                 [
                     command[index + 1]
@@ -646,7 +646,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             sentinel = source / "uncommitted.rs"
             sentinel.write_text("preserve", encoding="utf-8")
             toolchain = root / "rust-toolchain.toml"
-            toolchain.write_text('[toolchain]\nchannel = "1.95.0"\n', encoding="utf-8")
+            toolchain.write_text('[toolchain]\nchannel = "1.97.1"\n', encoding="utf-8")
             with (
                 patch.object(GuestRustBuildConstants, "DIRECTORY", crate),
                 patch.object(GuestRustBuildConstants, "TOOLCHAIN_FILE", toolchain),
@@ -670,7 +670,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
             crate = root / "nvx-rs"
             crate.mkdir()
             toolchain = root / "rust-toolchain.toml"
-            toolchain.write_text('[toolchain]\nchannel = "1.95.0"\n', encoding="utf-8")
+            toolchain.write_text('[toolchain]\nchannel = "1.97.1"\n', encoding="utf-8")
             output = root / "output"
             output.mkdir()
             sentinel = output / "uncommitted.txt"
@@ -884,7 +884,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 guest_binaries.test_guest_binaries(directory)
             raw_command = cast(list[str | os.PathLike[str]], run.call_args.args[0])
             command = [os.fspath(part) for part in raw_command]
-            self.assertEqual(command[:3], ["cargo", "+1.95.0", "test"])
+            self.assertEqual(command[:3], ["cargo", "+1.97.1", "test"])
             self.assertIn("--locked", command)
             self.assertIn(GuestRustBuildConstants.TARGET, command)
             self.assertIn("--no-default-features", command)

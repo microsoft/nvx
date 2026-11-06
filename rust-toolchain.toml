@@ -1,6 +1,6 @@
 # NVX builds OpenVMM, its test guests, and the Rust code in this repository with
 # this release. Rust 1.99.0 cannot link OpenVMM's guest_test_uefi (`undefined
-# symbol: wcslen`, rust-lang/rust#163614, microsoft/nvx#402); 1.95.0 is the
+# symbol: wcslen`, rust-lang/rust#163614, microsoft/nvx#402); 1.97.1 is the
 # release that OpenVMM's own pipelines use. See doc/ci.md before moving it.
 [toolchain]
-channel = "1.95.0"
+channel = "1.97.1"
