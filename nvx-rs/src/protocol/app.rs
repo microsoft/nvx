@@ -28,6 +28,12 @@ pub const APP_FEATURES: u8 = 5;
 /// Request that the guest agent mount entries of the host mapping table; the payload is a `MAPS`
 /// payload.
 pub const APP_MAPS: u8 = 6;
+/// Request that nvx-init capture the VM after optionally killing its executions.
+#[cfg_attr(
+    not(any(test, feature = "host")),
+    expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
+)]
+pub(crate) const APP_CAPTURE: u8 = 7;
 /// Response that acknowledges a request.
 pub const APP_READY: u8 = 0x81;
 /// Response that carries a chunk of a workload's standard output.
@@ -110,6 +116,30 @@ pub fn decode_app(frame: &[u8]) -> Result<AppFrame<'_>, ProtocolError> {
         status: i32::from_le_bytes(array(&frame[16..20])),
         payload,
     })
+}
+
+/// Encodes the capture request's flag as one byte, 0 or 1.
+#[cfg_attr(
+    not(any(test, feature = "host")),
+    expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
+)]
+pub(crate) fn encode_capture_payload(kill_executions: bool) -> [u8; 1] {
+    [u8::from(kill_executions)]
+}
+
+/// Decodes the capture request's sole kill-executions flag.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
+)]
+pub(crate) fn decode_capture_payload(payload: &[u8]) -> Result<bool, ProtocolError> {
+    match payload {
+        [0] => Ok(false),
+        [1] => Ok(true),
+        _ => Err(violation(
+            "the capture request must contain one kill-executions flag",
+        )),
+    }
 }
 
 /// Exit category reported by the guest agent, the payload of an [`APP_EXIT`] response.
