@@ -108,10 +108,9 @@ impl ReadyListener {
         let open = self
             .listener
             .receive(process.reference().pid, received, limit, timeout);
-        let open = open.map_err(listener_error)?;
         // A matching numeric PID is not enough if the held process exited during acceptance.
         check_running(process)?;
-        Ok(open)
+        open.map_err(listener_error)
     }
 
     /// Transfers the same nonblocking Unix listener, without reopening or duplicating it.
