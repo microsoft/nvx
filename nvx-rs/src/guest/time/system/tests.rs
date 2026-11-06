@@ -15,6 +15,26 @@ use crate::guest::time::NSEC_PER_MSEC;
 use crate::guest::time::events::CheckId;
 use crate::guest::time::state::HostClockStatus;
 
+impl Suppression<'_> {
+    /// Runs the shared save without a caller deadline for the legacy cases below.
+    fn save(&self) -> Result<(), SaveError> {
+        self.save_with(sys::write_number)
+    }
+
+    /// Runs the same save with the test's detector writer.
+    fn save_with(
+        &self,
+        write: impl FnMut(&CStr, i64) -> Result<(), Errno>,
+    ) -> Result<(), SaveError> {
+        self.save_until(None, write)
+    }
+
+    /// Runs the shared restore without a caller deadline for the legacy cases below.
+    fn restore(&self, missing_ok: bool) -> Result<(), Vec<u8>> {
+        self.restore_until(missing_ok, None)
+    }
+}
+
 /// Privileged operations that record their requests and replay canned port input.
 pub(crate) struct FakeOps {
     /// The error with which the kernel refuses to grant the port permission, if any.
@@ -908,4 +928,61 @@ fn a_save_waits_for_the_suppression_lock() {
         assert_eq!(receiver.recv().unwrap(), Ok(()));
     });
     assert_eq!(test.settings(), settings([Some("1"), Some("0"), Some("0")]));
+}
+
+#[test]
+fn capture_suppression_and_rollback_share_the_deadline_of_their_runtime_lock() {
+    let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
+    let detectors = test.detectors();
+    let suppression = test.suppression(&detectors);
+    let held = sys::lock_file(&test.lock, PRIVATE_FILE_MODE).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(20);
+    assert_eq!(
+        suppression.save_until(Some(deadline), sys::write_number),
+        Err(SaveError::Undone(Errno::ETIMEDOUT))
+    );
+    assert_eq!(
+        test.settings(),
+        settings([Some("0"), Some("60"), Some("120")])
+    );
+    assert_eq!(sys::check_exists(&test.record), Err(Errno::ENOENT));
+    drop(held);
+
+    suppression.save().unwrap();
+    let held = sys::lock_file(&test.lock, PRIVATE_FILE_MODE).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(20);
+    assert!(suppression.restore_until(false, Some(deadline)).is_err());
+    assert_eq!(test.settings(), settings([Some("1"), Some("0"), Some("0")]));
+    assert!(sys::read_file(&test.record).is_ok());
+    drop(held);
+    suppression.restore(false).unwrap();
+    assert_eq!(
+        test.settings(),
+        settings([Some("0"), Some("60"), Some("120")])
+    );
+}
+
+#[test]
+fn a_deadline_during_suppression_keeps_the_record_when_rollback_cannot_finish() {
+    let test = TestDetectors::new([Some("0"), Some("60"), Some("120")]);
+    let detectors = test.detectors();
+    let suppression = test.suppression(&detectors);
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let result = suppression.save_until(Some(deadline), |path, value| {
+        sys::write_number(path, value)?;
+        thread::sleep(Duration::from_millis(40));
+        Ok(())
+    });
+    assert_eq!(result, Err(SaveError::Kept(Errno::ETIMEDOUT)));
+    assert_eq!(
+        test.settings(),
+        settings([Some("1"), Some("60"), Some("120")])
+    );
+    assert!(sys::read_file(&test.record).is_ok());
+    assert!(suppression.restore_until(false, Some(deadline)).is_err());
+    suppression.restore(false).unwrap();
+    assert_eq!(
+        test.settings(),
+        settings([Some("0"), Some("60"), Some("120")])
+    );
 }

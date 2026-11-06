@@ -5,6 +5,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use super::Phase;
 use super::api::Violation;
@@ -264,6 +265,8 @@ pub(crate) struct Runtime<'a> {
     async_output: AtomicBool,
     /// Serializes multi-destination violation records.
     report_lock: Mutex<()>,
+    /// One absolute pre-request deadline, absent for legacy calls and capture requests.
+    pub(crate) deadline: Option<Instant>,
 }
 
 impl<'a> Runtime<'a> {
@@ -278,6 +281,7 @@ impl<'a> Runtime<'a> {
             tsc_hz: AtomicU64::new(0),
             async_output: AtomicBool::new(false),
             report_lock: Mutex::new(()),
+            deadline: None,
         }
     }
 
@@ -419,7 +423,7 @@ impl<'a> Runtime<'a> {
             b""
         };
         self.ops.write_console(separator, line.as_bytes());
-        let _ = count_violation();
+        let _ = count_violation(self.deadline);
     }
 
     /// Reports a conformance failure, and powers off unless report-only or strict.
@@ -526,8 +530,14 @@ pub(crate) fn replace_file(path: &CStr, temporary: &CStr, text: &[u8]) -> Result
 
 /// Opens or creates a runtime lock file and takes its exclusive advisory lock.
 pub(crate) fn lock_file(path: &CStr) -> Result<FileLock, Errno> {
+    lock_file_until(path, None)
+}
+
+/// Takes a runtime lock using the caller's explicit pre-request deadline, if any.
+pub(crate) fn lock_file_until(path: &CStr, deadline: Option<Instant>) -> Result<FileLock, Errno> {
+    FileLock::check_deadline(deadline)?;
     make_runtime_directories();
-    sys::lock_file(path, PRIVATE_FILE_MODE)
+    FileLock::acquire(path, PRIVATE_FILE_MODE, deadline)
 }
 
 /// Loads and parses the published time state.
@@ -543,18 +553,30 @@ pub(crate) fn state_store(state: &TimeState) -> Result<(), Errno> {
 
 /// Applies one read-modify-write update to the time state under its lock.
 pub(crate) fn state_apply(update: impl FnOnce(&mut TimeState)) -> Result<(), Errno> {
-    let _lock = lock_file(STATE_LOCK_PATH)?;
+    state_apply_until(None, update)
+}
+
+/// Updates state under a runtime lock bounded by the same pre-request deadline.
+pub(crate) fn state_apply_until(
+    deadline: Option<Instant>,
+    update: impl FnOnce(&mut TimeState),
+) -> Result<(), Errno> {
+    let _lock = lock_file_until(STATE_LOCK_PATH, deadline)?;
     let mut state = state_load().unwrap_or_default();
+    FileLock::check_deadline(deadline)?;
     update(&mut state);
-    state_store(&state)
+    state_store(&state)?;
+    FileLock::check_deadline(deadline)
 }
 
 /// Increments the persisted violation counter when state exists.
-fn count_violation() -> Result<(), Errno> {
+fn count_violation(deadline: Option<Instant>) -> Result<(), Errno> {
     if !sys::path_exists(STATE_PATH) {
         return Ok(());
     }
-    state_apply(|state| state.violations = state.violations.wrapping_add(1))
+    state_apply_until(deadline, |state| {
+        state.violations = state.violations.wrapping_add(1)
+    })
 }
 
 /// Loads validated TSC and LAPIC rates from state.
@@ -567,12 +589,11 @@ pub(crate) fn rates_load() -> Result<(u64, u64), Errno> {
     }
 }
 
-/// Saves the stall detectors' settings in the suppression record, and suppresses them for a
-/// snapshot capture; see [`Suppression::save`]. A record that exists already, of a pending
-/// capture, is `EEXIST`.
-pub(crate) fn suppression_save() -> Result<(), SaveError> {
+/// Saves suppression with explicitly bounded runtime-lock and detector operations.
+pub(crate) fn suppression_save_until(deadline: Option<Instant>) -> Result<(), SaveError> {
+    FileLock::check_deadline(deadline).map_err(SaveError::Undone)?;
     make_runtime_directories();
-    SUPPRESSION.save()
+    SUPPRESSION.save_until(deadline, sys::write_number)
 }
 
 /// Why a save of the stall detectors' settings failed.
@@ -593,10 +614,19 @@ fn describe(prefix: &[u8], error: Errno) -> Vec<u8> {
 }
 
 /// Restores the stall detectors' settings from the suppression record, and removes the record;
-/// see [`Suppression::restore`]. A missing record succeeds when `missing_ok`.
+/// see [`Suppression::restore_until`]. A missing record succeeds when `missing_ok`.
 pub(crate) fn suppression_restore(missing_ok: bool) -> Result<(), Vec<u8>> {
+    suppression_restore_until(missing_ok, None)
+}
+
+/// Restores suppression by an explicit deadline, absent after a capture request.
+pub(crate) fn suppression_restore_until(
+    missing_ok: bool,
+    deadline: Option<Instant>,
+) -> Result<(), Vec<u8>> {
+    FileLock::check_deadline(deadline).map_err(|error| describe(b"restore detectors: ", error))?;
     make_runtime_directories();
-    SUPPRESSION.restore(missing_ok)
+    SUPPRESSION.restore_until(missing_ok, deadline)
 }
 
 /// The suppression of the stall detectors for a capture: the detectors, the record of their
@@ -619,23 +649,17 @@ const SUPPRESSION: Suppression<'static> = Suppression {
 };
 
 impl Suppression<'_> {
-    /// Saves the detectors' settings in the record, and suppresses the detectors, under the
-    /// lock, so that no restore runs between its reads and its writes. A record that exists
-    /// already, of a pending capture, is `EEXIST`. A save that fails before it created the
-    /// record changes nothing; one that fails after undoes its changes and removes the record,
-    /// or keeps the record if it can't.
-    fn save(&self) -> Result<(), SaveError> {
-        self.save_with(sys::write_number)
-    }
-
-    /// Implements [`save`](Self::save), with `write` writing a detector's setting.
-    fn save_with(
+    /// Saves with one deadline shared by locking, reads, writes and any rollback.
+    fn save_until(
         &self,
+        deadline: Option<Instant>,
         mut write: impl FnMut(&CStr, i64) -> Result<(), Errno>,
     ) -> Result<(), SaveError> {
-        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
+        let _lock =
+            FileLock::acquire(self.lock, PRIVATE_FILE_MODE, deadline).map_err(SaveError::Undone)?;
         let mut saved = Vec::new();
         for (index, &(path, suppressed)) in self.detectors.iter().enumerate() {
+            FileLock::check_deadline(deadline).map_err(SaveError::Undone)?;
             if let Err(error) = sys::check_exists(path) {
                 if index == 0 {
                     return Err(SaveError::Undone(error));
@@ -650,20 +674,29 @@ impl Suppression<'_> {
             text.extend_from_slice(path.to_bytes());
             text.extend_from_slice(format!("={value}\n").as_bytes());
         }
+        FileLock::check_deadline(deadline).map_err(SaveError::Undone)?;
         let record =
             CreatedFile::create(self.record, true, PRIVATE_FILE_MODE).map_err(SaveError::Undone)?;
         record.write_all(&text).map_err(SaveError::Undone)?;
         // As in the C program, a record that fails to close stays, and the suppression goes on.
         let _ = record.keep();
         for (written, &(path, _, suppressed)) in saved.iter().enumerate() {
-            if let Err(error) = write(path, suppressed) {
+            if let Err(error) =
+                FileLock::check_deadline(deadline).and_then(|()| write(path, suppressed))
+            {
                 // The record stays unless every earlier write is undone, so that a restore can
                 // still restore the settings.
                 let mut undone = true;
                 for &(path, value, _) in &saved[..written] {
-                    undone &= write(path, value).is_ok();
+                    undone &= FileLock::check_deadline(deadline)
+                        .and_then(|()| write(path, value))
+                        .is_ok();
                 }
-                if undone && sys::unlink(self.record).is_ok() {
+                if undone
+                    && FileLock::check_deadline(deadline)
+                        .and_then(|()| sys::unlink(self.record))
+                        .is_ok()
+                {
                     return Err(SaveError::Undone(error));
                 }
                 return Err(SaveError::Kept(error));
@@ -672,10 +705,10 @@ impl Suppression<'_> {
         Ok(())
     }
 
-    /// Restores the detectors' settings from the record, and removes it, under the lock. A
-    /// missing record succeeds when `missing_ok`.
-    fn restore(&self, missing_ok: bool) -> Result<(), Vec<u8>> {
-        let _lock = sys::lock_file(self.lock, PRIVATE_FILE_MODE)
+    /// Restores under the same explicit deadline as the failed preparation.
+    fn restore_until(&self, missing_ok: bool, deadline: Option<Instant>) -> Result<(), Vec<u8>> {
+        let expired = |error| describe(b"restore detectors: ", error);
+        let _lock = FileLock::acquire(self.lock, PRIVATE_FILE_MODE, deadline)
             .map_err(|error| describe(b"lock /run/nvx/time-suppression.lock: ", error))?;
         let text = match sys::read_file(self.record) {
             Ok(text) => text,
@@ -686,6 +719,7 @@ impl Suppression<'_> {
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
+            FileLock::check_deadline(deadline).map_err(expired)?;
             let Some(equal) = line.iter().position(|byte| *byte == b'=') else {
                 break;
             };
@@ -700,8 +734,10 @@ impl Suppression<'_> {
                 ));
             }
         }
+        FileLock::check_deadline(deadline).map_err(expired)?;
         sys::unlink(self.record)
-            .map_err(|error| describe(b"remove /run/nvx/time-suppression: ", error))
+            .map_err(|error| describe(b"remove /run/nvx/time-suppression: ", error))?;
+        FileLock::check_deadline(deadline).map_err(expired)
     }
 }
 
