@@ -291,7 +291,7 @@ fn a_failed_revocation_fails_the_call_and_every_later_one_until_a_revocation_suc
 fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
     let revoke = Err(PortError::Revoke(Errno::ENOMEM));
     // A preparation that suppressed the detectors holds their suppression.
-    let error = released_preparation(Ok(()), revoke).unwrap_err();
+    let error = released_preparation(Ok(()), revoke, None).unwrap_err();
     assert!(
         matches!(
             &error,
@@ -305,14 +305,14 @@ fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
     assert!(error.holds_suppression());
     // One that kept the record of the settings that it could not restore holds it too.
     let kept = Err(PreCaptureError::Unrestored(Errno::EIO));
-    let error = released_preparation(kept, revoke).unwrap_err();
+    let error = released_preparation(kept, revoke, None).unwrap_err();
     assert!(error.holds_suppression(), "{error:?}");
     // One that left the settings as they were holds nothing.
     for failed in [
         PreCaptureError::Pending,
         PreCaptureError::Suppression(Errno::EIO),
     ] {
-        let error = released_preparation(Err(failed), revoke).unwrap_err();
+        let error = released_preparation(Err(failed), revoke, None).unwrap_err();
         assert!(
             matches!(
                 error,
@@ -326,16 +326,43 @@ fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
         assert!(!error.holds_suppression());
     }
     // Without port permission, the preparation's result stands.
-    released_preparation(Ok(()), Ok(())).unwrap();
-    let error = released_preparation(Err(PreCaptureError::Pending), Ok(())).unwrap_err();
+    released_preparation(Ok(()), Ok(()), None).unwrap();
+    let error = released_preparation(Err(PreCaptureError::Pending), Ok(()), None).unwrap_err();
     assert!(matches!(error, PreCaptureError::Pending), "{error:?}");
     assert!(!error.holds_suppression());
     let kept = Err(PreCaptureError::Unrestored(Errno::EIO));
     assert!(
-        released_preparation(kept, Ok(()))
+        released_preparation(kept, Ok(()), None)
             .unwrap_err()
             .holds_suppression()
     );
+}
+
+#[test]
+fn strict_preparation_keeps_the_boot_failure_stage_and_suppression_ownership() {
+    let violation = Violation::of_missing_daemon();
+    let boot = Err(PreCaptureError::BootChecks(TimeError::Violation(
+        violation.clone(),
+    )));
+    let failure = released_preparation(boot, Ok(()), Some(violation)).unwrap_err();
+    assert!(
+        matches!(failure, PreCaptureError::BootChecks(TimeError::Violation(ref violation))
+        if violation.status() == status::TIME_CONFORMANCE)
+    );
+
+    let failure = released_preparation(
+        Ok(()),
+        Err(PortError::Revoke(Errno::ENOMEM)),
+        Some(Violation::of_missing_daemon()),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        failure,
+        PreCaptureError::PortRelease {
+            suppressed: true,
+            ..
+        }
+    ));
 }
 
 /// Returns the outcome of a cold boot that accepted no sample.

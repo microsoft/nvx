@@ -528,13 +528,8 @@ pub(crate) fn replace_file(path: &CStr, temporary: &CStr, text: &[u8]) -> Result
     file.rename(path)
 }
 
-/// Opens or creates a runtime lock file and takes its exclusive advisory lock.
-pub(crate) fn lock_file(path: &CStr) -> Result<FileLock, Errno> {
-    lock_file_until(path, None)
-}
-
 /// Takes a runtime lock using the caller's explicit pre-request deadline, if any.
-pub(crate) fn lock_file_until(path: &CStr, deadline: Option<Instant>) -> Result<FileLock, Errno> {
+pub(crate) fn lock_file(path: &CStr, deadline: Option<Instant>) -> Result<FileLock, Errno> {
     FileLock::check_deadline(deadline)?;
     make_runtime_directories();
     FileLock::acquire(path, PRIVATE_FILE_MODE, deadline)
@@ -561,12 +556,11 @@ pub(crate) fn state_apply_until(
     deadline: Option<Instant>,
     update: impl FnOnce(&mut TimeState),
 ) -> Result<(), Errno> {
-    let _lock = lock_file_until(STATE_LOCK_PATH, deadline)?;
+    let _lock = lock_file(STATE_LOCK_PATH, deadline)?;
     let mut state = state_load().unwrap_or_default();
     FileLock::check_deadline(deadline)?;
     update(&mut state);
-    state_store(&state)?;
-    FileLock::check_deadline(deadline)
+    state_store(&state)
 }
 
 /// Increments the persisted violation counter when state exists.
@@ -736,8 +730,7 @@ impl Suppression<'_> {
         }
         FileLock::check_deadline(deadline).map_err(expired)?;
         sys::unlink(self.record)
-            .map_err(|error| describe(b"remove /run/nvx/time-suppression: ", error))?;
-        FileLock::check_deadline(deadline).map_err(expired)
+            .map_err(|error| describe(b"remove /run/nvx/time-suppression: ", error))
     }
 }
 
@@ -751,7 +744,7 @@ pub(crate) fn portb_read(ports: &PortAccess<'_>, port: Port, buffer: &mut [u8]) 
 
 /// Locks the shared port-window transaction.
 pub(crate) fn lock_portb() -> Result<FileLock, Errno> {
-    lock_file(PORTB_LOCK_PATH)
+    lock_file(PORTB_LOCK_PATH, None)
 }
 
 /// Formats a failure of [`lock_portb`]: `portb lock: `, then the description of `error`.

@@ -88,8 +88,9 @@ impl TimeAbi {
     /// enforcing mode.
     ///
     /// The time daemon that [`start_daemon`](Self::start_daemon) starts enforces the ABI even
-    /// then, since no caller owns its failures, and so does the preparation of a capture that
-    /// `nvx::guest::clone` runs, as `nvx-time pre-capture` does.
+    /// then, since no caller owns its failures, and so does the legacy activation capture's
+    /// preparation, as `nvx-time pre-capture` does. The single-call
+    /// [`snapshot::capture`](crate::guest::snapshot::capture) uses strict preparation instead.
     pub fn strict(self) -> Self {
         Self {
             strict: !self.report_only,
@@ -244,6 +245,7 @@ impl TimeAbi {
         released_preparation(
             pre_capture(&self.enforcing_runtime()),
             sys::check_released(),
+            None,
         )
     }
 
@@ -258,13 +260,8 @@ impl TimeAbi {
         let suppressed = result
             .as_ref()
             .map_or_else(PreCaptureError::holds_suppression, |()| true);
-        let result = match runtime.take_violation() {
-            Some(violation) => Err(PreCaptureError::CaptureChecks(TimeError::Violation(
-                violation,
-            ))),
-            None => result,
-        };
-        released_preparation(result, sys::check_released()).map_err(|error| (error, suppressed))
+        released_preparation(result, sys::check_released(), runtime.take_violation())
+            .map_err(|error| (error, suppressed))
     }
 
     /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
@@ -321,9 +318,15 @@ fn settled<T>(runtime: &Runtime<'_>, result: Result<T, TimeError>) -> Result<T, 
 fn released_preparation(
     result: Result<(), PreCaptureError>,
     released: Result<(), PortError>,
+    violation: Option<Violation>,
 ) -> Result<(), PreCaptureError> {
     let Err(error) = released else {
-        return result;
+        return match violation {
+            Some(violation) if !matches!(result, Err(PreCaptureError::BootChecks(_))) => Err(
+                PreCaptureError::CaptureChecks(TimeError::Violation(violation)),
+            ),
+            _ => result,
+        };
     };
     let suppressed = result
         .as_ref()
@@ -404,7 +407,7 @@ fn read_generation_id(runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> 
     }
     let mut id = [0_u8; GenerationId::LENGTH];
     {
-        let _lock = system::lock_file_until(system::PORTB_LOCK_PATH, runtime.deadline)
+        let _lock = system::lock_file(system::PORTB_LOCK_PATH, runtime.deadline)
             .map_err(|error| TimeError::PortLock(error.into()))?;
         ports.write_u8(Port::PortbStatus, SELECT_GENERATION_ID);
         portb_read(&ports, Port::PortbData, &mut id);
@@ -509,7 +512,8 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
         cpu / NSEC_PER_USEC,
         0,
         0,
-    ) {
+    ) && (error != Errno::ETIMEDOUT || sys::FileLock::check_deadline(runtime.deadline).is_ok())
+    {
         checks.fail(
             runtime,
             CheckId::C10,
