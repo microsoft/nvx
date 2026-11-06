@@ -16321,7 +16321,7 @@ class BuildTests(unittest.TestCase):
 
     def _precompile_in_subprocess(
         self, root: Path, *interpreter_flags: str, env: Mapping[str, str] | None = None
-    ) -> None:
+    ) -> subprocess.CompletedProcess[str]:
         code = (
             "import sys; from pathlib import Path; "
             "from nvx_tools import ubuntu; "
@@ -16329,9 +16329,10 @@ class BuildTests(unittest.TestCase):
         )
         scripts = Path(__file__).resolve().parent
         environment = {**os.environ, "PYTHONPATH": str(scripts), **(env or {})}
-        subprocess.run(
+        return subprocess.run(
             [sys.executable, *interpreter_flags, "-c", code, str(root)],
-            check=True,
+            capture_output=True,
+            text=True,
             env=environment,
         )
 
@@ -16342,7 +16343,8 @@ class BuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             library = self._python_tree(root, name)
-            self._precompile_in_subprocess(root, "-O")
+            result = self._precompile_in_subprocess(root, "-O")
+            self.assertEqual(result.returncode, 0, result.stderr)
             names = sorted(path.name for path in library.rglob("*.pyc"))
         tag = sys.implementation.cache_tag
         self.assertEqual(names, [f"__init__.{tag}.pyc", f"os.{tag}.pyc"])
@@ -16355,9 +16357,10 @@ class BuildTests(unittest.TestCase):
             root = Path(temporary) / "root"
             prefix = Path(temporary) / "host-cache"
             library = self._python_tree(root, name)
-            self._precompile_in_subprocess(
+            result = self._precompile_in_subprocess(
                 root, env={"PYTHONPYCACHEPREFIX": str(prefix)}
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(list(library.rglob("*.pyc"))), 2)
             # The interpreter that runs this build imports its own modules
             # under the prefix; only the root's modules, which the prefix
@@ -16368,6 +16371,28 @@ class BuildTests(unittest.TestCase):
                 if Path(temporary).name in p.relative_to(prefix).parts
             ]
             self.assertEqual(leaked, [])
+
+    @unittest.skipIf(sys.version_info < (3, 11), "debug ranges start in Python 3.11")
+    def test_python_precompile_refuses_suppressed_debug_ranges(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        for flags, env in (
+            (("-X", "no_debug_ranges"), {}),
+            ((), {"PYTHONNODEBUGRANGES": "1"}),
+        ):
+            with (
+                self.subTest(flags=flags, env=env),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                library = self._python_tree(root, name)
+                result = self._precompile_in_subprocess(root, *flags, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "needs the build interpreter's debug ranges", result.stderr
+                )
+                self.assertEqual(list(library.rglob("*.pyc")), [])
 
     def test_python_precompile_needs_the_matching_interpreter(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -775,6 +775,19 @@ def _validate_ubuntu_identity(root: Path) -> None:
         )
 
 
+def _debug_ranges_suppressed() -> bool:
+    """Whether -X no_debug_ranges or PYTHONNODEBUGRANGES is in effect.
+
+    Without debug ranges the compiler leaves the column positions out of the
+    code objects that it writes, so the bytecode of a source changes with the
+    build machine's setting.
+    """
+    if sys.version_info < (3, 11):
+        return False
+    probe = compile("value", "<debug-ranges>", "eval")
+    return all(position[2] is None for position in probe.co_positions())
+
+
 def precompile_python(root: Path) -> None:
     """Byte-compiles the Python standard library of the root, if it has one.
 
@@ -801,10 +814,17 @@ def precompile_python(root: Path) -> None:
                 f"byte-compiling {library.name} needs a final-release Python "
                 f"{major}.{minor} build interpreter; this is {sys.version.split()[0]}"
             )
+        if _debug_ranges_suppressed():
+            raise ScriptError(
+                f"byte-compiling {library.name} needs the build interpreter's "
+                "debug ranges; unset PYTHONNODEBUGRANGES and drop "
+                "-X no_debug_ranges"
+            )
         # compileall follows the build interpreter's settings unless told
         # otherwise: -O would write only *.opt-1.pyc files, which the guest's
         # interpreter does not read, and a cache prefix would send the bytecode
-        # to a host directory instead of the root.
+        # to a host directory instead of the root. Debug ranges cannot be
+        # restored in process, so the check above refuses their suppression.
         cache_prefix = sys.pycache_prefix
         sys.pycache_prefix = None
         try:
