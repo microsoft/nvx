@@ -17,6 +17,6 @@
     "nvx-rs/src/host/sandbox/plan.rs": 5,
     "nvx-rs/src/host/vm.rs": 7,
     "nvx-rs/src/host/session.rs": 1,
-    "nvx-rs/src/protocol/app.rs": 8
+    "nvx-rs/src/protocol/app.rs": 6
   }
 }
