@@ -15,6 +15,9 @@
 //! - `NVX_MANAGED_LIFECYCLE_TIMEOUT`: the longest wait for each operation, in seconds.
 //! - `NVX_MANAGED_LIFECYCLE_OUTPUT_DIR`: receives OpenVMM's output, `managed-lifecycle.log`, and
 //!   the guest console, `managed-lifecycle-guest.log`, which the scenario then scans.
+//! - `NVX_LAYERED_INIT_MAPS`, only for the dedicated real layered-init fixture: `0` for a live
+//!   share without an export, or `2` for the retained host export and an ordered mapping table.
+//!   That fixture boots the actual `nvx-init` as PID 1 with CLI identity `1000:1001`.
 //!
 //! The test also records OpenVMM's process ID in `NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL`, if set,
 //! as the microVM scenarios do for the adversarial campaigns.
@@ -35,7 +38,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nvx::host::instance::generate_capability;
 use nvx::host::platform::{Transport, process_start_time};
 use nvx::host::session::{self, ControlSession, ExecEvent};
-use nvx::protocol::{CAPABILITY_LEN, CWD_FAILED, ExitCategory, Workload, WorkloadEnvironment};
+use nvx::protocol::{
+    self, APP_ERROR, APP_MAPS, APP_READY, CAPABILITY_LEN, CWD_FAILED, ExitCategory, HostMap,
+    Workload, WorkloadEnvironment,
+};
 
 /// An entry whose value has spaces, an equals sign, and a character beyond ASCII.
 const COMPLEX: &str = "COMPLEX=space = \u{2603}";
@@ -362,10 +368,136 @@ fn the_process_id_journal_has_the_entries_that_the_adversarial_executor_reads() 
     assert_eq!(pids, [4321, u64::from(u32::MAX)]);
 }
 
+fn layered_mapping_session(
+    guest: &Guest,
+    mut session: ControlSession,
+    count: u32,
+) -> ControlSession {
+    assert!(
+        matches!(count, 0 | 2),
+        "the layered fixture has zero or two mappings"
+    );
+    let maps = ["/workspace", "/run/task-state"].map(|target| HostMap {
+        source: "0".to_owned(),
+        target: target.to_owned(),
+        read_only: true,
+    });
+    let parts = protocol::encode_maps_payloads(&maps, 40).unwrap();
+    assert_eq!(parts.len(), 2);
+    let send = |session: &mut ControlSession, payload: &[u8], accepted| {
+        let deadline = Instant::now() + guest.timeout;
+        session
+            .send_request(APP_MAPS, 900, payload, deadline)
+            .unwrap();
+        let expected = if accepted {
+            (APP_READY, 900, 0, Vec::new())
+        } else {
+            (
+                APP_ERROR,
+                900,
+                22,
+                protocol::INVALID_REQUEST.as_bytes().to_vec(),
+            )
+        };
+        assert_eq!(session.read_response(Some(deadline)).unwrap(), expected);
+    };
+    if count == 0 {
+        send(&mut session, &parts[0], false);
+    } else {
+        let incomplete = |session: &mut ControlSession| {
+            let outcome = guest.exec(
+                session,
+                &["/bin/true"],
+                5_000,
+                None,
+                WorkloadEnvironment::Default,
+            );
+            assert_eq!(
+                outcome.refusal,
+                Some((11, protocol::MAPPINGS_INCOMPLETE.to_owned()))
+            );
+            assert!(outcome.exit.is_none());
+        };
+        incomplete(&mut session);
+        send(&mut session, &parts[1], false);
+        send(&mut session, &parts[0], true);
+        drop(session);
+        session = guest.connect();
+        incomplete(&mut session);
+        send(&mut session, &parts[1], true);
+    }
+    drop(session);
+    session = guest.connect();
+    session.ping(Instant::now() + guest.timeout).unwrap();
+    send(&mut session, &parts[0], false);
+    let defaults = guest.exec(
+        &mut session,
+        &[
+            "/bin/sh",
+            "-c",
+            "test \"$(cat /proc/1/comm)\" = nvx-init && \
+             test \"$(cat /proc/sys/kernel/hostname)\" = sl76b-real-root && \
+             test -s /run/nvx/time/state && test \"$(wc -c </etc/machine-id)\" -eq 33 && \
+             test ! -e /run/nvx/hostfs/root && \
+             printf '%s:%s|%s|%s|%s' \"$(id -u)\" \"$(id -g)\" \"$USER\" \"$HOME\" \"$PWD\"",
+        ],
+        5_000,
+        None,
+        WorkloadEnvironment::Default,
+    );
+    assert!(defaults.printed("1000:1001|nvx|/tmp|/"), "{defaults:?}");
+    let targets: &[&str] = if count == 0 {
+        &["/run/app/data"]
+    } else {
+        &["/workspace/data", "/run/task-state/data"]
+    };
+    for path in targets {
+        let mapped = guest.exec(
+            &mut session,
+            &["/bin/cat", path],
+            5_000,
+            None,
+            WorkloadEnvironment::Default,
+        );
+        assert!(mapped.printed("sl76b-real-export\n"), "{path}: {mapped:?}");
+    }
+    let request = session
+        .start_exec(
+            &Workload {
+                argv: vec!["/bin/sleep".to_owned(), "30".to_owned()],
+                timeout_ms: 0,
+                cwd: None,
+                environment: WorkloadEnvironment::Default,
+            },
+            Instant::now() + guest.timeout,
+        )
+        .unwrap();
+    session
+        .cancel_exec(request, Instant::now() + guest.timeout)
+        .unwrap();
+    assert!(matches!(
+        session
+            .next_exec_event(request, Some(Instant::now() + guest.timeout))
+            .unwrap(),
+        ExecEvent::Exit {
+            category: ExitCategory::Cancelled,
+            status: 137
+        }
+    ));
+    session
+}
+
 #[test]
 #[ignore = "requires a hypervisor and NVX guest artifacts; run scripts/nvx.py test-microvm \
             --scenario managed-lifecycle"]
 fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
+    let layered_maps = env::var_os("NVX_LAYERED_INIT_MAPS").map(|value| {
+        value
+            .into_string()
+            .expect("NVX_LAYERED_INIT_MAPS is ASCII")
+            .parse::<u32>()
+            .expect("NVX_LAYERED_INIT_MAPS is 0 or 2")
+    });
     let command: Vec<String> = serde_json::from_str(&variable("NVX_MANAGED_LIFECYCLE_COMMAND"))
         .expect("NVX_MANAGED_LIFECYCLE_COMMAND is a JSON array of strings");
     let timeout = Duration::from_secs_f64(
@@ -416,6 +548,9 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
     session
         .ping(Instant::now() + timeout)
         .expect("the guest agent is ready");
+    if let Some(count) = layered_maps {
+        session = layered_mapping_session(&guest, session, count);
+    }
     let exact = vec!["EMPTY=".to_owned(), COMPLEX.to_owned()];
     let first = guest.exec(
         &mut session,
@@ -477,7 +612,11 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
         WorkloadEnvironment::Default,
     );
     assert!(
-        identity.printed(WORKLOAD_IDENTITY),
+        identity.printed(if layered_maps.is_some() {
+            "1000:1001"
+        } else {
+            WORKLOAD_IDENTITY
+        }),
         "the workload identity is {identity:?}"
     );
     // State persists across requests, while working directories and environments do not, and a
@@ -604,4 +743,22 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
         status.success(),
         "the managed OpenVMM process exited with {status}"
     );
+    if let Some(count) = layered_maps {
+        let output = [
+            fs::read(output_dir.join("managed-lifecycle-guest.log")).unwrap(),
+            fs::read(output_dir.join("managed-lifecycle.log")).unwrap(),
+        ]
+        .concat();
+        let marker = format!("NVX-INIT-ROOT: switched mappings={count}");
+        assert!(
+            output
+                .windows(marker.len())
+                .any(|bytes| bytes == marker.as_bytes())
+        );
+        assert!(
+            !output
+                .windows(b"NVX-INIT-ERROR:".len())
+                .any(|bytes| bytes == b"NVX-INIT-ERROR:")
+        );
+    }
 }
