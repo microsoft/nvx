@@ -154,7 +154,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
 | [`nvx::guest::exec::binding`](#nvxguestexecbinding) | `Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest adapter would otherwise write |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
-| [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture, staged failure dispositions, and MMIO device mount checks, without execution control |
+| [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation, with the retained template capture and clone repair interface |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 | [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
@@ -1825,15 +1825,20 @@ A strict time violation preserves its actual status. A `PortRelease` remains
 the cause even if detector rollback also fails. Request and release failures
 are final.
 
-The time core performs its existing clock correction after a restore, but
-this interface does not complete the clone's repair and returns `MustEnd`.
+After the time core's existing clock correction, `capture` runs the clone's
+existing repair inline. `Captured::Restored(Repaired)` returns only once its
+processor and memory targets, reseed and finish completed. `Repaired` reports
+the generation ID, CPU count, memory size and acknowledgement instant; every
+repair failure is `MustEnd` with the existing `RepairError`'s status and detail.
 Fresh platform restore packets must carry no network settings; even an
 otherwise empty network policy is explicitly refused.
 
 The caller owns its transport. After answering the capture request, send
 nothing until `capture` returns. After `Continued` or a `Resumed` failure,
-report on the same session. The activation module retains the legacy
-Device-shaped capture interface for existing callers.
+report on the same session. After `Restored`, take the session's reset and
+attach again before receiving the activation record. The activation module
+retains its legacy Device-shaped capture and repair interfaces for the test
+adapter until its migration.
 
 ### `nvx::guest::activation`
 
