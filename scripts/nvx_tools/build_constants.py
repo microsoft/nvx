@@ -346,12 +346,37 @@ class UbuntuBuildConstants:
     SOURCE_OUTPUT_ENTRIES: Final = frozenset(
         ("manifest.json", "metadata", "packages", "SHA256SUMS")
     )
+    # The maintainer actions that the build has reviewed, by package. It runs
+    # none of them, and it refuses a package whose actions differ. Besides the
+    # lock's packages, the list covers Ubuntu's python3 and the packages that
+    # it adds to Ubuntu Base. On a new installation, their scripts
+    # byte-compile Python modules, which precompile_python does for the
+    # standard library; record dpkg diversions, an installation marker,
+    # py3compile's /etc/python3/debian_config, and empty /usr/local
+    # directories for locally installed modules; create /etc/inputrc and
+    # /etc/localtime, without which readline and the C library keep their
+    # defaults, UTC for the time zone; and create /etc/hosts and /etc/networks
+    # if they are missing, which they are not in Ubuntu Base. The rest do
+    # nothing on a new installation, and the triggers run ldconfig.
     KNOWN_PACKAGE_CONTROL_ACTIONS: Final[dict[str, frozenset[str]]] = {
         "iputils-ping": frozenset({"postinst"}),
         "libcap2": frozenset({"triggers"}),
+        "libexpat1": frozenset({"triggers"}),
+        "libffi8": frozenset({"triggers"}),
         "libidn2-0": frozenset({"triggers"}),
+        "libpython3.14-minimal": frozenset({"postinst", "postrm", "prerm"}),
+        "libpython3.14-stdlib": frozenset({"prerm"}),
+        "libreadline8t64": frozenset({"postrm", "preinst", "triggers"}),
+        "libsqlite3-0": frozenset({"triggers"}),
         "libunistring5": frozenset({"triggers"}),
+        "netbase": frozenset({"postinst", "postrm"}),
         "netcat-openbsd": frozenset({"postinst", "prerm"}),
+        "python3": frozenset({"postinst", "postrm", "preinst", "prerm"}),
+        "python3-minimal": frozenset({"postinst", "prerm"}),
+        "python3.14": frozenset({"postinst", "prerm"}),
+        "python3.14-minimal": frozenset({"postinst", "postrm", "preinst", "prerm"}),
+        "readline-common": frozenset({"postinst", "postrm"}),
+        "tzdata": frozenset({"postinst", "postrm"}),
     }
 
 
