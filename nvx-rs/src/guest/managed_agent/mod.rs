@@ -122,9 +122,9 @@ impl AgentConfig {
         user: CString,
         home: CString,
     ) -> Result<Self, Errno> {
-        let mut identities = command_line
-            .split(u8::is_ascii_whitespace)
-            .filter_map(|token| token.strip_prefix(b"nvx_identity="));
+        let mut identities = crate::protocol::cmdline::init_tokens(command_line)
+            .filter(|token| token.name == b"nvx_identity")
+            .filter_map(|token| token.value);
         let identity = identities.next().ok_or(Errno::EINVAL)?;
         let mut ids = identity.split(|&byte| byte == b':');
         let (Some(uid), Some(gid), None) = (ids.next(), ids.next(), ids.next()) else {
