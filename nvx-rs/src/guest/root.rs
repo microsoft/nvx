@@ -90,7 +90,7 @@
 //!
 //! - is absolute and canonical: not `/`, without an empty, `.`, or `..` component, a trailing
 //!   `/`, or a NUL, and of at most [`MAX_PATH_BYTES`](super::mappings::MAX_PATH_BYTES) bytes, as
-//!   the target of a [`Mapping`](super::mappings::Mapping) is;
+//!   the target of a [`Mapping`] is;
 //! - holds no `\`, `=`, `,`, or `"`;
 //! - is not where a container runtime mounts or binds in the root, as
 //!   [`protocol::share`](crate::protocol::share) lists them for the host and the guest: `/proc`,
@@ -105,18 +105,18 @@
 //! overlay, or on the runtime's `/run` tmpfs once the root has mounted it, a directory with mode
 //! 0755, or a file child's file with mode 0644, whatever the umask or a default ACL; checks that
 //! the target is a directory, or a regular file for a child that is a host file; and attaches
-//! each mount with its [`Access`](super::mappings::Access), `nosuid`, and `nodev` set already.
+//! each mount with its [`Access`], `nosuid`, and `nodev` set already.
 //! The root mounts a share's device at `staging`, with them, then moves it onto its target, and
 //! mounts an aggregate's device at `shares`, then attaches a copy of each child's entry there.
-//! [`Root::map`] applies a caller's host [`Mapping`](super::mappings::Mapping)s beneath the
-//! overlay the same way, from the caller's [`SourceRoot`](super::mappings::SourceRoot).
+//! [`Root::map`] applies a caller's host [`Mapping`]s beneath the
+//! overlay the same way, from the caller's [`SourceRoot`].
 //!
 //! The host export is the device of an aggregate whose children the root never binds itself:
 //! they are the sources of the caller's mappings, such as the mapping table of NVX's managed
 //! lifecycle, whose boot tokens [`protocol::export`](crate::protocol::export) reads.
 //! [`Root::mount_export`] mounts it at `hostfs/root`, out of the root, with the access of its
 //! [`ExportMode`](crate::protocol::export::ExportMode), `nosuid`, and `nodev`, and returns its
-//! root, the [`SourceRoot`](super::mappings::SourceRoot) from which [`Root::map`] applies the
+//! root, the [`SourceRoot`] from which [`Root::map`] applies the
 //! caller's mappings. A root has one export at most.
 //!
 //! The mounts are made in the caller's mount namespace, which must be recursively private, as a
@@ -862,7 +862,7 @@ impl Root {
     ///
     /// Each unmount is attempted, whatever failed before, without detaching a busy mount except
     /// one retained after a failed attachment, and every failure names the mount it leaves in place.
-    /// A [`SourceRoot`](super::mappings::SourceRoot) of the export that the caller still holds
+    /// A [`SourceRoot`] of the export that the caller still holds
     /// keeps the export busy.
     ///
     /// The file system of an ext4 scratch is synced to the scratch device before the scratch is
