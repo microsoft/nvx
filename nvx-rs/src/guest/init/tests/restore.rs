@@ -218,7 +218,13 @@ fn the_restored_announcer_unblocks_pid_1_signals_before_exec() {
         let mut child = Child::new(runtime.helpers.announcer.unwrap());
         assert!(sys::readable_or_hung_up(&[child.descriptor.borrowed()], 5000).unwrap()[0]);
         assert_eq!(blocked(child.process), 0);
-        assert!(collect_failure(&mut runtime, &mut child).contains("exited with status 1"));
+        assert_eq!(
+            collect_failure(&mut runtime, &mut child),
+            format!(
+                "the announcer, process {}, exited with status 1",
+                child.process.raw()
+            )
+        );
     });
 }
 
