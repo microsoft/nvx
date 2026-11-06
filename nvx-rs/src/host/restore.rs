@@ -72,6 +72,9 @@ impl ReadyListener {
     /// receive with a different process identity, fails with
     /// [`ErrorKind::Protocol`](crate::ErrorKind::Protocol). An exited held process fails with
     /// [`ErrorKind::Exited`](crate::ErrorKind::Exited), even if its PID has been reused.
+    /// Linux authenticates the original socket peer through `SO_PEERPIDFD` (Linux 6.5 or a
+    /// backport), failing with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable)
+    /// if the host cannot provide it, rather than falling back to a numeric PID.
     #[cfg_attr(
         not(all(test, any(target_os = "linux", windows))),
         expect(
@@ -97,10 +100,15 @@ impl ReadyListener {
         }
         check_running(process)?;
         self.process = Some(process.reference().clone());
+        #[cfg(target_os = "linux")]
+        let open =
+            self.listener
+                .receive_verified(process.reference().pid, received, limit, timeout);
+        #[cfg(not(target_os = "linux"))]
         let open = self
             .listener
-            .receive(process.reference().pid, received, limit, timeout)
-            .map_err(listener_error)?;
+            .receive(process.reference().pid, received, limit, timeout);
+        let open = open.map_err(listener_error)?;
         // A matching numeric PID is not enough if the held process exited during acceptance.
         check_running(process)?;
         Ok(open)
@@ -110,9 +118,10 @@ impl ReadyListener {
     ///
     /// Call before a receive accepts a client; otherwise fails with
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported). The caller must verify each
-    /// accepted stream's peer credentials against the held VM process before reading its event.
-    /// After matching the PID, check [`Process::has_exited`] and refuse an exited process:
-    /// holding a Linux pidfd does not reserve a reaped process's numeric PID.
+    /// accepted stream's original peer through `SO_PEERPIDFD`, refuse an exited peer, and match
+    /// its credentials against the held VM process before reading its event. Opening a pidfd
+    /// from the credentials' numeric PID does not authenticate an already-reaped peer.
+    /// After matching the peer, check [`Process::has_exited`] and refuse an exited VM.
     #[cfg(target_os = "linux")]
     pub fn into_std(self) -> Result<std::os::unix::net::UnixListener> {
         self.listener.into_std().map_err(transfer_error)

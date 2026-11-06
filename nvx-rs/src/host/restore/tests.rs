@@ -170,6 +170,126 @@ fn an_exited_held_process_cannot_supply_even_an_already_queued_event() {
     assert!(received.is_empty());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
+    use std::fs;
+    use std::thread;
+
+    let namespace = fs::read_link("/proc/self/ns/pid").unwrap();
+    let outer = "NVX_TEST_READY_OUTER_PID_NAMESPACE";
+    if std::env::var_os(outer).is_none() {
+        let mut command = Command::new("unshare");
+        command
+            .args([
+                "--user",
+                "--map-root-user",
+                "--pid",
+                "--fork",
+                "--mount-proc",
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host::restore::tests::a_queued_peer_cannot_be_the_vm_that_reuses_its_pid",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(outer, namespace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = spawn_command(&mut command)
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // Never write the host's PID allocator: this process is its private namespace's init.
+    assert_eq!(std::process::id(), 1);
+    assert_ne!(namespace.as_os_str(), std::env::var_os(outer).unwrap());
+    let (_temporary, directory) = vm_directory();
+    let mut listener = ReadyListener::bind(&directory).unwrap();
+    let mut peer = Client::start(listener.endpoint(), b"OPENVMM_RESTORE_READY_V1\n", true);
+    let recycled = peer.child.id();
+    peer.stop();
+    assert!(peer.process.has_exited().unwrap());
+    thread::sleep(Duration::from_millis(20));
+    fs::write("/proc/sys/kernel/ns_last_pid", (recycled - 1).to_string()).unwrap();
+    let mut command = Command::new("python3");
+    command
+        .args([
+            "-c",
+            "import sys\nprint('running',flush=True)\nsys.stdin.buffer.read(1)\n",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let child = spawn_command(&mut command).unwrap();
+    assert_eq!(child.id(), recycled);
+    let process = held_process(child.id());
+    let mut vm = Client { child, process };
+    let mut line = String::new();
+    BufReader::new(vm.child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "running");
+    assert!(!vm.process.has_exited().unwrap());
+    let mut received = Vec::new();
+    let error = listener
+        .receive(&vm.process, &mut received, 64, Duration::from_secs(2))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Protocol);
+    assert!(received.is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_receiver_fails_closed_without_original_peer_pidfds() {
+    let child = "NVX_TEST_READY_PIDFD_DENIAL";
+    if std::env::var_os(child).is_none() {
+        for errno in [nix::libc::ENOPROTOOPT, nix::libc::EPERM] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "host::restore::tests::the_receiver_fails_closed_without_original_peer_pidfds",
+                    "--nocapture",
+                ])
+                .env(child, errno.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::host::sys::tests::refuse_peer_pidfd_on_spawn(&mut command, errno);
+            let output = spawn_command(&mut command)
+                .unwrap()
+                .wait_with_output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    let (_temporary, directory) = vm_directory();
+    let mut listener = ReadyListener::bind(&directory).unwrap();
+    let client = Client::start(listener.endpoint(), b"OPENVMM_RESTORE_READY_V1\n", true);
+    let mut received = Vec::new();
+    let error = listener
+        .receive(&client.process, &mut received, 64, Duration::from_secs(2))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert!(received.is_empty());
+}
+
 #[test]
 fn the_expected_process_cannot_change_after_acceptance() {
     let (_temporary, directory) = vm_directory();
