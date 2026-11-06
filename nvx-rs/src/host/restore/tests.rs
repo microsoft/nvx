@@ -174,50 +174,89 @@ fn an_exited_held_process_cannot_supply_even_an_already_queued_event() {
 #[test]
 fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
     use std::thread;
 
     let namespace = fs::read_link("/proc/self/ns/pid").unwrap();
+    let mount = fs::read_link("/proc/self/ns/mnt").unwrap();
     let outer = "NVX_TEST_READY_OUTER_PID_NAMESPACE";
+    let outer_mount = "NVX_TEST_READY_OUTER_MOUNT_NAMESPACE";
+    let verified = "NVX-READY-PID-REUSE-VERIFIED";
     if std::env::var_os(outer).is_none() {
-        let mut command = Command::new("unshare");
-        command
-            .args([
-                "--user",
-                "--map-root-user",
-                "--pid",
-                "--fork",
-                "--mount-proc",
-            ])
-            .arg(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "host::restore::tests::a_queued_peer_cannot_be_the_vm_that_reuses_its_pid",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(outer, namespace)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let output = spawn_command(&mut command)
-            .unwrap()
-            .wait_with_output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
+        let mut diagnostics = String::new();
+        for privileged in [false, true] {
+            let route = if privileged { "sudo" } else { "userns" };
+            let mut command = Command::new(if privileged { "sudo" } else { "unshare" });
+            if privileged {
+                command.args([
+                    "-n",
+                    "--preserve-env=NVX_TEST_READY_OUTER_PID_NAMESPACE,NVX_TEST_READY_OUTER_MOUNT_NAMESPACE,TMPDIR,TEMP,TMP",
+                    "/usr/bin/unshare",
+                ]);
+            } else {
+                command.args(["--user", "--map-root-user"]);
+            }
+            command
+                .args([
+                    "--mount",
+                    "--propagation",
+                    "private",
+                    "--pid",
+                    "--fork",
+                    "--mount-proc",
+                    "/bin/bash",
+                    "-c",
+                    "\"$@\"; result=$?; exit \"$result\"",
+                    "--",
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "host::restore::tests::a_queued_peer_cannot_be_the_vm_that_reuses_its_pid",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(outer, &namespace)
+                .env(outer_mount, &mount)
+                .env("LC_ALL", "C")
+                .env_remove("BASH_ENV")
+                .env_remove("ENV")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let output = spawn_command(&mut command)
+                .and_then(Child::wait_with_output)
+                .unwrap_or_else(|error| panic!("{diagnostics}\n{route} helper: {error}"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            diagnostics.push_str(&format!("{route}: {}\n{stdout}\n{stderr}\n", output.status));
+            if output.status.success() {
+                assert!(stdout.contains(verified), "{diagnostics}");
+                println!("{route}: {stdout}");
+                return;
+            }
+            assert!(
+                !privileged
+                    && output.status.code() == Some(1)
+                    && stderr.contains("unshare:")
+                    && (stderr.contains("Operation not permitted")
+                        || stderr.contains("Permission denied")),
+                "{diagnostics}"
+            );
+        }
+        unreachable!("both namespace setup failures must fail the test");
     }
-    // Never write the host's PID allocator: this process is its private namespace's init.
-    assert_eq!(std::process::id(), 1);
+    // Both namespaces must be private before any PID allocation, reaping, or signal in the test.
     assert_ne!(namespace.as_os_str(), std::env::var_os(outer).unwrap());
+    assert_ne!(mount.as_os_str(), std::env::var_os(outer_mount).unwrap());
+    assert_eq!(nix::unistd::getppid().as_raw(), 1);
+    assert_eq!(fs::read_to_string("/proc/1/comm").unwrap().trim(), "bash");
     let (_temporary, directory) = vm_directory();
     let mut listener = ReadyListener::bind(&directory).unwrap();
     let mut peer = Client::start(listener.endpoint(), b"OPENVMM_RESTORE_READY_V1\n", true);
     let recycled = peer.child.id();
+    let uid = fs::metadata(format!("/proc/{recycled}")).unwrap().uid();
+    assert_eq!(uid, nix::unistd::geteuid().as_raw());
     peer.stop();
     assert!(peer.process.has_exited().unwrap());
     thread::sleep(Duration::from_millis(20));
@@ -234,6 +273,10 @@ fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
     assert_eq!(child.id(), recycled);
     let process = held_process(child.id());
     let mut vm = Client { child, process };
+    assert_eq!(
+        fs::metadata(format!("/proc/{recycled}")).unwrap().uid(),
+        uid
+    );
     let mut line = String::new();
     BufReader::new(vm.child.stdout.as_mut().unwrap())
         .read_line(&mut line)
@@ -246,6 +289,11 @@ fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Protocol);
     assert!(received.is_empty());
+    println!(
+        "{verified} pid={recycled} uid={uid} reaper=bash pidns={} mountns={}",
+        namespace.display(),
+        mount.display()
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -253,7 +301,7 @@ fn a_queued_peer_cannot_be_the_vm_that_reuses_its_pid() {
 fn the_receiver_fails_closed_without_original_peer_pidfds() {
     let child = "NVX_TEST_READY_PIDFD_DENIAL";
     if std::env::var_os(child).is_none() {
-        for errno in [nix::libc::ENOPROTOOPT, nix::libc::EPERM] {
+        for errno in [nix::libc::ENOPROTOOPT, nix::libc::EPERM, nix::libc::EINVAL] {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args([
@@ -286,7 +334,12 @@ fn the_receiver_fails_closed_without_original_peer_pidfds() {
     let error = listener
         .receive(&client.process, &mut received, 64, Duration::from_secs(2))
         .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    let expected = if std::env::var(child).unwrap() == nix::libc::EINVAL.to_string() {
+        ErrorKind::Protocol
+    } else {
+        ErrorKind::Unavailable
+    };
+    assert_eq!(error.kind(), expected);
     assert!(received.is_empty());
 }
 

@@ -192,7 +192,8 @@ fn check_original_peer(connection: &UnixStream) -> io::Result<()> {
                 "restore-ready peer authentication requires SO_PEERPIDFD",
             ));
         }
-        Err(sys::Errno::ESRCH | sys::Errno::ENODATA) => {
+        // Before Linux 6.16, a reaped peer yields EINVAL rather than a readable pidfd.
+        Err(sys::Errno::EINVAL | sys::Errno::ESRCH | sys::Errno::ENODATA) => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "the original restore-ready socket peer exited",
