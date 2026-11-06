@@ -51,6 +51,46 @@ fn sandbox_config(hostname: &[u8], uid: &[u8]) -> AgentConfig {
 }
 
 #[test]
+fn a_layered_cold_boot_takes_only_the_clis_workload_identity() {
+    let config = AgentConfig::layered(
+        b"nvx_workload_uid=9 nvx_workload_gid=10 nvx_identity=1000:1001",
+        c"workload".to_owned(),
+        c"/home/workload".to_owned(),
+    )
+    .unwrap();
+    assert_eq!(config.uid.as_bytes(), b"1000");
+    assert_eq!(config.gid.as_bytes(), b"1001");
+    assert_eq!(config.user.as_c_str(), c"workload");
+    assert_eq!(config.home.as_c_str(), c"/home/workload");
+    assert!(config.direct);
+    assert!(config.entry.is_none());
+}
+
+#[test]
+fn a_layered_cold_boot_refuses_missing_repeated_or_invalid_cli_identities() {
+    for command_line in [
+        b"nvx_workload_uid=1000 nvx_workload_gid=1000".as_slice(),
+        b"nvx_identity=1000:1000 nvx_identity=1001:1001",
+        b"nvx_identity=",
+        b"nvx_identity=1000",
+        b"nvx_identity=:1000",
+        b"nvx_identity=1000:",
+        b"nvx_identity=1000:1000:1000",
+        b"nvx_identity=0:1000",
+        b"nvx_identity=1000:000",
+        b"nvx_identity=4294967295:1000",
+        b"nvx_identity=1000:4294967296",
+        b"nvx_identity=+1000:1000",
+    ] {
+        assert_eq!(
+            AgentConfig::layered(command_line, c"workload".to_owned(), c"/tmp".to_owned()).err(),
+            Some(Errno::EINVAL),
+            "{command_line:?}"
+        );
+    }
+}
+
+#[test]
 fn the_sandbox_entry_takes_an_existing_account_and_one_machine_id_per_boot() {
     let (_temporary, system) = TestSystem::with_container_cgroup();
     let config = sandbox_config(b"sandbox", b"65534");
