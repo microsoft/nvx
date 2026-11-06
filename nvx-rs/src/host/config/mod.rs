@@ -11,7 +11,8 @@ use super::network::NetworkPolicy;
 use crate::activation::{self, Journal, MAX_HOSTNAME_BYTES, OverlayMode, View};
 use crate::error::{Error, Result};
 use crate::net::Ipv4Cidr;
-use crate::protocol::root::{ImageFormat, RootImage};
+use crate::protocol::root::{ImageFormat, RootImage, RootLayout, RootUpper};
+use crate::protocol::view;
 
 /// The guest address of a VM's NIC at a cold boot whose configuration names none, in the form
 /// that [`Ipv4Cidr::parse`] reads.
@@ -123,6 +124,52 @@ pub struct Boot {
 }
 
 impl VmConfig {
+    /// Renders a cold boot's kernel command line without reading the host: the root's tokens,
+    /// the view's tokens, the export's mapping count when present, then the caller's
+    /// [`Boot::command_line`] without trimming or rewriting it.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when
+    /// [`check`](Self::check) refuses the configuration or when it has no [`Boot`]. A restore
+    /// receives its view through its activation record, not a kernel command line.
+    pub fn kernel_command_line(&self) -> Result<String> {
+        self.check()?;
+        let boot = self
+            .boot
+            .as_ref()
+            .ok_or_else(|| Error::unsupported("a kernel command line needs a cold boot's Boot"))?;
+        let mut tokens = Vec::new();
+        if let RootConfig::Layered(root) = &self.root {
+            let (upper, journal, max_memory_percent) = match &root.upper {
+                UpperConfig::Scratch { journal, .. } => (RootUpper::Scratch, Some(*journal), None),
+                UpperConfig::Ram { max_memory_percent } => {
+                    (RootUpper::Ram, None, Some(*max_memory_percent))
+                }
+            };
+            tokens.extend(
+                RootLayout {
+                    image: root.format,
+                    upper,
+                    overlay: Some(root.overlay),
+                    journal,
+                    gpt_first_partition_bound: root.gpt_first_partition_bound,
+                    max_memory_percent,
+                }
+                .tokens(),
+            );
+        }
+        tokens.extend(
+            view::tokens(&self.view)
+                .map_err(|error| Error::unsupported(error.to_string()).with_source(error))?,
+        );
+        if let Some(export) = &self.filesystem {
+            tokens.push(export.kernel_token());
+        }
+        if !boot.command_line.is_empty() {
+            tokens.push(boot.command_line.clone());
+        }
+        Ok(tokens.join(" "))
+    }
+
     /// Checks the whole configuration without reading the host: it opens no path, and checks no
     /// support of the host.
     ///
