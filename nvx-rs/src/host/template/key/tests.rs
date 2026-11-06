@@ -807,51 +807,6 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
 }
 
 #[test]
-fn invariant_settings_have_one_form() {
-    let settings = Invariants::new()
-        .with("isolation.seccomp", "strict")
-        .unwrap()
-        .with("limits.pids", "512")
-        .unwrap()
-        .with("isolation.seccomp", "relaxed")
-        .unwrap();
-    assert_eq!(settings.len(), 2);
-    assert!(!settings.is_empty());
-    assert_eq!(settings.get("isolation.seccomp"), Some("relaxed"));
-    assert_eq!(settings.get("limits.cpu"), None);
-    assert_eq!(
-        settings.iter().collect::<Vec<_>>(),
-        [("isolation.seccomp", "relaxed"), ("limits.pids", "512")]
-    );
-    let long_name = "a".repeat(Invariants::MAX_NAME_LEN + 1);
-    let long_value = "v".repeat(Invariants::MAX_VALUE_LEN + 1);
-    for (name, value) in [
-        ("", "value"),
-        ("Isolation", "value"),
-        ("1st", "value"),
-        ("with space", "value"),
-        (long_name.as_str(), "value"),
-        ("name", long_value.as_str()),
-        ("name", "line\nbreak"),
-        ("name", "tab\there"),
-        ("name", "é"),
-    ] {
-        let error = Invariants::new().with(name, value).unwrap_err();
-        assert_eq!(error.code(), ErrorCode::Unsupported, "{name:?} {value:?}");
-    }
-    assert!(Invariants::new().with("name", "").is_ok());
-    let mut full = Invariants::new();
-    for index in 0..Invariants::MAX_SETTINGS {
-        full = full.with(&format!("setting{index}"), "1").unwrap();
-    }
-    assert!(full.clone().with("setting0", "2").is_ok());
-    assert_eq!(
-        full.with("another", "1").unwrap_err().message(),
-        "a template holds at most 64 invariant settings"
-    );
-}
-
-#[test]
 fn a_key_identity_is_the_identity_that_names_a_clones_template() {
     let identity = network_key().identity();
     let named = activation::Identity::from(identity);

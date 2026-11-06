@@ -123,7 +123,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
-| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: a VM's processors, memory, root, view, network, export, boot console, and cold-boot settings as one value, checked without reading the host |
+| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`, a VM's configuration as one value, and `CaptureConfig`, what a capture adds and the identity of its snapshots, checked without reading the host |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -490,9 +490,46 @@ path and checks no support of the host. It fails with an `nvx::Error` of kind
 root without an image or a scratch path, with a bound of an EROFS image or of 0,
 or with a RAM upper's cap outside 1 to 90 percent; a hostname that an activation
 record refuses; or an export that `ExportPlan::check` refuses for the guest
-targets that the root reserves. The network's policy and the boot's command line
-are checked where they are lowered, with the guest's address and NVX's own
-tokens.
+targets that the root reserves. Last, it checks a boot's capture with
+`CaptureConfig::check`, below, and fails with its error. The network's policy
+and the boot's command line are checked where they are lowered, with the
+guest's address and NVX's own tokens.
+
+A `Boot` may also hold a `CaptureConfig`, what a capture of the VM adds to the
+VM's configuration, which keeps the rest, such as the NIC, the console, and the
+export: a `DiskCapture`, so far only `Fresh`, the `BlockGeometry`, length and
+block sizes, of the placeholder of the image and of the dormant scratch that a
+fresh capture of a blockless VM attaches, which each restore replaces with its
+own; its processors and its memory in MiB, each a `Capacity`, what the VM boots
+with and what a restore may grow it to; and the caller's `Invariants`, at most
+64 settings that NVX keeps without interpreting them, each named by 1 to 64
+lowercase ASCII letters, digits, `.`, `-`, and `_` from a letter, with a value
+of at most 256 printable ASCII characters. `Invariants` and `BlockGeometry`
+belong here, and `nvx::host::template` re-exports them where they were.
+
+`CaptureConfig::check` checks a capture without reading the host. It fails with
+an `nvx::Error` of kind `Unsupported` for processors at boot or a capacity other
+than 1, 2, 4, or 8, more processors at boot than the capacity, no memory at
+boot, a memory capacity below it or not a multiple of 128 MiB, or a disk whose
+geometry the template's manifest would refuse: a logical block size that is not
+a power of two of at least 512 bytes, a physical one that is not a power of two
+of at least the logical one, or a length that is not a nonzero multiple of the
+logical one.
+
+`CaptureConfig::identity` returns the `CaptureIdentity` that names the
+snapshots of a capture of a VM of a `VmConfig` on a `Runtime`: the SHA-256
+digest, after the domain `nvx capture` and a NUL, of a fixed encoding of what
+tells captures apart, which displays and serializes as 64 lowercase hexadecimal
+digits. It identifies the captures that NVX supports, fresh captures of a
+blockless VM, from the values alone: it reads nothing on the host and refuses
+no configuration, which creating the capture checks. It digests the runtime's
+identity, the versions of this crate's contracts, the hypervisor, and the
+requested CPU profile; the capture's disks, processors, memory, and invariants;
+and the VM's NIC's address, `DEFAULT_GUEST_NETWORK` when the configuration
+names none, its console attachment, whether it exports host paths, and its
+boot's command line. No path, launch option, view, network policy, or anything
+of the VM's root is part of it, nor the VM's own processors and memory, for
+which the capture's count.
 
 ### `nvx::host::artifacts`
 
