@@ -8,8 +8,8 @@ use super::*;
 /// The disk GUID of the tests' GPT images.
 const DISK_GUID: &str = "fedcba98-7654-3210-fedc-ba9876543210";
 
-/// Returns the configuration of the tests: an EROFS image over a tmpfs, without an export, a
-/// or network.
+/// Returns the configuration of the tests: an EROFS image over a tmpfs, without an export or a
+/// network.
 pub(super) fn configuration() -> Configuration {
     Configuration {
         image: Image::Erofs { uuid: None },
