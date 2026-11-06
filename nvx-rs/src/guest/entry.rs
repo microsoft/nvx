@@ -126,12 +126,11 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::mappings::mapper::{AttachFailure, bind_retained_with};
 use super::mappings::{
-    self, Access, Kernel, Kind, Mapped, Mapping, MappingError, SourceRoot, Step, SystemKernel,
-    TargetRoot, TeardownError,
+    self, Kernel, Kind, Mapped, MappingError, SystemKernel, TargetRoot, TeardownError,
 };
 use super::parse::parse_decimal;
+use super::root::{TIME_STATUS_TARGET, bind_file_retained, bind_runtime_file};
 #[cfg(doc)]
 use super::spawn::{Command, LaunchStage};
 use super::sys::{self, EntryChild, Errno, FileDescriptor, Mode, OpenFlags};
@@ -151,10 +150,6 @@ const PASSWD: &std::ffi::CStr = c"etc/passwd";
 const GROUP: &std::ffi::CStr = c"etc/group";
 /// The ID that `setresuid` and `setresgid` read as "unchanged", which no identity may hold.
 const UNCHANGED_ID: u32 = u32::MAX;
-/// Where [`Entry::bind_runtime`] binds the time status in the root, as a layered root's
-/// [`mount_runtime`](super::root::Root::mount_runtime) does.
-pub(crate) const TIME_STATUS_TARGET: &str = "/run/nvx/time";
-
 /// The names of the Linux capabilities, by number.
 const CAPABILITY_NAMES: [&str; 41] = [
     "CAP_CHOWN",
@@ -796,118 +791,6 @@ fn bind_file(
     target: &str,
 ) -> Result<Mapped, MappingError> {
     bind_file_retained(kernel, root, path, source, target).map_err(|failure| failure.error)
-}
-
-/// Binds a runtime file as [`bind_file`] does, retaining an attachment that could not be detached.
-pub(crate) fn bind_file_retained(
-    kernel: &mut dyn Kernel,
-    root: &TargetRoot,
-    path: &Path,
-    source: &Path,
-    target: &str,
-) -> Result<Mapped, AttachFailure> {
-    match bind_runtime_file_retained(kernel, root, source, target, Kind::File) {
-        Err(failure)
-            if matches!(&failure.error, MappingError::Link { path: link }
-                if link == Path::new(target)) =>
-        {
-            remove_link(path, target).map_err(|_| failure)?;
-            bind_runtime_file_retained(kernel, root, source, target, Kind::File)
-        }
-        bound => bound,
-    }
-}
-
-/// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
-/// `root`, with `kernel`, through the walk and attach of [`mappings::bind`] from a source root at
-/// `path`'s parent directory, and returns the bind.
-pub(crate) fn bind_runtime_file(
-    kernel: &mut dyn Kernel,
-    root: &TargetRoot,
-    path: &Path,
-    target: &str,
-    kind: Kind,
-) -> Result<Mapped, MappingError> {
-    let (source, mapping) = runtime_mapping(path, target, kind)?;
-    mappings::bind_with(kernel, root, &source, &mapping)
-}
-
-/// Binds as [`bind_runtime_file`] does, retaining a failed bind that its caller must detach.
-pub(crate) fn bind_runtime_file_retained(
-    kernel: &mut dyn Kernel,
-    root: &TargetRoot,
-    path: &Path,
-    target: &str,
-    kind: Kind,
-) -> Result<Mapped, AttachFailure> {
-    let (source, mapping) = runtime_mapping(path, target, kind)?;
-    bind_retained_with(kernel, root, &source, &mapping)
-}
-
-/// Prepares the source root and read-only mapping for a runtime bind.
-fn runtime_mapping(
-    path: &Path,
-    target: &str,
-    kind: Kind,
-) -> Result<(SourceRoot, Mapping), MappingError> {
-    let source_error = |error: i32| MappingError::System {
-        step: Step::Source,
-        error,
-    };
-    let Some((parent, name)) = runtime_source(path) else {
-        return Err(source_error(Errno::EINVAL as i32));
-    };
-    let source = SourceRoot::open(parent)
-        .map_err(|error| source_error(error.raw_os_error().unwrap_or(Errno::EIO as i32)))?;
-    let mapping = Mapping::new(name, target, Access::ReadOnly)
-        .map_err(|_| source_error(Errno::EINVAL as i32))?
-        .with_kind(kind);
-    Ok((source, mapping))
-}
-
-/// Returns the directory that holds the runtime file at `path`, the current directory for a
-/// relative path of one component, and the file's name in it, unless `path` names no file.
-fn runtime_source(path: &Path) -> Option<(&Path, &std::ffi::OsStr)> {
-    let name = path.file_name()?;
-    let parent = path.parent()?;
-    if parent.as_os_str().is_empty() {
-        Some((Path::new("."), name))
-    } else {
-        Some((parent, name))
-    }
-}
-
-/// Removes the symbolic link at `target`, a file of `/etc` such as `/etc/machine-id`, beneath
-/// `root`, reached through no other link and on the root's own mount.
-fn remove_link(root: &Path, target: &str) -> Result<(), Errno> {
-    let name = target.strip_prefix("/etc/").ok_or(Errno::EINVAL)?;
-    let name = sys::c_string(name.as_bytes())?;
-    let root = sys::path_c_string(root)?;
-    let directory = sys::open(
-        &root,
-        OpenFlags::O_PATH | OpenFlags::O_DIRECTORY | OpenFlags::O_NOFOLLOW | OpenFlags::O_CLOEXEC,
-        Mode::empty(),
-    )?;
-    let etc = sys::open_beneath(
-        &directory,
-        c"etc",
-        OpenFlags::O_PATH | OpenFlags::O_DIRECTORY,
-        Mode::empty(),
-        false,
-    )?;
-    let status = nix::sys::stat::fstatat(
-        etc.borrowed(),
-        name.as_c_str(),
-        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-    )?;
-    if status.st_mode & nix::libc::S_IFMT != nix::libc::S_IFLNK {
-        return Err(Errno::EEXIST);
-    }
-    nix::unistd::unlinkat(
-        etc.borrowed(),
-        name.as_c_str(),
-        nix::unistd::UnlinkatFlags::NoRemoveDir,
-    )
 }
 
 /// One execution that an [`Entry`] prepared, which [`Command::enter`] takes.
