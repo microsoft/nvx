@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::at;
 use crate::guest::GenerationId;
+use crate::guest::activation::{at, live_abi};
 use crate::guest::parse::{parse_decimal, parse_hexadecimal};
 use crate::guest::reseed::{self, ReseedError, Seed};
 use crate::guest::root::Paths;
@@ -109,15 +109,11 @@ impl Repair {
     /// [`CaptureRequest::in_memory`](crate::guest::time::CaptureRequest::in_memory), so that the
     /// restore holds it.
     pub fn new(restore: Restore) -> Self {
-        let system = LiveSystem {
-            paths: Paths::default(),
-            abi: super::live_abi(),
-        };
-        Self::with_system(restore, Box::new(system))
+        Self::with_system(restore, live_system())
     }
 
     /// Returns the repair of the clone that `restore` started, on `system`.
-    fn with_system(mut restore: Restore, system: Box<dyn RepairSystem>) -> Self {
+    pub(super) fn with_system(mut restore: Restore, system: Box<dyn RepairSystem>) -> Self {
         let seed = restore.take_seed();
         Self {
             restore,
@@ -913,7 +909,7 @@ fn lossy(text: &[u8]) -> String {
 
 /// What a repair reads and writes of the kernel, and asks of the time ABI, which the tests' fake
 /// replaces.
-trait RepairSystem: Send {
+pub(super) trait RepairSystem: Send {
     /// Reads the CPUs that are online, as the kernel lists them.
     fn online_cpus(&mut self) -> io::Result<Vec<u8>>;
 
@@ -948,6 +944,14 @@ struct LiveSystem {
     paths: Paths,
     /// The time ABI, in strict mode unless the kernel command line makes it report-only.
     abi: TimeAbi,
+}
+
+/// Returns the existing strict kernel/time seam for an inline or legacy repair.
+pub(super) fn live_system() -> Box<dyn RepairSystem> {
+    Box::new(LiveSystem {
+        paths: Paths::default(),
+        abi: live_abi(),
+    })
 }
 
 impl LiveSystem {
