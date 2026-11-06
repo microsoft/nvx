@@ -107,8 +107,7 @@ pub(super) const CPUID_ENTRY_LEN: usize = 44;
 /// Most entries of a CPU profile's effective CPUID record.
 pub(super) const MAX_CPUID_ENTRIES: usize = 1024;
 
-/// The processor counts of a microVM.
-pub(super) const PROCESSOR_COUNTS: [u32; 4] = [1, 2, 4, 8];
+pub(super) use crate::host::config::PROCESSOR_COUNTS;
 
 /// Bytes of a SHA-256 digest.
 const SHA256_LEN: usize = 32;
@@ -439,37 +438,6 @@ pub(super) struct Interrupts {
     pub(super) status_page_start: u64,
     /// The length of the shared interrupt-status page, or 0 without one.
     pub(super) status_page_length: u64,
-}
-
-impl BlockGeometry {
-    /// Explains why the geometry is invalid, if it is, as a phrase whose subject is a size, such
-    /// as "length 1000 is not a nonzero multiple of its logical block size".
-    pub(super) fn problem(&self) -> Option<String> {
-        if self.logical_block_size < 512 || !self.logical_block_size.is_power_of_two() {
-            Some(format!(
-                "logical block size {} is not a power of two of at least 512",
-                self.logical_block_size
-            ))
-        } else if self.physical_block_size < self.logical_block_size
-            || !self.physical_block_size.is_power_of_two()
-        {
-            Some(format!(
-                "physical block size {} is not a power of two of at least its logical block size",
-                self.physical_block_size
-            ))
-        } else if self.length == 0
-            || !self
-                .length
-                .is_multiple_of(u64::from(self.logical_block_size))
-        {
-            Some(format!(
-                "length {} is not a nonzero multiple of its logical block size",
-                self.length
-            ))
-        } else {
-            None
-        }
-    }
 }
 
 /// The IPv6 identity of a machine's fixed NIC.
