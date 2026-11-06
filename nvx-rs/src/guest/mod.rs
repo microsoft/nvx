@@ -20,7 +20,8 @@
 //! own. NVX's own space is internal reference code, which NVX's guest programs use: it is hidden
 //! from this documentation and unstable, and it becomes crate-private once nothing outside NVX
 //! uses it. It is `root`, which bootstraps the guest for a layered root, assembles the root,
-//! mounts live shares and mappings in it, and tears it down; `gpt`, which reads the partition
+//! mounts live shares and mappings in it, and tears it down; `view`, which sets the VM's hostname,
+//! machine ID, and resolver file, whose binds the root owns; `gpt`, which reads the partition
 //! table of a GPT disk that the kernel attached as a block device; the mapper of `mappings`, which
 //! mounts host mappings beneath the descriptors of the roots that it names; and the activation's
 //! application, `clone::apply` and its types, with which a clone assembles its root and checks
@@ -138,3 +139,5 @@ pub mod time;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod time_probe;
+#[doc(hidden)]
+pub mod view;

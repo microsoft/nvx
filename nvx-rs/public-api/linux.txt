@@ -1670,6 +1670,17 @@ method nvx::guest::time::Violation::status
 fn nvx::guest::time::main (hidden)
 mod nvx::guest::time_probe (hidden)
 fn nvx::guest::time_probe::main (hidden)
+mod nvx::guest::view (hidden)
+const nvx::guest::view::DEFAULT_HOSTNAME (hidden)
+const nvx::guest::view::MACHINE_ID_FILE (hidden)
+const nvx::guest::view::MAX_HOSTNAME_BYTES (hidden)
+enum nvx::guest::view::MachineId (hidden)
+variant nvx::guest::view::MachineId::Generated (hidden)
+field nvx::guest::view::MachineId::Generated::0 (hidden)
+variant nvx::guest::view::MachineId::Image (hidden)
+method nvx::guest::view::MachineId::generate (hidden)
+const nvx::guest::view::RESOLVER_FILE (hidden)
+fn nvx::guest::view::apply (hidden)
 fn nvx::guest_path
 mod nvx::host
 mod nvx::host::artifacts
