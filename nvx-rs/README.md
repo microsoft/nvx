@@ -544,19 +544,24 @@ which the capture's count.
 `ReadyListener` owns a restore-ready endpoint: a mode-0600 Unix socket in the
 private VM directory on Linux, or a fresh first-instance named pipe with an
 owner-only protected access control list on Windows. The library's receiver
-checks the connecting client's process ID against the held VM process, and
-refuses an exited process even if its ID has been reused.
+checks the connecting client's process ID against the held VM process. On
+Linux it also checks the socket's original peer through `SO_PEERPIDFD`, so
+a reaped client's queued event cannot impersonate a VM that reuses its ID.
+This requires Linux 6.5 or a backport of that option; if the host cannot
+provide it, receive fails with `ErrorKind::Unavailable`, without a numeric-PID
+fallback. An exited held VM is refused too.
 
 `into_std()` transfers the same nonblocking `UnixListener` on Linux, or the
 same overlapped first pipe instance as an `OwnedHandle` on Windows, without
 reopening or duplicating it. Transfer precedes acceptance; transferring after
 the receiver accepted a client fails with `ErrorKind::Unsupported`. A caller
-that drives the native object owns its I/O and checks the client's peer
-credentials or named-pipe client process ID against its held VM process
-before reading the event. After matching the PID, it checks
-`Process::has_exited` and refuses an exited process: a Linux pidfd does not
-reserve a reaped process's numeric PID. Listener construction remains internal until
-restore launch preparation supplies it.
+that drives the native object owns its I/O. On Linux it checks the original
+socket peer through `SO_PEERPIDFD`, refuses an exited peer, and matches its
+credentials against the held VM process: opening a pidfd from the cached
+numeric PID is not authentication. On Windows it checks the named-pipe client
+process ID. After matching the peer, it checks `Process::has_exited` and
+refuses an exited VM. Listener construction remains internal until restore
+launch preparation supplies it.
 
 ### `nvx::host::artifacts`
 

@@ -3,12 +3,15 @@
 
 use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::sys::socket::{getsockopt, sockopt::PeerPidfd};
 
 use crate::host::platform::{Transport, TransportHandle, time_left};
 use crate::host::sys;
@@ -84,6 +87,30 @@ impl ReadyListener {
         limit: usize,
         timeout: Duration,
     ) -> io::Result<bool> {
+        self.receive_checked(pid, received, limit, timeout, false)
+    }
+
+    /// Receives only from the original socket peer while it still runs, never from a cached
+    /// numeric PID that a later process reused. Requires Linux's `SO_PEERPIDFD`.
+    pub(crate) fn receive_verified(
+        &mut self,
+        pid: u32,
+        received: &mut Vec<u8>,
+        limit: usize,
+        timeout: Duration,
+    ) -> io::Result<bool> {
+        self.receive_checked(pid, received, limit, timeout, true)
+    }
+
+    /// Shares the byte/deadline receive path, verifying the original peer only when requested.
+    fn receive_checked(
+        &mut self,
+        pid: u32,
+        received: &mut Vec<u8>,
+        limit: usize,
+        timeout: Duration,
+        verify_original_peer: bool,
+    ) -> io::Result<bool> {
         let deadline = Instant::now() + timeout;
         if self.connection.is_none() {
             if !sys::wait_readable(&self.socket, timeout)? {
@@ -110,6 +137,9 @@ impl ReadyListener {
                          process {pid}"
                     ),
                 ));
+            }
+            if verify_original_peer {
+                check_original_peer(&connection)?;
             }
             connection.set_nonblocking(true)?;
             self.connection = Some(connection);
@@ -145,6 +175,45 @@ impl ReadyListener {
             Err(error) => Err(error),
         }
     }
+}
+
+/// The kernel returns a descriptor of the socket's original peer, not a new lookup of its PID.
+fn check_original_peer(connection: &UnixStream) -> io::Result<()> {
+    let peer = match getsockopt(connection, PeerPidfd) {
+        Err(
+            sys::Errno::ENOPROTOOPT
+            | sys::Errno::EOPNOTSUPP
+            | sys::Errno::ENOSYS
+            | sys::Errno::EPERM
+            | sys::Errno::EACCES,
+        ) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "restore-ready peer authentication requires SO_PEERPIDFD",
+            ));
+        }
+        Err(sys::Errno::ESRCH | sys::Errno::ENODATA) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the original restore-ready socket peer exited",
+            ));
+        }
+        result => result?,
+    };
+    let mut descriptors = [PollFd::new(peer.as_fd(), PollFlags::POLLIN)];
+    if poll(&mut descriptors, PollTimeout::ZERO)? == 0 {
+        return Ok(());
+    }
+    let events = descriptors[0].revents().unwrap_or(PollFlags::empty());
+    if events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the original restore-ready socket peer exited",
+        ));
+    }
+    Err(io::Error::other(format!(
+        "the restore-ready peer pidfd reported unexpected events {events:?}"
+    )))
 }
 
 /// Gives the restore-ready socket at `socket_path`, which the caller bound, the mode 0600, whatever
