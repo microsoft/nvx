@@ -556,6 +556,12 @@ process ID. After matching the peer, it checks `Process::has_exited` and
 refuses an exited VM. Listener construction remains internal until restore
 launch preparation supplies it.
 
+The Linux PID-reuse regression runs a separate helper in private PID and mount
+namespaces with Bash as its reaper. If the host refuses unprivileged user
+namespaces, it uses passwordless `sudo` only for that isolated helper, not the
+test suite or build. If neither route works, the test fails; it never changes
+host namespace policy or skips the identity assertions.
+
 ### `nvx::host::artifacts`
 
 `Artifacts` (also `nvx::Artifacts`): the OpenVMM executable, guest kernel, and
