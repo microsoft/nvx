@@ -853,10 +853,6 @@ impl Runtime {
     }
 
     /// Poll alongside control input so a blocked peer cannot hide a helper's end.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "SL7.6b polls the init runtime with control input")
-    )]
     pub(crate) fn wake(&self) -> Pollable<'_> {
         Pollable::Signals(self.system.signals.as_ref().expect("listening"))
     }
@@ -907,12 +903,13 @@ fn serve_layered(runtime: &mut Runtime) -> Result<(), String> {
         )
         .as_bytes(),
     );
-    loop {
-        if runtime.service(|_, _| {})? {
-            return Ok(());
-        }
-        runtime.terminating |= runtime.system.wait_signal() == Some(Signal::SIGTERM);
-    }
+    super::managed_agent::AgentConfig::layered(&boot.command_line, boot.user, boot.home)
+        .map_err(|error| format!("invalid layered identity: {}", error.desc()))?
+        .serve_layered(
+            runtime,
+            boot.control,
+            (boot.table, boot.mapper, boot.export),
+        )
 }
 
 /// Keeps diagnostics, sync and direct power-off with the original PID-1 owner.

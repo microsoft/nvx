@@ -14,13 +14,6 @@ use super::seam::{Paths, RealSystem, System};
 use super::session::{Event, ReceiveFailure, Session};
 use super::{AgentConfig, exec, launch, tty};
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the layered boot owner supplies the control handoff"
-    )
-)]
 impl AgentConfig {
     /// Takes a layered cold boot's CLI identity and its already-resolved account defaults.
     pub(crate) fn layered(
