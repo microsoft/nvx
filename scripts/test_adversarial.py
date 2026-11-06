@@ -857,6 +857,7 @@ class AdversarialOracleTests(unittest.TestCase):
     def test_contained_guest_runner_timeout_kills_descendants(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             child_pid_path = Path(temporary) / "child.pid"
+            ready_path = Path(temporary) / "ready"
             command = [
                 sys.executable,
                 "-u",
@@ -864,13 +865,58 @@ class AdversarialOracleTests(unittest.TestCase):
                 (
                     "import pathlib,subprocess,sys,time; "
                     "child=subprocess.Popen([sys.executable,'-c',"
-                    "'import time; time.sleep(60)']); "
-                    "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-                    "print('ALPINE-MICROVM-BOOT-OK',flush=True); time.sleep(60)"
+                    "'import os,pathlib,sys,time; "
+                    "path=pathlib.Path(sys.argv[1]); "
+                    "path.with_suffix(\".tmp\").write_text(str(os.getpid())); "
+                    "path.with_suffix(\".tmp\").replace(path); "
+                    "time.sleep(60)',sys.argv[1]]); "
+                    "print('ALPINE-MICROVM-BOOT-OK',flush=True); "
+                    "pathlib.Path(sys.argv[2]).touch(); time.sleep(60)"
                 ),
                 str(child_pid_path),
+                str(ready_path),
             ]
-            with self.assertRaisesRegex(RuntimeError, "did not finish"):
+
+            def start_ready(
+                command: Sequence[str],
+                environment: dict[str, str],
+                *,
+                contain_process_tree: bool,
+                separate_stderr: bool,
+            ) -> InteractiveProcess:
+                interaction = InteractiveProcess(
+                    command,
+                    environment,
+                    contain_process_tree=contain_process_tree,
+                    separate_stderr=separate_stderr,
+                )
+                ready = False
+                try:
+                    deadline = time.monotonic() + 5.0
+                    while not ready_path.exists() or not child_pid_path.exists():
+                        self.assertIsNone(
+                            interaction.process.poll(), "fixture exited before readiness"
+                        )
+                        self.assertLess(
+                            time.monotonic(), deadline, "fixture did not become ready"
+                        )
+                        time.sleep(0.01)
+                    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+                    self.assertGreater(child_pid, 0)
+                    self.assertTrue(_process_running(child_pid))
+                    ready = True
+                    return interaction
+                finally:
+                    if not ready:
+                        interaction.close()
+
+            with (
+                patch("nvx_tools.benchmark.InteractiveProcess", side_effect=start_ready),
+                self.assertRaisesRegex(
+                    (TimeoutError, RuntimeError),
+                    r"^guest workload did not finish within 0\.5s(?:\n|$)",
+                ),
+            ):
                 run_guest_script(
                     command,
                     "exit\n",
