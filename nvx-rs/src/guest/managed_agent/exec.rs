@@ -54,7 +54,7 @@ pub(crate) fn run(
             }
         }
     }
-    let mut workload = match launch(system, config, execution) {
+    let mut workload = match launch(system, session, config, execution) {
         Ok(launched) => launched,
         Err(LaunchError::Entry(error)) => {
             let diagnostic =
@@ -63,7 +63,7 @@ pub(crate) fn run(
             return session.send_error(request_id, 125, LAUNCH_FAILED);
         }
         Err(LaunchError::Start(failure)) => {
-            settle_start(system, &failure)?;
+            settle_start(system, session, &failure)?;
             return session.send_error(request_id, 125, LAUNCH_FAILED);
         }
         Err(LaunchError::Other) => return session.send_error(request_id, 125, LAUNCH_FAILED),
@@ -99,8 +99,11 @@ pub(crate) fn run(
                 }
                 Err(error) => {
                     workload.terminate();
+                    if session.stopping() {
+                        return Err(error);
+                    }
                     if !(config.direct && state.status_lost)
-                        && let Err(failure) = workload.wait()
+                        && let Err(failure) = workload.wait(session)
                     {
                         report_wait_failure(system, &failure);
                     }
@@ -114,8 +117,11 @@ pub(crate) fn run(
         } else {
             &mut buffer[..]
         };
+        if let Some((id, status)) = session.take_status() {
+            workload.observe(id, status);
+        }
         state.forward(system, session, request_id, &mut workload, output)?;
-        workload.collect();
+        workload.collect(session)?;
         if state.running(&workload)
             && execution.timeout_ms != 0
             && started.elapsed() >= Duration::from_millis(u64::from(execution.timeout_ms))
@@ -128,7 +134,7 @@ pub(crate) fn run(
         if state.ending()
             && state.running(&workload)
             && !config.direct
-            && let Err(error) = workload.wait()
+            && let Err(error) = workload.wait(session)
         {
             state.lose_status(system, &error);
         }
@@ -333,15 +339,15 @@ impl Workload {
         }
     }
 
-    fn collect(&mut self) {
-        collect(|id, status| match self {
-            Self::Direct(workload) => {
-                workload.observe(id, status);
-            }
-            Self::Sandbox(workload) => {
-                workload.observe(id, status);
-            }
-        });
+    fn observe(&mut self, id: u32, status: std::process::ExitStatus) {
+        match self {
+            Self::Direct(workload) => workload.observe(id, status),
+            Self::Sandbox(workload) => workload.observe(id, status),
+        };
+    }
+
+    fn collect(&mut self, session: &Session) -> Result<(), Errno> {
+        session.collect(|id, status| self.observe(id, status))
     }
 
     fn terminate(&mut self) {
@@ -379,12 +385,12 @@ impl Workload {
         }
     }
 
-    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    fn wait(&mut self, session: &Session) -> std::io::Result<std::process::ExitStatus> {
         if let Self::Sandbox(workload) = self {
             return workload.wait();
         }
         loop {
-            self.collect();
+            self.collect(session)?;
             if let Some(status) = self.status() {
                 return Ok(status);
             }
@@ -417,7 +423,7 @@ impl Workload {
 }
 
 /// Feeds the agent's sole status collector to its active or failed-start owner.
-fn collect(mut observe: impl FnMut(u32, std::process::ExitStatus)) {
+pub(super) fn collect(mut observe: impl FnMut(u32, std::process::ExitStatus)) {
     while let Some(reaped) = sys::reap_any_nonblocking() {
         observe(
             reaped.process.raw().unsigned_abs(),
@@ -427,18 +433,23 @@ fn collect(mut observe: impl FnMut(u32, std::process::ExitStatus)) {
 }
 
 /// Keeps a failed native launch owned until its child is collected or explicitly lost.
-fn settle_start(system: &mut impl System, failure: &init::StartFailure) -> Result<(), Errno> {
+fn settle_start(
+    system: &mut impl System,
+    session: &Session,
+    failure: &init::StartFailure,
+) -> Result<(), Errno> {
     super::diagnostics::error(system, "exec-launch", sys::errno_of(&failure.error) as i32);
     if let Some(error) = failure.cleanup {
         super::diagnostics::error(system, "exec-kill", error as i32);
     }
     if let Some(process) = failure.process {
+        session.watch(process.raw().unsigned_abs());
         loop {
             let mut settled = false;
-            collect(|id, status| {
+            session.collect(|id, status| {
                 settled |= id == process.raw().unsigned_abs()
                     && (status.code().is_some() || status.signal().is_some());
-            });
+            })?;
             if settled {
                 break;
             }
@@ -638,15 +649,17 @@ impl From<Errno> for LaunchError {
 /// Starts a native direct workload, or the unchanged sandbox entry and placement sequence.
 fn launch(
     system: &mut impl System,
+    session: &Session,
     config: &AgentConfig,
     execution: &GuestExecPayload,
 ) -> Result<Workload, LaunchError> {
     if config.direct {
-        collect(|_, _| {});
-        return system
+        session.collect(|_, _| {})?;
+        let workload = system
             .start_direct(launch::direct_request(config, execution)?)
-            .map(Workload::Direct)
-            .map_err(LaunchError::Start);
+            .map_err(LaunchError::Start)?;
+        session.watch(workload.id());
+        return Ok(Workload::Direct(workload));
     }
     let (pipes, ends) = Pipes::new(false).map_err(|error| sys::errno_of(&error))?;
     let request = LaunchRequest {
@@ -681,7 +694,7 @@ fn launch(
     {
         super::diagnostics::error(system, "exec-launch", error as i32);
         workload.terminate();
-        if let Err(error) = workload.wait() {
+        if let Err(error) = workload.wait(session) {
             report_wait_failure(system, &error);
         }
         return Err(LaunchError::Other);
@@ -810,6 +823,7 @@ fn handle_control(
             return Ok(ExecControl::SessionLost);
         }
         Ok(SessionEvent::Data(payload)) => payload,
+        Err(_) if session.stopping() => return Err(Errno::ECANCELED),
         Err(failure) => return Err(report_control_failure(system, failure)),
     };
     let request = match session.accept_request(&payload) {

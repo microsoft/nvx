@@ -1,18 +1,90 @@
-use std::io;
+use std::cell::{Cell, RefCell};
+use std::io::{self, Read, Write};
+use std::process::ExitStatus;
 
+use crate::guest::init::Runtime;
 use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
-use crate::guest::sys::{Errno, FileDescriptor};
+use crate::guest::sys::{self, Errno, FileDescriptor, Pollable};
 use crate::protocol::nvxs::{GuestEvent, RecordError, RecordType, SessionError};
 use crate::protocol::{self, APP_ERROR, OUTER_MAX_PAYLOAD, OUTER_RECEIVE_WINDOW};
 
 /// The agent's control session: the guest's role of the shared NVXS session on the control
 /// console, and the NVXC frames that its DATA records carry.
-pub(crate) struct Session {
+pub(crate) struct Session<'r> {
     /// The guest's NVXS connection on the owned control-console descriptor.
-    connection: GuestConnection<FileDescriptor>,
+    connection: GuestConnection<Control<'r>>,
     /// Error of the connection's latest failure, which a connection that a failure ended reports
     /// again.
     last_error: Option<Errno>,
+}
+
+/// Byte transport only: the existing connection still owns all record framing.
+struct Control<'r> {
+    descriptor: FileDescriptor,
+    runtime: Option<RefCell<&'r mut Runtime>>,
+    leader: Cell<u32>,
+    status: Cell<Option<(u32, ExitStatus)>>,
+    outcome: RefCell<Result<bool, String>>,
+}
+
+impl Control<'_> {
+    fn service(&self, observed: impl FnMut(u32, ExitStatus)) -> Result<bool, Errno> {
+        if self.outcome.borrow().is_err() {
+            return Err(Errno::ECHILD);
+        }
+        if let Some(runtime) = &self.runtime {
+            self.outcome.replace(runtime.borrow_mut().service(observed));
+        } else {
+            super::exec::collect(observed);
+        }
+        self.outcome
+            .borrow()
+            .as_ref()
+            .copied()
+            .map_err(|_| Errno::ECHILD)
+    }
+}
+
+impl Read for Control<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Read::read(&mut self.descriptor, bytes);
+        }
+        let Some(runtime) = &self.runtime else {
+            return Read::read(&mut self.descriptor, bytes);
+        };
+        loop {
+            if self.service(|id, status| {
+                // Keep the first leader status across partial reads, not unrelated orphans.
+                if id == self.leader.get() && self.status.get().is_none() {
+                    self.status.set(Some((id, status)));
+                }
+            })? {
+                return Err(Errno::ECANCELED.into());
+            }
+            let signals = sys::poll(
+                [Pollable::File(&self.descriptor), runtime.borrow().wake()],
+                None,
+            )?[1];
+            if signals.error {
+                return Err(Errno::EIO.into());
+            }
+            if !signals.readable {
+                // A control-only wake includes HUP, which PollEvents does not expose.
+                return Read::read(&mut self.descriptor, bytes);
+            }
+        }
+    }
+}
+
+impl Write for Control<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        Write::write(&mut self.descriptor, bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.descriptor)
+    }
 }
 
 /// Record from the broker that the session accepted.
@@ -82,20 +154,84 @@ impl DataFailure {
     }
 }
 
-impl Session {
+impl<'r> Session<'r> {
     /// Starts unattached session state on an owned control descriptor.
     pub(crate) fn new(descriptor: FileDescriptor) -> Self {
+        Self::open(descriptor, None)
+    }
+
+    fn open(descriptor: FileDescriptor, runtime: Option<&'r mut Runtime>) -> Self {
         Self {
-            connection: GuestConnection::new(descriptor),
+            connection: GuestConnection::new(Control {
+                descriptor,
+                runtime: runtime.map(RefCell::new),
+                leader: Cell::new(0),
+                status: Cell::new(None),
+                outcome: RefCell::new(Ok(false)),
+            }),
             last_error: None,
         }
+    }
+
+    /// Borrows init's sole collector for the lifetime of this control session.
+    pub(crate) fn with_runtime(
+        descriptor: FileDescriptor,
+        runtime: &'r mut Runtime,
+    ) -> Result<Self, String> {
+        let session = Self::open(descriptor, Some(runtime));
+        session
+            .connection
+            .get_ref()
+            .service(|_, _| {})
+            .map_err(|_| {
+                session
+                    .runtime_failure()
+                    .expect("the collector retained its failure")
+            })?;
+        Ok(session)
+    }
+
+    /// Registers the newly launched leader before any control read can collect it.
+    pub(crate) fn watch(&self, id: u32) {
+        self.connection.get_ref().leader.set(id);
+        self.connection.get_ref().status.set(None);
+    }
+
+    /// Takes a status collected while a partial control record was being read.
+    pub(crate) fn take_status(&self) -> Option<(u32, ExitStatus)> {
+        self.connection.get_ref().status.take()
+    }
+
+    /// Collects in the caller's existing position, after handing over any earlier status.
+    pub(crate) fn collect(&self, mut observed: impl FnMut(u32, ExitStatus)) -> Result<(), Errno> {
+        if let Some((id, status)) = self.take_status() {
+            observed(id, status);
+        }
+        if self.connection.get_ref().service(observed)? {
+            return Err(Errno::ECANCELED);
+        }
+        Ok(())
+    }
+
+    /// A helper failure overrides even an already-latched normal termination.
+    pub(crate) fn stopping(&self) -> bool {
+        matches!(*self.connection.get_ref().outcome.borrow(), Ok(true))
+    }
+
+    /// Returns the original init diagnostic to its shutdown owner.
+    pub(crate) fn runtime_failure(&self) -> Option<String> {
+        std::mem::replace(
+            &mut *self.connection.get_ref().outcome.borrow_mut(),
+            Ok(false),
+        )
+        .err()
     }
 
     /// Borrows the control descriptor for polling and TTY operations. The connection never reads
     /// past the record in progress and holds no partial record between calls, so polling sees
     /// every record that the session has not returned.
     pub(crate) fn descriptor(&self) -> &FileDescriptor {
-        self.connection.get_ref()
+        &self.connection.get_ref().descriptor
     }
 
     /// Sends the initial guest-attach record.

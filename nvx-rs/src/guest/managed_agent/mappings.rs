@@ -53,10 +53,6 @@ struct TableMapper {
 
 impl HostMappings {
     /// Adopts a layered root's table and prepared mapping handles without resetting either.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "SL7.7c hands over the layered root")
-    )]
     pub(crate) fn layered(table: MappingTable, mapper: Mapper, export: SourceRoot) -> Self {
         Self {
             table,

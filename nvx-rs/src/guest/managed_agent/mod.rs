@@ -111,43 +111,6 @@ pub(crate) struct AgentConfig {
     entry: Option<Entry>,
 }
 
-impl AgentConfig {
-    /// Takes a layered cold boot's CLI identity and its already-resolved account defaults.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "SL7.7c selects layered cold boots")
-    )]
-    pub(crate) fn layered(
-        command_line: &[u8],
-        user: CString,
-        home: CString,
-    ) -> Result<Self, Errno> {
-        let mut identities = crate::protocol::cmdline::init_tokens(command_line)
-            .filter(|token| token.name == b"nvx_identity")
-            .filter_map(|token| token.value);
-        let identity = identities.next().ok_or(Errno::EINVAL)?;
-        let mut ids = identity.split(|&byte| byte == b':');
-        let (Some(uid), Some(gid), None) = (ids.next(), ids.next(), ids.next()) else {
-            return Err(Errno::EINVAL);
-        };
-        if identities.next().is_some() {
-            return Err(Errno::EINVAL);
-        }
-        launch::parse_id(uid)?;
-        launch::parse_id(gid)?;
-        Ok(Self {
-            rootfs: c"-".to_owned(),
-            hostname: c"nvx-managed".to_owned(),
-            uid: sys::c_string(uid)?,
-            gid: sys::c_string(gid)?,
-            user,
-            home,
-            direct: true,
-            entry: None,
-        })
-    }
-}
-
 /// Runs `nvx-managed-agent` with the process's arguments. It exits with 0, or 125 when the agent
 /// fails.
 pub fn main() -> ExitCode {
