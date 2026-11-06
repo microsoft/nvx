@@ -98,7 +98,7 @@ class OpenVMMBuildConstants:
     TARGET_DIRECTORY_NAME: Final = "target"
     BUILD_PROFILE: Final = "release"
     MUSL_SYSROOT: Final = Path(".packages") / "extracted" / "x86_64-sysroot"
-    RUST_TOOLCHAIN: Final = "1.95.0"
+    RUST_TOOLCHAIN: Final = "1.97.1"
     GNU_RUST_TARGET: Final = "x86_64-unknown-linux-gnu"
     MUSL_RUST_TARGET: Final = "x86_64-unknown-linux-musl"
     WINDOWS_RUST_TARGET: Final = "x86_64-pc-windows-msvc"
@@ -399,7 +399,7 @@ class DockerBuildConstants:
     DOCKERFILE: Final = Path("docker") / "Dockerfile"
     RUST_BUILDER_IMAGE: Final = (
         f"rust:{GuestRustBuildConstants.TOOLCHAIN}-slim-bookworm@"
-        "sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082"
+        "sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3"
     )
     ALPINE_TARGET: Final = "artifacts"
     UBUNTU_TARGET: Final = "ubuntu-guest-artifacts"

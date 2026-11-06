@@ -201,7 +201,7 @@ All three initramfses install the same ten Rust executables under `/sbin`:
 `nvx-console-pending`, `nvx-device-io`, `nvx-exit`, `nvx-ingress`, `nvx-init`,
 `nvx-managed-agent`, `nvx-mmio-write`, `nvx-reseed`, `nvx-time`, and
 `nvx-time-probe`. Docker builds them once in a Rust
-1.95.0 image pinned by digest and copies the identical bytes into Alpine,
+1.97.1 image pinned by digest and copies the identical bytes into Alpine,
 Ubuntu, and Azure Linux; the kernel targets do not depend on that build. The
 Ubuntu determinism target instead rebuilds them from fresh targets in both
 attempts. Native image builds also rebuild them fresh.
@@ -522,7 +522,7 @@ initramfs and its package manifest, the Ubuntu distro layer and its manifest,
 and the sandbox scratch template, under `scratch_template_sha256` in its
 `ubuntu` section. Its `nvx_rs` section records the `nvx-rs` executable's
 SHA-256, the digest of the `nvx-rs` sources that built it, and the build's Rust
-release, target, and features. Its `guest_rust` section pins Rust 1.95.0 and
+release, target, and features. Its `guest_rust` section pins Rust 1.97.1 and
 `x86_64-unknown-linux-musl`, and each guest's `guest_sources` includes `nvx-rs`
 and `rust-toolchain.toml`. The OpenVMM section advertises microVM ABI 1, time
 ABI 1, restore packet 1, control-session protocol 1, and contract
