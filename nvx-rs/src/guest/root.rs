@@ -744,8 +744,8 @@ pub struct Root {
     /// What each of the mapper's mappings mounts, in the mapper's order, then what the one that
     /// a rename moved and that the mapper failed to detach mounts, if any.
     mapped: Vec<Mount>,
-    /// Whether a share, the export, or a mapping failed, after which the root refuses every later
-    /// one.
+    /// Whether a share, the export, a mapping, or a view bind failed, after which the root refuses
+    /// later shares, exports, mappings, and view applications.
     latched: bool,
     /// Whether the root's mount has moved onto `/`, after which the root refuses another switch
     /// and its teardown, and unmounts nothing.
@@ -818,8 +818,8 @@ impl Root {
         Ok(())
     }
 
-    /// Returns whether a live share, the host export, or a mapping failed, after which the root
-    /// refuses every later one, so that its caller starts no workload in it.
+    /// Returns whether a live share, the host export, a mapping, or a view bind failed, after which
+    /// the root refuses later shares, exports, mappings, and views.
     pub fn is_latched(&self) -> bool {
         self.latched
     }
