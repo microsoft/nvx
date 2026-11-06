@@ -869,21 +869,20 @@ impl Runtime {
             c"nvx-ingress".to_owned(),
             CString::new(gateway.to_string()).expect("an IPv4 address has no NUL"),
         ];
-        match sys::fork().map_err(|error| {
+        let fork = sys::fork().map_err(|error| {
             crate::Error::io("cannot fork the restored announcer")
                 .with_source(io::Error::from(error))
-        })? {
-            sys::ForkResult::Parent(process) => self.helpers.announcer = Some(process),
-            sys::ForkResult::Child => {
-                let error = sys::exec(&program, &arguments, None);
-                write_console(
-                    kernel::CONSOLE_DEVICE,
-                    format!("NVX-INIT-ERROR: cannot exec /sbin/nvx-ingress: {error}\n").as_bytes(),
-                );
-                sys::exit_immediately(FAILURE);
-            }
+        })?;
+        if let sys::ForkResult::Parent(process) = fork {
+            self.helpers.announcer = Some(process);
+            return Ok(());
         }
-        Ok(())
+        let error = sys::exec(&program, &arguments, None);
+        write_console(
+            kernel::CONSOLE_DEVICE,
+            format!("NVX-INIT-ERROR: cannot exec /sbin/nvx-ingress: {error}\n").as_bytes(),
+        );
+        sys::exit_immediately(FAILURE);
     }
 
     /// Poll alongside control input so a blocked peer cannot hide a helper's end.
