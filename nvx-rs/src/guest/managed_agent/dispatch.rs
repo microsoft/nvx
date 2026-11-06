@@ -1,4 +1,8 @@
-use crate::guest::sys::Errno;
+use std::ffi::CString;
+
+use crate::guest::init::Runtime;
+use crate::guest::mappings::{Mapper, MappingTable, SourceRoot};
+use crate::guest::sys::{self, Errno, FileDescriptor};
 use crate::protocol::{
     self, APP_CANCEL, APP_EXEC, APP_FEATURES, APP_MAPS, APP_PING, APP_READY, APP_STOP, APP_STOPPED,
     GuestFeatures, INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
@@ -6,9 +10,68 @@ use crate::protocol::{
 
 use super::diagnostics;
 use super::mappings::{HostMappings, MappingError};
-use super::seam::System;
+use super::seam::{Paths, RealSystem, System};
 use super::session::{Event, ReceiveFailure, Session};
-use super::{AgentConfig, exec, tty};
+use super::{AgentConfig, exec, launch, tty};
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the layered boot owner supplies the control handoff"
+    )
+)]
+impl AgentConfig {
+    /// Takes a layered cold boot's CLI identity and its already-resolved account defaults.
+    pub(crate) fn layered(
+        command_line: &[u8],
+        user: CString,
+        home: CString,
+    ) -> Result<Self, Errno> {
+        let mut identities = crate::protocol::cmdline::init_tokens(command_line)
+            .filter(|token| token.name == b"nvx_identity")
+            .filter_map(|token| token.value);
+        let identity = identities.next().ok_or(Errno::EINVAL)?;
+        let mut ids = identity.split(|&byte| byte == b':');
+        let (Some(uid), Some(gid), None) = (ids.next(), ids.next(), ids.next()) else {
+            return Err(Errno::EINVAL);
+        };
+        if identities.next().is_some() {
+            return Err(Errno::EINVAL);
+        }
+        launch::parse_id(uid)?;
+        launch::parse_id(gid)?;
+        Ok(Self {
+            rootfs: c"-".to_owned(),
+            hostname: c"nvx-managed".to_owned(),
+            uid: sys::c_string(uid)?,
+            gid: sys::c_string(gid)?,
+            user,
+            home,
+            direct: true,
+            entry: None,
+        })
+    }
+
+    /// Serves an initialized layered root, returning shutdown to its init owner.
+    pub(crate) fn serve_layered(
+        &self,
+        runtime: &mut Runtime,
+        control: FileDescriptor,
+        (table, mapper, export): (MappingTable, Mapper, SourceRoot),
+    ) -> Result<(), String> {
+        let mut system = RealSystem::new(Paths::default());
+        let mut session = Session::with_runtime(control, runtime)?;
+        let mut mappings = HostMappings::layered(table, mapper, export);
+        run(&mut system, &mut session, self, &mut mappings)
+            .map(|Outcome::Stopped| ())
+            .map_err(|error| {
+                session
+                    .runtime_failure()
+                    .unwrap_or_else(|| format!("control session failed: {}", error.desc()))
+            })
+    }
+}
 
 /// Terminal outcome of the long-lived dispatch loop.
 #[derive(Debug)]
@@ -24,6 +87,9 @@ pub(crate) fn run(
     config: &AgentConfig,
     mappings: &mut HostMappings,
 ) -> Result<Outcome, Errno> {
+    if session.stopping() {
+        return Ok(Outcome::Stopped);
+    }
     session.send_attach()?;
     loop {
         let payload = match session.next_event() {
@@ -34,6 +100,7 @@ pub(crate) fn run(
                 continue;
             }
             Ok(Event::Data(payload)) => payload,
+            Err(_) if session.stopping() => return Ok(Outcome::Stopped),
             Err(failure) => return Err(report_failure(system, failure)),
         };
         // As in the C agent, a DATA record that fails also reports the `data` stage, after any
@@ -43,6 +110,7 @@ pub(crate) fn run(
         match handle_data(system, session, config, mappings, &payload) {
             Ok(Some(outcome)) => return Ok(outcome),
             Ok(None) => {}
+            Err(_) if session.stopping() => return Ok(Outcome::Stopped),
             Err(error) => {
                 diagnostics::error(system, "data", error as i32);
                 return Err(error);
