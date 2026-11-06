@@ -5203,6 +5203,9 @@ class MicrovmTests(unittest.TestCase):
                 .replace(
                     "/tmp/nvx-host-loopback-", f"{root.as_posix()}/nvx-host-loopback-"
                 )
+                # Fixture inputs never change, so repeated polling only adds
+                # process-launch overhead, especially with Git's Windows shell.
+                .replace('[ "$tries" -lt 100 ]', '[ "$tries" -lt 1 ]')
                 # The stubbed servers finish at once; wait for their output
                 # before releasing the guest.
                 .replace("read -r release", "wait; read -r release")
