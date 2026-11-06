@@ -3,8 +3,8 @@
 //!
 //! A [`Request`] holds what the host program's options choose of a clone: its image, an EROFS
 //! layer or a GPT disk no longer than the template's placeholder, its upper, on an ext4 scratch
-//! image or in RAM, its processor and memory targets, the workload identity of its record, which
-//! its guest ignores, its overlay mode, its scratch's journal policy, the bound of a GPT disk's
+//! image or in RAM, its processor and memory targets, its overlay mode, its scratch's journal
+//! policy, the bound of a GPT disk's
 //! first partition, the machine ID that its executions see, the image's own or one that its
 //! guest generates, the host paths that it shares with its root, as a launch shares them,
 //! `sharing::HostFsSharing`, and its network, as a launch reads it, `layered::read_network`,
@@ -35,8 +35,7 @@ use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use nvx::activation::{
-    Journal, MachineIdMode, OverlayMode as RecordOverlay, StoreGeneration, WorkloadIdentity,
-    WorkloadView,
+    Journal, MachineIdMode, OverlayMode as RecordOverlay, StoreGeneration, View,
 };
 use nvx::host::filesystem::ExportPlan;
 use nvx::host::process::BootId;
@@ -84,8 +83,8 @@ pub struct Request {
     pub processors: Option<u32>,
     /// The memory target, in bytes, or `None` for the template's RAM.
     pub memory: Option<u64>,
-    /// The workload identity of the clone's record, if any: its user ID and its group ID. The
-    /// clone's guest ignores it: each execution names its own.
+    /// The legacy workload option, which activation records do not encode. Each execution names
+    /// its own identity.
     pub workload_identity: Option<(u32, u32)>,
     /// The overlay's mode, or `None` for the guest's default, which trusts the lowers.
     pub overlay_mode: Option<OverlayMode>,
@@ -142,8 +141,8 @@ impl Request {
     /// sandbox's store stages for its images, `bindings`, as `staged::Staged::bindings` finds
     /// them, the processor target `processors`, and the memory target `memory`, in bytes.
     ///
-    /// The record of the clone's activation names the workload identity, if any, the
-    /// [`CLONE_HOSTNAME`], the request's machine ID, the overlay's mode, and the scratch's
+    /// The record of the clone's activation names the [`CLONE_HOSTNAME`], the request's machine
+    /// ID, the overlay's mode, and the scratch's
     /// journal policy, each the guest's default unless the request names it, as a root
     /// configuration's are, and the bound of a GPT disk's first partition, the default of a
     /// launch's guest, [`DEFAULT_FIRST_PARTITION_BOUND`], unless the request names one. The record
@@ -188,12 +187,9 @@ impl Request {
             export,
             processors,
             memory,
-            workload: WorkloadView {
+            view: View {
                 hostname: CLONE_HOSTNAME.as_bytes().to_vec(),
                 machine_id: self.machine_id,
-                identity: self
-                    .workload_identity
-                    .map(|(uid, gid)| WorkloadIdentity { uid, gid }),
             },
             overlay,
             journal,
