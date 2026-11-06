@@ -287,19 +287,16 @@ The activation record of a layered root: one bounded, versioned, non-secret
 record of the settings that its activation applies, which a clone restored from
 a template reads in place of its captured configuration.
 
-An `ActivationRecord` holds the schema's `VERSION`, a clone's `RestoreSection`,
-the restore's `TransactionId` and the `TemplateReference` of its template, the
-template's `StoreGeneration`, a nonzero publication ID that its store assigns in
-order, and the `Identity` of its key, and the `Configuration`: the `Image`,
-EROFS or GPT, with the `Identity` of its binding and the UUID or disk GUID that
-the guest expects; the `Upper`, a tmpfs or the scratch with its binding's
-`Identity` and its `Journal` policy; the `OverlayMode`; an `Export`, a directory
-or an aggregate with its plan's `Identity`, and its 1 to 4,096 mappings; the
-`Network`, its policy's `Identity`, a DNS address, the listeners' `Publication`,
-and a proxy endpoint without credentials; the `WorkloadView`, its hostname,
-`MachineIdMode`, and `WorkloadIdentity`, whose IDs are neither 0 nor `u32::MAX`;
-and the `ExpectedResources`. The other inputs of the root's assembly are
-invariants of the template.
+An `ActivationRecord` holds the schema's `VERSION`, 2, a clone's
+`RestoreSection`, only the restore's `TransactionId`, and the `Configuration`:
+the `Image`, EROFS or GPT, with the UUID or disk GUID that the guest expects;
+the `Upper`, a tmpfs with its cap in percent of the VM's memory or the scratch
+with its `Journal` policy; the `OverlayMode`; an `Export`, a directory or an
+aggregate, and its 1 to 4,096 mappings; the `Network`, a DNS address, the
+listeners' `Publication`, and a proxy endpoint without credentials; the `View`,
+its hostname and `MachineIdMode`; and the `ExpectedResources`. Store, binding,
+plan, policy and execution identities never enter a record. The other inputs
+of the root's assembly are invariants of the template.
 
 `View` is the view that a VM's configuration, a [`VmConfig`](#nvxhostconfig),
 gives its workload: its hostname and `MachineIdMode`, without an identity, which
@@ -308,13 +305,13 @@ each execution names.
 `ActivationRecord::new` refuses a configuration that `Configuration::check`
 finds past a public limit, `MAX_MAPPINGS`, `MAX_HOSTNAME_BYTES`, or
 `MAX_PROXY_ENDPOINT_BYTES`, which keep every record within `MAX_RECORD_BYTES`,
-or with an export without mappings, mappings without an export, a UID or GID of
-0 or `u32::MAX`, a proxy endpoint with credentials, or a zero size.
+or with an export without mappings, mappings without an export, a tmpfs cap
+outside 1 to 90 percent, a proxy endpoint with credentials, or a zero size.
 
 `ActivationRecord::encode` writes a record's canonical encoding, its version,
 then a tagged, length-prefixed field for each part in the order of their tags,
-602 bytes at most, and `ActivationRecord::decode` reads exactly those bytes back
-and refuses any others, naming the `Field` at fault.
+424 bytes at most, and `ActivationRecord::decode` reads exactly those bytes back
+and refuses any others, naming the `Field` at fault. Version 1 is refused.
 
 `ReadyActivation` is what Ready reports once the activation applied: a clone's
 transaction ID, which `ReadyActivation::of` takes from a record, and nothing
@@ -827,8 +824,8 @@ capture's own metadata, such as its time anchor and host, stays out of the key.
 
 A key and a class each have one canonical, versioned encoding, whose
 domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
-to and from the `nvx::activation::Identity` by which a clone's activation record
-names its template's key, or a `ClassIdentity`; the
+to and from the `nvx::activation::Identity` by which a clone's lease and durable records
+name its template's key, or a `ClassIdentity`; the
 [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/template-key-v1.txt`, pin both encodings and identities. The
 key's encoding, version 1, leaves the network policy out, since templates
@@ -855,7 +852,7 @@ its directories and files.
 
 Four namespaces stay apart: the `nvx::activation::StoreGeneration`, the host's
 publication ID, which the index assigns in the order of publication and never
-twice, and by which a clone's activation record names its template; the
+twice, and by which a clone's lease and durable records name its template; the
 bound-block `StorageGeneration` of a capture, which belongs to the storage
 owner; the time lineage counter of the time contract; and the VM generation ID,
 which the store never records.
@@ -915,22 +912,20 @@ as those above a clone's block devices must; and a fresh capability.
 
 It builds the clone's activation record, `ClonePlan::activation`, which the
 clone's guest applies in place of the configuration that the template captured,
-from the request's `WorkloadView`, overlay mode, journal policy, and bound of a
+from the request's `View`, overlay mode, journal policy, and bound of a
 GPT disk's first partition, and from the checked inputs: a restore section with
-a fresh transaction ID of 16 random bytes and the lease's `TemplateReference`;
-the image, an EROFS layer or a GPT disk, as its binding names it, with its
-binding's identity and the filesystem UUID or disk GUID that the adapter's plan
+a fresh transaction ID of 16 random bytes alone;
+the image, an EROFS layer or a GPT disk, as its binding names it, with the
+filesystem UUID or disk GUID that the adapter's plan
 expects of it, and for a GPT disk the bound of its first partition, whose
-partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs,
-or the scratch image's binding identity with the journal policy; the export, an
-aggregate, with its plan's identity, and its mappings, the plan's binds, from 1
+partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs
+capped at half of the VM's memory, or the scratch image with the journal policy;
+the export, an aggregate, and its mappings, the plan's binds, from 1
 to 4,096, or no export and no mappings, which leaves the slot dormant; the
-clone's network, with its identity, the DNS server that OpenVMM serves the guest
+clone's network, the DNS server that OpenVMM serves the guest
 at a gateway under its policy, if any, whether the guest publishes its
 listeners, as under a policy that allows ingress or host-loopback access both
-ways, and the guest's proxy URL; and the processor and memory targets. The
-identity of a binding, of an export plan, or of a network is the SHA-256 digest
-of a domain and of its serde form, never of a file's content.
+ways, and the guest's proxy URL; and the processor and memory targets.
 
 The image must present the logical and physical block sizes of the template's
 placeholder and be no longer than it, since a restore presents every clone's
@@ -1554,7 +1549,7 @@ with `BLKRRPART`, since the kernel created the block devices of partitions for
 the template's placeholder. Whatever the image, it requires a fresh upper, whose
 `upper` and `work` directories are missing or empty, in a bounded check that
 reads no file, while a cold sandbox's scratch keeps its upper across boots. It
-ignores the record's workload identity, if it has one: each execution names its
+uses no execution identity from the record, which carries none: each execution names its
 own identity, which `Entry::check` checks, as in a sandbox without a workload
 identity at a cold boot. With the record's generated machine ID, it then
 generates one, once, with `MachineId::generate`, after the repair's reseed, so
@@ -2905,7 +2900,7 @@ sides of every record, frame, and payload: the codec decodes each vector of
 accepts or refuses OpenVMM's vectors and cases of the `NVXS` session as they
 say, and, on Linux, the guest's listener announcements match
 `tests/vectors/nvxl-v1.txt`. The activation codecs decode each record and
-Ready activation of `tests/vectors/activation-v1.txt` to its values, encode
+Ready activation of `tests/vectors/activation-v2.txt` to its values, encode
 them to its bytes, and refuse its invalid bytes. Property tests check that
 records and activation records round-trip, that the activation record and
 Ready activation decoders accept only canonical encodings, and that the
