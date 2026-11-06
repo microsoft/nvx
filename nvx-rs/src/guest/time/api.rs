@@ -6,6 +6,7 @@ use std::io;
 use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use super::checks::{self, Checks};
 use super::cpu_mask::CpuMask;
@@ -177,6 +178,16 @@ impl TimeAbi {
         settled(&runtime, read_generation_id(&runtime))
     }
 
+    /// Reads the generation ID using the same deadline as the capture's preparation.
+    pub(crate) fn generation_id_until(
+        &self,
+        deadline: Option<Instant>,
+    ) -> Result<GenerationId, TimeError> {
+        let mut runtime = self.runtime();
+        runtime.deadline = deadline;
+        settled(&runtime, read_generation_id(&runtime))
+    }
+
     /// Requests a capture through the snapshot port, preparation step 5, and, in a VM that a
     /// snapshot restored, repairs the restore: reads and validates the restore packet, steps and
     /// slews the wall clock, hands over the packet's fresh entropy, and records the restore,
@@ -236,12 +247,37 @@ impl TimeAbi {
         )
     }
 
+    /// Prepares strictly by one deadline and retains suppression ownership on every failure.
+    pub(crate) fn pre_capture_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), (PreCaptureError, bool)> {
+        let mut runtime = self.runtime();
+        runtime.deadline = Some(deadline);
+        let result = pre_capture(&runtime);
+        let suppressed = result
+            .as_ref()
+            .map_or_else(PreCaptureError::holds_suppression, |()| true);
+        let result = match runtime.take_violation() {
+            Some(violation) => Err(PreCaptureError::CaptureChecks(TimeError::Violation(
+                violation,
+            ))),
+            None => result,
+        };
+        released_preparation(result, sys::check_released()).map_err(|error| (error, suppressed))
+    }
+
     /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
     /// removes their record, as `nvx-time cancel-capture` does, or fails with its diagnostic,
     /// such as `read /run/nvx/time-suppression: No such file or directory`. It takes no
     /// permission for the ports.
     pub(crate) fn cancel_capture(&self) -> Result<(), Vec<u8>> {
         system::suppression_restore(false)
+    }
+
+    /// Restores detectors with a deadline only before the capture request.
+    pub(crate) fn cancel_capture_until(&self, deadline: Option<Instant>) -> Result<(), Vec<u8>> {
+        system::suppression_restore_until(false, deadline)
     }
 }
 
@@ -361,16 +397,19 @@ fn cold_boot(runtime: &Runtime<'_>) -> Result<ColdBoot, TimeError> {
 
 /// The read of [`TimeAbi::generation_id`].
 fn read_generation_id(runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> {
+    sys::FileLock::check_deadline(runtime.deadline).map_err(|_| TimeError::Deadline)?;
     let ports = runtime.open_ports()?;
     if ports.read_u8(Port::PortbStatus) & PORTB_GENERATION_ID_AVAILABLE == 0 {
         return Err(TimeError::GenerationIdUnavailable);
     }
     let mut id = [0_u8; GenerationId::LENGTH];
     {
-        let _lock = system::lock_portb().map_err(|error| TimeError::PortLock(error.into()))?;
+        let _lock = system::lock_file_until(system::PORTB_LOCK_PATH, runtime.deadline)
+            .map_err(|error| TimeError::PortLock(error.into()))?;
         ports.write_u8(Port::PortbStatus, SELECT_GENERATION_ID);
         portb_read(&ports, Port::PortbData, &mut id);
     }
+    sys::FileLock::check_deadline(runtime.deadline).map_err(|_| TimeError::Deadline)?;
     Ok(GenerationId::from_bytes(id))
 }
 
@@ -421,8 +460,13 @@ impl PreCaptureError {
 
 /// The preparation of [`TimeAbi::pre_capture`].
 fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
-    let (state, completed) = checks::wait_for_checks(true);
+    sys::FileLock::check_deadline(runtime.deadline)
+        .map_err(|_| PreCaptureError::BootChecks(TimeError::Deadline))?;
+    let (state, completed) = checks::wait_for_checks_until(true, runtime.deadline);
     if !completed {
+        if sys::FileLock::check_deadline(runtime.deadline).is_err() {
+            return Err(PreCaptureError::BootChecks(TimeError::Deadline));
+        }
         return Err(PreCaptureError::BootChecks(check_failed(
             runtime,
             Phase::Capture,
@@ -430,6 +474,8 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
             "the boot checks are still pending",
         )));
     }
+    sys::FileLock::check_deadline(runtime.deadline)
+        .map_err(|_| PreCaptureError::BootChecks(TimeError::Deadline))?;
     let start = clock_ns(sys::Clock::Monotonic);
     let cpu_start = cpu_time_ns();
     runtime.set_generation(state.generation as u32);
@@ -441,10 +487,16 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
             "cannot read the CPU sets",
         ))
     })?;
-    checks::run_capture_checks(runtime, &mut checks);
+    checks::run_capture_checks_until(runtime, &mut checks, runtime.deadline)
+        .map_err(|_| PreCaptureError::CaptureChecks(TimeError::Deadline))?;
+    if let Some(violation) = runtime.take_violation() {
+        return Err(PreCaptureError::CaptureChecks(TimeError::Violation(
+            violation,
+        )));
+    }
     let elapsed = clock_ns(sys::Clock::Monotonic).wrapping_sub(start);
     let cpu = cpu_time_ns().wrapping_sub(cpu_start);
-    match system::suppression_save() {
+    match system::suppression_save_until(runtime.deadline) {
         Ok(()) => {}
         Err(SaveError::Undone(Errno::EEXIST)) => return Err(PreCaptureError::Pending),
         Err(SaveError::Undone(error)) => return Err(PreCaptureError::Suppression(error)),
@@ -464,6 +516,7 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
             format!("cannot record the capture check: {}", error.desc()),
         );
     }
+    sys::FileLock::check_deadline(runtime.deadline).map_err(PreCaptureError::Unrestored)?;
     Ok(())
 }
 
@@ -1298,6 +1351,8 @@ impl Display for Violation {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum TimeError {
+    /// The caller's absolute pre-request deadline expired.
+    Deadline,
     /// The calling thread could not take the permission for OpenVMM's ports, which needs
     /// `CAP_SYS_RAWIO`.
     PortAccess(io::Error),
@@ -1340,6 +1395,7 @@ impl From<PortError> for TimeError {
 impl Display for TimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Deadline => formatter.write_str("the capture preparation deadline expired"),
             Self::PortAccess(error) => write!(formatter, "ioperm: {}", sys::describe(error)),
             Self::PortRelease(error) => {
                 write!(formatter, "ioperm revoke: {}", sys::describe(error))
@@ -1369,7 +1425,10 @@ impl std::error::Error for TimeError {
             | Self::PortLock(error)
             | Self::Spawn(error)
             | Self::EntropyFile { source: error, .. } => Some(error),
-            Self::StateUnavailable | Self::GenerationIdUnavailable | Self::Violation(_) => None,
+            Self::Deadline
+            | Self::StateUnavailable
+            | Self::GenerationIdUnavailable
+            | Self::Violation(_) => None,
         }
     }
 }

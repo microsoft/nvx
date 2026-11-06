@@ -1,4 +1,16 @@
-//! The devices and mount checks of a platform snapshot.
+//! A Fresh platform capture in the calling guest process, without execution control.
+//!
+//! [`capture`] checks mounts and the time ABI, suppresses the stall detectors, reads the
+//! generation ID, and requests capture. All pre-request steps, locks, waits and rollback
+//! share one caller deadline. The request has no deadline while the host saves stopped
+//! processors. A strict time violation is returned with its status, never powered off here.
+//!
+//! The caller keeps its executions still. After answering the capture request, its transport
+//! sends nothing until this call returns. After [`Captured::Continued`] or a failure with
+//! [`Disposition::Resumed`], it reports on the same session.
+//!
+//! This interface does not repair restored guests, which must end. A Fresh platform restore
+//! that carries network settings is explicitly refused rather than silently dropping them.
 //!
 //! Each line of `/proc/self/mountinfo` describes one mount with fields separated by spaces: its
 //! ID, its parent's ID, the device number of its file system, `MAJ:MIN`, the root of the mount
@@ -12,10 +24,15 @@ use std::fmt;
 use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use super::activation::{CaptureCause, CaptureStage, System};
-use super::time::PreCaptureError;
+use super::activation::{self, System};
+use super::sys;
+use super::time::{CaptureOutcome, CaptureRequest, PreCaptureError, ScratchPolicy, TimeError};
 use crate::guest::parse::parse_decimal;
+use crate::protocol::status;
+
+pub use super::activation::{CaptureCause, CaptureStage};
 
 /// The most bytes of the caller's mount table that capture accepts: 1 MiB.
 pub const MOUNT_TABLE_LIMIT: usize = 1 << 20;
@@ -29,6 +46,209 @@ pub struct Devices {
     pub scratch: u64,
     /// The host filesystem device's virtio-fs tag.
     pub filesystem_tag: String,
+}
+
+/// The disk policy of a capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Disks {
+    /// Capture before mounting the disks that each clone replaces.
+    Fresh,
+}
+
+/// How a capture ended in this guest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Captured {
+    /// No snapshot was taken; the stall detectors were restored and this guest may continue.
+    Continued,
+}
+
+/// Whether the caller may resume the guest or must end it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Disposition {
+    /// No detector suppression owned by this call remains.
+    Resumed,
+    /// The guest cannot safely continue.
+    MustEnd {
+        /// The exit status, preserving a strict time violation's actual status.
+        status: u8,
+    },
+}
+
+/// A capture failure and what the caller must do with the guest.
+#[derive(Debug)]
+pub struct CaptureFailure {
+    /// The stage that failed.
+    pub stage: CaptureStage,
+    /// The failure, or a failed detector restoration.
+    pub cause: CaptureCause,
+    /// Whether the guest may resume or must end.
+    pub disposition: Disposition,
+}
+
+impl CaptureFailure {
+    /// Classifies a failure, making request and release failures final.
+    fn new(stage: CaptureStage, cause: CaptureCause) -> Self {
+        let must_end = matches!(stage, CaptureStage::Capture | CaptureStage::Release);
+        let status = match &cause {
+            CaptureCause::Time(TimeError::Violation(violation)) => Some(violation.status()),
+            CaptureCause::Time(TimeError::PortRelease(_)) => Some(status::TIME_REPAIR),
+            _ => must_end.then_some(status::TIME_REPAIR),
+        };
+        Self {
+            stage,
+            cause,
+            disposition: status.map_or(Disposition::Resumed, |status| Disposition::MustEnd {
+                status,
+            }),
+        }
+    }
+
+    /// Restores only this call's suppression, retaining a port-release cause and fatal status.
+    fn cleanup(mut self, system: &mut dyn System, suppressed: bool) -> Self {
+        if suppressed
+            && let Err(cause) = release(system)
+            && !matches!(self.cause, CaptureCause::Time(TimeError::PortRelease(_)))
+        {
+            let failure = Self::new(CaptureStage::Release, cause);
+            self.stage = failure.stage;
+            self.cause = failure.cause;
+            if self.disposition == Disposition::Resumed {
+                self.disposition = failure.disposition;
+            }
+        }
+        self
+    }
+}
+
+impl fmt::Display for CaptureFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "failed to {}: {}", self.stage, self.cause)
+    }
+}
+
+impl std::error::Error for CaptureFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.cause {
+            CaptureCause::Io(error) => Some(error),
+            CaptureCause::Time(error) => Some(error),
+            CaptureCause::Mounted(_) | CaptureCause::Pending => None,
+        }
+    }
+}
+
+/// Captures a Fresh template without freezing or inspecting the caller's executions.
+///
+/// The deadline bounds pre-request work only. This call starts no helper, drives no transport,
+/// repairs no restore, and never powers off the VM; failures return the caller's disposition.
+pub fn capture(
+    devices: &Devices,
+    disks: Disks,
+    deadline: Instant,
+) -> Result<Captured, CaptureFailure> {
+    let Disks::Fresh = disks;
+    sys::check_released().map_err(|error| {
+        CaptureFailure::new(
+            CaptureStage::CaptureChecks,
+            CaptureCause::Time(error.into()),
+        )
+    })?;
+    before(CaptureStage::BootChecks, deadline)?;
+    capture_with(
+        activation::capture_system(Some(deadline)).as_mut(),
+        devices,
+        deadline,
+    )
+}
+
+/// Composes the existing kernel/time operations with one explicit pre-request deadline.
+fn capture_with(
+    system: &mut dyn System,
+    devices: &Devices,
+    deadline: Instant,
+) -> Result<Captured, CaptureFailure> {
+    let mut suppressed = false;
+    let prepared: Result<_, CaptureFailure> = (|| {
+        check_mounts(system, devices, Some(deadline))
+            .map_err(|cause| CaptureFailure::new(CaptureStage::Mounts, cause))?;
+        system
+            .pre_capture_until(deadline)
+            .map_err(|(error, held)| {
+                suppressed = held;
+                let (stage, cause, _) = preparation_failure(error);
+                CaptureFailure::new(stage, cause)
+            })?;
+        suppressed = true;
+        before(CaptureStage::GenerationId, deadline)?;
+        let generation = system.generation_id().map_err(|error| {
+            CaptureFailure::new(CaptureStage::GenerationId, CaptureCause::Time(error))
+        })?;
+        before(CaptureStage::GenerationId, deadline)?;
+        Ok(CaptureRequest::in_memory(ScratchPolicy::Fresh, generation))
+    })();
+    let request = prepared.map_err(|failure| failure.cleanup(system, suppressed))?;
+    system.clear_deadline();
+    let outcome = system.capture(request).map_err(|error| {
+        CaptureFailure::new(CaptureStage::Capture, CaptureCause::Time(error))
+            .cleanup(system, suppressed)
+    })?;
+    match outcome {
+        CaptureOutcome::Continued => {
+            release(system).map_err(|cause| CaptureFailure::new(CaptureStage::Release, cause))?;
+            Ok(Captured::Continued)
+        }
+        CaptureOutcome::Restored(restore) => {
+            let detail = if restore.network().is_some() {
+                "a Fresh platform restore must not carry network settings"
+            } else {
+                "this capture interface does not repair restored guests"
+            };
+            Err(CaptureFailure::new(
+                CaptureStage::Capture,
+                CaptureCause::Io(io::Error::new(io::ErrorKind::Unsupported, detail)),
+            )
+            .cleanup(system, suppressed))
+        }
+    }
+}
+
+/// Checks the same caller deadline before the next pre-request step.
+fn before(stage: CaptureStage, deadline: Instant) -> Result<(), CaptureFailure> {
+    sys::FileLock::check_deadline(Some(deadline))
+        .map_err(|error| CaptureFailure::new(stage, CaptureCause::Io(error.into())))
+}
+
+/// Restores detectors and prioritizes any port permission that the thread still holds.
+fn release(system: &mut dyn System) -> Result<(), CaptureCause> {
+    let result = system.cancel_capture();
+    sys::check_released().map_err(|error| CaptureCause::Time(error.into()))?;
+    result.map_err(|detail| {
+        CaptureCause::Io(io::Error::other(
+            String::from_utf8_lossy(&detail).into_owned(),
+        ))
+    })
+}
+
+/// Checks the one bounded mount table for both capture interfaces.
+pub(super) fn check_mounts(
+    system: &mut dyn System,
+    devices: &Devices,
+    deadline: Option<Instant>,
+) -> Result<(), CaptureCause> {
+    sys::FileLock::check_deadline(deadline).map_err(CaptureCause::Io)?;
+    let table = system.mount_table().map_err(CaptureCause::Io)?;
+    if table.len() > MOUNT_TABLE_LIMIT {
+        return Err(CaptureCause::Io(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("the mount table is longer than {MOUNT_TABLE_LIMIT} bytes"),
+        )));
+    }
+    match first_blocking(system, devices, &table, deadline).map_err(CaptureCause::Io)? {
+        Some(mounted) => Err(CaptureCause::Mounted(mounted)),
+        None => Ok(()),
+    }
 }
 
 /// The file system type of an overlay, as the mount table shows it.
@@ -217,11 +437,16 @@ pub(super) fn first_blocking(
     system: &mut dyn System,
     devices: &Devices,
     table: &[u8],
+    deadline: Option<Instant>,
 ) -> io::Result<Option<Mounted>> {
+    sys::FileLock::check_deadline(deadline)?;
     let distro = system.windows(devices.distro)?;
+    sys::FileLock::check_deadline(deadline)?;
     let scratch = system.windows(devices.scratch)?;
+    sys::FileLock::check_deadline(deadline)?;
     let tag = devices.filesystem_tag.as_bytes();
     for (index, text) in table.split(|&byte| byte == b'\n').enumerate() {
+        sys::FileLock::check_deadline(deadline)?;
         if text.is_empty() {
             continue;
         }
@@ -239,6 +464,7 @@ pub(super) fn first_blocking(
             None
         } else {
             let device = system.block_device(line.device)?;
+            sys::FileLock::check_deadline(deadline)?;
             let below =
                 |windows: &[PathBuf]| windows.iter().any(|window| device.starts_with(window));
             if below(&distro) {

@@ -33,6 +33,12 @@ impl Restore {
         self
     }
 
+    /// Returns a restore that carries network settings, including an otherwise empty policy.
+    pub(crate) fn with_network(mut self, dns: Option<IpAddr>, announce: bool) -> Self {
+        self.network = Some(RestoreNetwork::new(dns, announce));
+        self
+    }
+
     /// Returns the restore with the host's input gated until the guest acknowledges it.
     pub(crate) fn gated(mut self) -> Self {
         self.flags |= decoders::PACKET_ACK_REQUIRED;
@@ -155,6 +161,19 @@ fn errors_print_the_diagnostics_of_nvx_time() {
         (violation.status(), violation.code(), violation.detail()),
         (193, "G_CONFORMANCE_C10", "detail")
     );
+}
+
+#[test]
+fn an_expired_preparation_deadline_does_not_wait_for_boot_checks() {
+    let (error, suppressed) = TimeAbi::report_only()
+        .pre_capture_until(Instant::now())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        PreCaptureError::BootChecks(TimeError::Deadline)
+    ));
+    assert!(!suppressed);
+    assert_eq!(sys::check_released(), Ok(()));
 }
 
 #[test]
