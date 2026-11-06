@@ -3,6 +3,8 @@
 use std::ffi::CStr;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub(crate) use nix::fcntl::OFlag as OpenFlags;
 use nix::fcntl::{FcntlArg, FdFlag, Flock, FlockArg, fcntl};
@@ -290,6 +292,48 @@ pub(crate) fn unlink(path: &CStr) -> Result<(), Errno> {
 pub(crate) struct FileLock {
     /// The locked file, which the lock holds only so that dropping it releases the lock.
     _lock: Flock<OwnedFd>,
+}
+
+impl FileLock {
+    /// Checks an explicit caller deadline; ordinary operations pass `None`.
+    pub(crate) fn check_deadline(deadline: Option<Instant>) -> Result<(), Errno> {
+        match deadline {
+            Some(deadline) if Instant::now() >= deadline => Err(Errno::ETIMEDOUT),
+            _ => Ok(()),
+        }
+    }
+
+    /// Takes an exclusive file lock, bounding every retry by the same optional deadline.
+    pub(crate) fn acquire(
+        path: &CStr,
+        mode: Mode,
+        deadline: Option<Instant>,
+    ) -> Result<Self, Errno> {
+        let Some(deadline) = deadline else {
+            return lock_file(path, mode);
+        };
+        Self::check_deadline(Some(deadline))?;
+        let flags = OpenFlags::O_RDWR | OpenFlags::O_CREAT | OpenFlags::O_CLOEXEC;
+        let mut descriptor = nix::fcntl::open(path, flags, mode)?;
+        loop {
+            Self::check_deadline(Some(deadline))?;
+            match Flock::lock(descriptor, FlockArg::LockExclusiveNonblock) {
+                Ok(lock) => {
+                    Self::check_deadline(Some(deadline))?;
+                    return Ok(Self { _lock: lock });
+                }
+                Err((returned, Errno::EINTR | Errno::EWOULDBLOCK)) => {
+                    descriptor = returned;
+                    thread::sleep(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_millis(1)),
+                    );
+                }
+                Err((_, error)) => return Err(error),
+            }
+        }
+    }
 }
 
 /// Opens `path`, creating it with `mode` if it is missing, and waits for its exclusive lock,

@@ -287,6 +287,16 @@ impl System for FakeSystem {
         }
     }
 
+    fn pre_capture_until(&mut self, _deadline: Instant) -> Result<(), (PreCaptureError, bool)> {
+        let result = self.pre_capture();
+        let held = result
+            .as_ref()
+            .map_or_else(PreCaptureError::holds_suppression, |()| true);
+        result.map_err(|error| (error, held))
+    }
+
+    fn clear_deadline(&mut self) {}
+
     fn generation_id(&mut self) -> Result<GenerationId, TimeError> {
         self.calls.push(Call::GenerationId);
         if self.generation_fails {
@@ -997,6 +1007,7 @@ fn the_live_system_finds_windows_and_block_devices_in_procfs_and_sysfs() {
     let mut system = LiveSystem {
         paths: paths.clone(),
         abi: TimeAbi::report_only(),
+        deadline: None,
     };
     assert_eq!(system.windows(DISTRO).unwrap(), [window]);
     assert_eq!(system.windows(SCRATCH).unwrap(), Vec::<PathBuf>::new());
@@ -1016,7 +1027,12 @@ fn the_live_system_finds_windows_and_block_devices_in_procfs_and_sysfs() {
     // The check finds a layer in the partition, from the live system's answers.
     let table =
         format!("{TEMPLATE_TABLE}30 23 254:2 / /run/nvx/layers/p2 ro - ext4 /dev/vda2 ro\n");
-    let mounted = mounts::first_blocking(&mut system, &devices(), table.as_bytes())
+    let canonical = mounts::Devices {
+        distro: DISTRO,
+        scratch: SCRATCH,
+        filesystem_tag: TAG.to_owned(),
+    };
+    let mounted = mounts::first_blocking(&mut system, &canonical, table.as_bytes(), None)
         .unwrap()
         .unwrap();
     assert_eq!(mounted.origin(), Origin::Distro);

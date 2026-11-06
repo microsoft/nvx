@@ -1,6 +1,40 @@
 use std::ffi::CString;
 
 use super::*;
+use std::os::unix::ffi::OsStrExt;
+
+#[test]
+fn a_bounded_file_lock_times_out_without_taking_or_leaking_the_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = CString::new(directory.path().join("lock").as_os_str().as_bytes()).unwrap();
+    let held = lock_file(&path, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(20);
+    assert!(matches!(
+        FileLock::acquire(&path, Mode::S_IRUSR | Mode::S_IWUSR, Some(deadline)),
+        Err(Errno::ETIMEDOUT)
+    ));
+    drop(held);
+    let next = FileLock::acquire(
+        &path,
+        Mode::S_IRUSR | Mode::S_IWUSR,
+        Some(Instant::now() + Duration::from_secs(1)),
+    )
+    .unwrap();
+    drop(next);
+    lock_file(&path, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+}
+
+#[test]
+fn an_expired_lock_deadline_does_not_create_the_lock_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("not-created");
+    let path = CString::new(file.as_os_str().as_bytes()).unwrap();
+    assert!(matches!(
+        FileLock::acquire(&path, Mode::S_IRUSR | Mode::S_IWUSR, Some(Instant::now())),
+        Err(Errno::ETIMEDOUT)
+    ));
+    assert!(!file.exists());
+}
 
 impl FileDescriptor {
     /// Formats the descriptor number for inherited-descriptor tests.
