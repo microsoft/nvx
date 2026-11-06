@@ -624,14 +624,15 @@ impl PreparedChild {
             unsafe { fail(report, stage, error) }
         }
         if self.entry.is_some() || self.workload.is_some() {
-            // An entry's child closes every descriptor that its stages used or opened, but its
-            // program's, and resolves its working directory, `/` unless the command names
-            // another, through no magic link: no `/proc` link to a descriptor, a working
-            // directory, or a root then reaches outside the root, or a directory that a mount of
-            // the view covers.
+            // Close the stages' descriptors before resolving either working directory.
+            // Entries refuse magic links that could escape their root or bypass a view mount;
+            // plain workloads keep chdir's resolution under their final credentials.
             let directory = self.directory.as_deref().unwrap_or(c"/");
-            if let Err(error) = close_other_descriptors(&self.kept)
-                .and_then(|()| super::entry::enter_directory(directory))
+            if let Err(error) =
+                close_other_descriptors(&self.kept).and_then(|()| match self.entry.as_ref() {
+                    Some(_) => super::entry::enter_directory(directory),
+                    None => nix::unistd::chdir(directory),
+                })
             {
                 // SAFETY: as above.
                 unsafe { fail(report, LaunchStage::WorkingDirectory, error) }
