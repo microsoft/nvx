@@ -19,8 +19,13 @@ use crate::activation::{self, Journal, MAX_HOSTNAME_BYTES, OverlayMode, View};
 use crate::contract;
 use crate::error::{Error, Result};
 use crate::net::Ipv4Cidr;
+use crate::protocol::cmdline::{self, Parameter};
+use crate::protocol::maps::HostMap;
 use crate::protocol::root::{ImageFormat, RootImage, RootLayout, RootUpper};
 use crate::protocol::view;
+
+/// Bytes of the x86 kernel command line available to caller tokens, including the NUL.
+pub const COMMAND_LINE_BUDGET: usize = 1024;
 
 /// The guest address of a VM's NIC at a cold boot whose configuration names none, in the form
 /// that [`Ipv4Cidr::parse`] reads.
@@ -139,6 +144,8 @@ pub struct NicConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boot {
     /// The caller's own kernel command-line tokens, to which NVX adds those of what it lowers.
+    /// The root's tokens, `nvx_hostname`, `nvx_machine_id`, `nvx_maps` and `virtfs_*` are reserved;
+    /// every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
     pub command_line: String,
     /// What a capture of the VM adds, if the VM may be captured.
     pub capture: Option<CaptureConfig>,
@@ -358,6 +365,17 @@ impl<'de> serde::Deserialize<'de> for CaptureIdentity {
 }
 
 impl VmConfig {
+    /// Returns the configured export's mapping table, in exactly the order and form of
+    /// [`ExportPlan::guest_table`], or an empty table without an export.
+    ///
+    /// This is a pure projection: it reads no host path and does not recheck the plan. A cold
+    /// boot's rendered `nvx_maps` token counts these entries.
+    pub fn mapping_table(&self) -> Vec<HostMap> {
+        self.filesystem
+            .as_ref()
+            .map_or_else(Vec::new, ExportPlan::guest_table)
+    }
+
     /// Renders a cold boot's kernel command line without reading the host: the root's tokens,
     /// the view's tokens, the export's mapping count when present, then the caller's
     /// [`Boot::command_line`] without trimming or rewriting it.
@@ -411,13 +429,15 @@ impl VmConfig {
     /// refusal in the order of the fields: no processor; no memory; a layered root without an image
     /// path, with a bound of an EROFS image's first partition or a bound of 0, with a scratch upper
     /// without a path, or with a RAM upper whose cap is not 1 to 90 percent; a hostname that is
-    /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; and an export that
-    /// [`ExportPlan::check`] refuses for the root, whose error is the source. Last, it checks a
-    /// boot's capture with [`CaptureConfig::check`], and fails with its error.
+    /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; an export that
+    /// [`ExportPlan::check`] refuses for the root, whose error is the source; a boot's capture
+    /// that [`CaptureConfig::check`] refuses; and caller boot tokens that collide with the root's,
+    /// the view's, `nvx_maps`, or any `virtfs_*` name.
     ///
     /// The NIC's address is checked when it is built, and the network's policy where it is
-    /// lowered, with the guest's address. This check does not inspect [`Boot::command_line`],
-    /// which [`kernel_command_line`](Self::kernel_command_line) appends unchanged.
+    /// lowered, with the guest's address. Boot tokens are read as both Linux and the guest's init
+    /// read them, with dashes and underscores matching as Linux matches parameter names.
+    /// [`kernel_command_line`](Self::kernel_command_line) appends accepted caller text unchanged.
     pub fn check(&self) -> Result<()> {
         if self.processors == 0 {
             return Err(Error::unsupported("a VM needs at least one processor"));
@@ -444,6 +464,36 @@ impl VmConfig {
         }
         if let Some(capture) = self.boot.as_ref().and_then(|boot| boot.capture.as_ref()) {
             capture.check()?;
+        }
+        if let Some(boot) = &self.boot {
+            let guest = cmdline::init_tokens(boot.command_line.as_bytes()).map(|token| Parameter {
+                name: token.name,
+                value: token.value,
+            });
+            for parameter in cmdline::parameters(boot.command_line.as_bytes()).chain(guest) {
+                if [
+                    "nvx_layer",
+                    "nvx_scratch",
+                    "nvx_overlay_upper",
+                    "nvx_overlay_mode",
+                    "nvx_scratch_journal",
+                    "nvx_first_partition_bound",
+                    "nvx_ram_upper_percent",
+                    "nvx_hostname",
+                    "nvx_machine_id",
+                    "nvx_maps",
+                ]
+                .iter()
+                .any(|name| parameter.is_named(name))
+                    || parameter.name.starts_with(b"virtfs_")
+                    || parameter.name.starts_with(b"virtfs-")
+                {
+                    return Err(Error::unsupported(format!(
+                        "Boot.command_line uses the reserved token {:?}",
+                        String::from_utf8_lossy(parameter.name)
+                    )));
+                }
+            }
         }
         Ok(())
     }
