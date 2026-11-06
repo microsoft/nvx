@@ -64,8 +64,6 @@ const NICE: i32 = -10;
 /// The signals that PID 1 reads from its signal descriptor: the end of a child, and the request
 /// to end the VM.
 const SIGNALS: [Signal; 2] = [Signal::SIGCHLD, Signal::SIGTERM];
-/// Pause before PID 1 polls its signal descriptor again after `poll` failed.
-const POLL_RETRY: Duration = Duration::from_secs(1);
 
 /// The helpers that the shell `/init` hands over: the only processes whose end ends the VM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -769,8 +767,6 @@ trait System {
     /// Collects the status of one child that ended, without waiting, or returns `None` when none
     /// did.
     fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)>;
-    /// Waits for one of [`SIGNALS`], and returns it.
-    fn wait_signal(&mut self) -> Option<Signal>;
     /// Writes the diagnostic `line` to the console.
     fn report(&mut self, line: &[u8]);
     /// Writes every file system's modified data to its storage, and then stops the VM with
@@ -809,19 +805,6 @@ impl System for RealSystem {
 
     fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
         sys::reap_any_nonblocking().map(|child| (child.process, child.status, child.wait_status))
-    }
-
-    fn wait_signal(&mut self) -> Option<Signal> {
-        let signals = self.signals.as_ref()?;
-        loop {
-            if let Some(event) = signals.read() {
-                return event.signal;
-            }
-            match sys::poll([Pollable::Signals(signals)], None) {
-                Ok(_) | Err(Errno::EINTR) => {}
-                Err(_) => std::thread::sleep(POLL_RETRY),
-            }
-        }
     }
 
     fn report(&mut self, line: &[u8]) {
