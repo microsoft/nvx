@@ -1,10 +1,9 @@
 use std::io;
-use std::num::NonZeroU64;
 use std::path::PathBuf;
 
 use nvx::activation::{
-    Configuration, ExpectedResources, Identity, Image, MachineIdMode, OverlayMode, RestoreSection,
-    StoreGeneration, TemplateReference, TransactionId, Upper, WorkloadIdentity, WorkloadView,
+    Configuration, ExpectedResources, Image, MachineIdMode, OverlayMode, RestoreSection,
+    TransactionId, Upper, View,
 };
 use nvx::guest::clone::{AdmissionFence, NetworkError};
 use nvx::guest::entry;
@@ -22,32 +21,25 @@ const RESOURCES: ExpectedResources = ExpectedResources {
     memory: 1 << 30,
 };
 
-/// Returns a clone's record of the transaction `transaction`, with the workload identity of
-/// `uid`.
-fn record(transaction: u8, uid: u32) -> ActivationRecord {
+/// Returns a clone's record of the transaction `transaction`, with `hostname`.
+fn record(transaction: u8, hostname: &[u8]) -> ActivationRecord {
     let configuration = Configuration {
-        image: Image::Erofs {
-            binding: Identity::from_bytes([0x11; 32]),
-            uuid: None,
+        image: Image::Erofs { uuid: None },
+        upper: Upper::Tmpfs {
+            max_memory_percent: 50,
         },
-        upper: Upper::Tmpfs,
         overlay: OverlayMode::UntrustedLowers,
         export: None,
         mappings: 0,
         network: None,
-        workload: WorkloadView {
-            hostname: b"clone".to_vec(),
+        view: View {
+            hostname: hostname.to_vec(),
             machine_id: MachineIdMode::Image,
-            identity: Some(WorkloadIdentity { uid, gid: uid }),
         },
         resources: RESOURCES,
     };
     let restore = RestoreSection {
         transaction: TransactionId::from_bytes([transaction; 16]),
-        template: TemplateReference {
-            generation: StoreGeneration::new(NonZeroU64::MIN),
-            key: Identity::from_bytes([0x44; 32]),
-        },
     };
     ActivationRecord::new(Some(restore), configuration).unwrap()
 }
@@ -72,7 +64,7 @@ fn restricted() -> Activation<Admission> {
 /// Returns an activation that accepted the record of the transaction 1.
 fn activating() -> Activation<Admission> {
     let mut activation = restricted();
-    let bytes = record(1, 1000).encode();
+    let bytes = record(1, b"clone").encode();
     let action = activation.input(Instant::now(), ActivationInput::Activate(&bytes));
     assert!(
         matches!(action, Ok(ActivationAction::Apply(_))),
@@ -89,7 +81,7 @@ fn failed<T: std::fmt::Debug>(result: Result<T, ActivationFailure>) -> Activatio
 #[test]
 fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     let now = Instant::now;
-    let bytes = record(1, 1000).encode();
+    let bytes = record(1, b"clone").encode();
     let mut cases = Vec::new();
 
     // The deadline.
@@ -104,21 +96,21 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     cases.push((failure, status::ACTIVATION_PROTOCOL));
     let early = activation(RESOURCES, ACTIVATION_TIMEOUT).input(now(), ActivationInput::Request);
     cases.push((failed(early), status::ACTIVATION_PROTOCOL));
-    let other = record(2, 1000).encode();
+    let other = record(2, b"clone").encode();
     let failure = failed(activating().input(now(), ActivationInput::Activate(&other)));
     assert!(matches!(
         failure.cause(),
         ActivationCause::Transaction { .. }
     ));
     cases.push((failure, status::ACTIVATION_PROTOCOL));
-    let changed = record(1, 1001).encode();
+    let changed = record(1, b"another-clone").encode();
     let failure = failed(activating().input(now(), ActivationInput::Activate(&changed)));
     assert!(matches!(failure.cause(), ActivationCause::Changed));
     cases.push((failure, status::ACTIVATION_PROTOCOL));
     // The record: one that does not decode, and a cold boot's.
     let failure = failed(restricted().input(now(), ActivationInput::Activate(b"\x01")));
     cases.push((failure, status::ACTIVATION_RECORD));
-    let cold = ActivationRecord::new(None, record(1, 1000).configuration().clone()).unwrap();
+    let cold = ActivationRecord::new(None, record(1, b"clone").configuration().clone()).unwrap();
     let cold = cold.encode();
     let failure = failed(restricted().input(now(), ActivationInput::Activate(&cold)));
     assert!(matches!(failure.cause(), ActivationCause::Cold));

@@ -825,9 +825,8 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
         clone.policy_revision,
         nvx::host::sandbox::distro::DISTRO_POLICY_REVISION
     );
-    assert_eq!(clone.workload.hostname, b"runtime-adapter");
-    assert_eq!(clone.workload.machine_id, MachineIdMode::Image);
-    assert_eq!(clone.workload.identity, None);
+    assert_eq!(clone.view.hostname, b"runtime-adapter");
+    assert_eq!(clone.view.machine_id, MachineIdMode::Image);
     assert_eq!(clone.overlay, nvx::activation::OverlayMode::TrustedLowers);
     assert_eq!(clone.journal, nvx::activation::Journal::Allowed);
     assert_eq!(clone.first_partition_bound, DEFAULT_FIRST_PARTITION_BOUND);
@@ -844,15 +843,8 @@ fn a_clone_s_request_takes_the_staged_bindings_and_the_guest_s_defaults() {
     let clone = named
         .clone_request(plan.clone(), None, &bindings, processors, memory)
         .unwrap();
-    assert_eq!(
-        clone.workload.identity,
-        Some(nvx::activation::WorkloadIdentity {
-            uid: 65534,
-            gid: 65533
-        })
-    );
-    assert_eq!(clone.workload.hostname, b"runtime-adapter");
-    assert_eq!(clone.workload.machine_id, MachineIdMode::Generated);
+    assert_eq!(clone.view.hostname, b"runtime-adapter");
+    assert_eq!(clone.view.machine_id, MachineIdMode::Generated);
     assert_eq!(clone.overlay, nvx::activation::OverlayMode::UntrustedLowers);
     assert_eq!(clone.journal, nvx::activation::Journal::Forbidden);
     assert_eq!(clone.first_partition_bound, 4096);

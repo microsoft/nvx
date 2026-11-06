@@ -2,7 +2,6 @@
 //! by field from the encoding's definition, never with the encoder that they check.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::num::NonZeroU64;
 
 use proptest::prelude::*;
 
@@ -26,19 +25,18 @@ fn encoding_of(version: u16, fields: &[RawField]) -> Vec<u8> {
     bytes
 }
 
-/// Returns the encoding of version 1 with `fields`, in the order given.
+/// Returns the encoding of version 2 with `fields`, in the order given.
 fn encoding(fields: &[RawField]) -> Vec<u8> {
-    encoding_of(1, fields)
+    encoding_of(2, fields)
 }
 
 /// Returns the fields of the cold record of the tests' [`configuration`], from the encoding's
 /// definition.
 fn cold_fields() -> Vec<RawField> {
     vec![
-        // An EROFS image, whose binding's identity is 0x11 bytes.
-        (0x10, [&[1][..], &[0x11; 32]].concat()),
-        // A tmpfs upper.
-        (0x20, vec![1]),
+        // An EROFS image and a tmpfs upper capped at 50 percent.
+        (0x10, vec![1]),
+        (0x20, vec![1, 50]),
         // Trusted lowers.
         (0x30, vec![1]),
         (0x60, b"nvx-sandbox".to_vec()),
@@ -66,17 +64,15 @@ fn without(mut fields: Vec<RawField>, tag: u8) -> Vec<RawField> {
     fields
 }
 
-/// Returns the fields of the cold record with an aggregate export, whose plan's identity is 0x55
-/// bytes, and with the mapping count `count`.
+/// Returns the fields of the cold record with an aggregate export and mapping count `count`.
 fn with_export(count: [u8; 2]) -> Vec<RawField> {
-    let fields = with(cold_fields(), 0x40, &[&[2][..], &[0x55; 32]].concat());
+    let fields = with(cold_fields(), 0x40, &[2]);
     with(fields, 0x41, &count)
 }
 
-/// Returns the fields of the cold record with a network, whose policy's identity is 0x66 bytes,
-/// and whose listeners are not published.
+/// Returns the fields of the cold record with a network whose listeners are not published.
 fn with_network() -> Vec<RawField> {
-    with(cold_fields(), 0x50, &[&[0x66; 32][..], &[2]].concat())
+    with(cold_fields(), 0x50, &[2])
 }
 
 /// Returns what the decoder makes of `fields`.
@@ -87,7 +83,7 @@ fn decode(fields: &[RawField]) -> Result<ActivationRecord, ActivationError> {
 /// Returns the fields of an encoding, as tag and value, and checks the encoding's version, and
 /// that its fields hold nothing past their ends and come in the increasing order of their tags.
 fn fields_of(bytes: &[u8]) -> Vec<RawField> {
-    assert_eq!(bytes[..2], [1, 0], "the version");
+    assert_eq!(bytes[..2], [2, 0], "the version");
     let mut fields: Vec<RawField> = Vec::new();
     let mut rest = &bytes[2..];
     while let [tag, length, tail @ ..] = rest {
@@ -118,7 +114,6 @@ fn the_fields_keep_their_tags_and_names() {
         (Field::Proxy, 0x52, "proxy"),
         (Field::Hostname, 0x60, "hostname"),
         (Field::MachineId, 0x61, "machine ID"),
-        (Field::WorkloadIdentity, 0x62, "workload identity"),
         (Field::Resources, 0x70, "resources"),
     ];
     assert_eq!(Field::ALL.len(), expected.len());
@@ -168,8 +163,8 @@ fn a_cold_record_encodes_to_the_bytes_of_its_definition() {
 #[test]
 fn a_clone_record_holds_its_restore_section_first() {
     let record = ActivationRecord::new(Some(restore()), configuration()).unwrap();
-    // The transaction ID, the store generation, and the identity of the template's key.
-    let section = [&[0x22; 16][..], &[0x33; 8], &[0x44; 32]].concat();
+    // Nothing besides the transaction ID belongs to the restore section.
+    let section = [0x22; 16];
     let bytes = encoding(&with(cold_fields(), 0x01, &section));
     assert_eq!(record.encode(), bytes);
     assert_eq!(ActivationRecord::decode(&bytes), Ok(record));
@@ -179,43 +174,32 @@ fn a_clone_record_holds_its_restore_section_first() {
 fn every_part_of_a_configuration_encodes_to_the_bytes_of_its_definition() {
     let mut configuration = configuration();
     configuration.image = Image::Gpt {
-        binding: Identity::from_bytes([0x77; 32]),
         disk_guid: Some("fedcba98-7654-3210-fedc-ba9876543210".parse().unwrap()),
         first_partition_bound: 64 << 10,
     };
     configuration.upper = Upper::Scratch {
-        binding: Identity::from_bytes([0x88; 32]),
         journal: Journal::Forbidden,
     };
     configuration.overlay = OverlayMode::UntrustedLowers;
     configuration.export = Some(Export {
         kind: ExportKind::Directory,
-        plan: Identity::from_bytes([0x99; 32]),
     });
     configuration.mappings = 0x0102;
     configuration.network = Some(Network {
-        policy: Identity::from_bytes([0xaa; 32]),
         dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
         publication: Publication::Published,
         proxy: Some("http://10.0.0.1:3128".to_owned()),
     });
-    configuration.workload = WorkloadView {
+    configuration.view = View {
         hostname: b"clone".to_vec(),
         machine_id: MachineIdMode::Generated,
-        identity: Some(WorkloadIdentity {
-            uid: 1000,
-            gid: 0x0102_0304,
-        }),
     };
     configuration.resources = ExpectedResources {
         cpus: 4,
         memory: 0x0102_0304_0506_0708,
     };
     let fields = vec![
-        (
-            0x10,
-            [&[2][..], &[0x77; 32], &[0, 0, 1, 0, 0, 0, 0, 0]].concat(),
-        ),
+        (0x10, vec![2, 0, 0, 1, 0, 0, 0, 0, 0]),
         (
             0x11,
             vec![
@@ -223,16 +207,15 @@ fn every_part_of_a_configuration_encodes_to_the_bytes_of_its_definition() {
                 0x32, 0x10,
             ],
         ),
-        (0x20, [&[2][..], &[0x88; 32], &[2]].concat()),
+        (0x20, vec![2, 2]),
         (0x30, vec![2]),
-        (0x40, [&[1][..], &[0x99; 32]].concat()),
+        (0x40, vec![1]),
         (0x41, vec![2, 1]),
-        (0x50, [&[0xaa; 32][..], &[1]].concat()),
+        (0x50, vec![1]),
         (0x51, vec![10, 0, 0, 1]),
         (0x52, b"http://10.0.0.1:3128".to_vec()),
         (0x60, b"clone".to_vec()),
         (0x61, vec![2]),
-        (0x62, vec![0xe8, 3, 0, 0, 4, 3, 2, 1]),
         (0x70, vec![4, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1]),
     ];
     let record = ActivationRecord::new(None, configuration.clone()).unwrap();
@@ -248,10 +231,10 @@ fn every_part_of_a_configuration_encodes_to_the_bytes_of_its_definition() {
 }
 
 #[test]
-fn a_maximal_record_holds_602_bytes_within_the_limit() {
+fn a_maximal_record_holds_424_bytes_within_the_limit() {
     let record = ActivationRecord::new(Some(restore()), maximal()).unwrap();
     let bytes = record.encode();
-    assert_eq!(bytes.len(), 602);
+    assert_eq!(bytes.len(), 424);
     assert!(bytes.len() <= MAX_RECORD_BYTES);
     assert_eq!(
         fields_of(&bytes)
@@ -286,11 +269,11 @@ fn every_prefix_of_an_encoding_is_refused() {
         Err(ActivationError::Truncated)
     );
     assert_eq!(
-        ActivationRecord::decode(&[1]),
+        ActivationRecord::decode(&[2]),
         Err(ActivationError::Truncated)
     );
     assert_eq!(
-        ActivationRecord::decode(&[1, 0]),
+        ActivationRecord::decode(&[2, 0]),
         Err(ActivationError::MissingField(Field::Image))
     );
 }
@@ -318,7 +301,7 @@ fn bytes_past_the_limit_are_refused_before_anything_else() {
 
 #[test]
 fn other_versions_are_refused() {
-    for version in [0, 2, 0x0100, u16::MAX] {
+    for version in [0, 1, 0x0100, u16::MAX] {
         assert_eq!(
             ActivationRecord::decode(&encoding_of(version, &cold_fields())),
             Err(ActivationError::Version(version)),
@@ -378,7 +361,7 @@ fn fields_out_of_order_are_refused() {
     }
     // The restore section comes first.
     let mut fields = cold_fields();
-    fields.push((0x01, [&[0x22; 16][..], &[0x33; 8], &[0x44; 32]].concat()));
+    fields.push((0x01, vec![0x22; 16]));
     assert_eq!(
         decode(&fields),
         Err(ActivationError::FieldOrder(Field::Restore))
@@ -407,7 +390,6 @@ fn a_dns_server_or_a_proxy_without_a_network_is_refused() {
     assert_eq!(
         network,
         Some(Network {
-            policy: Identity::from_bytes([0x66; 32]),
             dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             publication: Publication::Unpublished,
             proxy: Some("10.0.0.1:3128".to_owned()),
@@ -417,34 +399,20 @@ fn a_dns_server_or_a_proxy_without_a_network_is_refused() {
 
 #[test]
 fn values_of_another_length_are_refused() {
-    let identity = [0x12; 32];
     let cases: Vec<(Field, Vec<RawField>, usize)> = vec![
-        (Field::Restore, with(cold_fields(), 0x01, &[1; 55]), 55),
-        (Field::Restore, with(cold_fields(), 0x01, &[1; 57]), 57),
+        (Field::Restore, with(cold_fields(), 0x01, &[1; 15]), 15),
+        (Field::Restore, with(cold_fields(), 0x01, &[1; 17]), 17),
         (Field::Image, with(cold_fields(), 0x10, &[]), 0),
+        (Field::Image, with(cold_fields(), 0x10, &[1, 0]), 2),
         (
             Field::Image,
-            with(cold_fields(), 0x10, &[&[1][..], &[0; 31]].concat()),
-            32,
+            with(cold_fields(), 0x10, &[&[2][..], &[1; 7]].concat()),
+            8,
         ),
         (
             Field::Image,
-            with(cold_fields(), 0x10, &[&[1][..], &[0; 33]].concat()),
-            34,
-        ),
-        (
-            Field::Image,
-            with(cold_fields(), 0x10, &[&[2][..], &identity].concat()),
-            33,
-        ),
-        (
-            Field::Image,
-            with(
-                cold_fields(),
-                0x10,
-                &[&[2][..], &identity, &[1; 9]].concat(),
-            ),
-            42,
+            with(cold_fields(), 0x10, &[&[2][..], &[1; 9]].concat()),
+            10,
         ),
         (
             Field::ImageIdentity,
@@ -457,46 +425,22 @@ fn values_of_another_length_are_refused() {
             17,
         ),
         (Field::Upper, with(cold_fields(), 0x20, &[]), 0),
-        (Field::Upper, with(cold_fields(), 0x20, &[1, 1]), 2),
+        (Field::Upper, with(cold_fields(), 0x20, &[1]), 1),
+        (Field::Upper, with(cold_fields(), 0x20, &[1, 50, 0]), 3),
         (Field::Upper, with(cold_fields(), 0x20, &[2]), 1),
-        (
-            Field::Upper,
-            with(cold_fields(), 0x20, &[&[2][..], &identity].concat()),
-            33,
-        ),
-        (
-            Field::Upper,
-            with(
-                cold_fields(),
-                0x20,
-                &[&[2][..], &identity, &[1, 1]].concat(),
-            ),
-            35,
-        ),
+        (Field::Upper, with(cold_fields(), 0x20, &[2, 1, 1]), 3),
         (Field::Overlay, with(cold_fields(), 0x30, &[]), 0),
         (Field::Overlay, with(cold_fields(), 0x30, &[1, 1]), 2),
-        (
-            Field::Export,
-            with(with_export([1, 0]), 0x40, &[&[1][..], &[0; 31]].concat()),
-            32,
-        ),
-        (
-            Field::Export,
-            with(with_export([1, 0]), 0x40, &[&[1][..], &[0; 33]].concat()),
-            34,
-        ),
+        (Field::Export, with(with_export([1, 0]), 0x40, &[]), 0),
+        (Field::Export, with(with_export([1, 0]), 0x40, &[1, 1]), 2),
         (Field::Mappings, with(with_export([1, 0]), 0x41, &[1]), 1),
         (
             Field::Mappings,
             with(with_export([1, 0]), 0x41, &[1, 0, 0]),
             3,
         ),
-        (Field::Network, with(cold_fields(), 0x50, &[0; 32]), 32),
-        (
-            Field::Network,
-            with(cold_fields(), 0x50, &[&[0; 32][..], &[1, 1]].concat()),
-            34,
-        ),
+        (Field::Network, with(cold_fields(), 0x50, &[]), 0),
+        (Field::Network, with(cold_fields(), 0x50, &[1, 1]), 2),
         (Field::Dns, with(with_network(), 0x51, &[]), 0),
         (Field::Dns, with(with_network(), 0x51, &[10, 0, 0]), 3),
         (Field::Dns, with(with_network(), 0x51, &[10, 0, 0, 1, 0]), 5),
@@ -504,16 +448,6 @@ fn values_of_another_length_are_refused() {
         (Field::Dns, with(with_network(), 0x51, &[0; 17]), 17),
         (Field::MachineId, with(cold_fields(), 0x61, &[]), 0),
         (Field::MachineId, with(cold_fields(), 0x61, &[1, 1]), 2),
-        (
-            Field::WorkloadIdentity,
-            with(cold_fields(), 0x62, &[1; 7]),
-            7,
-        ),
-        (
-            Field::WorkloadIdentity,
-            with(cold_fields(), 0x62, &[1; 9]),
-            9,
-        ),
         (Field::Resources, with(cold_fields(), 0x70, &[1; 11]), 11),
         (Field::Resources, with(cold_fields(), 0x70, &[1; 13]), 13),
     ];
@@ -528,35 +462,14 @@ fn values_of_another_length_are_refused() {
 
 #[test]
 fn unknown_codes_are_refused() {
-    let identity = [0x12; 32];
     for code in [0, 3, u8::MAX] {
         let cases = [
-            (
-                Field::Image,
-                with(cold_fields(), 0x10, &[&[code][..], &identity].concat()),
-            ),
+            (Field::Image, with(cold_fields(), 0x10, &[code])),
             (Field::Upper, with(cold_fields(), 0x20, &[code])),
-            (
-                Field::Upper,
-                with(
-                    cold_fields(),
-                    0x20,
-                    &[&[2][..], &identity, &[code]].concat(),
-                ),
-            ),
+            (Field::Upper, with(cold_fields(), 0x20, &[2, code])),
             (Field::Overlay, with(cold_fields(), 0x30, &[code])),
-            (
-                Field::Export,
-                with(
-                    with_export([1, 0]),
-                    0x40,
-                    &[&[code][..], &identity].concat(),
-                ),
-            ),
-            (
-                Field::Network,
-                with(cold_fields(), 0x50, &[&identity[..], &[code]].concat()),
-            ),
+            (Field::Export, with(with_export([1, 0]), 0x40, &[code])),
+            (Field::Network, with(cold_fields(), 0x50, &[code])),
             (Field::MachineId, with(cold_fields(), 0x61, &[code])),
         ];
         for (field, fields) in cases {
@@ -582,19 +495,16 @@ fn a_mapping_count_of_zero_is_refused() {
 }
 
 #[test]
-fn a_store_generation_of_0_is_refused() {
-    let section = [&[0x22; 16][..], &[0; 8], &[0x44; 32]].concat();
-    assert_eq!(
-        decode(&with(cold_fields(), 0x01, &section)),
-        Err(ActivationError::FieldValue(Field::Restore))
-    );
-    // A store's first generation, 1, is read.
-    let section = [&[0x22; 16][..], &[1, 0, 0, 0, 0, 0, 0, 0], &[0x44; 32]].concat();
-    let record = decode(&with(cold_fields(), 0x01, &section)).unwrap();
-    assert_eq!(
-        record.restore().map(|restore| restore.template.generation),
-        Some(StoreGeneration::new(NonZeroU64::MIN))
-    );
+fn a_tmpfs_cap_round_trips_in_its_upper_field() {
+    for max_memory_percent in [1, 50, 90] {
+        let fields = with(cold_fields(), 0x20, &[1, max_memory_percent]);
+        let record = decode(&fields).unwrap();
+        assert_eq!(
+            record.configuration().upper,
+            Upper::Tmpfs { max_memory_percent }
+        );
+        assert_eq!(record.encode(), encoding(&fields));
+    }
 }
 
 #[test]
@@ -635,15 +545,22 @@ fn values_past_a_limit_are_refused() {
 
 #[test]
 fn values_that_a_configuration_refuses_are_refused() {
-    let identity = [0x12; 32];
     let cases = [
         (
-            with(
-                cold_fields(),
-                0x10,
-                &[&[2][..], &identity, &[0; 8]].concat(),
-            ),
+            with(cold_fields(), 0x10, &[&[2][..], &[0; 8]].concat()),
             ActivationError::FirstPartitionBound,
+        ),
+        (
+            with(cold_fields(), 0x20, &[1, 0]),
+            ActivationError::TmpfsMemoryPercent(0),
+        ),
+        (
+            with(cold_fields(), 0x20, &[1, 91]),
+            ActivationError::TmpfsMemoryPercent(91),
+        ),
+        (
+            with(cold_fields(), 0x20, &[1, 255]),
+            ActivationError::TmpfsMemoryPercent(255),
         ),
         (
             with(with_network(), 0x52, b""),
@@ -669,22 +586,6 @@ fn values_that_a_configuration_refuses_are_refused() {
         (
             with(cold_fields(), 0x60, b"nvx\0sandbox"),
             ActivationError::Hostname,
-        ),
-        (
-            with(cold_fields(), 0x62, &[0, 0, 0, 0, 1, 0, 0, 0]),
-            ActivationError::WorkloadIdentity,
-        ),
-        (
-            with(cold_fields(), 0x62, &[1, 0, 0, 0, 0, 0, 0, 0]),
-            ActivationError::WorkloadIdentity,
-        ),
-        (
-            with(cold_fields(), 0x62, &[0xff, 0xff, 0xff, 0xff, 1, 0, 0, 0]),
-            ActivationError::WorkloadIdentity,
-        ),
-        (
-            with(cold_fields(), 0x62, &[1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]),
-            ActivationError::WorkloadIdentity,
         ),
         (
             with(cold_fields(), 0x70, &[0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
@@ -772,8 +673,8 @@ fn refusals_name_the_rule_that_they_break() {
             "the record ends inside its version or one of its fields",
         ),
         (
-            ActivationError::Version(2),
-            "the record's version is 2, not 1",
+            ActivationError::Version(1),
+            "the record's version is 1, not 2",
         ),
         (
             ActivationError::UnknownField(0x0f),
@@ -808,11 +709,6 @@ fn refusals_name_the_rule_that_they_break() {
     }
 }
 
-/// Returns arbitrary identities.
-fn identities() -> impl Strategy<Value = Identity> {
-    any::<[u8; 32]>().prop_map(Identity::from_bytes)
-}
-
 /// Returns arbitrary UUIDs, or none.
 fn uuids() -> impl Strategy<Value = Option<Uuid>> {
     any::<Option<[u8; 16]>>().prop_map(|bytes| bytes.map(Uuid::from_bytes))
@@ -821,22 +717,18 @@ fn uuids() -> impl Strategy<Value = Option<Uuid>> {
 /// Returns arbitrary valid configurations.
 fn configurations() -> impl Strategy<Value = Configuration> {
     let image = prop_oneof![
-        (identities(), uuids()).prop_map(|(binding, uuid)| Image::Erofs { binding, uuid }),
-        (identities(), uuids(), 1..=u64::MAX).prop_map(|(binding, disk_guid, bound)| {
+        uuids().prop_map(|uuid| Image::Erofs { uuid }),
+        (uuids(), 1..=u64::MAX).prop_map(|(disk_guid, bound)| {
             Image::Gpt {
-                binding,
                 disk_guid,
                 first_partition_bound: bound,
             }
         }),
     ];
     let upper = prop_oneof![
-        Just(Upper::Tmpfs),
-        (
-            identities(),
-            prop_oneof![Just(Journal::Allowed), Just(Journal::Forbidden)]
-        )
-            .prop_map(|(binding, journal)| Upper::Scratch { binding, journal }),
+        (1_u8..=90).prop_map(|max_memory_percent| Upper::Tmpfs { max_memory_percent }),
+        prop_oneof![Just(Journal::Allowed), Just(Journal::Forbidden)]
+            .prop_map(|journal| Upper::Scratch { journal }),
     ];
     let overlay = prop_oneof![
         Just(OverlayMode::TrustedLowers),
@@ -846,10 +738,9 @@ fn configurations() -> impl Strategy<Value = Configuration> {
         Just((None::<Export>, 0_usize)),
         (
             prop_oneof![Just(ExportKind::Directory), Just(ExportKind::Aggregate)],
-            identities(),
             1..=MAX_MAPPINGS,
         )
-            .prop_map(|(kind, plan, mappings)| (Some(Export { kind, plan }), mappings)),
+            .prop_map(|(kind, mappings)| (Some(Export { kind }), mappings)),
     ];
     let address = prop_oneof![
         any::<[u8; 4]>().prop_map(IpAddr::from),
@@ -863,41 +754,35 @@ fn configurations() -> impl Strategy<Value = Configuration> {
     .prop_map(|bytes| String::from_utf8(bytes).unwrap());
     let network = prop::option::of(
         (
-            identities(),
             prop::option::of(address),
             prop_oneof![Just(Publication::Published), Just(Publication::Unpublished)],
             prop::option::of(proxy),
         )
-            .prop_map(|(policy, dns, publication, proxy)| Network {
-                policy,
+            .prop_map(|(dns, publication, proxy)| Network {
                 dns,
                 publication,
                 proxy,
             }),
     );
-    let workload = (
+    let view = (
         prop::collection::vec(1_u8..=u8::MAX, 1..=MAX_HOSTNAME_BYTES),
         prop_oneof![Just(MachineIdMode::Image), Just(MachineIdMode::Generated)],
-        prop::option::of(
-            (1..u32::MAX, 1..u32::MAX).prop_map(|(uid, gid)| WorkloadIdentity { uid, gid }),
-        ),
     )
-        .prop_map(|(hostname, machine_id, identity)| WorkloadView {
+        .prop_map(|(hostname, machine_id)| View {
             hostname,
             machine_id,
-            identity,
         });
     let resources =
         (1..=u32::MAX, 1..=u64::MAX).prop_map(|(cpus, memory)| ExpectedResources { cpus, memory });
-    (image, upper, overlay, export, network, workload, resources).prop_map(
-        |(image, upper, overlay, (export, mappings), network, workload, resources)| Configuration {
+    (image, upper, overlay, export, network, view, resources).prop_map(
+        |(image, upper, overlay, (export, mappings), network, view, resources)| Configuration {
             image,
             upper,
             overlay,
             export,
             mappings,
             network,
-            workload,
+            view,
             resources,
         },
     )
@@ -905,17 +790,9 @@ fn configurations() -> impl Strategy<Value = Configuration> {
 
 /// Returns arbitrary valid records, of cold boots and of clones.
 fn records() -> impl Strategy<Value = ActivationRecord> {
-    let restore = prop::option::of(
-        (any::<[u8; 16]>(), any::<NonZeroU64>(), identities()).prop_map(
-            |(transaction, generation, key)| RestoreSection {
-                transaction: TransactionId::from_bytes(transaction),
-                template: TemplateReference {
-                    generation: StoreGeneration::new(generation),
-                    key,
-                },
-            },
-        ),
-    );
+    let restore = prop::option::of(any::<[u8; 16]>().prop_map(|transaction| RestoreSection {
+        transaction: TransactionId::from_bytes(transaction),
+    }));
     (restore, configurations())
         .prop_map(|(restore, configuration)| ActivationRecord::new(restore, configuration).unwrap())
 }
