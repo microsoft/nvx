@@ -8,20 +8,20 @@
 - Mapped fork tip: `3cdf4fe3834cfb90b9ee685875493bc9bff1b7a4`, position 135. The graph, PR
   summary, and commit mapping below cover positions 001-135, the PR20 fixup at position 152, PR06's
   read fix at position 217, and the PR13 fixups at positions 218 and 219.
-- NVX's pinned OpenVMM revision: `6fb64731f03314a3c5ee634d3c85d6782a5babe0`, position 219. Positions
-  217-219, which microsoft/openvmm#4952 proposes for `feature/microvm/dev`, are three commits on
-  position 216, `14dc4116e`, the head of `feature/microvm/dev`. microsoft/openvmm#4921 landed
-  positions 215 and 216 there by fast-forward, as microsoft/openvmm#4916 landed position 214, and
-  microsoft/openvmm#4894, microsoft/openvmm#4886, and microsoft/openvmm#4887 landed positions
-  211-213 on position 210, `eda13d80a`, the head of the `feature/microvm/release/v4.0` branch of
-  microsoft/openvmm. The v4.0 reorganization moved the 205
+- NVX's pinned OpenVMM revision: `e1ca353eb23c43d38b52e9b5156252fc4c7fc62d`, position 220. Position
+  220, which microsoft/openvmm#4951 proposes for `feature/microvm/dev`, is one commit on position
+  219, `6fb64731f`, the head of `feature/microvm/dev`. microsoft/openvmm#4952 landed positions
+  217-219 there by fast-forward, as microsoft/openvmm#4921 landed positions 215 and 216,
+  microsoft/openvmm#4916 position 214, and microsoft/openvmm#4894, microsoft/openvmm#4886, and
+  microsoft/openvmm#4887 positions 211-213 on position 210, `eda13d80a`, the head of the
+  `feature/microvm/release/v4.0` branch of microsoft/openvmm. The v4.0 reorganization moved the 205
   commits of `feature/microvm/release/v3.0` and the NVX pin before it, `35e76265f`, onto
   `c6d3da0ff`. It dropped the eight commits whose changes upstream had landed or superseded, retired
   the fallible device start that microsoft/nvx#1232 replaces with awaited device restoration, folded
   that restoration into the commits that it changes, and added 14 commits that give each ABI that
   the chain introduces a single version; see [The v4.0 reorganization](#the-v40-reorganization). The
-  pin is 84 commits past the mapped tip on the same first-parent chain. Positions 136-216, except
-  the PR20 fixup at position 152, are not yet assigned to PRs; see
+  pin is 85 commits past the mapped tip on the same first-parent chain. Positions 136-216 and 220,
+  except the PR20 fixup at position 152, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ca6b2b177da5e33ae1bcac72986b31d6b039811c` (2026-11-02), one commit past the
   fork base; see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -209,7 +209,7 @@ position 046 and the portb console of PR15's position 064 keep the guest output 
 peer leaves only when that write fails, and on Linux a write to an AF_UNIX peer that has closed
 fails with `EPIPE`, which upstream's backend reports as successful. Position 015 moves to PR13,
 ahead of position 046, so that it goes upstream with the policy that needs it.
-microsoft/openvmm#4952 proposes positions 217-219 for `feature/microvm/dev`: position 217
+microsoft/openvmm#4952 landed positions 217-219 on `feature/microvm/dev`: position 217
 cherry-picks `48e0681e9` for PR06, position 218 explains and tests the write handling of position
 015, and position 219 tests that a `Retain` console keeps that output for the next peer. When the
 chain moves onto an upstream main that has `48e0681e9`, drop position 217 and keep position 015:
@@ -687,7 +687,8 @@ c6d3da0ff
   -> boot console exit drain [211] -> portb without host input [212-213]
   -> long Windows paths [214] -> snapshot quiesce without a deadline [215-216]
   -> PR06 read fix [217] -> PR13 fixups [218-219]
-  -> 6fb64731f (NVX pin)
+  -> port forward bind code [220]
+  -> e1ca353eb (NVX pin)
 ```
 
 For upstream review, PR01-PR07 and PR14 can be rebased independently onto current upstream main,
@@ -706,13 +707,13 @@ that has `48e0681e9`; see [Open upstream pull requests](#open-upstream-pull-requ
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 135 without merges. Of the 84 later commits, position
+The NVX pin extends the chain past position 135 without merges. Of the 85 later commits, position
 152 is a PR20 fixup, position 217 is PR06's copy of a change that upstream has landed, positions 218
 and 219 are PR13 fixups, and the others are not yet classified or assigned to PRs. Each of positions
 136-191 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 192-196
 followed the v3.0 reorganization, positions 197-210 are the ABI restart of the v4.0
-reorganization, and positions 211-219 followed it, so they combine none.
+reorganization, and positions 211-220 followed it, so they combine none.
 
 | Position | Commit | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | --- | --- |
@@ -800,6 +801,7 @@ reorganization, and positions 211-219 followed it, so they combine none.
 | 217 | `62b427a38` | - | - | serial_socket: report read errors as EOF and drop the connection (microsoft/openvmm#4952; PR06's microsoft/openvmm#4605, merged as `48e0681e9`) |
 | 218 | `3f5224fd2` | - | - | serial_socket: document and test why a failed write drops the connection (microsoft/openvmm#4952; fold into 015) |
 | 219 | `6fb64731f` | - | - | virtio_console: test that Retain keeps output for the next peer (microsoft/openvmm#4952; fold into 047) |
+| 220 | `e1ca353eb` | - | - | net_consomme: give a port forward that cannot bind a stable code (microsoft/openvmm#4951) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -923,6 +925,15 @@ change, and in the two test files, which upstream main lacks. They follow PR06 a
 upstream main has since merged position 217's change as `48e0681e9`, and positions 218 and 219
 fold into PR13. Position 218's test runs on Linux only, since on Windows the first write after an
 AF_UNIX peer closes is accepted and the next fails with `ConnectionReset`.
+
+Position 220 leads the error with which the Consomme resolver, which upstream main has, reports a
+port forward that it cannot bind with the stable code `E_PORT_FORWARD_BIND`, renames the helper with
+which position 143's fatal error finds the first code of an error chain, and gives the code in the
+Guide's sentences on the forwards of positions 179, 183, and 186 and on the time ABI codes of
+position 151. It changes nothing that a mapped PR adds, but its resolver test builds a Consomme
+handle with the fields that PR13's position 051 and positions 173 and 179 add. Replaying it on
+upstream main conflicts in all four of its files, one of which, the verification module of position
+143, upstream main lacks, so it follows those commits upstream.
 
 ## PR summary
 
