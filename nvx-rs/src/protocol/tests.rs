@@ -157,6 +157,27 @@ fn frames_match_their_vectors() {
     }
 }
 
+#[test]
+fn capture_requests_round_trip_both_kill_flags() {
+    for (payload, kill_executions) in [([0], false), ([1], true)] {
+        assert_eq!(app::encode_capture_payload(kill_executions), payload);
+        let bytes = encode_app(app::APP_CAPTURE, 42, 0, &payload);
+        let frame = decode_app(&bytes).unwrap();
+        assert_eq!((frame.kind, frame.request_id, frame.status), (7, 42, 0));
+        assert_eq!(
+            app::decode_capture_payload(frame.payload).unwrap(),
+            kill_executions
+        );
+    }
+}
+
+#[test]
+fn capture_requests_refuse_unknown_or_mis_sized_flags() {
+    for payload in [&[][..], &[2], &[1, 0]] {
+        assert!(app::decode_capture_payload(payload).is_err());
+    }
+}
+
 /// Each `EXEC` vector decodes, with the host's and with the guest's decoder, to its values, which
 /// the host encodes to its bytes. Without an explicit environment, the host's
 /// `inherit_default_env` is true, and the guest's, which follows the layering flag alone, false
