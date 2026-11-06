@@ -1,5 +1,5 @@
-//! `nvx-init TIME_DAEMON [ANNOUNCER]`: NVX's PID 1 for layered roots, which runs ahead of the
-//! workloads.
+//! `nvx-init TIME_DAEMON [ANNOUNCER]`: NVX's PID 1, which initializes a layered root and serves
+//! its managed control session through the same dispatcher as blockless VMs.
 //!
 //! A layered root's early boot, which the shell `/init` runs, mounts the kernel's file systems,
 //! runs `nvx-time boot`, whose child becomes the time daemon, configures the network, and, when
@@ -30,8 +30,8 @@
 //!   nothing from it;
 //! - ends the VM itself, without another guest program: it writes every file system's modified
 //!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control port with a
-//!   status: 0 after `SIGTERM`, or 125, as `nvx-init-agent`'s failures do, after a failure, which
-//!   an `NVX-INIT-ERROR:` line on the console names first.
+//!   status: 0 after a host `STOP` or `SIGTERM`, or 125, as `nvx-init-agent`'s failures do, after
+//!   a failure, which an `NVX-INIT-ERROR:` line on the console names first.
 //!
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
 
