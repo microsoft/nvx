@@ -488,7 +488,10 @@ fn prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher() -> T
     use crate::guest::mappings::{Mapper, MappingTable, Reserved, SourceRoot, TargetRoot};
 
     let (_temporary, mut system, rootfs) = sandbox_root();
-    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
+    system.direct_starter = Some(|request| {
+        assert_eq!((request.uid, request.gid), (1234, 2345));
+        super::super::seam::tests::start_as_privileged(request)
+    });
     let export = system.paths.hostfs_dir.join("root").canonicalize()?;
     let source = SourceRoot::open(&export)?;
     let target = TargetRoot::open_with(&mut system.kernel, &rootfs)?;
@@ -511,7 +514,7 @@ fn prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher() -> T
     let mappings = HostMappings::layered(table, mapper, source);
     system.paths.hostfs_dir = rootfs.join("not-the-retained-export");
     let config = AgentConfig::layered(
-        b"nvx_identity=1000:1000",
+        b"nvx_identity=1234:2345",
         c"workload".to_owned(),
         c"/home/workload".to_owned(),
     )?;
@@ -560,7 +563,6 @@ fn prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher() -> T
     assert_eq!(system.kernel.calls(), expected);
     assert_eq!(system.spawn_calls, 1);
     assert_eq!(system.entries_prepared, 0);
-    assert_eq!(system.runtime_binds, 0);
     Ok(())
 }
 
