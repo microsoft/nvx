@@ -58,11 +58,12 @@ impl AgentConfig {
         &self,
         runtime: &mut Runtime,
         control: FileDescriptor,
-        (table, mapper, export): (MappingTable, Mapper, SourceRoot),
+        (table, mapper, export): (MappingTable, Mapper, Option<SourceRoot>),
     ) -> Result<(), String> {
         let mut system = RealSystem::new(Paths::default());
         let mut session = Session::with_runtime(control, runtime)?;
-        let mut mappings = HostMappings::layered(table, mapper, export);
+        let mut mappings = HostMappings::layered(table, mapper, export)
+            .map_err(|error| format!("invalid layered mappings: {}", error.desc()))?;
         run(&mut system, &mut session, self, &mut mappings)
             .map(|Outcome::Stopped| ())
             .map_err(|error| {
