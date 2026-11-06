@@ -166,8 +166,10 @@ impl std::error::Error for CaptureFailure {
 
 /// Captures a Fresh template without freezing or inspecting the caller's executions.
 ///
-/// The deadline bounds pre-request work only. This call starts no helper, drives no transport,
-/// and never powers off the VM. A restore is repaired inline, and failures return its disposition.
+/// The deadline bounds pre-request work only. This call drives no transport and never powers off
+/// the VM. A restore is repaired inline, and failures return its disposition. Only a report-only
+/// finish without a running time daemon starts helper processes, as
+/// [`restore_finish`](super::time::TimeAbi::restore_finish) describes.
 pub fn capture(
     devices: &Devices,
     disks: Disks,

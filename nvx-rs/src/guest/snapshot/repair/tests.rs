@@ -260,7 +260,7 @@ fn repairing(restore: Restore, system: FakeSystem) -> Repair {
 }
 
 /// Runs the existing repair through the single capture call, before that call returns.
-fn captured(restore: Restore, system: impl RepairSystem + 'static) -> Repaired {
+fn capture_repaired(restore: Restore, system: impl RepairSystem + 'static) -> Repaired {
     take_dropped();
     let result = super::super::tests::capture_restored(restore, Box::new(system)).unwrap();
     let Captured::Restored(repaired) = result else {
@@ -331,7 +331,7 @@ fn capture_returns_the_repaired_generation_resources_and_acknowledgement_after_t
         .with_processor_target(4)
         .with_memory_target(&[(512 * MIB, 128 * MIB)]);
     let started = Instant::now();
-    let repaired = captured(restore, FakeSystem::new(&calls));
+    let repaired = capture_repaired(restore, FakeSystem::new(&calls));
     let returned = Instant::now();
     assert_eq!(repaired.generation_id(), RESTORED);
     assert_eq!(repaired.cpus(), 4);
@@ -357,7 +357,7 @@ fn capture_returns_the_repaired_generation_resources_and_acknowledgement_after_t
 fn an_ungated_restore_is_finished_without_an_acknowledgement() {
     let calls = Calls::default();
     let restore = Restore::to(RESTORED).holding(seed());
-    let repaired = captured(restore, FakeSystem::new(&calls));
+    let repaired = capture_repaired(restore, FakeSystem::new(&calls));
     assert_eq!(repaired.acknowledged_at(), None);
     assert_eq!(
         calls.take().last(),
@@ -436,7 +436,7 @@ fn the_instant_of_the_acknowledgement_precedes_the_deferred_work_of_the_finish()
         reseeded: Arc::clone(&reseeded),
         acknowledged: Arc::clone(&acknowledged),
     };
-    let repaired = captured(restore(), system);
+    let repaired = capture_repaired(restore(), system);
     let returned = Instant::now();
     let reseeded = *reseeded.get().unwrap();
     let acknowledged = *acknowledged.get().unwrap();
@@ -465,7 +465,7 @@ fn the_instant_of_the_acknowledgement_precedes_the_deferred_work_of_the_finish()
 fn expands(captured: u64, ranges: &[(u64, u64)], added: &[u64], memory: u64) {
     let calls = Calls::default();
     let system = FakeSystem::new(&calls).capturing(captured);
-    let repaired = captured(restore().with_memory_target(ranges), system);
+    let repaired = capture_repaired(restore().with_memory_target(ranges), system);
     assert_eq!(repaired.memory(), memory, "{ranges:?}");
     let mut expected = vec![Call::OnlineCpus, Call::BlockSize];
     if !ranges.is_empty() {
