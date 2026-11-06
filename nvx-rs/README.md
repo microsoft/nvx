@@ -914,9 +914,12 @@ any point, and one of the activation before the start was sent.
 A VMM that exits before its restore-ready event, as OpenVMM does once it cannot
 restore the snapshot, after it closed the event's endpoint, which the sequence
 then gives ten seconds to exit, leaves the line with which OpenVMM reported its
-fatal error in its log, which the failure's message keeps, and whose time ABI
+fatal error in its log, which the failure's message keeps, and whose stable
 code, if it says that the host cannot present the template's CPU profile, TSC,
-or LAPIC timer, attributes the failure to the host.
+or LAPIC timer, or that OpenVMM cannot bind the port of a forward of the clone's
+network, `E_PORT_FORWARD_BIND`, attributes the failure to the host, as the text
+of the error that names such a forward does from an OpenVMM that predates that
+code. The message then keeps the cause of the error that names the forward.
 
 From the launch on, a failure ends the clone's VMM through its verified
 identity, and the sandbox keeps the clone's progress log, `clone-progress.log`,
