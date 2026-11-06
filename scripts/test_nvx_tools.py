@@ -7125,7 +7125,7 @@ class CiConfigurationTests(unittest.TestCase):
             triggers["merge_group"],
             {"types": ["checks_requested"], "branches": ["dev"]},
         )
-        self.assertEqual(triggers["push"]["branches"], ["dev"])
+        self.assertEqual(triggers["push"]["branches"], ["dev", "feature/nvx-refactor"])
 
         # The detector compares a merge group's head with the commit on which
         # the queue built it: dev, or the group of the pull request ahead.
@@ -7216,6 +7216,11 @@ class CiConfigurationTests(unittest.TestCase):
         returned = settings(merge_group(group, before), 102)
         repeated = settings(merge_group(group, tip), 103)
         push = settings({"event_name": "push", "ref": "refs/heads/dev"}, 104)
+        # A push to feature/nvx-refactor queues as dev's do, in a group of its
+        # own (doc/ci.md#feature-branch-pushes).
+        feature_push = settings(
+            {"event_name": "push", "ref": "refs/heads/feature/nvx-refactor"}, 106
+        )
         pull_request = settings(
             {
                 "event_name": "pull_request",
@@ -7226,9 +7231,22 @@ class CiConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(first, ("ci-CI-merge-group-101", False, "max"))
         self.assertEqual(push, ("ci-CI-refs/heads/dev", False, "max"))
+        self.assertEqual(
+            feature_push, ("ci-CI-refs/heads/feature/nvx-refactor", False, "max")
+        )
         self.assertEqual(pull_request, ("ci-CI-7", True, "single"))
         self.assertEqual(
-            len({first[0], returned[0], repeated[0], push[0], pull_request[0]}), 5
+            len(
+                {
+                    first[0],
+                    returned[0],
+                    repeated[0],
+                    push[0],
+                    feature_push[0],
+                    pull_request[0],
+                }
+            ),
+            6,
         )
 
     def test_ci_job_conditions_follow_the_required_result_policy(self):
@@ -7273,6 +7291,9 @@ class CiConfigurationTests(unittest.TestCase):
                 },
             ),
             ("push", True, {"ref": "refs/heads/dev", "event": {}}),
+            # A push to feature/nvx-refactor runs as a dev push does, but
+            # publishes and records nothing (doc/ci.md#feature-branch-pushes).
+            ("push", True, {"ref": "refs/heads/feature/nvx-refactor", "event": {}}),
             ("schedule", True, {"ref": "refs/heads/dev", "event": {}}),
             ("workflow_dispatch", True, {"ref": "refs/heads/dev", "event": {}}),
         )
@@ -7309,6 +7330,7 @@ class CiConfigurationTests(unittest.TestCase):
                     published = (
                         "success"
                         if event_name == "push"
+                        and github["ref"] == "refs/heads/dev"
                         and expected["platform-kvm"] == "success"
                         else "skipped"
                     )
@@ -8556,8 +8578,8 @@ class CiConfigurationTests(unittest.TestCase):
         )
         self.assertIn(
             "### Platform benchmarks and packages: run\nA push runs the platform "
-            "and package jobs for every change but documentation, so that it "
-            "publishes its development "
+            "and package jobs for every change but documentation, so that a "
+            "`dev` push publishes its development "
             "release and records its performance results.\n",
             push,
         )
