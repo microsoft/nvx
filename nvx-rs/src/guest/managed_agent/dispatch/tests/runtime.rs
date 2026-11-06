@@ -304,3 +304,105 @@ fn privileged_layered_runtime_delivers_a_fragment_collected_status_before_driver
         },
     );
 }
+
+#[test]
+#[ignore = "requires root with CAP_SYS_NICE and CAP_SYS_RESOURCE"]
+fn privileged_layered_runtime_keeps_helper_policy_and_first_error_during_failed_start() {
+    isolated(
+        "NVX_LAYERED_RUNTIME_FAILED_START_CHILD",
+        "guest::managed_agent::dispatch::tests::runtime::privileged_layered_runtime_keeps_helper_policy_and_first_error_during_failed_start",
+        || {
+            let temporary = tempfile::tempdir().unwrap();
+            let marker = temporary.path().join("failed-child");
+            let gate = temporary.path().join("gate");
+            crate::guest::sys::tests::create_fifo(
+                &sys::path_c_string(&gate).unwrap(),
+                sys::Mode::from_bits_retain(0o600),
+            )
+            .unwrap();
+            let payload = workload_payload(
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "read -r go < \"$1\"; exit 19",
+                    "_",
+                    gate.to_str().unwrap(),
+                    marker.to_str().unwrap(),
+                ],
+                Some("/"),
+            )
+            .unwrap();
+            let helper = helper();
+            let (descriptor, _peer, proof) = peer(|mut host, probe| {
+                drop(probe);
+                assert_eq!(read_outer(&mut host).0.record_type, OUTER_GUEST_ATTACH);
+                host.write_all(&encode_outer(OUTER_RESET, &INSTANCE, 1, 0, &[]).unwrap())
+                    .unwrap();
+                assert_eq!(read_outer(&mut host).0.record_type, OUTER_ACK);
+                host.write_all(
+                    &encode_outer(
+                        OUTER_DATA,
+                        &INSTANCE,
+                        1,
+                        1,
+                        &encode_app(APP_EXEC, 9, 0, &payload),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
+                until(|| marker.exists() && std::fs::metadata(&marker).unwrap().len() != 0);
+                let id = std::fs::read_to_string(&marker)
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                let failed = OwnedChild::new(ProcessId::from_positive(id).unwrap());
+                assert!(!sys::readable_or_hung_up(&[failed.descriptor.borrowed()], 0).unwrap()[0]);
+                sys::kill_through_pidfd(helper.descriptor.borrowed(), false).unwrap();
+                let mut traffic = Vec::new();
+                host.read_to_end(&mut traffic).unwrap();
+                assert!(
+                    traffic.is_empty(),
+                    "helper failure must end the control loop"
+                );
+                drop(failed);
+            });
+            let mut runtime =
+                Runtime::new(&[CString::new(helper.process.raw().to_string()).unwrap()]).unwrap();
+            let mut session = Session::with_runtime(descriptor, &mut runtime).unwrap();
+            let mut system = TestSystem::new(Paths::default());
+            system.direct_starter = Some(start_with_failed_pidfd_and_cleanup);
+            let config =
+                AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())
+                    .unwrap();
+            let mut mappings = HostMappings::announced_for(&config, 0);
+            assert_eq!(
+                run(&mut system, &mut session, &config, &mut mappings).err(),
+                Some(Errno::ECHILD)
+            );
+            let failure = session.runtime_failure().unwrap();
+            assert!(failure.contains("the time daemon"), "{failure}");
+            let diagnostics = String::from_utf8(system.diagnostics).unwrap();
+            assert!(diagnostics.starts_with(&format!(
+                "NVX-MANAGED-ERROR: stage=exec-launch status={}\n\
+                 NVX-MANAGED-ERROR: stage=exec-kill status={}\n",
+                Errno::EPERM as i32,
+                Errno::EPERM as i32
+            )));
+            assert!(!diagnostics.contains("stage=exec-wait"), "{diagnostics}");
+            drop(session);
+            drop(runtime);
+            completed(proof);
+            let id = std::fs::read_to_string(&marker)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                sys::wait(ProcessId::from_positive(id).unwrap()),
+                Some(ChildStatus::Signaled(Signal::SIGKILL as i32))
+            );
+        },
+    );
+}
