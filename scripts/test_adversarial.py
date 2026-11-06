@@ -867,8 +867,8 @@ class AdversarialOracleTests(unittest.TestCase):
                     "child=subprocess.Popen([sys.executable,'-c',"
                     "'import os,pathlib,sys,time; "
                     "path=pathlib.Path(sys.argv[1]); "
-                    "path.with_suffix(\".tmp\").write_text(str(os.getpid())); "
-                    "path.with_suffix(\".tmp\").replace(path); "
+                    'path.with_suffix(".tmp").write_text(str(os.getpid())); '
+                    'path.with_suffix(".tmp").replace(path); '
                     "time.sleep(60)',sys.argv[1]]); "
                     "print('ALPINE-MICROVM-BOOT-OK',flush=True); "
                     "pathlib.Path(sys.argv[2]).touch(); time.sleep(60)"
@@ -895,7 +895,8 @@ class AdversarialOracleTests(unittest.TestCase):
                     deadline = time.monotonic() + 5.0
                     while not ready_path.exists() or not child_pid_path.exists():
                         self.assertIsNone(
-                            interaction.process.poll(), "fixture exited before readiness"
+                            interaction.process.poll(),
+                            "fixture exited before readiness",
                         )
                         self.assertLess(
                             time.monotonic(), deadline, "fixture did not become ready"
@@ -911,7 +912,9 @@ class AdversarialOracleTests(unittest.TestCase):
                         interaction.close()
 
             with (
-                patch("nvx_tools.benchmark.InteractiveProcess", side_effect=start_ready),
+                patch(
+                    "nvx_tools.benchmark.InteractiveProcess", side_effect=start_ready
+                ),
                 self.assertRaisesRegex(
                     (TimeoutError, RuntimeError),
                     r"^guest workload did not finish within 0\.5s(?:\n|$)",
