@@ -1982,10 +1982,7 @@ start the workflow, and a manually dispatched run notifies the person who
 started it.
 The job checks out the default branch, never the run's code. Its token can
 read the repository, the run's jobs and logs, and their check annotations,
-and write issues. No other workflow can write issues, except the
-`safe_outputs` and `conclusion` jobs that gh-aw generates for the
-[NFV PR reviewer](../.github/workflows/nfv-pr-review.md), which comment on a
-pull request and report the reviewer's failures as issues; the
+and write issues, and no other workflow can write issues; the
 [Test changes](#test-changes) workflow labels and comments on pull requests
 with a token that writes pull requests instead. The job runs one
 report at a time; a newer reporter can replace one that waits for its turn,
@@ -2041,29 +2038,6 @@ owner triages a new report within a working day:
 
 To hand triage over or to rotate it, change the workflow's `--assignee`
 options, and reassign the open report.
-
-## Advisory NFV review
-
-The [NFV PR reviewer](../.github/workflows/nfv-pr-review.md) is advisory.
-Its jobs are not part of CI's `Required status check` and must not be added
-as required merge checks. Leave CI requirements and the merge queue unchanged.
-An NFV analysis or publication failure stays visible; do not force a successful
-status or suppress the error with `continue-on-error`.
-
-Both NFV workflows explicitly use their job-scoped Actions token for safe
-outputs. Their `safe-outputs.github-token: ${{ secrets.GITHUB_TOKEN }}` setting prevents
-a shared `GH_AW_GITHUB_TOKEN` secret from overriding comment-publication
-credentials. The inference and private-release tokens are not publication
-credentials; no additional PAT is needed for comments in this repository.
-The PR reviewer's generated `safe_outputs` and `conclusion` jobs retain
-their existing issue/PR write permissions; analysis remains read-only.
-
-For HTTP 401 **Bad credentials** in `Process Safe Outputs`, inspect its
-compiled token expression without printing token values. Recompile the
-Markdown sources with gh-aw v0.88.7 and commit the regenerated locks; do not
-hand-edit them or delete shared secrets used by other workflows.
-A successful agent job does not establish that a completed NFV report was
-published.
 
 ## Test changes
 
