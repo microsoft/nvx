@@ -1,7 +1,6 @@
 //! The compatibility key of a template, [`TemplateKey`], and the [`CaptureClass`] of the capture
 //! that makes one.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -18,11 +17,14 @@ use super::manifest::{
 use crate::activation;
 use crate::contract;
 use crate::error::{Error, Result};
+use crate::host::config::check_setting;
 use crate::host::platform::parse_hex32;
 use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::mount::MOUNT_TAG;
 use crate::host::store::{ArtifactIdentity, MAX_IDENTITY_LEN, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
+
+pub use crate::host::config::Invariants;
 
 /// The domain of a key's identity: the bytes that precede its canonical encoding in the digest.
 const KEY_DOMAIN: &[u8] = b"nvx template key\0";
@@ -236,70 +238,8 @@ identity!(
     "a capture class's identity"
 );
 
-/// The invariant settings of a template that its key holds beyond its machine, such as the
-/// isolation and resource settings of its guest, by name: what its adapter fixes for the
-/// template and every clone of it, and no restore changes.
-///
-/// A name is 1 to [`MAX_NAME_LEN`](Self::MAX_NAME_LEN) bytes of lowercase ASCII letters, digits,
-/// `.`, `-`, and `_`, which starts with a letter, and a value 0 to
-/// [`MAX_VALUE_LEN`](Self::MAX_VALUE_LEN) printable ASCII characters, spaces included. A template
-/// holds at most [`MAX_SETTINGS`](Self::MAX_SETTINGS) of them, in the order of their names.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct Invariants(BTreeMap<String, String>);
-
+/// The canonical encoding of a template's invariant settings, which its key holds.
 impl Invariants {
-    /// Most settings of a template.
-    pub const MAX_SETTINGS: usize = 64;
-    /// Longest name of a setting, in bytes.
-    pub const MAX_NAME_LEN: usize = 64;
-    /// Longest value of a setting, in bytes.
-    pub const MAX_VALUE_LEN: usize = 256;
-
-    /// Returns no settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns the settings with `name` set to `value`, which replaces any earlier value of
-    /// `name`.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a name or a value
-    /// of another form than the [type](Self) allows, and for a new setting beyond
-    /// [`MAX_SETTINGS`](Self::MAX_SETTINGS).
-    pub fn with(mut self, name: &str, value: &str) -> Result<Self> {
-        check_setting(name, value).map_err(|error| Error::unsupported(error.to_string()))?;
-        if !self.0.contains_key(name) && self.0.len() == Self::MAX_SETTINGS {
-            return Err(Error::unsupported(format!(
-                "a template holds at most {} invariant settings",
-                Self::MAX_SETTINGS
-            )));
-        }
-        self.0.insert(name.to_owned(), value.to_owned());
-        Ok(self)
-    }
-
-    /// Returns the value of the setting `name`, if the settings hold it.
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.0.get(name).map(String::as_str)
-    }
-
-    /// Returns the settings, in the order of their names.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.0
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-    }
-
-    /// Returns the number of settings.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Returns whether there are no settings.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// Writes the settings: a list of names and values.
     fn write(&self, writer: &mut Writer) {
         let settings: Vec<(&str, &str)> = self.iter().collect();
@@ -314,7 +254,7 @@ impl Invariants {
         let settings = reader.list(Self::MAX_SETTINGS, "the invariant settings", |reader| {
             let name = reader.text(Self::MAX_NAME_LEN, "the name of a setting")?;
             let value = reader.text(Self::MAX_VALUE_LEN, "the value of a setting")?;
-            check_setting(name, value)?;
+            check_setting(name, value).map_err(CanonicalError::new)?;
             Ok((name.to_owned(), value.to_owned()))
         })?;
         if settings.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
@@ -322,34 +262,13 @@ impl Invariants {
                 "the invariant settings are not in the strict order of their names",
             ));
         }
-        Ok(Self(settings.into_iter().collect()))
+        settings
+            .iter()
+            .try_fold(Self::new(), |settings, (name, value)| {
+                settings.with(name, value)
+            })
+            .map_err(|error| CanonicalError::new(error.message()))
     }
-}
-
-/// Explains why `name` and `value` are not an invariant setting, if they are not.
-fn check_setting(name: &str, value: &str) -> Result<(), CanonicalError> {
-    let name_valid = (1..=Invariants::MAX_NAME_LEN).contains(&name.len())
-        && name.starts_with(|first: char| first.is_ascii_lowercase())
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
-        });
-    if !name_valid {
-        return Err(CanonicalError::new(format!(
-            "invariant setting {name:?} must be named by 1 to {} lowercase ASCII letters, digits, \
-             '.', '-', or '_', starting with a letter",
-            Invariants::MAX_NAME_LEN
-        )));
-    }
-    if value.len() > Invariants::MAX_VALUE_LEN
-        || !value.bytes().all(|byte| (0x20..0x7f).contains(&byte))
-    {
-        return Err(CanonicalError::new(format!(
-            "the value of invariant setting {name:?} must hold at most {} printable ASCII \
-             characters",
-            Invariants::MAX_VALUE_LEN
-        )));
-    }
-    Ok(())
 }
 
 /// The CPU profile that a capture requests: OpenVMM's `--cpu-profile`.
