@@ -906,9 +906,8 @@ pub(super) const FORWARD_BIND_CODE: &str = "E_PORT_FORWARD_BIND";
 
 /// The text with which a cause of OpenVMM's fatal error names a forward of a clone's network whose
 /// port of host loopback OpenVMM cannot bind as it restores the clone's NIC: the forward's
-/// protocol, `Tcp` or `Udp`, its address, and its port follow, then `)`, as the excerpt of
-/// OpenVMM's source `tests/vectors/openvmm/port_forward_socket_creation.rs` spells the error.
-/// An OpenVMM that predates [`FORWARD_BIND_CODE`] gives the error no code.
+/// protocol, `Tcp` or `Udp`, its address, and its port follow, then `)`, as an OpenVMM that
+/// predates [`FORWARD_BIND_CODE`] spells the error, without a code.
 pub(super) const FORWARD_BIND_TEXT: &str = "failed to create socket for port forward (";
 
 /// Returns the code in brackets with which `text` starts, as OpenVMM leads an error, and the line
