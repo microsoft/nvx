@@ -468,6 +468,16 @@ the guest must have installed the IPv6 default route that the last token,
 `virtnet_gw6=`, names. OpenVMM must refuse a command line one byte longer
 before boot, with an error that names its length and the limit.
 
+The `cpu-bandwidth` scenario covers the guest kernel's
+[CPU controller](design/4.3-isolation-and-resource-model.md#433-cgroups-and-resources),
+through which a guest agent caps an execution's CPU time with its cgroup's
+`cpu.max` (#1193). The guest enables the controller in the root cgroup,
+limits a cgroup to a quarter of a CPU, 25 ms of every 100 ms period, and runs
+a busy loop in it for a second. The cgroup's `cpu.max` must hold the limit,
+its `cpu.stat` must show that the kernel throttled the loop, and the loop must
+have run for at most half of the wall time, twice the limit's share, which a
+loop without the limit exceeds.
+
 The `virtio-features` scenario covers the guest-visible virtio features of
 [Table 2.8](design/2.5-device-topology-transport-and-discovery.md). It boots a
 guest with every fixed virtio device: the NIC, the dormant host filesystem

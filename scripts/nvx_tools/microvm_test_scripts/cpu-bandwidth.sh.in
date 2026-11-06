@@ -1,0 +1,35 @@
+set -eu
+fail() {
+    echo "NVX-CPU-BANDWIDTH-FAIL $1"
+    nvx-exit 97
+    exit 97
+}
+cgroups=/sys/fs/cgroup
+grep -q " $cgroups cgroup2 " /proc/mounts ||
+    mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 "$cgroups"
+echo +cpu >"$cgroups/cgroup.subtree_control" ||
+    fail "the kernel has no CPU controller"
+limited=$cgroups/nvx-cpu-bandwidth
+mkdir "$limited"
+echo "@QUOTA_US@ @PERIOD_US@" >"$limited/cpu.max" ||
+    fail "cpu.max refused the limit"
+read -r start _ </proc/uptime
+# The loop moves itself into the limited cgroup, writing 0, before it spins.
+(
+    echo 0 >"$limited/cgroup.procs"
+    while :; do :; done
+) &
+loop=$!
+sleep 1
+read -r end _ </proc/uptime
+kill "$loop" || fail "the busy loop ended early"
+read -r quota period <"$limited/cpu.max"
+# /proc/uptime has two decimals, which a leading 1 keeps from reading as octal.
+wall=$(((${end%.*} - ${start%.*}) * 100 + 1${end#*.} - 1${start#*.}))
+report="quota_us=$quota period_us=$period wall_cs=$wall"
+while read -r key value; do
+    report="$report $key=$value"
+done <"$limited/cpu.stat"
+echo "NVX-CPU-BANDWIDTH $report"
+echo NVX-CPU-BANDWIDTH-OK
+nvx-exit 0

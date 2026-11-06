@@ -485,7 +485,7 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
             "task group unless a guest agent sets a limit."
         ),
         consumers=("nvx::guest::cgroup", "guest agents of runtime adapters"),
-        validation=("build-kernel's sandbox group",),
+        validation=("build-kernel's sandbox group", "the cpu-bandwidth scenario"),
         settings=(
             "CONFIG_CGROUP_SCHED=y",
             "CONFIG_FAIR_GROUP_SCHED=y",

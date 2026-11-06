@@ -27,6 +27,7 @@
         "command-line-limit": 1.5,
         "console-exit": 25.2,
         "console-snapshot": 49.1,
+        "cpu-bandwidth": 2.0,
         "cpu-profile-fallback": 1.5,
         "denied-filesystem-paths": 0.8,
         "directional-network-policy": 5.8,
@@ -74,10 +75,11 @@
       },
       "shards": [
         {
-          "seconds": 269.1,
+          "seconds": 271.1,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
+            "cpu-bandwidth",
             "directional-network-policy",
             "endpoint-policy-snapshot",
             "filesystem-comma-paths",
@@ -137,6 +139,7 @@
         "command-line-limit": 1.2,
         "console-exit": 27.2,
         "console-snapshot": 1.0,
+        "cpu-bandwidth": 2.0,
         "cpu-profile-fallback": 1.7,
         "denied-filesystem-paths": 0.6,
         "directional-network-policy": 5.7,
@@ -209,9 +212,10 @@
           ]
         },
         {
-          "seconds": 249.8,
+          "seconds": 251.8,
           "scenarios": [
             "console-exit",
+            "cpu-bandwidth",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
             "filesystem-comma-paths",
@@ -247,6 +251,7 @@
         "command-line-limit": 2.3,
         "console-exit": 87.5,
         "console-snapshot": 3.9,
+        "cpu-bandwidth": 2.0,
         "cpu-profile-fallback": 4.3,
         "denied-filesystem-paths": 1.3,
         "directional-network-policy": 7.0,
@@ -294,8 +299,9 @@
       },
       "shards": [
         {
-          "seconds": 356.1,
+          "seconds": 358.1,
           "scenarios": [
+            "cpu-bandwidth",
             "denied-filesystem-paths",
             "directional-network-policy",
             "endpoint-policy-snapshot",

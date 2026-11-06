@@ -100,6 +100,7 @@ MICROVM_TEST_SCENARIOS = (
     "command-line-limit",
     "console-exit",
     "console-snapshot",
+    "cpu-bandwidth",
     "cpu-profile-fallback",
     "directional-network-policy",
     "denied-filesystem-paths",
@@ -277,6 +278,13 @@ COMMAND_LINE_LIMIT_ERROR = (
     b"microVM kernel command line is 2048 bytes; "
     b"the limit is 2047 bytes plus the terminating NUL"
 )
+CPU_BANDWIDTH_COMPLETION_MARKER = b"NVX-CPU-BANDWIDTH-OK"
+# The cpu.max limit of the cpu-bandwidth scenario's busy loop, a quarter of a
+# CPU, and the prefix of the line on which its guest reports the limit that it
+# reads back, the wall time in centiseconds, and the cgroup's cpu.stat.
+CPU_BANDWIDTH_QUOTA_US = 25_000
+CPU_BANDWIDTH_PERIOD_US = 100_000
+CPU_BANDWIDTH_REPORT_PREFIX = b"NVX-CPU-BANDWIDTH "
 DIRECTIONAL_NETWORK_ALLOW_MARKER = b"NVX-DIRECTIONAL-NETWORK-ALLOW-OK"
 DIRECTIONAL_NETWORK_DENY_MARKER = b"NVX-DIRECTIONAL-NETWORK-DENY-OK"
 DIRECTIONAL_NETWORK_INGRESS_READY_MARKER = b"NVX-DIRECTIONAL-INGRESS-READY"
@@ -2146,6 +2154,65 @@ def run_command_line_limit(
         raise RuntimeError(
             "OpenVMM did not refuse a kernel command line one byte over the guest "
             "kernel's limit before boot"
+        )
+
+
+def run_cpu_bandwidth(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    log_path: Path,
+) -> None:
+    """Cap a busy loop at a quarter of a CPU with its cgroup's cpu.max (#1193).
+
+    The guest runs the loop for a second in a cgroup whose cpu.max allows
+    CPU_BANDWIDTH_QUOTA_US of every CPU_BANDWIDTH_PERIOD_US, and reports the
+    limit, the wall time, and the cgroup's cpu.stat to check_cpu_bandwidth.
+    """
+    result = run_guest_script(
+        workload_boot_command(
+            executable, backend, kernel, initrd, memory_mib, "quiet loglevel=0"
+        ),
+        _render_script(
+            "cpu-bandwidth.sh.in",
+            QUOTA_US=str(CPU_BANDWIDTH_QUOTA_US),
+            PERIOD_US=str(CPU_BANDWIDTH_PERIOD_US),
+        ),
+        CPU_BANDWIDTH_COMPLETION_MARKER,
+        timeout=timeout,
+        log_path=log_path,
+    )
+    check_cpu_bandwidth(result["output"])
+
+
+def check_cpu_bandwidth(output: str) -> None:
+    """Require the one report of the cpu-bandwidth guest's ``output`` to hold
+    the limit that it wrote, and its loop to have been throttled to at most
+    twice the limit's share of the wall time, which a loop without it exceeds.
+    """
+    report = _single_marker_value(
+        output.encode("utf-8"), CPU_BANDWIDTH_REPORT_PREFIX
+    ).decode("utf-8")
+    try:
+        fields = parse_fields(report)
+        limit = (int(fields["quota_us"]), int(fields["period_us"]))
+        wall_us = int(fields["wall_cs"]) * 10_000
+        usage_us = int(fields["usage_usec"])
+        throttled = int(fields["nr_throttled"])
+    except (KeyError, ValueError) as error:
+        raise RuntimeError(f"malformed CPU bandwidth report {report!r}") from error
+    if limit != (CPU_BANDWIDTH_QUOTA_US, CPU_BANDWIDTH_PERIOD_US):
+        raise RuntimeError(f"cpu.max holds {limit}, not the limit that the guest wrote")
+    if throttled < 1:
+        raise RuntimeError("the kernel never throttled the busy loop")
+    if usage_us * CPU_BANDWIDTH_PERIOD_US > 2 * wall_us * CPU_BANDWIDTH_QUOTA_US:
+        raise RuntimeError(
+            f"the busy loop ran for {usage_us} us in {wall_us} us, more than twice "
+            "its limit's share"
         )
 
 
@@ -11634,4 +11701,18 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+        )
+    if "cpu-bandwidth" in scenarios:
+        report.start(
+            "cpu-bandwidth",
+            f"Running the microVM CPU bandwidth limit on OpenVMM/{args.backend}",
+        )
+        run_cpu_bandwidth(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            log_path=output_dir / "cpu-bandwidth.log",
         )

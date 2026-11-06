@@ -8692,6 +8692,54 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[3], "mshv")
         self.assertEqual(run.call_args.kwargs["output_dir"], Path(temporary))
 
+    def test_cpu_bandwidth_requires_cpu_max_to_throttle_a_busy_loop(self):
+        self.assertIn("cpu-bandwidth", microvm_tests.MICROVM_TEST_SCENARIOS)
+        # A second at a quarter of a CPU: 25 ms of each 100 ms period, and the
+        # overruns of the 10 ms ticks.
+        report = (
+            "NVX-CPU-BANDWIDTH quota_us=25000 period_us=100000 wall_cs=101 "
+            "usage_usec=290000 user_usec=290000 system_usec=0 nr_periods=10 "
+            "nr_throttled=9 throttled_usec=690000 nr_bursts=0 burst_usec=0\r\n"
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests,
+                "run_guest_script",
+                return_value=_guest_script_result(f"{report}NVX-CPU-BANDWIDTH-OK\r\n"),
+            ) as run_guest_script,
+        ):
+            microvm_tests.run_cpu_bandwidth(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initrd"),
+                "kvm",
+                memory_mib=128,
+                timeout=60,
+                log_path=Path(temporary) / "cpu-bandwidth.log",
+            )
+        _, script, marker = run_guest_script.call_args.args
+        self.assertIn('echo "25000 100000" >"$limited/cpu.max"', script)
+        self.assertEqual(marker, microvm_tests.CPU_BANDWIDTH_COMPLETION_MARKER)
+
+        # Half a CPU, twice the limit's share, is the most that the loop may use.
+        microvm_tests.check_cpu_bandwidth(
+            report.replace("usage_usec=290000", "usage_usec=505000")
+        )
+        for (old, new), message in (
+            (("nr_throttled=9", "nr_throttled=0"), "never throttled"),
+            (("usage_usec=290000", "usage_usec=505001"), "more than twice"),
+            (("period_us=100000", "period_us=50000"), "not the limit"),
+            (("quota_us=25000", "quota_us=max"), "malformed"),
+            ((report, ""), "found 0"),
+            ((report, report * 2), "found 2"),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                microvm_tests.check_cpu_bandwidth(report.replace(old, new))
+
     def test_directional_network_commands_map_generic_default_actions(self):
         with patch.object(
             microvm_tests,
