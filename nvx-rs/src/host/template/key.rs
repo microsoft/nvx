@@ -208,8 +208,8 @@ identity!(
     ///
     /// Its text form, which `Display` writes and `FromStr` parses, is 64 lowercase hexadecimal
     /// digits; parsing also accepts uppercase ones. It converts to and from the
-    /// [`activation::Identity`] by which a clone's activation record names the key of its
-    /// template, in its [`TemplateReference`](activation::TemplateReference), without loss.
+    /// [`activation::Identity`] by which a clone's lease and durable records name the key of its
+    /// template, in their [`TemplateReference`](activation::TemplateReference), without loss.
     KeyIdentity,
     "a template key's identity"
 );
