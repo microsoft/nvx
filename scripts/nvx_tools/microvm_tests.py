@@ -461,7 +461,9 @@ PLATFORM_NETWORK_REJECTED = (
     ("readdressed", b"network addressing from saved state"),
     ("foreign-proxy", b"must match the guest gateway"),
 )
-PLATFORM_NETWORK_BUSY_FORWARD_REJECTION = b"failed to create socket for port forward"
+# OpenVMM leads its fatal error with the stable code of a forward whose host
+# port it cannot bind.
+PLATFORM_NETWORK_BUSY_FORWARD_REJECTION = b"fatal error: [E_PORT_FORWARD_BIND] "
 PLATFORM_NETWORK_NOT_TEMPLATE_REJECTION = b"is not a complete deny-all"
 # Lines that only a restored clone's guest prints, from its platform repair's
 # report to the restore's end, so that a refused restore prints none of them.

@@ -12966,7 +12966,10 @@ class MicrovmTests(unittest.TestCase):
     def test_platform_network_refusal_rejects_an_expected_error_after_guest_entry(
         self,
     ):
-        error = b"fatal error: " + microvm_tests.PLATFORM_NETWORK_BUSY_FORWARD_REJECTION
+        error = (
+            microvm_tests.PLATFORM_NETWORK_BUSY_FORWARD_REJECTION
+            + b"failed to launch vm worker"
+        )
 
         def refuse(output: bytes) -> None:
             process = MagicMock()
