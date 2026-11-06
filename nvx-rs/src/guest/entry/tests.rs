@@ -13,10 +13,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
+use crate::guest::mappings::{Access, Step};
 use crate::guest::root::tests::{Call, FakeKernel, Operation, attach_calls};
 use crate::guest::spawn::{Command, LaunchFailure, LaunchStage};
-use crate::guest::sys::ChildStatus;
 use crate::guest::sys::tests::Simulation;
+use crate::guest::sys::{ChildStatus, Errno};
 use crate::protocol::cmdline::write_resolver;
 
 impl Prepared {
