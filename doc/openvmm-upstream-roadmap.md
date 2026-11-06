@@ -6,19 +6,21 @@
   The `feature/microvm/release/v4.0` reorganization moved the chain there from
   `b2676222b383bf50c7022f6a5983920421469a47`; see [Upstream status](#upstream-status).
 - Mapped fork tip: `3cdf4fe3834cfb90b9ee685875493bc9bff1b7a4`, position 135. The graph, PR
-  summary, and commit mapping below cover positions 001-135 and the PR20 fixup at position 152.
-- NVX's pinned OpenVMM revision: `14dc4116ec7e57567633c4b7b07892aca3a58522`, position 216. Positions
-  215 and 216, which microsoft/openvmm#4921 proposes for `feature/microvm/dev`, are two commits on
-  position 214, `9cec2b892`, the head of `feature/microvm/dev`. microsoft/openvmm#4916 landed
-  position 214 there by fast-forward, as microsoft/openvmm#4894, microsoft/openvmm#4886, and
-  microsoft/openvmm#4887 landed positions 211-213 on position 210, `eda13d80a`, the head of the
-  `feature/microvm/release/v4.0` branch of microsoft/openvmm. The v4.0 reorganization moved the 205
+  summary, and commit mapping below cover positions 001-135, the PR20 fixup at position 152, PR06's
+  read fix at position 217, and the PR13 fixups at positions 218 and 219.
+- NVX's pinned OpenVMM revision: `6fb64731f03314a3c5ee634d3c85d6782a5babe0`, position 219. Positions
+  217-219, which microsoft/openvmm#4952 proposes for `feature/microvm/dev`, are three commits on
+  position 216, `14dc4116e`, the head of `feature/microvm/dev`. microsoft/openvmm#4921 landed
+  positions 215 and 216 there by fast-forward, as microsoft/openvmm#4916 landed position 214, and
+  microsoft/openvmm#4894, microsoft/openvmm#4886, and microsoft/openvmm#4887 landed positions
+  211-213 on position 210, `eda13d80a`, the head of the `feature/microvm/release/v4.0` branch of
+  microsoft/openvmm. The v4.0 reorganization moved the 205
   commits of `feature/microvm/release/v3.0` and the NVX pin before it, `35e76265f`, onto
   `c6d3da0ff`. It dropped the eight commits whose changes upstream had landed or superseded, retired
   the fallible device start that microsoft/nvx#1232 replaces with awaited device restoration, folded
   that restoration into the commits that it changes, and added 14 commits that give each ABI that
   the chain introduces a single version; see [The v4.0 reorganization](#the-v40-reorganization). The
-  pin is 81 commits past the mapped tip on the same first-parent chain. Positions 136-216, except
+  pin is 84 commits past the mapped tip on the same first-parent chain. Positions 136-216, except
   the PR20 fixup at position 152, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ca6b2b177da5e33ae1bcac72986b31d6b039811c` (2026-11-02), one commit past the
@@ -196,6 +198,30 @@ instead of panicking when a unit's task has ended, so a rebase onto it adapts th
 callers of `StateUnits::stop`, in the microVM worker's `dispatch/microvm.rs` and
 `dispatch/restore.rs`.
 
+On 2026-11-05, microsoft/openvmm#4605 merged as `48e0681e9`, narrowed in review to the read path: a
+read error is traced, drops the socket, and is reported as EOF, while writes keep upstream's
+handling, which reports a broken pipe as a successful write and keeps the socket. Review settled
+disconnect detection in virtio-console instead, with microsoft/openvmm#4778, which every fork base
+since v2.4 includes. Position 015, which carried the pull request's first revision and drops the
+socket and returns the error on any failed write, therefore has no upstream pull request. The chain
+keeps it for output rather than disconnects: a virtio-console with the `Retain` policy of PR13's
+position 046 and the portb console of PR15's position 064 keep the guest output written after their
+peer leaves only when that write fails, and on Linux a write to an AF_UNIX peer that has closed
+fails with `EPIPE`, which upstream's backend reports as successful. Position 015 moves to PR13,
+ahead of position 046, so that it goes upstream with the policy that needs it.
+microsoft/openvmm#4952 proposes positions 217-219 for `feature/microvm/dev`: position 217
+cherry-picks `48e0681e9` for PR06, position 218 explains and tests the write handling of position
+015, and position 219 tests that a `Retain` console keeps that output for the next peer. When the
+chain moves onto an upstream main that has `48e0681e9`, drop position 217 and keep position 015:
+dropping 015 as microsoft/openvmm#4605's commit would make `Retain` consoles and portb lose that
+output on Linux.
+
+Position 016's microsoft/openvmm#4609 has the same split: it drops a Windows named pipe on a failed
+write, flush, or close, while upstream's named-pipe backend reports a broken pipe on a write as
+successful, and a `Retain` console on a named pipe needs that write handling for the same reason.
+Position 016 stays whole in PR06. If the review of microsoft/openvmm#4609 narrows it as that of
+microsoft/openvmm#4605 did, its write handling joins position 015 in PR13.
+
 | Roadmap PR | Positions | Upstream pull requests, in position order |
 | --- | ---: | --- |
 | PR01 | 002-005 | microsoft/openvmm#4595, microsoft/openvmm#4618, microsoft/openvmm#4598, microsoft/openvmm#4615 |
@@ -203,7 +229,7 @@ callers of `StateUnits::stop`, in the microVM worker's `dispatch/microvm.rs` and
 | PR03 | 008-009 | microsoft/openvmm#4589, microsoft/openvmm#4591 |
 | PR04 | 010 | microsoft/openvmm#4604 |
 | PR05 | 011-013 | microsoft/openvmm#4536, microsoft/openvmm#4607, microsoft/openvmm#4613 |
-| PR06 | 014-016 | microsoft/openvmm#4597, microsoft/openvmm#4605, microsoft/openvmm#4609 |
+| PR06 | 014, 016 | microsoft/openvmm#4597, microsoft/openvmm#4609 |
 | PR07 | 017 | microsoft/openvmm#4600 |
 | PR09 | 018, 020, 022 | microsoft/openvmm#4872, microsoft/openvmm#4624, microsoft/openvmm#4626 |
 | PR14 | 055-058 | microsoft/openvmm#4554 (055-057), microsoft/openvmm#4611 |
@@ -214,7 +240,8 @@ and microsoft/openvmm#4626 builds on microsoft/openvmm#4872.
 Most of these pull requests have gained review commits that the fork chain does not carry. When
 one merges, the next rebase should drop its fork commit, as the `microvm/v2.2`,
 `feature/microvm/release/v2.3`, and `feature/microvm/release/v2.4` rebases and the v3.0 and v4.0
-reorganizations dropped the 28 above, and adapt later commits to the merged form.
+reorganizations dropped the 28 above, and adapt later commits to the merged form. For
+microsoft/openvmm#4605, which has merged, that commit is position 217, not position 015.
 
 The v3.0 reorganization folded fixups into positions 007, 012, 013, 021, and 058, and the v4.0
 reorganization changed positions 018, 021, and 022, whose pull requests lack those changes; see
@@ -531,7 +558,7 @@ flowchart TB
         P03["PR03<br/>PAL on Unix<br/>U - 2 commits, 2 in review"]
         P04["PR04<br/>PAL/PAL async on Windows<br/>U - 1 commit, 1 in review"]
         P05["PR05<br/>Hypervisor fixes<br/>U - 3 commits, 3 in review"]
-        P06["PR06<br/>Device hardening<br/>U - 3 commits, 3 in review"]
+        P06["PR06<br/>Device hardening<br/>U - 3 commits, 2 in review, 1 landed"]
         P07["PR07<br/>Consomme resource bounding<br/>U - 1 commit, 1 in review"]
         P14["PR14<br/>Direct-boot loader<br/>U - 4 commits, 4 in review"]
     end
@@ -542,7 +569,7 @@ flowchart TB
         P10["PR10<br/>CPU/clock state<br/>U - 11 commits"]
         P11["PR11<br/>Snapshot publication<br/>U - 4 commits"]
         P12["PR12<br/>Private-CoW restore<br/>U - 5 commits"]
-        P13["PR13<br/>Virtio persistence<br/>U - 11 commits"]
+        P13["PR13<br/>Virtio persistence<br/>U - 12 commits + 2 fixups"]
     end
 
     subgraph Product["Ordered microVM product stack"]
@@ -634,7 +661,8 @@ The physical branch is one first-parent chain:
 ```text
 c6d3da0ff
   -> PR01 [001-005] -> PR02 [006-007] -> PR03 [008-009]
-  -> PR04 [010] -> PR05 [011-013] -> PR06 [014-016]
+  -> PR04 [010] -> PR05 [011-013] -> PR06 [014]
+  -> PR13 [015] -> PR06 [016]
   -> PR07 [017] -> PR09 [018-023]
   -> PR10 [024-034] -> PR11 [035-038] -> PR12 [039-043]
   -> PR13 [044-054] -> PR14 [055-058] -> PR15 [059-069]
@@ -658,7 +686,8 @@ c6d3da0ff
   -> IOAPIC interrupt lines [195-196] -> ABI restart [197-210]
   -> boot console exit drain [211] -> portb without host input [212-213]
   -> long Windows paths [214] -> snapshot quiesce without a deadline [215-216]
-  -> 14dc4116e (NVX pin)
+  -> PR06 read fix [217] -> PR13 fixups [218-219]
+  -> 6fb64731f (NVX pin)
 ```
 
 For upstream review, PR01-PR07 and PR14 can be rebased independently onto current upstream main,
@@ -670,16 +699,20 @@ PR07 and PR13; PR23's protocol and broker commits can be prepared after PR03, PR
 fork tail, positions 131-133, remains outside the upstream queue. PR27 can be prepared once PR22
 lands; its generic confinement commit can be submitted independently if preferred. Fold position
 152 into PR20's position 101 before submission, re-expressed for 101's tier check;
-see [The v3.0 reorganization](#the-v30-reorganization).
+see [The v3.0 reorganization](#the-v30-reorganization). Move position 015 into PR13 ahead of
+position 046, fold position 218 into it and position 219 into PR13's position 047, and drop
+position 217, PR06's copy of microsoft/openvmm#4605, once the chain moves onto an upstream main
+that has `48e0681e9`; see [Open upstream pull requests](#open-upstream-pull-requests).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 135 without merges. Of the 81 later commits, position
-152 is a PR20 fixup, and the others are not yet classified or assigned to PRs. Each of positions
+The NVX pin extends the chain past position 135 without merges. Of the 84 later commits, position
+152 is a PR20 fixup, position 217 is PR06's copy of a change that upstream has landed, positions 218
+and 219 are PR13 fixups, and the others are not yet classified or assigned to PRs. Each of positions
 136-191 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 192-196
 followed the v3.0 reorganization, positions 197-210 are the ABI restart of the v4.0
-reorganization, and positions 211-216 followed it, so they combine none.
+reorganization, and positions 211-219 followed it, so they combine none.
 
 | Position | Commit | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | --- | --- |
@@ -764,6 +797,9 @@ reorganization, and positions 211-216 followed it, so they combine none.
 | 214 | `9cec2b892` | - | - | pal: support long paths in secure file and directory creation (microsoft/openvmm#4916) |
 | 215 | `1108c05c7` | - | - | state_unit: log the units that a state change waits for (microsoft/openvmm#4921) |
 | 216 | `14dc4116e` | - | - | microVM: quiesce snapshots without a deadline (microsoft/openvmm#4921) |
+| 217 | `62b427a38` | - | - | serial_socket: report read errors as EOF and drop the connection (microsoft/openvmm#4952; PR06's microsoft/openvmm#4605, merged as `48e0681e9`) |
+| 218 | `3f5224fd2` | - | - | serial_socket: document and test why a failed write drops the connection (microsoft/openvmm#4952; fold into 015) |
+| 219 | `6fb64731f` | - | - | virtio_console: test that Retain keeps output for the next peer (microsoft/openvmm#4952; fold into 047) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -875,6 +911,19 @@ upstream main conflicts only where its test module joins those of positions 018,
 and management RPC, and their Guide pages: replaying it on upstream main conflicts in all 24 of
 its files, 18 of which upstream main lacks, so it follows those PRs upstream.
 
+Positions 217-219 change only `serial_socket`'s socket backend and its tests, and virtio-console's
+direct-mode tests and their harness. Position 217 moves the Linux-only peer-identity test that
+PR23's position 114 adds into upstream's unconditional test module, and position 218 explains and
+tests the write path that PR13's position 015 changes. Position 219 extends the direct-mode tests
+and the mock controls that PR13's position 047 adds, where PR23's position 117 added a `Default`
+implementation and the write interception that position 219 extends, so its fold into 047 is
+re-expressed for the harness there. Replaying the three on upstream main, `ca6b2b177`, conflicts in
+all three of their files: in `net.rs`, whose write path and test module positions 015 and 114
+change, and in the two test files, which upstream main lacks. They follow PR06 and PR13 upstream:
+upstream main has since merged position 217's change as `48e0681e9`, and positions 218 and 219
+fold into PR13. Position 218's test runs on Linux only, since on Windows the first write after an
+AF_UNIX peer closes is accepted and the next fails with `ConnectionReset`.
+
 ## PR summary
 
 Each count is of v4.0 commits, which include the fixups that the v3.0 reorganization folded into
@@ -888,14 +937,14 @@ them; see [The v3.0 reorganization](#the-v30-reorganization) and
 | PR03 | U | Host primitives: PAL on Unix | 008-009 | `9ed441599..9a57be0d3` | 2 | Current upstream |
 | PR04 | U | Host primitives: PAL and PAL async on Windows | 010 | `2d2cbd726` | 1 | Current upstream |
 | PR05 | U | Hypervisor backend fixes | 011-013 | `4bf383cab..61fac3a9b` | 3 | Current upstream |
-| PR06 | U | Device fixes and hardening | 014-016 | `d58f66764..04c5b9465` | 3 | Current upstream |
+| PR06 | U | Device fixes and hardening | 014, 016; 217 (landed upstream) | `d58f66764`, `04c5b9465`; `62b427a38` | 3 | Current upstream |
 | PR07 | U | Consomme resource bounding | 017 | `ea1153ef4` | 1 | Current upstream |
 | PR08 | U | Preparatory refactors | - | all landed upstream | 0 | Current upstream |
 | PR09 | U | Fallible and bounded VM lifecycle | 018-023 | `a1a72fa96..0692a461c` | 6 | Current upstream |
 | PR10 | U | Portable CPU and clock state | 024-034 | `a6bd7a70f..3df7239c6` | 11 | PR09 |
 | PR11 | U | Snapshot publication protocol | 035-038 | `b6c992de2..c048f33cb` | 4 | PR10 |
 | PR12 | U | Immutable private-CoW restore | 039-043 | `dd194c17f..5c169565a` | 5 | PR10 |
-| PR13 | U | Generic virtio persistence | 044-054 | `81f9f26f6..c10e1b7c2` | 11 | PR11 + PR12 |
+| PR13 | U | Generic virtio persistence | 015, 044-054; 218-219 (fixups) | `92d6de98f`, `81f9f26f6..c10e1b7c2`; `3f5224fd2..6fb64731f` | 14 | PR11 + PR12 |
 | PR14 | U | Firmware-less direct boot, loader half | 055-058 | `899b3be68..0955b38c4` | 4 | Current upstream |
 | PR15 | P | microVM machine profile and minimal chipset | 059-069 | `ae83f20db..7a933d281` | 11 | Foundation fan-in |
 | PR16 | P | Fixed virtio-MMIO ABI and shared interrupt status | 070-073 | `73c12f980..91e5ab7de` | 4 | PR15 |
@@ -1008,8 +1057,10 @@ Landed upstream and dropped from the chain:
 <summary><strong>PR06 - Device fixes and hardening (U)</strong> - 3 commits + 7 landed upstream</summary>
 
 - 014 `d58f66764` - virtiofs: bound guest payload allocations and rate-limit diagnostics (v3.0 018, v2.4 019; **open upstream**: microsoft/openvmm#4597)
-- 015 `92d6de98f` - serial_socket: drop the connection on any write failure (v3.0 019, v2.4 020; **open upstream**: microsoft/openvmm#4605)
-- 016 `04c5b9465` - serial_socket: keep Windows named-pipe listeners reconnectable (v3.0 020, v2.4 021; **open upstream**: microsoft/openvmm#4609, stacked on microsoft/openvmm#4582 and microsoft/openvmm#4585)
+- 016 `04c5b9465` - serial_socket: keep Windows named-pipe listeners reconnectable (v3.0 020, v2.4 021; **open upstream**: microsoft/openvmm#4609, stacked on microsoft/openvmm#4582 and microsoft/openvmm#4585; a `Retain` console on a named pipe needs its write handling, which joins position 015 in PR13 if review narrows microsoft/openvmm#4609 as it narrowed microsoft/openvmm#4605)
+- 217 `62b427a38` - serial_socket: report read errors as EOF and drop the connection (**landed upstream**: microsoft/openvmm#4605, merged as `48e0681e9`, which position 217 cherry-picks with position 114's peer-identity test joined to its test module; the next rebase drops position 217 and keeps position 015)
+
+Position 015, which carried the first revision of microsoft/openvmm#4605, moved to PR13.
 
 Landed upstream and dropped from the chain:
 
@@ -1122,8 +1173,9 @@ Retired by the v4.0 reorganization:
 </details>
 
 <details>
-<summary><strong>PR13 - Generic virtio persistence (U)</strong> - 11 commits</summary>
+<summary><strong>PR13 - Generic virtio persistence (U)</strong> - 14 commits</summary>
 
+- 015 `92d6de98f` - serial_socket: drop the connection on any write failure (v3.0 019, v2.4 020; moved from PR06, where it carried the first revision of microsoft/openvmm#4605, which merged narrowed to the read path as `48e0681e9`; kept for the guest output that position 046's `Retain` policy and PR15's portb console keep for the next peer, so it goes upstream with this PR and moves ahead of position 046 at the next reorganization)
 - 044 `81f9f26f6` - virtio: add device-private saved state and restore it while the device is stopped (v3.0 053, v2.4 053; folds v2.4 372; rewritten by the v4.0 reorganization to restore device-private state into the stopped device, for microsoft/nvx#1232)
 - 045 `b11f00541` - virtio: forward input quiesce and resume through transports (v3.0 054, v2.4 054)
 - 046 `c72a9d0d6` - virtio_console: add attachment identities and reconnect and disconnect policies (v3.0 055, v2.4 055; folds v2.4 380 (part))
@@ -1135,6 +1187,8 @@ Retired by the v4.0 reorganization:
 - 052 `3f7c036d2` - virtio_net: persist drained queue state for static-identity NICs (v3.0 061, v2.4 061)
 - 053 `aa7426dcb` - fuse: save and restore negotiated session state (v3.0 062, v2.4 062)
 - 054 `c10e1b7c2` - virtiofs: track inode aliases through link, rename, and unlink (v3.0 063, v2.4 063)
+- 218 `3f5224fd2` - serial_socket: document and test why a failed write drops the connection (**fold into 015**, whose message then gives the output-retention reason instead of disconnect detection)
+- 219 `6fb64731f` - virtio_console: test that Retain keeps output for the next peer (**fold into 047**, re-expressed for its harness)
 
 </details>
 
