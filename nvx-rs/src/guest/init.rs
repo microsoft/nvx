@@ -37,10 +37,13 @@
 
 use std::ffi::{CStr, CString};
 use std::io::{self, Read};
+use std::net::Ipv4Addr;
 use std::os::fd::BorrowedFd;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitCode, ExitStatus as ProcessStatus};
 use std::time::{Duration, Instant};
+
+use crate::activation::Publication;
 
 use super::parse::parse_decimal;
 use super::status::ExitStatus;
@@ -833,6 +836,54 @@ impl Runtime {
             helpers,
             terminating: false,
         })
+    }
+
+    /// Starts ingress from the applied root's publication and gateway, before its root switch.
+    /// The fork keeps the initramfs root and PID 1's priority; the sole collector owns its exit.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SL7.7b starts the restored announcer before the root switch"
+        )
+    )]
+    pub(crate) fn restore_announcer(
+        &mut self,
+        publication: Publication,
+        gateway: Option<Ipv4Addr>,
+    ) -> crate::Result<()> {
+        if publication == Publication::Unpublished {
+            return Ok(());
+        }
+        if self.helpers.announcer.is_some() {
+            return Err(crate::Error::unsupported(
+                "an announcer is already registered",
+            ));
+        }
+        let gateway = gateway
+            .ok_or_else(|| crate::Error::unsupported("published listeners require a gateway"))?;
+        let program = super::ingress::PROGRAM.to_owned();
+        #[cfg(test)]
+        let program = tests::restore::announcer_program(program);
+        let arguments = [
+            c"nvx-ingress".to_owned(),
+            CString::new(gateway.to_string()).expect("an IPv4 address has no NUL"),
+        ];
+        match sys::fork().map_err(|error| {
+            crate::Error::io("cannot fork the restored announcer")
+                .with_source(io::Error::from(error))
+        })? {
+            sys::ForkResult::Parent(process) => self.helpers.announcer = Some(process),
+            sys::ForkResult::Child => {
+                let error = sys::exec(&program, &arguments, None);
+                write_console(
+                    kernel::CONSOLE_DEVICE,
+                    format!("NVX-INIT-ERROR: cannot exec /sbin/nvx-ingress: {error}\n").as_bytes(),
+                );
+                sys::exit_immediately(FAILURE);
+            }
+        }
+        Ok(())
     }
 
     /// Poll alongside control input so a blocked peer cannot hide a helper's end.

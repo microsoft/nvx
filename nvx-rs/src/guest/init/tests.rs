@@ -8,6 +8,7 @@
 //! check stops a VM: each records the status with which PID 1 would.
 
 mod exec;
+pub(super) mod restore;
 pub(super) use exec::prepare_child;
 
 use std::collections::VecDeque;
