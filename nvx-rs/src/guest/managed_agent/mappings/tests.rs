@@ -133,6 +133,20 @@ fn a_table_without_mappings_has_nothing_to_tear_down() {
     assert!(system.kernel.calls().is_empty());
 }
 
+#[test]
+fn a_layered_table_that_announces_mappings_needs_its_retained_export() {
+    let (_temporary, mut system, _mappings, rootfs) = sandbox(1);
+    let mapper = Mapper::new(
+        TargetRoot::open_with(&mut system.kernel, &rootfs).unwrap(),
+        Reserved::container_root(),
+    );
+    assert_eq!(
+        HostMappings::layered(MappingTable::new(1).unwrap(), mapper, None).err(),
+        Some(Errno::ENOENT)
+    );
+    assert!(system.kernel.calls().is_empty());
+}
+
 fn payload(first: u32, entries: &[(&[u8], &[u8], u16)], count: Option<u32>) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&first.to_le_bytes());
