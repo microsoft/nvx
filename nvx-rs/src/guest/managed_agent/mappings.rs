@@ -38,6 +38,8 @@ enum TableRoot {
     Direct,
     /// The sandbox agent's `ROOTFS`, the container's assembled root.
     Sandbox(PathBuf),
+    /// A layered root's retained mapper and export, never reopened by path.
+    Layered,
 }
 
 /// The mapper of the host mapping table beneath the table's root, and the root of the host's
@@ -50,6 +52,19 @@ struct TableMapper {
 }
 
 impl HostMappings {
+    /// Adopts a layered root's table and prepared mapping handles without resetting either.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "SL7.7c hands over the layered root")
+    )]
+    pub(crate) fn layered(table: MappingTable, mapper: Mapper, export: SourceRoot) -> Self {
+        Self {
+            table,
+            root: TableRoot::Layered,
+            mapper: Some(TableMapper { mapper, export }),
+        }
+    }
+
     /// Returns the state of the table of the agent that `config` configures, before
     /// [`prepare`] reads its announcement: the direct agent maps beneath `/`, and the sandbox
     /// agent beneath `ROOTFS`.
@@ -172,6 +187,7 @@ fn open_table(system: &mut impl System, root: &TableRoot) -> Result<TableMapper,
             TargetRoot::open_with(system.kernel(), rootfs).map_err(errno)?,
             Reserved::container_root(),
         ),
+        TableRoot::Layered => return Err(Errno::EINVAL),
     };
     let export = SourceRoot::open(&system.paths().hostfs_dir.join("root")).map_err(errno)?;
     Ok(TableMapper {

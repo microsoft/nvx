@@ -7,6 +7,8 @@
     "nvx-rs/src/guest/exec.rs": 4,
     "nvx-rs/src/guest/init.rs": 8,
     "nvx-rs/src/guest/init/boot.rs": 1,
+    "nvx-rs/src/guest/managed_agent/mappings.rs": 1,
+    "nvx-rs/src/guest/managed_agent/mod.rs": 1,
     "nvx-rs/src/guest/reseed.rs": 1,
     "nvx-rs/src/guest/sys/entry.rs": 3,
     "nvx-rs/src/guest/sys/process.rs": 1,

@@ -67,13 +67,17 @@ impl Harness {
 
     /// Starts a direct agent, or a sandbox agent whose assembled root is `rootfs`, which
     /// attaches and waits for the broker's first RESET.
-    fn spawn_at(rootfs: Option<&Path>, mut system: TestSystem, expected_mappings: u32) -> Self {
+    fn spawn_at(rootfs: Option<&Path>, system: TestSystem, expected_mappings: u32) -> Self {
+        let config = AgentConfig::for_test(rootfs);
+        let mappings = HostMappings::announced_for(&config, expected_mappings);
+        Self::spawn_with(system, config, mappings)
+    }
+
+    fn spawn_with(mut system: TestSystem, config: AgentConfig, mut mappings: HostMappings) -> Self {
         let (host, guest) = UnixStream::pair().unwrap();
         let descriptor = FileDescriptor::from_owned(guest.into());
-        let config = AgentConfig::for_test(rootfs);
         let thread = thread::spawn(move || {
             let mut session = Session::new(descriptor);
-            let mut mappings = HostMappings::announced_for(&config, expected_mappings);
             let outcome = run(&mut system, &mut session, &config, &mut mappings);
             (outcome, system)
         });
@@ -471,6 +475,93 @@ fn sandbox_root() -> (tempfile::TempDir, TestSystem, std::path::PathBuf) {
     std::fs::create_dir(&rootfs).unwrap();
     system.kernel.add_mount(&rootfs);
     (temporary, system, rootfs)
+}
+
+#[test]
+fn prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_LAYERED_DISPATCH_CHILD",
+        "guest::managed_agent::dispatch::tests::prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher",
+    ) {
+        return Ok(());
+    }
+    use crate::guest::mappings::{Mapper, MappingTable, Reserved, SourceRoot, TargetRoot};
+
+    let (_temporary, mut system, rootfs) = sandbox_root();
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
+    let export = system.paths.hostfs_dir.join("root").canonicalize()?;
+    let source = SourceRoot::open(&export)?;
+    let target = TargetRoot::open_with(&mut system.kernel, &rootfs)?;
+    let mut mapper = Mapper::new(target, Reserved::container_root());
+    let mut table = MappingTable::new(2).unwrap();
+    table
+        .apply(
+            &maps_payload(
+                0,
+                &[(b"0/src", b"/workspace", protocol::MAP_READ_ONLY)],
+                None,
+            ),
+            |batch| {
+                mapper
+                    .apply_with(&mut system.kernel, &source, batch)
+                    .map_err(|failure| (failure.entry(), failure.error().raw_os_error()))
+            },
+        )
+        .unwrap();
+    let mappings = HostMappings::layered(table, mapper, source);
+    system.paths.hostfs_dir = rootfs.join("not-the-retained-export");
+    let config = AgentConfig::layered(
+        b"nvx_identity=1000:1000",
+        c"workload".to_owned(),
+        c"/home/workload".to_owned(),
+    )?;
+    let mut harness = Harness::spawn_with(system, config, mappings);
+    harness.reset(1, 7);
+    assert_eq!(harness.request(APP_PING, &[]).kind, APP_READY);
+    assert_eq!(
+        harness.request(APP_EXEC, &exec_payload(None)),
+        response(APP_ERROR, 42, Errno::EAGAIN as i32, b"mappings-incomplete")
+    );
+    harness.reset(2, 0);
+    assert_eq!(
+        harness.request(APP_MAPS, &maps_payload(0, &[(b"1", b"/out", 0)], None)),
+        response(APP_ERROR, 42, Errno::EINVAL as i32, b"invalid-request")
+    );
+    assert_eq!(
+        harness
+            .request(APP_MAPS, &maps_payload(1, &[(b"1", b"/out", 0)], None))
+            .kind,
+        APP_READY
+    );
+    assert_eq!(
+        stdout_from(
+            harness.request_all(
+                9,
+                APP_EXEC,
+                &workload_payload(&["/bin/sh", "-c", "printf layered; exit 7"], Some("/"))?,
+            ),
+            9,
+            7
+        ),
+        b"layered"
+    );
+    let system = harness.stop();
+    let expected: Vec<_> = [
+        (
+            export.join("0/src"),
+            rootfs.join("workspace"),
+            Access::ReadOnly,
+        ),
+        (export.join("1"), rootfs.join("out"), Access::ReadWrite),
+    ]
+    .into_iter()
+    .flat_map(|(from, to, access)| attach_calls(&from, &to, access))
+    .collect();
+    assert_eq!(system.kernel.calls(), expected);
+    assert_eq!(system.spawn_calls, 1);
+    assert_eq!(system.entries_prepared, 0);
+    assert_eq!(system.runtime_binds, 0);
+    Ok(())
 }
 
 #[test]
