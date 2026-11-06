@@ -359,8 +359,8 @@ def describe_ci_changes(
         benchmarks_reason = (
             "A push runs the platform and package jobs for every change but "
             "documentation, "
-            "so that it publishes its development release and records its "
-            "performance results."
+            "so that a `dev` push publishes its development release and records "
+            "its performance results."
         )
     else:
         benchmarks_reason = inputs_reason(changes.run_benchmarks, BENCHMARK_INPUT_PATHS)
