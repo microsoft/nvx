@@ -283,6 +283,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::GenerationId;
 use super::root::{self, Device, Paths};
@@ -392,11 +393,7 @@ impl<F: AdmissionFence> CapturePreparation<F> {
     /// the permission for the time ABI's ports fails with [`TimeError::PortRelease`] instead,
     /// after which the thread must start neither a thread nor a process, which would inherit it.
     pub fn prepare(self) -> Result<CaptureBarrier<F>, CaptureError> {
-        let system = LiveSystem {
-            paths: Paths::default(),
-            abi: live_abi(),
-        };
-        self.prepare_with(Box::new(system))
+        self.prepare_with(capture_system(None))
     }
 
     /// Implements [`prepare`](Self::prepare) on `system`.
@@ -438,22 +435,12 @@ impl<F> fmt::Debug for CapturePreparation<F> {
 /// Checks, in the mount table that `system` reads, that nothing is mounted from `devices` or an
 /// overlay, and fails with the first mount that is, or with why the table could not be checked.
 fn check_mounts(system: &mut dyn System, devices: &Devices) -> Result<(), CaptureCause> {
-    let table = system.mount_table().map_err(CaptureCause::Io)?;
-    if table.len() > MOUNT_TABLE_LIMIT {
-        return Err(CaptureCause::Io(io::Error::new(
-            io::ErrorKind::FileTooLarge,
-            format!("the mount table is longer than {MOUNT_TABLE_LIMIT} bytes"),
-        )));
-    }
     let devices = mounts::Devices {
         distro: devices.distro.mmio,
         scratch: devices.scratch.mmio,
         filesystem_tag: devices.filesystem_tag.clone(),
     };
-    match mounts::first_blocking(system, &devices, &table).map_err(CaptureCause::Io)? {
-        Some(mounted) => Err(CaptureCause::Mounted(mounted)),
-        None => Ok(()),
-    }
+    mounts::check_mounts(system, &devices, None)
 }
 
 /// The barrier of a prepared capture, which holds the caller's fence closed and the stall
@@ -782,6 +769,12 @@ pub(super) trait System: Send {
     /// detectors, as [`TimeAbi::pre_capture`] does.
     fn pre_capture(&mut self) -> Result<(), PreCaptureError>;
 
+    /// Prepares strictly by the caller deadline, retaining suppression ownership on failure.
+    fn pre_capture_until(&mut self, deadline: Instant) -> Result<(), (PreCaptureError, bool)>;
+
+    /// Removes the pre-request deadline before requesting capture.
+    fn clear_deadline(&mut self);
+
     /// Restores the stall detectors' settings, as [`TimeAbi::cancel_capture`] does.
     fn cancel_capture(&mut self) -> Result<(), Vec<u8>>;
 
@@ -798,6 +791,17 @@ struct LiveSystem {
     paths: Paths,
     /// The time ABI of [`live_abi`], whose preparation of a capture enforces the ABI all the same.
     abi: TimeAbi,
+    /// The caller's pre-request deadline, cleared before the request.
+    deadline: Option<Instant>,
+}
+
+/// Returns the live capture seam with an explicit optional pre-request deadline.
+pub(super) fn capture_system(deadline: Option<Instant>) -> Box<dyn System> {
+    Box::new(LiveSystem {
+        paths: Paths::default(),
+        abi: live_abi(),
+        deadline,
+    })
 }
 
 /// Returns the time ABI of the capture and of the repair: in strict mode, unless the kernel
@@ -808,6 +812,7 @@ fn live_abi() -> TimeAbi {
 
 impl System for LiveSystem {
     fn mount_table(&mut self) -> io::Result<Vec<u8>> {
+        sys::FileLock::check_deadline(self.deadline)?;
         let path = self.paths.proc.join(MOUNT_TABLE);
         let mut table = Vec::new();
         File::open(&path)
@@ -816,14 +821,17 @@ impl System for LiveSystem {
                     .read_to_end(&mut table)
             })
             .map_err(|error| at(&path, &error))?;
+        sys::FileLock::check_deadline(self.deadline)?;
         Ok(table)
     }
 
     fn windows(&mut self, mmio: u64) -> io::Result<Vec<PathBuf>> {
+        sys::FileLock::check_deadline(self.deadline)?;
         let windows = root::window_directories(&self.paths, mmio)
             .map_err(|error| at(&self.paths.proc.join("iomem"), &error))?;
         let mut directories = Vec::with_capacity(windows.len());
         for window in windows {
+            sys::FileLock::check_deadline(self.deadline)?;
             match fs::canonicalize(&window) {
                 Ok(directory) => directories.push(directory),
                 // The kernel lists the window before it adds the window's device, from which
@@ -832,24 +840,36 @@ impl System for LiveSystem {
                 Err(error) => return Err(at(&window, &error)),
             }
         }
+        sys::FileLock::check_deadline(self.deadline)?;
         Ok(directories)
     }
 
     fn block_device(&mut self, device: DeviceNumber) -> io::Result<PathBuf> {
+        sys::FileLock::check_deadline(self.deadline)?;
         let path = self.paths.sys.join(BLOCK_DEVICES).join(device.to_string());
-        fs::canonicalize(&path).map_err(|error| at(&path, &error))
+        let directory = fs::canonicalize(&path).map_err(|error| at(&path, &error))?;
+        sys::FileLock::check_deadline(self.deadline)?;
+        Ok(directory)
     }
 
     fn pre_capture(&mut self) -> Result<(), PreCaptureError> {
         self.abi.pre_capture()
     }
 
+    fn pre_capture_until(&mut self, deadline: Instant) -> Result<(), (PreCaptureError, bool)> {
+        self.abi.pre_capture_until(deadline)
+    }
+
+    fn clear_deadline(&mut self) {
+        self.deadline = None;
+    }
+
     fn cancel_capture(&mut self) -> Result<(), Vec<u8>> {
-        self.abi.cancel_capture()
+        self.abi.cancel_capture_until(self.deadline)
     }
 
     fn generation_id(&mut self) -> Result<GenerationId, TimeError> {
-        self.abi.generation_id()
+        self.abi.generation_id_until(self.deadline)
     }
 
     fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
