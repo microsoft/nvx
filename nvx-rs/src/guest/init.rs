@@ -869,6 +869,10 @@ impl Runtime {
             c"nvx-ingress".to_owned(),
             CString::new(gateway.to_string()).expect("an IPv4 address has no NUL"),
         ];
+        sys::check_released().map_err(|error| {
+            crate::Error::io("cannot fork the restored announcer with port permission")
+                .with_source(error)
+        })?;
         let fork = sys::fork().map_err(|error| {
             crate::Error::io("cannot fork the restored announcer")
                 .with_source(io::Error::from(error))
@@ -876,6 +880,13 @@ impl Runtime {
         if let sys::ForkResult::Parent(process) = fork {
             self.helpers.announcer = Some(process);
             return Ok(());
+        }
+        if let Err(error) = sys::reset_signals() {
+            write_console(
+                kernel::CONSOLE_DEVICE,
+                format!("NVX-INIT-ERROR: cannot reset announcer signals: {error}\n").as_bytes(),
+            );
+            sys::exit_immediately(FAILURE);
         }
         let error = sys::exec(&program, &arguments, None);
         write_console(

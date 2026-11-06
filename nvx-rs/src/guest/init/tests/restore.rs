@@ -37,12 +37,28 @@ fn runtime() -> Runtime {
     }
 }
 
-struct Child(ProcessId);
+struct Child {
+    process: ProcessId,
+    descriptor: FileDescriptor,
+    collected: bool,
+}
+
+impl Child {
+    fn new(process: ProcessId) -> Self {
+        Self {
+            process,
+            descriptor: sys::open_pidfd(process).unwrap(),
+            collected: false,
+        }
+    }
+}
 
 impl Drop for Child {
     fn drop(&mut self) {
-        let _ = sys::kill_process(self.0);
-        sys::wait(self.0);
+        if !self.collected {
+            let _ = sys::kill_through_pidfd(self.descriptor.borrowed(), false);
+            let _ = sys::wait(self.process);
+        }
     }
 }
 
@@ -61,12 +77,22 @@ fn until(mut ready: impl FnMut() -> bool) {
     }
 }
 
-fn collect_failure(helpers: Helpers, descriptor: &FileDescriptor) -> String {
-    assert!(sys::readable_or_hung_up(&[descriptor.borrowed()], 5000).unwrap()[0]);
-    collect(&mut RealSystem { signals: None }, helpers, |_, _| {
-        panic!("the restored announcer was treated as a workload")
-    })
-    .unwrap_err()
+fn collect_failure(runtime: &mut Runtime, child: &mut Child) -> String {
+    assert!(sys::readable_or_hung_up(&[child.descriptor.borrowed()], 5000).unwrap()[0]);
+    let error = runtime
+        .service(|_, _| panic!("the restored announcer was treated as a workload"))
+        .unwrap_err();
+    child.collected = true;
+    error
+}
+
+fn blocked(process: ProcessId) -> u64 {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", process.raw())).unwrap();
+    let mask = status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigBlk:"))
+        .unwrap();
+    u64::from_str_radix(mask.trim(), 16).unwrap()
 }
 
 #[test]
@@ -119,27 +145,27 @@ fn the_restored_child_gets_only_the_gateway_and_joins_fatal_helper_supervision()
             ),
         );
         let mut runtime = runtime();
+        runtime.system.listen().unwrap();
         with_program(&program, || {
             runtime
                 .restore_announcer(Publication::Published, Some(Ipv4Addr::new(10, 88, 0, 1)))
                 .unwrap();
         });
-        let child = Child(runtime.helpers.announcer.unwrap());
-        let descriptor = sys::open_pidfd(child.0).unwrap();
+        let mut child = Child::new(runtime.helpers.announcer.unwrap());
         let expected = format!("1\n10.88.0.1\n{}\n", sys::current_process().raw());
         until(|| std::fs::read_to_string(&record).is_ok_and(|record| record == expected));
-        assert_eq!(nice_of(child.0), nice_of(sys::current_process()));
+        assert_eq!(nice_of(child.process), nice_of(sys::current_process()));
         assert_eq!(
-            std::fs::read(format!("/proc/{}/oom_score_adj", child.0.raw())).unwrap(),
+            std::fs::read(format!("/proc/{}/oom_score_adj", child.process.raw())).unwrap(),
             std::fs::read("/proc/self/oom_score_adj").unwrap()
         );
-        sys::kill_process(child.0).unwrap();
-        let error = collect_failure(runtime.helpers, &descriptor);
+        sys::kill_through_pidfd(child.descriptor.borrowed(), false).unwrap();
+        let error = collect_failure(&mut runtime, &mut child);
         assert_eq!(
             error,
             format!(
                 "the announcer, process {}, was killed by signal 9",
-                child.0.raw()
+                child.process.raw()
             )
         );
         let mut system = Fake::default();
@@ -156,20 +182,43 @@ fn a_failed_exec_remains_a_registered_fatal_helper() {
     }
     in_child(|| {
         let mut runtime = runtime();
+        runtime.system.listen().unwrap();
         with_program(Path::new("/nonexistent/nvx-ingress"), || {
             runtime
                 .restore_announcer(Publication::Published, Some(Ipv4Addr::new(10, 88, 0, 1)))
                 .unwrap();
         });
-        let child = Child(runtime.helpers.announcer.unwrap());
-        let descriptor = sys::open_pidfd(child.0).unwrap();
+        let mut child = Child::new(runtime.helpers.announcer.unwrap());
         assert_eq!(
-            collect_failure(runtime.helpers, &descriptor),
+            collect_failure(&mut runtime, &mut child),
             format!(
                 "the announcer, process {}, exited with status 125",
-                child.0.raw()
+                child.process.raw()
             )
         );
+    });
+}
+
+#[test]
+fn the_restored_announcer_unblocks_pid_1_signals_before_exec() {
+    let name =
+        "guest::init::tests::restore::the_restored_announcer_unblocks_pid_1_signals_before_exec";
+    if isolate_process_test("NVX_INIT_RESTORED_SIGNALS_TEST", name) {
+        return;
+    }
+    in_child(|| {
+        let mut runtime = runtime();
+        runtime.system.listen().unwrap();
+        assert_ne!(blocked(sys::current_process()), 0);
+        with_program(Path::new("/bin/false"), || {
+            runtime
+                .restore_announcer(Publication::Published, Some(Ipv4Addr::new(10, 88, 0, 1)))
+                .unwrap();
+        });
+        let mut child = Child::new(runtime.helpers.announcer.unwrap());
+        assert!(sys::readable_or_hung_up(&[child.descriptor.borrowed()], 5000).unwrap()[0]);
+        assert_eq!(blocked(child.process), 0);
+        assert!(collect_failure(&mut runtime, &mut child).contains("exited with status 1"));
     });
 }
 
@@ -226,19 +275,19 @@ fn the_restored_helper_keeps_the_pre_switch_root_and_pid_1_priority() {
                 output.display()
             ),
         );
-        RealSystem { signals: None }.raise_priority(None).unwrap();
         let mut runtime = runtime();
+        runtime.system.listen().unwrap();
+        runtime.system.raise_priority(None).unwrap();
         with_program(&program, || {
             runtime
                 .restore_announcer(Publication::Published, Some(Ipv4Addr::new(10, 88, 0, 1)))
                 .unwrap();
         });
-        let child = Child(runtime.helpers.announcer.unwrap());
-        let descriptor = sys::open_pidfd(child.0).unwrap();
+        let mut child = Child::new(runtime.helpers.announcer.unwrap());
         until(|| ready.is_file());
-        assert_eq!(nice_of(child.0), -10);
+        assert_eq!(nice_of(child.process), -10);
         assert_eq!(
-            std::fs::read_to_string(format!("/proc/{}/oom_score_adj", child.0.raw()))
+            std::fs::read_to_string(format!("/proc/{}/oom_score_adj", child.process.raw()))
                 .unwrap()
                 .trim(),
             "-1000"
@@ -253,7 +302,7 @@ fn the_restored_helper_keeps_the_pre_switch_root_and_pid_1_priority() {
             output_file.read_to_string(&mut observed).unwrap();
             observed == "the helper kept the initramfs root\n"
         });
-        sys::kill_process(child.0).unwrap();
-        assert!(collect_failure(runtime.helpers, &descriptor).contains("the announcer"));
+        sys::kill_through_pidfd(child.descriptor.borrowed(), false).unwrap();
+        assert!(collect_failure(&mut runtime, &mut child).contains("the announcer"));
     });
 }
