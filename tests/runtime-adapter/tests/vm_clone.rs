@@ -5013,8 +5013,9 @@ fn a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s() {
 
     // The clone's VMM exits before its restore-ready event, and NVX attributes the failure to the
     // host, by the evidence of the forward's bind, at the restore, which quarantines nothing. The
-    // start's diagnostic names the forward, and the start released the lease, with the records of
-    // the clone's launch.
+    // start's diagnostic keeps OpenVMM's fatal error, which leads with the stable code of the
+    // forward's bind, and names the forward, and the start released the lease, with the records
+    // of the clone's launch.
     let failed = start_with(&template, "cl-b", &options, CLONE_FAILED);
     let printed = &failed.started;
     assert!(printed.contains_key("pid"), "{printed:?}");
@@ -5033,8 +5034,12 @@ fn a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s() {
     assert_eq!(printed["quarantined"], "no", "{printed:?}");
     assert_eq!(printed["released"], printed["lease"], "{printed:?}");
     let stderr = failed.sandbox.stderr();
-    let cause = format!("failed to create socket for port forward (Tcp 127.0.0.1:{port})");
-    assert!(stderr.contains(&cause), "{cause:?} in {stderr}");
+    for reported in [
+        "fatal error: [E_PORT_FORWARD_BIND] ".to_owned(),
+        format!("(Tcp 127.0.0.1:{port})"),
+    ] {
+        assert!(stderr.contains(&reported), "{reported:?} in {stderr}");
+    }
     assert!(failed.sandbox.record().is_none());
     let store = SandboxStore::open(&failed.sandbox.store).unwrap();
     assert!(CloneRecords::read(&store).unwrap().is_none());
