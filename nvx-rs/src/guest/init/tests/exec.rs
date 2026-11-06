@@ -646,6 +646,86 @@ fn host_launch_tests_use_the_syscall_seam_without_mocking_the_execution_core() {
 }
 
 #[test]
+fn native_workload_cwd_accepts_procfs_links_but_closes_inherited_descriptors() {
+    let name = "guest::init::tests::exec::native_workload_cwd_accepts_procfs_links_but_closes_inherited_descriptors";
+    if crate::guest::managed_agent::tests::isolate_process_test("NVX_INIT_PROCFS_CWD_TEST", name) {
+        return;
+    }
+    in_child(|| {
+        sys::reset_child_signal();
+        procfs_workload_cwd_checks(true);
+    });
+}
+
+fn procfs_workload_cwd_checks(simulated: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = sys::path_c_string(directory.path()).unwrap();
+    sys::chmod(&path, Mode::from_bits_truncate(0o755)).unwrap();
+    nix::unistd::chdir(directory.path()).unwrap();
+    let inherited = std::fs::File::open(directory.path()).unwrap();
+    let descriptor = std::os::fd::AsRawFd::as_raw_fd(&inherited);
+    let (uid, gid) = if simulated {
+        (
+            nix::unistd::geteuid().as_raw(),
+            nix::unistd::getegid().as_raw(),
+        )
+    } else {
+        (65534, 65534)
+    };
+    let expected = format!(
+        "{uid}\n{gid}\n{}\n",
+        std::env::current_dir().unwrap().display()
+    );
+    for (directory, failure) in [
+        (c"/proc/self/cwd".to_owned(), None),
+        (
+            CString::new(format!("/proc/self/fd/{descriptor}")).unwrap(),
+            Some(Errno::ENOENT),
+        ),
+    ] {
+        let mut values = request("id -u; id -g; pwd -P");
+        values.uid = uid;
+        values.gid = gid;
+        values.directory = directory;
+        let mut execution = if simulated {
+            Exec::start_simulated(values, None)
+        } else {
+            Exec::start(values)
+        }
+        .unwrap();
+        let mut collected = Collected::default();
+        finish(&mut execution, &mut collected);
+        match failure {
+            None => {
+                assert_eq!(collected.launch, Some(None));
+                assert_eq!(collected.stdout, expected.as_bytes());
+                assert!(collected.outcome.unwrap().status.success());
+            }
+            Some(error) => {
+                assert_eq!(
+                    collected.launch,
+                    Some(Some(LaunchFailure {
+                        stage: 18,
+                        error: error as i32
+                    }))
+                );
+                assert!(collected.stdout.is_empty());
+                assert_eq!(collected.outcome.unwrap().status.code(), Some(125));
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a guest's root credentials"]
+fn privileged_workload_cwd_accepts_procfs_links_after_dropping_credentials() {
+    isolated(
+        "privileged_workload_cwd_accepts_procfs_links_after_dropping_credentials",
+        || procfs_workload_cwd_checks(false),
+    );
+}
+
+#[test]
 fn a_stolen_or_auto_reaped_status_is_reported_once_and_never_reclassified_by_an_ending() {
     let name = "guest::init::tests::exec::a_stolen_or_auto_reaped_status_is_reported_once_and_never_reclassified_by_an_ending";
     if crate::guest::managed_agent::tests::isolate_process_test("NVX_INIT_LOST_STATUS_TEST", name) {
