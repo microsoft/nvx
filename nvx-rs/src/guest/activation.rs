@@ -273,7 +273,6 @@
 //! writes the machine ID's and the resolver's files in the runtime directory, whose binds over
 //! the root's `/etc/machine-id` and `/etc/resolv.conf` need Linux 6.8 or later.
 
-mod mounts;
 mod repair;
 mod state;
 #[cfg(test)]
@@ -285,15 +284,14 @@ use std::io::{self, Read};
 use std::mem;
 use std::path::{Path, PathBuf};
 
-use self::mounts::DeviceNumber;
 use super::GenerationId;
 use super::root::{self, Device, Paths};
+use super::snapshot::{self as mounts, DeviceNumber};
 use super::sys;
 use super::time::{
     CaptureOutcome, CaptureRequest, PreCaptureError, Restore, ScratchPolicy, TimeAbi, TimeError,
 };
 
-pub use self::mounts::{Mounted, Origin};
 pub use self::repair::{
     RangeFault, Repair, RepairCause, RepairError, RepairProgress, RepairStage, Repaired, repair,
 };
@@ -305,10 +303,7 @@ pub use self::state::{
 pub use self::state::{
     Applied, AppliedTeardownError, ApplyError, NetworkError, RootTemplate, apply,
 };
-
-/// The most bytes of the mount table that a [`CapturePreparation`] reads: 1 MiB, the lines of
-/// thousands of mounts. It refuses a longer table, rather than check a part of it.
-pub const MOUNT_TABLE_LIMIT: usize = 1 << 20;
+pub use super::snapshot::{MOUNT_TABLE_LIMIT, Mounted, Origin};
 
 /// The mount table of the calling process's mount namespace, below procfs.
 const MOUNT_TABLE: &str = "self/mountinfo";
@@ -421,22 +416,9 @@ impl<F: AdmissionFence> CapturePreparation<F> {
         if let Err(error) = barrier.system.pre_capture() {
             // The barrier restores a suppression that the time ABI holds after a failure, as
             // after a preparation that succeeded.
-            barrier.suppressed = error.holds_suppression();
-            let error = match error {
-                PreCaptureError::BootChecks(error) => {
-                    CaptureError::new(CaptureStage::BootChecks, CaptureCause::Time(error))
-                }
-                PreCaptureError::CaptureChecks(error)
-                | PreCaptureError::PortRelease { error, .. } => {
-                    CaptureError::new(CaptureStage::CaptureChecks, CaptureCause::Time(error))
-                }
-                PreCaptureError::Pending => {
-                    CaptureError::new(CaptureStage::Suppression, CaptureCause::Pending)
-                }
-                PreCaptureError::Suppression(error) | PreCaptureError::Unrestored(error) => {
-                    CaptureError::new(CaptureStage::Suppression, CaptureCause::Io(error.into()))
-                }
-            };
+            let (stage, cause, suppressed) = mounts::preparation_failure(error);
+            barrier.suppressed = suppressed;
+            let error = CaptureError::new(stage, cause);
             return Err(barrier.fail(error));
         }
         barrier.suppressed = true;
@@ -463,7 +445,12 @@ fn check_mounts(system: &mut dyn System, devices: &Devices) -> Result<(), Captur
             format!("the mount table is longer than {MOUNT_TABLE_LIMIT} bytes"),
         )));
     }
-    match mounts::first_blocking(system, devices, &table).map_err(CaptureCause::Io)? {
+    let devices = mounts::Devices {
+        distro: devices.distro.mmio,
+        scratch: devices.scratch.mmio,
+        filesystem_tag: devices.filesystem_tag.clone(),
+    };
+    match mounts::first_blocking(system, &devices, &table).map_err(CaptureCause::Io)? {
         Some(mounted) => Err(CaptureCause::Mounted(mounted)),
         None => Ok(()),
     }
@@ -779,7 +766,7 @@ impl std::error::Error for CaptureError {
 }
 
 /// What a capture reads of the kernel and asks of the time ABI, which the tests' fake replaces.
-trait System: Send {
+pub(super) trait System: Send {
     /// Reads the mount table of the calling process's mount namespace, at most one byte more than
     /// [`MOUNT_TABLE_LIMIT`] of it.
     fn mount_table(&mut self) -> io::Result<Vec<u8>>;

@@ -136,6 +136,8 @@ pub mod process;
 pub mod reseed;
 #[doc(hidden)]
 pub mod root;
+#[cfg(target_arch = "x86_64")]
+pub mod snapshot;
 pub mod spawn;
 pub mod terminal;
 #[cfg(target_arch = "x86_64")]
