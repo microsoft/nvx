@@ -154,6 +154,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
 | [`nvx::guest::exec::binding`](#nvxguestexecbinding) | `Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest adapter would otherwise write |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
+| [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture, staged failure dispositions, and MMIO device mount checks, without execution control |
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation, with the retained template capture and clone repair interface |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 | [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
@@ -1771,7 +1772,9 @@ A violation of the ABI stops the VM in enforcing mode, with the time ABI's
 status, as `nvx-time` does; in strict mode, `TimeAbi::strict`, which a caller
 that owns the VM's exit status and shutdown selects, the call fails with the
 `Violation`, whose `status` is the one with which enforcing mode stops the VM,
-and the time daemon and a capture's preparation enforce the ABI all the same.
+and the time daemon and the legacy activation capture's preparation enforce
+the ABI all the same. The single-call snapshot capture below uses strict
+preparation instead.
 
 A call takes the permission for OpenVMM's ports on the calling thread for each
 port transaction alone, and fails with `TimeError::PortRelease` if the thread
@@ -1780,6 +1783,36 @@ from which `nvx::guest::spawn` starts none. No call waits for a child that it
 did not start.
 
 `nvx-time` runs its steps through them.
+
+### `nvx::guest::snapshot`
+
+x86_64: `capture(&Devices, Disks::Fresh, deadline)` composes the platform
+template's mount checks, strict time checks, stall-detector suppression,
+generation ID and capture request, without inspecting or freezing the
+caller's executions. `Devices` names the distro and scratch devices by their
+MMIO base values and the host filesystem by its virtio-fs tag. `Mounted`,
+`Origin` and `MOUNT_TABLE_LIMIT` describe a mount refusal.
+
+Every step and wait before the request, including runtime-lock acquisition
+and rollback, shares the caller's absolute deadline. The request itself has
+no deadline while the host saves stopped processors. If no snapshot was
+taken, `Captured::Continued` reports that the detectors were restored.
+
+`CaptureFailure` reports its `stage`, `cause` and `disposition`: `Resumed`
+only when no suppression owned by this call remains, or `MustEnd { status }`.
+A strict time violation preserves its actual status. A `PortRelease` remains
+the cause even if detector rollback also fails. Request and release failures
+are final.
+
+The time core performs its existing clock correction after a restore, but
+this interface does not complete the clone's repair and returns `MustEnd`.
+Fresh platform restore packets must carry no network settings; even an
+otherwise empty network policy is explicitly refused.
+
+The caller owns its transport. After answering the capture request, send
+nothing until `capture` returns. After `Continued` or a `Resumed` failure,
+report on the same session. The activation module retains the legacy
+Device-shaped capture interface for existing callers.
 
 ### `nvx::guest::activation`
 

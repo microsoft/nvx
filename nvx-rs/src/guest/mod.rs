@@ -8,7 +8,8 @@
 //! mounts, and its account of a host's mapping table; [`exec`], which drives each program as one
 //! execution, with its launch, its bounded output and input, its ending, and its outcome, alone
 //! or, through its [`binding`](exec::binding), under the [execution engine](crate::exec); and,
-//! on x86-64, `activation`, through which a template's guest prepares for and requests a snapshot's
+//! on x86-64, [`snapshot`], which composes a strictly checked Fresh capture by one caller deadline,
+//! without execution control; and `activation`, through which a template's guest prepares for and requests a snapshot's
 //! capture before its root's assembly, behind the caller's fence of workload admission, with
 //! nothing mounted from the devices that its clones replace, and through which each clone that a
 //! restore of the snapshot starts repairs its restore: it activates the restore's memory target,
