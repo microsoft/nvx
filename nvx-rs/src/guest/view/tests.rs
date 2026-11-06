@@ -1,5 +1,6 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 #[test]
 fn machine_ids_are_version_4_uuids_in_lowercase_hexadecimal() {
@@ -75,27 +76,38 @@ fn a_generated_machine_id_has_mode_0444_whatever_the_umask() {
 }
 
 #[test]
-fn the_resolver_keeps_the_single_server_format_and_refuses_existing_files_and_links() {
+fn a_resolver_file_names_its_dns_server_once_and_every_execution_may_read_it() {
+    // The file names the server in its canonical text, as NVX's init writes the initramfs's,
+    // with mode 0444, whatever the umask.
     let directory = tempfile::tempdir().unwrap();
-    for (name, server, expected) in [
-        ("ipv4", "10.0.0.1", "nameserver 10.0.0.1\n"),
-        ("ipv6", "fd00::53", "nameserver fd00::53\n"),
-    ] {
+    let dns = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let ipv6 = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1));
+    let cases = [
+        ("v4", dns, &b"nameserver 10.0.0.1\n"[..]),
+        ("v6", ipv6, &b"nameserver fd00::a00:1\n"[..]),
+    ];
+    for (name, server, text) in cases {
         let path = directory.path().join(name);
-        write_resolver_file(&path, server.parse().unwrap()).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o444
-        );
-        let error = write_resolver_file(&path, "10.0.0.2".parse().unwrap()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        sys::tests::with_thread_umask(0o077, || write_resolver_file(&path, server)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), text);
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o444, "{mode:o}");
     }
-    let link = directory.path().join("link");
-    let target = directory.path().join("missing");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-    let error = write_resolver_file(&link, "10.0.0.1".parse().unwrap()).unwrap_err();
+
+    // A file there already fails the write, and is left alone, and so is the file that a
+    // symbolic link there names, or the path where a dangling one leads.
+    let written = directory.path().join("v4");
+    let error = write_resolver_file(&written, ipv6).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    assert!(!target.exists());
+    let link = directory.path().join("link");
+    symlink(&written, &link).unwrap();
+    let error = write_resolver_file(&link, ipv6).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(&written).unwrap(), b"nameserver 10.0.0.1\n");
+    let absent = directory.path().join("absent");
+    let dangling = directory.path().join("dangling");
+    symlink(&absent, &dangling).unwrap();
+    let error = write_resolver_file(&dangling, dns).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert!(!absent.exists());
 }
