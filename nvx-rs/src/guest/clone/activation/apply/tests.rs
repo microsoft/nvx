@@ -20,7 +20,6 @@ use std::error::Error as _;
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::num::NonZeroU64;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::rc::Rc;
 use std::time::Instant;
@@ -28,8 +27,7 @@ use std::time::Instant;
 use super::*;
 use crate::activation::{
     ExpectedResources, Export, ExportKind, MachineIdMode, Network, Publication, ReadyActivation,
-    RestoreSection, StoreGeneration, TemplateReference, TransactionId, WorkloadIdentity,
-    WorkloadView,
+    RestoreSection, TransactionId, View as RecordView,
 };
 use crate::guest::clone::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
@@ -60,11 +58,6 @@ const IMAGE_UUID: Uuid = Uuid::from_bytes([0x5a; 16]);
 const DISK_GUID: Uuid = Uuid::from_bytes([0xd1; 16]);
 /// The most bytes that the first partition of the tests' GPT disks may hold.
 const FIRST_PARTITION_BOUND: u64 = 4096;
-/// The tests' workload identity, whose account the tests' image holds.
-const WORKLOAD: WorkloadIdentity = WorkloadIdentity {
-    uid: 1000,
-    gid: 1001,
-};
 /// The passwd database of the tests' image, which holds the workload identity's account.
 const PASSWD: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n\
 workload:x:1000:1001::/home/workload:/bin/sh\n";
@@ -534,17 +527,13 @@ fn template() -> RootTemplate {
 
 /// Returns an EROFS image, with the UUID `uuid` that the record expects of it, if any.
 fn erofs(uuid: Option<Uuid>) -> activation::Image {
-    activation::Image::Erofs {
-        binding: activation::Identity::from_bytes([0x11; activation::Identity::LEN]),
-        uuid,
-    }
+    activation::Image::Erofs { uuid }
 }
 
 /// Returns a GPT disk, with the GUID `disk_guid` that the record expects of it, if any, whose
 /// first partition holds at most [`FIRST_PARTITION_BOUND`] bytes.
 fn gpt(disk_guid: Option<Uuid>) -> activation::Image {
     activation::Image::Gpt {
-        binding: activation::Identity::from_bytes([0x11; activation::Identity::LEN]),
         disk_guid,
         first_partition_bound: FIRST_PARTITION_BOUND,
     }
@@ -564,20 +553,16 @@ fn gpt_image(disk_guid: Option<Uuid>) -> root::Image {
 
 /// Returns the scratch upper, with the journal policy `journal`.
 fn scratch(journal: activation::Journal) -> activation::Upper {
-    activation::Upper::Scratch {
-        binding: activation::Identity::from_bytes([0x33; activation::Identity::LEN]),
-        journal,
-    }
+    activation::Upper::Scratch { journal }
 }
 
 /// Returns the configuration of a root of `image` over `upper`, in `overlay` mode, which names
-/// the workload identity `identity`, if any, and expects the tests' clone's resources, without an
+/// the view and expects the tests' clone's resources, without an
 /// export or a network.
 fn configuration(
     image: activation::Image,
     upper: activation::Upper,
     overlay: activation::OverlayMode,
-    identity: Option<WorkloadIdentity>,
 ) -> Configuration {
     Configuration {
         image,
@@ -586,10 +571,9 @@ fn configuration(
         export: None,
         mappings: 0,
         network: None,
-        workload: WorkloadView {
+        view: RecordView {
             hostname: HOSTNAME.to_vec(),
             machine_id: MachineIdMode::Image,
-            identity,
         },
         resources: ExpectedResources {
             cpus: CPUS,
@@ -602,22 +586,19 @@ fn configuration(
 fn clone_record(configuration: Configuration) -> ActivationRecord {
     let restore = RestoreSection {
         transaction: TRANSACTION,
-        template: TemplateReference {
-            generation: StoreGeneration::new(NonZeroU64::MIN),
-            key: activation::Identity::from_bytes([0x44; activation::Identity::LEN]),
-        },
     };
     ActivationRecord::new(Some(restore), configuration).unwrap()
 }
 
 /// Returns the record of the tests' Activate: an EROFS image, whose UUID it expects, over a
-/// tmpfs, with untrusted lowers, which names the tests' workload identity.
+/// tmpfs capped at 50 percent, with untrusted lowers.
 fn accepted() -> ActivationRecord {
     clone_record(configuration(
         erofs(Some(IMAGE_UUID)),
-        activation::Upper::Tmpfs,
+        activation::Upper::Tmpfs {
+            max_memory_percent: 50,
+        },
         activation::OverlayMode::UntrustedLowers,
-        Some(WORKLOAD),
     ))
 }
 
@@ -633,7 +614,7 @@ fn accepted_assembly() -> Assembly {
             uuid: Some(IMAGE_UUID),
         },
         upper: root::Upper::Tmpfs {
-            max_memory_percent: None,
+            max_memory_percent: Some(50),
         },
         overlay: root::OverlayMode::UntrustedLowers,
         timeout: template.timeout,
@@ -644,23 +625,19 @@ fn accepted_assembly() -> Assembly {
 /// a machine ID that the guest generates.
 fn with_generated_id() -> ActivationRecord {
     let mut configuration = accepted().configuration().clone();
-    configuration.workload.machine_id = MachineIdMode::Generated;
+    configuration.view.machine_id = MachineIdMode::Generated;
     clone_record(configuration)
 }
 
-/// Returns an export of `kind`, of the tests' plan.
+/// Returns an export of `kind`.
 fn export(kind: ExportKind) -> Export {
-    Export {
-        kind,
-        plan: activation::Identity::from_bytes([0x77; activation::Identity::LEN]),
-    }
+    Export { kind }
 }
 
 /// Returns a network whose resolver names `dns`, if any, and whose proxy is `proxy`, if any,
 /// with published listeners.
 fn network(dns: Option<IpAddr>, proxy: Option<&str>) -> Network {
     Network {
-        policy: activation::Identity::from_bytes([0x88; activation::Identity::LEN]),
         dns,
         publication: Publication::Published,
         proxy: proxy.map(str::to_owned),
@@ -931,12 +908,22 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
         (gpt(None), gpt_image(None), true),
         (gpt(Some(DISK_GUID)), gpt_image(Some(DISK_GUID)), true),
     ];
-    // The record names no cap of a tmpfs, which then takes the kernel's default size.
+    // The root receives the record's cap, including both ends of its range.
     let uppers = [
         (
-            activation::Upper::Tmpfs,
+            activation::Upper::Tmpfs {
+                max_memory_percent: 1,
+            },
             root::Upper::Tmpfs {
-                max_memory_percent: None,
+                max_memory_percent: Some(1),
+            },
+        ),
+        (
+            activation::Upper::Tmpfs {
+                max_memory_percent: 90,
+            },
+            root::Upper::Tmpfs {
+                max_memory_percent: Some(90),
             },
         ),
         (
@@ -967,50 +954,40 @@ fn assembly_inputs_are_taken_exactly_from_the_record() {
     for (image, root_image, reread) in images {
         for (upper, root_upper) in uppers {
             for (overlay, root_overlay) in overlays {
-                // The record's workload identity, if any, is no input: each execution names
-                // its own.
-                for identity in [None, Some(WORKLOAD)] {
-                    let record = clone_record(configuration(image, upper, overlay, identity));
-                    let mut system = FakeSystem::new();
-                    let applied = apply_with(&mut system, &record, &template, None).unwrap();
-                    let assembly = Assembly {
-                        runtime: template.runtime.clone(),
-                        distro: template.distro,
-                        image: root_image.clone(),
-                        upper: root_upper,
-                        overlay: root_overlay,
-                        timeout: template.timeout,
-                    };
-                    let mut effects = Vec::new();
-                    if reread {
-                        effects.push(Effect::Reread(template.distro));
-                    }
-                    effects.push(Effect::Assemble(assembly));
-                    effects.push(Effect::Bind(view(MachineId::Image)));
-                    assert_eq!(system.effects, effects, "{record:?}");
-                    assert_eq!(applied, activated(&system, MachineId::Image));
+                let record = clone_record(configuration(image, upper, overlay));
+                let mut system = FakeSystem::new();
+                let applied = apply_with(&mut system, &record, &template, None).unwrap();
+                let assembly = Assembly {
+                    runtime: template.runtime.clone(),
+                    distro: template.distro,
+                    image: root_image.clone(),
+                    upper: root_upper,
+                    overlay: root_overlay,
+                    timeout: template.timeout,
+                };
+                let mut effects = Vec::new();
+                if reread {
+                    effects.push(Effect::Reread(template.distro));
                 }
+                effects.push(Effect::Assemble(assembly));
+                effects.push(Effect::Bind(view(MachineId::Image)));
+                assert_eq!(system.effects, effects, "{record:?}");
+                assert_eq!(applied, activated(&system, MachineId::Image));
             }
         }
     }
 
     // The record's other settings, which the application leaves alone, change no input: its
-    // bindings, its export's shape and plan, the number of its mappings, which the adapter's
-    // order takes, its network's policy, its resources, and its restore section.
+    // export's shape, the number of its mappings, which the adapter's order takes, its resources,
+    // and its restore section.
     let mut other = with_everything().configuration().clone();
     other.image = activation::Image::Erofs {
-        binding: activation::Identity::from_bytes([0x66; activation::Identity::LEN]),
         uuid: Some(IMAGE_UUID),
     };
     other.export = Some(Export {
         kind: ExportKind::Directory,
-        plan: activation::Identity::from_bytes([0x99; activation::Identity::LEN]),
     });
     other.mappings = 7;
-    other.network = Some(Network {
-        policy: activation::Identity::from_bytes([0xaa; activation::Identity::LEN]),
-        ..network(Some(DNS), Some(PROXY))
-    });
     other.resources = ExpectedResources {
         cpus: 8,
         memory: 1 << 33,
@@ -1040,7 +1017,6 @@ fn a_gpt_disk_s_partition_table_is_reread_before_its_root_is_assembled() {
         gpt(Some(DISK_GUID)),
         scratch(activation::Journal::Forbidden),
         activation::OverlayMode::UntrustedLowers,
-        Some(WORKLOAD),
     ));
     let mut adapter = Adapter::restricted(FakeSystem::new(), base);
     adapter
@@ -1075,13 +1051,9 @@ fn a_gpt_disk_s_partition_table_is_reread_before_its_root_is_assembled() {
 }
 
 #[test]
-fn the_application_checks_no_account_of_the_record_s_workload_identity() {
-    // The record's workload identity is no identity in which the executions run: each execution
-    // names its own, whose account the adapter's entry reads and checks before the execution
-    // runs, as in a sandbox without a workload identity at a cold boot. The application reads no
-    // account database, so a record that names a workload identity activates whether the image
-    // holds its account or not: one of its user ID whose primary group is its group ID, which the
-    // group database holds, and whose home is absolute.
+fn the_application_leaves_the_images_accounts_to_each_execution() {
+    // Each execution names its own identity, whose entry checks its account. Activation reads
+    // no account database, including one that is absent or malformed.
     let base = Instant::now();
     let record = accepted().encode();
     let without_passwd = FakeSystem::new();
@@ -1825,9 +1797,10 @@ fn the_application_refuses_without_privileges_what_it_cannot_assemble() {
     // template's distro device, the reread fails at its one poll, with nothing mounted.
     let disk = clone_record(configuration(
         gpt(None),
-        activation::Upper::Tmpfs,
+        activation::Upper::Tmpfs {
+            max_memory_percent: 50,
+        },
         activation::OverlayMode::TrustedLowers,
-        Some(WORKLOAD),
     ));
     let at_once = RootTemplate {
         timeout: Duration::ZERO,

@@ -29,7 +29,7 @@
 //! activation, retries of the `Activate`, the order that the worker serves once the clone is
 //! ready, the status of each class of the activation's failures, which the worker answers with
 //! nothing, before any side effect where the class allows, its deadline, also once the stream
-//! takes nothing more, the record's workload identity, as which every execution runs, the
+//! takes nothing more, the identity that each execution names, the
 //! mapping table of the record's export, which the worker applies from the export that the
 //! application mounted, while it leaves the endpoint of the network's proxy to the host, and the
 //! announcer of the listeners of a record whose network publishes them, whose end ends the clone,
@@ -1395,8 +1395,8 @@ impl RootOperations for FakeRoot {
     /// the gate, if any: for a GPT disk, it stands for the kernel's reread of the disk's partition
     /// table first, which fails as the kernel does while a partition is open if the test fails
     /// [`Operation::Reread`]; it then takes as long as the assembly, but no longer than until
-    /// `deadline`, as the waits for the devices do; like the application, it checks no account of
-    /// the record's workload identity. It then stands for the generation of the machine ID
+    /// `deadline`, as the waits for the devices do; like the application, it checks no account.
+    /// It then stands for the generation of the machine ID
     /// that the record asks for, if any, the mount of the record's export through the template's
     /// host filesystem device, if it has one, the write of the resolver file that names the DNS
     /// server of the record's network, if it names one, the start of the announcer of the
@@ -1442,8 +1442,8 @@ impl RootOperations for FakeRoot {
             None => self.assembly,
         };
         thread::sleep(assembly);
-        let workload = &configuration.workload;
-        if workload.machine_id == MachineIdMode::Generated {
+        let view = &configuration.view;
+        if view.machine_id == MachineIdMode::Generated {
             self.result(Operation::MachineId)
                 .map_err(|problem| ApplyError::MachineId {
                     error: io::Error::other(problem),
@@ -4125,12 +4125,10 @@ fn the_worker_runs_executions_on_a_tty() {
 #[cfg(target_arch = "x86_64")]
 mod clones {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::num::NonZeroU64;
 
     use nvx::activation::{
         self, ActivationRecord, Configuration, ExpectedResources, MachineIdMode, ReadyActivation,
-        RestoreSection, StoreGeneration, TemplateReference, TransactionId, WorkloadIdentity,
-        WorkloadView,
+        RestoreSection, TransactionId, View,
     };
     use nvx::guest::clone::{Activation, AdmissionFence, RootTemplate};
     use nvx::protocol::nvxs::{GuestEvent, GuestSession};
@@ -4165,36 +4163,27 @@ mod clones {
     /// The IPv4 gateway of the NIC of the clones' template.
     const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
-    /// Returns the record of a clone's Activate of the transaction `transaction`, whose workload
-    /// runs as `identity`, if any: an EROFS image over a scratch, without an export, a mapping, or
+    /// Returns the record of a clone's Activate of the transaction `transaction`:
+    /// an EROFS image over a scratch, without an export, a mapping, or
     /// a network, which expects [`RESOURCES`].
-    fn record(transaction: u8, identity: Option<(u32, u32)>) -> ActivationRecord {
+    fn record(transaction: u8) -> ActivationRecord {
         let configuration = Configuration {
-            image: activation::Image::Erofs {
-                binding: activation::Identity::from_bytes([0x11; 32]),
-                uuid: None,
-            },
+            image: activation::Image::Erofs { uuid: None },
             upper: activation::Upper::Scratch {
-                binding: activation::Identity::from_bytes([0x22; 32]),
                 journal: activation::Journal::Forbidden,
             },
             overlay: activation::OverlayMode::UntrustedLowers,
             export: None,
             mappings: 0,
             network: None,
-            workload: WorkloadView {
+            view: View {
                 hostname: b"clone".to_vec(),
                 machine_id: MachineIdMode::Image,
-                identity: identity.map(|(uid, gid)| WorkloadIdentity { uid, gid }),
             },
             resources: RESOURCES,
         };
         let restore = RestoreSection {
             transaction: TransactionId::from_bytes([transaction; 16]),
-            template: TemplateReference {
-                generation: StoreGeneration::new(NonZeroU64::MIN),
-                key: activation::Identity::from_bytes([0x44; 32]),
-            },
         };
         ActivationRecord::new(Some(restore), configuration).unwrap()
     }
@@ -4215,7 +4204,6 @@ mod clones {
         changed(record, |configuration| {
             configuration.export = Some(activation::Export {
                 kind: activation::ExportKind::Aggregate,
-                plan: activation::Identity::from_bytes([0x33; 32]),
             });
             configuration.mappings = mappings;
         })
@@ -4226,7 +4214,6 @@ mod clones {
     fn networked(record: &ActivationRecord, proxy: Option<&str>) -> ActivationRecord {
         changed(record, |configuration| {
             configuration.network = Some(activation::Network {
-                policy: activation::Identity::from_bytes([0x55; 32]),
                 dns: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3))),
                 publication: activation::Publication::Unpublished,
                 proxy: proxy.map(str::to_owned),
@@ -4428,7 +4415,7 @@ mod clones {
         // The worker sends no attachment: it acknowledges the reset that the restore queued, with
         // its receive window, first.
         broker.reset(RESTORED);
-        let record = record(1, Some(WORKLOAD));
+        let record = record(1);
         let replies = broker.exchange(&[activate(&record)], OUTER_MAX_PAYLOAD, 1);
         assert_eq!(replies, [activated(&record)]);
         let Message::Ready(body) = &replies[0] else {
@@ -4526,7 +4513,7 @@ mod clones {
     fn a_clone_s_activation_fails_finally_with_the_status_of_the_failure_s_class() {
         // The activation refuses a record that does not decode, a cold boot's, and one that
         // expects other resources than the repair found, before anything has a side effect.
-        let clone = record(1, None);
+        let clone = record(1);
         let cold = ActivationRecord::new(None, clone.configuration().clone()).unwrap();
         let more = changed(&clone, |configuration| configuration.resources.memory *= 2);
         let cases = [
@@ -4554,13 +4541,12 @@ mod clones {
         // Ready.
         let gpt = changed(&clone, |configuration| {
             configuration.image = activation::Image::Gpt {
-                binding: activation::Identity::from_bytes([0x11; 32]),
                 disk_guid: None,
                 first_partition_bound: 1 << 20,
             };
         });
         let generated = changed(&clone, |configuration| {
-            configuration.workload.machine_id = MachineIdMode::Generated;
+            configuration.view.machine_id = MachineIdMode::Generated;
         });
         let cases = [
             (
@@ -4609,7 +4595,7 @@ mod clones {
         // can have before it takes any byte of its body, and the activation takes it as a record
         // that long: it fails with the record's status, whether the clone is ready or not, and the
         // worker answers nothing more.
-        let accepted = record(1, Some(WORKLOAD));
+        let accepted = record(1);
         let kind = activate(&accepted).kind();
         for length in [MAX_ACTIVATE_BODY + 1, usize::try_from(u32::MAX).unwrap()] {
             let mut header = u32::try_from(length).unwrap().to_le_bytes().to_vec();
@@ -4651,7 +4637,7 @@ mod clones {
         // activation, before anything has a side effect. The broker sends what it sends before the
         // worker runs, which then takes it at once: a worker that runs only once the deadline
         // passed still acknowledges the reset, and fails with the deadline's status.
-        let record = record(1, Some(WORKLOAD));
+        let record = record(1);
         let bytes = activate(&record).encode().unwrap();
         let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..bytes.len() / 2])];
         for sent in cases {
@@ -4703,7 +4689,7 @@ mod clones {
         let started = Instant::now();
         let (mut broker, working) = start_clone(root, timeout);
         broker.reset(RESTORED);
-        let record = record(1, Some(WORKLOAD));
+        let record = record(1);
         broker.send_data(&activate(&record).encode().unwrap(), OUTER_MAX_PAYLOAD);
         let root = unactivated(&mut broker, working, status::ACTIVATION_DEADLINE);
         let ended = Instant::now();
@@ -4724,7 +4710,7 @@ mod clones {
         // its Activate, before Ready, which the worker takes before it completes the activation:
         // another reset, which the worker acknowledges, or a request fails the activation, with
         // the status of the host's session, after one application, and with no Ready.
-        let record = record(1, Some(WORKLOAD));
+        let record = record(1);
         let bytes = activate(&record).encode().unwrap();
         for reset in [true, false] {
             let (root, gate) = FakeRoot::booting(&layout()).gated();
@@ -4803,7 +4789,7 @@ mod clones {
         // Whether the restore's reset came or not, or part of an Activate, a broker that closes
         // the stream before the clone is ready ends the clone with the status of the host's
         // session, with nothing applied, and its fence closed.
-        let record = record(1, Some(WORKLOAD));
+        let record = record(1);
         let bytes = activate(&record).encode().unwrap();
         let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..bytes.len() / 2])];
         for sent in cases {
@@ -4880,11 +4866,14 @@ mod clones {
         // An Activate of another transaction, or of the same transaction with another record, once
         // the clone is ready or its sandbox started, fails the activation with the status of the
         // host's session. The worker leaves the root that it assembled to its operations.
-        let accepted = record(1, Some(WORKLOAD));
+        let accepted = record(1);
+        let changed = changed(&accepted, |configuration| {
+            configuration.view.hostname = b"another-clone".to_vec();
+        });
         let cases = [
-            (record(2, Some(WORKLOAD)), false),
-            (record(1, None), false),
-            (record(1, None), true),
+            (record(2), false),
+            (changed.clone(), false),
+            (changed, true),
         ];
         for (other, started) in cases {
             let (mut broker, working) =
@@ -4915,20 +4904,17 @@ mod clones {
 
     #[test]
     fn a_clone_s_executions_name_their_own_identity_and_take_the_hostname_of_its_record() {
-        // A clone has no workload identity of the whole sandbox, whether its record names one or
-        // not: each start names its execution's identity, as in a sandbox without a workload
+        // A clone has no workload identity of the whole sandbox: each start names its
+        // execution's identity, as in a sandbox without a workload
         // identity, and a start that names none is refused. Every execution's entry takes the
         // record's hostname.
         let refused = LaunchFailure::new(0, Errno::EINVAL as i32);
         let workload = exec::Identity::new(WORKLOAD.0, WORKLOAD.1);
         let identity = entry::Identity::new(WORKLOAD.0, WORKLOAD.1);
-        let renamed = changed(&record(1, None), |configuration| {
-            configuration.workload.hostname = b"another-clone".to_vec();
+        let renamed = changed(&record(1), |configuration| {
+            configuration.view.hostname = b"another-clone".to_vec();
         });
-        let records = [
-            (record(1, Some(WORKLOAD)), &b"clone"[..]),
-            (renamed, &b"another-clone"[..]),
-        ];
+        let records = [(record(1), &b"clone"[..]), (renamed, &b"another-clone"[..])];
         for (record, hostname) in records {
             let mut host = Host::activated(FakeRoot::booting(&layout()), &record);
             host.start(start_of(1, shell("exit 0")), Vec::new());
@@ -4956,9 +4942,9 @@ mod clones {
             Capability::CHOWN,
         ];
         for (record, publication) in [
-            (record(1, None), Publication::Unpublished),
-            (networked(&record(1, None), None), Publication::Unpublished),
-            (published(&record(1, None)), Publication::Published),
+            (record(1), Publication::Unpublished),
+            (networked(&record(1), None), Publication::Unpublished),
+            (published(&record(1)), Publication::Published),
         ] {
             let mut host = Host::activated(FakeRoot::booting(&layout()), &record);
             for (id, capability) in (1..).zip(capabilities) {
@@ -5001,7 +4987,7 @@ mod clones {
         // with an execution running, ends the clone with the network's status, once the worker
         // dropped its executions: the gateway would keep publishing the listeners that the
         // announcer last announced, and learn of no later change of them.
-        let record = published(&record(1, None));
+        let record = published(&record(1));
         for started in [false, true] {
             let (root, ending) = FakeRoot::booting(&layout()).ending();
             let (mut broker, working) = start_clone(root, ACTIVATION_TIMEOUT);
@@ -5091,7 +5077,7 @@ mod clones {
         // executions running or not: the restore's reset came after the repair's acknowledgement,
         // then the host's first message, the clone's Activate, then its Ready and its start, and
         // no execution yet.
-        let record = record(1, Some(WORKLOAD));
+        let record = record(1);
         let mut host = Host::activated(FakeRoot::booting(&layout()), &record);
         let probe = Message::Probe(ACTIVATION_PROBE.as_bytes().to_vec());
         host.send(std::slice::from_ref(&probe));
@@ -5134,7 +5120,7 @@ mod clones {
         let table = table(3);
         let parts = parts(&table, 2);
         assert_eq!(parts.len(), 2);
-        let record = exported(&record(1, Some(WORKLOAD)), table.len());
+        let record = exported(&record(1), table.len());
         let record = networked(&record, Some("http://10.0.0.1:3128"));
         let mut host = Host::mapped(FakeRoot::booting(&layout()), &record, &parts);
         // The host tells the workloads the endpoint of the network's proxy, as after a cold boot:

@@ -858,7 +858,7 @@ fn a_key_identity_is_the_identity_that_names_a_clones_template() {
     assert_eq!(named.as_bytes(), identity.as_bytes());
     assert_eq!(named.to_string(), identity.to_string());
     assert_eq!(KeyIdentity::from(named), identity);
-    // A clone's activation record names the template by its generation and this identity.
+    // A clone's lease and durable records name its template by generation and key identity.
     let reference = activation::TemplateReference {
         generation: activation::StoreGeneration::new(std::num::NonZeroU64::MIN),
         key: identity.into(),

@@ -4,7 +4,7 @@
 use proptest::prelude::*;
 
 use super::*;
-use crate::tests::{ACTIVATION_V1, of_kind, vector};
+use crate::tests::{ACTIVATION_V2, of_kind, vector};
 
 /// The names of the vectors of what Ready reports, in order: those of the records whose
 /// activations they report.
@@ -72,7 +72,7 @@ fn every_other_form_is_refused() {
 #[test]
 fn ready_reports_a_clone_s_transaction_and_nothing_more_for_a_cold_boot() {
     for name in READY {
-        let record = ActivationRecord::decode(&vector(ACTIVATION_V1, "RECORD", name).bytes)
+        let record = ActivationRecord::decode(&vector(ACTIVATION_V2, "RECORD", name).bytes)
             .unwrap_or_else(|error| panic!("RECORD {name}: {error}"));
         let ready = ReadyActivation::of(&record);
         assert_eq!(
@@ -82,7 +82,7 @@ fn ready_reports_a_clone_s_transaction_and_nothing_more_for_a_cold_boot() {
         );
         assert_eq!(
             ready.encode(),
-            vector(ACTIVATION_V1, "READY", name).bytes,
+            vector(ACTIVATION_V2, "READY", name).bytes,
             "{name}"
         );
     }
@@ -90,7 +90,7 @@ fn ready_reports_a_clone_s_transaction_and_nothing_more_for_a_cold_boot() {
 
 #[test]
 fn ready_activations_match_their_vectors() {
-    for vector in of_kind(ACTIVATION_V1, "READY", &READY) {
+    for vector in of_kind(ACTIVATION_V2, "READY", &READY) {
         let mut values = vector.values();
         let transaction =
             values.optional(|values| TransactionId::from_bytes(values.bytes().try_into().unwrap()));
@@ -117,7 +117,7 @@ fn invalid_ready_activations_are_refused() {
         "SHORT_TRANSACTION",
         "LONG_TRANSACTION",
     ];
-    for vector in of_kind(ACTIVATION_V1, "INVALID_READY", &names) {
+    for vector in of_kind(ACTIVATION_V2, "INVALID_READY", &names) {
         assert_eq!(
             ReadyActivation::decode(&vector.bytes),
             Err(ActivationError::Ready),
