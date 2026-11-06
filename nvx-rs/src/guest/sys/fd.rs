@@ -310,7 +310,7 @@ impl FileLock {
         deadline: Option<Instant>,
     ) -> Result<Self, Errno> {
         let Some(deadline) = deadline else {
-            return lock_file(path, mode);
+            return super::lock_file(path, mode);
         };
         Self::check_deadline(Some(deadline))?;
         let flags = OpenFlags::O_RDWR | OpenFlags::O_CREAT | OpenFlags::O_CLOEXEC;
