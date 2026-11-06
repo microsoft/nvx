@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::artifacts::Artifacts;
+use super::config::COMMAND_LINE_BUDGET;
 use super::filesystem::ExportPlan;
 use super::network::{self, NetworkPolicy};
 use crate::error::{Error, Result};
@@ -31,8 +32,6 @@ use crate::protocol::cmdline::{self, Parameter};
 
 pub use super::config::DEFAULT_GUEST_NETWORK;
 
-/// Bytes of the x86 kernel command line available to caller tokens, including the NUL.
-pub const COMMAND_LINE_BUDGET: usize = 1024;
 /// Longest Windows process command line, in UTF-16 code units, including the terminating NUL.
 ///
 /// OpenVMM's command line is held to it on every host, so a policy behaves alike on all of them.

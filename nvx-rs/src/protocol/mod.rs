@@ -45,7 +45,7 @@ pub mod cmdline;
 mod exec;
 pub mod export;
 mod features;
-mod maps;
+pub mod maps;
 pub mod nvxs;
 mod outer;
 pub mod restore_ready;
