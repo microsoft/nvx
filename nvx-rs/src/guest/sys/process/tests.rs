@@ -39,6 +39,41 @@ fn process_group_exists(process: ProcessId) -> bool {
     signal_process_group(process, 0) != Err(Errno::ESRCH)
 }
 
+#[test]
+fn process_stats_distinguish_live_userspace_kernel_threads_and_zombies() {
+    for (state, flags, threads, live) in [
+        ("R", 0, 1, true),
+        ("S", KERNEL_THREAD, 1, false),
+        ("Z", 0, 1, false),
+        ("X", 0, 1, false),
+        ("Z", 0, 2, true),
+    ] {
+        let stat = format!("42 (a ) name) {state} 1 2 3 4 5 {flags} 0 0 0 0 0 0 0 0 0 0 {threads}");
+        assert_eq!(live_userspace(stat.as_bytes()), Ok(live));
+    }
+    for malformed in [
+        b"missing".as_slice(),
+        b"42 (name) R 1",
+        b"42 (name) R 1 2 3 4 5 flags",
+    ] {
+        assert_eq!(live_userspace(malformed), Err(Errno::EPROTO));
+    }
+    assert!(
+        ProcessId::live_userspace()
+            .unwrap()
+            .contains(&current_process())
+    );
+}
+
+/// Ends only the calling main thread, leaving its process's other threads alive, for the sweep
+/// check's private child. libc's `_exit` would end the entire process.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn exit_main_thread() -> ! {
+    // SAFETY: the system call takes only an exit status and does not return.
+    unsafe { nix::libc::syscall(nix::libc::SYS_exit, 0) };
+    unreachable!("exit of the main thread does not return")
+}
+
 /// Forks a test's process, which the harness's threads keep [`fork`] from forking, for a test
 /// that the process runs alone, as `isolate_process_test` starts one. The child has only the
 /// calling thread, so [`fork`] works in it.
@@ -132,6 +167,34 @@ pub(crate) fn deny_system_call(number: nix::libc::c_long) {
             1,
             number as u32,
         ),
+        filter_statement(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+        ),
+        filter_statement(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    install_seccomp_filter(&mut filter);
+}
+
+/// Rejects negative-ID `kill` with `EPERM`, but leaves positive child IDs usable for cleanup.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn deny_group_kill() {
+    use nix::libc;
+
+    // kill takes a 32-bit pid_t: its sign bit is in the low word of seccomp_data.args[0],
+    // at byte 16 on x86-64, even when the caller has zero-extended that syscall argument.
+    let mut filter = [
+        filter_statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+        filter_statement(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            0,
+            3,
+            libc::SYS_kill as u32,
+        ),
+        filter_statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 16),
+        filter_statement(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, 0, 1, 1 << 31),
         filter_statement(
             libc::BPF_RET | libc::BPF_K,
             0,

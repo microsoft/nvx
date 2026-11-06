@@ -5,17 +5,18 @@ use std::io::{self, Write};
 use super::*;
 
 pub(crate) use super::entry::tests::Simulation;
+pub(crate) use super::entry::tests::seed_inheritable_and_ambient;
 pub(crate) use super::fd::tests::{create_fifo, set_descriptor_limit};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::kernel::tests::nice_of;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::port::tests::PortBackend;
-#[cfg(target_arch = "x86_64")]
-pub(crate) use super::process::tests::forbid_system_calls;
 pub(crate) use super::process::tests::{
     BEFORE_LINUX_6_16, continue_traced, deny_system_call, fork_isolated_test, has_exited,
     spawn_child_without_exit_signal, spawn_traced_child,
 };
+#[cfg(target_arch = "x86_64")]
+pub(crate) use super::process::tests::{deny_group_kill, exit_main_thread, forbid_system_calls};
 pub(crate) use super::rooted::tests::{
     exchange_paths, restrict_new_entries, thread_umask, unshare_standard_descriptors,
     with_thread_umask,
