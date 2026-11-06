@@ -523,20 +523,40 @@ needs one, and a VM that a snapshot restores takes none.
 
 `VmConfig::kernel_command_line` checks the configuration and requires `Boot`,
 then renders the root's tokens and settings, the view's tokens, and `nvx_maps`
-when an export exists, followed by `Boot.command_line` unchanged. It neither
-reads the host nor checks or rewrites caller text. A restore has no kernel
-command line from this method and fails with kind `Unsupported`.
+when an export exists, followed by accepted `Boot.command_line` text unchanged.
+It reads nothing on the host. A restore has no kernel command line from this
+method and fails with kind `Unsupported`.
 
 `VmConfig::check` checks the whole value without reading the host: it opens no
 path and checks no support of the host. It fails with an `nvx::Error` of kind
 `Unsupported` that names the first refusal: no processor or no memory; a layered
 root without an image or a scratch path, with a bound of an EROFS image or of 0,
 or with a RAM upper's cap outside 1 to 90 percent; a hostname that an activation
-record refuses; or an export that `ExportPlan::check` refuses for the guest
-targets that the root reserves. Last, it checks a boot's capture with
-`CaptureConfig::check`, below, and fails with its error. The network's policy is
-checked where it is lowered, with the guest's address. This check does not
-inspect the boot's command-line text.
+record refuses; an export that `ExportPlan::check` refuses for the guest targets
+that the root reserves; a boot's capture that `CaptureConfig::check` refuses;
+or caller boot tokens that use a reserved name. The network's policy is checked
+where it is lowered, with the guest's address.
+
+The reserved boot names are the root's `nvx_layer`, `nvx_scratch`,
+`nvx_overlay_upper`, `nvx_overlay_mode`, `nvx_scratch_journal`,
+`nvx_first_partition_bound` and `nvx_ram_upper_percent`; the view's
+`nvx_hostname` and `nvx_machine_id`; `nvx_maps`; and every name beginning
+`virtfs_`. The check reads tokens as both Linux and the guest's init read them,
+with dashes and underscores matching as Linux matches parameter names.
+Reserved names stay reserved after `--` and when init's splitting exposes them
+inside quoted text. Every other token stays caller-owned, including
+`nvx_entrypoint`, `nvx_arg` and `nvx_share`.
+
+`VmConfig::mapping_table` returns exactly the configured
+`ExportPlan::guest_table`, in its order, without reading host paths or
+revalidating the plan. Without an export it returns an empty table and the
+kernel command line omits `nvx_maps`; with an export the token counts those
+entries. The table's `HostMap` and its wire codecs are accessible through
+`nvx::protocol::maps`, and remain re-exported from `nvx::protocol`.
+
+`COMMAND_LINE_BUDGET`, in `nvx::host::config`, is the 1,024-byte x86 kernel
+command-line budget, including the terminating NUL. The legacy launch checks
+continue to use it.
 
 A `Boot` may also hold a `CaptureConfig`, what a capture of the VM adds to the
 VM's configuration, which keeps the rest, such as the NIC, the console, and the
