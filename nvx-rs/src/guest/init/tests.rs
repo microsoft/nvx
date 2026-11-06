@@ -23,12 +23,12 @@ use crate::guest::sys::{ForkResult, wait};
 
 /// Drives the unchanged helper/signal scripts through production preparation, collection and
 /// shutdown; layered boot itself is exercised by the boot tests.
-fn init(system: &mut impl System, arguments: &[CString]) {
+fn init(system: &mut impl Waiting, arguments: &[CString]) {
     let result = serve(system, arguments);
     finish(system, result);
 }
 
-fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> {
+fn serve(system: &mut impl Waiting, arguments: &[CString]) -> Result<(), String> {
     let helpers = prepare(system, arguments)?;
     let mut terminating = false;
     loop {
@@ -37,6 +37,25 @@ fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> 
             return Ok(());
         }
         terminating = system.wait_signal() == Some(Signal::SIGTERM);
+    }
+}
+
+trait Waiting: System {
+    fn wait_signal(&mut self) -> Option<Signal>;
+}
+
+impl Waiting for RealSystem {
+    fn wait_signal(&mut self) -> Option<Signal> {
+        let signals = self.signals.as_ref()?;
+        loop {
+            if let Some(event) = signals.read() {
+                return event.signal;
+            }
+            match sys::poll([Pollable::Signals(signals)], None) {
+                Ok(_) | Err(Errno::EINTR) => {}
+                Err(_) => std::thread::sleep(Duration::from_secs(1)),
+            }
+        }
     }
 }
 
@@ -51,7 +70,7 @@ enum Call {
     Adopt(i32),
     /// [`System::reap`].
     Reap,
-    /// [`System::wait_signal`].
+    /// [`Waiting::wait_signal`].
     Wait,
     /// [`System::report`] of this line.
     Report(String),
@@ -73,7 +92,7 @@ struct Fake {
     /// The answers of [`System::reap`], in order: a child that ended, or `None` when none did.
     /// Once they run out, no child ended.
     reaped: VecDeque<Option<(i32, ChildStatus)>>,
-    /// The signals that [`System::wait_signal`] returns, in order. The check fails if PID 1 waits
+    /// The signals that [`Waiting::wait_signal`] returns, in order. The check fails if PID 1 waits
     /// for another.
     signals: VecDeque<Signal>,
 }
@@ -112,15 +131,6 @@ impl System for Fake {
         Some((pid(process), status, raw))
     }
 
-    fn wait_signal(&mut self) -> Option<Signal> {
-        self.calls.push(Call::Wait);
-        Some(
-            self.signals
-                .pop_front()
-                .expect("PID 1 waits for no signal that the check sends"),
-        )
-    }
-
     fn report(&mut self, line: &[u8]) {
         self.calls
             .push(Call::Report(String::from_utf8(line.to_vec()).unwrap()));
@@ -128,6 +138,17 @@ impl System for Fake {
 
     fn shut_down(&mut self, status: u8) {
         self.calls.push(Call::ShutDown(status));
+    }
+}
+
+impl Waiting for Fake {
+    fn wait_signal(&mut self) -> Option<Signal> {
+        self.calls.push(Call::Wait);
+        Some(
+            self.signals
+                .pop_front()
+                .expect("PID 1 waits for no signal that the check sends"),
+        )
     }
 }
 
@@ -261,6 +282,16 @@ impl System for Subreaper {
         Some(child)
     }
 
+    fn report(&mut self, line: &[u8]) {
+        self.reports.push_str(std::str::from_utf8(line).unwrap());
+    }
+
+    fn shut_down(&mut self, status: u8) {
+        self.status = Some(status);
+    }
+}
+
+impl Waiting for Subreaper {
     fn wait_signal(&mut self) -> Option<Signal> {
         if let Some(before_wait) = self.before_wait.take() {
             before_wait();
@@ -268,14 +299,6 @@ impl System for Subreaper {
         let signal = self.real.wait_signal();
         self.signals.extend(signal);
         signal
-    }
-
-    fn report(&mut self, line: &[u8]) {
-        self.reports.push_str(std::str::from_utf8(line).unwrap());
-    }
-
-    fn shut_down(&mut self, status: u8) {
-        self.status = Some(status);
     }
 }
 
@@ -312,6 +335,16 @@ impl System for Observer {
         self.real.reap()
     }
 
+    fn report(&mut self, line: &[u8]) {
+        self.reports.push_str(std::str::from_utf8(line).unwrap());
+    }
+
+    fn shut_down(&mut self, status: u8) {
+        self.status = Some(status);
+    }
+}
+
+impl Waiting for Observer {
     fn wait_signal(&mut self) -> Option<Signal> {
         let processes = std::iter::once(sys::current_process()).chain(self.helpers);
         self.observed = processes
@@ -322,14 +355,6 @@ impl System for Observer {
             })
             .collect();
         Some(Signal::SIGTERM)
-    }
-
-    fn report(&mut self, line: &[u8]) {
-        self.reports.push_str(std::str::from_utf8(line).unwrap());
-    }
-
-    fn shut_down(&mut self, status: u8) {
-        self.status = Some(status);
     }
 }
 
