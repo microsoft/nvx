@@ -180,8 +180,9 @@ impl VmConfig {
     /// empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL; and an export that
     /// [`ExportPlan::check`] refuses for the root, whose error is the source.
     ///
-    /// The NIC's address is checked when it is built. The network's policy and the boot's command
-    /// line are checked where they are lowered, with the guest's address and NVX's own tokens.
+    /// The NIC's address is checked when it is built, and the network's policy where it is
+    /// lowered, with the guest's address. This check does not inspect [`Boot::command_line`],
+    /// which [`kernel_command_line`](Self::kernel_command_line) appends unchanged.
     pub fn check(&self) -> Result<()> {
         if self.processors == 0 {
             return Err(Error::unsupported("a VM needs at least one processor"));
