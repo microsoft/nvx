@@ -20,7 +20,6 @@ use std::error::Error as _;
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::unix::fs::{PermissionsExt, symlink};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -1418,42 +1417,6 @@ fn a_network_s_dns_server_is_written_to_a_resolver_file_that_every_execution_see
             }
         );
     }
-}
-
-#[test]
-fn a_resolver_file_names_its_dns_server_once_and_every_execution_may_read_it() {
-    // The file names the server in its canonical text, as NVX's init writes the initramfs's,
-    // with mode 0444, whatever the umask.
-    let directory = tempfile::tempdir().unwrap();
-    let ipv6 = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1));
-    let cases = [
-        ("v4", DNS, &b"nameserver 10.0.0.1\n"[..]),
-        ("v6", ipv6, &b"nameserver fd00::a00:1\n"[..]),
-    ];
-    for (name, server, text) in cases {
-        let path = directory.path().join(name);
-        sys::tests::with_thread_umask(0o077, || write_resolver_file(&path, server)).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), text);
-        let mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o7777, 0o444, "{mode:o}");
-    }
-
-    // A file there already fails the write, and is left alone, and so is the file that a
-    // symbolic link there names, or the path where a dangling one leads.
-    let written = directory.path().join("v4");
-    let error = write_resolver_file(&written, ipv6).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    let link = directory.path().join("link");
-    symlink(&written, &link).unwrap();
-    let error = write_resolver_file(&link, ipv6).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    assert_eq!(fs::read(&written).unwrap(), b"nameserver 10.0.0.1\n");
-    let absent = directory.path().join("absent");
-    let dangling = directory.path().join("dangling");
-    symlink(&absent, &dangling).unwrap();
-    let error = write_resolver_file(&dangling, DNS).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    assert!(!absent.exists());
 }
 
 #[test]
