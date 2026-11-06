@@ -917,9 +917,8 @@ then gives ten seconds to exit, leaves the line with which OpenVMM reported its
 fatal error in its log, which the failure's message keeps, and whose stable
 code, if it says that the host cannot present the template's CPU profile, TSC,
 or LAPIC timer, or that OpenVMM cannot bind the port of a forward of the clone's
-network, `E_PORT_FORWARD_BIND`, attributes the failure to the host, as the text
-of the error that names such a forward does from an OpenVMM that predates that
-code. The message then keeps the cause of the error that names the forward.
+network, `E_PORT_FORWARD_BIND`, attributes the failure to the host. The message
+then keeps the cause of the error that names the forward.
 
 From the launch on, a failure ends the clone's VMM through its verified
 identity, and the sandbox keeps the clone's progress log, `clone-progress.log`,

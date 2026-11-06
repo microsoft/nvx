@@ -68,10 +68,9 @@ use crate::protocol::status;
 /// holds, which OpenVMM binds as it restores the clone's NIC, before its restore-ready event,
 /// failed to [bind a forward](Self::ForwardBind), and the failure's message keeps the cause of the
 /// error's chain that names the forward after the line, unless the line names the forward itself.
-/// An OpenVMM that predates that code names the forward by the text of that cause alone, which
-/// the launch reads as it reads the code. Any other code, such as one of the snapshot's time
-/// contract, keeps what the host saw, since it does not tell a defect of the generation from one
-/// of this host's OpenVMM, and the failure's message keeps the line.
+/// Any other code, such as one of the snapshot's time contract, keeps what the host saw, since it
+/// does not tell a defect of the generation from one of this host's OpenVMM, and the failure's
+/// message keeps the line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -904,12 +903,6 @@ const INCOMPATIBLE_HOST_CODES: [&str; 13] = [
 /// and its port, and so the line that leads the fatal error.
 pub(super) const FORWARD_BIND_CODE: &str = "E_PORT_FORWARD_BIND";
 
-/// The text with which a cause of OpenVMM's fatal error names a forward of a clone's network whose
-/// port of host loopback OpenVMM cannot bind as it restores the clone's NIC: the forward's
-/// protocol, `Tcp` or `Udp`, its address, and its port follow, then `)`, as an OpenVMM that
-/// predates [`FORWARD_BIND_CODE`] spells the error, without a code.
-pub(super) const FORWARD_BIND_TEXT: &str = "failed to create socket for port forward (";
-
 /// Returns the code in brackets with which `text` starts, as OpenVMM leads an error, and the line
 /// of its fatal error, with the error's stable code, such as `E_TSC_RATE_TOLERANCE` of
 /// `[E_TSC_RATE_TOLERANCE] the destination's TSC rate`, or none if `text` starts with none.
@@ -924,16 +917,12 @@ pub(super) fn leading_code(text: &str) -> Option<&str> {
 /// of the VMM's log, as [the attribution of evidence](Evidence#attribution) describes:
 /// [`Evidence::IncompatibleHost`] for an error whose time ABI code says that the host cannot
 /// present the template's CPU or time, [`Evidence::ForwardBind`] for one whose code,
-/// [`FORWARD_BIND_CODE`], says that OpenVMM cannot bind a forward, or, from an OpenVMM that
-/// predates the code, that names one by its text, [`FORWARD_BIND_TEXT`], and none for any other.
+/// [`FORWARD_BIND_CODE`], says that OpenVMM cannot bind a forward, and none for any other.
 pub(super) fn fatal_evidence(line: &str) -> Option<Evidence> {
-    let reported = line.strip_prefix(FATAL_PREFIX)?;
-    match leading_code(reported) {
-        Some(code) if INCOMPATIBLE_HOST_CODES.contains(&code) => Some(Evidence::IncompatibleHost),
-        Some(FORWARD_BIND_CODE) => Some(Evidence::ForwardBind),
-        _ => reported
-            .contains(FORWARD_BIND_TEXT)
-            .then_some(Evidence::ForwardBind),
+    match leading_code(line.strip_prefix(FATAL_PREFIX)?)? {
+        code if INCOMPATIBLE_HOST_CODES.contains(&code) => Some(Evidence::IncompatibleHost),
+        FORWARD_BIND_CODE => Some(Evidence::ForwardBind),
+        _ => None,
     }
 }
 

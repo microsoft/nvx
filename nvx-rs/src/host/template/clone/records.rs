@@ -982,9 +982,7 @@ fn read_private(path: &Path, description: &str, limit: u64) -> Result<Option<Vec
 /// too, which names the forward, follows the line, after `: `, cut to [`MAX_FATAL_CHARS`] too,
 /// without the indentation and the number with which the chain lists it, and without the code. A
 /// line that is the forward's own error names the forward itself, and its chain holds no such
-/// cause, so it stays alone. From an OpenVMM that predates the code, the cause that names the
-/// forward by its text, [`failure::FORWARD_BIND_TEXT`], follows a line that does not name it, in
-/// the same way.
+/// cause, so it stays alone.
 fn read_fatal(path: &Path) -> Option<String> {
     let mut log = open_regular(path).ok()?;
     let start = last_line_start(&mut log, failure::FATAL_PREFIX.as_bytes()).ok()??;
@@ -1003,12 +1001,8 @@ fn read_fatal(path: &Path) -> Option<String> {
         lines
             .map(cause)
             .find_map(|named| named.strip_prefix(tag.as_str()))
-    } else if fatal.contains(failure::FORWARD_BIND_TEXT) {
-        None
     } else {
-        lines
-            .map(cause)
-            .find(|named| named.starts_with(failure::FORWARD_BIND_TEXT))
+        None
     };
     if let Some(forward) = forward {
         fatal.push_str(": ");

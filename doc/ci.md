@@ -279,10 +279,10 @@ admits, which must receive no other request, and serve the host through the
 forward only when its policy has one. Before the guest runs, OpenVMM must
 refuse a restore of the template that keeps its policy but passes another or
 explicit host loopback, a new address, a proxy that is not the gateway, a
-forward whose host port another socket holds, the option on a platform
-snapshot captured with plain deny-all egress, which leaves host loopback
-allowed, and the option on a cold boot, and no restore may change the
-template.
+forward whose host port another socket holds, with a fatal error that leads
+with the stable code `E_PORT_FORWARD_BIND`, the option on a platform snapshot
+captured with plain deny-all egress, which leaves host loopback allowed, and
+the option on a cold boot, and no restore may change the template.
 The `untiered-network-policy` scenario covers a NIC template without a tier, a
 snapshot without sandbox blocks, as the non-sandbox mode captures one, whose
 NIC was captured with the complete deny-all policy. It restores the template
