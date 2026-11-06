@@ -1,4 +1,4 @@
-//! The kernel's mount table, and the mounts in it that keep a template's guest from capturing.
+//! The devices and mount checks of a platform snapshot.
 //!
 //! Each line of `/proc/self/mountinfo` describes one mount with fields separated by spaces: its
 //! ID, its parent's ID, the device number of its file system, `MAJ:MIN`, the root of the mount
@@ -13,8 +13,23 @@ use std::io;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
-use super::{Devices, System};
+use super::activation::{CaptureCause, CaptureStage, System};
+use super::time::PreCaptureError;
 use crate::guest::parse::parse_decimal;
+
+/// The most bytes of the caller's mount table that capture accepts: 1 MiB.
+pub const MOUNT_TABLE_LIMIT: usize = 1 << 20;
+
+/// The devices from which a platform capture must find nothing mounted.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Devices {
+    /// The distro device's MMIO base, including all of its partitions.
+    pub distro: u64,
+    /// The scratch device's MMIO base.
+    pub scratch: u64,
+    /// The host filesystem device's virtio-fs tag.
+    pub filesystem_tag: String,
+}
 
 /// The file system type of an overlay, as the mount table shows it.
 const OVERLAY: &[u8] = b"overlay";
@@ -194,23 +209,17 @@ impl fmt::Display for Mounted {
     }
 }
 
-/// Returns the first mount of the mount table `table` that is from `devices` or an overlay, bind
-/// mounts included, or `None` if there is none.
+/// Returns the first mount from the named devices or an overlay, bind mounts included.
 ///
-/// A mount is from the distro device or the scratch device when its file system's device, which
-/// `system` finds in sysfs by its number, is below the sysfs directory of the device's MMIO
-/// window, where the kernel creates the device's block device and partitions. A mount is from the
-/// filesystem tag when its file system is virtio-fs and its source is the tag, and from an overlay
-/// when its file system is one. A line that is not of the kernel's form, or a file system on a
-/// block device that sysfs does not show, fails the check, which never passes a mount that it
-/// cannot tell apart.
+/// Device numbers are resolved through sysfs; malformed lines and unresolved block devices
+/// fail closed rather than passing a mount that cannot be classified.
 pub(super) fn first_blocking(
     system: &mut dyn System,
     devices: &Devices,
     table: &[u8],
 ) -> io::Result<Option<Mounted>> {
-    let distro = system.windows(devices.distro.mmio)?;
-    let scratch = system.windows(devices.scratch.mmio)?;
+    let distro = system.windows(devices.distro)?;
+    let scratch = system.windows(devices.scratch)?;
     let tag = devices.filesystem_tag.as_bytes();
     for (index, text) in table.split(|&byte| byte == b'\n').enumerate() {
         if text.is_empty() {
@@ -248,6 +257,25 @@ pub(super) fn first_blocking(
         }
     }
     Ok(None)
+}
+
+/// The existing preparation's stage and cause, and whether it owns suppression to undo.
+pub(crate) type PreparationFailure = (CaptureStage, CaptureCause, bool);
+
+/// Classifies preparation without changing its suppression ownership.
+pub(super) fn preparation_failure(error: PreCaptureError) -> PreparationFailure {
+    let suppressed = error.holds_suppression();
+    let (stage, cause) = match error {
+        PreCaptureError::BootChecks(error) => (CaptureStage::BootChecks, CaptureCause::Time(error)),
+        PreCaptureError::CaptureChecks(error) | PreCaptureError::PortRelease { error, .. } => {
+            (CaptureStage::CaptureChecks, CaptureCause::Time(error))
+        }
+        PreCaptureError::Pending => (CaptureStage::Suppression, CaptureCause::Pending),
+        PreCaptureError::Suppression(error) | PreCaptureError::Unrestored(error) => {
+            (CaptureStage::Suppression, CaptureCause::Io(error.into()))
+        }
+    };
+    (stage, cause, suppressed)
 }
 
 #[cfg(test)]
