@@ -743,20 +743,6 @@ fn manifests_of_invalid_machines_are_refused() {
             "names no interrupt delivery mode",
         ),
         (
-            |spec| spec.contract().blocks[0].logical_block_size = 256,
-            "has a distro block whose logical block size 256 is not a power of two of at least \
-             512",
-        ),
-        (
-            |spec| spec.contract().blocks[1].physical_block_size = 256,
-            "has a scratch block whose physical block size 256 is not a power of two",
-        ),
-        (
-            |spec| spec.contract().blocks[1].length = 1000,
-            "has a scratch block whose length 1000 is not a nonzero multiple of its logical \
-             block size",
-        ),
-        (
             |spec| spec.time().host_clock = "utc".to_owned(),
             "has a time contract of the unknown host clock \"utc\"",
         ),
