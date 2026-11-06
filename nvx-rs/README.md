@@ -156,6 +156,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::clone`](#nvxguestclone) | x86_64: the preparation of a template's guest for a capture, and the repair and activation of each clone |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 | [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
+| [`nvx::guest::view`](#nvxguestview) | The VM-wide hostname, machine ID, and single-server resolver, whose binds the layered root owns |
 | [`nvx::guest::gpt`](#nvxguestgpt) | `read_disk`: the partition table of a GPT disk, read and checked through its block device |
 
 GPT lower layers use `noload,errors=remount-ro`: the kernel neither loads nor
@@ -1973,7 +1974,7 @@ refused, and dropping the root unmounts nothing, while descriptors opened before
 the switch, such as a `TargetRoot` and a `SourceRoot`, still map. A move that
 fails leaves the root where it was.
 
-`Root::teardown`: the shares and mappings in reverse order, a runtime mount whose
+`Root::teardown`: the view's binds, then the shares and mappings in reverse order, a runtime mount whose
 attachment failed and which could not be detached, then the mounts of an
 aggregate, of the export, and of the runtime, the later first, the overlay,
 the layers from the top down, and the upper, with every failed sync or unmount
@@ -1986,6 +1987,25 @@ Each failure is a typed `Error`, or a `SwitchError` for the switch. The
 operations collect no child's status, change the caller's root only by the
 switch and never its credentials, start no async runtime, and never power the VM
 off.
+
+### `nvx::guest::view`
+
+Hidden, unstable internal reference code of the guest's space, like `root`.
+`apply(&mut Root, &activation::View, dns)` sets the current UTS namespace's
+hostname from the view's bytes. Image mode leaves `/etc/machine-id` untouched;
+generated mode writes a new UUID at `MACHINE_ID_FILE` in the runtime directory
+and binds it read-only over the image's ID. Optional DNS writes one server in
+`RESOLVER_FILE` and binds it read-only over `/etc/resolv.conf`. The existing
+`entry::MachineId` and hostname constants, and activation's file constants,
+remain available through re-exports.
+
+The root owns every bind, including an attachment left by a failed call.
+Teardown before the switch removes them; after the switch teardown refuses
+and drop unmounts nothing. A view is attempted once per root, before its
+switch. Refusals return the crate's `Error` with kind `Unsupported`, and
+system failures with kind `Io`; an error does not restore the old hostname
+or remove generated files. The activation record's hostname limit and
+machine-ID modes are unchanged.
 
 ### `nvx::guest::gpt`
 
