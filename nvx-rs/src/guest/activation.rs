@@ -273,7 +273,6 @@
 //! writes the machine ID's and the resolver's files in the runtime directory, whose binds over
 //! the root's `/etc/machine-id` and `/etc/resolv.conf` need Linux 6.8 or later.
 
-mod repair;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -293,9 +292,6 @@ use super::time::{
     CaptureOutcome, CaptureRequest, PreCaptureError, Restore, ScratchPolicy, TimeAbi, TimeError,
 };
 
-pub use self::repair::{
-    RangeFault, Repair, RepairCause, RepairError, RepairProgress, RepairStage, Repaired, repair,
-};
 pub use self::state::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
     ActivationState, MACHINE_ID_FILE, RESOLVER_FILE,
@@ -304,7 +300,11 @@ pub use self::state::{
 pub use self::state::{
     Applied, AppliedTeardownError, ApplyError, NetworkError, RootTemplate, apply,
 };
+pub use super::snapshot::repair::{Repair, repair};
 pub use super::snapshot::{MOUNT_TABLE_LIMIT, Mounted, Origin};
+pub use super::snapshot::{
+    RangeFault, RepairCause, RepairError, RepairProgress, RepairStage, Repaired,
+};
 
 /// The mount table of the calling process's mount namespace, below procfs.
 const MOUNT_TABLE: &str = "self/mountinfo";
@@ -651,6 +651,8 @@ pub enum CaptureStage {
     GenerationId,
     /// Requesting the capture, and repairing the time of a restore.
     Capture,
+    /// Repairing the clone's resources, entropy and acknowledgement after a restore.
+    Repair,
     /// Restoring the stall detectors' settings, as the barrier releases them.
     Release,
 }
@@ -666,6 +668,7 @@ impl fmt::Display for CaptureStage {
             Self::Suppression => "suppress the stall detectors",
             Self::GenerationId => "read the VM generation ID",
             Self::Capture => "request the capture",
+            Self::Repair => "repair the restored clone",
             Self::Release => "restore the stall detectors",
         })
     }
@@ -689,6 +692,8 @@ pub enum CaptureCause {
     /// A call of the time ABI failed: a violation that a strict or report-only call reports, or a
     /// failure of its ports, its time state, or its entropy file.
     Time(TimeError),
+    /// The inline repair of a restored clone failed, with its existing stage and progress.
+    Repair(RepairError),
 }
 
 impl fmt::Display for CaptureCause {
@@ -698,6 +703,7 @@ impl fmt::Display for CaptureCause {
             Self::Mounted(mounted) => mounted.fmt(formatter),
             Self::Pending => formatter.write_str("a capture is already pending"),
             Self::Time(error) => error.fmt(formatter),
+            Self::Repair(error) => error.fmt(formatter),
         }
     }
 }
@@ -747,6 +753,7 @@ impl std::error::Error for CaptureError {
         match &self.cause {
             CaptureCause::Io(error) => Some(error),
             CaptureCause::Time(error) => Some(error),
+            CaptureCause::Repair(error) => Some(error),
             CaptureCause::Mounted(_) | CaptureCause::Pending => None,
         }
     }
@@ -803,7 +810,7 @@ pub(super) fn capture_system(deadline: Option<Instant>) -> Box<dyn System> {
 
 /// Returns the time ABI of the capture and of the repair: in strict mode, unless the kernel
 /// command line makes it report-only.
-fn live_abi() -> TimeAbi {
+pub(super) fn live_abi() -> TimeAbi {
     TimeAbi::new().strict()
 }
 
@@ -880,7 +887,7 @@ impl System for LiveSystem {
 
 /// Returns `error`, of an operation on `path`, as an error of the same kind whose text names the
 /// path, such as `/proc/self/mountinfo: Permission denied`.
-fn at(path: &Path, error: &io::Error) -> io::Error {
+pub(super) fn at(path: &Path, error: &io::Error) -> io::Error {
     io::Error::new(
         error.kind(),
         format!("{}: {}", path.display(), sys::describe(error)),

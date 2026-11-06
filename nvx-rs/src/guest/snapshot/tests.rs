@@ -141,6 +141,39 @@ fn capture_devices() -> Devices {
     }
 }
 
+/// Runs the capture fixture on the existing live repair seam when no repair can reach it.
+fn capture_with(
+    system: &mut dyn System,
+    devices: &Devices,
+    deadline: Instant,
+) -> Result<Captured, CaptureFailure> {
+    super::capture_with(system, devices, deadline, repair::live_system())
+}
+
+/// Returns a capture's inline repair result on the repair tests' existing kernel/time seam.
+pub(super) fn capture_restored(
+    restore: Restore,
+    repair_system: Box<dyn repair::RepairSystem>,
+) -> Result<Captured, CaptureFailure> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut system = CaptureSystem::new(deadline);
+    system.outcome = Some(Ok(CaptureOutcome::Restored(restore)));
+    let result = super::capture_with(&mut system, &capture_devices(), deadline, repair_system);
+    assert_eq!(
+        system.calls,
+        [
+            "mounts",
+            "window",
+            "window",
+            "prepare",
+            "generation",
+            "unbounded",
+            "request"
+        ]
+    );
+    result
+}
+
 #[test]
 fn fresh_capture_orders_the_existing_steps_and_does_not_deadline_the_request() {
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -347,7 +380,7 @@ fn a_fresh_restore_refuses_even_an_otherwise_empty_network_policy() {
 }
 
 #[test]
-fn a_pending_capture_is_not_released_and_a_restore_without_network_is_not_repaired() {
+fn a_pending_capture_is_not_released_and_an_unseeded_restore_must_end() {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut system = CaptureSystem::new(deadline);
     system.preparation = Some(Err((PreCaptureError::Pending, false)));
@@ -362,15 +395,16 @@ fn a_pending_capture_is_not_released_and_a_restore_without_network_is_not_repair
         GenerationId::from_bytes([8; GenerationId::LENGTH]),
     ))));
     let failure = capture_with(&mut system, &capture_devices(), deadline).unwrap_err();
-    assert_eq!(failure.stage, CaptureStage::Capture);
+    assert_eq!(failure.stage, CaptureStage::Repair);
     assert_eq!(
         failure.disposition,
         Disposition::MustEnd {
-            status: status::TIME_REPAIR
+            status: status::REPAIR_RESTORE
         }
     );
-    assert!(matches!(failure.cause, CaptureCause::Io(ref error)
-        if error.to_string().contains("does not repair")));
+    assert!(matches!(failure.cause, CaptureCause::Repair(ref error)
+        if matches!(error.cause(), RepairCause::NoSeed)));
+    assert_eq!(system.calls.last(), Some(&"request"));
 }
 
 #[test]

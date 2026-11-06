@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::guest::reseed::tests::take_dropped;
+use crate::guest::snapshot::{CaptureCause, CaptureFailure, CaptureStage, Captured, Disposition};
 use crate::guest::sys::Errno;
 use crate::guest::time::Violation;
 
@@ -258,6 +259,16 @@ fn repairing(restore: Restore, system: FakeSystem) -> Repair {
     Repair::with_system(restore, Box::new(system))
 }
 
+/// Runs the existing repair through the single capture call, before that call returns.
+fn captured(restore: Restore, system: impl RepairSystem + 'static) -> Repaired {
+    take_dropped();
+    let result = super::super::tests::capture_restored(restore, Box::new(system)).unwrap();
+    let Captured::Restored(repaired) = result else {
+        panic!("a restored guest must return its repaired data");
+    };
+    repaired
+}
+
 /// Returns the calls of a repair once its memory target is active: the listing of the memory
 /// blocks, whose online ones it counts, the reseed, the drop of the seed, which zeroed it before
 /// the finish, and the finish, with the acknowledgement.
@@ -314,10 +325,39 @@ fn a_clone_is_reseeded_then_acknowledged_once_and_reentry_returns_the_same_clone
 }
 
 #[test]
+fn capture_returns_the_repaired_generation_resources_and_acknowledgement_after_the_finish() {
+    let calls = Calls::default();
+    let restore = restore()
+        .with_processor_target(4)
+        .with_memory_target(&[(512 * MIB, 128 * MIB)]);
+    let started = Instant::now();
+    let repaired = captured(restore, FakeSystem::new(&calls));
+    let returned = Instant::now();
+    assert_eq!(repaired.generation_id(), RESTORED);
+    assert_eq!(repaired.cpus(), 4);
+    assert_eq!(repaired.memory(), 640 * MIB);
+    let acknowledged = repaired.acknowledged_at().unwrap();
+    assert!(started <= acknowledged && acknowledged <= returned);
+    let mut expected = vec![
+        Call::OnlineCpus,
+        Call::OnlineCpu(2),
+        Call::OnlineCpu(3),
+        Call::OnlineCpus,
+        Call::BlockSize,
+        Call::MemoryBlocks,
+    ];
+    expected.extend(activations([4]));
+    let mut finished = finishing();
+    finished[3] = Call::Finish(RestoreFinish::new().acknowledge().new_cpus(cpu_set(2..4)));
+    expected.extend(finished);
+    assert_eq!(calls.take(), expected);
+}
+
+#[test]
 fn an_ungated_restore_is_finished_without_an_acknowledgement() {
     let calls = Calls::default();
     let restore = Restore::to(RESTORED).holding(seed());
-    let repaired = repairing(restore, FakeSystem::new(&calls)).run().unwrap();
+    let repaired = captured(restore, FakeSystem::new(&calls));
     assert_eq!(repaired.acknowledged_at(), None);
     assert_eq!(
         calls.take().last(),
@@ -396,11 +436,7 @@ fn the_instant_of_the_acknowledgement_precedes_the_deferred_work_of_the_finish()
         reseeded: Arc::clone(&reseeded),
         acknowledged: Arc::clone(&acknowledged),
     };
-    let restore = restore();
-    take_dropped();
-    let repaired = Repair::with_system(restore, Box::new(system))
-        .run()
-        .unwrap();
+    let repaired = captured(restore(), system);
     let returned = Instant::now();
     let reseeded = *reseeded.get().unwrap();
     let acknowledged = *acknowledged.get().unwrap();
@@ -429,9 +465,7 @@ fn the_instant_of_the_acknowledgement_precedes_the_deferred_work_of_the_finish()
 fn expands(captured: u64, ranges: &[(u64, u64)], added: &[u64], memory: u64) {
     let calls = Calls::default();
     let system = FakeSystem::new(&calls).capturing(captured);
-    let repaired = repairing(restore().with_memory_target(ranges), system)
-        .run()
-        .unwrap();
+    let repaired = captured(restore().with_memory_target(ranges), system);
     assert_eq!(repaired.memory(), memory, "{ranges:?}");
     let mut expected = vec![Call::OnlineCpus, Call::BlockSize];
     if !ranges.is_empty() {
@@ -705,7 +739,19 @@ fn a_finish_that_never_returned_never_runs_again() {
 
 /// Returns the error with which the repair of `restore` on `system` fails.
 fn failure(restore: Restore, system: FakeSystem) -> RepairError {
-    repairing(restore, system).run().unwrap_err()
+    take_dropped();
+    let failure = super::super::tests::capture_restored(restore, Box::new(system)).unwrap_err();
+    assert_eq!(failure.stage, CaptureStage::Repair);
+    let CaptureCause::Repair(error) = failure.cause else {
+        panic!("capture must retain the existing repair error");
+    };
+    assert_eq!(
+        failure.disposition,
+        Disposition::MustEnd {
+            status: error.status()
+        }
+    );
+    error
 }
 
 #[test]
@@ -792,6 +838,13 @@ fn each_failure_class_ends_the_clone_with_a_status_of_its_own() {
     let mut classes = Vec::new();
     for (case, error, class) in cases {
         assert_eq!(error.status(), class, "{case}: {error}");
+        let failure = CaptureFailure::unrepaired(error);
+        assert_eq!(failure.stage, CaptureStage::Repair, "{case}");
+        assert_eq!(
+            failure.disposition,
+            Disposition::MustEnd { status: class },
+            "{case}"
+        );
         classes.push(class);
     }
     // The cases cover every status of the repair, and the time ABI's statuses of a strict call.
@@ -1216,7 +1269,7 @@ fn a_repair_draws_no_randomness_before_its_reseed() {
     // that the thread starts, so the test runs in a process of its own.
     if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_CLONE_REPAIR_RANDOMNESS_TEST_CHILD",
-        "guest::activation::repair::tests::a_repair_draws_no_randomness_before_its_reseed",
+        "guest::snapshot::repair::tests::a_repair_draws_no_randomness_before_its_reseed",
     ) {
         return;
     }
