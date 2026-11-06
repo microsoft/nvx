@@ -66,34 +66,55 @@ hosts, and both paths run the same builder. Its inputs are pinned:
   [`ubuntu/packages.lock.json`](../../ubuntu/packages.lock.json), which adds
   `busybox-static`, `iputils-ping`, `net-tools`, and `netcat-openbsd` with
   their library dependencies so the common `/init` works unchanged. Each entry
-  records the package's exact URL, SHA-256, version, source package, and
-  dependencies. The builder never resolves packages from a live repository.
+  records the package's exact URL, SHA-256, version, architecture, `amd64` or
+  the architecture-independent `all`, source package, and dependencies. The
+  builder never resolves packages from a live repository.
 
 The builder then:
 
-1. verifies the base archive digest and extracts it with its own extractor,
+1. refuses a work directory whose file system does not keep POSIX
+   permissions, such as a Windows drive under WSL, on which the root would
+   silently lose its modes;
+2. verifies the base archive digest and extracts it with its own extractor,
    which rejects absolute or parent-relative member paths, links that escape
    the root, writes through a linked directory, device nodes, FIFOs, sockets,
    and duplicate paths of different types;
-2. checks that `/etc/os-release` names the pinned release;
-3. verifies each supplemental `.deb` against the lock, extracts it with the
+3. checks that `/etc/os-release` names the pinned release;
+4. verifies each supplemental `.deb` against the lock, extracts it with the
    same extractor, and records it in the package database. It never runs
    maintainer scripts, and it fails when a package carries maintainer actions
-   outside a reviewed per-package list;
-4. creates `/root`, `/tmp`, `/run`, and `/nonexistent` with fixed modes,
+   outside a reviewed per-package list, which also covers Ubuntu's `python3`
+   and the packages that it adds to Ubuntu Base;
+5. byte-compiles the Python standard library, if the packages installed one,
+   as their maintainer scripts would have, into unchecked-hash bytecode that
+   records each module's path in the guest, so that a workload that cannot
+   write to the root does not recompile the modules at every start;
+6. creates `/root`, `/tmp`, `/run`, and `/nonexistent` with fixed modes,
    leaves an empty `/etc/resolv.conf` for the network bootstrap, and adds the
-   `nc`, `netcat`, `wget`, and `mdev` links;
-5. removes package caches, logs, temporary files, machine IDs, random seeds,
+   `nc`, `netcat`, `wget`, and `mdev` links, and a `python` link to `python3`
+   when the root has `python3`;
+7. removes package caches, logs, temporary files, machine IDs, random seeds,
    and SSH host keys;
-6. requires one `root` account, a `nobody` account with UID 65534 and home
+8. requires one `root` account, a `nobody` account with UID 65534 and home
    `/nonexistent`, a `nogroup` group, and usr-merged `/bin`, `/sbin`, `/lib`,
    and `/lib64` links; and
-7. installs the NVX scripts from `guest/common` and `guest/ubuntu`, and the
+9. installs the NVX scripts from `guest/common` and `guest/ubuntu`, and the
    ten Rust guest binaries from `nvx-rs`.
 
 The builder never executes a binary from the Ubuntu tree on the host. Both
 artifacts are packed with root ownership, fixed timestamps, and a stable file
 order, so a rebuild from the same inputs is byte-identical.
+
+The builder compiles Python with the interpreter that runs it, and bytecode
+fits only the Python minor version that wrote it. A root with Python therefore
+needs a final release of the root's minor version, Python 3.14 for Ubuntu
+26.04, and the builder refuses any other. It also refuses `-X no_debug_ranges`
+and `PYTHONNODEBUGRANGES`, which change the bytecode. The Docker build runs
+Debian 12's Python 3.11, so a root with Python builds natively, with
+[`build-guest --native`](../usage.md#build-guest),
+[`build-initramfs`](../usage.md#build-initramfs), or
+[`build-distro-layer`](../usage.md#build-distro-layer). The pinned lock has no
+Python, so its builds compile nothing.
 
 ## Ubuntu initramfs
 

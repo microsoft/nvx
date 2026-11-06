@@ -16199,12 +16199,16 @@ class BuildTests(unittest.TestCase):
                 patch.object(ubuntu, "_validate_ubuntu_identity"),
                 patch.object(ubuntu, "load_package_lock", return_value=()),
                 patch.object(ubuntu, "_validate_package_closure"),
+                patch.object(ubuntu, "require_posix_permissions") as permissions,
+                patch.object(ubuntu, "precompile_python") as precompile,
                 patch.object(ubuntu, "_customize_root"),
                 patch.object(ubuntu.Path, "chmod", autospec=True) as chmod,
             ):
                 self.assertEqual(ubuntu.prepare_root(work), expected_root)
 
             chmod.assert_called_once_with(expected_root, 0o755)
+            permissions.assert_called_once_with(work)
+            precompile.assert_called_once_with(expected_root)
 
     def test_ubuntu_customization_installs_busybox_wget(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -16220,6 +16224,374 @@ class BuildTests(unittest.TestCase):
                 ubuntu._customize_root(root)
 
             ensure_symlink.assert_any_call(root, "usr/bin/wget", "busybox")
+
+    def test_ubuntu_package_lock_accepts_architecture_independent_packages(self):
+        document = json.loads(UbuntuBuildConstants.PACKAGE_LOCK.read_text("utf-8"))
+        package = dict(document["packages"][0])
+        package.update(
+            name="zz-data",
+            architecture="all",
+            url=(
+                "https://archive.ubuntu.com/ubuntu/pool/main/z/zz-data/"
+                "zz-data_1_all.deb"
+            ),
+            license_path="/usr/share/doc/zz-data/copyright",
+        )
+        document["packages"].append(package)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "packages.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            packages = ubuntu.load_package_lock(path)
+            self.assertEqual(packages[-1]["name"], "zz-data")
+            self.assertEqual(packages[-1]["architecture"], "all")
+
+            package["architecture"] = "arm64"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(
+                common.ScriptError, "unsupported architecture arm64"
+            ):
+                ubuntu.load_package_lock(path)
+
+    def test_ubuntu_customization_links_python_only_when_python3_exists(self):
+        for has_python3 in (True, False):
+            with self.subTest(has_python3=has_python3):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    for relative in ("etc", "usr/bin", "usr/sbin"):
+                        (root / relative).mkdir(parents=True)
+                    if has_python3:
+                        (root / "usr" / "bin" / "python3").touch()
+                    with (
+                        patch.object(ubuntu, "_clear_directory"),
+                        patch.object(ubuntu, "_validate_accounts"),
+                        patch.object(ubuntu, "_validate_usr_merge"),
+                        patch.object(ubuntu, "_ensure_symlink") as ensure_symlink,
+                    ):
+                        ubuntu._customize_root(root)
+
+                    linked = (
+                        call(root, "usr/bin/python", "python3")
+                        in ensure_symlink.call_args_list
+                    )
+                    self.assertEqual(linked, has_python3)
+
+    @staticmethod
+    def _python_tree(root: Path, library_name: str) -> Path:
+        library = root / "usr" / "lib" / library_name
+        (library / "package").mkdir(parents=True)
+        (library / "os.py").write_text("PATH = 'os'\n", encoding="utf-8")
+        (library / "package" / "__init__.py").write_text(
+            "def value():\n    return 1\n", encoding="utf-8"
+        )
+        return library
+
+    def test_python_precompile_is_deterministic_unchecked_hash_bytecode(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        runs: list[dict[str, bytes]] = []
+        roots: list[str] = []
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                roots.append(str(root))
+                library = self._python_tree(root, name)
+                ubuntu.precompile_python(root)
+                runs.append(
+                    {
+                        path.relative_to(library).as_posix(): path.read_bytes()
+                        for path in sorted(library.rglob("*.pyc"))
+                    }
+                )
+        self.assertEqual(len(runs[0]), 2)
+        self.assertEqual(runs[0], runs[1])
+        for relative, data in runs[0].items():
+            with self.subTest(relative=relative):
+                # Bytes 4..8 are the flags: 0b01 is a hash-based file that is
+                # not checked against its source.
+                self.assertEqual(int.from_bytes(data[4:8], "little"), 0b01)
+        # The recorded source path is the one inside the guest, never the
+        # build directory.
+        os_module = runs[0][f"__pycache__/os.{sys.implementation.cache_tag}.pyc"]
+        guest_path = os.path.join(f"/usr/lib/{name}", "os.py")
+        self.assertIn(guest_path.encode(), os_module)
+        for run, root in zip(runs, roots, strict=True):
+            for data in run.values():
+                self.assertNotIn(root.encode(), data)
+
+    def _precompile_in_subprocess(
+        self, root: Path, *interpreter_flags: str, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        code = (
+            "import sys; from pathlib import Path; "
+            "from nvx_tools import ubuntu; "
+            "ubuntu.precompile_python(Path(sys.argv[1]))"
+        )
+        scripts = Path(__file__).resolve().parent
+        environment = {**os.environ, "PYTHONPATH": str(scripts), **(env or {})}
+        return subprocess.run(
+            [sys.executable, *interpreter_flags, "-c", code, str(root)],
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+    def test_python_precompile_ignores_the_build_optimization_level(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            library = self._python_tree(root, name)
+            result = self._precompile_in_subprocess(root, "-O")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            names = sorted(path.name for path in library.rglob("*.pyc"))
+        tag = sys.implementation.cache_tag
+        self.assertEqual(names, [f"__init__.{tag}.pyc", f"os.{tag}.pyc"])
+
+    def test_python_precompile_ignores_the_build_cache_prefix(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            prefix = Path(temporary) / "host-cache"
+            library = self._python_tree(root, name)
+            result = self._precompile_in_subprocess(
+                root, env={"PYTHONPYCACHEPREFIX": str(prefix)}
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(list(library.rglob("*.pyc"))), 2)
+            # The interpreter that runs this build imports its own modules
+            # under the prefix; only the root's modules, which the prefix
+            # mirrors under the root's own path, must stay out of it.
+            leaked = [
+                p
+                for p in prefix.rglob("*.pyc")
+                if Path(temporary).name in p.relative_to(prefix).parts
+            ]
+            self.assertEqual(leaked, [])
+
+    @unittest.skipIf(sys.version_info < (3, 11), "debug ranges start in Python 3.11")
+    def test_python_precompile_refuses_suppressed_debug_ranges(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        name = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        for flags, env in (
+            (("-X", "no_debug_ranges"), {}),
+            ((), {"PYTHONNODEBUGRANGES": "1"}),
+        ):
+            with (
+                self.subTest(flags=flags, env=env),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                library = self._python_tree(root, name)
+                result = self._precompile_in_subprocess(root, *flags, env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "needs the build interpreter's debug ranges", result.stderr
+                )
+                self.assertEqual(list(library.rglob("*.pyc")), [])
+
+    def test_python_precompile_needs_the_matching_interpreter(self):
+        minor = sys.version_info.minor + 1
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._python_tree(root, f"python3.{minor}")
+            with self.assertRaisesRegex(
+                common.ScriptError,
+                f"needs a final-release Python 3.{minor} build interpreter; .*"
+                f"build the Ubuntu root natively with Python 3.{minor}$",
+            ):
+                ubuntu.precompile_python(root)
+
+    def test_python_precompile_ignores_a_root_without_python(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ubuntu.precompile_python(root)
+            (root / "usr" / "lib").mkdir(parents=True)
+            ubuntu.precompile_python(root)
+            self.assertEqual(sorted(root.rglob("*.pyc")), [])
+
+    @staticmethod
+    def _ubuntu_deb(
+        directory: Path,
+        name: str,
+        actions: Sequence[str],
+        files: Mapping[str, bytes],
+    ) -> tuple[ubuntu.UbuntuLockedPackage, Path]:
+        def tar(members: Mapping[str, tuple[bytes, int]]) -> bytes:
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w") as archive:
+                for member, (content, mode) in sorted(members.items()):
+                    info = tarfile.TarInfo(f"./{member}")
+                    info.size = len(content)
+                    info.mode = mode
+                    archive.addfile(info, io.BytesIO(content))
+            return buffer.getvalue()
+
+        control = f"Package: {name}\nVersion: 1\nArchitecture: amd64\n".encode()
+        control_files = {"control": (control, 0o644)} | {
+            action: (f"# {name} {action}\n".encode(), 0o755) for action in actions
+        }
+        data = {path: (content, 0o644) for path, content in files.items()}
+        deb = bytearray(b"!<arch>\n")
+        for member, content in (
+            ("debian-binary", b"2.0\n"),
+            ("control.tar", tar(control_files)),
+            ("data.tar", tar(data)),
+        ):
+            deb += f"{member:<16}{0:<12}{0:<6}{0:<6}{100644:<8}{len(content):<10}`\n".encode()
+            deb += content + b"\n" * (len(content) % 2)
+        path = directory / f"{name}_1_amd64.deb"
+        path.write_bytes(deb)
+        package: ubuntu.UbuntuLockedPackage = {
+            "name": name,
+            "source_name": name,
+            "source_version": "1",
+            "version": "1",
+            "architecture": "amd64",
+            "url": f"https://archive.ubuntu.com/ubuntu/pool/main/p/{name}/{path.name}",
+            "sha256": hashlib.sha256(deb).hexdigest(),
+            "license_path": f"/usr/share/doc/{name}/copyright",
+            "required_by": ["python3"],
+            "depends": "",
+            "pre_depends": "",
+            "component": "main",
+            "suite": UbuntuBuildConstants.CODENAME,
+        }
+        return package, path
+
+    def test_ubuntu_prepare_root_byte_compiles_the_python_that_it_installs(self):
+        if sys.version_info.releaselevel != "final":
+            self.skipTest("byte-compiling needs a final-release interpreter")
+        library = f"usr/lib/python{sys.version_info.major}.{sys.version_info.minor}"
+        # Ubuntu's python3 and the packages that it adds to Ubuntu Base, with
+        # the maintainer actions of their Ubuntu 26.04 builds. They install the
+        # library of the interpreter that runs this test, the only one that
+        # precompile_python can compile.
+        packages: dict[str, tuple[tuple[str, ...], dict[str, bytes]]] = {
+            "libexpat1": (("triggers",), {}),
+            "libffi8": (("triggers",), {}),
+            "libpython3-stdlib": ((), {}),
+            "libpython3.14-minimal": (
+                ("postinst", "postrm", "prerm"),
+                {f"{library}/os.py": b"PATH = 'os'\n"},
+            ),
+            "libpython3.14-stdlib": (
+                ("prerm",),
+                {f"{library}/json/__init__.py": b"def loads():\n    return 1\n"},
+            ),
+            "libreadline8t64": (("postrm", "preinst", "triggers"), {}),
+            "libsqlite3-0": (("triggers",), {}),
+            "media-types": ((), {}),
+            "netbase": (("postinst", "postrm"), {}),
+            "python3": (("postinst", "postrm", "preinst", "prerm"), {}),
+            "python3-minimal": (("postinst", "prerm"), {}),
+            "python3.14": (("postinst", "prerm"), {}),
+            "python3.14-minimal": (
+                ("postinst", "postrm", "preinst", "prerm"),
+                {"usr/bin/python3.14": b""},
+            ),
+            "readline-common": (("postinst", "postrm"), {}),
+            "tzdata": (("postinst", "postrm"), {}),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            cache = temporary_root / "cache"
+            downloads = (
+                cache
+                / BuildConstants.DOWNLOAD_DIRECTORY_NAME
+                / UbuntuBuildConstants.PACKAGE_CACHE_DIRECTORY_NAME
+            )
+            downloads.mkdir(parents=True)
+            lock = tuple(
+                self._ubuntu_deb(downloads, name, actions, files)[0]
+                for name, (actions, files) in sorted(packages.items())
+            )
+
+            def extract(
+                archive: Path,
+                destination: Path,
+                *,
+                label: str,
+            ) -> None:
+                status = destination / "var" / "lib" / "dpkg" / "status"
+                status.parent.mkdir(parents=True)
+                status.write_text("", encoding="utf-8")
+
+            with (
+                patch.object(ubuntu, "cache_root", return_value=cache),
+                patch.object(ubuntu, "download_verified"),
+                patch.object(ubuntu, "safe_extract_tar", side_effect=extract),
+                patch.object(ubuntu, "_validate_ubuntu_identity"),
+                patch.object(ubuntu, "load_package_lock", return_value=lock),
+                patch.object(ubuntu, "_customize_root"),
+            ):
+                root = ubuntu.prepare_root(temporary_root / "work")
+
+            tag = sys.implementation.cache_tag
+            self.assertEqual(
+                sorted(
+                    path.relative_to(root / library).as_posix()
+                    for path in (root / library).rglob("*.pyc")
+                ),
+                [f"__pycache__/os.{tag}.pyc", f"json/__pycache__/__init__.{tag}.pyc"],
+            )
+            info = root / "var" / "lib" / "dpkg" / "info"
+            self.assertTrue((info / "python3.14-minimal.postinst").is_file())
+            installed = [
+                record["Package"]
+                for record in ubuntu.parse_deb822(
+                    (info.parent / "status").read_text(encoding="utf-8")
+                )
+            ]
+            self.assertEqual(installed, sorted(packages))
+
+    def test_ubuntu_install_refuses_unreviewed_python_maintainer_actions(self):
+        reviewed = UbuntuBuildConstants.KNOWN_PACKAGE_CONTROL_ACTIONS[
+            "python3.14-minimal"
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            root = directory / "root"
+            status = root / "var" / "lib" / "dpkg" / "status"
+            status.parent.mkdir(parents=True)
+            status.write_text("", encoding="utf-8")
+            for actions, difference in (
+                ((*sorted(reviewed), "triggers"), "triggers"),
+                (sorted(reviewed - {"preinst"}), "preinst"),
+            ):
+                with self.subTest(difference=difference):
+                    package, path = self._ubuntu_deb(
+                        directory, "python3.14-minimal", actions, {}
+                    )
+                    with self.assertRaisesRegex(
+                        common.ScriptError,
+                        f"has unsupported maintainer actions: {difference}$",
+                    ):
+                        ubuntu._install_deb(root, package, path)
+
+    def test_posix_permission_check_follows_the_filesystem(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            with patch.object(ubuntu.sys, "platform", "win32"):
+                ubuntu.require_posix_permissions(work / "never-created")
+
+            with (
+                patch.object(ubuntu.sys, "platform", "linux"),
+                patch.object(ubuntu.stat, "S_IMODE", return_value=0o777),
+                self.assertRaisesRegex(
+                    common.ScriptError, "does not preserve POSIX permissions"
+                ),
+            ):
+                ubuntu.require_posix_permissions(work)
+            self.assertEqual(list(work.iterdir()), [])
+
+            if os.name == "posix":
+                with patch.object(ubuntu.sys, "platform", "linux"):
+                    ubuntu.require_posix_permissions(work)
 
     def test_distro_layer_refuses_existing_output_without_replace(self):
         with tempfile.TemporaryDirectory() as temporary:

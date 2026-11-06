@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import compileall
 import gzip
 import hashlib
 import io
@@ -9,11 +10,14 @@ import json
 import lzma
 import os
 import posixpath
+import py_compile
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
+import tempfile
 import uuid
 from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
@@ -182,7 +186,7 @@ def load_package_lock(
                 "pre_depends": str(package_document.get("pre_depends", "")),
             },
         )
-        if package["architecture"] != UbuntuBuildConstants.ARCHITECTURE:
+        if package["architecture"] not in (UbuntuBuildConstants.ARCHITECTURE, "all"):
             raise ScriptError(
                 f"{path} package {name} has unsupported architecture "
                 f"{package['architecture']}"
@@ -744,6 +748,8 @@ def _customize_root(root: Path) -> None:
     _ensure_symlink(root, "usr/bin/netcat", "nc.openbsd")
     _ensure_symlink(root, "usr/bin/wget", "busybox")
     _ensure_symlink(root, "usr/sbin/mdev", "../bin/busybox")
+    if path_exists(root / "usr" / "bin" / "python3"):
+        _ensure_symlink(root, "usr/bin/python", "python3")
     _validate_accounts(root)
     _validate_usr_merge(root)
 
@@ -769,8 +775,106 @@ def _validate_ubuntu_identity(root: Path) -> None:
         )
 
 
+def _debug_ranges_suppressed() -> bool:
+    """Whether -X no_debug_ranges or PYTHONNODEBUGRANGES is in effect.
+
+    Without debug ranges the compiler leaves the column positions out of the
+    code objects that it writes, so the bytecode of a source changes with the
+    build machine's setting.
+    """
+    if sys.version_info < (3, 11):
+        return False
+    probe = compile("value", "<debug-ranges>", "eval")
+    return all(position[2] is None for position in probe.co_positions())
+
+
+def precompile_python(root: Path) -> None:
+    """Byte-compiles the Python standard library of the root, if it has one.
+
+    The build never runs maintainer scripts, so the packages' own byte-compilation
+    does not happen. Workloads run unprivileged on a root they cannot write to,
+    so without these files every interpreter start recompiles the modules it
+    imports. Unchecked-hash files carry no timestamp and the recorded source
+    path is the path inside the guest rather than the build directory, which
+    keeps the output deterministic. Bytecode only fits the exact minor version
+    of the interpreter that wrote it, so the build interpreter must match. The
+    Docker build runs Debian's Python rather than Ubuntu's, so a root with
+    Python builds natively.
+    """
+    libraries = sorted(
+        path
+        for path in (root / "usr" / "lib").glob("python3.[0-9]*")
+        if path.is_dir() and not path.is_symlink()
+    )
+    for library in libraries:
+        major, minor = (int(part) for part in library.name[len("python") :].split("."))
+        if (
+            sys.version_info[:2] != (major, minor)
+            or sys.version_info.releaselevel != "final"
+        ):
+            raise ScriptError(
+                f"byte-compiling {library.name} needs a final-release Python "
+                f"{major}.{minor} build interpreter; this is "
+                f"{sys.version.split()[0]}, so build the Ubuntu root natively "
+                f"with Python {major}.{minor}"
+            )
+        if _debug_ranges_suppressed():
+            raise ScriptError(
+                f"byte-compiling {library.name} needs the build interpreter's "
+                "debug ranges; unset PYTHONNODEBUGRANGES and drop "
+                "-X no_debug_ranges"
+            )
+        # compileall follows the build interpreter's settings unless told
+        # otherwise: -O would write only *.opt-1.pyc files, which the guest's
+        # interpreter does not read, and a cache prefix would send the bytecode
+        # to a host directory instead of the root. Debug ranges cannot be
+        # restored in process, so the check above refuses their suppression.
+        cache_prefix = sys.pycache_prefix
+        sys.pycache_prefix = None
+        try:
+            compiled = compileall.compile_dir(
+                str(library),
+                ddir=f"/usr/lib/{library.name}",
+                quiet=1,
+                force=True,
+                workers=1,
+                optimize=0,
+                invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+            )
+        finally:
+            sys.pycache_prefix = cache_prefix
+        if not compiled:
+            raise ScriptError(f"failed to byte-compile {library.name}")
+        for path in (*library.rglob("__pycache__"), *library.rglob("*.pyc")):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+
+
+def require_posix_permissions(work: Path) -> None:
+    """Rejects a work directory whose filesystem discards permission bits.
+
+    The Ubuntu root is assembled with exact modes, and a filesystem that keeps
+    none of them (a Windows drive seen from WSL) would silently produce a root
+    with the wrong ones. Native Windows has no POSIX modes and cannot run this
+    build, so the check is skipped there.
+    """
+    if sys.platform == "win32":
+        return
+    with tempfile.TemporaryDirectory(prefix="nvx-mode-check-", dir=work) as temporary:
+        probe = Path(temporary) / "probe"
+        probe.write_bytes(b"")
+        for mode in (0o700, 0o600):
+            probe.chmod(mode)
+            if stat.S_IMODE(probe.stat().st_mode) != mode:
+                raise ScriptError(
+                    f"Ubuntu work directory {work} does not preserve POSIX "
+                    "permissions; use a native Linux filesystem (for example "
+                    "/tmp under WSL)"
+                )
+
+
 def prepare_root(work: Path) -> Path:
     work.mkdir(parents=True, exist_ok=True)
+    require_posix_permissions(work)
     downloads = cache_root() / BuildConstants.DOWNLOAD_DIRECTORY_NAME
     downloads.mkdir(parents=True, exist_ok=True)
     archive = downloads / UbuntuBuildConstants.BASE_ARCHIVE_NAME
@@ -811,6 +915,7 @@ def prepare_root(work: Path) -> Path:
         package_path = package_downloads / filename
         download_verified(package["url"], package_path, package["sha256"])
         _install_deb(root, package, package_path)
+    precompile_python(root)
     _customize_root(root)
     return root
 
