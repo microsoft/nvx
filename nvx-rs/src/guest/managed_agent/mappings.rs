@@ -48,17 +48,24 @@ struct TableMapper {
     /// The mapper, which tracks the table's mappings, and latches at the first that fails.
     mapper: Mapper,
     /// The host export's mount, `hostfs_dir/root`.
-    export: SourceRoot,
+    export: Option<SourceRoot>,
 }
 
 impl HostMappings {
     /// Adopts a layered root's table and prepared mapping handles without resetting either.
-    pub(crate) fn layered(table: MappingTable, mapper: Mapper, export: SourceRoot) -> Self {
-        Self {
+    pub(crate) fn layered(
+        table: MappingTable,
+        mapper: Mapper,
+        export: Option<SourceRoot>,
+    ) -> Result<Self, Errno> {
+        if table.expected() != 0 && export.is_none() {
+            return Err(Errno::ENOENT);
+        }
+        Ok(Self {
             table,
             root: TableRoot::Layered,
             mapper: Some(TableMapper { mapper, export }),
-        }
+        })
     }
 
     /// Returns the state of the table of the agent that `config` configures, before
@@ -149,9 +156,10 @@ pub(crate) fn apply_request(
                 None => open_table(system, root).map_err(|error| (0, error as i32))?,
             };
             let opened = mapper.insert(opened);
+            let export = opened.export.as_ref().ok_or((0, Errno::ENOENT as i32))?;
             opened
                 .mapper
-                .apply_with(system.kernel(), &opened.export, batch)
+                .apply_with(system.kernel(), export, batch)
                 .map_err(|failure| (failure.entry(), failure.error().raw_os_error()))
         })
         .map_err(|error| match error {
@@ -188,7 +196,7 @@ fn open_table(system: &mut impl System, root: &TableRoot) -> Result<TableMapper,
     let export = SourceRoot::open(&system.paths().hostfs_dir.join("root")).map_err(errno)?;
     Ok(TableMapper {
         mapper: Mapper::new(root, reserved),
-        export,
+        export: Some(export),
     })
 }
 

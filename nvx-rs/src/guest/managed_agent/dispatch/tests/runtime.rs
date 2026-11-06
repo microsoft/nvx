@@ -117,16 +117,18 @@ fn fragment(host: &mut UnixStream, probe: UnixStream, record: &[u8]) {
     drop(probe);
 }
 
-fn prepared() -> (tempfile::TempDir, (MappingTable, Mapper, SourceRoot)) {
+fn prepared() -> (
+    tempfile::TempDir,
+    (MappingTable, Mapper, Option<SourceRoot>),
+) {
     let (temporary, mut system, rootfs) = sandbox_root();
-    let source = SourceRoot::open(&system.paths.hostfs_dir.join("root")).unwrap();
     let target = TargetRoot::open_with(&mut system.kernel, &rootfs).unwrap();
     (
         temporary,
         (
             MappingTable::new(0).unwrap(),
             Mapper::new(target, Reserved::container_root()),
-            source,
+            None,
         ),
     )
 }

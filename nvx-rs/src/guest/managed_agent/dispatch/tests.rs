@@ -517,7 +517,7 @@ fn prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher() -> T
             },
         )
         .unwrap();
-    let mappings = HostMappings::layered(table, mapper, source);
+    let mappings = HostMappings::layered(table, mapper, Some(source))?;
     system.paths.hostfs_dir = rootfs.join("not-the-retained-export");
     let config = AgentConfig::layered(
         b"nvx_identity=1234:2345",
@@ -570,6 +570,35 @@ fn prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher() -> T
     assert_eq!(system.spawn_calls, 1);
     assert_eq!(system.entries_prepared, 0);
     Ok(())
+}
+
+#[test]
+fn a_layered_root_without_an_export_refuses_maps_but_keeps_its_complete_table() {
+    use crate::guest::mappings::{Mapper, MappingTable, Reserved, TargetRoot};
+
+    let (_temporary, mut system, rootfs) = sandbox_root();
+    let mapper = Mapper::new(
+        TargetRoot::open_with(&mut system.kernel, &rootfs).unwrap(),
+        Reserved::container_root(),
+    );
+    let mappings = HostMappings::layered(MappingTable::new(0).unwrap(), mapper, None).unwrap();
+    let config =
+        AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into()).unwrap();
+    let mut harness = Harness::spawn_with(system, config, mappings);
+    harness.reset(1, 0);
+    for payload in [
+        maps_payload(0, &[], None),
+        maps_payload(0, &[(b"0", b"/workspace", 0)], None),
+    ] {
+        assert_eq!(
+            harness.request(APP_MAPS, &payload),
+            response(APP_ERROR, 42, Errno::EINVAL as i32, b"invalid-request")
+        );
+    }
+    harness.reset(2, 0);
+    assert_eq!(harness.request(APP_PING, &[]).kind, APP_READY);
+    let system = harness.stop();
+    assert!(system.kernel.calls().is_empty());
 }
 
 #[test]
