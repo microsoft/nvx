@@ -372,6 +372,14 @@ impl EntryChild {
     }
 }
 
+/// Takes a plain workload's IDs with empty groups and capabilities, without an entry or mounts.
+pub(super) fn take_workload_identity(uid: u32, gid: u32) -> Result<(), (LaunchStage, Errno)> {
+    drop_bounding(0).map_err(|error| (LaunchStage::Bounding, error))?;
+    set_identity(uid, gid, &[]).map_err(|error| (LaunchStage::Identity, error))?;
+    set_capabilities(0).map_err(|error| (LaunchStage::Capabilities, error))?;
+    prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0).map_err(|error| (LaunchStage::NoNewPrivileges, error))
+}
+
 /// Starts a child in the namespaces that `flags` names, as `fork` starts one otherwise, and
 /// returns its process ID in the parent, or `None` in the child. The child's end sends its
 /// parent `SIGCHLD`, and the child keeps a copy of its parent's memory and descriptors.

@@ -1,5 +1,24 @@
 use super::*;
 
+/// Seeds CAP_CHOWN in the parent's inheritable and ambient sets for real credential controls.
+pub(crate) fn seed_inheritable_and_ambient() -> Result<(), Errno> {
+    let header = CapabilityHeader {
+        version: CAPABILITY_VERSION,
+        pid: 0,
+    };
+    let mut data = capability_data(0);
+    // SAFETY: the valid header selects the two writable data words.
+    unit(unsafe { libc::syscall(libc::SYS_capget, &header, data.as_mut_ptr()) })?;
+    data[0].inheritable |= 1;
+    // SAFETY: the initialized header and both data words outlive the syscall.
+    unit(unsafe { libc::syscall(libc::SYS_capset, &header, data.as_ptr()) })?;
+    prctl(
+        libc::PR_CAP_AMBIENT,
+        libc::PR_CAP_AMBIENT_RAISE as c_ulong,
+        0,
+    )
+}
+
 /// How a test without privileges simulates the stages of an entry: the child starts without
 /// new namespaces and skips the system calls of every entry stage.
 #[derive(Clone, Copy, Debug)]
