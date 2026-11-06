@@ -99,7 +99,7 @@
 //! - and is not another share's or mapping's target, nor inside one, nor holds one.
 //!
 //! The root's [`Mapper`] then attaches the shares beneath the overlay's descriptor, as
-//! [`mappings`](super::mappings) describes, with NVX's container root's reserved targets,
+//! [`mappings`] describes, with NVX's container root's reserved targets,
 //! [`Reserved::container_root`](super::mappings::Reserved::container_root): it walks to each
 //! target through no symbolic link or magic link; creates each missing component only on the
 //! overlay, or on the runtime's `/run` tmpfs once the root has mounted it, a directory with mode
@@ -191,8 +191,9 @@ use std::time::{Duration, Instant};
 use self::kernel::{Kernel, SystemKernel};
 use super::entry::{self, TIME_STATUS_TARGET};
 use super::gpt::DeviceError;
-use super::mappings::{Kind, Mapper, MappingError, TargetRoot, below_its_root};
+use super::mappings::{self, Kind, Mapped, Mapper, MappingError, TargetRoot, below_its_root};
 use super::sys::{self, Errno, FileDescriptor, FileSystem, Mode, MountFlags, OpenFlags};
+use super::view::{MACHINE_ID_TARGET, MachineId, RESOLVER_TARGET};
 use crate::gpt::{Expected, GptError, Partition};
 use crate::protocol::root::RAM_UPPER_CAPS;
 use crate::uuid::Uuid;
@@ -645,6 +646,8 @@ fn assemble_with(
         first_partition: None,
         shares: Vec::new(),
         runtime_stray: None,
+        view_binds: None,
+        view_stray: None,
         mapper: None,
         mapped: Vec::new(),
         latched: false,
@@ -731,6 +734,10 @@ pub struct Root {
     /// A runtime mount whose attachment failed and which could not be detached during setup or
     /// its rollback.
     runtime_stray: Option<(RuntimeMounts, FileDescriptor)>,
+    /// The view's root descriptor and binds, in bind order, once its application was attempted.
+    view_binds: Option<(TargetRoot, Vec<Mapped>)>,
+    /// A view bind whose attachment failed and which could not be detached.
+    view_stray: Option<(PathBuf, FileDescriptor)>,
     /// The mapper of the live shares and mappings in the root, once the root has mounted one, whose
     /// own mounts are the overlay and the runtime's `/run` tmpfs, if the root held it then.
     mapper: Option<Mapper>,
@@ -758,6 +765,57 @@ impl Root {
     /// Returns the runtime directory.
     pub fn runtime(&self) -> &Path {
         &self.runtime
+    }
+
+    /// Reserves the root's one view application before it changes the VM's hostname or files.
+    pub(crate) fn begin_view(&mut self) -> crate::Result<()> {
+        if self.switched || self.latched || self.view_binds.is_some() {
+            return Err(crate::Error::unsupported(
+                "the root is switched, failed, or its view has already been attempted",
+            ));
+        }
+        let root = TargetRoot::open_with(self.kernel.as_mut(), &self.path).map_err(|error| {
+            crate::Error::io(format!("failed to open the VM view's root: {error}"))
+                .with_source(error)
+        })?;
+        self.view_binds = Some((root, Vec::new()));
+        Ok(())
+    }
+
+    /// Binds the view's fixed files through the existing entry seam and retains every attachment.
+    pub(crate) fn bind_view(
+        &mut self,
+        machine_id: &MachineId,
+        resolver: Option<&Path>,
+    ) -> crate::Result<()> {
+        let Some((root, binds)) = self.view_binds.as_mut() else {
+            return Err(crate::Error::unsupported(
+                "the root's view has not been started",
+            ));
+        };
+        let machine_id = match machine_id {
+            MachineId::Image => None,
+            MachineId::Generated(path) => Some(path.as_path()),
+        };
+        for (source, target) in [(machine_id, MACHINE_ID_TARGET), (resolver, RESOLVER_TARGET)] {
+            let Some(source) = source else {
+                continue;
+            };
+            match entry::bind_file_retained(self.kernel.as_mut(), root, &self.path, source, target)
+            {
+                Ok(bound) => binds.push(bound),
+                Err(failure) => {
+                    self.latched = true;
+                    self.view_stray = failure.stray.map(|tree| (PathBuf::from(target), tree));
+                    return Err(crate::Error::io(format!(
+                        "failed to bind the VM view at {target}: {}",
+                        failure.error
+                    ))
+                    .with_source(failure.error));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns whether a live share, the host export, or a mapping failed, after which the root
@@ -791,7 +849,7 @@ impl Root {
         self.overlay_mode
     }
 
-    /// Unmounts the root's mounts, in order: a live share or a mapping that a rename moved and
+    /// Unmounts the root's mounts, in order: the view's binds, a live share or a mapping that a rename moved and
     /// that its mapper failed to detach, which the mapper detaches, the live shares and mappings
     /// in reverse order, a runtime mount whose attachment failed and which could not be detached,
     /// the mounts of an aggregate live share, of the host export, and of the runtime, the later
@@ -1363,7 +1421,34 @@ impl Root {
             });
         }
         let mut failures = Vec::new();
-        // The mapper's descriptor of the root keeps the overlay busy, so it goes first.
+        if let Some((target, tree)) = self.view_stray.take()
+            && let Err(error) = self.kernel.detach(&tree)
+        {
+            failures.push(Unmount {
+                mount: Mount::Mapping {
+                    target: target.clone(),
+                },
+                path: self.path.join(target.strip_prefix("/").unwrap_or(&target)),
+                step: Step::Unmount,
+                error: error.into(),
+            });
+        }
+        if let Some((root, binds)) = self.view_binds.take()
+            && let Err(error) = mappings::unbind_with(self.kernel.as_mut(), &root, &binds)
+        {
+            for failure in error.failures() {
+                let target = failure.target();
+                failures.push(Unmount {
+                    mount: Mount::Mapping {
+                        target: target.to_owned(),
+                    },
+                    path: self.path.join(target.strip_prefix("/").unwrap_or(target)),
+                    step: Step::Unmount,
+                    error: share::io_error(failure.error()),
+                });
+            }
+        }
+        // The mapper's descriptor must also close before the overlay is unmounted.
         if let Some(mut mapper) = self.mapper.take() {
             let mapped = std::mem::take(&mut self.mapped);
             for (index, failure) in mapper.unmount_with(self.kernel.as_mut()) {
@@ -1456,6 +1541,8 @@ impl fmt::Debug for Root {
             )
             .field("shares", &self.shares)
             .field("runtime_stray", &self.runtime_stray)
+            .field("view_binds", &self.view_binds)
+            .field("view_stray", &self.view_stray)
             .field("mapped", &self.mapped)
             .field("latched", &self.latched)
             .field("switched", &self.switched)

@@ -469,8 +469,8 @@ fn make_mounts_private() -> Result<(), Errno> {
     )
 }
 
-/// Sets the hostname of the child's new UTS namespace.
-fn set_hostname(hostname: &[u8]) -> Result<(), Errno> {
+/// Sets the hostname of the current UTS namespace.
+pub(crate) fn set_hostname(hostname: &[u8]) -> Result<(), Errno> {
     // SAFETY: the kernel reads `hostname.len()` bytes from the slice.
     unit(unsafe { libc::syscall(libc::SYS_sethostname, hostname.as_ptr(), hostname.len()) })
 }

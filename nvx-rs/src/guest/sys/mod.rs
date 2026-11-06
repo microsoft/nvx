@@ -91,7 +91,7 @@ pub(crate) use clock::{monotonic_ns, syscall_monotonic_nanoseconds};
 pub(crate) use discipline::{ClockAdjustment, ClockDiscipline, FrequencyHold, adjust_clock};
 pub(crate) use entry::{
     DEV, DEV_PTS, DEV_SHM, EntryChild, FileSystem, PROC, RUN, SYS, create_devices, file_size,
-    mount_detached, restrict_tree,
+    mount_detached, restrict_tree, set_hostname,
 };
 #[cfg(target_arch = "x86_64")]
 pub(crate) use fd::close_inherited_descriptors;

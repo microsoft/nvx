@@ -10,10 +10,8 @@
 mod tests;
 
 use std::fmt;
-use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -23,24 +21,15 @@ use super::super::Devices;
 use super::Activation;
 use crate::activation::{self, ActivationRecord, Configuration, MachineIdMode, Publication};
 use crate::gpt::Expected;
-use crate::guest::entry::{self, Entry, Identity, MachineId, RuntimeBinds};
+use crate::guest::entry::{self, Entry, Identity, RuntimeBinds};
 use crate::guest::ingress::{Announcer, StartError};
 use crate::guest::mappings::{self, Access, SourceRoot};
 use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownError};
+use crate::guest::view::{MachineId, write_resolver_file};
+#[cfg(doc)]
 use crate::protocol::cmdline::write_resolver;
 
-/// The name of the file, in the template's runtime directory, to which the activation's
-/// application writes the machine ID that it generates for a record that asks for one, as NVX's
-/// managed agent writes its own to `/run/nvx/workload-machine-id`.
-pub const MACHINE_ID_FILE: &str = "workload-machine-id";
-
-/// The name of the file, in the template's runtime directory, to which the activation's
-/// application writes the resolver file that names the DNS server of a record's network, which
-/// every execution sees read-only at `/etc/resolv.conf`.
-pub const RESOLVER_FILE: &str = "resolv.conf";
-
-/// The mode of the resolver file, whatever the umask: every execution may read it.
-const RESOLVER_MODE: u32 = 0o444;
+pub use crate::guest::view::{MACHINE_ID_FILE, RESOLVER_FILE};
 
 /// The inputs of a clone's activation that its guest takes from its own configuration, which its
 /// template captured, so that every clone of the template has the same: the runtime directory,
@@ -917,24 +906,6 @@ fn teardown_with<S: System>(
         return Ok(());
     }
     Err(AppliedTeardownError { binds, root })
-}
-
-/// Writes a resolver file that names `server` as the guest's one DNS server, as [`write_resolver`]
-/// writes one, to a new file at `path`, with mode 0444 whatever the process's umask, so that
-/// every execution may read it.
-///
-/// A file, or a symbolic link, at `path` already fails the call with `AlreadyExists`, and is left
-/// alone, so each activation writes its resolver file once.
-fn write_resolver_file(path: &Path, server: IpAddr) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(RESOLVER_MODE)
-        .open(path)?;
-    // The umask narrows the mode that creates the file, which could keep executions of other
-    // users from reading it.
-    file.set_permissions(fs::Permissions::from_mode(RESOLVER_MODE))?;
-    write_resolver(&mut file, server)
 }
 
 /// Returns the assembly of the root that `configuration` sets, with `template`'s runtime

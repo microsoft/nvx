@@ -90,6 +90,8 @@ impl Scene {
             first_partition: None,
             shares: Vec::new(),
             runtime_stray: None,
+            view_binds: None,
+            view_stray: None,
             mapper: None,
             mapped: Vec::new(),
             latched: false,
@@ -446,5 +448,180 @@ fn a_switched_root_keeps_its_mounts_and_maps_through_earlier_descriptors() {
             assert_eq!(mounts_below(Path::new("/")), mounts);
             assert_eq!(fs::read("/srv/early/data").unwrap(), b"early");
         });
+    });
+}
+
+/// Returns a view's root in private mount and UTS namespaces, never the host's UTS namespace.
+fn view_scene() -> Option<(Scene, Root)> {
+    let scene = Scene::new()?;
+    let before = fs::read_link("/proc/thread-self/ns/uts").unwrap();
+    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWUTS).unwrap();
+    assert_ne!(fs::read_link("/proc/thread-self/ns/uts").unwrap(), before);
+    let root = scene.root();
+    fs::create_dir(root.path().join("etc")).unwrap();
+    fs::write(root.path().join("etc/machine-id"), b"image-machine-id\n").unwrap();
+    fs::write(root.path().join("etc/resolv.conf"), b"image resolver\n").unwrap();
+    Some((scene, root))
+}
+
+#[test]
+#[ignore = "needs root and Linux 6.8 or later"]
+fn view_image_mode_applies_decoded_bytes_without_machine_id_or_resolver_binds() {
+    let Some((scene, mut root)) = view_scene() else {
+        return;
+    };
+    let view = crate::protocol::view::parse(b"nvx_hostname=766d20ff09 nvx_machine_id=image")
+        .unwrap()
+        .unwrap();
+    let selected = crate::guest::view::apply(&mut root, &view, None).unwrap();
+    assert_eq!(selected, MachineId::Image);
+    assert_eq!(
+        fs::read("/proc/sys/kernel/hostname").unwrap(),
+        [view.hostname.as_slice(), b"\n"].concat()
+    );
+    assert_eq!(
+        fs::read(root.path().join("etc/machine-id")).unwrap(),
+        b"image-machine-id\n"
+    );
+    assert_eq!(
+        fs::read(root.path().join("etc/resolv.conf")).unwrap(),
+        b"image resolver\n"
+    );
+    assert!(mounts_below(root.path()).is_empty());
+    assert!(
+        !root
+            .runtime()
+            .join(crate::guest::view::MACHINE_ID_FILE)
+            .exists()
+    );
+    assert!(
+        !root
+            .runtime()
+            .join(crate::guest::view::RESOLVER_FILE)
+            .exists()
+    );
+    assert_eq!(
+        crate::guest::view::apply(&mut root, &view, None)
+            .unwrap_err()
+            .kind(),
+        crate::ErrorKind::Unsupported
+    );
+    root.teardown().unwrap();
+    assert!(mounts_below(&scene.path("root")).is_empty());
+}
+
+#[test]
+#[ignore = "needs root and Linux 6.8 or later"]
+fn view_generated_id_and_dns_are_read_only_and_the_root_unmounts_them() {
+    let Some((scene, mut root)) = view_scene() else {
+        return;
+    };
+    root.mount_runtime(None).unwrap();
+    let base = root.path().to_path_buf();
+    let resolver = base.join("etc/resolv.conf");
+    fs::remove_file(&resolver).unwrap();
+    std::os::unix::fs::symlink("../run/image-resolver", &resolver).unwrap();
+    let view = crate::activation::View {
+        hostname: b"vm-view".to_vec(),
+        machine_id: crate::activation::MachineIdMode::Generated,
+    };
+    let selected =
+        crate::guest::view::apply(&mut root, &view, Some("fd00::53".parse().unwrap())).unwrap();
+    let MachineId::Generated(source) = selected else {
+        panic!("no generated ID");
+    };
+    let id = fs::read(&source).unwrap();
+    assert_eq!(id.len(), 33);
+    assert_eq!(fs::read(base.join("etc/machine-id")).unwrap(), id);
+    assert_eq!(fs::read(&resolver).unwrap(), b"nameserver fd00::53\n");
+    for target in [base.join("etc/machine-id"), resolver.clone()] {
+        assert_eq!(mounted(&target).1, ["nodev", "nosuid", "ro"]);
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        assert_eq!(
+            fs::write(&target, b"changed").unwrap_err().raw_os_error(),
+            Some(Errno::EROFS as i32)
+        );
+    }
+    root.teardown().unwrap();
+    assert!(mounts_below(&base).is_empty());
+    assert_eq!(
+        fs::read(base.join("etc/machine-id")).unwrap(),
+        b"image-machine-id\n"
+    );
+    assert!(fs::read(&resolver).unwrap().is_empty());
+    assert_eq!(fs::read(source).unwrap(), id);
+    assert!(scene.path("root").is_dir());
+}
+
+#[test]
+#[ignore = "needs root and Linux 6.8 or later"]
+fn view_failure_after_the_machine_id_bind_leaves_it_owned_for_teardown() {
+    let Some((_scene, mut root)) = view_scene() else {
+        return;
+    };
+    let base = root.path().to_path_buf();
+    fs::remove_file(base.join("etc/resolv.conf")).unwrap();
+    fs::create_dir(base.join("etc/resolv.conf")).unwrap();
+    let view = crate::activation::View {
+        hostname: b"view-failure".to_vec(),
+        machine_id: crate::activation::MachineIdMode::Generated,
+    };
+    let error =
+        crate::guest::view::apply(&mut root, &view, Some("10.0.0.1".parse().unwrap())).unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Io);
+    assert!(shown(&base.join("etc/machine-id")).is_some());
+    assert!(root.is_latched());
+    root.teardown().unwrap();
+    assert!(mounts_below(&base).is_empty());
+    assert_eq!(
+        fs::read(base.join("etc/machine-id")).unwrap(),
+        b"image-machine-id\n"
+    );
+}
+
+#[test]
+#[ignore = "needs root and Linux 6.8 or later"]
+fn view_binds_survive_the_actual_switch_teardown_refusal_and_drop() {
+    let Some((_scene, mut root)) = view_scene() else {
+        return;
+    };
+    root.mount_runtime(None).unwrap();
+    let view = crate::activation::View {
+        hostname: b"switched-view".to_vec(),
+        machine_id: crate::activation::MachineIdMode::Generated,
+    };
+    let selected =
+        crate::guest::view::apply(&mut root, &view, Some("10.0.0.1".parse().unwrap())).unwrap();
+    let MachineId::Generated(source) = selected else {
+        panic!("no generated ID");
+    };
+    let id = fs::read(source).unwrap();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+                root.switch().unwrap();
+                assert_eq!(fs::read("/etc/machine-id").unwrap(), id);
+                assert_eq!(
+                    fs::read("/etc/resolv.conf").unwrap(),
+                    b"nameserver 10.0.0.1\n"
+                );
+                let mounts = mounts_below(Path::new("/"));
+                for target in ["/etc/machine-id", "/etc/resolv.conf"] {
+                    assert!(mounts.contains(&PathBuf::from(target)), "{mounts:?}");
+                }
+                assert!(root.teardown().unwrap_err().is_switched());
+                assert_eq!(mounts_below(Path::new("/")), mounts);
+                assert_eq!(fs::read("/etc/machine-id").unwrap(), id);
+                assert_eq!(
+                    fs::read("/etc/resolv.conf").unwrap(),
+                    b"nameserver 10.0.0.1\n"
+                );
+            })
+            .join()
+            .unwrap();
     });
 }

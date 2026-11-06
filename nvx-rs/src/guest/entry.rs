@@ -135,13 +135,12 @@ use super::parse::parse_decimal;
 #[cfg(doc)]
 use super::spawn::{Command, LaunchStage};
 use super::sys::{self, EntryChild, Errno, FileDescriptor, Mode, OpenFlags};
+use super::view::{MACHINE_ID_TARGET, RESOLVER_TARGET};
 #[cfg(doc)]
 use crate::protocol::cmdline::write_resolver;
 
-/// The hostname that an entry gives its execution unless the adapter names another.
-pub const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
-/// The longest hostname, in bytes: Linux's `HOST_NAME_MAX`.
-pub const MAX_HOSTNAME_BYTES: usize = 64;
+pub use super::view::{DEFAULT_HOSTNAME, MAX_HOSTNAME_BYTES, MachineId};
+
 /// The most supplementary groups that an identity holds: Linux's `NGROUPS_MAX`.
 pub const MAX_GROUPS: usize = 65536;
 /// The largest account database, `/etc/passwd` or `/etc/group`, that existing-account mode reads.
@@ -152,15 +151,9 @@ const PASSWD: &std::ffi::CStr = c"etc/passwd";
 const GROUP: &std::ffi::CStr = c"etc/group";
 /// The ID that `setresuid` and `setresgid` read as "unchanged", which no identity may hold.
 const UNCHANGED_ID: u32 = u32::MAX;
-/// The mode of a generated machine ID's file.
-const MACHINE_ID_MODE: u32 = 0o444;
-/// Where [`Entry::bind_runtime`] binds a generated machine ID in the root.
-const MACHINE_ID_TARGET: &str = "/etc/machine-id";
 /// Where [`Entry::bind_runtime`] binds the time status in the root, as a layered root's
 /// [`mount_runtime`](super::root::Root::mount_runtime) does.
 pub(crate) const TIME_STATUS_TARGET: &str = "/run/nvx/time";
-/// Where [`Entry::bind_runtime`] binds the resolver file in the root.
-const RESOLVER_TARGET: &str = "/etc/resolv.conf";
 
 /// The names of the Linux capabilities, by number.
 const CAPABILITY_NAMES: [&str; 41] = [
@@ -436,70 +429,6 @@ impl Identity {
     pub fn account_mode(&self) -> AccountMode {
         self.account
     }
-}
-
-/// The machine ID that an execution sees at `/etc/machine-id`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum MachineId {
-    /// The image's own `/etc/machine-id`, which the entry leaves untouched.
-    #[default]
-    Image,
-    /// The ID that the regular file at this path holds, such as one that [`MachineId::generate`]
-    /// wrote once for the boot, which [`Entry::bind_runtime`] binds read-only over
-    /// `/etc/machine-id`. The bind shows the file as it is, so an ID that the file's owner
-    /// rewrites in place, as after a restore, reaches every execution.
-    Generated(PathBuf),
-}
-
-impl MachineId {
-    /// Generates a machine ID from the kernel's random number generator, writes it to a new file
-    /// at `path`, with mode 0444 whatever the process's umask, and returns the mode that binds
-    /// it.
-    ///
-    /// The ID is a random version 4 UUID, written as `/etc/machine-id` holds one: 32 lowercase
-    /// hexadecimal digits and a newline. A file, or a symbolic link, at `path` already fails the
-    /// call with `AlreadyExists`, so each boot generates its ID once.
-    pub fn generate(path: impl Into<PathBuf>) -> io::Result<Self> {
-        let path = path.into();
-        let mut id = [0u8; 16];
-        getrandom::fill(&mut id).map_err(|error| {
-            error
-                .raw_os_error()
-                .map_or_else(|| io::Error::other(error), io::Error::from_raw_os_error)
-        })?;
-        let mode = Mode::from_bits_retain(MACHINE_ID_MODE);
-        let file = sys::open(
-            &sys::path_c_string(&path)?,
-            OpenFlags::O_WRONLY
-                | OpenFlags::O_CREAT
-                | OpenFlags::O_EXCL
-                | OpenFlags::O_NOFOLLOW
-                | OpenFlags::O_CLOEXEC,
-            mode,
-        )?;
-        // The umask narrows the mode that creates the file, which could keep executions of
-        // other users from reading the ID.
-        file.set_mode(mode)?;
-        file.write_all(&machine_id_text(id))?;
-        file.close()?;
-        Ok(Self::Generated(path))
-    }
-}
-
-/// Returns the text of the machine ID made of `id`'s random bits, as a version 4 UUID: 32
-/// lowercase hexadecimal digits and a newline.
-fn machine_id_text(mut id: [u8; 16]) -> [u8; 33] {
-    /// The lowercase hexadecimal digits.
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    id[6] = (id[6] & 0x0f) | 0x40;
-    id[8] = (id[8] & 0x3f) | 0x80;
-    let mut text = [b'\n'; 33];
-    for (index, byte) in id.iter().enumerate() {
-        text[2 * index] = DIGITS[usize::from(byte >> 4)];
-        text[2 * index + 1] = DIGITS[usize::from(byte & 0x0f)];
-    }
-    text
 }
 
 /// Whether an execution's listeners are published, through private-network ingress or the
@@ -866,10 +795,24 @@ fn bind_file(
     source: &Path,
     target: &str,
 ) -> Result<Mapped, MappingError> {
-    match bind_runtime_file(kernel, root, source, target, Kind::File) {
-        Err(MappingError::Link { path: link }) if link == Path::new(target) => {
-            remove_link(path, target).map_err(|_| MappingError::Link { path: link })?;
-            bind_runtime_file(kernel, root, source, target, Kind::File)
+    bind_file_retained(kernel, root, path, source, target).map_err(|failure| failure.error)
+}
+
+/// Binds a runtime file as [`bind_file`] does, retaining an attachment that could not be detached.
+pub(crate) fn bind_file_retained(
+    kernel: &mut dyn Kernel,
+    root: &TargetRoot,
+    path: &Path,
+    source: &Path,
+    target: &str,
+) -> Result<Mapped, AttachFailure> {
+    match bind_runtime_file_retained(kernel, root, source, target, Kind::File) {
+        Err(failure)
+            if matches!(&failure.error, MappingError::Link { path: link }
+                if link == Path::new(target)) =>
+        {
+            remove_link(path, target).map_err(|_| failure)?;
+            bind_runtime_file_retained(kernel, root, source, target, Kind::File)
         }
         bound => bound,
     }
