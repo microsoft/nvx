@@ -509,3 +509,40 @@ fn the_cause_that_names_a_forward_that_openvmm_cannot_bind_follows_the_fatal_lin
     fs::write(&path, log).unwrap();
     assert_eq!(read_fatal(&path).as_deref(), Some(fatal));
 }
+
+#[test]
+fn the_cause_that_leads_with_the_code_of_a_forward_follows_the_line_that_leads_with_it() {
+    let (_directory, private) = private_dir();
+    let path = private.join("openvmm.log");
+    let fatal = "fatal error: [E_PORT_FORWARD_BIND] failed to launch vm worker";
+    let forward = "failed to create socket for port forward (Tcp 127.0.0.1:18080)";
+    let expected = format!("{fatal}: {forward}");
+    // The cause that names the forward leads with the code too, among the causes that OpenVMM
+    // lists after the line, numbered when there are several, and alone otherwise; the cause
+    // follows the line without its code.
+    for chain in [
+        format!(
+            "    0: failed to resolve the network endpoint\n    1: [E_PORT_FORWARD_BIND] \
+             {forward}\n    2: Address already in use (os error 98)\n"
+        ),
+        format!("    [E_PORT_FORWARD_BIND] {forward}\n"),
+    ] {
+        let log = format!("a line of the VMM's log\n{fatal}\n\nCaused by:\n{chain}");
+        fs::write(&path, &log).unwrap();
+        assert_eq!(
+            read_fatal(&path).as_deref(),
+            Some(expected.as_str()),
+            "{log}"
+        );
+    }
+    // A line that is the forward's own error keeps its text alone.
+    let named = format!("fatal error: [E_PORT_FORWARD_BIND] {forward}");
+    let log = format!("{named}\n\nCaused by:\n    Address already in use (os error 98)\n");
+    fs::write(&path, log).unwrap();
+    assert_eq!(read_fatal(&path).as_deref(), Some(named.as_str()));
+    // The cause follows only a line that leads with its code.
+    let other = "fatal error: [E_TSC_RATE_TOLERANCE] failed to launch vm worker";
+    let log = format!("{other}\n\nCaused by:\n    0: [E_PORT_FORWARD_BIND] {forward}\n");
+    fs::write(&path, log).unwrap();
+    assert_eq!(read_fatal(&path).as_deref(), Some(other));
+}
