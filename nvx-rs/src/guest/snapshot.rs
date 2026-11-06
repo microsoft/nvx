@@ -1,4 +1,4 @@
-//! A Fresh platform capture in the calling guest process, without execution control.
+//! A Fresh platform capture and restore repair in the calling guest process.
 //!
 //! [`capture`] checks mounts and the time ABI, suppresses the stall detectors, reads the
 //! generation ID, and requests capture. All pre-request steps, locks, waits and rollback
@@ -7,10 +7,16 @@
 //!
 //! The caller keeps its executions still. After answering the capture request, its transport
 //! sends nothing until this call returns. After [`Captured::Continued`] or a failure with
-//! [`Disposition::Resumed`], it reports on the same session.
+//! [`Disposition::Resumed`], it reports on the same session. After [`Captured::Restored`], it
+//! takes the session's reset and attaches again before receiving the activation record.
 //!
-//! The time core repairs a restore's clock, but this interface does not complete the clone's
-//! repair, so a restored guest must end. Fresh restore network settings are explicitly refused.
+//! On a restore, the existing repair runs before this call returns: it checks the restore and
+//! its seed, activates its processor target and then its memory target, reseeds the kernel's
+//! random number generator, drops the seed, and finishes the restore with its acknowledgement.
+//! The finish hands deferred time work, including detector release, to the time daemon. The
+//! returned [`Repaired`] reports the generation ID, online CPUs and memory, and acknowledgement
+//! instant. A repair failure is always [`Disposition::MustEnd`], with [`RepairError::status`].
+//! Fresh restore network settings are explicitly refused.
 //!
 //! Each line of `/proc/self/mountinfo` describes one mount with fields separated by spaces: its
 //! ID, its parent's ID, the device number of its file system, `MAJ:MIN`, the root of the mount
@@ -18,6 +24,8 @@
 //! them, then the file system's type, the mount's source, and the file system's options. The
 //! kernel writes a space, a tab, a newline, or a backslash within a field as a backslash and
 //! three octal digits.
+
+pub(super) mod repair;
 
 use std::ffi::OsString;
 use std::fmt;
@@ -32,6 +40,9 @@ use super::time::{CaptureOutcome, CaptureRequest, PreCaptureError, ScratchPolicy
 use crate::guest::parse::parse_decimal;
 use crate::protocol::status;
 
+pub use self::repair::{
+    RangeFault, RepairCause, RepairError, RepairProgress, RepairStage, Repaired,
+};
 pub use super::activation::{CaptureCause, CaptureStage};
 
 /// The most bytes of the caller's mount table that capture accepts: 1 MiB.
@@ -62,6 +73,8 @@ pub enum Disks {
 pub enum Captured {
     /// No snapshot was taken; the stall detectors were restored and this guest may continue.
     Continued,
+    /// A restore started this clone, and its repair completed before capture returned.
+    Restored(Repaired),
 }
 
 /// Whether the caller may resume the guest or must end it.
@@ -106,6 +119,17 @@ impl CaptureFailure {
         }
     }
 
+    /// Retains the existing repair's detail and the status with which the guest must end.
+    fn unrepaired(error: RepairError) -> Self {
+        Self {
+            stage: CaptureStage::Repair,
+            disposition: Disposition::MustEnd {
+                status: error.status(),
+            },
+            cause: CaptureCause::Repair(error),
+        }
+    }
+
     /// Restores only this call's suppression, retaining a port-release cause and fatal status.
     fn cleanup(mut self, system: &mut dyn System, suppressed: bool) -> Self {
         if suppressed
@@ -134,6 +158,7 @@ impl std::error::Error for CaptureFailure {
         match &self.cause {
             CaptureCause::Io(error) => Some(error),
             CaptureCause::Time(error) => Some(error),
+            CaptureCause::Repair(error) => Some(error),
             CaptureCause::Mounted(_) | CaptureCause::Pending => None,
         }
     }
@@ -142,7 +167,7 @@ impl std::error::Error for CaptureFailure {
 /// Captures a Fresh template without freezing or inspecting the caller's executions.
 ///
 /// The deadline bounds pre-request work only. This call starts no helper, drives no transport,
-/// completes no clone repair, and never powers off the VM; failures return its disposition.
+/// and never powers off the VM. A restore is repaired inline, and failures return its disposition.
 pub fn capture(
     devices: &Devices,
     disks: Disks,
@@ -160,6 +185,7 @@ pub fn capture(
         activation::capture_system(Some(deadline)).as_mut(),
         devices,
         deadline,
+        repair::live_system(),
     )
 }
 
@@ -168,6 +194,7 @@ fn capture_with(
     system: &mut dyn System,
     devices: &Devices,
     deadline: Instant,
+    repair_system: Box<dyn repair::RepairSystem>,
 ) -> Result<Captured, CaptureFailure> {
     let mut suppressed = false;
     let prepared: Result<_, CaptureFailure> = (|| {
@@ -203,16 +230,20 @@ fn capture_with(
             Ok(Captured::Continued)
         }
         CaptureOutcome::Restored(restore) => {
-            let detail = if restore.network().is_some() {
-                "a Fresh platform restore must not carry network settings"
-            } else {
-                "this capture interface does not repair restored guests"
-            };
-            Err(CaptureFailure::new(
-                CaptureStage::Capture,
-                CaptureCause::Io(io::Error::new(io::ErrorKind::Unsupported, detail)),
-            )
-            .cleanup(system, suppressed))
+            if restore.network().is_some() {
+                return Err(CaptureFailure::new(
+                    CaptureStage::Capture,
+                    CaptureCause::Io(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "a Fresh platform restore must not carry network settings",
+                    )),
+                )
+                .cleanup(system, suppressed));
+            }
+            repair::Repair::with_system(restore, repair_system)
+                .run()
+                .map(Captured::Restored)
+                .map_err(CaptureFailure::unrepaired)
         }
     }
 }
@@ -519,4 +550,4 @@ pub(super) fn preparation_failure(error: PreCaptureError) -> PreparationFailure 
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
