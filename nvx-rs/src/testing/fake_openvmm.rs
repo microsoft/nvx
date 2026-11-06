@@ -111,12 +111,12 @@
 //!
 //! The fake also runs the VMs of templates' captures, whose command lines have no
 //! `--microvm-lifecycle`, a `distro` layer and a `scratch` disk on sandbox block devices and no
-//! share, `--snapshot-destination`, `--snapshot-tier platform`,
-//! `--snapshot-block-identity generation` with a nonzero `--snapshot-generation-id` of 32
-//! hexadecimal digits, the options of a cold boot of a run with a `--memory-capacity` that is a
-//! multiple of 128 MiB, `nvx_sandbox=1` on the kernel command line, alone or followed by a
-//! canonical `maxcpus=` of 1, 2, 4, or 8 of its `--processors`, `--virtio-console none`,
-//! the control console with its capability on standard input, and an outcome report. On Unix, the
+//! share, `--snapshot-destination`, `--snapshot-tier platform`, a nonzero
+//! `--snapshot-generation-id` of 32 hexadecimal digits, the options of a cold boot of a run with
+//! a `--memory-capacity` that is a multiple of 128 MiB, `nvx_sandbox=1` on the kernel command
+//! line, alone or followed by a canonical `maxcpus=` of 1, 2, 4, or 8 of its `--processors`,
+//! `--virtio-console none`, the control console with its capability on standard input, and an
+//! outcome report. On Unix, the
 //! control console's socket must be in the directory of the snapshot's destination, as above. The
 //! fake serves no control session of a capture, which the host opens none of. Like OpenVMM, it
 //! opens each block device itself, at its path, without following a link, and on Windows sharing
@@ -1184,10 +1184,9 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         "--restore-ready-path",
     ];
     // The options that only the VMs of templates' captures take.
-    const CAPTURE_VALUED: [&str; 4] = [
+    const CAPTURE_VALUED: [&str; 3] = [
         "--snapshot-destination",
         "--snapshot-tier",
-        "--snapshot-block-identity",
         "--snapshot-generation-id",
     ];
     // `nvx-rs run` boots or restores its microVM without a lifecycle, and is no sandbox; a
@@ -1730,8 +1729,8 @@ fn check_run_boot(
 /// Checks the options of a template's capture, besides those of its boot, and returns them: RAM
 /// and a RAM capacity in MiB, the capacity a multiple of 128 MiB no smaller than the RAM, a
 /// `--snapshot-destination` that does not exist, in an existing directory, `--snapshot-tier
-/// platform`, `--snapshot-block-identity generation`, and a `--snapshot-generation-id` of 32
-/// hexadecimal digits that are not all zero. The scenario of the capture is next to `kernel`.
+/// platform`, and a `--snapshot-generation-id` of 32 hexadecimal digits that are not all zero. The
+/// scenario of the capture is next to `kernel`.
 fn check_capture(
     values: &BTreeMap<&str, Vec<&str>>,
     kernel: &Path,
@@ -1752,14 +1751,9 @@ fn check_capture(
             "--memory-capacity must be a multiple of 128 MiB no smaller than --memory".to_owned(),
         );
     }
-    for (name, expected) in [
-        ("--snapshot-tier", "platform"),
-        ("--snapshot-block-identity", "generation"),
-    ] {
-        let value = exactly_once(values, name)?;
-        if value != expected {
-            return Err(format!("{name} must be {expected}, not {value}"));
-        }
+    let tier = exactly_once(values, "--snapshot-tier")?;
+    if tier != "platform" {
+        return Err(format!("--snapshot-tier must be platform, not {tier}"));
     }
     let generation = exactly_once(values, "--snapshot-generation-id")?;
     if generation.len() != 32

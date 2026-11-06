@@ -66,7 +66,7 @@ fn random_id(what: &str) -> Result<[u8; ID_LEN]> {
 
 /// The bound-block storage generation of a capture: 16 bytes, not all zero, that a capture gives
 /// OpenVMM for every block that it binds, which the storage owner keeps immutable for those
-/// blocks, so that neither the capture nor a restore reads a block to identify it.
+/// blocks, since OpenVMM reads no block to identify it.
 ///
 /// It belongs to the storage owner, and is neither a [store generation](StoreGeneration), nor a
 /// time lineage counter, nor a VM generation ID; see

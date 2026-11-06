@@ -7950,11 +7950,10 @@ class MicrovmTests(unittest.TestCase):
         workload = microvm_tests._snapshot_storage_policy("workload-start")
         checkpoint = microvm_tests._snapshot_storage_policy("instance-checkpoint")
 
+        # OpenVMM identifies bound blocks by their storage generation alone.
         self.assertEqual(
             workload,
             (
-                "--snapshot-block-identity",
-                "generation",
                 "--snapshot-generation-id",
                 "00112233445566778899aabbccddee01",
                 "--snapshot-scratch-restore-mode",
@@ -7964,6 +7963,23 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(checkpoint[-1], "direct-claimed")
         with self.assertRaisesRegex(ValueError, "unsupported snapshot tier"):
             microvm_tests._snapshot_storage_policy("other")
+
+    def test_snapshot_restore_policy_states_the_captured_generation(self):
+        # A restore states the generation to which its tier's capture bound
+        # the blocks, and a platform capture binds none.
+        self.assertEqual(microvm_tests._snapshot_restore_policy("platform"), ())
+        for tier in ("workload-start", "instance-checkpoint"):
+            with self.subTest(tier=tier):
+                capture = microvm_tests._snapshot_storage_policy(tier)
+                generation = capture[capture.index("--snapshot-generation-id") + 1]
+                self.assertEqual(
+                    microvm_tests._snapshot_restore_policy(tier),
+                    ("--restore-generation-id", generation),
+                )
+        with self.assertRaisesRegex(ValueError, "unsupported snapshot tier"):
+            microvm_tests._snapshot_restore_policy("other")
+        runner = inspect.getsource(microvm_tests._run_snapshot_tier)
+        self.assertIn("*_snapshot_restore_policy(tier),", runner)
 
     def test_lifecycle_uses_one_vcpu_linux_guest(self):
         with (

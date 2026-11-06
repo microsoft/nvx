@@ -673,9 +673,9 @@ and the processors online at boot when they are fewer, so that the capture's
 whole command line holds tokens of OpenVMM's platform allowlist alone, and no
 tenant data, which the tests check with a copy of the allowlist's source; and
 the capture's options, `--snapshot-tier platform`, a `--snapshot-destination`,
-`SNAPSHOT_NAME` in the transaction directory, and
-`--snapshot-block-identity generation` with the capture's bound-block
-`StorageGeneration`, so that the capture hashes no block device.
+`SNAPSHOT_NAME` in the transaction directory, and `--snapshot-generation-id`
+with the capture's bound-block `StorageGeneration`, which OpenVMM does not
+record, since a platform capture binds no block.
 
 `TemplateManifest::read` reads the `manifest.bin` that OpenVMM wrote for a
 capture, at most `MAX_MANIFEST_LEN` bytes of a regular file that is not a link
