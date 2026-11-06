@@ -469,6 +469,32 @@ KERNEL_FEATURES: tuple[KernelFeature, ...] = (
         expects=("CONFIG_SECCOMP_FILTER=y", "CONFIG_CGROUP_WRITEBACK=y"),
     ),
     KernelFeature(
+        name="execution-cpu-limits",
+        summary="The CPU controller's bandwidth limit, cpu.max, for executions (#1193)",
+        rationale=(
+            "A guest agent that runs executions in cgroups of their own, "
+            "which nvx::guest::cgroup prepares with the resource values that "
+            "it chooses, caps each one's CPU time with its cgroup's cpu.max, "
+            "as it caps its memory and processes with memory.max and pids.max "
+            "(#1193). cpu.max is the bandwidth control of the CPU controller's "
+            "fair group scheduling, which throttles a cgroup's tasks once they "
+            "have used up its quota in a period. Real-time group scheduling "
+            "stays off, so that no real-time process outside the root cgroup "
+            "keeps the controller from being enabled. NVX's own agents enable "
+            "the controller for no cgroup, so every task stays in the root "
+            "task group unless a guest agent sets a limit."
+        ),
+        consumers=("nvx::guest::cgroup", "guest agents of runtime adapters"),
+        validation=("build-kernel's sandbox group",),
+        settings=(
+            "CONFIG_CGROUP_SCHED=y",
+            "CONFIG_FAIR_GROUP_SCHED=y",
+            "CONFIG_CFS_BANDWIDTH=y",
+            "# CONFIG_RT_GROUP_SCHED is not set",
+        ),
+        expects=("CONFIG_GROUP_SCHED_BANDWIDTH=y",),
+    ),
+    KernelFeature(
         name="guest-internal-networking",
         summary="Network namespaces and veth pairs for guest services (#309)",
         rationale=(
@@ -706,6 +732,7 @@ KERNEL_CONFIG_CHECKS: dict[str, tuple[str, ...]] = {
         "block-storage",
         "sandbox-filesystems",
         "sandbox-isolation",
+        "execution-cpu-limits",
         "guest-internal-networking",
         "unix-sockets",
     ),

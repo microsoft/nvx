@@ -124,6 +124,25 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(owner.name, "guest-internal-networking")
         self.assertIn("#309", owner.summary)
 
+    def test_the_cpu_limit_of_1193_is_required(self):
+        # cpu.max exists with the CPU controller's bandwidth control, which
+        # throttles fair-class tasks, and cgroup v2 refuses to enable the
+        # controller while real-time group scheduling has a real-time process
+        # outside the root cgroup.
+        sandbox = KernelBuildConstants.REQUIRED_SANDBOX_CONFIG
+        for setting in (
+            "CONFIG_CGROUP_SCHED=y",
+            "CONFIG_FAIR_GROUP_SCHED=y",
+            "CONFIG_CFS_BANDWIDTH=y",
+            "CONFIG_GROUP_SCHED_BANDWIDTH=y",
+            "# CONFIG_RT_GROUP_SCHED is not set",
+        ):
+            with self.subTest(setting=setting):
+                self.assertIn(setting, sandbox)
+        owner = kc.inventory_settings()["CFS_BANDWIDTH"][0]
+        self.assertEqual(owner.name, "execution-cpu-limits")
+        self.assertIn("#1193", owner.summary)
+
     def test_build_checks_are_their_features_settings_and_expectations(self):
         groups = {
             "direct-boot": KernelBuildConstants.REQUIRED_DIRECT_BOOT_CONFIG,

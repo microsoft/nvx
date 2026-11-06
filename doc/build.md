@@ -380,8 +380,8 @@ host, which remains supported.
 The inventory was built from the configuration that CI's kernel build
 resolved before it existed, which set 1,131 symbols, 1,055 of them `y` and
 503 with a prompt: it keeps what an NVX component, contract, or workload
-needs, and leaves the rest off (#344). The generated configuration sets 769
-symbols: 175 inventory settings and 594 derived ones, 53 of which have a
+needs, and leaves the rest off (#344). The generated configuration sets 774
+symbols: 178 inventory settings and 596 derived ones, 53 of which have a
 prompt. The checked-in file had also drifted from what `olddefconfig`
 resolved: it omitted 130 symbols that the build set, such as the wireless and
 Ethernet vendor menus, and listed four that the build never set, among them
@@ -397,7 +397,7 @@ builds, so it needs neither the serial core nor `CONFIG_SERIAL_EARLYCON`.
 | Kexec, crash dumps, `/proc/vmcore`, `/proc/kcore`, KASLR (`RANDOMIZE_BASE`, `RANDOMIZE_MEMORY`) and the relocatable kernel | OpenVMM loads `vmlinux` at its link address and never sets `boot_params`' KASLR flag, so randomization never ran |
 | The crypto API, keyrings, X.509 and PKCS#7 parsers, the security module framework and integrity | No guest component uses them; the kernel's own users, such as module signing, are off |
 | Filesystems and formats: ISO 9660, autofs, quotas, hugetlbfs, NLS code pages, MBR partitions, EROFS's file backing and LZMA and DEFLATE decompression, FUSE's io_uring and passthrough, `binfmt_misc`, and every initramfs compression but gzip | NVX's layers are EROFS (LZ4 or Zstandard) on virtio-blk, raw or GPT, its scratch ext4, its shares virtio-fs, and its initramfses gzip |
-| Cgroup controllers and namespaces that the sandbox never enables: CPU, cpuset, cpuacct, devices v1, freezer v1, hugetlb, RDMA, misc, perf, and the I/O controller's policies, and the IPC and time namespaces | The sandbox enables memory and process-count limits and creates mount, PID, and UTS namespaces; workloads have no capabilities to create others |
+| Cgroup controllers and namespaces that the sandbox never enables: cpuset, cpuacct, devices v1, freezer v1, hugetlb, RDMA, misc, perf, and the I/O controller's policies, and the IPC and time namespaces | The sandbox enables memory and process-count limits and creates mount, PID, and UTS namespaces; workloads have no capabilities to create others |
 | Swap, the block layer's debugfs files, scheduler statistics, SLUB debugging, memory-init debugging, BIOS-corruption checks, process accounting, relayfs, `PM` and its debugging, the CPU idle framework, the I/O schedulers, `/dev/cpu/*/cpuid` | No guest runs swap or reads them; with no cpuidle driver the kernel idles with HLT either way, and virtio-blk uses no scheduler |
 | Obsolete interfaces: 16-bit UIDs, `sgetmask`, 16-bit segments, `TIOCSTI` for unprivileged users, line-discipline autoloading, writes to mounted block devices | No supported workload uses them |
 | CPU vendors other than Intel and AMD | CPU profiles serve Intel and AMD hosts |
@@ -448,7 +448,7 @@ rationales say why NVX needs them.
 | --- | --- | --- |
 | Direct boot | `direct-boot`: ACPI, PVH, and PCI off; MP-table parsing, local APIC, IOAPIC, and virtio-mmio devices from the command line | Boot through the [ACPI-free MP-table loader](design/5.1-boot-protocol.md#511-linux-direct-loader) |
 | Virtio console | `virtio-console`: virtio console and HVC driver over virtio-mmio | Drive the [virtio consoles](design/3.3-consoles.md) |
-| Sandbox | `block-storage`, `sandbox-filesystems`, `sandbox-isolation`, `guest-internal-networking`, `unix-sockets`: virtio-blk with GPT partitions; ext4; EROFS with zstd compression; overlayfs that does not always follow redirects; tmpfs extended attributes; memory, PID, and writeback cgroups; BPF and cgroup BPF; seccomp filters; mount, PID, and UTS namespaces without user namespaces; Unix-domain sockets; network namespaces and veth | Layer EROFS over ext4 scratch and confine the workload in the [sandbox bootstrap](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root) |
+| Sandbox | `block-storage`, `sandbox-filesystems`, `sandbox-isolation`, `execution-cpu-limits`, `guest-internal-networking`, `unix-sockets`: virtio-blk with GPT partitions; ext4; EROFS with zstd compression; overlayfs that does not always follow redirects; tmpfs extended attributes; memory, PID, and writeback cgroups; the CPU controller's bandwidth limit, `cpu.max`, without real-time group scheduling; BPF and cgroup BPF; seccomp filters; mount, PID, and UTS namespaces without user namespaces; Unix-domain sockets; network namespaces and veth | Layer EROFS over ext4 scratch and confine the workload in the [sandbox bootstrap](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), and let guest agents [cap an execution's CPU time](design/4.3-isolation-and-resource-model.md#433-cgroups-and-resources) |
 | Network | `network`: IPv4 with TCP socket diagnostics; IPv6 without the SIT tunnel driver; virtio-net | Configure the dual-stack NIC of the [portable network profile](design/3.5-network.md); SIT would add an `sit0` device that decapsulates IPv6 from IPv4 packets |
 | Shared interrupt status | `shared-interrupt-status`: `CONFIG_VIRTIO_MMIO_SHARED_STATUS` from the kernel patches | Read [shared virtio interrupt status](design/2.4-interrupt-and-io-architecture.md#244-shared-interrupt-status) |
 | Time ABI | `time-abi`: hypervisor-guest and paravirtualization support on; Hyper-V, KVM guest, and cpufreq off; tickless idle at 100 Hz with high-resolution timers; the RCU stall timeouts; a 256 KiB log buffer | Meet the [time ABI](design/3.2-clock-and-time.md), as described above |
