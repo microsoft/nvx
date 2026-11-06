@@ -458,11 +458,15 @@ fn the_line_of_openvmm_s_fatal_error_is_read_before_a_chain_of_any_length() {
         fs::write(&path, &log).unwrap();
         assert_eq!(read_fatal(&path).as_deref(), Some(fatal));
     }
-    // A cause that names a forward that OpenVMM cannot bind follows the line after it.
+    // The cause that leads with the code of a forward that OpenVMM cannot bind follows a line
+    // that leads with it too, after a cause of any length.
+    let bind = "fatal error: [E_PORT_FORWARD_BIND] failed to launch vm worker";
     let forward = "failed to create socket for port forward (Tcp 127.0.0.1:18080)";
-    let log = format!("{fatal}\n\nCaused by:\n    0: {differences}\n    1: {forward}\n");
+    let log = format!(
+        "{bind}\n\nCaused by:\n    0: {differences}\n    1: [E_PORT_FORWARD_BIND] {forward}\n"
+    );
     fs::write(&path, &log).unwrap();
-    assert_eq!(read_fatal(&path), Some(format!("{fatal}: {forward}")));
+    assert_eq!(read_fatal(&path), Some(format!("{bind}: {forward}")));
     // The line is read wherever a block starts around it: after the newline before the line,
     // at the line's start, within its prefix, or after it.
     let filler = "a line of the VMM's log\n".repeat(2 * block / 24);
@@ -474,40 +478,6 @@ fn the_line_of_openvmm_s_fatal_error_is_read_before_a_chain_of_any_length() {
         fs::write(&path, &log).unwrap();
         assert_eq!(read_fatal(&path).as_deref(), Some(fatal), "{from_end}");
     }
-}
-
-#[test]
-fn the_cause_that_names_a_forward_that_openvmm_cannot_bind_follows_the_fatal_line() {
-    let (_directory, private) = private_dir();
-    let path = private.join("openvmm.log");
-    let fatal = "fatal error: failed to launch vm worker";
-    let forward = "failed to create socket for port forward (Tcp 127.0.0.1:18080)";
-    let expected = format!("{fatal}: {forward}");
-    // OpenVMM lists the causes of its error's chain after the line, numbered when there are
-    // several, and alone otherwise.
-    for chain in [
-        format!(
-            "    0: failed to resolve the network endpoint\n    1: {forward}\n    2: Address \
-                 already in use (os error 98)\n"
-        ),
-        format!("    {forward}\n"),
-    ] {
-        let log = format!("a line of the VMM's log\n{fatal}\n\nCaused by:\n{chain}");
-        fs::write(&path, &log).unwrap();
-        assert_eq!(
-            read_fatal(&path).as_deref(),
-            Some(expected.as_str()),
-            "{log}"
-        );
-    }
-    // A line that names the forward itself keeps its text alone.
-    let named = format!("fatal error: {forward}");
-    fs::write(&path, format!("{named}\n\nCaused by:\n    {forward}\n")).unwrap();
-    assert_eq!(read_fatal(&path).as_deref(), Some(named.as_str()));
-    // A forward that a line before the fatal error names is no cause of it.
-    let log = format!("warning: {forward}\n{fatal}\n\nCaused by:\n    0: another cause\n");
-    fs::write(&path, log).unwrap();
-    assert_eq!(read_fatal(&path).as_deref(), Some(fatal));
 }
 
 #[test]
@@ -540,9 +510,15 @@ fn the_cause_that_leads_with_the_code_of_a_forward_follows_the_line_that_leads_w
     let log = format!("{named}\n\nCaused by:\n    Address already in use (os error 98)\n");
     fs::write(&path, log).unwrap();
     assert_eq!(read_fatal(&path).as_deref(), Some(named.as_str()));
-    // The cause follows only a line that leads with its code.
+    // The cause follows only a line that leads with its code, and a forward that a line before
+    // the fatal error names is no cause of it.
     let other = "fatal error: [E_TSC_RATE_TOLERANCE] failed to launch vm worker";
     let log = format!("{other}\n\nCaused by:\n    0: [E_PORT_FORWARD_BIND] {forward}\n");
     fs::write(&path, log).unwrap();
     assert_eq!(read_fatal(&path).as_deref(), Some(other));
+    let log = format!(
+        "warning: [E_PORT_FORWARD_BIND] {forward}\n{fatal}\n\nCaused by:\n    0: another cause\n"
+    );
+    fs::write(&path, log).unwrap();
+    assert_eq!(read_fatal(&path).as_deref(), Some(fatal));
 }

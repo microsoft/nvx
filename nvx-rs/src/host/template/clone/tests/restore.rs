@@ -993,8 +993,8 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
             } else {
                 word.strip_prefix("forward:").map(|port| {
                     format!(
-                        "failed to launch vm worker: failed to create socket for port forward \
-                         (Tcp 127.0.0.1:{port})"
+                        "[E_PORT_FORWARD_BIND] failed to launch vm worker: the test's forward \
+                         (Tcp 127.0.0.1:{port}) is held"
                     )
                 })
             }
