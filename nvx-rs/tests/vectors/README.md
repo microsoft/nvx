@@ -11,9 +11,8 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | --- | --- |
 | [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
-| [`activation-v1.txt`](activation-v1.txt) | Version 1 of the activation record of a layered root, and what Ready reports about an activation |
-| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encoding of a template's compatibility key, with its identity |
-| [`capture-class-v2.txt`](capture-class-v2.txt) | Version 2 of the canonical encoding of a capture class, with its identity |
+| [`activation-v2.txt`](activation-v2.txt) | Version 2 of the activation record of a layered root, and what Ready reports about an activation |
+| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key and of a capture class, with their identities |
 | [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
@@ -24,10 +23,9 @@ describe the protocols, and the documentation of `nvx::activation`, in
 
 ## Line format
 
-`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v1.txt`, `template-key-v1.txt`, and
-`capture-class-v2.txt` share one line format. A line that starts with `#` is a
-comment, and an empty line is ignored. Every other line is one vector, whose
-fields `|` separates:
+`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v2.txt`, and `template-key-v1.txt`
+share one line format. A line that starts with `#` is a comment, and an empty
+line is ignored. Every other line is one vector, whose fields `|` separates:
 
 ```text
 KIND|NAME|BYTES|VALUE|...

@@ -165,9 +165,8 @@
 //! at a cold boot. The upper must be fresh: the assembly refuses one whose `upper` or `work`
 //! directory exists and is not empty, since a clone's root starts as its image alone, while a cold
 //! sandbox's scratch keeps its upper across boots; the check reads at most one entry of each, and
-//! no file. It takes no identity in which the executions run from the record, whose workload
-//! identity, if any, has no effect: the adapter gives each execution the identity that the
-//! execution names, which [`Entry::check`](super::entry::Entry::check) checks, as for a sandbox
+//! no file. The record holds no execution identity: the adapter gives each execution the identity
+//! that the execution names, which [`Entry::check`](super::entry::Entry::check) checks, as for a sandbox
 //! without a workload identity at a cold boot. If the record asks for a generated machine
 //! ID, it then generates one, once, with
 //! [`MachineId::generate`](super::entry::MachineId::generate), after the repair's reseed, so that

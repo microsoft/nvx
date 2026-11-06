@@ -298,8 +298,8 @@ impl Index {
 ///
 /// - The store generation, [`StoreGeneration`], is the host's publication ID: the store assigns
 ///   one to each generation as it indexes it, from 1 on, in the order of publication, and never
-///   assigns one twice, even once its generation is gone. A clone's activation record names the
-///   generation that it restores by its store generation and the identity of its key, in its
+///   assigns one twice, even once its generation is gone. A clone's lease and durable records name
+///   the generation that it restores by its store generation and the identity of its key, in their
 ///   [`TemplateReference`](crate::activation::TemplateReference).
 /// - The storage generation, [`StorageGeneration`], is the bound-block storage generation that a
 ///   capture gives OpenVMM, which the storage owner keeps immutable for the blocks that it binds.

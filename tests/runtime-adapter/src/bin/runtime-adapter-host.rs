@@ -170,13 +170,12 @@
 //!   `ExportPlan::verify`, OpenVMM restores the generation's snapshot in place, with the clone's
 //!   devices, through NVX's supervisor, as the launch that the lease reserves, and the restore
 //!   sequence of `nvx::host::template` activates the clone through the adapter's clone order,
-//!   `runtime_adapter::host::CloneOrder`, with the clone's activation record: the workload
-//!   identity UID:GID, if given, which the clone's guest ignores as it applies the record, since
-//!   each execution names its own identity, the overlay mode MODE and the scratch's journal policy
+//!   `runtime_adapter::host::CloneOrder`, with the clone's activation record: the overlay mode
+//!   MODE and the scratch's journal policy
 //!   POLICY, as a launch takes them, for a GPT disk, the bound BYTES of its first partition, 64
-//!   KiB unless given, as a launch's guest takes it by default, the export, by the identity of
-//!   its plan, with the number of its mappings, and for a template with a NIC the clone's network:
-//!   the identity of its policy, the DNS server that OpenVMM serves the guest under the policy, if
+//!   KiB unless given, as a launch's guest takes it by default, the export's shape and number of
+//!   mappings, and for a template with a NIC the clone's network:
+//!   the DNS server that OpenVMM serves the guest under the policy, if
 //!   any, which NVX finds as OpenVMM does, since the template's guest learned none, and whose
 //!   address the clone's guest writes to a resolver file that it binds read-only over the root's
 //!   `/etc/resolv.conf`, whether the policy publishes the workload's listeners, as it does with

@@ -662,7 +662,6 @@ fn a_retry_never_sends_another_record_nor_takes_another_activation() {
     let other = ActivationRecord::new(
         Some(RestoreSection {
             transaction: TransactionId::from_bytes([0x77; TransactionId::LEN]),
-            template: restore.template,
         }),
         original.configuration().clone(),
     )

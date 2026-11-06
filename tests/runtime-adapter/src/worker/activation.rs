@@ -318,7 +318,7 @@ impl CloneState {
         self.applied = Some(Applied {
             result,
             mappings,
-            hostname: configuration.workload.hostname.clone(),
+            hostname: configuration.view.hostname.clone(),
             publication,
             joined: 0,
         });

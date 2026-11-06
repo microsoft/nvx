@@ -6,18 +6,15 @@
 mod launch;
 mod restore;
 
-use std::collections::HashSet;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use super::*;
 use crate::ErrorCode;
 use crate::activation::{
-    Configuration, ExpectedResources, Export, ExportKind, Identity, Image, MachineIdMode, Network,
-    Publication, Upper, WorkloadIdentity,
+    Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode, Network,
+    Publication, Upper,
 };
 use crate::host::filesystem;
 use crate::host::network::{
@@ -194,7 +191,7 @@ fn gpt_layer(path: &Path) -> SandboxLayer {
 }
 
 /// Returns the request of a clone of the image at `image`, which `binding` binds, over an upper in
-/// RAM, with the template's processors and RAM as its targets, and the settings of [`workload`],
+/// RAM, with the template's processors and RAM as its targets, and the settings of [`view`],
 /// for untrusted lowers, and with a journal policy, [`Journal::Forbidden`], that its record leaves
 /// out, and for a GPT disk, the bound [`FIRST_PARTITION_BOUND`].
 fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
@@ -209,7 +206,7 @@ fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
         export: None,
         processors: PROCESSORS,
         memory: MEMORY,
-        workload: workload(),
+        view: view(),
         overlay: OverlayMode::UntrustedLowers,
         journal: Journal::Forbidden,
         first_partition_bound: FIRST_PARTITION_BOUND,
@@ -217,14 +214,10 @@ fn tmpfs_request(image: &Path, binding: &DistroBinding) -> CloneRequest {
 }
 
 /// Returns the view that these tests' clones give their workloads of their VMs.
-fn workload() -> WorkloadView {
-    WorkloadView {
+fn view() -> View {
+    View {
         hostname: b"clone".to_vec(),
         machine_id: MachineIdMode::Generated,
-        identity: Some(WorkloadIdentity {
-            uid: 1000,
-            gid: 1000,
-        }),
     }
 }
 
@@ -2242,16 +2235,6 @@ fn files_that_their_paths_do_not_name_as_checked_are_refused() {
     assert_untouched(&acquired);
 }
 
-/// Returns the SHA-256 digest of `domain` and of the serde form of `binding`, as the identity of a
-/// binding is documented.
-fn digest_of(domain: &[u8], binding: &impl serde::Serialize) -> Identity {
-    let digest = Sha256::new()
-        .chain_update(domain)
-        .chain_update(serde_json::to_vec(binding).unwrap())
-        .finalize();
-    Identity::from_bytes(digest.into())
-}
-
 #[test]
 fn the_activation_record_of_a_clone_in_ram_names_its_restore_image_and_settings() {
     let fixture = Fixture::new();
@@ -2261,21 +2244,21 @@ fn the_activation_record_of_a_clone_in_ram_names_its_restore_image_and_settings(
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     let record = plan.activation();
     let restore = record.restore().unwrap();
-    assert_eq!(restore.template, acquired.lease.template());
     assert_eq!(
         record.configuration(),
         &Configuration {
             image: Image::Erofs {
-                binding: digest_of(b"nvx distro binding\0", &binding),
                 uuid: Some(Uuid::parse(UUID).unwrap()),
             },
             // A clone in RAM has no journal policy, whatever the request's.
-            upper: Upper::Tmpfs,
+            upper: Upper::Tmpfs {
+                max_memory_percent: 50
+            },
             overlay: OverlayMode::UntrustedLowers,
             export: None,
             mappings: 0,
             network: None,
-            workload: workload(),
+            view: view(),
             resources: ExpectedResources {
                 cpus: PROCESSORS,
                 memory: MEMORY,
@@ -2294,7 +2277,6 @@ fn the_activation_record_of_a_clone_in_ram_names_its_restore_image_and_settings(
     let again = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     let restored = again.activation().restore().unwrap();
     assert_ne!(restored.transaction, transaction);
-    assert_eq!(restored.template, acquired.lease.template());
     // A larger memory target is the resources that the clone must have.
     drop(again);
     let larger = CloneRequest {
@@ -2309,7 +2291,7 @@ fn the_activation_record_of_a_clone_in_ram_names_its_restore_image_and_settings(
 }
 
 #[test]
-fn the_activation_record_of_a_clone_on_a_scratch_image_names_its_binding_and_journal() {
+fn the_activation_record_of_a_clone_on_a_scratch_image_names_only_its_journal() {
     let fixture = Fixture::new();
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let (scratch, scratch_binding) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
@@ -2322,27 +2304,20 @@ fn the_activation_record_of_a_clone_on_a_scratch_image_names_its_binding_and_jou
         };
         let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
         let configuration = plan.activation().configuration();
-        assert_eq!(
-            configuration.upper,
-            Upper::Scratch {
-                binding: digest_of(b"nvx scratch binding\0", &scratch_binding),
-                journal,
-            }
-        );
+        assert_eq!(configuration.upper, Upper::Scratch { journal });
         assert_eq!(configuration.overlay, OverlayMode::TrustedLowers);
         assert_eq!(
-            *configuration.image.binding(),
-            digest_of(b"nvx distro binding\0", &binding)
+            configuration.image.expected(),
+            Some(Uuid::parse(UUID).unwrap())
         );
     }
-    // The identities of two bindings differ, as their files do.
+    // Another binding does not change the guest-applied upper.
     let (other, other_binding) = fixture.scratch("other.ext4", SCRATCH_LEN);
     let request = scratch_request(&image, &binding, &other, &other_binding);
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
-    assert_ne!(
+    assert_eq!(
         plan.activation().configuration().upper,
         Upper::Scratch {
-            binding: digest_of(b"nvx scratch binding\0", &scratch_binding),
             journal: Journal::Forbidden,
         }
     );
@@ -2355,7 +2330,6 @@ fn the_activation_record_of_a_gpt_clone_names_its_disk_and_the_bound_of_its_firs
     let (scratch, scratch_binding) = fixture.scratch("scratch.ext4", SCRATCH_LEN);
     let mut acquired = fixture.acquire("sandbox");
     let gpt = |first_partition_bound| Image::Gpt {
-        binding: digest_of(b"nvx distro binding\0", &binding),
         disk_guid: Some(Uuid::parse(UUID).unwrap()),
         first_partition_bound,
     };
@@ -2376,7 +2350,7 @@ fn the_activation_record_of_a_gpt_clone_names_its_disk_and_the_bound_of_its_firs
         assert!(plan.image().file().read(&mut byte).is_err());
         let configuration = plan.activation().configuration();
         assert_eq!(configuration.image, gpt(FIRST_PARTITION_BOUND));
-        assert_eq!(configuration.workload, workload());
+        assert_eq!(configuration.view, view());
     }
     // The record keeps the request's bound, whatever it is from 1 on.
     for bound in [1, u64::MAX] {
@@ -2417,10 +2391,9 @@ fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_own_netwo
     ];
     assert_eq!(policies.len(), expected.len());
     // Each clone's record names its own network, whatever the policy of the template's class:
-    // the identity of the network, the DNS server that OpenVMM serves the guest at a gateway
+    // the DNS server that OpenVMM serves the guest at a gateway
     // under its policy, whether the guest publishes its listeners, and the proxy's URL as the
     // guest sees it, at its gateway.
-    let mut identities = HashSet::new();
     for (policy, (dns, publication, proxy)) in policies.into_iter().zip(expected) {
         let network = SandboxNetwork::new("10.0.0.2/24", policy).unwrap();
         let request = with_network(tmpfs_request(&image, &binding), Some(network.clone()));
@@ -2429,14 +2402,12 @@ fn the_activation_record_of_a_clone_of_a_template_with_a_nic_names_its_own_netwo
         assert_eq!(
             recorded,
             Some(Network {
-                policy: digest_of(b"nvx network policy\0", &network),
                 dns,
                 publication,
                 proxy: proxy.map(str::to_owned),
             }),
             "{network:?}"
         );
-        assert!(identities.insert(recorded.unwrap().policy));
     }
 }
 
@@ -2446,41 +2417,34 @@ fn settings_that_no_activation_record_holds_are_refused_before_anything_is_creat
     let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
     let mut acquired = fixture.acquire("sandbox");
     let request = tmpfs_request(&image, &binding);
-    let with_workload = |workload: WorkloadView| CloneRequest {
-        workload,
+    let with_view = |view: View| CloneRequest {
+        view,
         ..request.clone()
     };
-    for (workload, problem) in [
+    for (view, problem) in [
         (
-            WorkloadView {
+            View {
                 hostname: Vec::new(),
-                ..workload()
+                ..view()
             },
             "the hostname is not 1 to 64 bytes without a NUL",
         ),
         (
-            WorkloadView {
+            View {
                 hostname: vec![b'h'; 65],
-                ..workload()
+                ..view()
             },
             "the hostname is not 1 to 64 bytes without a NUL",
         ),
         (
-            WorkloadView {
+            View {
                 hostname: b"clone\0".to_vec(),
-                ..workload()
+                ..view()
             },
             "the hostname is not 1 to 64 bytes without a NUL",
-        ),
-        (
-            WorkloadView {
-                identity: Some(WorkloadIdentity { uid: 0, gid: 1000 }),
-                ..workload()
-            },
-            "the workload identity's UID or GID is 0 or 4294967295",
         ),
     ] {
-        let plan = fixture.plan(&mut acquired, &with_workload(workload), NO_CONTENT);
+        let plan = fixture.plan(&mut acquired, &with_view(view), NO_CONTENT);
         assert_eq!(
             refused(plan, Evidence::InvalidActivate),
             (
@@ -2577,14 +2541,12 @@ fn a_clone_with_an_export_records_its_plan_and_maps_from_its_children() {
     let request = with_export(tmpfs_request(&image, &binding), &export);
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     assert_eq!(plan.export(), Some(&export));
-    // The record names the export, an aggregate, by the identity of its plan, and announces its
-    // mappings, the plan's binds.
+    // The record names the export's shape and announces its mappings, not its plan identity.
     let configuration = plan.activation().configuration();
     assert_eq!(
         configuration.export,
         Some(Export {
             kind: ExportKind::Aggregate,
-            plan: digest_of(b"nvx export plan\0", &export),
         })
     );
     assert_eq!(configuration.mappings, export.binds.len());
@@ -2597,15 +2559,17 @@ fn a_clone_with_an_export_records_its_plan_and_maps_from_its_children() {
         .map(|mapping| mapping.source)
         .collect();
     assert_eq!(sources, ["0", "1", "2", "3", "0/work"]);
-    // The identity covers the whole plan: another aggregate's is another.
+    // Another aggregate still records only its shape and mapping count.
     drop(plan);
     let other = fixture.data_export("other");
     let request = with_export(tmpfs_request(&image, &binding), &other);
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
     let recorded = plan.activation().configuration().export.unwrap();
     assert_eq!(recorded.kind, ExportKind::Aggregate);
-    assert_eq!(recorded.plan, digest_of(b"nvx export plan\0", &other));
-    assert_ne!(recorded.plan, digest_of(b"nvx export plan\0", &export));
+    assert_eq!(
+        plan.activation().configuration().mappings,
+        other.binds.len()
+    );
     assert_eq!(plan.table(), data_table());
     // A clone without mappings has no export, and its record none, so its template's slot stays
     // dormant.

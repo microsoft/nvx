@@ -2071,12 +2071,12 @@ impl Crashed {
             .unwrap()
     }
 
-    /// Checks that the sandbox holds the clone's activation record, which names the restore of
-    /// the leased generation, and, on Linux, the restore-ready socket.
+    /// Checks that the sandbox holds the clone's activation record, with its restore
+    /// transaction, and, on Linux, the restore-ready socket.
     fn kept_its_files(&self, locked: &LockedStore) {
         let recorded = fs::read(locked.clone_activation_path()).unwrap();
         let record = ActivationRecord::decode(&recorded).unwrap();
-        assert_eq!(record.restore().unwrap().template, self.lease.template());
+        assert!(record.restore().is_some());
         if cfg!(target_os = "linux") {
             assert!(exists(&locked.restore_ready_path()));
         }

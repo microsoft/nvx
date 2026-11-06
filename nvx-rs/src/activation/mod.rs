@@ -10,10 +10,8 @@
 //!
 //! - [`ActivationRecord`]: the [`VERSION`] of its schema, the [`RestoreSection`] of a clone, and
 //!   the [`Configuration`]. A clone's restore section holds the restore's [`TransactionId`], 16
-//!   random bytes that the host picks for each restore and keeps across the restore's retries,
-//!   and the [`TemplateReference`] of the template that the clone restores: the template's
-//!   [`StoreGeneration`], the nonzero publication ID that its store assigned to it, and the
-//!   [`Identity`] of its key. A cold boot's record has no restore section.
+//!   random bytes that the host picks for each restore and keeps across the restore's retries.
+//!   A cold boot's record has no restore section.
 //! - [`Configuration`]: the non-secret settings that the activation applies, which the
 //!   [configuration](#configuration) lists.
 //! - [`ReadyActivation`]: what Ready reports about the activation: that it applied, which every
@@ -31,22 +29,18 @@
 //!
 //! A [`Configuration`] holds:
 //!
-//! - the [`Image`]: its format, an EROFS filesystem or a GPT disk, the [`Identity`] of the
-//!   image's binding, and the EROFS filesystem's UUID or the GPT disk's GUID that the guest
-//!   expects, if any;
-//! - the [`Upper`]: a tmpfs, or the scratch, with the [`Identity`] of the scratch's binding;
-//! - the [`Export`], if any: one export, a directory or an aggregate, with the [`Identity`] of
-//!   its plan, which covers the export's whole shape, and the number of host mappings that the
-//!   host sends once the guest is ready, from 1 to [`MAX_MAPPINGS`]. A configuration without an
-//!   export has no mappings;
-//! - the [`Network`] of a VM that has one: the [`Identity`] of its policy, the address of its DNS
-//!   server, if any, the [`Publication`] of the workload's listeners, and the endpoint of its
-//!   proxy, if any, which holds no credentials;
-//! - the [`WorkloadView`]: the hostname, the [`MachineIdMode`], the image's own machine ID or one
-//!   that the guest generates, and the [`WorkloadIdentity`], if any: a UID and a GID, neither 0
-//!   nor `u32::MAX`, which the guest ignores as it applies the record, since each execution of a
-//!   clone names its own identity, as CRI containers do. A VM's configuration names its hostname
-//!   and machine ID in a [`View`], which leaves the identity to each execution;
+//! - the [`Image`]: its format, an EROFS filesystem or a GPT disk, and the EROFS filesystem's
+//!   UUID or the GPT disk's GUID that the guest expects, if any;
+//! - the [`Upper`]: a tmpfs with its cap in percent of the VM's memory, or the scratch with its
+//!   journal policy;
+//! - the [`Export`], if any: one export, a directory or an aggregate, and the number of host
+//!   mappings that the host sends once the guest is ready, from 1 to [`MAX_MAPPINGS`]. A
+//!   configuration without an export has no mappings;
+//! - the [`Network`] of a VM that has one: the address of its DNS server, if any, the
+//!   [`Publication`] of the workload's listeners, and the endpoint of its proxy, if any, which
+//!   holds no credentials;
+//! - the [`View`]: the hostname and the [`MachineIdMode`], the image's own machine ID or one that
+//!   the guest generates. Each execution names its own identity;
 //! - the root's settings: the [`OverlayMode`], the [`Journal`] policy of a scratch upper, and the
 //!   bound of a GPT disk's first partition;
 //! - the [`ExpectedResources`]: the CPU count and the memory size that the guest must have, as a
@@ -69,10 +63,9 @@
 //! record's encoding within [`MAX_RECORD_BYTES`].
 //!
 //! [`Configuration::check`] also refuses an export without mappings, mappings without an export,
-//! a workload identity whose UID or GID is 0, or `u32::MAX`, which the kernel reads as an
-//! unchanged ID, a hostname with a NUL, a proxy endpoint with anything other than visible ASCII
-//! characters or with an `@`, which would start credentials, and a zero CPU count, memory size,
-//! or bound of a GPT disk's first partition.
+//! a tmpfs cap outside 1 to 90 percent, a hostname with a NUL, a proxy endpoint with anything
+//! other than visible ASCII characters or with an `@`, which would start credentials, and a
+//! zero CPU count, memory size, or bound of a GPT disk's first partition.
 //!
 //! # Encoding
 //!
@@ -82,30 +75,29 @@
 //!
 //! | Tag | [`Field`] | Value | Bytes | Present |
 //! | --- | --- | --- | --- | --- |
-//! | `0x01` | [`Restore`](Field::Restore) | The transaction ID, the store generation, a `u64`, and the identity of the template's key | 56 | In a clone's record |
-//! | `0x10` | [`Image`](Field::Image) | The format, `1` for EROFS or `2` for GPT, the identity of the image's binding, and a GPT disk's first-partition bound, a `u64` | 33 for EROFS, 41 for GPT | Always |
+//! | `0x01` | [`Restore`](Field::Restore) | The transaction ID | 16 | In a clone's record |
+//! | `0x10` | [`Image`](Field::Image) | The format, `1` for EROFS or `2` for GPT, and a GPT disk's first-partition bound, a `u64` | 1 for EROFS, 9 for GPT | Always |
 //! | `0x11` | [`ImageIdentity`](Field::ImageIdentity) | The UUID or the disk GUID that the guest expects, in the order of its canonical text | 16 | If the guest expects one |
-//! | `0x20` | [`Upper`](Field::Upper) | `1` for a tmpfs, or `2` for the scratch, then the identity of the scratch's binding and its journal policy, `1` allowed or `2` forbidden | 1 for a tmpfs, 34 for the scratch | Always |
+//! | `0x20` | [`Upper`](Field::Upper) | `1` for a tmpfs and its cap, 1 to 90 percent, or `2` for the scratch and its journal policy, `1` allowed or `2` forbidden | 2 | Always |
 //! | `0x30` | [`Overlay`](Field::Overlay) | `1` for trusted lowers, or `2` for untrusted lowers | 1 | Always |
-//! | `0x40` | [`Export`](Field::Export) | The shape, `1` for a directory or `2` for an aggregate, and the identity of the export's plan | 33 | With an export |
+//! | `0x40` | [`Export`](Field::Export) | The shape, `1` for a directory or `2` for an aggregate | 1 | With an export |
 //! | `0x41` | [`Mappings`](Field::Mappings) | The number of mappings, a `u16` from 1 to [`MAX_MAPPINGS`] | 2 | With an export |
-//! | `0x50` | [`Network`](Field::Network) | The identity of the policy, and `1` if listeners are published, or `2` if not | 33 | With a network |
+//! | `0x50` | [`Network`](Field::Network) | `1` if listeners are published, or `2` if not | 1 | With a network |
 //! | `0x51` | [`Dns`](Field::Dns) | The DNS server's IPv4 or IPv6 address | 4 or 16 | With a network that has one |
 //! | `0x52` | [`Proxy`](Field::Proxy) | The proxy endpoint | 1 to [`MAX_PROXY_ENDPOINT_BYTES`] | With a network that has one |
 //! | `0x60` | [`Hostname`](Field::Hostname) | The hostname | 1 to [`MAX_HOSTNAME_BYTES`] | Always |
 //! | `0x61` | [`MachineId`](Field::MachineId) | `1` for the image's machine ID, or `2` for a generated one | 1 | Always |
-//! | `0x62` | [`WorkloadIdentity`](Field::WorkloadIdentity) | The UID and the GID, each a `u32` | 8 | With a workload identity |
 //! | `0x70` | [`Resources`](Field::Resources) | The CPU count, a `u32`, and the memory size, a `u64` | 12 | Always |
 //!
 //! Integers are little-endian, and identities, IDs, and addresses are their bytes, in order. The
-//! largest record, with every field at its largest, holds 602 bytes.
+//! largest record, with every field at its largest, holds 424 bytes.
 //!
 //! [`ActivationRecord::decode`] refuses bytes that are longer than [`MAX_RECORD_BYTES`], end
 //! inside the version or a field, or hold another version; a field with an unknown tag, a
 //! repeated field, and a field out of order; a value with another number of bytes than its
 //! contents take, or with a code that the version does not define; a mapping count of 0, since
-//! a record without mappings leaves the field out, and a store generation of 0, which no store
-//! assigns; a record without a field that is always present, or with a DNS server or a proxy but
+//! a record without mappings leaves the field out; a record without a field that is always
+//! present, or with a DNS server or a proxy but
 //! no network; and every configuration that [`Configuration::check`] refuses, such as one with
 //! an export without mappings, or with mappings without an export. A record therefore has
 //! exactly one encoding, which [`ActivationRecord::encode`] writes, and which the decoder reads
@@ -123,48 +115,39 @@
 //! [`ReadyActivation::CLONE_LEN`] bytes. A Ready that embeds these bytes therefore has the same
 //! encoding for a clone as for a cold boot.
 //!
-//! The conformance vectors of `tests/vectors/activation-v1.txt` hold records, and what Ready
+//! The conformance vectors of `tests/vectors/activation-v2.txt` hold records, and what Ready
 //! reports about their activations, in both encodings, and bytes that every decoder refuses.
 //!
 //! # Example
 //!
 //! ```
-//! use std::num::NonZeroU64;
-//!
 //! use nvx::activation::{
-//!     ActivationRecord, Configuration, ExpectedResources, Identity, Image, MachineIdMode,
-//!     OverlayMode, RestoreSection, StoreGeneration, TemplateReference, TransactionId, Upper,
-//!     WorkloadIdentity, WorkloadView,
+//!     ActivationRecord, Configuration, ExpectedResources, Image, MachineIdMode,
+//!     OverlayMode, RestoreSection, TransactionId, Upper, View,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let configuration = Configuration {
 //!     image: Image::Erofs {
-//!         binding: Identity::from_bytes([0x11; 32]),
 //!         uuid: Some("0123abcd-4567-89ef-0123-456789abcdef".parse()?),
 //!     },
-//!     upper: Upper::Tmpfs,
+//!     upper: Upper::Tmpfs { max_memory_percent: 50 },
 //!     overlay: OverlayMode::UntrustedLowers,
 //!     export: None,
 //!     mappings: 0,
 //!     network: None,
-//!     workload: WorkloadView {
+//!     view: View {
 //!         hostname: b"sandbox".to_vec(),
 //!         machine_id: MachineIdMode::Generated,
-//!         identity: Some(WorkloadIdentity { uid: 1000, gid: 1000 }),
 //!     },
 //!     resources: ExpectedResources { cpus: 2, memory: 1 << 30 },
 //! };
 //! // A cold boot's record has no restore section.
 //! let cold = ActivationRecord::new(None, configuration.clone())?;
 //! assert!(cold.restore().is_none());
-//! // A clone's names its restore's transaction and the template that it restores.
+//! // A clone's names only its restore's transaction.
 //! let restore = RestoreSection {
 //!     transaction: TransactionId::from_bytes([0x22; 16]),
-//!     template: TemplateReference {
-//!         generation: StoreGeneration::new(NonZeroU64::MIN),
-//!         key: Identity::from_bytes([0x44; 32]),
-//!     },
 //! };
 //! let clone = ActivationRecord::new(Some(restore), configuration)?;
 //! assert_eq!(clone.restore(), Some(&restore));
@@ -192,7 +175,7 @@ pub use self::codec::Field;
 
 /// The version of the schema of an [`ActivationRecord`] that this build speaks, which every
 /// record names. A record of another version is refused.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// The version of the activation contract that this build speaks, which the compatibility key of
 /// a template holds: the schema of an [`ActivationRecord`], at [`VERSION`], and how a clone of
@@ -219,10 +202,8 @@ pub const MAX_HOSTNAME_BYTES: usize = 64;
 /// The longest proxy endpoint, in bytes.
 pub const MAX_PROXY_ENDPOINT_BYTES: usize = 255;
 
-/// The identity of an object that a record names: 32 bytes that the host computes, such as a
-/// SHA-256 digest of the object's canonical form, by which a record names the binding of its
-/// image and of its scratch, the plan of its export, the policy of its network, and the key of a
-/// clone's template. A record never holds or reads the objects themselves.
+/// The identity of a stored object's canonical form: 32 bytes that the host computes, such as a
+/// SHA-256 digest of a template's key. Activation records do not encode store identities.
 ///
 /// It displays as 64 lowercase hexadecimal digits.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -326,14 +307,11 @@ pub struct TemplateReference {
     pub key: Identity,
 }
 
-/// The restore section of a clone's record: the restore's transaction ID, and the template that
-/// the clone restores.
+/// The restore section of a clone's record: only the restore's transaction ID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RestoreSection {
     /// The restore's transaction ID, which the clone's Ready reports.
     pub transaction: TransactionId,
-    /// The template that the clone restores.
-    pub template: TemplateReference,
 }
 
 /// The image of a layered root, on its `distro` block device, in the format that the record
@@ -342,16 +320,12 @@ pub struct RestoreSection {
 pub enum Image {
     /// An EROFS filesystem, the overlay's one lower layer.
     Erofs {
-        /// The identity of the image's binding.
-        binding: Identity,
         /// The UUID that the filesystem's superblock must hold, if the guest expects one.
         uuid: Option<Uuid>,
     },
     /// A GPT disk, whose first partition holds opaque bytes, and whose later partitions hold the
     /// overlay's lower layers.
     Gpt {
-        /// The identity of the image's binding.
-        binding: Identity,
         /// The GUID that the disk must have, if the guest expects one.
         disk_guid: Option<Uuid>,
         /// The most bytes that the disk's first partition may hold: at least 1, since a
@@ -369,13 +343,6 @@ impl Image {
         }
     }
 
-    /// Returns the identity of the image's binding.
-    pub fn binding(&self) -> &Identity {
-        match self {
-            Self::Erofs { binding, .. } | Self::Gpt { binding, .. } => binding,
-        }
-    }
-
     /// Returns what the guest expects of the image, if anything: the EROFS filesystem's UUID, or
     /// the GPT disk's GUID.
     pub fn expected(&self) -> Option<Uuid> {
@@ -390,11 +357,12 @@ impl Image {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Upper {
     /// A tmpfs, for a root that keeps no upper on a scratch.
-    Tmpfs,
+    Tmpfs {
+        /// The most that the upper may hold, in percent of the VM's memory: 1 to 90.
+        max_memory_percent: u8,
+    },
     /// A whole-device ext4 filesystem on the `scratch` block device.
     Scratch {
-        /// The identity of the scratch's binding.
-        binding: Identity,
         /// Whether the scratch's filesystem may have a journal.
         journal: Journal,
     },
@@ -433,9 +401,6 @@ pub enum ExportKind {
 pub struct Export {
     /// The export's shape.
     pub kind: ExportKind,
-    /// The identity of the export's plan, which covers the export's whole shape, so that an
-    /// export of any shape has a record of the same form.
-    pub plan: Identity,
 }
 
 /// Whether the workload's listeners are published, through private-network ingress or the
@@ -451,8 +416,6 @@ pub enum Publication {
 /// The network of a VM that has one.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Network {
-    /// The identity of the network's policy.
-    pub policy: Identity,
     /// The address of the DNS server that the guest's resolver configuration names, if any.
     pub dns: Option<IpAddr>,
     /// Whether the workload's listeners are published.
@@ -470,28 +433,6 @@ pub enum MachineIdMode {
     Image,
     /// A machine ID that the guest generates for the activation.
     Generated,
-}
-
-/// A workload identity that an activation record may carry: a UID and a GID, neither 0 nor
-/// `u32::MAX`. The guest ignores it as it applies the record: each execution names its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct WorkloadIdentity {
-    /// The user ID: neither 0 nor `u32::MAX`.
-    pub uid: u32,
-    /// The group ID: neither 0 nor `u32::MAX`.
-    pub gid: u32,
-}
-
-/// The view that the workload has of its VM.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct WorkloadView {
-    /// The hostname: 1 to [`MAX_HOSTNAME_BYTES`] bytes, without a NUL.
-    pub hostname: Vec<u8>,
-    /// The machine ID that the workload sees.
-    pub machine_id: MachineIdMode,
-    /// A workload identity, which the guest ignores as it applies the record: each execution
-    /// names its own.
-    pub identity: Option<WorkloadIdentity>,
 }
 
 /// The view that a VM's workload has of it: its hostname and its machine ID, without an identity
@@ -534,7 +475,7 @@ pub struct Configuration {
     /// The network, for a VM that has one.
     pub network: Option<Network>,
     /// The workload's view.
-    pub workload: WorkloadView,
+    pub view: View,
     /// The resources that the guest must have.
     pub resources: ExpectedResources,
 }
@@ -543,12 +484,12 @@ impl Configuration {
     /// Checks that the configuration keeps every limit of the [module](self#limits), and returns
     /// the first that it breaks, in the order of the configuration's fields.
     ///
-    /// It refuses a GPT disk's first-partition bound of 0; an export without mappings, mappings
+    /// It refuses a GPT disk's first-partition bound of 0; a tmpfs cap outside 1 to 90 percent;
+    /// an export without mappings, mappings
     /// without an export, and more than [`MAX_MAPPINGS`] mappings; a proxy endpoint that is empty
     /// or longer than [`MAX_PROXY_ENDPOINT_BYTES`], or holds a byte other than a visible ASCII
     /// character, or an `@`; a hostname that is empty or longer than [`MAX_HOSTNAME_BYTES`], or
-    /// holds a NUL; a workload identity whose UID or GID is 0 or `u32::MAX`; and a CPU count or
-    /// memory size of 0.
+    /// holds a NUL; and a CPU count or memory size of 0.
     pub fn check(&self) -> Result<(), ActivationError> {
         if let Image::Gpt {
             first_partition_bound: 0,
@@ -556,6 +497,11 @@ impl Configuration {
         } = self.image
         {
             return Err(ActivationError::FirstPartitionBound);
+        }
+        if let Upper::Tmpfs { max_memory_percent } = self.upper
+            && !(1..=90).contains(&max_memory_percent)
+        {
+            return Err(ActivationError::TmpfsMemoryPercent(max_memory_percent));
         }
         match (self.export.is_some(), self.mappings) {
             (true, 0) => return Err(ActivationError::ExportWithoutMappings),
@@ -573,14 +519,8 @@ impl Configuration {
         {
             return Err(ActivationError::ProxyEndpoint);
         }
-        if !is_hostname(&self.workload.hostname) {
+        if !is_hostname(&self.view.hostname) {
             return Err(ActivationError::Hostname);
-        }
-        // The kernel reads `u32::MAX` as an unchanged ID, which the guest's entry refuses.
-        if let Some(WorkloadIdentity { uid, gid }) = self.workload.identity
-            && [uid, gid].into_iter().any(|id| id == 0 || id == u32::MAX)
-        {
-            return Err(ActivationError::WorkloadIdentity);
         }
         if self.resources.cpus == 0 {
             return Err(ActivationError::Cpus);
@@ -651,6 +591,8 @@ pub struct ReadyActivation {
 pub enum ActivationError {
     /// A GPT disk's first-partition bound is 0.
     FirstPartitionBound,
+    /// The tmpfs cap is outside 1 to 90 percent: this value.
+    TmpfsMemoryPercent(u8),
     /// The configuration has an export, but no mappings.
     ExportWithoutMappings,
     /// The configuration has mappings, but no export.
@@ -662,9 +604,6 @@ pub enum ActivationError {
     ProxyEndpoint,
     /// The hostname is empty, longer than [`MAX_HOSTNAME_BYTES`], or holds a NUL.
     Hostname,
-    /// The workload identity's UID or GID is 0, or `u32::MAX`, which the kernel reads as an
-    /// unchanged ID.
-    WorkloadIdentity,
     /// The expected CPU count is 0.
     Cpus,
     /// The expected memory size is 0.
@@ -701,6 +640,10 @@ impl fmt::Display for ActivationError {
             Self::FirstPartitionBound => {
                 formatter.write_str("the bound of a GPT disk's first partition is 0")
             }
+            Self::TmpfsMemoryPercent(percent) => write!(
+                formatter,
+                "the tmpfs cap of {percent}% of the VM's memory is not 1 to 90%"
+            ),
             Self::ExportWithoutMappings => formatter.write_str("the export has no mappings"),
             Self::MappingsWithoutExport => formatter.write_str("the mappings have no export"),
             Self::TooManyMappings(mappings) => write!(
@@ -716,9 +659,6 @@ impl fmt::Display for ActivationError {
                 formatter,
                 "the hostname is not 1 to {MAX_HOSTNAME_BYTES} bytes without a NUL"
             ),
-            Self::WorkloadIdentity => {
-                formatter.write_str("the workload identity's UID or GID is 0 or 4294967295")
-            }
             Self::Cpus => formatter.write_str("the expected CPU count is 0"),
             Self::Memory => formatter.write_str("the expected memory size is 0"),
             Self::TooLong(length) => write!(

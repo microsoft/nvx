@@ -5,13 +5,11 @@
 
 use std::cell::Cell;
 use std::io;
-use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use super::*;
 use crate::activation::{
-    Configuration, Identity, Image, MAX_RECORD_BYTES, MachineIdMode, OverlayMode, RestoreSection,
-    StoreGeneration, TemplateReference, Upper, WorkloadView,
+    Configuration, Image, MAX_RECORD_BYTES, MachineIdMode, OverlayMode, RestoreSection, Upper, View,
 };
 
 /// The number of online CPUs of the clone.
@@ -78,19 +76,17 @@ fn resources() -> ExpectedResources {
 /// `resources`.
 fn configuration(hostname: &[u8], resources: ExpectedResources) -> Configuration {
     Configuration {
-        image: Image::Erofs {
-            binding: Identity::from_bytes([0x11; Identity::LEN]),
-            uuid: None,
+        image: Image::Erofs { uuid: None },
+        upper: Upper::Tmpfs {
+            max_memory_percent: 50,
         },
-        upper: Upper::Tmpfs,
         overlay: OverlayMode::UntrustedLowers,
         export: None,
         mappings: 0,
         network: None,
-        workload: WorkloadView {
+        view: View {
             hostname: hostname.to_vec(),
             machine_id: MachineIdMode::Image,
-            identity: None,
         },
         resources,
     }
@@ -103,13 +99,7 @@ fn clone_record(
     hostname: &[u8],
     resources: ExpectedResources,
 ) -> ActivationRecord {
-    let restore = RestoreSection {
-        transaction,
-        template: TemplateReference {
-            generation: StoreGeneration::new(NonZeroU64::MIN),
-            key: Identity::from_bytes([0x44; Identity::LEN]),
-        },
-    };
+    let restore = RestoreSection { transaction };
     ActivationRecord::new(Some(restore), configuration(hostname, resources)).unwrap()
 }
 
@@ -469,7 +459,7 @@ fn an_activate_is_decoded_and_validated_before_any_side_effect() {
     let mut long = record();
     long.resize(MAX_RECORD_BYTES + 1, 0);
     let mut version = record();
-    version[0] = 2;
+    version[0] = 1;
     let cold = ActivationRecord::new(None, configuration(b"clone", resources()))
         .unwrap()
         .encode();
@@ -497,7 +487,7 @@ fn an_activate_is_decoded_and_validated_before_any_side_effect() {
             )
         }),
         (version, |cause| {
-            matches!(cause, ActivationCause::Record(ActivationError::Version(2)))
+            matches!(cause, ActivationCause::Record(ActivationError::Version(1)))
         }),
         (cold, |cause| matches!(cause, ActivationCause::Cold)),
         (

@@ -66,10 +66,10 @@
 //!   child of its own, and whose mappings, each from a source that names its child by its index,
 //!   keep their access, show what the host holds, but for the paths that the start hides, and
 //!   those inside them that it shows again, and take what the guest, and the clone's workload,
-//!   write through the writable ones alone. The clone's record names the export, an aggregate, by
-//!   the identity of its plan, with the number of its mappings.
+//!   write through the writable ones alone. The clone's record names the export's aggregate
+//!   shape and the number of its mappings, without its host plan identity.
 //! - Clones of one generation at once see only their own exports: each its own directory, or two
-//!   the same one, which their records name by the same identity, and a clone without an export
+//!   the same one, without recording a host plan identity, and a clone without an export
 //!   none, whose restore leaves the slot dormant. A clone mounts its export read-write, even where
 //!   every mapping is read-only, mount tables list the bind of a generated machine ID below the
 //!   root beside the mappings, and the bind holds even against the guest's root.
@@ -79,9 +79,9 @@
 //!   the guest may write, that another directory replaced.
 //! - A clone whose guest fails a mapping of its table ends before its sandbox starts, nothing of
 //!   it runs, and the host's directory stays as it was.
-//! - A clone runs the executions that name their identity, once it is ready, whatever workload
-//!   identity its record names, and refuses one that names none: the repair acknowledged the
-//!   restore before the clone took its reset, the host's first message came after that, and the
+//! - A clone runs the executions that name their identity, once it is ready, and refuses one that
+//!   names none: the repair acknowledged the restore before the clone took its reset,
+//!   the host's first message came after that, and the
 //!   clone's Ready, its start, and its first execution came in that order.
 //! - OpenVMM reads none of the host's input until the clone's repair acknowledges its restore, as
 //!   the host sees it: a template whose initramfs delays each clone's repair, for tests, holds a
@@ -3285,7 +3285,7 @@ fn a_clone_whose_view_cannot_be_set_ends_before_it_is_ready() {
 #[ignore = "boots VMs; see the module documentation for what they need"]
 fn a_clone_runs_the_executions_that_name_their_identity_once_it_is_ready() {
     let template = Template::create("cl-ident");
-    // The clone's record names a workload identity, which its guest ignores.
+    // The legacy workload option is not encoded; each execution names its own identity.
     let options = ["--workload-identity", NOBODY];
     let start = StartOf {
         upper: Upper::Scratch,
@@ -4376,8 +4376,8 @@ fn a_clone_maps_an_aggregate_of_directories_and_files_beneath_its_root_before_it
     let mut clone = template.start("cl-export-1", start, 0);
     clone.assert_mapped(EXPORT_SHARES.len());
 
-    // The clone's record names the export, an aggregate, by the identity of its plan, and the
-    // number of its mappings, which the restore sequence sent once the clone was ready. NVX
+    // The clone's record names the export's aggregate shape and the number of its mappings,
+    // which the restore sequence sent once the clone was ready. NVX
     // attached the aggregate to the template's dormant filesystem slot as a cold launch attaches
     // one: its children, the outermost shares, in order, `dir` read-write, since the guest may
     // write `dir/inner` in it, and nothing else of it, each file with its access, and `out`, then
@@ -4538,28 +4538,19 @@ fn clones_at_once_see_only_their_own_exports() {
     }
     without.assert_started();
 
-    // Each record names its clone's export, an aggregate of one directory, by the identity of its
-    // plan, which the clones of the same export share, and one mapping; the clone without an
-    // export has none, and no mapping, and NVX restored it with none of OpenVMM's options of an
+    // Each record names its clone's export, an aggregate of one directory, and one mapping,
+    // without its host plan identity; the clone without an export has none, and no mapping,
+    // and NVX restored it with none of OpenVMM's options of an
     // export, which leaves the template's filesystem slot dormant. NVX attached each directory to
     // the slot as its aggregate's one child, with the access that its mapping needs.
     let exported = |clone: &Cloned| {
         let configuration = clone.configuration();
-        let export = configuration
-            .export
-            .map(|export| (export.kind, export.plan));
+        let export = configuration.export.map(|export| export.kind);
         (export, configuration.mappings)
     };
-    let (own_export, own_mappings) = exported(with_own);
-    let (common_export, common_mappings) = exported(with_common);
-    let (own_export, common_export) = (own_export.unwrap(), common_export.unwrap());
-    assert_eq!((own_export.0, own_mappings), (ExportKind::Aggregate, 1));
-    assert_eq!(
-        (common_export.0, common_mappings),
-        (ExportKind::Aggregate, 1)
-    );
-    assert_ne!(own_export.1, common_export.1);
-    assert_eq!(exported(with_same), (Some(common_export), 1));
+    for clone in [&*with_own, &*with_common, &*with_same] {
+        assert_eq!(exported(clone), (Some(ExportKind::Aggregate), 1));
+    }
     assert_eq!(exported(without), (None, 0));
     with_own.assert_vmm_export(&own.attached(&[(".", "rw")]));
     with_common.assert_vmm_export(&common.attached(&[(".", "ro")]));
@@ -4912,10 +4903,9 @@ fn one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address
     // policy of the network that its creation named, which publishes the guest's listeners, and
     // forwards a port of host loopback.
     let template = Template::in_network("cl-pol", Network::Forward);
-    let mut policies = Vec::new();
     for network in Network::WITH_NIC {
         // The restore of a clone of each network installs the network's policy on the template's
-        // NIC, and the clone's record names the policy, the DNS server that OpenVMM serves the
+        // NIC, and the clone's record names the DNS server that OpenVMM serves the
         // guest under it, where it lets the guest reach the gateway's, the proxy, if any, and
         // whether it publishes the workload's listeners.
         let own = template.network_options(network, GUEST_NETWORK);
@@ -4931,7 +4921,6 @@ fn one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address
             (&network.dns(), &network.proxy(), network.publication()),
             "{network:?}"
         );
-        policies.push((network, recorded.policy));
         cloned.assert_vmm_network(&network.restored(GUEST_NETWORK));
         assert_eq!(cloned.script(NETWORK_VIEW)[0], "devices 1", "{network:?}");
 
@@ -4982,12 +4971,6 @@ fn one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address
         refused.assert_unserved(problem);
     }
 
-    // Each clone's record names a policy of its own.
-    for (index, (network, policy)) in policies.iter().enumerate() {
-        for (other, other_policy) in &policies[index + 1..] {
-            assert_ne!(policy, other_policy, "{network:?} and {other:?}");
-        }
-    }
     assert!(template.leases().is_empty());
     assert_payload(&template, false);
 }

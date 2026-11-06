@@ -2,14 +2,13 @@
 //! encoding's definition, never from the code that they check.
 
 use std::net::IpAddr;
-use std::num::NonZeroU64;
 
 use crate::activation::{
-    ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind,
-    Identity, Image, Journal, MachineIdMode, Network, OverlayMode, Publication, RestoreSection,
-    StoreGeneration, TemplateReference, TransactionId, Upper, WorkloadIdentity, WorkloadView,
+    ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image,
+    Journal, MachineIdMode, Network, OverlayMode, Publication, RestoreSection, TransactionId,
+    Upper, View,
 };
-use crate::tests::{ACTIVATION_V1, Values, Vector, of_kind};
+use crate::tests::{ACTIVATION_V2, Values, Vector, of_kind};
 use crate::uuid::Uuid;
 
 /// The names of the vectors of records, in order.
@@ -27,11 +26,6 @@ fn array<const N: usize>(values: &mut Values<'_>) -> [u8; N] {
         .bytes()
         .try_into()
         .unwrap_or_else(|bytes: Vec<u8>| panic!("{} bytes are not {N}", bytes.len()))
-}
-
-/// Reads an identity.
-fn identity(values: &mut Values<'_>) -> Identity {
-    Identity::from_bytes(array(values))
 }
 
 /// Reads a UUID or a GUID, in the order of its canonical text.
@@ -54,29 +48,22 @@ fn record_of(vector: &Vector) -> ActivationRecord {
     let mut values = vector.values();
     let restore = values.optional(|values| RestoreSection {
         transaction: TransactionId::from_bytes(array(values)),
-        template: TemplateReference {
-            generation: StoreGeneration::new(
-                NonZeroU64::new(values.number()).expect("a store generation of 0"),
-            ),
-            key: identity(values),
-        },
     });
     let image = match values.word() {
         "EROFS" => Image::Erofs {
-            binding: identity(&mut values),
             uuid: values.optional(uuid),
         },
         "GPT" => Image::Gpt {
-            binding: identity(&mut values),
             first_partition_bound: values.number(),
             disk_guid: values.optional(uuid),
         },
         format => panic!("{format} is no image format"),
     };
     let upper = match values.word() {
-        "TMPFS" => Upper::Tmpfs,
+        "TMPFS" => Upper::Tmpfs {
+            max_memory_percent: values.number(),
+        },
         "SCRATCH" => Upper::Scratch {
-            binding: identity(&mut values),
             journal: choice(
                 &mut values,
                 &[
@@ -102,15 +89,13 @@ fn record_of(vector: &Vector) -> ActivationRecord {
                 ("AGGREGATE", ExportKind::Aggregate),
             ],
         );
-        let plan = identity(values);
-        (Export { kind, plan }, values.number())
+        (Export { kind }, values.number())
     });
     let (export, mappings) = match export {
         Some((export, mappings)) => (Some(export), mappings),
         None => (None, 0),
     };
     let network = values.optional(|values| Network {
-        policy: identity(values),
         publication: choice(
             values,
             &[
@@ -135,10 +120,6 @@ fn record_of(vector: &Vector) -> ActivationRecord {
             ("GENERATED", MachineIdMode::Generated),
         ],
     );
-    let workload_identity = values.optional(|values| WorkloadIdentity {
-        uid: values.number(),
-        gid: values.number(),
-    });
     let resources = ExpectedResources {
         cpus: values.number(),
         memory: values.number(),
@@ -151,10 +132,9 @@ fn record_of(vector: &Vector) -> ActivationRecord {
         export,
         mappings,
         network,
-        workload: WorkloadView {
+        view: View {
             hostname,
             machine_id,
-            identity: workload_identity,
         },
         resources,
     };
@@ -164,7 +144,7 @@ fn record_of(vector: &Vector) -> ActivationRecord {
 
 #[test]
 fn records_match_their_vectors() {
-    for vector in of_kind(ACTIVATION_V1, "RECORD", &RECORDS) {
+    for vector in of_kind(ACTIVATION_V2, "RECORD", &RECORDS) {
         let name = vector.name;
         let record = record_of(&vector);
         assert_eq!(record.encode(), vector.bytes, "{name}");
@@ -183,7 +163,7 @@ fn invalid_records_are_refused() {
         "TRUNCATED_VERSION",
         "NO_FIELDS",
         "VERSION_0",
-        "VERSION_2",
+        "VERSION_1",
         "TOO_LONG",
         "TRUNCATED_FIELD_HEADER",
         "TRUNCATED_FIELD_VALUE",
@@ -203,7 +183,12 @@ fn invalid_records_are_refused() {
         "MACHINE_ID_CODE_0",
         "DNS_OF_5_BYTES",
         "SHORT_RESOURCES",
-        "ZERO_GENERATION",
+        "RESTORE_WITH_TEMPLATE",
+        "IMAGE_WITH_BINDING",
+        "SCRATCH_WITH_BINDING",
+        "EXPORT_WITH_PLAN",
+        "NETWORK_WITH_POLICY",
+        "WORKLOAD_IDENTITY",
         "MISSING_IMAGE",
         "MISSING_RESOURCES",
         "EXPORT_WITHOUT_MAPPINGS",
@@ -220,14 +205,12 @@ fn invalid_records_are_refused() {
         "HOSTNAME_WITH_NUL",
         "LONG_HOSTNAME",
         "ZERO_FIRST_PARTITION_BOUND",
-        "ZERO_UID",
-        "ZERO_GID",
-        "UNCHANGED_UID",
-        "UNCHANGED_GID",
+        "ZERO_TMPFS_CAP",
+        "LARGE_TMPFS_CAP",
         "ZERO_CPUS",
         "ZERO_MEMORY",
     ];
-    for vector in of_kind(ACTIVATION_V1, "INVALID_RECORD", &names) {
+    for vector in of_kind(ACTIVATION_V2, "INVALID_RECORD", &names) {
         let refusal: Result<_, ActivationError> = ActivationRecord::decode(&vector.bytes);
         assert!(refusal.is_err(), "{} is admitted", vector.name);
     }
