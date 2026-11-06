@@ -928,3 +928,175 @@ fn only_a_checked_cold_boot_has_a_kernel_command_line() {
     assert_eq!(error.kind(), ErrorKind::Unsupported);
     assert!(error.to_string().contains("processor"), "{error}");
 }
+
+#[test]
+fn caller_tokens_cannot_replace_rendered_tokens_under_kernel_name_matching() {
+    let reserved = [
+        "nvx_layer",
+        "nvx_scratch",
+        "nvx_overlay_upper",
+        "nvx_overlay_mode",
+        "nvx_scratch_journal",
+        "nvx_first_partition_bound",
+        "nvx_ram_upper_percent",
+        "nvx_hostname",
+        "nvx_machine_id",
+        "nvx_maps",
+        "virtfs_dir",
+        "virtfs_tag",
+        "virtfs_mode",
+        "virtfs_aggregate",
+        "virtfs_future_option",
+        "virtfs_",
+    ];
+    for name in reserved {
+        let underscores = name.bytes().filter(|&byte| byte == b'_').count();
+        for mask in 0..(1 << underscores) {
+            let mut index = 0;
+            let spelling: String = name
+                .chars()
+                .map(|character| {
+                    if character != '_' {
+                        return character;
+                    }
+                    let dash = mask & (1 << index) != 0;
+                    index += 1;
+                    if dash { '-' } else { '_' }
+                })
+                .collect();
+            for command_line in [
+                spelling.clone(),
+                format!("{spelling}=value"),
+                format!("quiet \"{spelling}=value\""),
+                format!("quiet\u{a0}{spelling}=value"),
+                format!("-- {spelling}=value"),
+                format!("other=\"value {spelling}=value\""),
+            ] {
+                for config in [blockless(), layered(erofs())] {
+                    let config = VmConfig {
+                        boot: Some(Boot {
+                            command_line: command_line.clone(),
+                            capture: None,
+                        }),
+                        ..config
+                    };
+                    for error in [
+                        config.check().unwrap_err(),
+                        config.kernel_command_line().unwrap_err(),
+                    ] {
+                        assert_eq!(error.kind(), ErrorKind::Unsupported, "{command_line:?}");
+                        assert!(
+                            error.to_string().contains("Boot.command_line"),
+                            "{command_line:?}: {error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn caller_owned_guest_tokens_and_noncolliding_names_stay_unchanged() {
+    for command_line in [
+        "nvx_entrypoint=/bin/work nvx_arg=\"x y\" nvx_share=0,/work",
+        "nvx-entrypoint=/bin/work nvx-arg=x nvx-share=0,/work",
+        "nvx_sandbox=1 nvx_lifecycle=one-shot nvx_workload_account=1",
+        "quiet tsc=reliable hostname=caller root=/dev/custom",
+        "nvx_maps_extra=1 NVX_MAPS=1 virtfs=1 virtfsx_name=1 other_virtfs_dir=1",
+        "other=nvx_maps=1 -- nvx_arg=nvx_hostname",
+    ] {
+        let mut config = VmConfig {
+            boot: Some(Boot {
+                command_line: String::new(),
+                capture: None,
+            }),
+            ..blockless()
+        };
+        let rendered = config.kernel_command_line().unwrap();
+        config.boot.as_mut().unwrap().command_line = command_line.to_owned();
+        config.check().unwrap();
+        assert_eq!(
+            config.kernel_command_line().unwrap(),
+            format!("{rendered} {command_line}")
+        );
+    }
+}
+
+#[test]
+fn mapping_table_is_the_exact_export_projection_counted_by_the_boot_token() {
+    let mut plan = export("/work");
+    plan.children.push(ExportChild {
+        root: missing("writable-export"),
+        writable: true,
+        ..plan.children[0].clone()
+    });
+    plan.binds.push(Bind {
+        child: 1,
+        source: String::new(),
+        target: "/zother".to_owned(),
+        read_only: false,
+        identity: None,
+    });
+    plan.binds.push(Bind {
+        source: "nested/file".to_owned(),
+        target: "/work/nested/file".to_owned(),
+        ..plan.binds[0].clone()
+    });
+    let mut config = VmConfig {
+        filesystem: Some(plan.clone()),
+        boot: Some(Boot {
+            command_line: String::new(),
+            capture: None,
+        }),
+        ..blockless()
+    };
+    let table = config.mapping_table();
+    assert_eq!(table, plan.guest_table());
+    assert_eq!(
+        table,
+        vec![
+            crate::protocol::maps::HostMap {
+                source: "0".to_owned(),
+                target: "/work".to_owned(),
+                read_only: true,
+            },
+            crate::protocol::maps::HostMap {
+                source: "1".to_owned(),
+                target: "/zother".to_owned(),
+                read_only: false,
+            },
+            crate::protocol::maps::HostMap {
+                source: "0/nested/file".to_owned(),
+                target: "/work/nested/file".to_owned(),
+                read_only: true,
+            },
+        ]
+    );
+    let command_line = config.kernel_command_line().unwrap();
+    assert_eq!(
+        parse_host_mapping_count(command_line.as_bytes()).unwrap(),
+        u32::try_from(table.len()).unwrap()
+    );
+    config.processors = 0;
+    assert!(config.check().is_err());
+    assert_eq!(config.mapping_table(), table);
+    config.processors = 1;
+    config.filesystem = None;
+    assert!(config.mapping_table().is_empty());
+    let command_line = config.kernel_command_line().unwrap();
+    assert!(!cmdline::init_tokens(command_line.as_bytes()).any(|token| token.name == b"nvx_maps"));
+}
+
+#[test]
+fn public_maps_codec_keeps_the_protocol_root_reexports_usable() {
+    let table: Vec<crate::protocol::HostMap> = export("/work").guest_table();
+    let payloads = crate::protocol::maps::encode_maps_payloads(&table, 1024).unwrap();
+    let decoded: crate::protocol::MapsPayload =
+        crate::protocol::maps::decode_maps_payload(&payloads[0]).unwrap();
+    assert_eq!(decoded.maps, table);
+    let payloads = crate::protocol::encode_maps_payloads(&decoded.maps, 1024).unwrap();
+    let decoded: crate::protocol::maps::MapsPayload =
+        crate::protocol::decode_maps_payload(&payloads[0]).unwrap();
+    assert_eq!(decoded.maps, table);
+}
