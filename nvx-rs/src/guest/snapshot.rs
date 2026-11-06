@@ -9,8 +9,8 @@
 //! sends nothing until this call returns. After [`Captured::Continued`] or a failure with
 //! [`Disposition::Resumed`], it reports on the same session.
 //!
-//! This interface does not repair restored guests, which must end. A Fresh platform restore
-//! that carries network settings is explicitly refused rather than silently dropping them.
+//! The time core repairs a restore's clock, but this interface does not complete the clone's
+//! repair, so a restored guest must end. Fresh restore network settings are explicitly refused.
 //!
 //! Each line of `/proc/self/mountinfo` describes one mount with fields separated by spaces: its
 //! ID, its parent's ID, the device number of its file system, `MAJ:MIN`, the root of the mount
@@ -142,7 +142,7 @@ impl std::error::Error for CaptureFailure {
 /// Captures a Fresh template without freezing or inspecting the caller's executions.
 ///
 /// The deadline bounds pre-request work only. This call starts no helper, drives no transport,
-/// repairs no restore, and never powers off the VM; failures return the caller's disposition.
+/// completes no clone repair, and never powers off the VM; failures return its disposition.
 pub fn capture(
     devices: &Devices,
     disks: Disks,
@@ -155,7 +155,7 @@ pub fn capture(
             CaptureCause::Time(error.into()),
         )
     })?;
-    before(CaptureStage::BootChecks, deadline)?;
+    before(CaptureStage::Mounts, deadline)?;
     capture_with(
         activation::capture_system(Some(deadline)).as_mut(),
         devices,
@@ -237,7 +237,7 @@ pub(super) fn check_mounts(
     devices: &Devices,
     deadline: Option<Instant>,
 ) -> Result<(), CaptureCause> {
-    sys::FileLock::check_deadline(deadline).map_err(CaptureCause::Io)?;
+    sys::FileLock::check_deadline(deadline).map_err(|error| CaptureCause::Io(error.into()))?;
     let table = system.mount_table().map_err(CaptureCause::Io)?;
     if table.len() > MOUNT_TABLE_LIMIT {
         return Err(CaptureCause::Io(io::Error::new(

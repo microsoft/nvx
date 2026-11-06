@@ -11,6 +11,8 @@ struct CaptureSystem {
     calls: Vec<&'static str>,
     /// The caller's deadline until the request context clears it.
     deadline: Option<Instant>,
+    /// The original deadline, retained only to force expiry at a chosen test step.
+    original_deadline: Instant,
     /// The calling namespace's mount table.
     table: Vec<u8>,
     /// The next preparation's result and suppression ownership.
@@ -21,10 +23,10 @@ struct CaptureSystem {
     outcome: Option<Result<CaptureOutcome, TimeError>>,
     /// Whether detector restoration fails.
     release_fails: bool,
-    /// Time spent reading the generation ID.
-    generation_delay: Duration,
-    /// Time spent in the request, which must not have a deadline.
-    request_delay: Duration,
+    /// Whether the generation read deliberately completes after the deadline.
+    expire_generation: bool,
+    /// Whether the unbounded request deliberately completes after the original deadline.
+    expire_request: bool,
 }
 
 impl CaptureSystem {
@@ -33,13 +35,14 @@ impl CaptureSystem {
         Self {
             calls: Vec::new(),
             deadline: Some(deadline),
+            original_deadline: deadline,
             table: b"1 1 0:2 / / rw - rootfs rootfs rw\n".to_vec(),
             preparation: Some(Ok(())),
             generation: Some(Ok(GenerationId::from_bytes([7; GenerationId::LENGTH]))),
             outcome: Some(Ok(CaptureOutcome::Continued)),
             release_fails: false,
-            generation_delay: Duration::ZERO,
-            request_delay: Duration::ZERO,
+            expire_generation: false,
+            expire_request: false,
         }
     }
 }
@@ -87,7 +90,9 @@ impl System for CaptureSystem {
 
     fn generation_id(&mut self) -> Result<GenerationId, TimeError> {
         self.calls.push("generation");
-        thread::sleep(self.generation_delay);
+        if self.expire_generation {
+            expire(self.original_deadline);
+        }
         self.generation.take().expect("generation is read once")
     }
 
@@ -101,9 +106,17 @@ impl System for CaptureSystem {
             )
         );
         self.calls.push("request");
-        thread::sleep(self.request_delay);
+        if self.expire_request {
+            expire(self.original_deadline);
+        }
         self.outcome.take().expect("capture is requested once")
     }
+}
+
+/// Forces expiry only after the operation under test has started.
+fn expire(deadline: Instant) {
+    thread::sleep(deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1));
+    assert!(Instant::now() >= deadline);
 }
 
 /// The canonical MMIO identities, independent of the legacy root Device type.
@@ -117,9 +130,9 @@ fn capture_devices() -> Devices {
 
 #[test]
 fn fresh_capture_orders_the_existing_steps_and_does_not_deadline_the_request() {
-    let deadline = Instant::now() + Duration::from_millis(50);
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut system = CaptureSystem::new(deadline);
-    system.request_delay = Duration::from_millis(100);
+    system.expire_request = true;
     assert_eq!(
         capture_with(&mut system, &capture_devices(), deadline).unwrap(),
         Captured::Continued
@@ -236,9 +249,9 @@ fn an_expired_pre_request_deadline_prevents_capture_and_does_not_extend_rollback
     assert_eq!(failure.disposition, Disposition::Resumed);
     assert!(system.calls.is_empty());
 
-    let deadline = Instant::now() + Duration::from_millis(20);
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut system = CaptureSystem::new(deadline);
-    system.generation_delay = Duration::from_millis(40);
+    system.expire_generation = true;
     let failure = capture_with(&mut system, &capture_devices(), deadline).unwrap_err();
     assert_eq!(failure.stage, CaptureStage::Release);
     assert_eq!(
@@ -269,6 +282,33 @@ fn a_fresh_restore_refuses_even_an_otherwise_empty_network_policy() {
         }
     );
     assert_eq!(system.calls.last(), Some(&"release"));
+}
+
+#[test]
+fn a_pending_capture_is_not_released_and_a_restore_without_network_is_not_repaired() {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut system = CaptureSystem::new(deadline);
+    system.preparation = Some(Err((PreCaptureError::Pending, false)));
+    let failure = capture_with(&mut system, &capture_devices(), deadline).unwrap_err();
+    assert!(matches!(failure.cause, CaptureCause::Pending));
+    assert_eq!(failure.disposition, Disposition::Resumed);
+    assert!(!system.calls.contains(&"release"));
+    assert!(!system.calls.contains(&"request"));
+
+    let mut system = CaptureSystem::new(deadline);
+    system.outcome = Some(Ok(CaptureOutcome::Restored(Restore::to(
+        GenerationId::from_bytes([8; GenerationId::LENGTH]),
+    ))));
+    let failure = capture_with(&mut system, &capture_devices(), deadline).unwrap_err();
+    assert_eq!(failure.stage, CaptureStage::Capture);
+    assert_eq!(
+        failure.disposition,
+        Disposition::MustEnd {
+            status: status::TIME_REPAIR
+        }
+    );
+    assert!(matches!(failure.cause, CaptureCause::Io(ref error)
+        if error.to_string().contains("does not repair")));
 }
 
 #[test]
