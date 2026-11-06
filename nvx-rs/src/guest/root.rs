@@ -189,9 +189,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use self::kernel::{Kernel, SystemKernel};
-use super::entry::{self, TIME_STATUS_TARGET};
 use super::gpt::DeviceError;
-use super::mappings::{self, Kind, Mapped, Mapper, MappingError, TargetRoot, below_its_root};
+use super::mappings::mapper::{AttachFailure, bind_retained_with};
+use super::mappings::{
+    self, Access, Kind, Mapped, Mapper, Mapping, MappingError, SourceRoot, TargetRoot,
+    below_its_root,
+};
 use super::sys::{self, Errno, FileDescriptor, FileSystem, Mode, MountFlags, OpenFlags};
 use super::view::{MACHINE_ID_TARGET, MachineId, RESOLVER_TARGET};
 use crate::gpt::{Expected, GptError, Partition};
@@ -202,6 +205,9 @@ pub(crate) use self::block::window_directories;
 pub use self::bootstrap::{Bootstrap, BootstrapStep, Resources, bootstrap};
 pub(crate) use self::kernel::Paths;
 pub use self::share::{ShareChild, ShareKind, ShareRefusal};
+
+/// Where the runtime binds its time status read-only in the root.
+pub(crate) const TIME_STATUS_TARGET: &str = "/run/nvx/time";
 
 /// The directory of the layers' mount points, below the runtime directory.
 const LAYERS_DIRECTORY: &str = "layers";
@@ -782,7 +788,7 @@ impl Root {
         Ok(())
     }
 
-    /// Binds the view's fixed files through the existing entry seam and retains every attachment.
+    /// Binds the view's fixed files and retains every attachment.
     pub(crate) fn bind_view(
         &mut self,
         machine_id: &MachineId,
@@ -801,8 +807,7 @@ impl Root {
             let Some(source) = source else {
                 continue;
             };
-            match entry::bind_file_retained(self.kernel.as_mut(), root, &self.path, source, target)
-            {
+            match bind_file_retained(self.kernel.as_mut(), root, &self.path, source, target) {
                 Ok(bound) => binds.push(bound),
                 Err(failure) => {
                     self.latched = true;
@@ -1007,7 +1012,7 @@ impl Root {
             target
                 .add_mount_with(self.kernel.as_mut(), &run)
                 .map_err(|error| Error::MountPoint { path: run, error })?;
-            let bound = entry::bind_runtime_file_retained(
+            let bound = bind_runtime_file_retained(
                 self.kernel.as_mut(),
                 &target,
                 source,
@@ -1548,6 +1553,118 @@ impl fmt::Debug for Root {
             .field("switched", &self.switched)
             .finish_non_exhaustive()
     }
+}
+
+/// Binds a view file read-only, retaining an attachment that could not be detached.
+pub(crate) fn bind_file_retained(
+    kernel: &mut dyn mappings::Kernel,
+    root: &TargetRoot,
+    path: &Path,
+    source: &Path,
+    target: &str,
+) -> Result<Mapped, AttachFailure> {
+    match bind_runtime_file_retained(kernel, root, source, target, Kind::File) {
+        Err(failure)
+            if matches!(&failure.error, MappingError::Link { path: link }
+                if link == Path::new(target)) =>
+        {
+            remove_link(path, target).map_err(|_| failure)?;
+            bind_runtime_file_retained(kernel, root, source, target, Kind::File)
+        }
+        bound => bound,
+    }
+}
+
+/// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
+/// `root`, with `kernel`, through the walk and attach of [`mappings::bind`] from a source root at
+/// `path`'s parent directory, and returns the bind.
+pub(crate) fn bind_runtime_file(
+    kernel: &mut dyn mappings::Kernel,
+    root: &TargetRoot,
+    path: &Path,
+    target: &str,
+    kind: Kind,
+) -> Result<Mapped, MappingError> {
+    let (source, mapping) = runtime_mapping(path, target, kind)?;
+    mappings::bind_with(kernel, root, &source, &mapping)
+}
+
+/// Binds as [`bind_runtime_file`] does, retaining a failed bind that its caller must detach.
+pub(crate) fn bind_runtime_file_retained(
+    kernel: &mut dyn mappings::Kernel,
+    root: &TargetRoot,
+    path: &Path,
+    target: &str,
+    kind: Kind,
+) -> Result<Mapped, AttachFailure> {
+    let (source, mapping) = runtime_mapping(path, target, kind)?;
+    bind_retained_with(kernel, root, &source, &mapping)
+}
+
+/// Prepares the source root and read-only mapping for a runtime bind.
+fn runtime_mapping(
+    path: &Path,
+    target: &str,
+    kind: Kind,
+) -> Result<(SourceRoot, Mapping), MappingError> {
+    let source_error = |error: i32| MappingError::System {
+        step: mappings::Step::Source,
+        error,
+    };
+    let Some((parent, name)) = runtime_source(path) else {
+        return Err(source_error(Errno::EINVAL as i32));
+    };
+    let source = SourceRoot::open(parent)
+        .map_err(|error| source_error(error.raw_os_error().unwrap_or(Errno::EIO as i32)))?;
+    let mapping = Mapping::new(name, target, Access::ReadOnly)
+        .map_err(|_| source_error(Errno::EINVAL as i32))?
+        .with_kind(kind);
+    Ok((source, mapping))
+}
+
+/// Returns the directory that holds the runtime file at `path`, the current directory for a
+/// relative path of one component, and the file's name in it, unless `path` names no file.
+fn runtime_source(path: &Path) -> Option<(&Path, &std::ffi::OsStr)> {
+    let name = path.file_name()?;
+    let parent = path.parent()?;
+    if parent.as_os_str().is_empty() {
+        Some((Path::new("."), name))
+    } else {
+        Some((parent, name))
+    }
+}
+
+/// Removes the symbolic link at `target`, a file of `/etc` such as `/etc/machine-id`, beneath
+/// `root`, reached through no other link and on the root's own mount.
+fn remove_link(root: &Path, target: &str) -> Result<(), Errno> {
+    let name = target.strip_prefix("/etc/").ok_or(Errno::EINVAL)?;
+    let name = sys::c_string(name.as_bytes())?;
+    let root = sys::path_c_string(root)?;
+    let directory = sys::open(
+        &root,
+        OpenFlags::O_PATH | OpenFlags::O_DIRECTORY | OpenFlags::O_NOFOLLOW | OpenFlags::O_CLOEXEC,
+        Mode::empty(),
+    )?;
+    let etc = sys::open_beneath(
+        &directory,
+        c"etc",
+        OpenFlags::O_PATH | OpenFlags::O_DIRECTORY,
+        Mode::empty(),
+        false,
+    )?;
+    let status = nix::sys::stat::fstatat(
+        etc.borrowed(),
+        name.as_c_str(),
+        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+    )?;
+    if status.st_mode & nix::libc::S_IFMT != nix::libc::S_IFLNK {
+        return Err(Errno::EEXIST);
+    }
+    nix::unistd::unlinkat(
+        etc.borrowed(),
+        name.as_c_str(),
+        nix::unistd::UnlinkatFlags::NoRemoveDir,
+    )
 }
 
 /// Opens the directory `name` beneath `directory`, on its mount and through no symbolic link, as

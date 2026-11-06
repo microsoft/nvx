@@ -5,6 +5,61 @@ use crate::{
     activation::{MachineIdMode, View},
 };
 
+#[test]
+fn runtime_sources_are_the_directories_beside_their_files() {
+    use std::ffi::OsStr;
+
+    // A relative path of one component names a file of the current directory.
+    assert_eq!(
+        runtime_source(Path::new("machine-id")),
+        Some((Path::new("."), OsStr::new("machine-id")))
+    );
+    assert_eq!(
+        runtime_source(Path::new("/run/nvx/workload-machine-id")),
+        Some((Path::new("/run/nvx"), OsStr::new("workload-machine-id")))
+    );
+    assert_eq!(
+        runtime_source(Path::new("state/time")),
+        Some((Path::new("state"), OsStr::new("time")))
+    );
+    for path in ["", "/", "..", "time/.."] {
+        assert_eq!(runtime_source(Path::new(path)), None, "{path}");
+    }
+}
+
+#[test]
+fn only_a_link_at_a_runtime_file_of_etc_is_removed() {
+    let root_with_etc = || {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("etc")).unwrap();
+        root
+    };
+    for target in [MACHINE_ID_TARGET, RESOLVER_TARGET] {
+        let root = root_with_etc();
+        let link = root.path().join(target.trim_start_matches('/'));
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        remove_link(root.path(), target).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(outside.path().exists());
+        assert_eq!(remove_link(root.path(), target), Err(Errno::ENOENT));
+        std::fs::write(&link, b"image\n").unwrap();
+        assert_eq!(remove_link(root.path(), target), Err(Errno::EEXIST));
+        assert_eq!(std::fs::read(&link).unwrap(), b"image\n");
+        // A link on the way to it is not followed.
+        let linked = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(root.path().join("etc"), linked.path().join("etc")).unwrap();
+        assert_eq!(remove_link(linked.path(), target), Err(Errno::ELOOP));
+        assert_eq!(std::fs::read(&link).unwrap(), b"image\n");
+    }
+    // Only a file of `/etc` is a runtime file there.
+    let root = root_with_etc();
+    assert_eq!(
+        remove_link(root.path(), TIME_STATUS_TARGET),
+        Err(Errno::EINVAL)
+    );
+}
+
 /// Returns a root and its view files, with no view bound yet.
 fn prepared() -> (Guest, Root, MachineId, PathBuf) {
     let guest = Guest::new();
