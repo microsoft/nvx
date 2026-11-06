@@ -10,8 +10,8 @@ use super::nvxs::{HostConnection, HostConnectionError};
 use super::platform::{self, Transport};
 use crate::protocol::nvxs::{self, RecordError, RecordType};
 use crate::protocol::{
-    self, APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAPS,
-    APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN,
+    self, APP_CANCEL, APP_CAPTURE, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN,
+    APP_MAPS, APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN,
     ExitCategory, GuestFeatures, HostMap, OUTER_MAX_PAYLOAD, ProtocolError, UNSUPPORTED_OPERATION,
     Workload,
 };
@@ -184,7 +184,29 @@ impl ControlSession {
 
     /// Waits until the guest agent acknowledges readiness.
     pub fn ping(&mut self, deadline: Instant) -> Result<(), SessionError> {
-        self.acknowledged(APP_PING, APP_READY, "readiness", deadline)
+        self.acknowledged(APP_PING, &[], APP_READY, "readiness", deadline)
+    }
+
+    /// Asks nvx-init to capture the VM, killing its executions first when requested.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SL3.7b requests capture once nvx-init handles it in SL7.7a"
+        )
+    )]
+    pub(crate) fn capture(
+        &mut self,
+        kill_executions: bool,
+        deadline: Instant,
+    ) -> Result<(), SessionError> {
+        self.acknowledged(
+            APP_CAPTURE,
+            &protocol::encode_capture_payload(kill_executions),
+            APP_READY,
+            "capture",
+            deadline,
+        )
     }
 
     /// Asks the guest agent which control features its image provides.
@@ -287,7 +309,7 @@ impl ControlSession {
 
     /// Asks the guest agent to shut the VM down.
     pub fn stop(&mut self, deadline: Instant) -> Result<(), SessionError> {
-        self.acknowledged(APP_STOP, APP_STOPPED, "stop", deadline)
+        self.acknowledged(APP_STOP, &[], APP_STOPPED, "stop", deadline)
     }
 
     /// Sends an application request of `kind` with `request_id` and `payload` in the next
@@ -366,17 +388,18 @@ impl ControlSession {
         Ok((kind, status, payload))
     }
 
-    /// Sends a request of `kind` without a payload and waits until the guest agent acknowledges
+    /// Sends a request of `kind` and waits until the guest agent acknowledges
     /// `what` with an empty `reply` of status 0.
     fn acknowledged(
         &mut self,
         kind: u8,
+        payload: &[u8],
         reply: u8,
         what: &str,
         deadline: Instant,
     ) -> Result<(), SessionError> {
         let request_id = request_id()?;
-        self.send_app(kind, request_id, &[], Some(deadline))?;
+        self.send_app(kind, request_id, payload, Some(deadline))?;
         let (kind, response_id, status, payload) = self.read_app(Some(deadline))?;
         if kind != reply || response_id != request_id || status != 0 || !payload.is_empty() {
             return Err(SessionError::Protocol(format!(
