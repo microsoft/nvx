@@ -11,16 +11,13 @@ use crate::activation::ActivationRecord;
 use self::workload::WorkloadIdentity;
 
 /// Shared identity data; host-side selection remains in the host module.
-#[cfg_attr(
-    not(any(test, feature = "host")),
-    expect(
-        dead_code,
-        reason = "SL7.7b gives nvx-init the restored workload identity"
-    )
-)]
 pub(crate) mod workload {
     /// The identity that workloads run as: a non-root user and group ID.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[cfg_attr(
+        not(feature = "host"),
+        expect(unreachable_pub, reason = "public host re-export when host is enabled")
+    )]
     pub struct WorkloadIdentity {
         /// User ID.
         pub uid: u32,
@@ -229,13 +226,6 @@ pub(crate) fn decode_activate_payload(
 }
 
 /// Matches the guest's non-root credential range, excluding the unchanged-ID sentinel.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "SL4.3 and nvx-init in SL7.7b exchange workload identities"
-    )
-)]
 fn check_workload_identity(workload: &WorkloadIdentity) -> Result<(), ProtocolError> {
     if matches!(workload.uid, 0 | u32::MAX) || matches!(workload.gid, 0 | u32::MAX) {
         return Err(violation(
