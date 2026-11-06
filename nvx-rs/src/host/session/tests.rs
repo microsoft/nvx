@@ -597,6 +597,40 @@ fn pings_and_stops_need_an_empty_acknowledgement() {
 }
 
 #[test]
+fn capture_sends_both_kill_flags_and_waits_for_acknowledgement() {
+    let (mut session, requests) = attached_recording(|kind, id| {
+        assert_eq!(kind, APP_CAPTURE);
+        assert_ne!(id, 0);
+        encode_app(APP_READY, id, 0, &[])
+    });
+    session.capture(false, deadline()).unwrap();
+    session.capture(true, deadline()).unwrap();
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [(APP_CAPTURE, vec![0]), (APP_CAPTURE, vec![1])]
+    );
+}
+
+#[test]
+fn capture_refuses_invalid_acknowledgements() {
+    let answers: [fn(u8, u64) -> Vec<u8>; 5] = [
+        |_, id| encode_app(APP_ERROR, id, 16, b"busy"),
+        |_, id| encode_app(APP_STOPPED, id, 0, &[]),
+        |_, id| encode_app(APP_READY, id ^ 1, 0, &[]),
+        |_, id| encode_app(APP_READY, id, 1, &[]),
+        |_, id| encode_app(APP_READY, id, 0, b"x"),
+    ];
+    for answer in answers {
+        let error = attached(answer).capture(false, deadline()).unwrap_err();
+        assert_violation(
+            &error,
+            "the guest agent did not acknowledge capture",
+            "an invalid capture acknowledgement",
+        );
+    }
+}
+
+#[test]
 fn features_report_what_the_guest_provides() {
     let mut session = attached(|kind, id| {
         assert_eq!(kind, APP_FEATURES);
