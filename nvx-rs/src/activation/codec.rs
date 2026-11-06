@@ -1,18 +1,15 @@
 //! The canonical encoding of an activation record, which the [module](super#encoding) describes:
 //! [`ActivationRecord::encode`] writes it, and [`ActivationRecord::decode`] reads it back.
 
-use std::fmt;
-use std::net::IpAddr;
-use std::num::NonZeroU64;
-
 use super::{
-    ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind,
-    Identity, Image, Journal, MAX_RECORD_BYTES, MachineIdMode, Network, OverlayMode, Publication,
-    RestoreSection, StoreGeneration, TemplateReference, TransactionId, Upper, VERSION,
-    WorkloadIdentity, WorkloadView,
+    ActivationError, ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image,
+    Journal, MAX_RECORD_BYTES, MachineIdMode, Network, OverlayMode, Publication, RestoreSection,
+    TransactionId, Upper, VERSION, View,
 };
 use crate::protocol::root::ImageFormat;
 use crate::uuid::Uuid;
+use std::fmt;
+use std::net::IpAddr;
 
 #[cfg(test)]
 mod tests;
@@ -33,20 +30,19 @@ const SCRATCH: u8 = 2;
 pub enum Field {
     /// `0x01`: the restore section of a clone.
     Restore,
-    /// `0x10`: the image's format, the identity of its binding, and a GPT disk's first-partition
-    /// bound.
+    /// `0x10`: the image's format and a GPT disk's first-partition bound.
     Image,
     /// `0x11`: the UUID or the disk GUID that the guest expects of the image.
     ImageIdentity,
-    /// `0x20`: the upper, and a scratch's binding and journal policy.
+    /// `0x20`: the upper, and its tmpfs cap or scratch journal policy.
     Upper,
     /// `0x30`: the overlay's mode.
     Overlay,
-    /// `0x40`: the export's shape, and the identity of its plan.
+    /// `0x40`: the export's shape.
     Export,
     /// `0x41`: the number of host mappings.
     Mappings,
-    /// `0x50`: the identity of the network's policy, and the publication of the listeners.
+    /// `0x50`: the publication of the listeners.
     Network,
     /// `0x51`: the address of the network's DNS server.
     Dns,
@@ -56,15 +52,13 @@ pub enum Field {
     Hostname,
     /// `0x61`: the machine ID's mode.
     MachineId,
-    /// `0x62`: the workload identity.
-    WorkloadIdentity,
     /// `0x70`: the expected resources.
     Resources,
 }
 
 impl Field {
     /// Every field, in the order of their tags.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 13] = [
         Self::Restore,
         Self::Image,
         Self::ImageIdentity,
@@ -77,7 +71,6 @@ impl Field {
         Self::Proxy,
         Self::Hostname,
         Self::MachineId,
-        Self::WorkloadIdentity,
         Self::Resources,
     ];
 
@@ -96,7 +89,6 @@ impl Field {
             Self::Proxy => 0x52,
             Self::Hostname => 0x60,
             Self::MachineId => 0x61,
-            Self::WorkloadIdentity => 0x62,
             Self::Resources => 0x70,
         }
     }
@@ -123,7 +115,6 @@ impl fmt::Display for Field {
             Self::Proxy => "proxy",
             Self::Hostname => "hostname",
             Self::MachineId => "machine ID",
-            Self::WorkloadIdentity => "workload identity",
             Self::Resources => "resources",
         })
     }
@@ -192,61 +183,43 @@ impl ActivationRecord {
     pub fn encode(&self) -> Vec<u8> {
         let configuration = &self.configuration;
         let mut encoder = Encoder::new();
-        if let Some(RestoreSection {
-            transaction,
-            template,
-        }) = &self.restore
-        {
-            encoder.field(
-                Field::Restore,
-                &[
-                    transaction.as_bytes(),
-                    &template.generation.get().get().to_le_bytes(),
-                    template.key.as_bytes(),
-                ],
-            );
+        if let Some(RestoreSection { transaction }) = &self.restore {
+            encoder.field(Field::Restore, &[transaction.as_bytes()]);
         }
         let image = &configuration.image;
         let format = [image.format().code()];
         match image {
-            Image::Erofs { binding, .. } => {
-                encoder.field(Field::Image, &[&format, binding.as_bytes()]);
+            Image::Erofs { .. } => {
+                encoder.field(Field::Image, &[&format]);
             }
             Image::Gpt {
-                binding,
                 first_partition_bound,
                 ..
             } => encoder.field(
                 Field::Image,
-                &[
-                    &format,
-                    binding.as_bytes(),
-                    &first_partition_bound.to_le_bytes(),
-                ],
+                &[&format, &first_partition_bound.to_le_bytes()],
             ),
         }
         if let Some(expected) = image.expected() {
             encoder.field(Field::ImageIdentity, &[expected.as_bytes()]);
         }
         match configuration.upper {
-            Upper::Tmpfs => encoder.field(Field::Upper, &[&[TMPFS]]),
-            Upper::Scratch { binding, journal } => encoder.field(
-                Field::Upper,
-                &[&[SCRATCH], binding.as_bytes(), &[journal.code()]],
-            ),
+            Upper::Tmpfs { max_memory_percent } => {
+                encoder.field(Field::Upper, &[&[TMPFS, max_memory_percent]]);
+            }
+            Upper::Scratch { journal } => {
+                encoder.field(Field::Upper, &[&[SCRATCH, journal.code()]]);
+            }
         }
         encoder.field(Field::Overlay, &[&[configuration.overlay.code()]]);
-        if let Some(Export { kind, plan }) = configuration.export {
-            encoder.field(Field::Export, &[&[kind.code()], plan.as_bytes()]);
+        if let Some(Export { kind }) = configuration.export {
+            encoder.field(Field::Export, &[&[kind.code()]]);
             // A record with an export announces 1 to `MAX_MAPPINGS` mappings, which a `u16` holds.
             let mappings = configuration.mappings as u16;
             encoder.field(Field::Mappings, &[&mappings.to_le_bytes()]);
         }
         if let Some(network) = &configuration.network {
-            encoder.field(
-                Field::Network,
-                &[network.policy.as_bytes(), &[network.publication.code()]],
-            );
+            encoder.field(Field::Network, &[&[network.publication.code()]]);
             match network.dns {
                 Some(IpAddr::V4(address)) => encoder.field(Field::Dns, &[&address.octets()]),
                 Some(IpAddr::V6(address)) => encoder.field(Field::Dns, &[&address.octets()]),
@@ -256,15 +229,9 @@ impl ActivationRecord {
                 encoder.field(Field::Proxy, &[proxy.as_bytes()]);
             }
         }
-        let workload = &configuration.workload;
-        encoder.field(Field::Hostname, &[&workload.hostname]);
-        encoder.field(Field::MachineId, &[&[workload.machine_id.code()]]);
-        if let Some(WorkloadIdentity { uid, gid }) = workload.identity {
-            encoder.field(
-                Field::WorkloadIdentity,
-                &[&uid.to_le_bytes(), &gid.to_le_bytes()],
-            );
-        }
+        let view = &configuration.view;
+        encoder.field(Field::Hostname, &[&view.hostname]);
+        encoder.field(Field::MachineId, &[&[view.machine_id.code()]]);
         let ExpectedResources { cpus, memory } = configuration.resources;
         encoder.field(
             Field::Resources,
@@ -280,7 +247,7 @@ impl ActivationRecord {
     /// then, field by field, a field whose tag and length end past the bytes, a field with an
     /// unknown tag, a repeated field, a field out of order, a value that ends past the bytes, and a
     /// value with another length than its contents take, with a code that the version does not
-    /// define, with a mapping count or a store generation of 0, or with a proxy endpoint that is
+    /// define, with a mapping count of 0, or with a proxy endpoint that is
     /// not UTF-8; then a missing field that every record holds, in the order of the tags; then a
     /// DNS server or a proxy without a network; then the first limit that [`Configuration::check`]
     /// finds broken, such as an export without mappings, or mappings without an export. So it reads
@@ -368,8 +335,8 @@ struct Draft {
     export: Option<Export>,
     /// The number of mappings: 1 or more.
     mappings: Option<usize>,
-    /// The identity of the network's policy, and the publication of the listeners.
-    network: Option<(Identity, Publication)>,
+    /// The publication of the listeners.
+    network: Option<Publication>,
     /// The address of the DNS server.
     dns: Option<IpAddr>,
     /// The proxy endpoint.
@@ -378,8 +345,6 @@ struct Draft {
     hostname: Option<Vec<u8>>,
     /// The machine ID's mode.
     machine_id: Option<MachineIdMode>,
-    /// The workload identity.
-    identity: Option<WorkloadIdentity>,
     /// The expected resources.
     resources: Option<ExpectedResources>,
 }
@@ -391,26 +356,13 @@ impl Draft {
         match field {
             Field::Restore => {
                 let transaction = TransactionId::from_bytes(value.take()?);
-                // A store assigns no template the generation 0.
-                let generation = NonZeroU64::new(u64::from_le_bytes(value.take()?))
-                    .map(StoreGeneration::new)
-                    .ok_or(ActivationError::FieldValue(field))?;
-                let key = Identity::from_bytes(value.take()?);
-                self.restore = Some(RestoreSection {
-                    transaction,
-                    template: TemplateReference { generation, key },
-                });
+                self.restore = Some(RestoreSection { transaction });
             }
             Field::Image => {
                 let format = value.code::<ImageFormat>()?;
-                let binding = Identity::from_bytes(value.take()?);
                 self.image = Some(match format {
-                    ImageFormat::Erofs => Image::Erofs {
-                        binding,
-                        uuid: None,
-                    },
+                    ImageFormat::Erofs => Image::Erofs { uuid: None },
                     ImageFormat::Gpt => Image::Gpt {
-                        binding,
                         disk_guid: None,
                         first_partition_bound: u64::from_le_bytes(value.take()?),
                     },
@@ -419,9 +371,10 @@ impl Draft {
             Field::ImageIdentity => self.image_identity = Some(Uuid::from_bytes(value.take()?)),
             Field::Upper => {
                 self.upper = Some(match value.take::<1>()? {
-                    [TMPFS] => Upper::Tmpfs,
+                    [TMPFS] => Upper::Tmpfs {
+                        max_memory_percent: value.take::<1>()?[0],
+                    },
                     [SCRATCH] => Upper::Scratch {
-                        binding: Identity::from_bytes(value.take()?),
                         journal: value.code()?,
                     },
                     _ => return Err(ActivationError::FieldValue(field)),
@@ -430,18 +383,14 @@ impl Draft {
             Field::Overlay => self.overlay = Some(value.code()?),
             Field::Export => {
                 let kind = value.code()?;
-                let plan = Identity::from_bytes(value.take()?);
-                self.export = Some(Export { kind, plan });
+                self.export = Some(Export { kind });
             }
             Field::Mappings => match u16::from_le_bytes(value.take()?) {
                 // A record without mappings leaves the field out.
                 0 => return Err(ActivationError::FieldValue(field)),
                 mappings => self.mappings = Some(usize::from(mappings)),
             },
-            Field::Network => {
-                let policy = Identity::from_bytes(value.take()?);
-                self.network = Some((policy, value.code()?));
-            }
+            Field::Network => self.network = Some(value.code()?),
             Field::Dns => {
                 // A DNS server's address is IPv4 or IPv6, which its length tells apart.
                 self.dns = Some(if bytes.len() == 4 {
@@ -457,11 +406,6 @@ impl Draft {
             }
             Field::Hostname => self.hostname = Some(value.rest().to_vec()),
             Field::MachineId => self.machine_id = Some(value.code()?),
-            Field::WorkloadIdentity => {
-                let uid = u32::from_le_bytes(value.take()?);
-                let gid = u32::from_le_bytes(value.take()?);
-                self.identity = Some(WorkloadIdentity { uid, gid });
-            }
             Field::Resources => {
                 let cpus = u32::from_le_bytes(value.take()?);
                 let memory = u64::from_le_bytes(value.take()?);
@@ -488,8 +432,7 @@ impl Draft {
             }
         }
         let network = match self.network {
-            Some((policy, publication)) => Some(Network {
-                policy,
+            Some(publication) => Some(Network {
                 dns: self.dns,
                 publication,
                 proxy: self.proxy,
@@ -509,10 +452,9 @@ impl Draft {
             export: self.export,
             mappings: self.mappings.unwrap_or(0),
             network,
-            workload: WorkloadView {
+            view: View {
                 hostname,
                 machine_id,
-                identity: self.identity,
             },
             resources,
         };

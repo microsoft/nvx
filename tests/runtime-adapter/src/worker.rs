@@ -82,8 +82,8 @@
 //!    `nvx::guest::clone::apply`: it assembles the root from the template's devices, with the
 //!    record's image, upper, and overlay mode, once the kernel reread the partition table of a
 //!    GPT disk, over a fresh upper, waiting for each device until the activation's deadline at the
-//!    latest, so that the application ends by then. It ignores the record's workload identity, if
-//!    it has one. If the record asks for a generated machine ID, it then generates one, once, after
+//!    latest, so that the application ends by then. Each execution names its own identity.
+//!    If the record asks for a generated machine ID, it then generates one, once, after
 //!    the repair's reseed. If the record has an export, it mounts the host export
 //!    out of the root, through the template's host filesystem device, `capture::FILESYSTEM_TAG`, as
 //!    the worker of a VM that boots cold mounts the one that its command line names, and if the
@@ -489,8 +489,8 @@ pub trait RootOperations: EntryOperations {
     /// [`map`](Self::map) maps the host's mapping table, and the announcer of the workload's
     /// listeners that it started, if the record's network publishes them, whose
     /// [pidfd](Self::announcer) the worker polls: in place of a root configuration's
-    /// [layout](Self::command_line), assembly, and [export](Self::mount_export). It ignores the
-    /// record's workload identity: each execution of a clone names its own. The template's VM
+    /// [layout](Self::command_line), assembly, and [export](Self::mount_export).
+    /// Each execution of a clone names its own identity. The template's VM
     /// [bootstrapped](Self::bootstrap) the guest before its capture.
     ///
     /// Fails as `nvx::guest::clone::apply` does, with an [`ApplyError`].
