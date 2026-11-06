@@ -96,22 +96,49 @@ fn a_later_bind_failure_stays_owned_and_its_teardown_removes_the_earlier_bind() 
 }
 
 #[test]
-fn a_switched_root_leaves_its_view_binds_mounted() {
+fn a_switched_root_never_unmounts_or_detaches_its_view_binds() {
     for teardown in [false, true] {
         let (guest, mut root, machine_id, resolver) = prepared();
         root.begin_view().unwrap();
         root.bind_view(&machine_id, Some(&resolver)).unwrap();
-        let targets = ["etc/machine-id", "etc/resolv.conf"].map(|target| root.path().join(target));
+        for target in ["etc/machine-id", "etc/resolv.conf"] {
+            assert!(guest.kernel.mount_at(&root.path().join(target)).is_some());
+        }
         root.switch().unwrap();
+        let switched = guest.kernel.calls();
         if teardown {
             assert!(root.teardown().unwrap_err().is_switched());
         } else {
             drop(root);
         }
         assert!(guest.kernel.unmounts().is_empty());
-        for target in targets {
-            assert!(guest.kernel.mount_at(&target).is_some());
+        assert_eq!(guest.kernel.calls(), switched);
+    }
+}
+
+#[test]
+fn switched_or_failed_roots_refuse_a_view_before_opening_its_root() {
+    for switched in [false, true] {
+        let guest = Guest::new();
+        let mut root = guest.assemble(&guest.assembly()).unwrap();
+        if switched {
+            root.switch().unwrap();
+        } else {
+            guest.kernel.fail(
+                Operation::Mount,
+                guest.path("run/nvx/hostfs/root"),
+                Errno::ENODEV,
+            );
+            root.mount_export("microvm", Access::ReadOnly).unwrap_err();
+            assert!(root.is_latched());
         }
+        let calls = guest.kernel.calls();
+        assert_eq!(
+            root.begin_view().unwrap_err().kind(),
+            ErrorKind::Unsupported
+        );
+        assert!(root.view_binds.is_none());
+        assert_eq!(guest.kernel.calls(), calls);
     }
 }
 
