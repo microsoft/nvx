@@ -18860,6 +18860,130 @@ def _shell_function(source: str, name: str) -> str:
     return source[start : source.index("\n}\n", start) + 3]
 
 
+class GuestInitWorkloadIdentityTests(unittest.TestCase):
+    """The shell /init's workload account and identity checks, as a one-shot
+    launch that asks for an account with nvx_workload_account=create runs
+    them: on a user database of their own, with setpriv and nvx-exit stubs."""
+
+    INIT = Path(__file__).parents[1] / "guest" / "common" / "init"
+    PASSWD = (
+        "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/sbin/nologin\n"
+    )
+    GROUP = "root:x:0:\nnobody:x:65534:\n"
+
+    def setUp(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        self.shell = shell
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        source = self.INIT.read_text(encoding="utf-8")
+        self.functions = (
+            "".join(
+                _shell_function(source, name)
+                for name in (
+                    "workload_fatal",
+                    "nonroot_id",
+                    "resolve_workload_identity",
+                    "ensure_workload_account",
+                    "run_workload",
+                    "read_workload_identity",
+                )
+            )
+            .replace("/etc/passwd", '"$root/passwd"')
+            .replace("/etc/group", '"$root/group"')
+            .replace("/sbin/nvx-exit", "nvx_exit")
+        )
+
+    def _run(self, uid: str, gid: str) -> subprocess.CompletedProcess[str]:
+        """Creates the account of the identity UID:GID and runs a workload as
+        it, on a fresh copy of the user database."""
+        (self.root / "passwd").write_bytes(self.PASSWD.encode())
+        (self.root / "group").write_bytes(self.GROUP.encode())
+        return subprocess.run(
+            [self.shell, "-s", "--", self.root.as_posix(), uid, gid],
+            input=(
+                "root=$1\nworkload_uid=$2\nworkload_gid=$3\n"
+                'nvx_exit() { echo "nvx-exit $1"; exit "$1"; }\n'
+                'setpriv() { echo "setpriv $*"; }\n'
+                f"{self.functions}"
+                "ensure_workload_account\n"
+                "run_workload /bin/busybox id\n"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_account_creation_refuses_a_zero_id_however_it_is_spelled(self):
+        # As numbers, zero-padded IDs are root's: the account would replace
+        # root's record, and setpriv would run the workload as root.
+        for uid, gid, message in (
+            ("00", "65534", "workload UID is unavailable"),
+            ("65534", "000", "workload GID is unavailable"),
+        ):
+            with self.subTest(uid=uid, gid=gid):
+                result = self._run(uid, gid)
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertIn(f"NVX-WORKLOAD-ERROR: {message}\n", result.stderr)
+                self.assertNotIn("setpriv", result.stdout)
+                self.assertEqual(
+                    (self.root / "passwd").read_bytes(), self.PASSWD.encode()
+                )
+                self.assertEqual(
+                    (self.root / "group").read_bytes(), self.GROUP.encode()
+                )
+
+    def test_account_creation_runs_a_new_identity_as_itself(self):
+        result = self._run("4242", "4242")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("setpriv --reuid 4242 --regid 4242 ", result.stdout)
+        self.assertEqual(
+            (self.root / "passwd").read_bytes().decode(),
+            self.PASSWD + "nvx:x:4242:4242:NVX workload:/tmp:/sbin/nologin\n",
+        )
+        self.assertEqual(
+            (self.root / "group").read_bytes().decode(), self.GROUP + "nvx:x:4242:\n"
+        )
+
+    def test_nvx_identity_needs_both_ids(self):
+        # With neither, an nvx_exec workload would skip the privilege drop and
+        # run as root.
+        for identity, expected in (
+            ("4242:4243", "read 4242:4243\n"),
+            (":", None),
+            ("4242:", None),
+            (":4243", None),
+            ("4242", None),
+        ):
+            with self.subTest(identity=identity):
+                result = subprocess.run(
+                    [self.shell, "-s", "--", identity],
+                    input=(
+                        'nvx_exit() { echo "nvx-exit $1"; exit "$1"; }\n'
+                        f"{self.functions}"
+                        'read_workload_identity "$1"\n'
+                        'echo "read $workload_uid:$workload_gid"\n'
+                    ),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if expected is None:
+                    self.assertEqual(result.returncode, 125, result.stdout)
+                    self.assertIn(
+                        "NVX-WORKLOAD-ERROR: nvx_identity must be UID:GID\n",
+                        result.stderr,
+                    )
+                    self.assertNotIn("read ", result.stdout)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected)
+
+
 def _aggregate_child_name(index: int, target: str) -> str:
     """Return the name that nvx-rs gives the child of an aggregate share at
     `index` that the guest binds at `target`: the index, a hyphen, and the first

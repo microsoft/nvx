@@ -84,11 +84,11 @@ OpenVMM loads the kernel and initramfs through the
 and the common [`/init`](../../guest/common/init) runs as PID 1. It runs the
 same boot steps as for the other guests, including the
 [time ABI](../design/3.2-clock-and-time.md) boot step, and then runs an `nvx_exec`
-workload, starts the managed agent, or opens a shell. The managed agent runs
-the workload directly in the initramfs root, not in a separate layer. On the
-shell path, `/init` reads the guest identity from `/etc/os-release`, stops on
-an unknown one, prints `NVX-GUEST-BOOT-OK: azurelinux`, and starts the
-BusyBox shell.
+workload, starts the managed agent, runs a one-shot workload, or opens a shell.
+The managed agent runs the workload directly in the initramfs root, not in a
+separate layer. On the shell path, `/init` reads the guest identity from
+`/etc/os-release`, stops on an unknown one, prints
+`NVX-GUEST-BOOT-OK: azurelinux`, and starts the BusyBox shell.
 
 The guest defaults to 512 MiB, like Ubuntu, because the kernel unpacks the
 initramfs into a RAM filesystem capped at half of guest memory; see

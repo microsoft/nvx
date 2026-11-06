@@ -125,8 +125,8 @@ loads the kernel and initramfs through the
 and the common [`/init`](../../guest/common/init) runs as PID 1. It disables
 module loading, runs the [time ABI](../design/3.2-clock-and-time.md) boot step, and then
 either runs an `nvx_exec` workload or mounts the HostFs share, configures
-static networking, and starts the managed agent or an interactive shell. For
-Ubuntu that shell is Bash, whose startup file prints
+static networking, and starts the managed agent, a one-shot workload, or an
+interactive shell. For Ubuntu that shell is Bash, whose startup file prints
 `NVX-GUEST-BOOT-OK: ubuntu` once it is ready for input.
 
 The guest defaults to 512 MiB because the kernel unpacks the initramfs into a

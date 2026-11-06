@@ -112,12 +112,22 @@ fn sandbox_blocks_are_a_distro_layer_and_a_scratch_disk() {
 /// snapshot directory, and the parse of the command line that `arguments` gives with the
 /// paths of that directory in place of `{dir}`.
 fn parse_run(arguments: &[&str]) -> (tempfile::TempDir, Result<Options, String>) {
+    parse_run_in(arguments, |_| {})
+}
+
+/// Returns the directory of [`parse_run`], and the parse of `arguments` there once `prepare` has
+/// changed the directory.
+fn parse_run_in(
+    arguments: &[&str],
+    prepare: impl FnOnce(&Path),
+) -> (tempfile::TempDir, Result<Options, String>) {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
     fs::write(root.join("vmlinux"), b"kernel").unwrap();
     fs::write(root.join("initramfs.cpio.gz"), b"initrd").unwrap();
     fs::create_dir_all(root.join("share").join("hidden")).unwrap();
     fs::create_dir(root.join("snapshot")).unwrap();
+    prepare(root);
     let directory = root.to_str().unwrap();
     let arguments: Vec<String> = arguments
         .iter()
@@ -496,6 +506,208 @@ fn launches_with_a_lifecycle_take_no_options_of_a_run() {
             Some(format!("unsupported argument {option}")),
             "{option}"
         );
+    }
+}
+
+/// The options of the cold boot of a run, with `{dir}` in place of the directory of [`parse_run`].
+const BOOT: [&str; 6] = [
+    "--memory",
+    "128M",
+    "--kernel",
+    "{dir}/vmlinux",
+    "--initrd",
+    "{dir}/initramfs.cpio.gz",
+];
+
+/// Returns the options of the cold boot of a run whose kernel command line is `command_line`,
+/// followed by `extra`, with the boot console on the terminal unless `extra` names one.
+fn boot_with<'a>(command_line: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut arguments = run_with(&BOOT);
+    arguments.extend(["--cmdline", command_line]);
+    if !extra.contains(&"--virtio-console") {
+        arguments.extend(["--virtio-console", "console"]);
+    }
+    arguments.extend(extra);
+    arguments
+}
+
+/// Makes `root` private to its user, as the directory of a control console's socket must be on
+/// Unix.
+fn private_directory(root: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+}
+
+#[test]
+fn runs_take_their_mode_and_workload_identity_from_the_cli_tokens() {
+    // In the one-shot mode, the default, a run that names an entrypoint runs it, with its
+    // arguments, as the identity of its tokens.
+    for command_line in [
+        "nvx_mode=one-shot nvx_identity=1000:1001 nvx_entrypoint=/bin/echo nvx_arg=a nvx_arg=b",
+        "nvx_identity=1000:1001 nvx_entrypoint=/bin/echo nvx_arg=a nvx_arg=b",
+    ] {
+        let arguments = boot_with(command_line, &["--mount", "/data,{dir}/share,rw"]);
+        let (_temporary, options) = parse_run(&arguments);
+        let options = options.unwrap();
+        assert_eq!(options.lifecycle, Lifecycle::OneShot, "{command_line}");
+        assert!(options.run && !options.sandbox);
+        assert_eq!(options.workload, ["/bin/echo", "a", "b"]);
+        assert_eq!(options.workload_uid, 1000);
+        assert!(options.endpoint.is_empty());
+    }
+    // One that names none boots on the terminal, as a run without the CLI's tokens does.
+    let arguments = boot_with("nvx_mode=one-shot nvx_identity=1000:1001", &[]);
+    let (_temporary, options) = parse_run(&arguments);
+    let options = options.unwrap();
+    assert_eq!(options.lifecycle, Lifecycle::Run);
+    assert!(options.workload.is_empty());
+    // In the managed mode, a run serves the control console for workloads of the identity of its
+    // tokens, which may ask the guest for an account, with the targets of its directory shares as
+    // directories of its guest. The console's socket is in a directory private to its user.
+    let managed = boot_with(
+        "nvx_mode=managed nvx_identity=1000:1001 nvx_workload_account=create \
+         nvx_share=0,/data,rw nvx_share=1,/etc/app.conf,ro,file",
+        &[
+            "--mount-aggregate",
+            "/run/nvx/shares",
+            "--mount-child",
+            "0,{dir}/share,rw",
+            "--virtio-console",
+            "none",
+            "--microvm-control-console",
+            "listen={dir}/control.sock",
+            "--microvm-control-auth-stdin",
+            "--microvm-report",
+            "{dir}/outcome.json",
+        ],
+    );
+    let (temporary, options) = parse_run_in(&managed, private_directory);
+    let options = options.unwrap();
+    assert_eq!(options.lifecycle, Lifecycle::Managed);
+    assert!(options.run && !options.sandbox);
+    assert_eq!(options.workload_uid, 1000);
+    assert_eq!(options.share_targets, ["/data"]);
+    assert!(options.workload.is_empty());
+    assert_eq!(
+        Path::new(&options.endpoint),
+        temporary.path().join("control.sock")
+    );
+    assert_eq!(options.report, Some(temporary.path().join("outcome.json")));
+}
+
+#[test]
+fn workloads_of_runs_can_enter_the_targets_of_their_direct_shares() {
+    // A run's single directory share needs no nvx_share= token: the guest mounts it at its target,
+    // which a workload of either mode can enter as its working directory.
+    let managed = [
+        "--virtio-console",
+        "none",
+        "--microvm-control-console",
+        "listen={dir}/control.sock",
+        "--microvm-control-auth-stdin",
+        "--microvm-report",
+        "{dir}/outcome.json",
+    ];
+    for (command_line, extra) in [
+        ("nvx_identity=1000:1001 nvx_entrypoint=/bin/true", &[][..]),
+        ("nvx_mode=managed nvx_identity=1000:1001", &managed[..]),
+    ] {
+        let arguments = boot_with(
+            command_line,
+            &[&["--mount", "/data,{dir}/share,rw"][..], extra].concat(),
+        );
+        let (_temporary, options) = parse_run_in(&arguments, private_directory);
+        let options = options.unwrap();
+        assert_eq!(options.share_targets, ["/data"], "{command_line}");
+        assert!(
+            Guest::new(&options).directories.contains("/data"),
+            "{command_line}"
+        );
+    }
+}
+
+#[test]
+fn restores_of_runs_resume_their_saved_guest_whatever_the_cli_tokens() {
+    // The guest that a snapshot saved read its tokens when it booted, so the CLI's tokens on a
+    // restore's command line run no workload: the restore resumes that guest, and one whose
+    // snapshot directory does not exist fails, as a restore without the tokens does.
+    for snapshot in ["{dir}/snapshot", "{dir}/missing"] {
+        let arguments = run_with(&[
+            "--restore-snapshot",
+            snapshot,
+            "--cmdline",
+            "nvx_identity=1000:1000 nvx_entrypoint=/bin/true",
+        ]);
+        let (_temporary, options) = parse_run(&arguments);
+        let options = options.unwrap();
+        assert_eq!(options.lifecycle, Lifecycle::Run, "{snapshot}");
+        assert!(options.workload.is_empty(), "{snapshot}");
+        if snapshot.ends_with("missing") {
+            assert_eq!(run_microvm(&options), 1);
+        }
+    }
+}
+
+#[test]
+fn runs_refuse_the_cli_tokens_that_their_guest_refuses() {
+    let identity_required = "the kernel command line must set one nvx_identity=";
+    let cases = [
+        ("nvx_mode=sideways", "unsupported mode sideways"),
+        (
+            "nvx_mode=managed nvx_mode=managed nvx_identity=1000:1001",
+            "nvx_mode= must be given at most once",
+        ),
+        // A workload of either mode runs as the non-root identity of the CLI's tokens.
+        ("nvx_entrypoint=/bin/true", identity_required),
+        ("nvx_mode=managed", identity_required),
+        (
+            "nvx_entrypoint=/bin/true nvx_identity=0:1001",
+            "invalid workload identity 0:1001",
+        ),
+        (
+            "nvx_entrypoint=/bin/true nvx_identity=1000",
+            "invalid workload identity 1000",
+        ),
+        // The shell `/init` reads IDs of decimal digits only.
+        (
+            "nvx_entrypoint=/bin/true nvx_identity=+1000:1001",
+            "invalid workload identity +1000:1001",
+        ),
+        (
+            "nvx_mode=managed nvx_identity=1000:+1001",
+            "invalid workload identity 1000:+1001",
+        ),
+        (
+            "nvx_entrypoint=/bin/true nvx_entrypoint=/bin/false nvx_identity=1000:1001",
+            "the kernel command line must set one nvx_entrypoint",
+        ),
+        (
+            "nvx_entrypoint=/bin/true nvx_identity=1000:1001 nvx_share=0,/data",
+            "invalid nvx_share=0,/data",
+        ),
+        // The shell `/init` runs only an absolute entrypoint.
+        (
+            "nvx_entrypoint=bin/true nvx_identity=1000:1001",
+            "nvx_entrypoint must be an absolute path",
+        ),
+        (
+            "nvx_entrypoint= nvx_identity=1000:1001",
+            "nvx_entrypoint must be an absolute path",
+        ),
+        // A managed run takes the control console of a managed launch.
+        (
+            "nvx_mode=managed nvx_identity=1000:1001",
+            "--virtio-console must be none, not console",
+        ),
+    ];
+    for (command_line, message) in cases {
+        let (_temporary, options) = parse_run(&boot_with(command_line, &[]));
+        assert_eq!(options.err().as_deref(), Some(message), "{command_line}");
     }
 }
 

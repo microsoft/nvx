@@ -174,6 +174,86 @@ fn runs_boot_or_restore_a_microvm_on_the_terminal() {
 }
 
 #[test]
+fn runs_with_the_cli_tokens_run_their_one_shot_workload() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let path = |name: &str| root.join(name).to_str().unwrap().to_owned();
+    fs::write(root.join("vmlinux"), b"kernel").unwrap();
+    fs::write(root.join("initramfs.cpio.gz"), b"initrd").unwrap();
+    fs::create_dir(root.join("reports")).unwrap();
+    let (kernel, initrd) = (path("vmlinux"), path("initramfs.cpio.gz"));
+    let boot = [
+        "--memory",
+        "128M",
+        "--kernel",
+        &kernel,
+        "--initrd",
+        &initrd,
+        "--virtio-console",
+        "console",
+    ];
+
+    // The workload runs once, with its output on the fake's, and the run ends with its status
+    // and writes the outcome report of a run.
+    let report = root.join("reports").join("one-shot.json");
+    let report_path = report.to_str().unwrap().to_owned();
+    let mut arguments = boot.to_vec();
+    arguments.extend([
+        "--cmdline",
+        "nvx_mode=one-shot nvx_identity=1000:1000 nvx_entrypoint=/bin/echo nvx_arg=a nvx_arg=b",
+        "--microvm-report",
+        &report_path,
+    ]);
+    let output = run_microvm(root, &arguments);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(text(&output.stdout), "a b\n");
+    let document: Value = serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(
+        document["outcome"],
+        json!({"operation": "run", "category": "success", "status_code": 0})
+    );
+    assert_eq!(document["network_policy"]["status"], "not-requested");
+    assert!(document["instance_id"].is_string(), "{document}");
+
+    let mut arguments = boot.to_vec();
+    arguments.extend([
+        "--cmdline",
+        "nvx_identity=1000:1000 nvx_entrypoint=/bin/false",
+    ]);
+    let output = run_microvm(root, &arguments);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+}
+
+#[test]
+fn restores_with_the_cli_tokens_resume_their_saved_guest() {
+    // The guest that a snapshot saved read its tokens when it booted, so a restore with the CLI's
+    // tokens runs no workload: it restores its snapshot, or fails as a restore whose snapshot does
+    // not exist does.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir(root.join("snapshot")).unwrap();
+    let tokens = "nvx_identity=1000:1000 nvx_entrypoint=/bin/echo nvx_arg=workload";
+    let snapshot = root.join("snapshot").to_str().unwrap().to_owned();
+    let output = run_microvm(
+        root,
+        &["--restore-snapshot", &snapshot, "--cmdline", tokens],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "nvx-fake-openvmm: restored the microVM\n"
+    );
+    let missing = root.join("missing").to_str().unwrap().to_owned();
+    let output = run_microvm(root, &["--restore-snapshot", &missing, "--cmdline", tokens]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(text(&output.stdout), "");
+    assert_eq!(
+        text(&output.stderr),
+        format!("nvx-fake-openvmm: cannot restore {missing}: no such snapshot directory\n")
+    );
+}
+
+#[test]
 fn runs_find_absolute_policy_paths_in_relative_share_roots() {
     // nvx-rs run passes the host path of each share as given, which may be relative to the
     // working directory, and with several shares, absolute policy paths, which OpenVMM
