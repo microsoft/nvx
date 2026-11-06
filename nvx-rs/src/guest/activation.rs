@@ -651,10 +651,10 @@ pub enum CaptureStage {
     GenerationId,
     /// Requesting the capture, and repairing the time of a restore.
     Capture,
-    /// Repairing the clone's resources, entropy and acknowledgement after a restore.
-    Repair,
     /// Restoring the stall detectors' settings, as the barrier releases them.
     Release,
+    /// Repairing the clone's resources, entropy and acknowledgement after a restore.
+    Repair,
 }
 
 impl fmt::Display for CaptureStage {
