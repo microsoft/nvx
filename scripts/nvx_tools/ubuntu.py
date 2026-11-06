@@ -797,7 +797,9 @@ def precompile_python(root: Path) -> None:
     imports. Unchecked-hash files carry no timestamp and the recorded source
     path is the path inside the guest rather than the build directory, which
     keeps the output deterministic. Bytecode only fits the exact minor version
-    of the interpreter that wrote it, so the build interpreter must match.
+    of the interpreter that wrote it, so the build interpreter must match. The
+    Docker build runs Debian's Python rather than Ubuntu's, so a root with
+    Python builds natively.
     """
     libraries = sorted(
         path
@@ -812,7 +814,9 @@ def precompile_python(root: Path) -> None:
         ):
             raise ScriptError(
                 f"byte-compiling {library.name} needs a final-release Python "
-                f"{major}.{minor} build interpreter; this is {sys.version.split()[0]}"
+                f"{major}.{minor} build interpreter; this is "
+                f"{sys.version.split()[0]}, so build the Ubuntu root natively "
+                f"with Python {major}.{minor}"
             )
         if _debug_ranges_suppressed():
             raise ScriptError(

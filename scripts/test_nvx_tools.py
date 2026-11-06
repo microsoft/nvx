@@ -16395,11 +16395,14 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(list(library.rglob("*.pyc")), [])
 
     def test_python_precompile_needs_the_matching_interpreter(self):
+        minor = sys.version_info.minor + 1
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self._python_tree(root, f"python3.{sys.version_info.minor + 1}")
+            self._python_tree(root, f"python3.{minor}")
             with self.assertRaisesRegex(
-                common.ScriptError, "needs a final-release Python"
+                common.ScriptError,
+                f"needs a final-release Python 3.{minor} build interpreter; .*"
+                f"build the Ubuntu root natively with Python 3.{minor}$",
             ):
                 ubuntu.precompile_python(root)
 

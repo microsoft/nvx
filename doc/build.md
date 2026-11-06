@@ -158,7 +158,10 @@ Ubuntu build requires `zstd`, and EROFS conversion additionally requires
 supplemental `.deb` before safe extraction and never executes binaries or
 maintainer scripts from the Ubuntu root. The Docker builder pins its Debian
 base image by digest and installs an exact `erofs-utils` version so clean EROFS
-builds use the same encoder.
+builds use the same encoder. A lock that adds Python needs a build interpreter
+of the root's Python minor version, which Debian's is not, so such a root
+builds natively; see
+[Ubuntu guest support](guests/ubuntu-guest.md#root-filesystem-builder).
 
 The sandbox scratch template, `build/ubuntu-smoke-scratch.ext4`, is the empty
 ext4 file system of which the sandbox scenarios boot a copy as their scratch.
