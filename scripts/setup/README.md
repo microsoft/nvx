@@ -29,7 +29,8 @@ checkout; see [Tool versions](#tool-versions).
 `setup-linux.sh` requires `--backend kvm` or `--backend mshv` in both modes. It
 supports distributions with `apt-get`, `dnf`, or `tdnf`, such as Ubuntu and
 Azure Linux. Both modes install the same native build dependencies, the
-pinned rustup, Rust release, and cargo-nextest, and a udev rule that lets only
+pinned rustup, Rust release with its `llvm-tools` component, cargo-nextest,
+and cargo-llvm-cov, and a udev rule that lets only
 the backend's group open its device, `/dev/kvm` or `/dev/mshv`; on MSHV, they
 load `mshv_root` when the device is missing. They differ in everything else:
 
@@ -244,7 +245,8 @@ ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 Development-host mode prepares a Linux/KVM or Linux/MSHV checkout for the user
 who runs the script. It installs native build dependencies, Docker with Buildx,
-and the Rust and cargo-nextest releases that the manifest pins, and configures
+and the Rust, cargo-nextest, and cargo-llvm-cov releases that the manifest
+pins, with Rust's `llvm-tools` component, and configures
 group-based access to Docker and to the backend's device. A host that already
 has a Docker CLI keeps its Docker, such as Docker's own `docker-ce`, which the
 distribution's packages would replace; install Buildx for it if it lacks the
@@ -290,8 +292,9 @@ separate `build-guest` invocation without provisioning or rebuilding the host.
 ## Windows / WHP
 
 Run the complete bootstrap from an elevated Windows PowerShell session. It uses
-WinGet to install missing tools, installs the Rust and cargo-nextest releases
-that the manifest pins, enables Windows Hypervisor Platform, and builds OpenVMM.
+WinGet to install missing tools, installs the Rust, cargo-nextest, and
+cargo-llvm-cov releases that the manifest pins, with Rust's `llvm-tools`
+component, enables Windows Hypervisor Platform, and builds OpenVMM.
 Runner-only provisioning additionally enables Hyper-V for its in-box PCAT and
 SVGA firmware. The script never reboots automatically.
 
@@ -320,7 +323,8 @@ checkout.
 ## Tool versions
 
 [`tool-versions.conf`](tool-versions.conf) pins the Rust toolchain, rustup,
-cargo-nextest, sccache, and Actions runner releases that the setup scripts and
+cargo-nextest, cargo-llvm-cov, sccache, and Actions runner releases that the
+setup scripts and
 the [Specula runner setup](../../.github/specula/README.md) install, and the
 SHA-256 checksum of each release artifact that they download; none of them
 repeats a pin. Each line is a `#` comment or `KEY=VALUE` without spaces:

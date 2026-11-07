@@ -2813,8 +2813,10 @@ updates them, as [Rust crates](../doc/ci.md#rust-crates) describes:
 python3 ../scripts/public_api.py --update
 ```
 
-Another workflow runs cargo-mutants on the files and with the tests that a
-dispatch names; see
+Two other workflows measure the tests: one reports, on Linux and Windows,
+which code of the crate they reach as `dev` changes, and the other runs
+cargo-mutants on the files and with the tests that a dispatch names; see
+[nvx-rs coverage](../doc/ci.md#nvx-rs-coverage) and
 [nvx-rs mutation testing](../doc/ci.md#nvx-rs-mutation-testing).
 
 The guest's mount-ID tests also run from a thread with its own descriptor
