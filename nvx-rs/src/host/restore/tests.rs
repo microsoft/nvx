@@ -1044,7 +1044,7 @@ fn restore_failure_messages_keep_the_original_cause_chain_without_replacing_it()
     assert!(error.message.contains("activation write failed"));
     assert!(error.message.contains("transport failed"));
     assert!(error.message.ends_with("root cause"));
-    assert_eq!(error.to_string(), error.message);
+    assert_eq!(error.to_string(), "restore failed during Activate: Io");
     let returned = StdError::source(&error)
         .unwrap()
         .downcast_ref::<Error>()
