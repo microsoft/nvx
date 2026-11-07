@@ -4,8 +4,9 @@
 They check the workflow's triggers, the tools that it pins, and the names of its
 artifacts, and the script's parts: how it finds the failed tests in Cargo's
 output and runs them again, which files it counts as production code, test code,
-or test doubles, the module table and the summary, and, with a stub of Cargo,
-the whole measurement.
+or test doubles, the module table and the summary, the lines that changes add or
+change, from Git's diffs in fixture repositories, and what LCOV reports say of
+them, and, with a stub of Cargo, the whole measurement.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -59,8 +61,9 @@ class WorkflowTests(unittest.TestCase):
         workflow = _workflow()
         # YAML 1.1 reads the key `on` as true.
         triggers = cast(dict[str, Any], workflow.get("on", workflow.get(True)))
-        # Never for pull requests, so that no required check depends on it.
-        self.assertEqual(set(triggers), {"push", "workflow_dispatch"})
+        # Never for merge groups, so that the merge queue waits for none of
+        # its jobs.
+        self.assertEqual(set(triggers), {"push", "pull_request", "workflow_dispatch"})
         push = triggers["push"]
         self.assertEqual(push["branches"], ["dev"])
         self.assertEqual(
@@ -84,10 +87,100 @@ class WorkflowTests(unittest.TestCase):
             job["strategy"]["matrix"]["os"], ["ubuntu-latest", "windows-latest"]
         )
         self.assertIs(job["strategy"]["fail-fast"], False)
-        self.assertEqual(
-            _step(_workflow(), "Measure")["run"],
-            "python scripts/nvx_rs_coverage.py --output build/nvx-rs-coverage",
+        run = _step(_workflow(), "Measure")["run"]
+        self.assertIn("options=(--output build/nvx-rs-coverage)", run)
+        self.assertIn('python scripts/nvx_rs_coverage.py "${options[@]}"', run)
+
+    def test_ready_pull_requests_that_change_the_measurement_run_it(self):
+        workflow = _workflow()
+        triggers = cast(dict[str, Any], workflow.get("on", workflow.get(True)))
+        ci = yaml.safe_load(
+            (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         )
+        ci_triggers = cast(dict[str, Any], ci.get("on", ci.get(True)))
+        pull_request = triggers["pull_request"]
+        # As in ci.yml, for any base, so that a stacked pull request lists the
+        # lines of its own changes, and once a draft is marked ready.
+        self.assertEqual(pull_request["types"], ci_triggers["pull_request"]["types"])
+        self.assertIn("ready_for_review", pull_request["types"])
+        self.assertNotIn("branches", pull_request)
+        self.assertEqual(pull_request["paths"], triggers["push"]["paths"])
+        # Drafts skip the measurement, as they skip CI's other jobs.
+        job = workflow["jobs"]["measure"]
+        self.assertEqual(
+            job["if"],
+            "github.event_name != 'pull_request' || "
+            "github.event.pull_request.draft == false",
+        )
+        self.assertEqual(job["if"], ci["jobs"]["nvx-rs"]["if"])
+        # dev requires only ci.yml's check, which GitHub finds by its name.
+        self.assertEqual(
+            ci["jobs"]["required-status-check"]["name"], "Required status check"
+        )
+        self.assertNotIn("Required status check", job["name"])
+        # A push to a pull request replaces the measurement of the one before.
+        self.assertEqual(
+            workflow["concurrency"],
+            {
+                "group": "${{ github.workflow }}-${{ github.ref }}",
+                "cancel-in-progress": True,
+            },
+        )
+
+    def test_pull_requests_measure_their_head_and_their_changes(self):
+        workflow = _workflow()
+        checkout = _step(workflow, "Checkout")["with"]
+        # A pull request's head, whose lines the summary names, with the
+        # history of its merge base; a push's commit, without that history.
+        self.assertEqual(checkout["ref"], "${{ github.event.pull_request.head.sha }}")
+        self.assertEqual(
+            checkout["fetch-depth"],
+            "${{ github.event_name == 'pull_request' && '0' || '1' }}",
+        )
+        self.assertIs(checkout["persist-credentials"], False)
+        measure = _step(workflow, "Measure")
+        self.assertEqual(
+            measure["env"], {"BASE": "${{ github.event.pull_request.base.sha }}"}
+        )
+        bash = shutil.which("bash")
+        if os.name != "posix" or bash is None:
+            self.skipTest("runs the workflow's bash step on POSIX hosts")
+        with tempfile.TemporaryDirectory() as directory:
+            programs = Path(directory)
+            arguments = programs / "arguments"
+            python = programs / "python"
+            python.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "$@" > {shlex.quote(str(arguments))}\n',
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            command = [
+                "scripts/nvx_rs_coverage.py",
+                "--output",
+                "build/nvx-rs-coverage",
+            ]
+            base = "0123456789abcdef0123456789abcdef01234567"
+            # A push or a dispatch has no base.
+            for value, expected in (("", command), (base, [*command, "--base", base])):
+                with self.subTest(base=value):
+                    result = subprocess.run(
+                        [bash, "--noprofile", "--norc", "-eo", "pipefail", "-c"]
+                        + [measure["run"]],
+                        cwd=REPO_ROOT,
+                        env={
+                            **os.environ,
+                            "BASE": value,
+                            "PATH": f"{programs}{os.pathsep}{os.environ['PATH']}",
+                        },
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        arguments.read_text(encoding="utf-8").splitlines(), expected
+                    )
 
     def test_reruns_replace_the_reports_of_their_system(self):
         workflow = _workflow()
@@ -571,6 +664,457 @@ class SummaryTests(unittest.TestCase):
         )
 
 
+class DiffTests(unittest.TestCase):
+    def test_hunks_hold_the_lines_that_their_headers_count(self):
+        diff = (
+            "diff --git a/nvx-rs/src/a.rs b/nvx-rs/src/a.rs\n"
+            "index 0123456..89abcde 100644\n"
+            "--- a/nvx-rs/src/a.rs\n"
+            "+++ b/nvx-rs/src/a.rs\n"
+            "@@ -1,0 +2,2 @@ fn a() {\n"
+            # Added lines that look like a header and a hunk.
+            "+++ b/nvx-rs/src/b.rs\n"
+            "+@@ -1 +1 @@\n"
+            "@@ -5 +7 @@ fn b() {\n"
+            "-old\n"
+            "\\ No newline at end of file\n"
+            "+new\n"
+            "\\ No newline at end of file\n"
+            "diff --git a/nvx-rs/src/gone.rs b/nvx-rs/src/gone.rs\n"
+            "deleted file mode 100644\n"
+            "--- a/nvx-rs/src/gone.rs\n"
+            "+++ /dev/null\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-a\n"
+            "-b\n"
+        )
+        self.assertEqual(coverage.added_lines(diff), {"nvx-rs/src/a.rs": {2, 3, 7}})
+        self.assertEqual(coverage.added_lines(""), {})
+
+    def test_headers_name_files_as_git_quotes_them(self):
+        for name, path in (
+            ('"b/src/caf\\303\\251.rs"', "src/caf\u00e9.rs"),
+            ('"b/src/a\\tb\\\\c\\"d.rs"', 'src/a\tb\\c"d.rs'),
+            # Git ends a name that holds a space with a tab.
+            ("b/src/a b.rs\t", "src/a b.rs"),
+            ("b/src/caf\u00e9.rs", "src/caf\u00e9.rs"),
+        ):
+            with self.subTest(name=name):
+                diff = f"+++ {name}\n@@ -0,0 +1 @@\n+a\n"
+                self.assertEqual(coverage.added_lines(diff), {path: {1}})
+
+    def test_malformed_diffs_fail(self):
+        for diff in (
+            "+++ b/a.rs\n@@ -0,0 +1,2 @@\n+a\n",
+            "+++ b/a.rs\n@@ -0,0 +1 @@\n a\n",
+            "+++ b/a.rs\n@@ -1 +0,0 @@\n+a\n",
+            "@@ -0,0 +1 @@\n+a\n",
+            "+++ a.rs\n",
+            '+++ "b/a\\q.rs"\n',
+            '+++ "b/a\\8.rs"\n',
+        ):
+            with self.subTest(diff=diff):
+                with self.assertRaises(coverage.MeasurementError):
+                    coverage.added_lines(diff)
+
+
+def _numbered(name: str, count: int) -> str:
+    return "".join(f"{name} {number}\n" for number in range(1, count + 1))
+
+
+class Repository:
+    """A Git repository in a temporary directory, whose Git commands read the
+    configuration in `configuration`, empty at first, rather than the
+    developer's, such as commit signing."""
+
+    def __init__(self, test: unittest.TestCase):
+        temporary = tempfile.TemporaryDirectory()
+        test.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        self.root = directory / "repository"
+        self.root.mkdir()
+        self.crate = self.root / "nvx-rs"
+        self.configuration = directory / "gitconfig"
+        self.configuration.write_bytes(b"")
+        environment = patch.dict(
+            os.environ,
+            {
+                "GIT_CEILING_DIRECTORIES": str(directory),
+                "GIT_CONFIG_GLOBAL": str(self.configuration),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_AUTHOR_NAME": "NVX",
+                "GIT_AUTHOR_EMAIL": "nvx@example.com",
+                "GIT_COMMITTER_NAME": "NVX",
+                "GIT_COMMITTER_EMAIL": "nvx@example.com",
+            },
+        )
+        environment.start()
+        test.addCleanup(environment.stop)
+        self.git("init", "--quiet", "--initial-branch=dev")
+
+    def git(self, *arguments: str) -> str:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        ).stdout
+
+    def write(self, files: Mapping[str, str | None]) -> None:
+        """Writes `files` with LF line endings, or deletes those without
+        text."""
+        for name, text in files.items():
+            path = self.root / name
+            if text is None:
+                path.unlink()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(text.encode("utf-8"))
+
+    def commit(self, files: Mapping[str, str | None]) -> str:
+        """Commits `files`, as write() writes them, and returns the commit."""
+        self.write(files)
+        self.git("add", "--all")
+        self.git("commit", "--quiet", "--message", "change")
+        return self.git("rev-parse", "HEAD").strip()
+
+
+@unittest.skipIf(shutil.which("git") is None, "requires git")
+class ChangesTests(unittest.TestCase):
+    def test_changes_hold_the_lines_that_the_working_tree_adds_or_changes(self):
+        repository = Repository(self)
+        lib = _numbered("line", 10)
+        base = repository.commit(
+            {
+                "nvx-rs/src/lib.rs": lib,
+                "nvx-rs/src/old.rs": _numbered("old", 12),
+                "nvx-rs/src/same.rs": _numbered("same", 12),
+                "nvx-rs/src/gone.rs": _numbered("gone", 5),
+                "nvx-rs/src/a b.rs": "a\nb\n",
+                "nvx-rs/src/caf\u00e9.rs": "a\nb\n",
+                "nvx-rs/tests/cli.rs": "a\n",
+                "scripts/tool.py": "a\n",
+            }
+        )
+        repository.git("switch", "--quiet", "--create", "topic")
+        repository.commit(
+            {
+                # Changes line 2, deletes line 5, and adds two after line 8.
+                "nvx-rs/src/lib.rs": lib.replace("line 2\n", "line two\n")
+                .replace("line 5\n", "")
+                .replace("line 8\n", "line 8\nnew a\nnew b\n"),
+                # A renamed file has only the lines that its changes add.
+                "nvx-rs/src/old.rs": None,
+                "nvx-rs/src/new.rs": _numbered("old", 12).replace("old 7", "old 07"),
+                "nvx-rs/src/same.rs": None,
+                "nvx-rs/src/moved.rs": _numbered("same", 12),
+                "nvx-rs/src/gone.rs": None,
+                "nvx-rs/src/added.rs": "a\nb\n",
+                "nvx-rs/src/a b.rs": "a\nB\n",
+                "nvx-rs/src/caf\u00e9.rs": "a\nB\n",
+                "nvx-rs/tests/cli.rs": "A\n",
+                "scripts/tool.py": "A\n",
+            }
+        )
+        # What dev changes after the merge base is none of the changes.
+        repository.git("switch", "--quiet", "dev")
+        repository.commit({"nvx-rs/src/lib.rs": lib.replace("line 1\n", "line one\n")})
+        repository.git("switch", "--quiet", "topic")
+        # The working tree's changes count, but untracked files don't.
+        repository.write(
+            {"nvx-rs/src/added.rs": "a\nb\nc\n", "nvx-rs/src/untracked.rs": "a\n"}
+        )
+        expected = coverage.Changes(
+            base,
+            {
+                "src/lib.rs": frozenset({2, 8, 9}),
+                "src/new.rs": frozenset({7}),
+                "src/added.rs": frozenset({1, 2, 3}),
+                "src/a b.rs": frozenset({2}),
+                "src/caf\u00e9.rs": frozenset({2}),
+                "tests/cli.rs": frozenset({1}),
+            },
+        )
+        self.assertEqual(
+            coverage.changes_since("dev", repository.root, repository.crate), expected
+        )
+        # Whatever the developer's configuration says of diffs.
+        repository.configuration.write_text(
+            "[diff]\n"
+            "\tnoprefix = true\n"
+            "\tmnemonicPrefix = true\n"
+            "\trenames = false\n"
+            "\tcontext = 5\n"
+            "\texternal = nvx-missing-diff-driver\n"
+            "[color]\n"
+            "\tui = always\n"
+            "[core]\n"
+            "\tquotePath = false\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            coverage.changes_since("dev", repository.root, repository.crate), expected
+        )
+
+    def test_bases_without_a_merge_base_fail(self):
+        repository = Repository(self)
+        repository.commit({"nvx-rs/src/lib.rs": "a\n"})
+        repository.git("switch", "--quiet", "--orphan", "other")
+        repository.commit({"nvx-rs/src/lib.rs": "b\n"})
+        for base, message in (
+            ("dev", "git merge-base dev HEAD failed with status 1"),
+            ("missing", "git merge-base missing HEAD failed with status 128: .+"),
+        ):
+            with self.subTest(base=base):
+                with self.assertRaisesRegex(coverage.MeasurementError, message):
+                    coverage.changes_since(base, repository.root, repository.crate)
+
+    def test_changes_find_the_lines_that_they_add_and_no_test_reaches(self):
+        repository = Repository(self)
+        repository.commit({"nvx-rs/src/lib.rs": "fn a() {\n    one();\n}\n"})
+        repository.git("switch", "--quiet", "--create", "topic")
+        repository.commit(
+            {"nvx-rs/src/lib.rs": "fn a() {\n    one();\n    // Two.\n    two();\n}\n"}
+        )
+        changes = coverage.changes_since("dev", repository.root, repository.crate)
+        self.assertEqual(changes.lines, {"src/lib.rs": frozenset({3, 4})})
+        # llvm-cov instruments no comment.
+        for hits, share, listed in (
+            (0, "0.0% of 1", True),
+            (2, "100.0% of 1", False),
+        ):
+            with self.subTest(hits=hits):
+                report = coverage.read_lcov(
+                    f"SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:4,{hits}\nDA:5,1\n"
+                    "end_of_record\n"
+                )
+                summary = "\n".join(
+                    coverage.render_changes(coverage.changed_coverage(changes, report))
+                )
+                self.assertIn(f"Tests reach {share} instrumented lines", summary)
+                self.assertEqual("| `src/lib.rs` | 4 |" in summary, listed)
+
+
+class LcovTests(unittest.TestCase):
+    def test_reports_give_the_hits_and_branches_of_each_line(self):
+        report = coverage.read_lcov(
+            "TN:\n"
+            "SF:src\\host\\cli.rs\n"
+            "FN:3,_RNvNtCs0_3nvx3cli\n"
+            "FNDA:1,_RNvNtCs0_3nvx3cli\n"
+            "DA:3,1\n"
+            "DA:4,0\n"
+            "DA:7,12,c2hlY2tzdW0\n"
+            "BRDA:4,0,0,-\n"
+            "BRDA:4,0,1,-\n"
+            "BRDA:7,0,0,12\n"
+            "BRDA:7,0,1,0\n"
+            "BRF:4\n"
+            "BRH:1\n"
+            "LF:3\n"
+            "LH:2\n"
+            "end_of_record\n"
+            "SF:src/lib.rs\n"
+            "DA:1,0\n"
+            "end_of_record\n"
+            # Another record of a file adds to the first.
+            "SF:src/lib.rs\n"
+            "DA:1,2\n"
+            "end_of_record\n"
+        )
+        self.assertEqual(
+            report,
+            {
+                "src/host/cli.rs": coverage.FileLines(
+                    {3: 1, 4: 0, 7: 12},
+                    {
+                        4: {("0", "0"): False, ("0", "1"): False},
+                        7: {("0", "0"): True, ("0", "1"): False},
+                    },
+                ),
+                "src/lib.rs": coverage.FileLines({1: 2}, {}),
+            },
+        )
+        self.assertEqual(coverage.read_lcov(""), {})
+
+    def test_malformed_reports_fail(self):
+        for text in (
+            "DA:1,1\n",
+            "SF:src/lib.rs\nend_of_record\nBRDA:1,0,0,1\n",
+            "SF:src/lib.rs\nDA:x,1\n",
+            "SF:src/lib.rs\nDA:1\n",
+            "SF:src/lib.rs\nBRDA:1,0,0\n",
+            "SF:src/lib.rs\nBRDA:1,0,0,x\n",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(coverage.MeasurementError):
+                    coverage.read_lcov(text)
+
+
+MERGE_BASE = "0123456789abcdef0123456789abcdef01234567"
+
+
+class ChangedCoverageTests(unittest.TestCase):
+    def test_changes_count_the_lines_that_the_report_instruments(self):
+        report = coverage.read_lcov(
+            "SF:src/lib.rs\nDA:2,1\nDA:3,0\nDA:4,0\nDA:9,5\nend_of_record\n"
+            "SF:src/host/windows.rs\nDA:1,0\nend_of_record\n"
+        )
+        changes = coverage.Changes(
+            MERGE_BASE,
+            {
+                # Line 1 is a comment.
+                "src/lib.rs": frozenset({1, 2, 3, 4}),
+                # Code that this host doesn't compile, and test code.
+                "src/host/linux.rs": frozenset({5}),
+                "tests/cli.rs": frozenset({1}),
+                # Lines of code that tests did not reach, but none changed.
+                "src/host/windows.rs": frozenset({2}),
+            },
+        )
+        changed = coverage.changed_coverage(changes, report)
+        self.assertEqual(
+            changed,
+            coverage.ChangedCoverage(
+                MERGE_BASE,
+                (coverage.ChangedFile("src/lib.rs", coverage.Count(1, 3), (3, 4), ()),),
+                False,
+            ),
+        )
+        self.assertEqual(changed.lines(), coverage.Count(1, 3))
+
+    def test_branches_that_no_test_takes_count_on_every_changed_line(self):
+        report = coverage.read_lcov(
+            "SF:src/lib.rs\n"
+            "DA:1,1\nBRDA:1,0,0,1\nBRDA:1,0,1,0\n"
+            "DA:2,0\nBRDA:2,0,0,-\nBRDA:2,0,1,-\n"
+            "DA:3,4\nBRDA:3,0,0,2\nBRDA:3,0,1,2\n"
+            "DA:4,1\n"
+            "DA:5,0\nBRDA:5,0,0,-\nBRDA:5,0,1,-\n"
+            "end_of_record\n"
+        )
+        changes = coverage.Changes(MERGE_BASE, {"src/lib.rs": frozenset({1, 2, 3, 4})})
+        changed = coverage.changed_coverage(changes, report)
+        self.assertEqual(
+            changed.files,
+            (
+                coverage.ChangedFile(
+                    "src/lib.rs",
+                    coverage.Count(3, 4),
+                    (2,),
+                    ((1, coverage.Count(1, 2)), (2, coverage.Count(0, 2))),
+                ),
+            ),
+        )
+        self.assertIs(changed.branches, True)
+
+
+class ChangedSummaryTests(unittest.TestCase):
+    def test_summaries_list_by_file_the_changed_lines_that_no_test_reaches(self):
+        changed = coverage.ChangedCoverage(
+            MERGE_BASE,
+            (
+                coverage.ChangedFile("src/a.rs", coverage.Count(2, 2), (), ()),
+                coverage.ChangedFile(
+                    "src/b.rs", coverage.Count(1, 7), (3, 4, 5, 9, 11, 12), ()
+                ),
+            ),
+            False,
+        )
+        self.assertEqual(
+            "\n".join(coverage.render_changes(changed)),
+            "### Changed lines that no test reaches\n"
+            "\n"
+            "Tests reach 33.3% of 9 instrumented lines of production code that the "
+            "changes since `0123456789ab` add or change.\n"
+            "\n"
+            "By file, the lines that no test reaches:\n"
+            "\n"
+            "| File | Lines |\n"
+            "| --- | --- |\n"
+            "| `src/b.rs` | 3-5, 9, 11-12 |\n",
+        )
+
+    def test_changes_that_tests_reach_entirely_list_no_line(self):
+        changed = coverage.ChangedCoverage(
+            MERGE_BASE,
+            (coverage.ChangedFile("src/a.rs", coverage.Count(2, 2), (), ()),),
+            False,
+        )
+        self.assertEqual(
+            coverage.render_changes(changed),
+            [
+                "### Changed lines that no test reaches",
+                "",
+                "Tests reach 100.0% of 2 instrumented lines of production code "
+                "that the changes since `0123456789ab` add or change.",
+                "",
+            ],
+        )
+
+    def test_changes_without_instrumented_lines_say_so(self):
+        changed = coverage.ChangedCoverage(MERGE_BASE, (), True)
+        self.assertEqual(
+            coverage.render_changes(changed),
+            [
+                "### Changed lines that no test reaches",
+                "",
+                "The changes since `0123456789ab` add or change no instrumented "
+                "line of production code.",
+                "",
+            ],
+        )
+
+    def test_branches_that_no_test_takes_show_when_measured(self):
+        changed = coverage.ChangedCoverage(
+            MERGE_BASE,
+            (
+                coverage.ChangedFile(
+                    "src/a.rs",
+                    coverage.Count(3, 4),
+                    (2,),
+                    (
+                        (1, coverage.Count(1, 2)),
+                        (2, coverage.Count(0, 2)),
+                        (5, coverage.Count(1, 4)),
+                    ),
+                ),
+                coverage.ChangedFile(
+                    "src/b.rs",
+                    coverage.Count(1, 1),
+                    (),
+                    ((3, coverage.Count(1, 2)),),
+                ),
+            ),
+            True,
+        )
+        summary = "\n".join(coverage.render_changes(changed))
+        self.assertIn(
+            "By file, the lines that no test reaches, and the changed lines with "
+            "branches that no test takes, with how many of the line's branches no "
+            "test takes:\n"
+            "\n"
+            "| File | Lines that no test reaches | Branches that no test takes |\n"
+            "| --- | --- | --- |\n"
+            "| `src/a.rs` | 2 | 1 (1 of 2), 2 (2 of 2), 5 (3 of 4) |\n"
+            "| `src/b.rs` | none | 3 (1 of 2) |\n",
+            summary,
+        )
+
+    def test_the_changes_follow_the_totals_and_precede_the_modules(self):
+        changed = coverage.ChangedCoverage(MERGE_BASE, (), False)
+        summary = coverage.render(_measurement(), coverage.analyze(REPORT), changed)
+        section = summary.index("### Changed lines that no test reaches\n")
+        self.assertLess(summary.index("| Production |"), section)
+        self.assertLess(section, summary.index("### Production code by module\n"))
+        self.assertNotIn(
+            "### Changed lines",
+            coverage.render(_measurement(), coverage.analyze(REPORT)),
+        )
+
+
 class ProfileTests(unittest.TestCase):
     def test_the_measurement_runs_with_cargo_s_instrumented_guest_binaries(self):
         result = coverage.environment(
@@ -680,6 +1224,23 @@ class FakeCargo:
                 (self.crate / stray).write_bytes(b"profile")
             self.strays = ()
         return subprocess.CompletedProcess(list(command), status, output)
+
+
+class LcovCargo(FakeCargo):
+    """A FakeCargo whose LCOV reports hold `lcov`."""
+
+    def __init__(self, root: Path, *runs: tuple[int, str], lcov: str):
+        super().__init__(root, *runs)
+        self.lcov = lcov
+
+    def __call__(
+        self, command: Sequence[str], echo: bool
+    ) -> subprocess.CompletedProcess[str]:
+        result = super().__call__(command, echo)
+        if "report" in command and "--lcov" in command:
+            path = Path(command[command.index("--output-path") + 1])
+            path.write_text(self.lcov, encoding="utf-8")
+        return result
 
 
 class MeasureTests(unittest.TestCase):
@@ -849,6 +1410,30 @@ class MeasureTests(unittest.TestCase):
             directory = coverage.profile_directory(runner, Path("crate"))
         self.assertEqual((directory, runner.commands), (Path("crate") / "coverage", []))
 
+    def test_measurements_of_changes_list_the_lines_that_no_test_reaches(self):
+        lcov = "SF:src\\host\\cli.rs\nDA:3,0\nDA:4,2\nend_of_record\n"
+        changes = coverage.Changes(
+            MERGE_BASE, {"src/host/cli.rs": frozenset({2, 3, 4})}
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            cargo = LcovCargo(Path(directory), (0, PASSED_OUTPUT), lcov=lcov)
+            with (
+                redirect_stderr(io.StringIO()),
+                redirect_stdout(io.StringIO()),
+                patch.dict("os.environ", {"CARGO_LLVM_COV_TARGET_DIR": ""}),
+            ):
+                status = coverage.measure(
+                    cargo.root / "out", run=cargo, crate=cargo.crate, changes=changes
+                )
+            _, summary, _ = self._outputs(cargo)
+        self.assertEqual(status, 0)
+        self.assertIn(
+            "Tests reach 50.0% of 2 instrumented lines of production code that the "
+            "changes since `0123456789ab` add or change.\n",
+            summary,
+        )
+        self.assertIn("| `src/host/cli.rs` | 3 |\n", summary)
+
 
 class CommandTests(unittest.TestCase):
     def test_commands_echo_their_output_and_errors_together(self):
@@ -889,7 +1474,7 @@ class CommandTests(unittest.TestCase):
         ):
             self.assertEqual(coverage.main([]), 0)
         measure.assert_called_once_with(
-            coverage.REPO_ROOT / "build" / "nvx-rs-coverage"
+            coverage.REPO_ROOT / "build" / "nvx-rs-coverage", changes=None
         )
         self.assertEqual(
             PurePosixPath(
@@ -897,6 +1482,34 @@ class CommandTests(unittest.TestCase):
             ),
             PurePosixPath("build/nvx-rs-coverage"),
         )
+
+    def test_a_base_lists_the_changes_since_its_merge_base(self):
+        changes = coverage.Changes(MERGE_BASE, {})
+        with (
+            redirect_stderr(io.StringIO()),
+            patch.object(coverage, "changes_since", return_value=changes) as since,
+            patch.object(coverage, "measure", return_value=0) as measure,
+        ):
+            self.assertEqual(
+                coverage.main(["--output", "out", "--base", "origin/dev"]), 0
+            )
+        since.assert_called_once_with("origin/dev")
+        measure.assert_called_once_with(Path("out"), changes=changes)
+
+    def test_bases_that_git_cannot_resolve_fail_before_the_measurement(self):
+        stderr = io.StringIO()
+        with (
+            redirect_stderr(stderr),
+            patch.object(
+                coverage,
+                "changes_since",
+                side_effect=coverage.MeasurementError("no merge base"),
+            ),
+            patch.object(coverage, "measure", return_value=0) as measure,
+        ):
+            self.assertEqual(coverage.main(["--base", "missing"]), 1)
+        measure.assert_not_called()
+        self.assertEqual(stderr.getvalue(), "error: no merge base\n")
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ nvx/
 |   |   |-- copilot-setup-steps.yml Copilot cloud agent environment
 |   |   |-- module-diagrams.yml  Module diagrams of the nvx crate, drawn after merges
 |   |   |-- nightly-ci-report.yml Report of failed nightly CI runs
-|   |   |-- nvx-rs-coverage.yml  Coverage of nvx-rs's own tests as dev changes
+|   |   |-- nvx-rs-coverage.yml  Coverage of nvx-rs's own tests, for dev and pull requests
 |   |   |-- nvx-rs-mutants.yml   On-demand mutation testing of nvx-rs
 |   |   |-- package-platform.yml Reusable platform release package job
 |   |   |-- run-nvx-microvm-tests.yml Reusable NVX microVM test job
