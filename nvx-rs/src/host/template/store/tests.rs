@@ -7,10 +7,10 @@ use std::sync::{Arc, Barrier, mpsc};
 use serde_json::{Value, json};
 
 use super::*;
+use crate::host::snapshot::tests::{ManifestSpec, class};
 use crate::host::template::MANIFEST_NAME;
 use crate::host::template::key::CaptureClass;
 use crate::host::template::manifest::TemplateManifest;
-use crate::host::template::tests::{ManifestSpec, class};
 
 #[cfg(any(target_os = "linux", windows))]
 pub(in crate::host::template) use super::capture::SNAPSHOT_ARTIFACTS;
@@ -21,7 +21,7 @@ impl Store {
     pub(crate) fn publish_for_tests(&self) -> Generation {
         tests::publish(
             self,
-            &crate::host::template::tests::ManifestSpec::template(),
+            &crate::host::snapshot::tests::ManifestSpec::template(),
             tests::storage(1),
         )
     }
@@ -33,7 +33,7 @@ impl Store {
     pub(in crate::host::template) fn publish_spec_for_tests(
         &self,
         class: &crate::host::template::CaptureClass,
-        spec: &crate::host::template::tests::ManifestSpec,
+        spec: &crate::host::snapshot::tests::ManifestSpec,
     ) -> Generation {
         tests::publish_with(self, class, spec, tests::storage(1))
     }
