@@ -585,6 +585,221 @@ struct nvx::guest::GenerationId
 const nvx::guest::GenerationId::LENGTH
 method nvx::guest::GenerationId::from_bytes
 method nvx::guest::GenerationId::to_bytes
+mod nvx::guest::activation
+struct nvx::guest::activation::Activation
+method nvx::guest::activation::Activation::complete
+method nvx::guest::activation::Activation::deadline
+method nvx::guest::activation::Activation::established
+method nvx::guest::activation::Activation::input
+method nvx::guest::activation::Activation::new
+method nvx::guest::activation::Activation::start
+method nvx::guest::activation::Activation::state
+method nvx::guest::activation::Activation::tick
+method nvx::guest::activation::Activation::with_resources
+enum nvx::guest::activation::ActivationAction
+variant nvx::guest::activation::ActivationAction::Acknowledge
+variant nvx::guest::activation::ActivationAction::Apply
+field nvx::guest::activation::ActivationAction::Apply::0
+variant nvx::guest::activation::ActivationAction::Continue
+variant nvx::guest::activation::ActivationAction::Join
+variant nvx::guest::activation::ActivationAction::Ready
+field nvx::guest::activation::ActivationAction::Ready::0
+variant nvx::guest::activation::ActivationAction::Serve
+enum nvx::guest::activation::ActivationCause
+variant nvx::guest::activation::ActivationCause::Changed
+variant nvx::guest::activation::ActivationCause::Cold
+variant nvx::guest::activation::ActivationCause::Completion
+variant nvx::guest::activation::ActivationCause::Expired
+variant nvx::guest::activation::ActivationCause::Failed
+field nvx::guest::activation::ActivationCause::Failed::0
+variant nvx::guest::activation::ActivationCause::Record
+field nvx::guest::activation::ActivationCause::Record::0
+variant nvx::guest::activation::ActivationCause::Request
+variant nvx::guest::activation::ActivationCause::Reset
+variant nvx::guest::activation::ActivationCause::Resources
+field nvx::guest::activation::ActivationCause::Resources::actual
+field nvx::guest::activation::ActivationCause::Resources::expected
+variant nvx::guest::activation::ActivationCause::Start
+variant nvx::guest::activation::ActivationCause::Transaction
+field nvx::guest::activation::ActivationCause::Transaction::accepted
+field nvx::guest::activation::ActivationCause::Transaction::offered
+struct nvx::guest::activation::ActivationFailure
+method nvx::guest::activation::ActivationFailure::cause
+method nvx::guest::activation::ActivationFailure::state
+enum nvx::guest::activation::ActivationInput
+variant nvx::guest::activation::ActivationInput::Activate
+field nvx::guest::activation::ActivationInput::Activate::0
+variant nvx::guest::activation::ActivationInput::Flow
+variant nvx::guest::activation::ActivationInput::Request
+variant nvx::guest::activation::ActivationInput::Reset
+variant nvx::guest::activation::ActivationInput::TooLong
+field nvx::guest::activation::ActivationInput::TooLong::0
+enum nvx::guest::activation::ActivationState
+variant nvx::guest::activation::ActivationState::Activating
+variant nvx::guest::activation::ActivationState::Bootstrap
+variant nvx::guest::activation::ActivationState::Failed
+variant nvx::guest::activation::ActivationState::Ready
+variant nvx::guest::activation::ActivationState::Restricted
+variant nvx::guest::activation::ActivationState::Started
+trait nvx::guest::activation::AdmissionFence
+method nvx::guest::activation::AdmissionFence::close
+method nvx::guest::activation::AdmissionFence::open
+struct nvx::guest::activation::Applied (hidden)
+method nvx::guest::activation::Applied::gateway (hidden)
+method nvx::guest::activation::Applied::hostname (hidden)
+method nvx::guest::activation::Applied::into_parts (hidden)
+method nvx::guest::activation::Applied::machine_id (hidden)
+method nvx::guest::activation::Applied::proxy (hidden)
+method nvx::guest::activation::Applied::publication (hidden)
+method nvx::guest::activation::Applied::resolver (hidden)
+method nvx::guest::activation::Applied::root (hidden)
+method nvx::guest::activation::Applied::root_mut (hidden)
+method nvx::guest::activation::Applied::take_export (hidden)
+method nvx::guest::activation::Applied::teardown (hidden)
+struct nvx::guest::activation::AppliedTeardownError (hidden)
+method nvx::guest::activation::AppliedTeardownError::binds (hidden)
+method nvx::guest::activation::AppliedTeardownError::root (hidden)
+enum nvx::guest::activation::ApplyError (hidden)
+variant nvx::guest::activation::ApplyError::Assembly (hidden)
+field nvx::guest::activation::ApplyError::Assembly::0 (hidden)
+variant nvx::guest::activation::ApplyError::Export (hidden)
+field nvx::guest::activation::ApplyError::Export::error (hidden)
+field nvx::guest::activation::ApplyError::Export::teardown (hidden)
+variant nvx::guest::activation::ApplyError::Gpt (hidden)
+field nvx::guest::activation::ApplyError::Gpt::0 (hidden)
+variant nvx::guest::activation::ApplyError::MachineId (hidden)
+field nvx::guest::activation::ApplyError::MachineId::error (hidden)
+field nvx::guest::activation::ApplyError::MachineId::teardown (hidden)
+variant nvx::guest::activation::ApplyError::Network (hidden)
+field nvx::guest::activation::ApplyError::Network::error (hidden)
+field nvx::guest::activation::ApplyError::Network::teardown (hidden)
+variant nvx::guest::activation::ApplyError::View (hidden)
+field nvx::guest::activation::ApplyError::View::error (hidden)
+field nvx::guest::activation::ApplyError::View::teardown (hidden)
+struct nvx::guest::activation::CaptureBarrier
+method nvx::guest::activation::CaptureBarrier::cancel
+method nvx::guest::activation::CaptureBarrier::capture
+enum nvx::guest::activation::CaptureCause
+variant nvx::guest::activation::CaptureCause::Io
+field nvx::guest::activation::CaptureCause::Io::0
+variant nvx::guest::activation::CaptureCause::Mounted
+field nvx::guest::activation::CaptureCause::Mounted::0
+variant nvx::guest::activation::CaptureCause::Pending
+variant nvx::guest::activation::CaptureCause::Time
+field nvx::guest::activation::CaptureCause::Time::0
+struct nvx::guest::activation::CaptureError
+method nvx::guest::activation::CaptureError::cause
+method nvx::guest::activation::CaptureError::into_cause
+method nvx::guest::activation::CaptureError::stage
+struct nvx::guest::activation::CapturePreparation
+method nvx::guest::activation::CapturePreparation::new
+method nvx::guest::activation::CapturePreparation::prepare
+enum nvx::guest::activation::CaptureStage
+variant nvx::guest::activation::CaptureStage::BootChecks
+variant nvx::guest::activation::CaptureStage::Capture
+variant nvx::guest::activation::CaptureStage::CaptureChecks
+variant nvx::guest::activation::CaptureStage::Fence
+variant nvx::guest::activation::CaptureStage::GenerationId
+variant nvx::guest::activation::CaptureStage::Mounts
+variant nvx::guest::activation::CaptureStage::Release
+variant nvx::guest::activation::CaptureStage::Suppression
+enum nvx::guest::activation::Captured
+variant nvx::guest::activation::Captured::Continued
+variant nvx::guest::activation::Captured::Restored
+field nvx::guest::activation::Captured::Restored::0
+struct nvx::guest::activation::Devices
+field nvx::guest::activation::Devices::distro
+field nvx::guest::activation::Devices::filesystem_tag
+field nvx::guest::activation::Devices::scratch
+const nvx::guest::activation::MACHINE_ID_FILE
+const nvx::guest::activation::MOUNT_TABLE_LIMIT
+struct nvx::guest::activation::Mounted
+method nvx::guest::activation::Mounted::mount_point
+method nvx::guest::activation::Mounted::origin
+enum nvx::guest::activation::NetworkError (hidden)
+variant nvx::guest::activation::NetworkError::Bind (hidden)
+field nvx::guest::activation::NetworkError::Bind::0 (hidden)
+variant nvx::guest::activation::NetworkError::Gateway (hidden)
+variant nvx::guest::activation::NetworkError::Write (hidden)
+field nvx::guest::activation::NetworkError::Write::0 (hidden)
+enum nvx::guest::activation::Origin
+variant nvx::guest::activation::Origin::Distro
+variant nvx::guest::activation::Origin::Filesystem
+variant nvx::guest::activation::Origin::Overlay
+variant nvx::guest::activation::Origin::Scratch
+const nvx::guest::activation::RESOLVER_FILE
+enum nvx::guest::activation::RangeFault
+variant nvx::guest::activation::RangeFault::Aperture
+variant nvx::guest::activation::RangeFault::Extra
+variant nvx::guest::activation::RangeFault::Gap
+variant nvx::guest::activation::RangeFault::Misaligned
+variant nvx::guest::activation::RangeFault::Overlap
+struct nvx::guest::activation::Repair
+method nvx::guest::activation::Repair::new
+method nvx::guest::activation::Repair::run
+enum nvx::guest::activation::RepairCause
+variant nvx::guest::activation::RepairCause::Activation
+field nvx::guest::activation::RepairCause::Activation::online
+field nvx::guest::activation::RepairCause::Activation::target
+variant nvx::guest::activation::RepairCause::BlockSize
+field nvx::guest::activation::RepairCause::BlockSize::0
+variant nvx::guest::activation::RepairCause::CapturedRam
+variant nvx::guest::activation::RepairCause::Finished
+variant nvx::guest::activation::RepairCause::Incomplete
+variant nvx::guest::activation::RepairCause::Io
+field nvx::guest::activation::RepairCause::Io::0
+variant nvx::guest::activation::RepairCause::Missing
+field nvx::guest::activation::RepairCause::Missing::0
+variant nvx::guest::activation::RepairCause::NoSeed
+variant nvx::guest::activation::RepairCause::Offline
+field nvx::guest::activation::RepairCause::Offline::block
+field nvx::guest::activation::RepairCause::Offline::state
+variant nvx::guest::activation::RepairCause::OnlineCpus
+field nvx::guest::activation::RepairCause::OnlineCpus::0
+variant nvx::guest::activation::RepairCause::ProcessorTarget
+field nvx::guest::activation::RepairCause::ProcessorTarget::online
+field nvx::guest::activation::RepairCause::ProcessorTarget::target
+variant nvx::guest::activation::RepairCause::Range
+field nvx::guest::activation::RepairCause::Range::fault
+field nvx::guest::activation::RepairCause::Range::index
+variant nvx::guest::activation::RepairCause::Reseed
+field nvx::guest::activation::RepairCause::Reseed::0
+variant nvx::guest::activation::RepairCause::Time
+field nvx::guest::activation::RepairCause::Time::0
+variant nvx::guest::activation::RepairCause::UntargetedRanges
+struct nvx::guest::activation::RepairError
+method nvx::guest::activation::RepairError::cause
+method nvx::guest::activation::RepairError::progress
+method nvx::guest::activation::RepairError::stage
+method nvx::guest::activation::RepairError::status
+struct nvx::guest::activation::RepairProgress
+method nvx::guest::activation::RepairProgress::added
+method nvx::guest::activation::RepairProgress::finish_started
+method nvx::guest::activation::RepairProgress::onlined
+method nvx::guest::activation::RepairProgress::reseeded
+enum nvx::guest::activation::RepairStage
+variant nvx::guest::activation::RepairStage::Finish
+variant nvx::guest::activation::RepairStage::Memory
+variant nvx::guest::activation::RepairStage::Processors
+variant nvx::guest::activation::RepairStage::Reseed
+variant nvx::guest::activation::RepairStage::Restore
+struct nvx::guest::activation::Repaired
+method nvx::guest::activation::Repaired::acknowledged_at
+method nvx::guest::activation::Repaired::cpus
+method nvx::guest::activation::Repaired::generation_id
+method nvx::guest::activation::Repaired::memory
+struct nvx::guest::activation::Restored
+method nvx::guest::activation::Restored::into_parts
+method nvx::guest::activation::Restored::restore
+struct nvx::guest::activation::RootTemplate (hidden)
+field nvx::guest::activation::RootTemplate::distro (hidden)
+field nvx::guest::activation::RootTemplate::filesystem_tag (hidden)
+field nvx::guest::activation::RootTemplate::gateway (hidden)
+field nvx::guest::activation::RootTemplate::runtime (hidden)
+field nvx::guest::activation::RootTemplate::scratch (hidden)
+field nvx::guest::activation::RootTemplate::timeout (hidden)
+fn nvx::guest::activation::apply (hidden)
+fn nvx::guest::activation::repair
 mod nvx::guest::cgroup
 struct nvx::guest::cgroup::ExecutionCgroup
 method nvx::guest::cgroup::ExecutionCgroup::is_occupied
@@ -663,12 +878,12 @@ trait nvx::guest::clone::AdmissionFence
 method nvx::guest::clone::AdmissionFence::close
 method nvx::guest::clone::AdmissionFence::open
 struct nvx::guest::clone::Applied (hidden)
-method nvx::guest::clone::Applied::announcer (hidden)
-method nvx::guest::clone::Applied::announcer_mut (hidden)
+method nvx::guest::clone::Applied::gateway (hidden)
 method nvx::guest::clone::Applied::hostname (hidden)
 method nvx::guest::clone::Applied::into_parts (hidden)
 method nvx::guest::clone::Applied::machine_id (hidden)
 method nvx::guest::clone::Applied::proxy (hidden)
+method nvx::guest::clone::Applied::publication (hidden)
 method nvx::guest::clone::Applied::resolver (hidden)
 method nvx::guest::clone::Applied::root (hidden)
 method nvx::guest::clone::Applied::root_mut (hidden)
@@ -735,8 +950,6 @@ struct nvx::guest::clone::Mounted
 method nvx::guest::clone::Mounted::mount_point
 method nvx::guest::clone::Mounted::origin
 enum nvx::guest::clone::NetworkError (hidden)
-variant nvx::guest::clone::NetworkError::Announcer (hidden)
-field nvx::guest::clone::NetworkError::Announcer::0 (hidden)
 variant nvx::guest::clone::NetworkError::Bind (hidden)
 field nvx::guest::clone::NetworkError::Bind::0 (hidden)
 variant nvx::guest::clone::NetworkError::Gateway (hidden)

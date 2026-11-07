@@ -153,7 +153,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
 | [`nvx::guest::exec::binding`](#nvxguestexecbinding) | `Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest adapter would otherwise write |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
-| [`nvx::guest::clone`](#nvxguestclone) | x86_64: the preparation of a template's guest for a capture, and the repair and activation of each clone |
+| [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation, with the retained template capture and clone repair interface |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 | [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
 | [`nvx::guest::view`](#nvxguestview) | The VM-wide hostname, machine ID, and single-server resolver, whose binds the layered root owns |
@@ -1696,11 +1696,15 @@ did not start.
 
 `nvx-time` runs its steps through them.
 
-### `nvx::guest::clone`
+### `nvx::guest::activation`
 
 x86_64: the preparation of a template's guest for a capture before its root's
 assembly, and the repair of each clone that a restore of its snapshot starts,
 for a guest init or agent, whether or not it is PID 1.
+
+`nvx::guest::clone` remains a compatibility alias. Activation itself holds no
+admission fence and starts no process; the older capture interface below
+retains its caller-owned fence.
 
 `CapturePreparation`, of the caller's `AdmissionFence` and the `Devices` that
 the template's clones replace, the `distro` and scratch block devices, which
@@ -1760,7 +1764,7 @@ capture's preparation and the time daemon enforce it.
 
 An `Activation` of the `Repaired` clone, or, with `Activation::with_resources`,
 of the resources and the instant of the acknowledgement that a repair reports,
-as in an adapter's tests, and of the caller's closed `AdmissionFence` then takes
+as in an adapter's tests, then takes
 the clone's own configuration from the host, in one Activate, on a restricted
 control session: a state machine without I/O, independent of any framing, to
 which the adapter passes what its session receives, as an `ActivationInput`, and
@@ -1794,37 +1798,29 @@ the template's placeholder. Whatever the image, it requires a fresh upper, whose
 reads no file, while a cold sandbox's scratch keeps its upper across boots. It
 uses no execution identity from the record, which carries none: each execution names its
 own identity, which `Entry::check` checks, as in a sandbox without a workload
-identity at a cold boot. With the record's generated machine ID, it then
-generates one, once, with `MachineId::generate`, after the repair's reseed, so
-that no two clones share it, to `MACHINE_ID_FILE` in the template's runtime
-directory. With the record's export, it mounts the host export through that
+identity at a cold boot. With the record's export, it mounts the host export through that
 filesystem device with `Root::mount_export`, read-write, at `hostfs/root` in the
 runtime directory, outside the root, since the record names no mode and OpenVMM
-limits each child to its own access; with its network's DNS server, it writes a
-resolver file that names it, mode 0444, to `RESOLVER_FILE` in the runtime
-directory; and with a network that publishes the workload's listeners, it starts
-their announcer, `/sbin/nvx-ingress inherit GATEWAY_IPV4`, which announces from
-its standard input, a UDP socket that the application bound, as root, to a
-privileged source port. It then binds the runtime's files for every execution
-with one `Entry::bind_runtime` in the caller's mount namespace: the machine ID's
-file read-only over the root's `/etc/machine-id` and the resolver file over its
-`/etc/resolv.conf`, or, with neither, nothing; the entry checks the record's
-hostname, which every execution's entry takes with `Entry::hostname`. It returns
+limits each child to its own access. It applies the record's VM-wide view with
+`view::apply`, passing the record's own DNS server. The view sets the hostname
+and, when requested, generates a machine ID after repair's reseed. The root
+owns the machine-ID and resolver binds, including those made before a later
+failure. Application starts no announcer and no other process. It returns
 the `Applied` root and workload, from which `take_export` hands the adapter the
 export's `SourceRoot`, to map the host's mapping table from once the clone is
 ready, `proxy` the network's proxy endpoint, which the adapter tells its
-workloads as at a cold boot, and `announcer` the announcer, which the adapter
-watches through its pidfd, and must end the clone once it ended, since the
-gateway then keeps publishing the listeners that it last announced until the VM
-ends, and whose `teardown` stops the announcer, closes the export's root, and
-removes the binds before it tears the root down, as a drop does, or an
+workloads as at a cold boot, and `publication` and `gateway`, from which its
+caller starts and supervises ingress. Its `teardown` closes the export's root,
+then tears the root down with its view binds; `into_parts` returns
+`(Root, MachineId)`, retaining every bind in the root. A switched root unmounts
+nothing. A failure returns an
 `ApplyError`, `Export` or `Network` among them, after which nothing that it
 mounted or bound stays mounted unless the error reports the unmounts that
-failed, and no announcer that it started runs.
+failed.
 
 Once the adapter passed the activation what the session received while the
-application ran, which came before Ready, `Activation::complete` opens the fence
-and returns the `ReadyActivation` that Ready reports beside the adapter's own
+application ran, which came before Ready, `Activation::complete` returns the
+`ReadyActivation` that Ready reports beside the adapter's own
 identities, that the activation applied, with the record's transaction ID, after
 which the host's mapping table and start follow in the adapter's order, as after
 a cold boot, and `Activation::start` records the start.
@@ -3105,7 +3101,7 @@ disk's block device.
 | `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
 | `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads (x86_64) |
-| `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
+| `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that the caller bound to one after the clone's process-free application; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
 | `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends or 0 on `SIGTERM`; elsewhere it exits with 2 (x86_64) |
