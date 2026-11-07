@@ -29,6 +29,12 @@ python3 .github/skills/nvx-host-connect/scripts/hosts.py
 python .github\skills\nvx-host-connect\scripts\hosts.py
 ```
 
+From a linked worktree, pass the main worktree's inventory to every `hosts.py`
+command with `--file <main-worktree>/.nvx-hosts.json`, where `<main-worktree>` is
+the first path that `git worktree list` prints. Git does not copy the ignored
+inventory into linked worktrees, and `hosts.py` reads the one at the root of its
+own worktree, so without `--file` it reports `remote_enabled` as `false` there.
+
 Treat the resolver output as authoritative:
 
 - If `remote_enabled` is `false`, inform the agent that remote hosts are not
@@ -73,8 +79,10 @@ for a secret, pause and have the user enter it directly in the terminal.
 - Do not disable SSH host-key checking. Stop on a changed host key.
 - Do not run `git reset`, `git clean`, checkout another revision, pull, overwrite
   files, or update submodules in a dirty remote checkout.
-- Prefer a separate checkout or worktree when the requested revision differs from
-  the remote checkout. Get approval before transferring uncommitted files.
+- Prefer a separate checkout or worktree, such as the temporary worktree of
+  [section 4](#4-establish-revision-and-artifacts), when the requested revision
+  differs from the remote checkout. Get approval before transferring uncommitted
+  files.
 - Do not enable Windows features, change device permissions, edit `sudoers`, load
   kernel modules, reboot, or install packages without explicit approval.
 - Do not use `sudo` merely to bypass KVM or MSHV access failures. Report the exact
@@ -166,6 +174,26 @@ Record `git rev-parse HEAD` and `git status --short`. Compare the commit with th
 requested revision. If the checkout is dirty, preserve it and ask whether to use it
 as-is or create an isolated checkout. Never silently test a different revision.
 
+To test another revision, such as a branch that you pushed, without touching the
+checkout, add a temporary detached worktree beside it. First check in the
+checkout that `git remote get-url origin` resolves to `microsoft/nvx` and that
+`git config --get submodule.openvmm.url`, when set, names `microsoft/openvmm`,
+since the worktree fetches from both, and ask before correcting either. Then fetch
+the branch, add the worktree at the exact revision, and initialize its submodule
+from the checkout's module store, leaving out `--reference` when that store does
+not exist:
+
+```console
+git fetch origin <branch>
+git worktree add --detach <worktree> <revision>
+git -C <worktree> submodule update --init --reference <checkout>/.git/modules/openvmm openvmm
+```
+
+Continue in the worktree, starting with `nvx.py verify` there. When the task ends,
+remove it from the checkout with `git worktree remove --force <worktree>`: Git
+removes a worktree that holds a submodule only with `--force`, which also discards
+its changes and builds.
+
 Choose artifact preparation according to the task:
 
 - For packaged NVX artifacts, use `nvx-rs download` with the explicit backend.
@@ -179,6 +207,11 @@ Choose artifact preparation according to the task:
   first, and again after `nvx-rs` changes.
 - For coordinator-only changes, existing matching release artifacts may be reused
   after reporting their provenance.
+- For the public sandbox scenarios of `test-microvm`, also provide the scratch
+  template, `build/ubuntu-smoke-scratch.ext4`, which `download` installs from the
+  releases that ship it. For an older release, format it on a Linux host with
+  `python3 scripts/nvx.py build-scratch-template`, which refuses to run on
+  Windows, and copy it from there to a Windows host.
 
 Linux examples:
 
@@ -217,7 +250,7 @@ nvx-rs\target\release\nvx-rs.exe run --hypervisor whp --dry-run
 
 Keep the SSH session open and report:
 
-- SSH host alias and remote repository path.
+- SSH host alias, remote repository path, and any temporary worktree.
 - Detected OS, selected backend, platform ID, and resolved host type.
 - Commit and whether the checkout is dirty.
 - Artifact source and completed preparation command.
