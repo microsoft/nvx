@@ -8,13 +8,13 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use nvx::Hypervisor;
 use nvx::activation::{MachineIdMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
 use nvx::host::platform::Transport;
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::supervisor::{self, Inherited};
 use nvx::host::{report, session, vm};
-use nvx::hypervisor::Hypervisor;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().collect();
@@ -136,6 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Prints console output through a marker, retaining only enough bytes to match across reads.
 fn read_until(console: &mut dyn Transport, marker: &[u8], deadline: Instant) -> io::Result<()> {
     let mut pending = Vec::new();
     let mut buffer = [0; 4096];
