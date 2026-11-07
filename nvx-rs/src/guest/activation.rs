@@ -491,7 +491,7 @@ impl<F: AdmissionFence> CaptureBarrier<F> {
         let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, generation_id);
         let outcome = match self.system.capture(request) {
             Ok(outcome) => outcome,
-            Err(error) => {
+            Err((error, _)) => {
                 // The fence is dropped closed.
                 self.fence = None;
                 let error = CaptureError::new(CaptureStage::Capture, CaptureCause::Time(error));
@@ -772,9 +772,6 @@ pub(super) trait System: Send {
     /// Prepares strictly by the caller deadline, retaining suppression ownership on failure.
     fn pre_capture_until(&mut self, deadline: Instant) -> Result<(), (PreCaptureError, bool)>;
 
-    /// Removes the pre-request deadline before requesting capture.
-    fn clear_deadline(&mut self);
-
     /// Restores the stall detectors' settings, as [`TimeAbi::cancel_capture`] does.
     fn cancel_capture(&mut self) -> Result<(), Vec<u8>>;
 
@@ -782,7 +779,7 @@ pub(super) trait System: Send {
     fn generation_id(&mut self) -> Result<GenerationId, TimeError>;
 
     /// Requests a capture, as [`TimeAbi::capture`] does.
-    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError>;
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, (TimeError, bool)>;
 }
 
 /// The guest's kernel, at the paths of its interfaces, and its time ABI.
@@ -860,10 +857,6 @@ impl System for LiveSystem {
         self.abi.pre_capture_until(deadline)
     }
 
-    fn clear_deadline(&mut self) {
-        self.deadline = None;
-    }
-
     fn cancel_capture(&mut self) -> Result<(), Vec<u8>> {
         self.abi.cancel_capture_until(self.deadline)
     }
@@ -872,8 +865,16 @@ impl System for LiveSystem {
         self.abi.generation_id_until(self.deadline)
     }
 
-    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
-        self.abi.capture(request)
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, (TimeError, bool)> {
+        let result = self.abi.capture_until(request, self.deadline);
+        if result
+            .as_ref()
+            .err()
+            .is_none_or(|(_, unbounded)| *unbounded)
+        {
+            self.deadline = None;
+        }
+        result
     }
 }
 

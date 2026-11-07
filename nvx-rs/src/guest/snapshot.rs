@@ -189,10 +189,13 @@ fn capture_with(
         Ok(CaptureRequest::in_memory(ScratchPolicy::Fresh, generation))
     })();
     let request = prepared.map_err(|failure| failure.cleanup(system, suppressed))?;
-    system.clear_deadline();
-    let outcome = system.capture(request).map_err(|error| {
-        CaptureFailure::new(CaptureStage::Capture, CaptureCause::Time(error))
-            .cleanup(system, suppressed)
+    let outcome = system.capture(request).map_err(|(error, unbounded)| {
+        let stage = if unbounded {
+            CaptureStage::Capture
+        } else {
+            CaptureStage::CaptureChecks
+        };
+        CaptureFailure::new(stage, CaptureCause::Time(error)).cleanup(system, suppressed)
     })?;
     match outcome {
         CaptureOutcome::Continued => {
