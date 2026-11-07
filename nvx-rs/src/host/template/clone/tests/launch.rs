@@ -292,13 +292,16 @@ pub(super) fn fake_vmm<'a>(
             .map(|argument| argument.to_str().unwrap().to_owned())
             .collect();
         fs::write(vmm.join(ARGUMENTS), serde_json::to_vec(&arguments).unwrap()).unwrap();
+        // The VMM reports its outcome in the sandbox, wherever the VMM runs.
+        let report = argument(&arguments, "--microvm-report").unwrap();
+        let sandbox = Path::new(&report).parent().unwrap();
         made.replace(Some(Made {
             program: command.program.clone(),
             arguments,
             working_dir: command.working_dir.clone(),
             inherited: command.inherit.len(),
-            bound: command.working_dir.join(CLONE_BINDING_NAME).is_file(),
-            begun: command.working_dir.join(JOURNAL_NAME).is_file(),
+            bound: sandbox.join(CLONE_BINDING_NAME).is_file(),
+            begun: sandbox.join(JOURNAL_NAME).is_file(),
         }));
         VmmCommand {
             program: env::current_exe().unwrap(),
@@ -761,14 +764,18 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     // restore-ready endpoint, which listened before the VMM started.
     assert_eq!(vmm.started(), format!("{} true", hex(&capability)));
     // The VMM started once the sandbox held the clone binding and the launch's journal, in the
-    // sandbox's directory, with nothing of the caller's besides its standard streams.
+    // working directory that `vmm_working_dir` chooses for the sandbox, with nothing of the
+    // caller's besides its standard streams.
     let made = made.take().unwrap();
     assert!(made.bound && made.begun, "{made:?}");
     assert_eq!(
         made.program,
         artifacts::absolute(Path::new(OPENVMM)).unwrap()
     );
-    assert_eq!(made.working_dir, sandbox);
+    assert_eq!(
+        made.working_dir,
+        supervisor::vmm_working_dir(&sandbox).unwrap()
+    );
     assert_eq!(made.inherited, 0);
     // It restores the generation's snapshot in place, with the clone's devices: its image, and its
     // `scratch` block device, which an upper in RAM declares absent, so that OpenVMM attaches it
@@ -1502,7 +1509,7 @@ fn a_clone_launches_only_as_the_launch_that_its_durable_binding_reserves() {
 
 #[cfg(windows)]
 #[test]
-fn working_directory_limits_are_checked_before_clone_launches() {
+fn clones_in_sandboxes_beyond_the_working_directory_limit_launch() {
     use std::os::windows::ffi::OsStrExt;
 
     let fixture = Fixture::new();
@@ -1517,24 +1524,29 @@ fn working_directory_limits_are_checked_before_clone_launches() {
     let sandbox = parent.join("sandbox");
     let mut acquired = fixture.acquire(sandbox.to_str().unwrap());
     let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    let mut vmm = VmmDir::new();
+    let dir = vmm.path().to_owned();
+    let made = RefCell::new(None);
+    let command = fake_vmm(&dir, &made);
     let hooks = Hooks {
-        command: &never_spawned,
+        command: &command,
         ..Hooks::LAUNCH
     };
-    let (kind, message) = refused_at(
-        plan.launch_with(
+    let restoring = plan
+        .launch_with(
             &mut acquired,
             Path::new(OPENVMM),
             &runtime_of(&fixture),
             hooks,
-        ),
-        Stage::Launch,
-        Evidence::HostFailure,
-    );
-    assert_eq!(kind, ErrorKind::Unsupported);
-    assert!(message.contains("working directory"));
-    assert!(message.contains("258"));
-    assert_unlaunched(&fixture, &acquired);
+        )
+        .unwrap();
+    vmm.reference = Some(restoring.starting().process().reference().clone());
+    // The sandbox's directory exceeds the 258 UTF-16 code units of a process's working
+    // directory, so its VMM starts in the system directory, once the sandbox holds the clone
+    // binding and the launch's journal.
+    let made = made.take().unwrap();
+    assert_eq!(made.working_dir, platform::system_directory().unwrap());
+    assert!(made.bound && made.begun, "{made:?}");
 }
 
 /// Returns OpenVMM's outcome report of a VM whose guest ended it with `status`.

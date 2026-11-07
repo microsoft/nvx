@@ -90,7 +90,8 @@
 //!     locked.recover()?;
 //!     let mut launch = locked.begin_launch(&LaunchId::generate()?, runtime, capability)?;
 //!     let arguments = spec.openvmm_arguments(launch.endpoint(), &store.outcome_path())?;
-//!     let command = VmmCommand::new(&spec.openvmm, arguments, store.dir());
+//!     let working_dir = supervisor::vmm_working_dir(store.dir())?;
+//!     let command = VmmCommand::new(&spec.openvmm, arguments, working_dir);
 //!     let log = launch.take_log()?;
 //!     let child = supervisor::spawn(&command, capability, log)?;
 //!     launch.record_process(&child)?;
