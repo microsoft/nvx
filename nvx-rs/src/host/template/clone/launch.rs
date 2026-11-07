@@ -152,7 +152,8 @@ impl ClonePlan {
     /// which authenticates with the capability that the VMM reads from its standard input, and the
     /// outcome report, [`SandboxStore::outcome_path`](crate::host::store::SandboxStore::outcome_path).
     /// They name no kernel, initramfs, kernel command line, or RAM, which the snapshot fixes. The
-    /// VMM runs in the sandbox's directory.
+    /// VMM runs in the working directory that [`supervisor::vmm_working_dir`] chooses for the
+    /// sandbox: the system directory on Windows, and the sandbox's directory elsewhere.
     ///
     /// The claim of a scratch image passes to the VMM, which holds it until it exits. On Linux,
     /// the VMM inherits the claim's descriptor, which no argument names. On Windows, the claim's
@@ -170,8 +171,8 @@ impl ClonePlan {
     /// Like every launch of the sandbox's store, the launch names the sandbox's files by their
     /// paths, under its lock: the progress log that it creates, the activation record that it
     /// writes, the restore-ready socket at which it listens on Linux, and the journal, capability,
-    /// and log with which it begins; and the VMM, which runs in the sandbox's directory, opens the
-    /// files that its arguments name there. So the directories above the sandbox's must be ones
+    /// and log with which it begins; and the VMM opens the files that its arguments name there, by
+    /// their absolute paths. So the directories above the sandbox's must be ones
     /// that only the current user, or an administrator, may change, as the
     /// [store](crate::host::store) requires of them, and as [Block devices by
     /// path](crate::host::template::Store#block-devices-by-path) requires of those above the
@@ -193,8 +194,7 @@ impl ClonePlan {
     ///   [`Lease::of`] fails, or the record of a failure cannot be examined, the host's evidence;
     ///   with
     ///   [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a runtime identity other
-    ///   than the template's, [`Evidence::RuntimeMismatch`], or on Windows for a sandbox directory
-    ///   beyond the VMM working-directory limit, [`Evidence::HostFailure`]; on Linux, with
+    ///   than the template's, [`Evidence::RuntimeMismatch`]; on Linux, with
     ///   [`ErrorKind::Other`](crate::ErrorKind::Other) if the control socket that the lease
     ///   reserves is not beside the plan's snapshot, as for a plan and a lease that name the
     ///   template store by different directories, [`Evidence::HostFailure`], with
@@ -371,7 +371,15 @@ impl ClonePlan {
             &capability,
             |endpoint| {
                 (hooks.interrupt)(Point::Begun)?;
-                let mut command = VmmCommand::new(&openvmm, restore.arguments(endpoint), &dir);
+                let working_dir = supervisor::vmm_working_dir(&dir).map_err(|error| {
+                    Error::io(format!(
+                        "cannot find the working directory of the VMM of the clone in {}",
+                        dir.display()
+                    ))
+                    .with_source(error)
+                })?;
+                let mut command =
+                    VmmCommand::new(&openvmm, restore.arguments(endpoint), working_dir);
                 command.inherit = inherit;
                 Ok((hooks.command)(command))
             },
@@ -495,7 +503,6 @@ impl ClonePlan {
                 )),
             ));
         }
-        platform::check_working_dir(locked.dir()).map_err(Fault::host)?;
         if cfg!(target_os = "linux")
             && let Some(socket) = locked.reserved_socket()
         {
