@@ -50,7 +50,9 @@
 //!   [`PreparedLaunch`](sandbox::PreparedLaunch) hands the VMM the files that those checks
 //!   opened, which it inherits through the [`supervisor`]'s allowlist.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
-//!   its files and endpoints, and its control credential, which the library never writes.
+//!   its files and endpoints, and a checked cold [`Prepared`](vm::Prepared) launch with its
+//!   opened log and control credential, which the library never writes. [`snapshot`] names the
+//!   opaque input of a future restore; cold creation refuses it.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
@@ -88,6 +90,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod seal;
 pub mod session;
+pub mod snapshot;
 mod spawn;
 pub mod store;
 pub mod supervisor;

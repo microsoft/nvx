@@ -716,7 +716,6 @@ method nvx::host::config::VmConfig::kernel_command_line
 method nvx::host::config::VmConfig::mapping_table
 field nvx::host::config::VmConfig::memory_mib
 field nvx::host::config::VmConfig::network
-method nvx::host::config::VmConfig::openvmm_arguments
 field nvx::host::config::VmConfig::processors
 field nvx::host::config::VmConfig::root
 field nvx::host::config::VmConfig::view
@@ -1493,6 +1492,8 @@ field nvx::host::session::SessionError::Refused::0
 variant nvx::host::session::SessionError::Reset
 variant nvx::host::session::SessionError::TimedOut
 fn nvx::host::session::connect
+mod nvx::host::snapshot
+struct nvx::host::snapshot::Snapshot
 mod nvx::host::store
 struct nvx::host::store::ArtifactIdentity
 method nvx::host::store::ArtifactIdentity::as_str
@@ -2095,6 +2096,12 @@ fn nvx::host::template::status_evidence
 mod nvx::host::vm
 struct nvx::host::vm::Capability
 method nvx::host::vm::Capability::as_bytes
+struct nvx::host::vm::Prepared
+method nvx::host::vm::Prepared::arguments
+method nvx::host::vm::Prepared::capability
+method nvx::host::vm::Prepared::inherit
+method nvx::host::vm::Prepared::log
+method nvx::host::vm::Prepared::outputs
 struct nvx::host::vm::VmDir
 method nvx::host::vm::VmDir::open
 method nvx::host::vm::VmDir::path
@@ -2103,6 +2110,7 @@ field nvx::host::vm::VmOutputs::console
 field nvx::host::vm::VmOutputs::endpoint
 field nvx::host::vm::VmOutputs::log
 field nvx::host::vm::VmOutputs::outcome
+fn nvx::host::vm::create
 fn nvx::host::vm::create_private_dir
 mod nvx::net
 struct nvx::net::Cidr

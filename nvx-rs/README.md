@@ -123,8 +123,9 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
-| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: one VM configuration, pure cold-boot kernel and OpenVMM arguments, and the portable command-line check |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory and its fixed outputs, and an inspectable cold launch with its opened log and control credential |
+| [`nvx::host::snapshot`](#nvxhostsnapshot) | The opaque snapshot input of a future VM restore |
+| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: one VM configuration, pure cold-boot kernel arguments, and the portable command-line check |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -479,6 +480,32 @@ credential that the host presents at a VM's control endpoint: `as_bytes`
 returns it, and its `Debug` form hides it. The library never writes it to a
 file; a caller that reconnects after a restart keeps it.
 
+`vm::create(&runtime, &config, None, &dir)` creates an inspectable cold
+`Prepared` launch without starting a process or binding a listener. It requires
+`config.boot`, refuses a snapshot input, rechecks the directory's privacy, and
+creates a new private log. Existing log, outcome and Linux endpoint entries
+are refused rather than replaced. Only the log is created before a spawn;
+OpenVMM creates the remaining outputs when it runs. A failed preparation
+closes and removes only its new log, preserving all pre-existing entries and
+caller-owned inputs, and reports a cleanup failure with the original error.
+
+`Prepared::capability()` and `outputs()` return what the caller may journal
+before a spawn. `log()` returns the same opened log, without reopening its
+path. `inherit(file)` moves an already opened resource into the preparation's
+inheritance allowlist and keeps it open. `arguments()` returns the whole
+configuration's OpenVMM arguments. Creation checks the complete Windows
+command line with the actual runtime and VM output paths and no reserve,
+including quoting and the terminating NUL, on every host. Callers keep the
+directory and runtime inputs stable through creation and a later spawn.
+Dropping a successful preparation closes its resources but leaves its output
+paths owned by the caller.
+
+### `nvx::host::snapshot`
+
+`Snapshot` is an opaque input of a future restore. `vm::create` currently
+refuses `Some(snapshot)` with `ErrorKind::Unsupported`; only cold boots are
+supported.
+
 ### `nvx::host::config`
 
 `VmConfig`: the configuration of a VM as one value, its processors, its memory
@@ -540,9 +567,9 @@ entries. The table's `HostMap` and its wire codecs are accessible through
 command-line budget, including the terminating NUL. The legacy launch checks
 continue to use it.
 
-`VmConfig::openvmm_arguments` renders a cold boot's whole OpenVMM argument list
-from `Runtime` and `VmConfig`. Its borrowed control endpoint, report path, and
-optional boot-console endpoint are already chosen output names, not additional
+The internal whole-config renderer used by `vm::create` renders a cold boot's
+OpenVMM arguments from `Runtime` and `VmConfig`. Its borrowed control endpoint,
+report path, and optional boot-console endpoint are already chosen output names, not additional
 launch settings. It opens no path, allocates no endpoint, and starts no process.
 It renders processors, memory without narrowing it, kernel and initramfs paths,
 the kernel command line, layered-root block devices by path, network and export
@@ -550,8 +577,8 @@ arguments, console attachment, the CPU profile, and every `LaunchOptions` value.
 A configured NIC remains attached even under deny-all policy. A listener needs
 its supplied console name; a disconnected attachment retains the device and
 discards its output. The renderer emits neither `--microvm-lifecycle` nor
-`--microvm-workload-identity`. The whole-config entry point is temporarily
-public: SL2.8 makes it internal when `host::vm::create` calls it.
+`--microvm-workload-identity`. Callers inspect the complete arguments through
+`Prepared::arguments()`.
 
 `VmConfig::check_command_line()` checks the configuration's known arguments on
 every host, before any host change, with 2048 UTF-16 code units reserved for the
