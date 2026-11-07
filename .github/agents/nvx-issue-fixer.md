@@ -155,27 +155,20 @@ Load each of these skills as a skill.
    the host type (`virtual-machine` or `baremetal`), the guest, the processor
    counts, and whether the defect lies in host tooling, `nvx-rs`, the guest, or
    OpenVMM.
-2. List the inventory's profiles. In a linked worktree, `hosts.py` looks for the
-   ignored inventory in that worktree, so pass the main worktree's:
-   `python .github/skills/nvx-host-connect/scripts/hosts.py --file <main worktree>/.nvx-hosts.json`.
+2. Load nvx-host-connect, and list the inventory's profiles as it describes,
+   from the main worktree's inventory when you work in a linked worktree.
    Choose the profiles yourself: cover every backend whose behavior the change
    can affect, use virtual machines for functional checks, and add bare metal
    when the issue concerns timing, performance, or hardware, or was reported
    there. Without configured hosts, work locally, leave the other backends to
    CI, and say so.
-3. Prepare each host as nvx-host-connect describes, in a temporary detached
-   worktree beside the profile's checkout and never in that checkout. First
-   repeat triage's checks of the NVX and OpenVMM URLs there, and ask the user
-   before correcting one. Then fetch, `git worktree add --detach`, initialize
-   the submodule with `--reference` to the checkout's module store, build
-   `nvx-rs`, and download the release artifacts or build those that the
+3. Prepare each host as nvx-host-connect describes, always in the temporary
+   worktree that its
+   [section 4](../skills/nvx-host-connect/SKILL.md#4-establish-revision-and-artifacts)
+   adds for another revision, and never in the profile's checkout: build
+   `nvx-rs` there, and download the release artifacts or build those that the
    change affects. To test your commits there, push the topic branch; the
    main CI runs only for the pull request.
-   The public sandbox scenarios also need the scratch template,
-   `build/ubuntu-smoke-scratch.ext4`, which `nvx-rs download` installs from
-   the releases that ship it. For an older release, format it on a Linux host
-   with `python3 scripts/nvx.py build-scratch-template`, which refuses to run
-   on Windows, and copy it from there to a Windows host.
 4. Reproduce the failure at the base revision before changing any code, and
    record the command, revision, profile, backend, artifacts, and result. When
    a failure is intermittent, repeat the issue's conditions often enough to
