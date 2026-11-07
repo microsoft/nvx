@@ -119,8 +119,7 @@ pub(super) fn complete_snapshot(fixture: &Fixture) -> (PathBuf, Vec<(&'static st
 }
 
 /// Returns the seals of the files of the snapshot in `snapshot`, by name, which change with their
-/// content, their length, their modification time, and on Linux their change time, which a
-/// restore checks.
+/// content, their length, their modification time, and on Linux their change time.
 fn seals(snapshot: &Path) -> Vec<(&'static str, FileSeal)> {
     SNAPSHOT_ARTIFACTS
         .map(|name| {
