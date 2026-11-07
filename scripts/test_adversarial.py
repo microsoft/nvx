@@ -334,6 +334,21 @@ def _process_exited(pid: int) -> bool:
     return not _process_running(pid)
 
 
+def _wait_for_descendant(pid_path: Path, process: subprocess.Popen[bytes]) -> None:
+    """Waits, for at most a minute, until a test's process has written the ID
+    of the descendant that it starts to `pid_path`, or has exited.
+
+    A Python process may take longer to start than a test's timeout, as when a
+    coverage measurement starts with it, so a test whose timeout must end a
+    process that has started its descendant starts the timeout only then.
+    """
+    deadline = time.monotonic() + 60.0
+    while (
+        not pid_path.exists() and process.poll() is None and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+
+
 class AdversarialBrokerTests(unittest.TestCase):
     def test_campaign_catalogs_are_strict_and_nonempty(self) -> None:
         for campaign in CAMPAIGNS:
@@ -861,12 +876,38 @@ class AdversarialOracleTests(unittest.TestCase):
                     "import pathlib,subprocess,sys,time; "
                     "child=subprocess.Popen([sys.executable,'-c',"
                     "'import time; time.sleep(60)']); "
+                    "print('ALPINE-MICROVM-BOOT-OK',flush=True); "
                     "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-                    "print('ALPINE-MICROVM-BOOT-OK',flush=True); time.sleep(60)"
+                    "time.sleep(60)"
                 ),
                 str(child_pid_path),
             ]
-            with self.assertRaisesRegex(RuntimeError, "did not finish"):
+
+            class BootedGuest(InteractiveProcess):
+                """Returns once the guest has started its descendant and
+                printed its boot marker, so that the runner's timeout counts
+                from then."""
+
+                def __init__(
+                    self,
+                    command: Sequence[str],
+                    environment: dict[str, str],
+                    *,
+                    contain_process_tree: bool = False,
+                    separate_stderr: bool = False,
+                ) -> None:
+                    super().__init__(
+                        command,
+                        environment,
+                        contain_process_tree=contain_process_tree,
+                        separate_stderr=separate_stderr,
+                    )
+                    _wait_for_descendant(child_pid_path, self.process)
+
+            with (
+                patch("nvx_tools.benchmark.InteractiveProcess", BootedGuest),
+                self.assertRaisesRegex(RuntimeError, "did not finish"),
+            ):
                 run_guest_script(
                     command,
                     "exit\n",
@@ -927,25 +968,38 @@ class AdversarialOracleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             child_pid_path = root / "child.pid"
-            result = run_bounded_process(
-                [
-                    sys.executable,
-                    "-c",
-                    (
-                        "import pathlib,subprocess,sys,time; "
-                        "child=subprocess.Popen([sys.executable,'-c',"
-                        "'import time; time.sleep(60)']); "
-                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-                        "time.sleep(60)"
-                    ),
-                    str(child_pid_path),
-                ],
-                cwd=Path.cwd(),
-                output_dir=root / "process",
-                timeout=1.0,
-                environment=os.environ,
-                contained_by_parent=True,
-            )
+
+            class StartedTree(ProcessTreeContainment):
+                """Returns from attaching to the process, which resumes it on
+                Windows, once it has started its descendant, so that the run's
+                timeout counts from then."""
+
+                def attach(self, process: subprocess.Popen[bytes]) -> None:
+                    super().attach(process)
+                    _wait_for_descendant(child_pid_path, process)
+
+            with patch(
+                "nvx_tools.adversarial_oracles.ProcessTreeContainment", StartedTree
+            ):
+                result = run_bounded_process(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import pathlib,subprocess,sys,time; "
+                            "child=subprocess.Popen([sys.executable,'-c',"
+                            "'import time; time.sleep(60)']); "
+                            "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                            "time.sleep(60)"
+                        ),
+                        str(child_pid_path),
+                    ],
+                    cwd=Path.cwd(),
+                    output_dir=root / "process",
+                    timeout=1.0,
+                    environment=os.environ,
+                    contained_by_parent=True,
+                )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
             deadline = time.monotonic() + 2.0
             while _process_running(child_pid) and time.monotonic() < deadline:

@@ -53,6 +53,7 @@ nvx/
 |   |   |-- package-platform.yml Reusable platform release package job
 |   |   |-- run-nvx-microvm-tests.yml Reusable NVX microVM test job
 |   |   |-- run-platform.yml     Reusable platform benchmark job
+|   |   |-- scripts-coverage.yml Coverage of the Python tooling's unit tests as dev changes
 |   |   |-- specula-release.yml  Specula verification of published releases
 |   |   `-- test-changes.yml     Label and comment for pull requests that change existing tests
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
@@ -175,6 +176,7 @@ nvx/
 |   |-- public_api.py            Public-API snapshot check of the nvx crate run by CI
 |   |-- publish_development_release.py Development release publisher run by CI
 |   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
+|   |-- scripts_coverage.py      Coverage of the Python tooling's unit tests, run by CI
 |   |-- test-layout-allowlist.json The test hooks that production files may hold
 |   `-- test_*.py                Python tooling unit tests
 |-- tests/                       Tests that build on the repository's crates from outside them
@@ -213,8 +215,9 @@ also publish the `nvx` crate to
 crates.io. The other workflows report failed nightly CI runs, flag the pull
 requests that change existing tests, draw the module
 diagrams of the `nvx` crate after merges, run adversarial campaigns, measure
-the coverage of the `nvx` crate's tests as `dev` changes, run the
-`nvx` crate's mutation tests, verify published releases with Specula, and
+the coverage of the `nvx` crate's tests and of the Python tooling's unit tests
+as `dev` changes, run the `nvx` crate's mutation tests, verify published
+releases with Specula, and
 prepare the
 Copilot cloud agent and code review environments. See
 [Continuous integration](ci.md) for the jobs and gates.
@@ -367,7 +370,9 @@ see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 `publish_nvx_crate.py` to publish the `nvx` crate to crates.io (see
 [crates.io releases](ci.md#cratesio-releases)), `nvx_rs_coverage.py` to
 measure which code of the `nvx` crate its tests reach (see
-[nvx-rs coverage](ci.md#nvx-rs-coverage)), and `module_diagrams.py` to
+[nvx-rs coverage](ci.md#nvx-rs-coverage)), `scripts_coverage.py` to measure
+which code of `scripts/` its unit tests reach (see
+[scripts coverage](ci.md#scripts-coverage)), and `module_diagrams.py` to
 draw the module diagrams that `doc/modules` publishes (see
 [Module diagrams](ci.md#module-diagrams)).
 
