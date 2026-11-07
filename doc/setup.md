@@ -173,7 +173,7 @@ only `hosts`; do not add a `version` field.
 
 Edit each profile in `.nvx-hosts.json`:
 
-- The profile name is the name supplied to the `nvx-host-connect` skill.
+- The profile name is the name supplied to the `nvx-prepare-host` skill.
 - `ssh_target` is one destination or alias configured in the developer's SSH configuration.
 - `backend` is exactly one of `kvm`, `mshv`, or `whp`.
 - `host_type` is required, identifies the server itself, and is exactly one of
