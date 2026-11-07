@@ -13,10 +13,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
+use crate::guest::mappings::{Access, Step};
 use crate::guest::root::tests::{Call, FakeKernel, Operation, attach_calls};
 use crate::guest::spawn::{Command, LaunchFailure, LaunchStage};
-use crate::guest::sys::ChildStatus;
 use crate::guest::sys::tests::Simulation;
+use crate::guest::sys::{ChildStatus, Errno};
 use crate::protocol::cmdline::write_resolver;
 
 impl Prepared {
@@ -473,81 +474,6 @@ fn an_entry_needs_a_root_directory() {
 }
 
 #[test]
-fn machine_ids_are_version_4_uuids_in_lowercase_hexadecimal() {
-    assert_eq!(
-        &machine_id_text([0; 16]),
-        b"00000000000040008000000000000000\n"
-    );
-    assert_eq!(
-        &machine_id_text([0xff; 16]),
-        b"ffffffffffff4fffbfffffffffffffff\n"
-    );
-    assert_eq!(
-        &machine_id_text([
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
-            0xcd, 0xef
-        ]),
-        b"0123456789ab4def8123456789abcdef\n"
-    );
-}
-
-#[test]
-fn a_machine_id_is_generated_once_per_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("machine-id");
-    let mode = MachineId::generate(&path).unwrap();
-    assert_eq!(mode, MachineId::Generated(path.clone()));
-    let text = std::fs::read(&path).unwrap();
-    assert_eq!(text.len(), 33);
-    assert_eq!(text[32], b'\n');
-    assert!(
-        text[..32]
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-    );
-    assert_eq!(text[12], b'4');
-    assert!(matches!(text[16], b'8' | b'9' | b'a' | b'b'));
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o444
-    );
-    let error = MachineId::generate(&path).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-    assert_eq!(std::fs::read(&path).unwrap(), text);
-    // A link at the path is never followed.
-    let target = directory.path().join("target");
-    let link = directory.path().join("link");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-    assert_eq!(
-        MachineId::generate(&link).unwrap_err().kind(),
-        io::ErrorKind::AlreadyExists
-    );
-    assert!(!target.exists());
-    let other = directory.path().join("other");
-    MachineId::generate(&other).unwrap();
-    assert_ne!(std::fs::read(&other).unwrap(), text);
-}
-
-#[test]
-fn a_generated_machine_id_has_mode_0444_whatever_the_umask() {
-    // The umask is the process's, so the test runs alone in a process of its own.
-    if crate::guest::managed_agent::tests::isolate_process_test(
-        "NVX_ENTRY_UMASK_TEST_CHILD",
-        "guest::entry::tests::a_generated_machine_id_has_mode_0444_whatever_the_umask",
-    ) {
-        return;
-    }
-    nix::sys::stat::umask(sys::Mode::from_bits_truncate(0o077));
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("machine-id");
-    MachineId::generate(&path).unwrap();
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
-        0o444
-    );
-}
-
-#[test]
 fn runtime_binds_need_a_mount_root_unless_there_are_none() {
     let root = root_with(None, None);
     let identity = || Identity::new(1, 1).account(AccountMode::Numeric);
@@ -800,56 +726,6 @@ fn a_runtime_bind_that_stays_is_reported() {
     assert_eq!(fixture.kernel.unmounts(), fixture.removals(&points));
     assert!(fixture.kernel.mount_at(&points[2]).is_some());
     assert!(fixture.kernel.mount_at(&points[0]).is_none());
-}
-
-#[test]
-fn runtime_sources_are_the_directories_beside_their_files() {
-    use std::ffi::OsStr;
-
-    // A relative path of one component names a file of the current directory.
-    assert_eq!(
-        runtime_source(Path::new("machine-id")),
-        Some((Path::new("."), OsStr::new("machine-id")))
-    );
-    assert_eq!(
-        runtime_source(Path::new("/run/nvx/workload-machine-id")),
-        Some((Path::new("/run/nvx"), OsStr::new("workload-machine-id")))
-    );
-    assert_eq!(
-        runtime_source(Path::new("state/time")),
-        Some((Path::new("state"), OsStr::new("time")))
-    );
-    for path in ["", "/", "..", "time/.."] {
-        assert_eq!(runtime_source(Path::new(path)), None, "{path}");
-    }
-}
-
-#[test]
-fn only_a_link_at_a_runtime_file_of_etc_is_removed() {
-    for target in [MACHINE_ID_TARGET, RESOLVER_TARGET] {
-        let root = root_with(None, None);
-        let link = root.path().join(target.trim_start_matches('/'));
-        let outside = tempfile::NamedTempFile::new().unwrap();
-        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-        remove_link(root.path(), target).unwrap();
-        assert!(std::fs::symlink_metadata(&link).is_err());
-        assert!(outside.path().exists());
-        assert_eq!(remove_link(root.path(), target), Err(Errno::ENOENT));
-        std::fs::write(&link, b"image\n").unwrap();
-        assert_eq!(remove_link(root.path(), target), Err(Errno::EEXIST));
-        assert_eq!(std::fs::read(&link).unwrap(), b"image\n");
-        // A link on the way to it is not followed.
-        let linked = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(root.path().join("etc"), linked.path().join("etc")).unwrap();
-        assert_eq!(remove_link(linked.path(), target), Err(Errno::ELOOP));
-        assert_eq!(std::fs::read(&link).unwrap(), b"image\n");
-    }
-    // Only a file of `/etc` is a runtime file there.
-    let root = root_with(None, None);
-    assert_eq!(
-        remove_link(root.path(), TIME_STATUS_TARGET),
-        Err(Errno::EINVAL)
-    );
 }
 
 #[test]

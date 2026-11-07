@@ -126,22 +126,20 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::mappings::mapper::{AttachFailure, bind_retained_with};
 use super::mappings::{
-    self, Access, Kernel, Kind, Mapped, Mapping, MappingError, SourceRoot, Step, SystemKernel,
-    TargetRoot, TeardownError,
+    self, Kernel, Kind, Mapped, MappingError, SystemKernel, TargetRoot, TeardownError,
 };
 use super::parse::parse_decimal;
+use super::root::{TIME_STATUS_TARGET, bind_file_retained, bind_runtime_file};
 #[cfg(doc)]
 use super::spawn::{Command, LaunchStage};
 use super::sys::{self, EntryChild, Errno, FileDescriptor, Mode, OpenFlags};
+use super::view::{MACHINE_ID_TARGET, RESOLVER_TARGET};
 #[cfg(doc)]
 use crate::protocol::cmdline::write_resolver;
 
-/// The hostname that an entry gives its execution unless the adapter names another.
-pub const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
-/// The longest hostname, in bytes: Linux's `HOST_NAME_MAX`.
-pub const MAX_HOSTNAME_BYTES: usize = 64;
+pub use super::view::{DEFAULT_HOSTNAME, MAX_HOSTNAME_BYTES, MachineId};
+
 /// The most supplementary groups that an identity holds: Linux's `NGROUPS_MAX`.
 pub const MAX_GROUPS: usize = 65536;
 /// The largest account database, `/etc/passwd` or `/etc/group`, that existing-account mode reads.
@@ -152,16 +150,6 @@ const PASSWD: &std::ffi::CStr = c"etc/passwd";
 const GROUP: &std::ffi::CStr = c"etc/group";
 /// The ID that `setresuid` and `setresgid` read as "unchanged", which no identity may hold.
 const UNCHANGED_ID: u32 = u32::MAX;
-/// The mode of a generated machine ID's file.
-const MACHINE_ID_MODE: u32 = 0o444;
-/// Where [`Entry::bind_runtime`] binds a generated machine ID in the root.
-const MACHINE_ID_TARGET: &str = "/etc/machine-id";
-/// Where [`Entry::bind_runtime`] binds the time status in the root, as a layered root's
-/// [`mount_runtime`](super::root::Root::mount_runtime) does.
-pub(crate) const TIME_STATUS_TARGET: &str = "/run/nvx/time";
-/// Where [`Entry::bind_runtime`] binds the resolver file in the root.
-const RESOLVER_TARGET: &str = "/etc/resolv.conf";
-
 /// The names of the Linux capabilities, by number.
 const CAPABILITY_NAMES: [&str; 41] = [
     "CAP_CHOWN",
@@ -436,70 +424,6 @@ impl Identity {
     pub fn account_mode(&self) -> AccountMode {
         self.account
     }
-}
-
-/// The machine ID that an execution sees at `/etc/machine-id`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum MachineId {
-    /// The image's own `/etc/machine-id`, which the entry leaves untouched.
-    #[default]
-    Image,
-    /// The ID that the regular file at this path holds, such as one that [`MachineId::generate`]
-    /// wrote once for the boot, which [`Entry::bind_runtime`] binds read-only over
-    /// `/etc/machine-id`. The bind shows the file as it is, so an ID that the file's owner
-    /// rewrites in place, as after a restore, reaches every execution.
-    Generated(PathBuf),
-}
-
-impl MachineId {
-    /// Generates a machine ID from the kernel's random number generator, writes it to a new file
-    /// at `path`, with mode 0444 whatever the process's umask, and returns the mode that binds
-    /// it.
-    ///
-    /// The ID is a random version 4 UUID, written as `/etc/machine-id` holds one: 32 lowercase
-    /// hexadecimal digits and a newline. A file, or a symbolic link, at `path` already fails the
-    /// call with `AlreadyExists`, so each boot generates its ID once.
-    pub fn generate(path: impl Into<PathBuf>) -> io::Result<Self> {
-        let path = path.into();
-        let mut id = [0u8; 16];
-        getrandom::fill(&mut id).map_err(|error| {
-            error
-                .raw_os_error()
-                .map_or_else(|| io::Error::other(error), io::Error::from_raw_os_error)
-        })?;
-        let mode = Mode::from_bits_retain(MACHINE_ID_MODE);
-        let file = sys::open(
-            &sys::path_c_string(&path)?,
-            OpenFlags::O_WRONLY
-                | OpenFlags::O_CREAT
-                | OpenFlags::O_EXCL
-                | OpenFlags::O_NOFOLLOW
-                | OpenFlags::O_CLOEXEC,
-            mode,
-        )?;
-        // The umask narrows the mode that creates the file, which could keep executions of
-        // other users from reading the ID.
-        file.set_mode(mode)?;
-        file.write_all(&machine_id_text(id))?;
-        file.close()?;
-        Ok(Self::Generated(path))
-    }
-}
-
-/// Returns the text of the machine ID made of `id`'s random bits, as a version 4 UUID: 32
-/// lowercase hexadecimal digits and a newline.
-fn machine_id_text(mut id: [u8; 16]) -> [u8; 33] {
-    /// The lowercase hexadecimal digits.
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    id[6] = (id[6] & 0x0f) | 0x40;
-    id[8] = (id[8] & 0x3f) | 0x80;
-    let mut text = [b'\n'; 33];
-    for (index, byte) in id.iter().enumerate() {
-        text[2 * index] = DIGITS[usize::from(byte >> 4)];
-        text[2 * index + 1] = DIGITS[usize::from(byte & 0x0f)];
-    }
-    text
 }
 
 /// Whether an execution's listeners are published, through private-network ingress or the
@@ -866,105 +790,7 @@ fn bind_file(
     source: &Path,
     target: &str,
 ) -> Result<Mapped, MappingError> {
-    match bind_runtime_file(kernel, root, source, target, Kind::File) {
-        Err(MappingError::Link { path: link }) if link == Path::new(target) => {
-            remove_link(path, target).map_err(|_| MappingError::Link { path: link })?;
-            bind_runtime_file(kernel, root, source, target, Kind::File)
-        }
-        bound => bound,
-    }
-}
-
-/// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
-/// `root`, with `kernel`, through the walk and attach of [`mappings::bind`] from a source root at
-/// `path`'s parent directory, and returns the bind.
-pub(crate) fn bind_runtime_file(
-    kernel: &mut dyn Kernel,
-    root: &TargetRoot,
-    path: &Path,
-    target: &str,
-    kind: Kind,
-) -> Result<Mapped, MappingError> {
-    let (source, mapping) = runtime_mapping(path, target, kind)?;
-    mappings::bind_with(kernel, root, &source, &mapping)
-}
-
-/// Binds as [`bind_runtime_file`] does, retaining a failed bind that its caller must detach.
-pub(crate) fn bind_runtime_file_retained(
-    kernel: &mut dyn Kernel,
-    root: &TargetRoot,
-    path: &Path,
-    target: &str,
-    kind: Kind,
-) -> Result<Mapped, AttachFailure> {
-    let (source, mapping) = runtime_mapping(path, target, kind)?;
-    bind_retained_with(kernel, root, &source, &mapping)
-}
-
-/// Prepares the source root and read-only mapping for a runtime bind.
-fn runtime_mapping(
-    path: &Path,
-    target: &str,
-    kind: Kind,
-) -> Result<(SourceRoot, Mapping), MappingError> {
-    let source_error = |error: i32| MappingError::System {
-        step: Step::Source,
-        error,
-    };
-    let Some((parent, name)) = runtime_source(path) else {
-        return Err(source_error(Errno::EINVAL as i32));
-    };
-    let source = SourceRoot::open(parent)
-        .map_err(|error| source_error(error.raw_os_error().unwrap_or(Errno::EIO as i32)))?;
-    let mapping = Mapping::new(name, target, Access::ReadOnly)
-        .map_err(|_| source_error(Errno::EINVAL as i32))?
-        .with_kind(kind);
-    Ok((source, mapping))
-}
-
-/// Returns the directory that holds the runtime file at `path`, the current directory for a
-/// relative path of one component, and the file's name in it, unless `path` names no file.
-fn runtime_source(path: &Path) -> Option<(&Path, &std::ffi::OsStr)> {
-    let name = path.file_name()?;
-    let parent = path.parent()?;
-    if parent.as_os_str().is_empty() {
-        Some((Path::new("."), name))
-    } else {
-        Some((parent, name))
-    }
-}
-
-/// Removes the symbolic link at `target`, a file of `/etc` such as `/etc/machine-id`, beneath
-/// `root`, reached through no other link and on the root's own mount.
-fn remove_link(root: &Path, target: &str) -> Result<(), Errno> {
-    let name = target.strip_prefix("/etc/").ok_or(Errno::EINVAL)?;
-    let name = sys::c_string(name.as_bytes())?;
-    let root = sys::path_c_string(root)?;
-    let directory = sys::open(
-        &root,
-        OpenFlags::O_PATH | OpenFlags::O_DIRECTORY | OpenFlags::O_NOFOLLOW | OpenFlags::O_CLOEXEC,
-        Mode::empty(),
-    )?;
-    let etc = sys::open_beneath(
-        &directory,
-        c"etc",
-        OpenFlags::O_PATH | OpenFlags::O_DIRECTORY,
-        Mode::empty(),
-        false,
-    )?;
-    let status = nix::sys::stat::fstatat(
-        etc.borrowed(),
-        name.as_c_str(),
-        nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-    )?;
-    if status.st_mode & nix::libc::S_IFMT != nix::libc::S_IFLNK {
-        return Err(Errno::EEXIST);
-    }
-    nix::unistd::unlinkat(
-        etc.borrowed(),
-        name.as_c_str(),
-        nix::unistd::UnlinkatFlags::NoRemoveDir,
-    )
+    bind_file_retained(kernel, root, path, source, target).map_err(|failure| failure.error)
 }
 
 /// One execution that an [`Entry`] prepared, which [`Command::enter`] takes.
