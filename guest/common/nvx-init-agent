@@ -178,11 +178,11 @@ is_canonical_uuid() {
     return 1
 }
 
-# Reads the value of the nvx_layer token for read_root_tokens:
-# distro,0xd0003000,FORMAT[:IDENTITY], where this init accepts only the erofs
-# format, with or without the filesystem UUID that the image must have.
+# Reads the nvx_layer format and EROFS identity for read_root_tokens.
+# This init assembles only EROFS; it refuses GPT after root-token validation.
 read_layer_token() {
     layer_image=${1#distro,0xd0003000,}
+    layer_format=${layer_image%%:*}
     case "$1" in
         distro,0xd0003000,*,*) ;;
         distro,0xd0003000,erofs)
@@ -196,10 +196,9 @@ read_layer_token() {
             return 0
             ;;
         distro,0xd0003000,gpt | distro,0xd0003000,gpt:*)
-            fatal "nvx_layer=$1 names a GPT image, which this init cannot assemble: it assembles only an EROFS image"
+            return 0
             ;;
         distro,0xd0003000,*)
-            layer_format=${layer_image%%:*}
             # The form without a format names the UUID in its place.
             if [ -z "$layer_format" ] || is_canonical_uuid "$layer_format"; then
                 fatal "the nvx_layer kernel parameter names no image format, erofs or gpt: '$1'"
@@ -314,7 +313,11 @@ read_root_tokens() {
         fatal "the nvx_scratch_journal kernel parameter needs a scratch upper, nvx_scratch"
     [ -z "$ram_percent" ] || [ "$upper" = ram ] ||
         fatal "the nvx_ram_upper_percent kernel parameter needs a RAM upper, nvx_overlay_upper"
-    case " $settings " in *" nvx_first_partition_bound "*) fatal "the nvx_first_partition_bound kernel parameter needs a GPT image" ;; esac
+    if [ "$layer_format" != gpt ]; then
+        case " $settings " in *" nvx_first_partition_bound "*) fatal "the nvx_first_partition_bound kernel parameter needs a GPT image" ;; esac
+    fi
+    [ "$layer_format" != gpt ] ||
+        fatal "nvx_layer=distro,0xd0003000,$layer_image names a GPT image, which this init cannot assemble: it assembles only an EROFS image"
     [ "$overlay_mode" != untrusted-lowers ] ||
         fatal "nvx_overlay_mode=untrusted-lowers names untrusted lowers, which this init cannot assemble: it mounts the overlay only for trusted lowers, with metacopy=on,xino=on"
     [ "$scratch_journal" != forbidden ] ||
