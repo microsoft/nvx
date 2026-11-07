@@ -1788,6 +1788,7 @@ field nvx::host::config::NetworkConfig::guest_network
 field nvx::host::config::NetworkConfig::policy
 struct nvx::host::config::NicConfig
 field nvx::host::config::NicConfig::guest_network
+const nvx::host::config::PROCESS_COMMAND_LINE_LIMIT
 enum nvx::host::config::RootConfig
 variant nvx::host::config::RootConfig::Blockless
 variant nvx::host::config::RootConfig::Layered
@@ -1802,15 +1803,19 @@ field nvx::host::config::UpperConfig::Scratch::path
 struct nvx::host::config::VmConfig
 field nvx::host::config::VmConfig::boot
 method nvx::host::config::VmConfig::check
+method nvx::host::config::VmConfig::check_command_line
 field nvx::host::config::VmConfig::console
 field nvx::host::config::VmConfig::filesystem
 method nvx::host::config::VmConfig::kernel_command_line
 method nvx::host::config::VmConfig::mapping_table
 field nvx::host::config::VmConfig::memory_mib
 field nvx::host::config::VmConfig::network
+method nvx::host::config::VmConfig::openvmm_arguments
 field nvx::host::config::VmConfig::processors
 field nvx::host::config::VmConfig::root
 field nvx::host::config::VmConfig::view
+fn nvx::host::config::fit_process_command_line
+fn nvx::host::config::process_command_line_units
 mod nvx::host::filesystem
 struct nvx::host::filesystem::Bind
 field nvx::host::filesystem::Bind::child

@@ -16,12 +16,12 @@
 //! [`PreparedLaunch::adapter_arguments`](super::sandbox::PreparedLaunch::adapter_arguments) holds
 //! an adapter's command line to the limit too.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::artifacts::Artifacts;
-pub use super::config::COMMAND_LINE_BUDGET;
+use super::config;
 use super::filesystem::ExportPlan;
 use super::network::{self, NetworkPolicy};
 use crate::error::{Error, Result};
@@ -30,12 +30,11 @@ use crate::net::{is_valid_guest_network, is_valid_hostname};
 use crate::protocol::WORKLOAD_ACCOUNT_TOKEN;
 use crate::protocol::cmdline::{self, Parameter};
 
-pub use super::config::DEFAULT_GUEST_NETWORK;
-
-/// Longest Windows process command line, in UTF-16 code units, including the terminating NUL.
-///
-/// OpenVMM's command line is held to it on every host, so a policy behaves alike on all of them.
-pub const PROCESS_COMMAND_LINE_LIMIT: usize = 32_767;
+pub(crate) use super::config::fit_arguments;
+pub use super::config::{
+    COMMAND_LINE_BUDGET, DEFAULT_GUEST_NETWORK, PROCESS_COMMAND_LINE_LIMIT,
+    fit_process_command_line, process_command_line_units,
+};
 /// Part of that limit kept for what may change between provision and start, such as the
 /// configured OpenVMM and guest paths.
 const PROCESS_COMMAND_LINE_RESERVE: usize = 1024;
@@ -338,7 +337,7 @@ impl VmmLaunch<'_> {
     /// plan: a quoted final path of up to `MAX_PATH` behind `\\?\` in place of a path of at least
     /// 4. A launch whose inputs are longer may still not fit, which its complete check refuses
     /// before OpenVMM starts.
-    pub const RESERVE: usize = 2048;
+    pub const RESERVE: usize = config::OPENVMM_COMMAND_LINE_RESERVE;
 
     /// Returns the arguments that name the launch's inputs, with the kernel command line
     /// `kernel_command_line`: the VM in one process, `--single-process`, on the hypervisor,
@@ -349,30 +348,19 @@ impl VmmLaunch<'_> {
     /// OpenVMM reads from its standard input, `--microvm-control-auth-stdin`, and the outcome
     /// report, `--microvm-report`.
     pub fn arguments(&self, kernel_command_line: &str) -> Vec<OsString> {
-        let memory = format!("{}M", self.memory_mib);
-        let control = format!("listen={}", self.endpoint);
-        [
-            OsStr::new("--single-process"),
-            OsStr::new("--hypervisor"),
-            OsStr::new(self.hypervisor.as_str()),
-            OsStr::new("--memory"),
-            OsStr::new(&memory),
-            OsStr::new("--kernel"),
-            self.kernel.as_os_str(),
-            OsStr::new("--initrd"),
-            self.initrd.as_os_str(),
-            OsStr::new("--cmdline"),
-            OsStr::new(kernel_command_line),
-            OsStr::new("--virtio-console"),
-            OsStr::new("none"),
-            OsStr::new("--microvm-control-console"),
-            OsStr::new(&control),
-            OsStr::new("--microvm-control-auth-stdin"),
-            OsStr::new("--microvm-report"),
-            self.report.as_os_str(),
-        ]
-        .map(OsStr::to_os_string)
-        .into()
+        let mut arguments = config::boot_arguments(
+            self.hypervisor,
+            u64::from(self.memory_mib),
+            self.kernel,
+            self.initrd,
+            kernel_command_line,
+        );
+        arguments.extend(config::console_arguments(
+            "none",
+            self.endpoint,
+            self.report,
+        ));
+        arguments
     }
 }
 
@@ -462,99 +450,6 @@ pub fn timeout_problem(value: Duration, positive: bool) -> Option<String> {
             MAX_TIMEOUT.as_secs() / (24 * 60 * 60)
         )
     })
-}
-
-/// Returns the length in UTF-16 code units, including the terminating NUL, of the Windows command
-/// line that runs `program` with `arguments`, quoted the way the Windows platform quotes it: the
-/// program always in quotes, and each argument in quotes if it is empty or holds a space or a
-/// tab, with a backslash before each quote that it holds and a backslash before each backslash
-/// that precedes a quote, its closing quote included, and one space between them.
-///
-/// It is the length that [`PROCESS_COMMAND_LINE_LIMIT`] bounds, whatever the host:
-/// [`fit_process_command_line`] checks it.
-pub fn process_command_line_units(program: &OsStr, arguments: &[OsString]) -> usize {
-    argument_units(program, true) + arguments_units(arguments)
-}
-
-/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless the Windows command
-/// line that runs `program`, such as OpenVMM, with `arguments`, as [`process_command_line_units`]
-/// counts it, leaves `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] unused: none for the
-/// complete command line of a launch about to spawn OpenVMM, and some for what may change before
-/// then, such as the paths of the artifacts.
-///
-/// The error says how long the command line is, and how to shorten it.
-pub fn fit_process_command_line(
-    program: &OsStr,
-    arguments: &[OsString],
-    reserve: usize,
-) -> Result<()> {
-    let length = process_command_line_units(program, arguments);
-    let held = if reserve == 0 {
-        String::new()
-    } else {
-        format!(", with {reserve} held in reserve")
-    };
-    fit("OpenVMM's command line", length, reserve, &held)
-}
-
-/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless OpenVMM's
-/// `arguments`, which a plan renders, without the program and the rest of the launch, leave
-/// `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] to that rest.
-pub(crate) fn fit_arguments(arguments: &[OsString], reserve: usize) -> Result<()> {
-    let held = format!(", with {reserve} held in reserve for the rest of the launch");
-    fit(
-        "OpenVMM's arguments",
-        arguments_units(arguments),
-        reserve,
-        &held,
-    )
-}
-
-/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), saying that `subject`
-/// would take `length` code units, `held` describing `reserve`, unless they leave `reserve` of
-/// [`PROCESS_COMMAND_LINE_LIMIT`] unused.
-fn fit(subject: &str, length: usize, reserve: usize, held: &str) -> Result<()> {
-    if length.saturating_add(reserve) <= PROCESS_COMMAND_LINE_LIMIT {
-        return Ok(());
-    }
-    Err(Error::unsupported(format!(
-        "{subject} would take {length} of the {PROCESS_COMMAND_LINE_LIMIT} characters that a \
-         Windows process command line allows{held}; map, hide, or allow fewer or shorter \
-         filesystem paths, or use fewer network rules"
-    )))
-}
-
-/// Returns the length in UTF-16 code units of `arguments` on a Windows command line, quoted as
-/// [`process_command_line_units`] quotes them, each with the space before it.
-fn arguments_units(arguments: &[OsString]) -> usize {
-    arguments
-        .iter()
-        .map(|argument| argument_units(argument, false))
-        .sum()
-}
-
-/// Returns the length in UTF-16 code units of `argument` on a Windows command line, quoted as
-/// [`process_command_line_units`] quotes it, always if it is the `program`, with one separating
-/// space, or the terminating NUL after the last argument.
-fn argument_units(argument: &OsStr, program: bool) -> usize {
-    let text = argument.to_string_lossy();
-    let quoted = program || text.is_empty() || text.contains([' ', '\t']);
-    let mut length = 1 + text.encode_utf16().count() + if quoted { 2 } else { 0 };
-    let mut backslashes = 0;
-    for character in text.chars() {
-        match character {
-            '\\' => backslashes += 1,
-            '"' => {
-                length += backslashes + 1;
-                backslashes = 0;
-            }
-            _ => backslashes = 0,
-        }
-    }
-    if quoted {
-        length += backslashes;
-    }
-    length
 }
 
 #[cfg(test)]
