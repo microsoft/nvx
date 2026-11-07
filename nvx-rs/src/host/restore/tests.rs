@@ -661,6 +661,7 @@ fn restore_machine_resends_canonical_bytes_and_stops_at_ready() {
         machine.next_action(),
         Some(RestoreAction::SendActivate(_))
     ));
+    machine.input(RestoreInput::ActivateSent);
     machine.input(RestoreInput::GuestReady(ReadyActivation::of(&record)));
     assert!(matches!(machine.next_action(), Some(RestoreAction::Done)));
     machine.input(RestoreInput::SessionLost);
@@ -703,7 +704,20 @@ fn restore_machine_session_loss_invalidates_each_session_phase() {
             panic!("the replacement session received no activation");
         };
         assert_eq!(bytes, restore_record().encode());
+        machine.input(RestoreInput::GuestReady(ReadyActivation::of(
+            &restore_record(),
+        )));
+        assert!(matches!(machine.next_action(), Some(RestoreAction::Done)));
     }
+
+    let mut machine = restore_machine_at(RestorePhase::Connect);
+    machine.input(RestoreInput::Connected);
+    machine.input(RestoreInput::SessionLost);
+    assert!(matches!(
+        machine.next_action(),
+        Some(RestoreAction::Connect)
+    ));
+    assert!(machine.next_action().is_none());
 }
 
 #[test]
@@ -730,6 +744,10 @@ fn restore_machine_keeps_operation_phase_evidence_and_original_source() {
             .downcast_ref::<io::Error>()
             .unwrap();
         assert!(std::ptr::eq(original, returned));
+        assert_eq!(
+            error.to_string(),
+            "restore failed during Activate: PeerMismatch"
+        );
 
         let mut machine = restore_machine_at(phase);
         machine.input(RestoreInput::OperationFailed {
