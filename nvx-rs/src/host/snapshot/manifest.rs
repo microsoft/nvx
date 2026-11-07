@@ -140,7 +140,7 @@ impl HostClock {
     }
 
     /// Parses the spelling of a clock in a manifest.
-    pub(super) fn parse(text: &str) -> Option<Self> {
+    pub(in crate::host) fn parse(text: &str) -> Option<Self> {
         match text {
             "linux-boottime" => Some(Self::LinuxBoottime),
             "windows-interrupt-time" => Some(Self::WindowsInterruptTime),
