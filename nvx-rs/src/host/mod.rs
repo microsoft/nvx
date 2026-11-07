@@ -50,7 +50,9 @@
 //!   [`PreparedLaunch`](sandbox::PreparedLaunch) hands the VMM the files that those checks
 //!   opened, which it inherits through the [`supervisor`]'s allowlist.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
-//!   its files and endpoints, and its control credential, which the library never writes.
+//!   its files and endpoints, and a checked cold [`Prepared`](vm::Prepared) launch with its
+//!   opened log and control credential, which the library never writes. The opaque
+//!   [`Snapshot`](snapshot::Snapshot) input of a future restore is refused by cold creation.
 //! - [`restore`] orders caller-driven activation to Ready without I/O or a clock, and listens for
 //!   OpenVMM's restore-ready event from the held VM process.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
