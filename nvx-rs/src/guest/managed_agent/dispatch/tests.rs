@@ -1302,7 +1302,7 @@ fn direct_endings_do_not_wait_for_an_escaped_descendant_to_close_output() -> Tes
                 "exec 3<\"$0\" 4<\"$1\" 5<\"$2\"; \
                  setsid sh -c 'echo $$ > \"$0\"; read -r line <&4; \
                  if [ \"$1\" = output-limit ]; then \
-                 (read -r line <&5; kill -KILL -- -$$) >/dev/null 2>&1 & \
+                 (read -r line <&5; kill -KILL -$$) >/dev/null 2>&1 & \
                  trap \"\" PIPE; \
                  for i in 1 2 3 4; do \
                  (while :; do cat /dev/zero 2>/dev/null; done) & done; wait; fi; \
