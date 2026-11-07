@@ -157,7 +157,19 @@ fn termination(helper_ends: bool) {
     let (_temporary, mappings) = prepared();
     let config =
         AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into()).unwrap();
-    let result = config.serve_layered(&mut runtime, descriptor, mappings);
+    let result = if helper_ends {
+        let mut session = Session::with_runtime(descriptor, &mut runtime).unwrap();
+        let mut system = TestSystem::new(Paths::default());
+        let (table, mapper, export) = mappings;
+        let mut mappings = HostMappings::layered(table, mapper, export).unwrap();
+        assert_eq!(
+            run(&mut system, &mut session, &config, &mut mappings).err(),
+            Some(Errno::ECHILD)
+        );
+        Err(session.runtime_failure().unwrap())
+    } else {
+        config.serve_layered(&mut runtime, descriptor, mappings)
+    };
     drop(runtime);
     if helper_ends {
         let failure = result.unwrap_err();
@@ -194,6 +206,98 @@ fn receive(host: &mut UnixStream) -> Response {
     assert_eq!(header.record_type, OUTER_DATA);
     let frame = decode_app(&payload).unwrap();
     response(frame.kind, frame.request_id, frame.status, frame.payload)
+}
+
+fn prelaunch_termination(helper_ends: bool) {
+    let helper = helper();
+    let mut runtime =
+        Runtime::new(&[CString::new(helper.process.raw().to_string()).unwrap()]).unwrap();
+    let (mut host, guest) = UnixStream::pair().unwrap();
+    let mut session =
+        Session::with_runtime(FileDescriptor::from_owned(guest.into()), &mut runtime).unwrap();
+    session.send_attach().unwrap();
+    assert_eq!(read_outer(&mut host).0.record_type, OUTER_GUEST_ATTACH);
+    host.write_all(&encode_outer(OUTER_RESET, &INSTANCE, 1, 0, &[]).unwrap())
+        .unwrap();
+    assert!(matches!(session.next_event(), Ok(Event::Reset)));
+    session.acknowledge().unwrap();
+    assert_eq!(read_outer(&mut host).0.record_type, OUTER_ACK);
+    let execution = workload_payload(&["/bin/true"], Some("/")).unwrap();
+    host.write_all(
+        &encode_outer(
+            OUTER_DATA,
+            &INSTANCE,
+            1,
+            1,
+            &encode_app(APP_EXEC, 9, 0, &execution),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let Ok(Event::Data(payload)) = session.next_event() else {
+        panic!("the complete EXEC record was not received");
+    };
+    let Ok(request) = session.accept_request(&payload) else {
+        panic!("the complete EXEC request was not accepted");
+    };
+    assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
+    let execution = crate::protocol::decode_guest_exec_payload(request.payload).unwrap();
+    if helper_ends {
+        sys::kill_through_pidfd(helper.descriptor.borrowed(), false).unwrap();
+        assert!(sys::readable_or_hung_up(&[helper.descriptor.borrowed()], 5000).unwrap()[0]);
+    } else {
+        let process = sys::open_pidfd(sys::current_process()).unwrap();
+        sys::signal_through_pidfd(process.borrowed(), Signal::SIGTERM as i32, false).unwrap();
+    }
+    let mut system = TestSystem::new(Paths::default());
+    let config =
+        AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into()).unwrap();
+    let error = super::super::super::exec::run(
+        &mut system,
+        &mut session,
+        &config,
+        request.request_id,
+        &execution,
+    )
+    .err();
+    drop(session);
+    drop(runtime);
+    let mut traffic = Vec::new();
+    host.read_to_end(&mut traffic).unwrap();
+    assert_eq!(
+        error,
+        Some(if helper_ends {
+            Errno::ECHILD
+        } else {
+            Errno::ECANCELED
+        })
+    );
+    assert!(
+        traffic.is_empty(),
+        "prelaunch shutdown must not send an application error"
+    );
+    assert_eq!(system.spawn_calls, 0);
+    assert!(system.diagnostics.is_empty(), "{:?}", system.diagnostics);
+}
+
+#[test]
+#[ignore = "requires root with CAP_SYS_NICE and CAP_SYS_RESOURCE"]
+fn privileged_layered_runtime_prelaunch_sigterm_sends_no_application_error() {
+    isolated(
+        "NVX_LAYERED_RUNTIME_PRELAUNCH_STOP_CHILD",
+        "guest::managed_agent::dispatch::tests::runtime::privileged_layered_runtime_prelaunch_sigterm_sends_no_application_error",
+        || prelaunch_termination(false),
+    );
+}
+
+#[test]
+#[ignore = "requires root with CAP_SYS_NICE and CAP_SYS_RESOURCE"]
+fn privileged_layered_runtime_prelaunch_helper_failure_sends_no_application_error() {
+    isolated(
+        "NVX_LAYERED_RUNTIME_PRELAUNCH_HELPER_CHILD",
+        "guest::managed_agent::dispatch::tests::runtime::privileged_layered_runtime_prelaunch_helper_failure_sends_no_application_error",
+        || prelaunch_termination(true),
+    );
 }
 
 #[test]
