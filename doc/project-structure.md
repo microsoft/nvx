@@ -48,6 +48,7 @@ nvx/
 |   |   |-- copilot-setup-steps.yml Copilot cloud agent environment
 |   |   |-- module-diagrams.yml  Module diagrams of the nvx crate, drawn after merges
 |   |   |-- nightly-ci-report.yml Report of failed nightly CI runs
+|   |   |-- nvx-rs-coverage.yml  Coverage of nvx-rs's own tests as dev changes
 |   |   |-- nvx-rs-mutants.yml   On-demand mutation testing of nvx-rs
 |   |   |-- package-platform.yml Reusable platform release package job
 |   |   |-- run-nvx-microvm-tests.yml Reusable NVX microVM test job
@@ -169,6 +170,7 @@ nvx/
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
+|   |-- nvx_rs_coverage.py       Coverage of the nvx crate's own tests, run by CI
 |   |-- powershell_testing.py    PowerShell launches of the unit tests, under a shared default time limit
 |   |-- public_api.py            Public-API snapshot check of the nvx crate run by CI
 |   |-- publish_development_release.py Development release publisher run by CI
@@ -210,7 +212,8 @@ reusable workflows: `build-openvmm-binary.yml` builds OpenVMM for one target,
 also publish the `nvx` crate to
 crates.io. The other workflows report failed nightly CI runs, flag the pull
 requests that change existing tests, draw the module
-diagrams of the `nvx` crate after merges, run adversarial campaigns, run the
+diagrams of the `nvx` crate after merges, run adversarial campaigns, measure
+the coverage of the `nvx` crate's tests as `dev` changes, run the
 `nvx` crate's mutation tests, verify published releases with Specula, and
 prepare the
 Copilot cloud agent and code review environments. See
@@ -362,7 +365,9 @@ see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 [remote agent host](setup.md#remote-agent-hosts) inventory, and CI runs
 `publish_development_release.py` to publish development releases,
 `publish_nvx_crate.py` to publish the `nvx` crate to crates.io (see
-[crates.io releases](ci.md#cratesio-releases)), and `module_diagrams.py` to
+[crates.io releases](ci.md#cratesio-releases)), `nvx_rs_coverage.py` to
+measure which code of the `nvx` crate its tests reach (see
+[nvx-rs coverage](ci.md#nvx-rs-coverage)), and `module_diagrams.py` to
 draw the module diagrams that `doc/modules` publishes (see
 [Module diagrams](ci.md#module-diagrams)).
 

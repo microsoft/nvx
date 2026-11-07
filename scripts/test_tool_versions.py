@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ LINUX = SETUP / "setup-linux.sh"
 WINDOWS = SETUP / "setup-windows-whp.ps1"
 SPECULA = REPO_ROOT / ".github" / "specula" / "setup-runner.sh"
 COPILOT_SETUP = REPO_ROOT / ".github" / "workflows" / "copilot-setup-steps.yml"
+COVERAGE = REPO_ROOT / ".github" / "workflows" / "nvx-rs-coverage.yml"
 GUIDES = (
     SETUP / "README.md",
     REPO_ROOT / "doc" / "setup.md",
@@ -42,7 +44,7 @@ GUIDES = (
 )
 
 PLATFORMS = ("linux-x86_64", "windows-x86_64")
-RELEASES = ("rust.toolchain", "cargo_nextest.version")
+RELEASES = ("rust.toolchain", "cargo_nextest.version", "cargo_llvm_cov.version")
 ARTIFACT_TOOLS = ("rustup", "sccache", "actions_runner")
 # What the installers assume about each artifact: rustup's installer runs
 # directly, each sccache archive holds a directory named after it, and
@@ -60,6 +62,7 @@ ARTIFACT_SUFFIXES = {
 TOOL_WORDS = {
     "rust.toolchain": r"rust[-_.]?toolchain|rust_version",
     "cargo_nextest.version": r"nextest",
+    "cargo_llvm_cov.version": r"llvm[-_]?cov",
     "rustup.version": r"rustup",
     "sccache.version": r"sccache",
     "actions_runner.version": r"actions[-_ ]?runner|runner_?version",
@@ -381,7 +384,7 @@ for manifest in "$@"; do
         (
             tool_manifest=$manifest
             load_tool_manifest
-            for release in rust.toolchain cargo_nextest.version; do
+            for release in rust.toolchain cargo_nextest.version cargo_llvm_cov.version; do
                 tool_manifest_value "$release"
                 printf '%s %s\\n' "$release" "$tool_value"
             done
@@ -422,7 +425,7 @@ foreach ($path in $env:NVX_TEST_MANIFESTS.Split([char]10)) {
         [Console]::Out.WriteLine("### $platform")
         try {
             $manifest = Read-ToolManifest $path
-            foreach ($key in "rust.toolchain", "cargo_nextest.version") {
+            foreach ($key in "rust.toolchain", "cargo_nextest.version", "cargo_llvm_cov.version") {
                 $value = Get-ToolManifestValue $manifest $key
                 [Console]::Out.WriteLine("$key $value")
             }
@@ -620,6 +623,7 @@ class ToolManifestReaderTests(unittest.TestCase):
         pins = {
             "RUST_TOOLCHAIN": entries["rust.toolchain"],
             "CARGO_NEXTEST_VERSION": entries["cargo_nextest.version"],
+            "CARGO_LLVM_COV_VERSION": entries["cargo_llvm_cov.version"],
         }
         for prefix, tool in (
             ("RUSTUP", "rustup"),
@@ -759,6 +763,7 @@ class ToolManifestReaderTests(unittest.TestCase):
         names = {
             "RustToolchain": "rust.toolchain",
             "CargoNextestVersion": "cargo_nextest.version",
+            "CargoLlvmCovVersion": "cargo_llvm_cov.version",
         }
         text = MANIFEST.read_text(encoding="utf-8")
         entries = parse_manifest(text)
@@ -1083,7 +1088,7 @@ class ToolManifestReaderTests(unittest.TestCase):
 
 class ToolManifestConsumerTests(unittest.TestCase):
     def test_consumers_read_the_manifest(self):
-        for path in (LINUX, WINDOWS, SPECULA, COPILOT_SETUP):
+        for path in (LINUX, WINDOWS, SPECULA, COPILOT_SETUP, COVERAGE):
             with self.subTest(path=path.name):
                 self.assertIn("tool-versions.conf", path.read_text(encoding="utf-8"))
 
@@ -1091,7 +1096,7 @@ class ToolManifestConsumerTests(unittest.TestCase):
         words = re.compile("|".join(TOOL_WORDS.values()), re.IGNORECASE)
         paths = {
             path
-            for path in (*SETUP.iterdir(), SPECULA, COPILOT_SETUP, *GUIDES)
+            for path in (*SETUP.iterdir(), SPECULA, COPILOT_SETUP, COVERAGE, *GUIDES)
             if path.is_file() and path != MANIFEST
         }
         for path in sorted(paths):
@@ -1317,6 +1322,147 @@ class LinuxSetupTests(unittest.TestCase):
                         base.add(tuple(packages[: len(packages) - len(extra)]))
             # Both modes install the same build dependencies.
             self.assertEqual(len(base), 1, base)
+
+    # Stubs of the Rust tools that the setup runs and checks. cargo-nextest and
+    # cargo-llvm-cov report the releases that STUB_NEXTEST and STUB_LLVM_COV
+    # name, and are missing when theirs is empty; rustup lists the components
+    # in STUB_COMPONENTS and the targets of both modes.
+    _RUST_TOOL_STUBS = {
+        "rustc": 'printf "rustc %s (0 1970-01-01)\\n" "$RUSTUP_TOOLCHAIN"\n',
+        "rustup": (
+            'case "$*" in\n'
+            '    "component list --installed") printf "%s\\n" $STUB_COMPONENTS ;;\n'
+            '    "target list --installed")\n'
+            '        printf "%s\\n" x86_64-unknown-none x86_64-unknown-linux-musl \\\n'
+            "            x86_64-unknown-uefi ;;\n"
+            "esac\n"
+        ),
+        "cargo-nextest": (
+            '[ -n "$STUB_NEXTEST" ] || exit 127\n'
+            'printf "cargo-nextest %s (0 1970-01-01)\\n" "$STUB_NEXTEST"\n'
+        ),
+        "cargo-llvm-cov": (
+            '[ -n "$STUB_LLVM_COV" ] || exit 127\n'
+            '[ "$*" = "llvm-cov --version" ] || exit 2\n'
+            'printf "cargo-llvm-cov %s\\n" "$STUB_LLVM_COV"\n'
+        ),
+        "cargo": (
+            'case "$1" in\n'
+            '    nextest) shift; exec cargo-nextest "$@" ;;\n'
+            '    llvm-cov) exec cargo-llvm-cov "$@" ;;\n'
+            "esac\n"
+            "exit 2\n"
+        ),
+    }
+
+    def _run_rust_tools(
+        self, shell: list[str], function: str, runner_only: str, **stubs: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Runs a function of the Linux setup with `shell` and stubs of the Rust
+        tools, which STUB_* `stubs` configure, in the trusted toolchain's bin
+        directory, which is first on PATH too, and returns its result.
+        run_rust_tool prints the commands that the setup runs as the toolchain's
+        owner, but for its query of the release, which it answers."""
+        entries = parse_manifest(MANIFEST.read_text(encoding="utf-8"))
+        source = LINUX.read_text(encoding="utf-8")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        stub_directory = root / "cargo" / "bin"
+        stub_directory.mkdir(parents=True)
+        for name, body in self._RUST_TOOL_STUBS.items():
+            stub = stub_directory / name
+            stub.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+            stub.chmod(0o755)
+        harness = (
+            "set -eu\n"
+            + "".join(
+                _shell_function(source, name)
+                for name in ("die", "with_rust_targets", "check_rust_targets", function)
+            )
+            + 'run_rust_tool() {\n    case "$*" in\n'
+            + '        *"rustc --version") printf "rustc %s (0)\\n" "$RUST_TOOLCHAIN" ;;\n'
+            + '        *) printf "%s\\n" "$*" ;;\n    esac\n}\n'
+            + 'run_as_builder() { "$@"; }\nrun_as_root() { :; }\n'
+            + "install_sccache() { :; }\n"
+            + f"runner_only={runner_only}\n"
+            + f"trusted_tool_root={shlex.quote(root.as_posix())}\n"
+            + f"trusted_cargo_home={shlex.quote(root.as_posix() + '/cargo')}\n"
+            + f"trusted_rustup_home={shlex.quote(root.as_posix() + '/rustup')}\n"
+            + f"RUST_TOOLCHAIN={entries['rust.toolchain']}\n"
+            + f"CARGO_NEXTEST_VERSION={entries['cargo_nextest.version']}\n"
+            + f"CARGO_LLVM_COV_VERSION={entries['cargo_llvm_cov.version']}\n"
+            + f"{function}\n"
+        )
+        return subprocess.run(
+            [*shell, "-c", harness],
+            env={
+                **os.environ,
+                "PATH": f"{stub_directory}{os.pathsep}{os.environ['PATH']}",
+                "STUB_NEXTEST": entries["cargo_nextest.version"],
+                "STUB_COMPONENTS": "llvm-tools-x86_64-unknown-linux-gnu",
+                **{f"STUB_{name.upper()}": value for name, value in stubs.items()},
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+    def test_linux_setup_installs_llvm_tools_and_the_pinned_cargo_llvm_cov(self):
+        shells = _posix_shells()
+        if os.name != "posix" or not shells:
+            self.skipTest("the harness needs a POSIX shell and executable stubs")
+        entries = parse_manifest(MANIFEST.read_text(encoding="utf-8"))
+        toolchain = entries["rust.toolchain"]
+        pinned = entries["cargo_llvm_cov.version"]
+        install = (
+            f"cargo +{toolchain} install --locked --force cargo-llvm-cov "
+            f"--version {pinned}"
+        )
+        # A release whose number the pinned one only begins is another one.
+        for installed, installs in (("", True), (f"{pinned}0", True), (pinned, False)):
+            for runner_only in ("false", "true"):
+                with self.subTest(installed=installed, runner_only=runner_only):
+                    result = self._run_rust_tools(
+                        shells[0], "install_rust_tools", runner_only, llvm_cov=installed
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    # Runner mode runs the tools of the trusted toolchain by path.
+                    commands = [
+                        line.rsplit("/", 1)[-1] for line in result.stdout.splitlines()
+                    ]
+                    self.assertIn(
+                        f"rustup component add --toolchain {toolchain} llvm-tools",
+                        commands,
+                    )
+                    self.assertEqual(install in commands, installs, commands)
+
+    def test_linux_setup_checks_llvm_tools_and_the_pinned_cargo_llvm_cov(self):
+        shells = _posix_shells()
+        if os.name != "posix" or not shells:
+            self.skipTest("the harness needs a POSIX shell and executable stubs")
+        entries = parse_manifest(MANIFEST.read_text(encoding="utf-8"))
+        toolchain = entries["rust.toolchain"]
+        pinned = entries["cargo_llvm_cov.version"]
+        for stubs, error in (
+            ({"llvm_cov": pinned}, None),
+            ({"llvm_cov": f"{pinned}0"}, f"cargo-llvm-cov {pinned} is not installed"),
+            (
+                {"llvm_cov": pinned, "components": "rust-std-x86_64-unknown-linux-gnu"},
+                f"the llvm-tools component of Rust {toolchain} is not installed",
+            ),
+        ):
+            for runner_only in ("false", "true"):
+                with self.subTest(stubs=stubs, runner_only=runner_only):
+                    result = self._run_rust_tools(
+                        shells[0], "check_rust_tools", runner_only, **stubs
+                    )
+                    if error is None:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertEqual(result.stderr, f"error: {error}\n")
 
 
 class RunnerSetupTests(unittest.TestCase):

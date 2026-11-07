@@ -166,6 +166,7 @@ $ToolPlatform = "windows-x86_64"
 $ToolManifest = Read-ToolManifest (Join-Path $PSScriptRoot "tool-versions.conf")
 $RustToolchain = Get-ToolManifestValue $ToolManifest "rust.toolchain"
 $CargoNextestVersion = Get-ToolManifestValue $ToolManifest "cargo_nextest.version"
+$CargoLlvmCovVersion = Get-ToolManifestValue $ToolManifest "cargo_llvm_cov.version"
 $rustupRelease = Get-ToolArtifact $ToolManifest "rustup" $ToolPlatform
 $RustupVersion = $rustupRelease.Version
 $RustupArtifact = $rustupRelease.Name
@@ -887,6 +888,11 @@ function Install-Toolchain {
         "x86_64-unknown-uefi",
         "--toolchain", $RustToolchain
     )
+    # cargo-llvm-cov merges and reports coverage profiles with the release's
+    # own llvm-profdata and llvm-cov.
+    Invoke-Native $rustupPath @(
+        "component", "add", "llvm-tools", "--toolchain", $RustToolchain
+    )
 
     $cargo = Join-Path $TrustedCargoHome "bin\cargo.exe"
     $nextest = Join-Path $TrustedCargoHome "bin\cargo-nextest.exe"
@@ -901,6 +907,22 @@ function Install-Toolchain {
         Invoke-Native $cargo @(
             "+$RustToolchain", "install", "--locked", "--force", "cargo-nextest",
             "--version", $CargoNextestVersion
+        )
+    }
+
+    $llvmCov = Join-Path $TrustedCargoHome "bin\cargo-llvm-cov.exe"
+    $installLlvmCov = -not (Test-Path -LiteralPath $llvmCov -PathType Leaf)
+    if (-not $installLlvmCov) {
+        # Alone, cargo-llvm-cov takes the name of its subcommand first.
+        $llvmCovVersion = & $llvmCov llvm-cov --version
+        Assert-LastExitCode "cargo-llvm-cov --version"
+        $installLlvmCov = ($llvmCovVersion -join "`n") -notmatch `
+            "(?m)^cargo-llvm-cov $([regex]::Escape($CargoLlvmCovVersion))$"
+    }
+    if ($installLlvmCov) {
+        Invoke-Native $cargo @(
+            "+$RustToolchain", "install", "--locked", "--force", "cargo-llvm-cov",
+            "--version", $CargoLlvmCovVersion
         )
     }
 
@@ -1590,6 +1612,7 @@ function Assert-Environment {
             "rustup.exe",
             "cargo.exe",
             "cargo-nextest.exe",
+            "cargo-llvm-cov.exe",
             "sccache.exe"
         )) {
         [void](Get-RequiredCommand $command)
@@ -1608,6 +1631,18 @@ function Assert-Environment {
     if (($nextestVersion -join "`n") -notmatch `
             "cargo-nextest $([regex]::Escape($CargoNextestVersion))") {
         throw "cargo-nextest $CargoNextestVersion is not installed"
+    }
+    $llvmCovVersion = & (Get-RequiredCommand "cargo-llvm-cov.exe") llvm-cov --version
+    Assert-LastExitCode "cargo-llvm-cov --version"
+    if (($llvmCovVersion -join "`n") -notmatch `
+            "(?m)^cargo-llvm-cov $([regex]::Escape($CargoLlvmCovVersion))$") {
+        throw "cargo-llvm-cov $CargoLlvmCovVersion is not installed"
+    }
+    $components = & (Get-RequiredCommand "rustup.exe") `
+        component list --installed --toolchain $RustToolchain
+    Assert-LastExitCode "rustup component list"
+    if (-not ($components -match "^llvm-tools-")) {
+        throw "the llvm-tools component of Rust $RustToolchain is not installed"
     }
     $installedSccacheVersion = & (Get-RequiredCommand "sccache.exe") --version
     Assert-LastExitCode "sccache --version"

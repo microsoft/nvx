@@ -761,6 +761,11 @@ fn run_agent_helper(
         .arg("--")
         .args(workload)
         .env_clear();
+    // An instrumented helper writes its coverage profile where `LLVM_PROFILE_FILE` names, and
+    // without it into its working directory, outside the profiles that a measurement merges.
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     for (name, value) in environment {
         command.env(name, value);
     }
@@ -770,13 +775,18 @@ fn run_agent_helper(
     output_of(command.stdout(Stdio::piped()))
 }
 
-/// Returns `stdout`, the environment that `/usr/bin/env` printed, without the variable that the
-/// LLVM profiling runtime of an instrumented build sets in the environment of its own process when
-/// it starts, such as the helper's, whose workload then inherits it.
+/// Returns `stdout`, the environment that `/usr/bin/env` printed, without the variables of the
+/// LLVM profiling runtime of an instrumented build: `LLVM_PROFILE_FILE`, which names where the
+/// runtime writes its profile and which [`run_agent_helper`] hands on to the helper, and the
+/// variable that the runtime sets in the environment of its own process when it starts, such as
+/// the helper's. A workload that inherits the helper's environment inherits both.
 fn without_profiling_runtime(stdout: Vec<u8>) -> Vec<u8> {
     stdout
         .split_inclusive(|&byte| byte == b'\n')
-        .filter(|line| !line.starts_with(b"__LLVM_PROFILE_RT_INIT_ONCE="))
+        .filter(|line| {
+            !line.starts_with(b"__LLVM_PROFILE_RT_INIT_ONCE=")
+                && !line.starts_with(b"LLVM_PROFILE_FILE=")
+        })
         .flatten()
         .copied()
         .collect()
