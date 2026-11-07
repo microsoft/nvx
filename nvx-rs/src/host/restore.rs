@@ -22,6 +22,7 @@ use super::report::Report;
 use super::vm::VmDir;
 use crate::activation::{ActivationRecord, ReadyActivation};
 use crate::protocol::restore_ready::parse_ready_event;
+use crate::protocol::status;
 use crate::{Error, Result};
 
 /// The pending part of a restore.
@@ -56,9 +57,125 @@ pub enum RestoreEvidence {
     Cancelled,
     /// The caller verified that the VM exited before Ready.
     Exited,
+    /// The requested resources are invalid or the guest refused them.
+    InvalidTargets,
+    /// The requested settings cannot be applied.
+    InvalidSettings,
+    /// The activation record is invalid or the guest refused it.
+    InvalidActivate,
+    /// The requested mappings or export cannot be applied.
+    InvalidMappings,
+    /// The snapshot cannot serve the requested image.
+    UnservableImage,
+    /// The requested scratch is not usable.
+    UnusableScratch,
+    /// The requested root cannot be assembled.
+    UnusableRoot,
+    /// A supplied file has the wrong identity.
+    SuppliedIdentity,
+    /// A supplied file has the wrong length.
+    SuppliedLength,
+    /// A supplied file has the wrong device geometry.
+    SuppliedGeometry,
+    /// A restore endpoint could not be bound.
+    EndpointBind,
+    /// A requested network forward could not be bound.
+    ForwardBind,
+    /// The host exhausted storage, memory or descriptors.
+    ResourceExhaustion,
+    /// The host cannot present the snapshot's CPU or time contract.
+    IncompatibleHost,
+    /// The restore uses another runtime identity.
+    RuntimeMismatch,
+    /// Another host operation failed.
+    HostFailure,
+    /// The VM ended without a usable status.
+    LostStatus,
+    /// The control session reset or ended.
+    Reset,
+    /// The caller or another controller forcibly ended the VM.
+    ForcedKill,
+    /// The snapshot is malformed or inconsistent.
+    MalformedSnapshot,
+    /// A diagnosis attributes a capture or repair defect to the snapshot.
+    SnapshotDefect,
+    /// A guest repair or time ABI status, whose provenance is not established.
+    RepairStatus,
 }
 
-/// A restore's failure phase, evidence and original cause.
+impl RestoreEvidence {
+    fn attribution(self) -> Attribution {
+        match self {
+            Self::InvalidTargets
+            | Self::InvalidSettings
+            | Self::InvalidActivate
+            | Self::InvalidMappings
+            | Self::UnservableImage
+            | Self::UnusableScratch
+            | Self::UnusableRoot
+            | Self::SuppliedIdentity
+            | Self::SuppliedLength
+            | Self::SuppliedGeometry => Attribution::Request,
+            Self::Io
+            | Self::ReportUnreadable
+            | Self::EndpointBind
+            | Self::ForwardBind
+            | Self::ResourceExhaustion
+            | Self::IncompatibleHost
+            | Self::RuntimeMismatch
+            | Self::HostFailure => Attribution::Host,
+            Self::PeerMismatch
+            | Self::Malformed
+            | Self::Expired
+            | Self::Cancelled
+            | Self::Exited
+            | Self::LostStatus
+            | Self::Reset
+            | Self::ForcedKill => Attribution::Unknown,
+            Self::MalformedSnapshot | Self::SnapshotDefect => Attribution::Snapshot,
+            Self::RepairStatus => Attribution::Repair,
+        }
+    }
+
+    fn reported(report: &Report) -> Option<Self> {
+        if !matches!(report.category.as_deref(), Some("guest-exit" | "success")) {
+            return None;
+        }
+        let code = u8::try_from(report.status_code?).ok()?;
+        if status::TIME_STATUSES.contains(&code) || status::REPAIR_STATUSES.contains(&code) {
+            return Some(Self::RepairStatus);
+        }
+        // The machine never sends Start, so no workload can have supplied an activation status.
+        Some(match code {
+            status::ACTIVATION_DEADLINE => Self::Expired,
+            status::ACTIVATION_PROTOCOL | status::ACTIVATION_ORDER => Self::Malformed,
+            status::ACTIVATION_RECORD => Self::InvalidActivate,
+            status::ACTIVATION_RESOURCES => Self::InvalidTargets,
+            status::ACTIVATION_ROOT => Self::UnusableRoot,
+            status::ACTIVATION_WORKLOAD | status::ACTIVATION_NETWORK => Self::InvalidSettings,
+            status::ACTIVATION_EXPORT => Self::InvalidMappings,
+            _ => return None,
+        })
+    }
+}
+
+/// What a restore failure's evidence attributes it to, without a disposition or retry policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Attribution {
+    /// The requested image, upper, resources or settings.
+    Request,
+    /// The host or its own operations.
+    Host,
+    /// The snapshot's payload or a diagnosed capture or repair defect.
+    Snapshot,
+    /// The guest's repair or time ABI, whose provenance is not established.
+    Repair,
+    /// The host, protocol or neither: the evidence establishes no provenance.
+    Unknown,
+}
+
+/// A restore's failure facts and original cause.
 ///
 /// This error neither stops the VM nor records a disposition. The caller retains its process,
 /// session and storage and decides what to do with them.
@@ -67,10 +184,46 @@ pub enum RestoreEvidence {
 pub struct RestoreError {
     /// The phase of the failed operation.
     pub phase: RestorePhase,
+    /// What the evidence attributes the failure to, without prescribing a response.
+    pub attribution: Attribution,
     /// What the caller or the machine observed.
     pub evidence: RestoreEvidence,
+    /// Whether guest code could have executed since the caller reported Spawned.
+    ///
+    /// This remains true after session loss or verified exit. It does not prove execution,
+    /// imply that the VM still runs, or mean that a workload Start was sent.
+    pub guest_may_have_run: bool,
+    /// The failure's description, including the messages of its original cause chain.
+    pub message: String,
     /// The original cause, when the failed operation supplied one.
     pub source: Option<Box<dyn StdError + Send + Sync>>,
+}
+
+impl RestoreError {
+    fn new(
+        phase: RestorePhase,
+        evidence: RestoreEvidence,
+        guest_may_have_run: bool,
+        source: Option<Box<dyn StdError + Send + Sync>>,
+    ) -> Self {
+        let mut message = format!("restore failed during {phase:?}: {evidence:?}");
+        let mut cause = source
+            .as_deref()
+            .map(|source| source as &(dyn StdError + 'static));
+        while let Some(source) = cause {
+            message.push_str(": ");
+            message.push_str(&source.to_string());
+            cause = source.source();
+        }
+        Self {
+            phase,
+            attribution: evidence.attribution(),
+            evidence,
+            guest_may_have_run,
+            message,
+            source,
+        }
+    }
 }
 
 impl fmt::Display for RestoreError {
@@ -186,6 +339,8 @@ pub struct RestoreMachine {
     encoded: Vec<u8>,
     /// The activation that a successful Ready must report.
     expected: ReadyActivation,
+    /// Guest execution cannot be ruled out once the caller reports a successful spawn.
+    guest_may_have_run: bool,
     /// The pending operation or terminal state.
     state: MachineState,
     /// The next action, which an input may invalidate before it is taken.
@@ -201,13 +356,14 @@ impl RestoreMachine {
         let mut machine = Self {
             encoded: record.encode(),
             expected: ReadyActivation::of(record),
+            guest_may_have_run: false,
             state: MachineState::Spawn,
             action: None,
         };
         if record.restore().is_none() {
             machine.fail(
                 RestorePhase::ReadyEvent,
-                RestoreEvidence::Malformed,
+                RestoreEvidence::InvalidActivate,
                 Some(Box::new(Error::unsupported(
                     "a restore needs an activation record with a transaction",
                 ))),
@@ -227,6 +383,7 @@ impl RestoreMachine {
         };
         match (self.state, input) {
             (MachineState::Spawn, RestoreInput::Spawned(_)) => {
+                self.guest_may_have_run = true;
                 self.state = MachineState::Event;
                 self.action = Some(RestoreAction::AwaitReadyEvent);
             }
@@ -247,8 +404,7 @@ impl RestoreMachine {
             }
             (MachineState::Activate | MachineState::Ready, RestoreInput::GuestReady(reported)) => {
                 if reported == self.expected {
-                    self.state = MachineState::Finished;
-                    self.action = Some(RestoreAction::Done);
+                    self.finish(RestoreAction::Done);
                 } else {
                     self.fail(
                         RestorePhase::Ready,
@@ -282,7 +438,20 @@ impl RestoreMachine {
             }
             (_, RestoreInput::Expired) => self.fail(phase, RestoreEvidence::Expired, None),
             (_, RestoreInput::Cancelled) => self.fail(phase, RestoreEvidence::Cancelled, None),
-            (_, RestoreInput::Exited(_)) => self.fail(phase, RestoreEvidence::Exited, None),
+            (_, RestoreInput::Exited(report)) => {
+                let evidence = report
+                    .as_ref()
+                    .and_then(RestoreEvidence::reported)
+                    .unwrap_or(RestoreEvidence::Exited);
+                let mut error = RestoreError::new(phase, evidence, self.guest_may_have_run, None);
+                if let Some(report) = report {
+                    error.message.push_str(&format!(
+                        "; VM outcome: category {:?}, status {:?}",
+                        report.category, report.status_code
+                    ));
+                }
+                self.finish(RestoreAction::Fail(error));
+            }
             _ => self.fail(
                 phase,
                 RestoreEvidence::Malformed,
@@ -312,12 +481,17 @@ impl RestoreMachine {
         evidence: RestoreEvidence,
         source: Option<Box<dyn StdError + Send + Sync>>,
     ) {
-        self.state = MachineState::Finished;
-        self.action = Some(RestoreAction::Fail(RestoreError {
+        self.finish(RestoreAction::Fail(RestoreError::new(
             phase,
             evidence,
+            self.guest_may_have_run,
             source,
-        }));
+        )));
+    }
+
+    fn finish(&mut self, action: RestoreAction) {
+        self.state = MachineState::Finished;
+        self.action = Some(action);
     }
 }
 
