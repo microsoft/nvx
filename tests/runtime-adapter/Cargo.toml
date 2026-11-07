@@ -48,6 +48,11 @@ nix = { version = "0.31.3", default-features = false, features = [
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 nix = { version = "0.31.3", default-features = false, features = ["ptrace", "term"] }
 
+[dev-dependencies]
+# The tests drop a connection that opened to itself with SO_LINGER 0: `TcpStream::set_linger`
+# is unstable, so they use the stable socket2 API.
+socket2 = "0.6"
+
 # The binaries have no unit tests; tests/independent_build.rs runs them.
 [[bin]]
 name = "runtime-adapter-host"
