@@ -204,8 +204,21 @@ impl TimeAbi {
     /// [`Restore::finished`] tells whether the call finished the restore, and how it reports a
     /// failed handoff of repair step 7.
     pub fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
-        let runtime = self.runtime();
-        settled(&runtime, capture(&runtime, request))
+        self.capture_until(request, None)
+            .map_err(|(error, _)| error)
+    }
+
+    /// Bounds capture preflight and reports whether cleanup has entered the unbounded phase.
+    pub(crate) fn capture_until(
+        &self,
+        request: CaptureRequest,
+        deadline: Option<Instant>,
+    ) -> Result<CaptureOutcome, (TimeError, bool)> {
+        let mut runtime = self.runtime();
+        runtime.deadline = deadline;
+        let result = capture(&mut runtime, request);
+        let unbounded = runtime.deadline.is_none();
+        settled(&runtime, result).map_err(|error| (error, unbounded))
     }
 
     /// Finishes a restore that [`capture`](Self::capture) left unfinished, after the caller
@@ -792,7 +805,11 @@ const ENTROPY_FLAGS: OpenFlags = OpenFlags::O_WRONLY
     .union(OpenFlags::O_CLOEXEC);
 
 /// The capture request and repair of [`TimeAbi::capture`].
-fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
+fn capture(
+    runtime: &mut Runtime<'_>,
+    request: CaptureRequest,
+) -> Result<CaptureOutcome, TimeError> {
+    sys::FileLock::check_deadline(runtime.deadline).map_err(|_| TimeError::Deadline)?;
     let CaptureRequest {
         scratch,
         generation_id,
@@ -831,13 +848,14 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
         },
         None => EntropySink::Seed,
     };
-    let _lock = match system::lock_portb() {
+    let _lock = match system::lock_file(system::PORTB_LOCK_PATH, runtime.deadline) {
         Ok(lock) => lock,
         Err(error) => {
             entropy.discard();
             return Err(TimeError::PortLock(error.into()));
         }
     };
+    runtime.deadline = None;
     ports.write_u8(Port::Snapshot, scratch.request());
     let start = clock_ns(sys::Clock::Monotonic);
     let read = (ports.read_u8(Port::PortbStatus) & PORTB_PACKET_AVAILABLE != 0)
