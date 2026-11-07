@@ -14,7 +14,7 @@ use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
 use nvx::host::platform::Transport;
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::supervisor::{self, Inherited};
-use nvx::host::{report, session, vm};
+use nvx::host::{artifacts, report, session, vm};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args_os().collect();
@@ -43,9 +43,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_err(Box::<dyn Error>::from)
     };
     let runtime = Runtime {
-        openvmm: args[2].clone().into(),
-        kernel: args[3].clone().into(),
-        initramfs: args[4].clone().into(),
+        openvmm: artifacts::absolute(Path::new(&args[2]))?,
+        kernel: artifacts::absolute(Path::new(&args[3]))?,
+        initramfs: artifacts::absolute(Path::new(&args[4]))?,
         identity: RuntimeIdentity::new(identity(6)?, identity(7)?, identity(8)?),
         hypervisor,
         cpu_profile: Some("auto".to_owned()),
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         breakaway_from_job,
         inherit: inherit.iter().map(Inherited::new).collect(),
     };
-    let launched = supervisor::spawn(&command, capability.as_bytes(), log)?;
+    let mut launched = supervisor::spawn(&command, capability.as_bytes(), log)?;
     let result = (|| -> Result<(), Box<dyn Error>> {
         let process = launched.process()?;
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -107,6 +107,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         read_until(console.as_mut(), b"\nNVX-EXTERNAL-LAUNCH-OK", deadline)?;
         if !process.wait(deadline)? {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "VM did not exit").into());
+        }
+        match launched.wait_timeout(Duration::ZERO)? {
+            Some(0) => {}
+            Some(status) => {
+                return Err(io::Error::other(format!("VMM exited with status {status}")).into());
+            }
+            None => return Err(io::Error::other("VMM exit status is unavailable").into()),
         }
         let outcome = report::read(&outputs.outcome)
             .ok_or_else(|| io::Error::other("missing or invalid VM outcome"))?;

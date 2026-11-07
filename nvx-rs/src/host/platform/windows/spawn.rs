@@ -11,26 +11,27 @@ use std::{mem, ptr};
 
 #[cfg(feature = "cli")]
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Foundation::{
     GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 #[cfg(feature = "cli")]
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
+#[cfg(feature = "cli")]
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, InitializeProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject,
 };
-#[cfg(feature = "cli")]
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetExitCodeProcess};
 
 #[cfg(feature = "cli")]
 use super::process::refused_termination;
@@ -78,7 +79,6 @@ impl LaunchedProcess {
 
     /// Waits up to `timeout` for the process to exit, and returns its exit status if it has,
     /// as `Popen.wait` reads it with `GetExitCodeProcess`.
-    #[cfg(feature = "cli")]
     pub(crate) fn wait_timeout(&self, timeout: Duration) -> io::Result<Option<u32>> {
         let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(INFINITE - 1);
         // SAFETY: CreateProcessW returned the handle with full access.

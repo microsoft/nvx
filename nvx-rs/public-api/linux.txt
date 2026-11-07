@@ -2709,6 +2709,7 @@ method nvx::host::supervisor::Launched::detach
 method nvx::host::supervisor::Launched::id
 method nvx::host::supervisor::Launched::kill_and_wait
 method nvx::host::supervisor::Launched::process
+method nvx::host::supervisor::Launched::wait_timeout
 enum nvx::host::supervisor::Reattached
 variant nvx::host::supervisor::Reattached::Exited
 field nvx::host::supervisor::Reattached::Exited::record
