@@ -178,11 +178,11 @@ is_canonical_uuid() {
     return 1
 }
 
-# Reads the value of the nvx_layer token for read_root_tokens:
-# distro,0xd0003000,FORMAT[:IDENTITY], where this init accepts only the erofs
-# format, with or without the filesystem UUID that the image must have.
+# Reads the nvx_layer format and EROFS identity for read_root_tokens.
+# This init assembles only EROFS; it refuses GPT after root-token validation.
 read_layer_token() {
     layer_image=${1#distro,0xd0003000,}
+    layer_format=${layer_image%%:*}
     case "$1" in
         distro,0xd0003000,*,*) ;;
         distro,0xd0003000,erofs)
@@ -196,10 +196,9 @@ read_layer_token() {
             return 0
             ;;
         distro,0xd0003000,gpt | distro,0xd0003000,gpt:*)
-            fatal "nvx_layer=$1 names a GPT image, which this init cannot assemble: it assembles only an EROFS image"
+            return 0
             ;;
         distro,0xd0003000,*)
-            layer_format=${layer_image%%:*}
             # The form without a format names the UUID in its place.
             if [ -z "$layer_format" ] || is_canonical_uuid "$layer_format"; then
                 fatal "the nvx_layer kernel parameter names no image format, erofs or gpt: '$1'"
@@ -212,24 +211,37 @@ read_layer_token() {
 
 # Reads the boot tokens of the layered root, with the rules of the host's
 # renderer, nvx::protocol::root: nvx_layer names the image of the distro block
-# device, and nvx_scratch=0xd0006000,ext4 or nvx_overlay_upper=ramfs the upper,
-# each once. This init assembles only an EROFS image, so it also refuses a GPT
-# image. Sets layer_uuid to the filesystem UUID that the image must have, or to
-# nothing if the token names none, and upper to scratch or ram. The parser also
-# refuses a RAM upper beside a scratch block device, which this init checks
-# against the kernel's devices instead, with refuse_scratch_device. The tests
-# replay nvx-rs/tests/fixtures/root-tokens.json through it.
+# device, nvx_scratch=0xd0006000,ext4 or nvx_overlay_upper=ramfs the upper, and
+# nvx_overlay_mode, nvx_scratch_journal, nvx_first_partition_bound, and
+# nvx_ram_upper_percent the root's settings, each once. This init assembles
+# only an EROFS image, mounts the overlay only for trusted lowers, and reads
+# nothing of a scratch's superblock, so after those rules it refuses a GPT
+# image, untrusted lowers, and a forbidden journal too. A bound is checked as
+# an unsigned decimal even though it needs a GPT image, which this init cannot
+# assemble. Sets layer_uuid to the filesystem UUID that the image must have, or to
+# nothing if the token names none, upper to scratch or ram, and ram_percent to
+# the RAM upper's cap, or to nothing for the kernel's default size. The parser
+# also refuses a RAM upper beside a scratch block device, which this init
+# checks against the kernel's devices instead, with refuse_scratch_device. The
+# tests replay nvx-rs/tests/fixtures/root-tokens.json through it.
 read_root_tokens() {
     layer_seen=false
     scratch_seen=false
     ram_seen=false
     layer_uuid=
+    first_root_parameter=
+    # The names of the settings that the command line names, and the values of
+    # three of them.
+    settings=
+    overlay_mode=
+    scratch_journal=
+    ram_percent=
     # Kernel command-line tokens are deliberately split on spaces.
     # shellcheck disable=SC2086
     set -f
     for token in $cmdline; do
         case "$token" in
-            nvx_layer | nvx_scratch | nvx_overlay_upper)
+            nvx_layer | nvx_scratch | nvx_overlay_upper | nvx_overlay_mode | nvx_scratch_journal | nvx_first_partition_bound | nvx_ram_upper_percent)
                 fatal "the $token kernel parameter has no value"
                 ;;
             nvx_layer=*)
@@ -239,6 +251,7 @@ read_root_tokens() {
                 read_layer_token "${token#*=}"
                 ;;
             nvx_scratch=*)
+                [ -n "$first_root_parameter" ] || first_root_parameter=nvx_scratch
                 [ "$scratch_seen" = false ] ||
                     fatal "the nvx_scratch kernel parameter is repeated"
                 scratch_seen=true
@@ -246,17 +259,53 @@ read_root_tokens() {
                     fatal "the nvx_scratch kernel parameter must be 0xd0006000,ext4, not '${token#*=}'"
                 ;;
             nvx_overlay_upper=*)
+                [ -n "$first_root_parameter" ] || first_root_parameter=nvx_overlay_upper
                 [ "$ram_seen" = false ] ||
                     fatal "the nvx_overlay_upper kernel parameter is repeated"
                 ram_seen=true
                 [ "${token#*=}" = ramfs ] ||
                     fatal "the nvx_overlay_upper kernel parameter must be ramfs, not '${token#*=}'"
                 ;;
+            nvx_overlay_mode=* | nvx_scratch_journal=* | nvx_first_partition_bound=* | nvx_ram_upper_percent=*)
+                setting=${token%%=*}
+                [ -n "$first_root_parameter" ] || first_root_parameter=$setting
+                case " $settings " in *" $setting "*) fatal "the $setting kernel parameter is repeated" ;; esac
+                settings="$settings $setting"
+                case "$token" in
+                    nvx_overlay_mode=trusted-lowers | nvx_overlay_mode=untrusted-lowers) overlay_mode=${token#*=} ;;
+                    nvx_overlay_mode=*) fatal "the $setting kernel parameter must be trusted-lowers or untrusted-lowers, not '${token#*=}'" ;;
+                    nvx_scratch_journal=allowed | nvx_scratch_journal=forbidden) scratch_journal=${token#*=} ;;
+                    nvx_scratch_journal=*) fatal "the $setting kernel parameter must be allowed or forbidden, not '${token#*=}'" ;;
+                    nvx_ram_upper_percent=[1-9] | nvx_ram_upper_percent=[1-8][0-9] | nvx_ram_upper_percent=90) ram_percent=${token#*=} ;;
+                    nvx_ram_upper_percent=*) fatal "the $setting kernel parameter must be a decimal number from 1 to 90, without a sign or leading zeros, not '${token#*=}'" ;;
+                    nvx_first_partition_bound= | nvx_first_partition_bound=0* | nvx_first_partition_bound=*[!0-9]*) fatal "the $setting kernel parameter must be a decimal number from 1 to 18446744073709551615, without a sign or leading zeros, not '${token#*=}'" ;;
+                    nvx_first_partition_bound=*)
+                        bound_digits=${token#*=}
+                        [ "${#bound_digits}" -le 20 ] ||
+                            fatal "the $setting kernel parameter must be a decimal number from 1 to 18446744073709551615, without a sign or leading zeros, not '${token#*=}'"
+                        if [ "${#bound_digits}" -eq 20 ]; then
+                            bound_limit=18446744073709551615
+                            # Compare digits, never the full unsigned value.
+                            while [ -n "$bound_digits" ]; do
+                                bound_digit=${bound_digits%"${bound_digits#?}"}
+                                limit_digit=${bound_limit%"${bound_limit#?}"}
+                                [ "$bound_digit" -le "$limit_digit" ] ||
+                                    fatal "the $setting kernel parameter must be a decimal number from 1 to 18446744073709551615, without a sign or leading zeros, not '${token#*=}'"
+                                [ "$bound_digit" -eq "$limit_digit" ] || break
+                                bound_digits=${bound_digits#?}
+                                bound_limit=${bound_limit#?}
+                            done
+                        fi
+                        ;;
+                esac
+                ;;
         esac
     done
     set +f
     [ "$scratch_seen" = false ] || [ "$ram_seen" = false ] ||
         fatal "a layered root has one upper, but the command line names both nvx_scratch and nvx_overlay_upper"
+    [ "$layer_seen" = true ] || [ -z "$first_root_parameter" ] ||
+        fatal "the $first_root_parameter kernel parameter needs an image, which nvx_layer names"
     [ "$layer_seen" = true ] ||
         fatal "the command line names no distro layer: this init needs nvx_layer=distro,0xd0003000,erofs[:UUID]"
     if [ "$scratch_seen" = true ]; then
@@ -266,6 +315,19 @@ read_root_tokens() {
     else
         fatal "the nvx_layer kernel parameter needs an upper, nvx_scratch or nvx_overlay_upper"
     fi
+    [ -z "$scratch_journal" ] || [ "$upper" = scratch ] ||
+        fatal "the nvx_scratch_journal kernel parameter needs a scratch upper, nvx_scratch"
+    [ -z "$ram_percent" ] || [ "$upper" = ram ] ||
+        fatal "the nvx_ram_upper_percent kernel parameter needs a RAM upper, nvx_overlay_upper"
+    if [ "$layer_format" != gpt ]; then
+        case " $settings " in *" nvx_first_partition_bound "*) fatal "the nvx_first_partition_bound kernel parameter needs a GPT image" ;; esac
+    fi
+    [ "$layer_format" != gpt ] ||
+        fatal "nvx_layer=distro,0xd0003000,$layer_image names a GPT image, which this init cannot assemble: it assembles only an EROFS image"
+    [ "$overlay_mode" != untrusted-lowers ] ||
+        fatal "nvx_overlay_mode=untrusted-lowers names untrusted lowers, which this init cannot assemble: it mounts the overlay only for trusted lowers, with metacopy=on,xino=on"
+    [ "$scratch_journal" != forbidden ] ||
+        fatal "nvx_scratch_journal=forbidden forbids the scratch a journal, which this init cannot check: it reads nothing of the scratch's superblock"
 }
 
 # Fails if the kernel has a virtio-mmio device at the scratch block device's
@@ -288,11 +350,11 @@ refuse_scratch_device() {
 # Mounts the upper that read_root_tokens read, and creates the overlay's upper
 # and work directories on it: the ext4 scratch disk at 0xd0006000, or a tmpfs,
 # with the mode of an ext4 scratch's root rather than tmpfs's world-writable
-# default, and with the kernel's default size, half of the guest's RAM, as
-# nvx::guest::root mounts them. Sets upper_point to the upper's mount point,
-# and upper_name to what messages call it. A tmpfs upper's pages are charged to
-# the memory cgroup of the process that writes them, so the workload's writes
-# count against its nvx_memory_max.
+# default, and with the size of its cap, size=N%, or else the kernel's default
+# size, half of the guest's RAM, as nvx::guest::root mounts them. Sets
+# upper_point to the upper's mount point, and upper_name to what messages call
+# it. A tmpfs upper's pages are charged to the memory cgroup of the process
+# that writes them, so the workload's writes count against its nvx_memory_max.
 mount_upper() {
     case "$upper" in
         scratch)
@@ -310,7 +372,7 @@ mount_upper() {
             upper_point=$tmpfs
             upper_name="the tmpfs upper"
             mkdir -p "$upper_point"
-            mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$upper_point" ||
+            mount -t tmpfs -o "mode=0755,nosuid,nodev${ram_percent:+,size=$ram_percent%}" tmpfs "$upper_point" ||
                 fatal "failed to mount the tmpfs upper"
             ;;
     esac
