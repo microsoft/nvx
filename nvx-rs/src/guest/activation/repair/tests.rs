@@ -1216,7 +1216,7 @@ fn a_repair_draws_no_randomness_before_its_reseed() {
     // that the thread starts, so the test runs in a process of its own.
     if crate::guest::managed_agent::tests::isolate_process_test(
         "NVX_CLONE_REPAIR_RANDOMNESS_TEST_CHILD",
-        "guest::clone::repair::tests::a_repair_draws_no_randomness_before_its_reseed",
+        "guest::activation::repair::tests::a_repair_draws_no_randomness_before_its_reseed",
     ) {
         return;
     }

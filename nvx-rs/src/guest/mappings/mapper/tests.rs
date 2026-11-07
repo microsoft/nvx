@@ -23,19 +23,6 @@ impl Mapped {
     }
 }
 
-impl TeardownError {
-    /// Returns the error of a teardown that failed to unmount the mapping at `target`, an
-    /// absolute path in the root, with `error`, for the tests of other modules.
-    pub(crate) fn of(target: impl Into<PathBuf>, error: MappingError) -> Self {
-        Self {
-            failures: vec![UnmountFailure {
-                target: target.into(),
-                error,
-            }],
-        }
-    }
-}
-
 /// A target root at `root` and a source root at `export`, below a temporary directory, each on a
 /// mount of the fake kernel's.
 struct Fixture {
