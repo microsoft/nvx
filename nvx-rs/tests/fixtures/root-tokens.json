@@ -117,7 +117,7 @@
     {"name": "a journal policy in RAM", "command_line": "nvx_layer=distro,0xd0003000,erofs nvx_overlay_upper=ramfs nvx_scratch_journal=allowed", "error": "the nvx_scratch_journal kernel parameter needs a scratch upper, nvx_scratch"},
     {"name": "a cap over scratch", "command_line": "nvx_layer=distro,0xd0003000,erofs nvx_scratch=0xd0006000,ext4 nvx_ram_upper_percent=50", "error": "the nvx_ram_upper_percent kernel parameter needs a RAM upper, nvx_overlay_upper"},
     {"name": "a bound of an EROFS image", "command_line": "nvx_layer=distro,0xd0003000,erofs nvx_scratch=0xd0006000,ext4 nvx_first_partition_bound=4096", "error": "the nvx_first_partition_bound kernel parameter needs a GPT image"},
-    {"name": "settings without a root", "command_line": "quiet nvx_overlay_mode=trusted-lowers nvx_scratch_journal=allowed", "error": "the nvx_overlay_mode kernel parameter needs an image, which nvx_layer names"},
-    {"name": "a cap before a RAM upper without an image", "command_line": "nvx_ram_upper_percent=50 nvx_overlay_upper=ramfs", "error": "the nvx_ram_upper_percent kernel parameter needs an image, which nvx_layer names"}
+    {"name": "settings without a root", "command_line": "quiet nvx_overlay_mode=trusted-lowers nvx_scratch_journal=allowed", "error": "the nvx_overlay_mode kernel parameter needs an image, which nvx_layer names", "shell_error": "the nvx_overlay_mode kernel parameter needs an image, which nvx_layer names"},
+    {"name": "a cap before a RAM upper without an image", "command_line": "nvx_ram_upper_percent=50 nvx_overlay_upper=ramfs", "error": "the nvx_ram_upper_percent kernel parameter needs an image, which nvx_layer names", "shell_error": "the nvx_ram_upper_percent kernel parameter needs an image, which nvx_layer names"}
   ]
 }
