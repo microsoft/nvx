@@ -51,7 +51,7 @@ pub enum RestoreEvidence {
     Malformed,
     /// The caller could not read the VM's outcome report.
     ReportUnreadable,
-    /// The caller's budget expired.
+    /// The caller's budget or the guest's activation deadline expired.
     Expired,
     /// The caller cancelled the restore.
     Cancelled,
