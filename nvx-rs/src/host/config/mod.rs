@@ -209,6 +209,7 @@ impl VmConfig {
     /// given. A [`ConsoleAttachment::Listener`] needs a nonempty `console_endpoint`; a
     /// [`ConsoleAttachment::Disconnected`] needs none and retains the console device with a
     /// discarded attachment. The control endpoint always listens and authenticates from stdin.
+    /// Listener names must be distinct, with ASCII-case-insensitive comparison for WHP.
     /// The caller runs `runtime.openvmm` with these arguments.
     ///
     /// This whole-config entry point is temporarily public. SL2.8 makes it internal when
@@ -218,9 +219,9 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration, no [`Boot`], empty or NUL-containing required names or runtime paths,
-    /// block paths with disk-option delimiters or unbalanced brackets, an invalid authentication
-    /// timeout, kernel text with double quotes or the standalone `--` delimiter, or a complete
-    /// command line beyond the Windows limit.
+    /// duplicate listener names, block paths that are not Unicode or hold disk-option delimiters
+    /// or unbalanced brackets, an invalid authentication timeout, kernel text with double quotes
+    /// or the standalone `--` delimiter, or a complete command line beyond the Windows limit.
     /// The complete limit check runs on every host, without a reserve.
     pub fn openvmm_arguments(
         &self,
@@ -244,9 +245,17 @@ impl VmConfig {
             }
         }
         let console = match (self.console, console_endpoint) {
-            (ConsoleAttachment::Listener, Some(endpoint)) => {
-                check_endpoint(endpoint, "console_endpoint")?;
-                format!("listen={endpoint}")
+            (ConsoleAttachment::Listener, Some(console_endpoint)) => {
+                check_endpoint(console_endpoint, "console_endpoint")?;
+                if console_endpoint == endpoint
+                    || (runtime.hypervisor == Hypervisor::Whp
+                        && console_endpoint.eq_ignore_ascii_case(endpoint))
+                {
+                    return Err(Error::unsupported(
+                        "boot and control console listeners require distinct endpoints",
+                    ));
+                }
+                format!("listen={console_endpoint}")
             }
             (ConsoleAttachment::Disconnected, None) => "none".to_owned(),
             (ConsoleAttachment::Listener, None) => {
@@ -312,8 +321,9 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration or no [`Boot`], an unlowerable network policy, a NUL-containing argument,
-    /// a block path that OpenVMM's disk syntax cannot hold literally, kernel text with double
-    /// quotes or the standalone `--` delimiter, or insufficient room for the reserve.
+    /// a non-Unicode block path or one that OpenVMM's disk syntax cannot hold literally, kernel
+    /// text with double quotes or the standalone `--` delimiter, or insufficient room for the
+    /// reserve.
     pub fn check_command_line(&self) -> Result<()> {
         let command_line = self.control_kernel_command_line()?;
         let mut arguments = self.device_arguments()?;
@@ -358,13 +368,23 @@ impl VmConfig {
             self.processors.to_string().into(),
         ];
         if let RootConfig::Layered(root) = &self.root {
-            reject_disk_path(&root.image, &root.image.display().to_string())?;
+            let scratch = match &root.upper {
+                UpperConfig::Scratch { path, .. } => Some(path),
+                UpperConfig::Ram { .. } => None,
+            };
+            for path in [Some(&root.image), scratch].into_iter().flatten() {
+                if path.to_str().is_none() {
+                    return Err(Error::unsupported(
+                        "block paths must be Unicode for OpenVMM's string arguments",
+                    ));
+                }
+                reject_disk_path(path, &path.display().to_string())?;
+            }
             let mut image = OsString::from("distro:file:");
             image.push(&root.image);
             image.push(",ro");
             arguments.extend(["--microvm-sandbox-block".into(), image]);
             if let UpperConfig::Scratch { path, .. } = &root.upper {
-                reject_disk_path(path, &path.display().to_string())?;
                 let mut scratch = OsString::from("scratch:file:");
                 scratch.push(path);
                 arguments.extend(["--microvm-sandbox-block".into(), scratch]);
