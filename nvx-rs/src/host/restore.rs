@@ -6,7 +6,7 @@
 //!
 //! A launch binds before spawning the VM and receives through its verified [`Process`].
 //! Parse the completed bytes with
-//! [`parse_ready_event`](crate::protocol::restore_ready::parse_ready_event).
+//! [`parse_ready_event`].
 //! External I/O users take the native listener with `ReadyListener::into_std` on Linux or
 //! Windows and check its client's process identity before reading the event.
 
