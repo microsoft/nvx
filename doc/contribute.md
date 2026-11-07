@@ -49,9 +49,9 @@ with the deploy key and on the hypervisor runners before it merges; see
 | Commit subject | `area: summary`, where `area` is the component, command, or directory that changes, such as `doc`, `ci`, `guest`, `sandbox`, or `openvmm`. Start the summary with a lowercase imperative verb and omit the trailing period: `ci: run each OpenVMM suite only when its inputs change`. |
 | Commit body | What changed and why, when the subject does not say enough. |
 | Pull request title | The commit subject of a single-commit pull request; otherwise a summary in the same form. |
-| Pull request body | What changed and why, then a `Validation` section that lists the checks you ran and the gates you leave to CI, such as backends you could not test. |
+| Pull request body | What changed and why, then a `Validation` section that lists the checks you ran and the gates you leave to CI, such as backends you could not test. The [pull request template](../.github/pull_request_template.md) holds these sections. |
 | Issue references | `Closes #N` or `Fixes #N` first when the pull request completes the issue; `Part of #N` or `Refs #N` otherwise. |
-| Review threads | Reply with the commit that addresses the comment, or with the evidence that no change is needed, then resolve the thread. |
+| Review threads | Reply with the commit that addresses the comment, or with the evidence that no change is needed, then resolve the thread once the pull request's head holds that outcome. `scripts/pr_threads.py` lists the threads, and checks each reply and resolution. |
 
 Leave the performance histories in `data/*.csv` to CI: successful `dev`
 pushes record their results, and the nightly full run appends them.
@@ -80,7 +80,10 @@ runner pools, so:
 
 CI runs these checks on GitHub-hosted runners. Run the ones that cover your
 change before you push; [Setup](setup.md#development) lists the commands for
-the Python, shell, and link checks.
+the Python, shell, and link checks, and
+`python3 scripts/local_gates.py --base origin/dev` lists the gates that a
+change selects, with the commands of the actions below, and runs them with
+`--run`.
 
 | Code | Checks | Definition |
 | --- | --- | --- |
@@ -343,7 +346,7 @@ A pin promotion moves the `openvmm` gitlink to a reviewed OpenVMM revision:
 - When a rebase conflicts on the gitlink, do not pick either side: combining
   both changes usually needs a new OpenVMM revision.
 
-The [nvx-openvmm-promote](../.github/skills/nvx-openvmm-promote/SKILL.md)
+The [nvx-promote-openvmm-pin](../.github/skills/nvx-promote-openvmm-pin/SKILL.md)
 skill gives the complete procedure, including how to show that a replacement
 revision matches the reviewed one.
 
@@ -359,5 +362,5 @@ so that it keeps every revision of the old line that NVX pinned, and only then
 does `feature/microvm/dev` move to the new release, by a push with a lease. The
 NVX pull request that pins the release remaps the whole
 [OpenVMM upstream roadmap](openvmm-upstream-roadmap.md). The
-[nvx-openvmm-rebase](../.github/skills/nvx-openvmm-rebase/SKILL.md) skill gives
+[nvx-rebase-openvmm-chain](../.github/skills/nvx-rebase-openvmm-chain/SKILL.md) skill gives
 the complete procedure.

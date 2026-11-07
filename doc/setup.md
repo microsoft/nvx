@@ -173,7 +173,7 @@ only `hosts`; do not add a `version` field.
 
 Edit each profile in `.nvx-hosts.json`:
 
-- The profile name is the name supplied to the `nvx-host-connect` skill.
+- The profile name is the name supplied to the `nvx-prepare-host` skill.
 - `ssh_target` is one destination or alias configured in the developer's SSH configuration.
 - `backend` is exactly one of `kvm`, `mshv`, or `whp`.
 - `host_type` is required, identifies the server itself, and is exactly one of
@@ -188,17 +188,22 @@ private keys, passphrases, or SSH options in `.nvx-hosts.json`. The file is igno
 List and validate the configured profiles on Linux with:
 
 ```bash
-python3 .github/skills/nvx-host-connect/scripts/hosts.py
+python3 scripts/nvx_hosts.py
 ```
 
 On Windows PowerShell, use:
 
 ```powershell
-python .github\skills\nvx-host-connect\scripts\hosts.py
+python scripts\nvx_hosts.py
 ```
 
 If the inventory is absent or contains no hosts, the resolver disables remote access and reports
-that only local NVX development is enabled.
+that only local NVX development is enabled. A linked worktree has no copy of the ignored inventory,
+so the resolver reads the main worktree's. `nvx_hosts.py show PROFILE` resolves one profile;
+`exec` and `run` run a command or a script in the host's checkout over SSH, and `probe`,
+`worktree`, and `benchmark` run this checkout's `host_probe.py`, `host_worktree.py`, and
+`benchmark_series.py` against that checkout, which can predate them. None of them prompts for
+secrets.
 
 ## Development
 

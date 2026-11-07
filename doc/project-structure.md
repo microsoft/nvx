@@ -10,7 +10,7 @@ are build products or caches and are not part of the tracked source tree. The
 | --- | --- |
 | `.github/workflows` | CI, nightly failure report, test change flag, module diagram, release verification, adversarial campaign, and Copilot environment workflows |
 | `.github/actions` | Reusable local CI actions |
-| `.github/skills` | Copilot agent skills for common development workflows, among them the issue fixer |
+| `.github/skills` | Copilot agent skills for NVX's own workflows, among them the issue fixer |
 | `.github/agents` | Copilot custom agent: the bounded adversarial strategist |
 | `.github/specula` | Incremental formal verification adapter and runner setup |
 | `doc` | User and contributor documentation |
@@ -38,7 +38,7 @@ nvx/
 |   |-- ISSUE_TEMPLATE/          CPU profile request issue form
 |   |-- actions/                 Reusable local CI actions
 |   |-- agents/                  Copilot custom agents
-|   |-- skills/                  Copilot development workflow skills
+|   |-- skills/                  Copilot skills for NVX's own workflows
 |   |-- specula/                 Incremental formal verification integration
 |   |-- workflows/               GitHub Actions workflows
 |   |   |-- adversarial.yml      Trusted scheduled/manual adversarial campaigns
@@ -57,7 +57,8 @@ nvx/
 |   |   |-- specula-release.yml  Specula verification of published releases
 |   |   `-- test-changes.yml     Label and comment for pull requests that change existing tests
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
-|   `-- copilot-instructions.md  Repository-wide Copilot instructions
+|   |-- copilot-instructions.md  Repository-wide Copilot instructions
+|   `-- pull_request_template.md Sections of a pull request's description
 |-- .vscode/settings.json        Shared VS Code settings
 |-- guest/                       Guest-owned scripts
 |   |-- common/                  Shared init, agent, snapshot, and probe scripts
@@ -164,18 +165,30 @@ nvx/
 |   |   |-- setup-linux.sh        Linux/KVM or Linux/MSHV development-host and Actions runner bootstrap
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
+|   |-- benchmark_series.py      Benchmark series with CI's validation, for local and remote hosts
 |   |-- check_markdown_links.py  Markdown link, anchor, and doc/ path check run by CI
 |   |-- check_test_changes.py    Flags the changes of a pull request to existing tests
 |   |-- check_test_layout.py     Check that tests live apart from the code that they test
+|   |-- ci_triage.py             Classification of a CI run and its first failure
+|   |-- host_probe.py            Report of whether a host can run NVX
+|   |-- host_worktree.py         Temporary worktrees of an NVX checkout
+|   |-- issue_workspace.py       Existing work, topic branch, and cleanup of an issue's fix
+|   |-- local_gates.py           The CI gates that a change selects, read from CI, run locally
 |   |-- module_diagrams.py       Module diagram generator of the nvx crate
 |   |-- nvx-hosts.example.json   Template for the ignored .nvx-hosts.json
 |   |-- nvx.py                   Supported command-line entry point
 |   |-- nvx_adversarial_executor.py Restricted adversarial executor entry point
+|   |-- nvx_hosts.py             Remote host inventory, and commands and scripts on its hosts
 |   |-- nvx_rs_coverage.py       Coverage of the nvx crate's own tests, run by CI
+|   |-- openvmm_git.py           Git and roadmap helpers of the OpenVMM tools
+|   |-- openvmm_pin.py           Checks, roadmap facts, and landing of an OpenVMM pin promotion
+|   |-- openvmm_release.py       State, checks, publication, and landing of an OpenVMM chain release
 |   |-- powershell_testing.py    PowerShell launches of the unit tests, under a shared default time limit
+|   |-- pr_threads.py            Pull-request review threads, with checked replies and resolution
 |   |-- public_api.py            Public-API snapshot check of the nvx crate run by CI
 |   |-- publish_development_release.py Development release publisher run by CI
 |   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
+|   |-- rebase_check.py          Checks of a branch before and after a rebase
 |   |-- scripts_coverage.py      Coverage of the Python tooling's unit tests, run by CI
 |   |-- test-layout-allowlist.json The test hooks that production files may hold
 |   `-- test_*.py                Python tooling unit tests
@@ -224,13 +237,17 @@ Copilot cloud agent and code review environments. See
 
 The `actions/` directory contains the reusable implementations for validation,
 artifact builds, benchmarks, packaging, releases, and performance history
-management. The `skills/` directory defines Copilot agent skills for common
-development workflows, among them `nvx-issue-fixer`, which composes the others
-to take an issue from its reproduction on the configured hosts to a pull
-request with green CI and resolved review threads, and runs only when a user
-invokes it. `copilot-instructions.md` holds the repository-wide Copilot
-instructions. The `agents/` directory defines `nvx-adversary`, the Copilot
-custom agent that is the bounded strategist of
+management. The `skills/` directory defines Copilot agent skills for NVX's own
+workflows, which run their deterministic steps through the tools in `scripts/`:
+preparing a host, running and benchmarking microVMs on it, triaging CI runs,
+promoting OpenVMM pins, and rebasing the OpenVMM chain. Among them,
+`nvx-fix-issue` takes an issue from its reproduction on the configured hosts to
+a pull request with green CI and resolved review threads, and runs only when a
+user invokes it. Generic workflows, such as commits, pull requests, reviews,
+and rebases, are left to the agents' own skills, which follow
+`copilot-instructions.md`, the repository-wide Copilot instructions, and
+`pull_request_template.md`. The `agents/` directory defines `nvx-adversary`, the
+Copilot custom agent that is the bounded strategist of
 [adversarial testing](adversarial-testing.md). The `specula/` directory contains
 the adapter, tests, and dedicated runner setup for incremental formal
 verification of the pinned OpenVMM release.
@@ -375,6 +392,29 @@ which code of `scripts/` its unit tests reach (see
 [scripts coverage](ci.md#scripts-coverage)), and `module_diagrams.py` to
 draw the module diagrams that `doc/modules` publishes (see
 [Module diagrams](ci.md#module-diagrams)).
+
+The other standalone tools carry the deterministic steps of the Copilot skills,
+and serve contributors as well. `local_gates.py` lists the gates of
+[check-quality](../.github/actions/check-quality/action.yml),
+[validate-nvx](../.github/actions/validate-nvx/action.yml), and
+[check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) that a change
+selects, with the commands that those actions define, and runs them.
+`pr_threads.py` lists a pull request's review threads, reviews, and
+conversation comments, and replies to and resolves threads, checking each
+reply and that the pull request's head holds a fix; `ci_triage.py` classifies a
+CI run and finds its first failure; and `rebase_check.py` checks a branch
+before and after a rebase. `issue_workspace.py` finds the work that may already
+cover an issue, and creates and cleans up the topic branch of its fix, in a
+worktree that `host_worktree.py` adds when the checkout holds changes.
+`nvx_hosts.py` resolves the profiles of the remote host inventory and runs
+commands and scripts on those hosts, where `host_probe.py` reports whether a
+host can run NVX and `host_worktree.py` adds temporary worktrees.
+`benchmark_series.py` runs a benchmark series into a fresh result directory
+with the validation of CI's benchmark jobs. `openvmm_pin.py` checks and lands
+an OpenVMM pin promotion and derives the
+[roadmap](openvmm-upstream-roadmap.md)'s positions from Git, and
+`openvmm_release.py` does the same for a release of the OpenVMM chain; both
+build on `openvmm_git.py`.
 
 ### `tests/`
 
