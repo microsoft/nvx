@@ -2275,6 +2275,10 @@ fn nvx::host::template::status_evidence
 mod nvx::host::vm
 struct nvx::host::vm::Capability
 method nvx::host::vm::Capability::as_bytes
+struct nvx::host::vm::Launched
+field nvx::host::vm::Launched::capability
+field nvx::host::vm::Launched::outputs
+field nvx::host::vm::Launched::process
 struct nvx::host::vm::Prepared
 method nvx::host::vm::Prepared::arguments
 method nvx::host::vm::Prepared::capability
@@ -2291,6 +2295,7 @@ field nvx::host::vm::VmOutputs::log
 field nvx::host::vm::VmOutputs::outcome
 fn nvx::host::vm::create
 fn nvx::host::vm::create_private_dir
+fn nvx::host::vm::spawn
 mod nvx::net
 struct nvx::net::Cidr
 method nvx::net::Cidr::contains
