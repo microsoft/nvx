@@ -25,6 +25,14 @@ ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 11, 6, tzinfo=timezone.utc)
 OLD_HEAD = "a" * 40
 NEW_HEAD = "b" * 40
+# The benchmark host check's mismatch diagnostic, as performance.py writes it.
+HOST_CHANGED = (
+    "Linux / KVM: this runner differs from "
+    "data/linux-kvm-virtual-machine-host.json in 2 required field(s): "
+    "cpu_model, vm_size. The series' history comes from the expected host; to "
+    "measure it here, accept this host and reset the history "
+    '(doc/benchmarks.md, "Expected benchmark hosts").'
+)
 
 
 @dataclass(frozen=True)
@@ -486,19 +494,93 @@ class CiTriageTests(unittest.TestCase):
         runner.assert_finished()
 
     def test_benchmark_host_failure_is_infrastructure(self) -> None:
-        failed_job = job(
-            "Linux benchmark (kvm, 1)",
-            failed_step="Check Linux benchmark host",
-        )
+        # The host check is a step of the run-benchmark composite action, so
+        # the job reports it as its Run benchmark step, which a benchmark's own
+        # failure also fails; only the failed log tells them apart.
+        failed_job = job("Linux benchmark (kvm, 1)", failed_step="Run benchmark")
         name, document, runner = self.json_classification(
             [
                 Response(run_document(conclusion="failure", jobs=[failed_job])),
-                Response("job\tstep\t2026-11-05T00:00:00Z ##[error]host differs\n"),
+                Response(
+                    "job\tRun benchmark\t2026-11-05T00:00:00Z MISMATCH: cpu_model\n"
+                    f"job\tRun benchmark\t2026-11-05T00:00:01Z ##[error]{HOST_CHANGED}\n"
+                    "job\tRun benchmark\t2026-11-05T00:00:02Z "
+                    "##[error]Process completed with exit code 1.\n"
+                ),
             ]
         )
         self.assertEqual(name, "benchmark-host-changed")
         first = cast(dict[str, object], document["firstFailure"])
-        self.assertEqual(first["step"], "Check Linux benchmark host")
+        self.assertEqual(first["step"], "Run benchmark")
+        runner.assert_finished()
+
+    def test_a_host_change_in_any_failed_benchmark_step_counts(self) -> None:
+        # Excerpts come from the first five failed jobs, but the log of every
+        # failed benchmark step counts.
+        others = [job(f"Build {index}", job_id=510 + index) for index in range(1, 6)]
+        benchmark = job(
+            "Linux benchmark (kvm, 1)", job_id=520, failed_step="Run benchmark"
+        )
+        name, _document, runner = self.json_classification(
+            [
+                Response(run_document(conclusion="failure", jobs=[*others, benchmark])),
+                *(
+                    Response("job\tRun tests\t2026-11-05T00:00:00Z Error: broken\n")
+                    for _ in others
+                ),
+                Response(
+                    f"job\tRun benchmark\t2026-11-05T00:00:00Z ##[error]{HOST_CHANGED}\n"
+                ),
+            ]
+        )
+        self.assertEqual(name, "benchmark-host-changed")
+        log = runner.calls[-1]
+        self.assertEqual(log[log.index("--job") + 1], "520")
+        runner.assert_finished()
+
+    def test_a_host_diagnostic_outside_a_benchmark_step_is_failed(self) -> None:
+        # A failing test of the host check can quote its diagnostic.
+        quoted = f"AssertionError: '{HOST_CHANGED}' != ''"
+        name, _document, runner = self.json_classification(
+            [
+                Response(
+                    run_document(
+                        conclusion="failure",
+                        jobs=[job("NVX CLI / Linux", failed_step="Run NVX CLI tests")],
+                    )
+                ),
+                Response(f"job\tRun NVX CLI tests\t2026-11-05T00:00:00Z {quoted}\n"),
+            ]
+        )
+        self.assertEqual(name, "failed")
+        runner.assert_finished()
+
+    def test_other_benchmark_failures_are_failed(self) -> None:
+        # Advisory host drift warns without failing the step.
+        drift = (
+            "Linux / KVM: this runner differs from "
+            "data/linux-kvm-virtual-machine-host.json in advisory field(s): "
+            "kernel. Update the file to acknowledge them; that needs no history "
+            "reset."
+        )
+        missing = "Expected 34 microVM one-vCPU metrics in build/benchmark/result.json"
+        name, _document, runner = self.json_classification(
+            [
+                Response(
+                    run_document(
+                        conclusion="failure",
+                        jobs=[
+                            job("Linux benchmark (kvm, 1)", failed_step="Run benchmark")
+                        ],
+                    )
+                ),
+                Response(
+                    f"job\tRun benchmark\t2026-11-05T00:00:00Z ##[warning]{drift}\n"
+                    f"job\tRun benchmark\t2026-11-05T00:09:00Z ##[error]{missing}\n"
+                ),
+            ]
+        )
+        self.assertEqual(name, "failed")
         runner.assert_finished()
 
     def test_other_failure_is_failed_and_text_starts_with_classification(self) -> None:

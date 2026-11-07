@@ -360,13 +360,12 @@ def _remove_remote_script(
             )
             result = runner.run(_powershell_ssh(profile, script, no_stdin=True))
         else:
+            # ssh joins its words into the command that the remote shell
+            # splits again.
             result = runner.run(
                 [
                     *_ssh_prefix(profile, no_stdin=True),
-                    "rm",
-                    "-f",
-                    "--",
-                    remote_path,
+                    f"rm -f -- {shlex.quote(remote_path)}",
                 ]
             )
     except OSError as error:

@@ -3,9 +3,10 @@
 
 The command resolves workflow-run and pull-request selectors, records the run's
 jobs and first failing steps, extracts concise failure evidence, and classifies
-cancellations using the workflow and current pull-request head. Optional
-history finds matching failures on ``dev`` and open issues. GitHub access is
-exclusively through ``gh`` and uses an injectable subprocess runner.
+cancellations using the workflow and current pull-request head, and benchmark
+host changes using the failed logs. Optional history finds matching failures on
+``dev`` and open issues. GitHub access is exclusively through ``gh`` and uses
+an injectable subprocess runner.
 """
 
 from __future__ import annotations
@@ -56,6 +57,14 @@ _LOG_MARKERS = tuple(
 # The lines before a marker that an excerpt keeps; the cause follows it.
 _LOG_CONTEXT_BEFORE = 3
 _TIMESTAMP_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
+# The benchmark host check, a step of the run-benchmark composite action that a
+# platform job reports as its Run benchmark step, fails that step with this
+# diagnostic when its runner is no longer the host of the series' history, as
+# nightly_ci.py detects (doc/benchmarks.md, "Expected benchmark hosts").
+_BENCHMARK_STEP = "Run benchmark"
+_BENCHMARK_HOST_CHANGED = re.compile(
+    r"this runner differs from \S+ in \d+ required field"
+)
 
 JsonObject = dict[str, object]
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -904,13 +913,23 @@ def classify(
             return ClassificationResult(CLASSIFICATIONS["merge-group-cancelled"])
         return ClassificationResult(CLASSIFICATIONS["cancelled-current-head"])
 
-    host_steps = {"Check Linux benchmark host", "Check Windows benchmark host"}
-    if any(
-        job.first_failed_step is not None and job.first_failed_step.name in host_steps
-        for job in run.jobs
-    ):
-        return ClassificationResult(CLASSIFICATIONS["benchmark-host-changed"])
     return ClassificationResult(CLASSIFICATIONS["failed"])
+
+
+def _failed_log(github: GitHub, run: Run, job: Job) -> tuple[str | None, str | None]:
+    return github.try_command(
+        [
+            "run",
+            "view",
+            str(run.database_id),
+            "--repo",
+            github.repository,
+            "--job",
+            str(job.database_id),
+            "--log-failed",
+        ],
+        f"reading failed log for {job.name}",
+    )
 
 
 def _log_records(
@@ -919,22 +938,14 @@ def _log_records(
     jobs: Sequence[Job],
     log_lines: int,
     notes: list[str],
-) -> list[JsonObject]:
+) -> tuple[list[JsonObject], dict[int, str | None]]:
+    """Return an excerpt of the failed log of each of the first five failed
+    jobs, and the logs that it read, by job."""
     records: list[JsonObject] = []
+    outputs: dict[int, str | None] = {}
     for job in jobs[:5]:
-        output, error = github.try_command(
-            [
-                "run",
-                "view",
-                str(run.database_id),
-                "--repo",
-                github.repository,
-                "--job",
-                str(job.database_id),
-                "--log-failed",
-            ],
-            f"reading failed log for {job.name}",
-        )
+        output, error = _failed_log(github, run, job)
+        outputs[job.database_id] = output
         if output is None:
             notes.append(error or f"could not read failed log for {job.name}")
             excerpt: list[str] = []
@@ -953,7 +964,31 @@ def _log_records(
                 "error": error,
             }
         )
-    return records
+    return records, outputs
+
+
+def _benchmark_host_changed(
+    github: GitHub,
+    run: Run,
+    jobs: Sequence[Job],
+    outputs: dict[int, str | None],
+    notes: list[str],
+) -> bool:
+    """Return whether the host check failed the benchmark step of a failed job,
+    reading the failed logs of the benchmark jobs that outputs lacks."""
+    for job in jobs:
+        step = job.first_failed_step
+        if step is None or step.name != _BENCHMARK_STEP:
+            continue
+        if job.database_id in outputs:
+            output = outputs[job.database_id]
+        else:
+            output, error = _failed_log(github, run, job)
+            if output is None:
+                notes.append(error or f"could not read failed log for {job.name}")
+        if output is not None and _BENCHMARK_HOST_CHANGED.search(output):
+            return True
+    return False
 
 
 def _history_run_jobs(github: GitHub, run_id: int) -> list[Job]:
@@ -1143,11 +1178,13 @@ def triage(
     result = classify(github, run, pull_request, notes, history_runs)
     current_failed_jobs = failed_jobs(run, resolved.job_id)
     stop_for_supersession = result.classification.name == "superseded"
-    logs = (
-        []
-        if stop_for_supersession
-        else _log_records(github, run, current_failed_jobs, log_lines, notes)
-    )
+    logs: list[JsonObject] = []
+    if not stop_for_supersession:
+        logs, outputs = _log_records(github, run, current_failed_jobs, log_lines, notes)
+        if result.classification.name == "failed" and _benchmark_host_changed(
+            github, run, current_failed_jobs, outputs, notes
+        ):
+            result = ClassificationResult(CLASSIFICATIONS["benchmark-host-changed"])
     if no_history or stop_for_supersession or not current_failed_jobs:
         history: JsonObject = {
             "enabled": not no_history,

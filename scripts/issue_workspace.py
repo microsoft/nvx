@@ -762,6 +762,11 @@ def cleanup_workspace(
             kept.append(
                 f"worktree {workspace}, whose HEAD reaches commits that no branch holds"
             )
+        elif host_worktree.unpreserved_openvmm_commits(workspace, git_runner):
+            kept.append(
+                f"worktree {workspace}, whose OpenVMM repository holds commits "
+                "that no remote branch holds"
+            )
         else:
             host_worktree.remove_worktree(
                 main,

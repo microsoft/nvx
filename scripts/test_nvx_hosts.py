@@ -429,8 +429,10 @@ class HostInventoryTests(unittest.TestCase):
             inventory = self.write_inventory(root, {"lab": self.profile()})
             script = root / "task.sh"
             script.write_bytes(b"printf ok\r\n")
+            # The host's temporary directory can hold a space, at which the
+            # remote shell would split an unquoted path.
             runner = FakeRunner(
-                nvx_hosts.CommandResult(0, "/tmp/nvx.123\n"),
+                nvx_hosts.CommandResult(0, "/tmp/nvx dir/nvx.123\n"),
                 nvx_hosts.CommandResult(7),
                 nvx_hosts.CommandResult(9),
             )
@@ -472,7 +474,7 @@ class HostInventoryTests(unittest.TestCase):
                     "ConnectTimeout=20",
                     "-n",
                     "kvm-target",
-                    "cd -- /srv/nvx && bash /tmp/nvx.123 'a b'",
+                    "cd -- /srv/nvx && bash '/tmp/nvx dir/nvx.123' 'a b'",
                 ),
             )
             self.assertEqual(
@@ -485,10 +487,7 @@ class HostInventoryTests(unittest.TestCase):
                     "ConnectTimeout=20",
                     "-n",
                     "kvm-target",
-                    "rm",
-                    "-f",
-                    "--",
-                    "/tmp/nvx.123",
+                    "rm -f -- '/tmp/nvx dir/nvx.123'",
                 ),
             )
 
@@ -635,7 +634,7 @@ class HostInventoryTests(unittest.TestCase):
             self.assertTrue(runner.calls[1].capture_stdout)
             self.assertEqual(
                 runner.calls[2].args,
-                (*SSH, "-n", "mshv-target", "rm", "-f", "--", "/tmp/nvx.1"),
+                (*SSH, "-n", "mshv-target", "rm -f -- /tmp/nvx.1"),
             )
 
     def test_probe_rejects_invalid_json(self) -> None:
@@ -695,7 +694,7 @@ class HostInventoryTests(unittest.TestCase):
             )
             self.assertEqual(
                 runner.calls[2].args,
-                (*SSH, "-n", "kvm-target", "rm", "-f", "--", "/tmp/nvx.2"),
+                (*SSH, "-n", "kvm-target", "rm -f -- /tmp/nvx.2"),
             )
 
     def test_benchmark_runs_this_checkouts_coordinator_on_the_host_checkout(
