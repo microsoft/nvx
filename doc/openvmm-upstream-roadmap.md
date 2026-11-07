@@ -7,15 +7,17 @@
   `61994293a9e5e3bcc1d685d708cf462920eed030`; see [Upstream status](#upstream-status).
 - Mapped fork tip: `18f4039db9511a3db59a847e95fb1f1f06f2f235`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131 and the PR20 fixup at position 148.
-- NVX's pinned OpenVMM revision: `bced18bec5c29c2ef43376ad443b52e3d0cddafb`, position 219, the
-  head of the `feature/microvm/release/v5.1` branch of microsoft/openvmm. The v5.1 rebase moved the
-  219 commits of `feature/microvm/dev` at the NVX pin before it, `db42fde04`, onto `ba105dd7f`
+- NVX's pinned OpenVMM revision: `3cf58a5234ed824435825c9f87187f5129219724`, position 220.
+  Position 220, which microsoft/openvmm#4981 proposes for `feature/microvm/dev`, is one commit on
+  position 219, `bced18bec`, the head of `feature/microvm/dev` and of the
+  `feature/microvm/release/v5.1` branch of microsoft/openvmm. The v5.1 rebase moved the 219
+  commits of `feature/microvm/dev` at the NVX pin before that rebase, `db42fde04`, onto `ba105dd7f`
   without dropping any: the 212 of `feature/microvm/release/v5.0` and the seven that
   microsoft/openvmm#4953, microsoft/openvmm#4954, microsoft/openvmm#4955, microsoft/openvmm#4970,
   microsoft/openvmm#4968, and microsoft/openvmm#4969 landed after it. Every commit keeps its
   position, and only position 183, which conflicted with upstream, changed its patch; see
-  [Conflicts of the v5.1 rebase](#conflicts-of-the-v51-rebase). The pin is 88 commits past the
-  mapped tip on the same first-parent chain. Positions 132-219, except the PR20 fixup at position
+  [Conflicts of the v5.1 rebase](#conflicts-of-the-v51-rebase). The pin is 89 commits past the
+  mapped tip on the same first-parent chain. Positions 132-220, except the PR20 fixup at position
   148, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
@@ -879,8 +881,8 @@ ba105dd7f
   -> long Windows paths [210] -> state change wait logging [211]
   -> port forward bind code [212] -> virtio queue starts after restore [213-215]
   -> storage generation block identity [216-217]
-  -> device start confirmation [218-219]
-  -> bced18bec (NVX pin)
+  -> device start confirmation [218-219] -> long Windows report paths [220]
+  -> 3cf58a523 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -896,15 +898,16 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 88 later commits, position
+The NVX pin extends the chain past position 131 without merges. Of the 89 later commits, position
 148 is a PR20 fixup, and the others are not yet classified or assigned to PRs. Each of positions
 132-187 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 188-192
 followed the v3.0 reorganization, positions 193-206 are the ABI restart of the v4.0
-reorganization, positions 207-212 followed it, and positions 213-219 followed the v5.0
-reorganization, so they combine none. Each commit has the position that it had in v5.0, since the
-v5.1 rebase dropped none. A v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose
-first 210 commits are those of `feature/microvm/release/v4.0`.
+reorganization, positions 207-212 followed it, positions 213-219 followed the v5.0
+reorganization, and position 220 followed the v5.1 rebase, so they combine none. Each commit
+through position 219 has the position that it had in v5.0, since the v5.1 rebase dropped none. A
+v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are those of
+`feature/microvm/release/v4.0`.
 
 | Position | Commit | v4.0 position | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | ---: | --- | --- |
@@ -996,6 +999,7 @@ first 210 commits are those of `feature/microvm/release/v4.0`.
 | 217 | `13f78d81a` | - | - | - | microVM: check the storage generation of a restore's sandbox blocks (microsoft/openvmm#4970) |
 | 218 | `dbec9b624` | - | - | - | virtio: keep the progress of queues that a failed start stops (microsoft/openvmm#4968) |
 | 219 | `bced18bec` | - | - | - | vmcore: confirm device starts before the VM runs (microsoft/openvmm#4969) |
+| 220 | `3cf58a523` | - | - | - | microVM: publish the outcome report below long Windows paths (microsoft/openvmm#4981) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1049,8 +1053,11 @@ PR09's position 015, whose start now confirms each unit's start before it starts
 dependents, and PR13's position 039, whose transports now leave a start's answer to that
 confirmation instead of taking it in `poll_device`, and replaces one of position 039's tests; it
 adds its confirmation next to the input quiesce of PR09's position 018 in the files that position
-018 changes, and rewrites position 215's documentation. Assigning the later commits therefore means
-revisiting those PRs, not only appending new ones.
+018 changes, and rewrites position 215's documentation. Position 220 changes the outcome report
+publication of PR24's position 122, which on Windows now publishes the report through the
+extended-length form of its path, and moves the extended-length encoding that position 210 gives
+`pal`'s secure creation into `pal`'s file system module, which both now use. Assigning the later
+commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 178, by contrast, changes only `disk_blob`, which upstream main and the fork base
 have alike and no other commit of the chain changes, so it can go upstream on its own. Position
@@ -1148,6 +1155,12 @@ and its tests, which PR09's position 015 adds, the virtio saved-state tests of P
 and position 218's tests. Only `state_unit`'s requests, the virtio test transports, the chipset
 device unit, and the device worker's request loop apply there. So both follow PR09 and PR13
 upstream.
+
+Position 220 builds on the chain too. Replaying it on upstream main conflicts in two of its three
+files: the outcome report module, which PR24's position 122 adds and upstream main lacks, and
+`pal`'s security module, whose encoding position 210 adds. Only its addition to `pal`'s file system
+module applies there. So its report change follows PR24 upstream, and its `pal` change follows
+position 210's.
 
 ## PR summary
 
