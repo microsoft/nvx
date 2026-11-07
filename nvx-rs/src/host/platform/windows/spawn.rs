@@ -76,6 +76,27 @@ impl LaunchedProcess {
         unsafe { WaitForSingleObject(raw(&self.process), milliseconds) == WAIT_OBJECT_0 }
     }
 
+    /// Terminates this owned child and waits for its exit before releasing its handle.
+    pub(crate) fn terminate_and_wait(self) -> io::Result<()> {
+        // SAFETY: CreateProcessW returned the owned handle with full access.
+        let termination = if unsafe { TerminateProcess(raw(&self.process), 1) } == 0 {
+            Some(io::Error::last_os_error())
+        } else {
+            None
+        };
+        // SAFETY: the process handle stays open for the whole wait.
+        if unsafe { WaitForSingleObject(raw(&self.process), INFINITE) } == WAIT_OBJECT_0 {
+            return Ok(());
+        }
+        let wait = io::Error::last_os_error();
+        Err(match termination {
+            None => wait,
+            Some(termination) => io::Error::other(format!(
+                "cannot terminate the child: {termination}; cannot wait for its exit: {wait}"
+            )),
+        })
+    }
+
     /// Waits up to `timeout` for the process to exit, and returns its exit status if it has,
     /// as `Popen.wait` reads it with `GetExitCodeProcess`.
     #[cfg(feature = "cli")]

@@ -1,4 +1,8 @@
 use std::fs;
+#[cfg(any(target_os = "linux", windows))]
+use std::process::{Command, Stdio};
+#[cfg(any(target_os = "linux", windows))]
+use std::time::{Duration, Instant};
 
 use super::*;
 use crate::ErrorKind;
@@ -756,4 +760,436 @@ fn creation_checks_the_complete_actual_command_line_at_the_windows_boundary() {
     assert!(!log.exists());
     assert_eq!(fs::read(&input).unwrap(), b"borrowed input");
     assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn stand_in(dir: &VmDir) -> Prepared {
+    #[cfg(target_os = "linux")]
+    let (program, arguments) = (PathBuf::from("sleep"), vec![OsString::from("60")]);
+    #[cfg(windows)]
+    let (program, arguments) = (
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32\\PING.EXE"),
+        ["-n", "60", "127.0.0.1"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+    );
+    let runtime = Runtime {
+        openvmm: program,
+        ..cold_runtime()
+    };
+    let mut prepared = create(&runtime, &cold_config(), None, dir).unwrap();
+    prepared.arguments = arguments;
+    prepared
+}
+
+#[cfg(any(target_os = "linux", windows))]
+struct RunningVm(Launched);
+
+#[cfg(any(target_os = "linux", windows))]
+impl Drop for RunningVm {
+    fn drop(&mut self) {
+        let _ = self.0.process.kill();
+        let _ = self
+            .0
+            .process
+            .wait(Instant::now() + Duration::from_secs(10));
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn spawn_returns_the_same_outputs_and_capability_with_a_verified_process() {
+    let (_directory, vm) = vm_dir();
+    let prepared = stand_in(&vm);
+    let outputs = prepared.outputs().clone();
+    let capability = *prepared.capability().as_bytes();
+    let launched = RunningVm(spawn(prepared).unwrap());
+    assert_eq!(launched.0.outputs, outputs);
+    assert_eq!(launched.0.capability.as_bytes(), &capability);
+    let reference = launched.0.process.reference();
+    assert_ne!(reference.pid, std::process::id());
+    let reopened = Process::open(reference).unwrap().unwrap();
+    assert_eq!(reopened.reference(), reference);
+    assert!(!reopened.has_exited().unwrap());
+    assert!(!format!("{:?}", launched.0).contains(&format!("{capability:?}")));
+    assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn a_failure_after_child_creation_terminates_only_that_child_and_confirms_its_exit() {
+    let (_directory, vm) = vm_dir();
+    let (_foreign_directory, foreign_vm) = vm_dir();
+    let foreign = RunningVm(spawn(stand_in(&foreign_vm)).unwrap());
+    let mut process = None;
+    let error = spawn_verified(stand_in(&vm), |child| {
+        process = Some(child.process().unwrap());
+        assert!(!process.as_ref().unwrap().has_exited().unwrap());
+        Err(io::Error::other("injected process verification failure"))
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io);
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "injected process verification failure"
+    );
+    assert!(process.unwrap().has_exited().unwrap());
+    assert!(!foreign.0.process.has_exited().unwrap());
+    assert!(vm.path().join(LOG).exists());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn spawn_failure_keeps_caller_owned_files_and_reports_the_host_error() {
+    let (_directory, vm) = vm_dir();
+    let mut prepared = stand_in(&vm);
+    prepared.program = vm.path().join("absent-openvmm");
+    let input = vm.path().join("caller-input");
+    fs::write(&input, b"caller-owned").unwrap();
+    let error = spawn(prepared).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io);
+    let source = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<io::Error>()
+        .unwrap();
+    assert_eq!(source.kind(), io::ErrorKind::NotFound);
+    assert_eq!(fs::read(&input).unwrap(), b"caller-owned");
+    assert!(vm.path().join(LOG).exists());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn spawn_passes_the_opened_log_and_owned_resources_without_reopening_paths() {
+    let (_directory, vm) = vm_dir();
+    let mut prepared = stand_in(&vm);
+    let original_log = vm.path().join("original-log");
+    fs::rename(&prepared.outputs.log, &original_log).unwrap();
+    fs::write(&prepared.outputs.log, b"replacement-log").unwrap();
+    let input = vm.path().join("caller-input");
+    let file = File::create(&input).unwrap();
+    let retained = file.try_clone().unwrap();
+    #[cfg(target_os = "linux")]
+    let value = std::os::fd::AsRawFd::as_raw_fd(&file);
+    #[cfg(windows)]
+    let value = std::os::windows::io::AsRawHandle::as_raw_handle(&file) as usize;
+    prepared.inherit(file);
+    let original_input = vm.path().join("original-input");
+    fs::rename(&input, &original_input).unwrap();
+    fs::write(&input, b"replacement-input").unwrap();
+    let launched = RunningVm(
+        spawn_verified(prepared, |child| {
+            #[cfg(target_os = "linux")]
+            {
+                let info = fs::read_to_string(format!("/proc/self/fdinfo/{value}")).unwrap();
+                let flags = info
+                    .lines()
+                    .find_map(|line| line.strip_prefix("flags:"))
+                    .map(|flags| u32::from_str_radix(flags.trim(), 8).unwrap())
+                    .unwrap();
+                assert_ne!(flags & nix::libc::O_CLOEXEC as u32, 0);
+            }
+            child.process()
+        })
+        .unwrap(),
+    );
+    let pid = launched.0.process.reference().pid;
+    #[cfg(target_os = "linux")]
+    {
+        let object = |descriptor| fs::read_link(format!("/proc/{pid}/fd/{descriptor}")).unwrap();
+        assert_eq!(object(value), original_input);
+        assert_eq!(object(1), original_log);
+        assert_eq!(object(2), original_log);
+        drop(retained);
+    }
+    #[cfg(windows)]
+    {
+        assert!(platform::tests::inherits_file(pid, value, &retained));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fs::metadata(&original_log).unwrap().len() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the opened log received no output"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    assert_eq!(fs::read(&input).unwrap(), b"replacement-input");
+    assert_eq!(
+        fs::read(&launched.0.outputs.log).unwrap(),
+        b"replacement-log"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn library_spawns_preserve_the_callers_umask_and_clear_only_the_childs_owner_bits() {
+    let umask_in = |path: &str| {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("Umask:"))
+            .map(|mask| u32::from_str_radix(mask.trim(), 8).unwrap())
+            .unwrap()
+    };
+    for mask in [
+        0o002, 0o022, 0o027, 0o077, 0o100, 0o200, 0o400, 0o477, 0o777,
+    ] {
+        let (_directory, vm) = vm_dir();
+        let launched = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+                    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(mask));
+                    let launched = RunningVm(spawn(stand_in(&vm)).unwrap());
+                    assert_eq!(umask_in("/proc/thread-self/status"), mask);
+                    launched
+                })
+                .join()
+                .unwrap()
+        });
+        assert_eq!(
+            umask_in(&format!(
+                "/proc/{}/status",
+                launched.0.process.reference().pid
+            )),
+            mask & 0o077
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn a_library_vm_outlives_the_caller_that_spawned_it_without_retaining_its_output_pipe() {
+    let directory = tempfile::tempdir().unwrap();
+    let vm = directory.path().join("vm");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "host::vm::tests::spawn_caller_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("NVX_VM_SPAWN_CALLER_DIR", &vm)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reference =
+        serde_json::from_slice(&fs::read(vm.join("caller-process.json")).unwrap()).unwrap();
+    let process = Process::open(&reference).unwrap().unwrap();
+    let launched = RunningVm(Launched {
+        process,
+        outputs: VmDir::open(&vm).unwrap().outputs(false).unwrap(),
+        capability: Capability([0; CAPABILITY_LEN]),
+    });
+    assert!(!launched.0.process.has_exited().unwrap());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+#[ignore = "invoked in a separate caller by the caller-survival test"]
+fn spawn_caller_helper() {
+    let path = PathBuf::from(std::env::var_os("NVX_VM_SPAWN_CALLER_DIR").unwrap());
+    create_private_dir(&path).unwrap();
+    let dir = VmDir::open(&path).unwrap();
+    let launched = spawn(stand_in(&dir)).unwrap();
+    let reference = serde_json::to_vec(launched.process.reference()).unwrap();
+    if let Err(error) = fs::write(path.join("caller-process.json"), reference) {
+        launched.process.kill().unwrap();
+        assert!(
+            launched
+                .process
+                .wait(Instant::now() + Duration::from_secs(10))
+                .unwrap()
+        );
+        panic!("cannot record the helper's child: {error}");
+    }
+    drop(launched);
+}
+
+#[cfg(windows)]
+#[test]
+fn library_spawns_refuse_taken_and_untrusted_log_job_names() {
+    for trusted in [true, false] {
+        let (_directory, vm) = vm_dir();
+        let prepared = stand_in(&vm);
+        let held = if trusted {
+            platform::create_log_job(prepared.log()).unwrap().unwrap()
+        } else {
+            platform::tests::untrusted_log_job(prepared.log())
+        };
+        let error =
+            spawn_verified(prepared, |_| panic!("a refused job started a child")).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io);
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(
+            source.kind(),
+            if trusted {
+                io::ErrorKind::AlreadyExists
+            } else {
+                io::ErrorKind::PermissionDenied
+            }
+        );
+        drop(held);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn an_unrelated_process_started_in_the_library_spawn_window_gets_no_vm_claim() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let (_directory, vm) = vm_dir();
+    let prepared = stand_in(&vm);
+    let log = prepared.outputs.log.clone();
+    let identity = platform::file_identity(&log).unwrap();
+    let program = prepared.program.clone();
+    let arguments = prepared.arguments.clone();
+    let (entered, in_window) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        platform::tests::with_spawn_window(
+            move || {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+            },
+            || spawn(prepared),
+        )
+    });
+    in_window.recv_timeout(Duration::from_secs(10)).unwrap();
+    let mut other = ChildGuard(
+        Command::new(program)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    release.send(()).unwrap();
+    let launched = RunningVm(thread.join().unwrap().unwrap());
+    assert!(platform::log_claim_held(&log, identity).unwrap());
+    launched.0.process.kill().unwrap();
+    assert!(
+        launched
+            .0
+            .process
+            .wait(Instant::now() + Duration::from_secs(10))
+            .unwrap()
+    );
+    assert!(other.0.try_wait().unwrap().is_none());
+    assert!(!platform::log_claim_held(&log, identity).unwrap());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+#[ignore = "needs exact current OpenVMM, kernel and initramfs paths and an available hypervisor"]
+fn current_cold_spawn_boots_a_guest_accepts_shell_input_and_exits_cleanly() {
+    use sha2::{Digest, Sha256};
+
+    let path =
+        |name| PathBuf::from(std::env::var_os(name).expect("missing explicit VM proof input"));
+    let openvmm = path("NVX_VM_SPAWN_OPENVMM");
+    let kernel = path("NVX_VM_SPAWN_KERNEL");
+    let initramfs = path("NVX_VM_SPAWN_INITRAMFS");
+    let identity = |path: &Path| {
+        ArtifactIdentity::sha256(&format!("{:x}", Sha256::digest(fs::read(path).unwrap()))).unwrap()
+    };
+    let runtime = Runtime {
+        identity: RuntimeIdentity::new(identity(&openvmm), identity(&kernel), identity(&initramfs)),
+        openvmm,
+        kernel,
+        initramfs,
+        cpu_profile: Some("auto".to_owned()),
+        ..cold_runtime()
+    };
+    let path = path("NVX_VM_SPAWN_PROOF_DIR");
+    assert!(
+        !path.exists(),
+        "a cold-spawn proof needs a fresh owned directory"
+    );
+    create_private_dir(&path).unwrap();
+    let vm = VmDir::open(&path).unwrap();
+    let config = VmConfig {
+        boot: Some(Boot {
+            command_line: "quiet loglevel=0".to_owned(),
+            capture: None,
+        }),
+        ..cold_config()
+    };
+    let prepared = create(&runtime, &config, None, &vm).unwrap();
+    let capability = *prepared.capability().as_bytes();
+    let launched = RunningVm(spawn(prepared).unwrap());
+    assert_eq!(launched.0.capability.as_bytes(), &capability);
+    let reference = launched.0.process.reference();
+    let reopened = Process::open(reference).unwrap().unwrap();
+    assert_eq!(reopened.reference(), reference);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut console = loop {
+        match platform::connect_endpoint(
+            launched.0.outputs.console.as_deref().unwrap(),
+            reference.pid,
+            Duration::from_millis(50),
+        ) {
+            Ok(console) => break console,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::WouldBlock
+                ) && Instant::now() < deadline =>
+            {
+                assert!(!launched.0.process.has_exited().unwrap());
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => panic!("cannot attach the spawned VM's console: {error}"),
+        }
+    };
+    let read_until = |console: &mut dyn platform::Transport, marker: &[u8]| {
+        let mut received = Vec::new();
+        while !received.windows(marker.len()).any(|part| part == marker) {
+            assert!(
+                Instant::now() < deadline,
+                "guest output: {}",
+                String::from_utf8_lossy(&received)
+            );
+            let mut buffer = [0; 4096];
+            match console.read(&mut buffer, Some(Duration::from_millis(100))) {
+                Ok(0) => panic!("console ended before {}", String::from_utf8_lossy(marker)),
+                Ok(count) => received.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) => panic!("cannot read the guest console: {error}"),
+            }
+            assert!(received.len() <= 1024 * 1024);
+        }
+        println!("{}", String::from_utf8_lossy(&received));
+    };
+    read_until(&mut *console, b"NVX-GUEST-BOOT-OK: alpine");
+    console
+        .write_all(
+            b"printf 'NVX-SPAWN-COLD-%s\\n' OK; /sbin/nvx-exit 0\n",
+            Some(Duration::from_secs(5)),
+        )
+        .unwrap();
+    read_until(&mut *console, b"NVX-SPAWN-COLD-OK");
+    assert!(launched.0.process.wait(deadline).unwrap());
+    assert!(reopened.has_exited().unwrap());
+    let outcome = crate::host::report::read(&launched.0.outputs.outcome).unwrap();
+    assert_eq!(outcome.category.as_deref(), Some("success"));
+    assert_eq!(outcome.status_code, Some(0));
+    println!("NVX-LIBRARY-COLD-SPAWN-EXIT-OK: {}", reference.pid);
 }
