@@ -39,7 +39,7 @@ use super::key::TemplateKey;
 use super::manifest::{BlockGeometry, PROCESSOR_COUNTS};
 use super::plan::MEMORY_BLOCK_SIZE;
 use super::store::{Acquired, Generation, Lease, Store};
-use crate::activation::{ActivationRecord, Journal, OverlayMode, WorkloadView};
+use crate::activation::{ActivationRecord, Journal, OverlayMode, View};
 use crate::contract;
 use crate::error::{Error, ErrorCode, ErrorKind, Result};
 use crate::host::filesystem::{self, ExportPlan};
@@ -105,10 +105,9 @@ pub struct CloneRequest {
     /// The memory target, in bytes: the RAM of the clone's VM once restored, to which the restore
     /// expands the template's RAM in whole blocks.
     pub memory: u64,
-    /// The view that the clone's workload has of its VM: its hostname, the machine ID that it
-    /// sees, and a workload identity, which the clone's guest ignores: each execution names its
-    /// own.
-    pub workload: WorkloadView,
+    /// The view that the clone's workload has of its VM: its hostname and machine ID. Each
+    /// execution names its own identity.
+    pub view: View,
     /// The mode of the clone's overlay, which selects its options.
     pub overlay: OverlayMode,
     /// Whether the filesystem of the scratch image of an upper on one may have a journal. An
@@ -249,7 +248,7 @@ pub enum CloneUpper {
 /// use std::path::Path;
 /// use std::time::{Duration, Instant};
 ///
-/// use nvx::activation::{Journal, MachineIdMode, OverlayMode, WorkloadView};
+/// use nvx::activation::{Journal, MachineIdMode, OverlayMode, View};
 /// use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 /// use nvx::host::sandbox::{SandboxDistro, SandboxPlan, SandboxUpper};
 /// use nvx::host::store::{CallerFiles, RuntimeIdentity};
@@ -280,10 +279,9 @@ pub enum CloneUpper {
 ///     export: None,
 ///     processors: 2,
 ///     memory: 8 * MEMORY_BLOCK_SIZE,
-///     workload: WorkloadView {
+///     view: View {
 ///         hostname: b"clone".to_vec(),
 ///         machine_id: MachineIdMode::Image,
-///         identity: None,
 ///     },
 ///     overlay: OverlayMode::UntrustedLowers,
 ///     journal: Journal::Allowed,
@@ -423,8 +421,8 @@ impl ClonePlan {
     /// - with [`ErrorKind::Unsupported`] for settings that no activation record holds, as
     ///   [`Configuration::check`] finds them, such as a GPT disk's first-partition bound of 0, a
     ///   hostname that is empty, longer than
-    ///   [`MAX_HOSTNAME_BYTES`](crate::activation::MAX_HOSTNAME_BYTES), or holds a NUL, and a
-    ///   workload identity whose UID or GID is 0, [`Evidence::InvalidActivate`], and with
+    ///   [`MAX_HOSTNAME_BYTES`](crate::activation::MAX_HOSTNAME_BYTES), or holds a NUL,
+    ///   [`Evidence::InvalidActivate`], and with
     ///   [`ErrorKind::Other`] if the transaction ID of the clone's restore cannot be drawn, the
     ///   host's evidence;
     /// - with [`ErrorKind::Unavailable`] for a link or a directory under a name that the sandbox's
@@ -567,7 +565,7 @@ impl ClonePlan {
         let key = store.read_key(&generation).map_err(generation_fault)?;
         let snapshot = store.snapshot_dir(&generation).map_err(generation_fault)?;
         check_template(request, &key, &generation)?;
-        let activation = record::build(request, lease, &key)?;
+        let activation = record::build(request, &key)?;
         let owned = StoreFiles::of(locked).on_host()?;
         let image = check_image(request, &key, &owned, access)?;
         let capability = generate_capability().on_host()?;
@@ -677,25 +675,19 @@ impl ClonePlan {
     /// Ready reports.
     ///
     /// The record holds the restore section, with the restore's transaction ID, 16 random bytes
-    /// that the plan drew, and the template that the [lease](Lease::template) names; the image, in
-    /// the format that its binding names, with the identity of its binding: an EROFS layer, with
+    /// that the plan drew; the image, in the format that its binding names: an EROFS layer, with
     /// the UUID that the guest expects of its filesystem, or a GPT disk, with the GUID that the
     /// guest expects of the disk, each if the adapter's plan names one, and the request's bound of
-    /// the disk's first partition; the upper, a tmpfs, or the scratch image, with the identity of
-    /// its binding and the request's journal policy; the request's overlay mode and workload view;
-    /// the export, if the request has one, an aggregate, with the identity of its plan, and the
+    /// the disk's first partition; the upper, a tmpfs capped at half of the VM's memory, or the
+    /// scratch image with the request's journal policy; the request's overlay mode and view;
+    /// the export, if the request has one, an aggregate, and the
     /// number of its mappings, the binds of the plan, from 1 to
     /// [`MAX_MAPPINGS`](crate::activation::MAX_MAPPINGS), or no export and no mappings; the
-    /// clone's network, if the template has a NIC, with the identity of the network, whose policy
-    /// the restore enforces on the NIC, the DNS server that OpenVMM serves the guest at a gateway
+    /// clone's network, if the template has a NIC: the DNS server that OpenVMM serves the guest at a gateway
     /// under that policy, if any, whether the guest publishes its listeners, as it does under a
     /// policy that allows ingress or host-loopback access both ways, and the URL of the policy's
     /// proxy as the guest sees it, if any; and the processor target, which the restore brings
     /// online, and the memory target, as the resources that the clone must have.
-    ///
-    /// The identity of a binding, of an export plan, or of a network is the SHA-256 digest of a
-    /// domain of its kind and of its serde form, a few hundred bytes of metadata: the plan reads
-    /// no content to compute it.
     pub fn activation(&self) -> &ActivationRecord {
         &self.activation
     }

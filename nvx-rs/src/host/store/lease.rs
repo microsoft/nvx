@@ -233,8 +233,8 @@ impl Lease {
         &self.launch
     }
 
-    /// Returns the reference by which the activation record of the clone names the template that
-    /// it restores: the leased generation's store generation, and its key's identity.
+    /// Returns the reference that the clone's lease and durable records keep of its template:
+    /// the leased generation's store generation and key identity.
     pub fn template(&self) -> TemplateReference {
         TemplateReference {
             generation: self.generation,

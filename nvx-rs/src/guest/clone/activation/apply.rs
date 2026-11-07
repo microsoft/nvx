@@ -300,13 +300,13 @@ impl std::error::Error for AppliedTeardownError {}
 ///
 /// 1. takes the inputs of the root's [`Assembly`] from the record: its image, an EROFS image,
 ///    with the UUID that the record expects of it, if any, or a GPT disk, with the disk GUID that
-///    the record expects of it, if any, and the bound of its first partition; its upper, a tmpfs,
-///    or the scratch, with the record's journal policy; and its overlay mode; and, from
-///    `template`, the runtime directory, the devices, and the timeout. It takes the workload's
+///    the record expects of it, if any, and the bound of its first partition; its upper, a tmpfs
+///    with the record's RAM cap, or the scratch with its journal policy; and its overlay mode;
+///    and, from `template`, the runtime directory, the devices, and the timeout. It takes the workload's
 ///    hostname and machine-ID mode, whether it has an export, and its network's DNS server,
 ///    proxy endpoint, and publication of the workload's listeners from the record too. It takes
-///    no identity in which the executions run: the record's workload identity, if any, has no
-///    effect, and each execution names its own identity, which its entry checks;
+///    no identity in which the executions run: each execution names its own identity, which its
+///    entry checks;
 /// 2. for a GPT disk, asks the kernel to reread the disk's partition table, once the distro
 ///    device appeared, so that the block devices of the disk's partitions are those of the
 ///    clone's disk, rather than those of the template's placeholder, which the kernel created
@@ -775,7 +775,7 @@ fn apply_with<S: System>(
 ) -> Result<ActivatedBy<S>, ApplyError> {
     let configuration = record.configuration();
     let assembly = assembly(template, configuration);
-    let workload = &configuration.workload;
+    let view = &configuration.view;
     if let root::Image::Gpt { .. } = assembly.image {
         system
             .reread(assembly.distro, assembly.timeout, deadline)
@@ -784,7 +784,7 @@ fn apply_with<S: System>(
     let mut root = system
         .assemble(&assembly, deadline)
         .map_err(ApplyError::Assembly)?;
-    let machine_id = match workload.machine_id {
+    let machine_id = match view.machine_id {
         MachineIdMode::Image => MachineId::Image,
         MachineIdMode::Generated => {
             match system.generate(&template.runtime.join(MACHINE_ID_FILE)) {
@@ -840,7 +840,7 @@ fn apply_with<S: System>(
         None
     };
     let view = View {
-        hostname: workload.hostname.clone(),
+        hostname: view.hostname.clone(),
         machine_id,
         resolver,
     };
@@ -956,9 +956,8 @@ fn assembly(template: &RootTemplate, configuration: &Configuration) -> Assembly 
         },
     };
     let upper = match configuration.upper {
-        // The record names no cap, so the tmpfs takes the kernel's default size.
-        activation::Upper::Tmpfs => root::Upper::Tmpfs {
-            max_memory_percent: None,
+        activation::Upper::Tmpfs { max_memory_percent } => root::Upper::Tmpfs {
+            max_memory_percent: Some(max_memory_percent),
         },
         activation::Upper::Scratch { journal, .. } => root::Upper::Scratch {
             device: template.scratch,
