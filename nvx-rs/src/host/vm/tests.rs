@@ -496,6 +496,78 @@ fn a_missing_boot_and_a_snapshot_are_refused_before_any_output_is_created() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_creation_refuses_listener_delimiters_before_creating_outputs() {
+    for delimiter in [',', '='] {
+        for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("vm{delimiter}option"));
+            create_private_dir(&path).unwrap();
+            let vm = VmDir::open(&path).unwrap();
+            let input = path.join("caller-input");
+            fs::write(&input, b"borrowed input").unwrap();
+            let config = VmConfig {
+                console,
+                ..cold_config()
+            };
+            let error = create(&cold_runtime(), &config, None, &vm).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+            assert_eq!(fs::read(&input).unwrap(), b"borrowed input");
+            assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_creation_checks_socket_path_byte_limits_before_creating_outputs() {
+    use std::os::unix::net::UnixListener;
+
+    for socket_bytes in [107usize, 108, 109] {
+        for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+            let directory = tempfile::tempdir().unwrap();
+            let name_bytes = socket_bytes
+                .checked_sub(directory.path().as_os_str().len() + CONTROL.len() + 2)
+                .expect("a short temporary directory is needed for the socket boundary");
+            let prefix = "unicode space ";
+            let remaining = name_bytes.checked_sub(prefix.len()).unwrap();
+            let mut name = format!("{prefix}{}", "\u{e9}".repeat(remaining / 2));
+            name.push_str(&"x".repeat(remaining % 2));
+            let path = directory.path().join(name);
+            create_private_dir(&path).unwrap();
+            let vm = VmDir::open(&path).unwrap();
+            let outputs = vm.outputs(console == ConsoleAttachment::Listener).unwrap();
+            assert_eq!(outputs.endpoint.len(), socket_bytes);
+            assert!(outputs.endpoint.encode_utf16().count() < socket_bytes);
+            let input = path.join("caller-input");
+            fs::write(&input, b"borrowed input").unwrap();
+            let config = VmConfig {
+                console,
+                ..cold_config()
+            };
+            let result = create(&cold_runtime(), &config, None, &vm);
+            if socket_bytes == 107 {
+                let prepared = result.unwrap();
+                for endpoint in std::iter::once(&prepared.outputs().endpoint)
+                    .chain(prepared.outputs().console.as_ref())
+                {
+                    let listener = UnixListener::bind(endpoint).unwrap();
+                    assert_eq!(
+                        listener.local_addr().unwrap().as_pathname(),
+                        Some(Path::new(endpoint))
+                    );
+                }
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+                assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+            }
+            assert_eq!(fs::read(&input).unwrap(), b"borrowed input");
+        }
+    }
+}
+
 #[test]
 fn creation_rolls_back_its_log_and_never_removes_preexisting_outputs_or_inputs() {
     let mut names = vec![LOG, OUTCOME];

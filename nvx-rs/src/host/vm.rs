@@ -382,7 +382,8 @@ impl Prepared {
 /// every pre-existing entry and the caller's inputs. The capability is never written to disk.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a restore, a missing
-/// boot, a refused configuration, or a complete Windows command line beyond the portable limit.
+/// boot, a refused configuration, unrepresentable Linux socket names, or a complete Windows
+/// command line beyond the portable limit.
 /// The final check includes the actual runtime and output paths, with no reserve, on every host.
 /// Filesystem failures have kind [`ErrorKind::Io`](crate::ErrorKind::Io), retaining their source;
 /// a rollback failure is reported along with the original error.
@@ -403,6 +404,15 @@ pub fn create(
     VmDir::open(dir.path())?;
     platform::check_working_dir(dir.path())?;
     let outputs = dir.outputs(config.console == ConsoleAttachment::Listener)?;
+    if !cfg!(windows) {
+        for endpoint in std::iter::once(&outputs.endpoint).chain(outputs.console.as_ref()) {
+            if endpoint.len() >= 108 || endpoint.contains([',', '=']) {
+                return Err(Error::unsupported(format!(
+                    "the VM socket {endpoint} must be shorter than 108 bytes and hold no ',' or '='",
+                )));
+            }
+        }
+    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

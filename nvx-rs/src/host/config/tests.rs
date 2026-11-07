@@ -629,7 +629,7 @@ fn runtime() -> Runtime {
 fn cold(config: VmConfig) -> VmConfig {
     VmConfig {
         boot: Some(Boot {
-            command_line: "quiet nvx_entrypoint=/bin/work nvx_arg=\"a b\"".to_owned(),
+            command_line: "quiet nvx_entrypoint=/bin/work nvx_arg=ab".to_owned(),
         }),
         ..config
     }
@@ -641,6 +641,171 @@ fn values<'a>(arguments: &'a [OsString], option: &str) -> Vec<&'a OsStr> {
         .filter(|pair| pair[0] == option)
         .map(|pair| pair[1].as_os_str())
         .collect()
+}
+
+#[test]
+fn cold_boot_command_lines_refuse_native_control_console_syntax() {
+    let runtime = runtime();
+    for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+        for (caller, refused) in [
+            (r#"nvx_arg="a b""#, true),
+            ("note=\"", true),
+            ("--", true),
+            ("quiet -- init", true),
+            ("quiet\t--\r\ninit", true),
+            ("nvx_arg='a'", false),
+            ("nvx_arg=--", false),
+            ("--not-a-delimiter", false),
+            ("--=1", false),
+            ("quiet\t--not-a-delimiter\nnote=ok", false),
+        ] {
+            let config = VmConfig {
+                boot: Some(Boot {
+                    command_line: caller.to_owned(),
+                }),
+                console,
+                ..blockless()
+            };
+            config.check().unwrap();
+            let command_line = config.kernel_command_line().unwrap();
+            assert!(command_line.ends_with(caller));
+            let rendered = config.openvmm_arguments(
+                &runtime,
+                "/missing/control",
+                Path::new("/missing/report"),
+                (console == ConsoleAttachment::Listener).then_some("/missing/console"),
+            );
+            if refused {
+                for result in [config.check_command_line(), rendered.map(|_| ())] {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.kind(), ErrorKind::Unsupported);
+                    assert!(
+                        error.to_string().contains("control console"),
+                        "{caller:?}: {error}"
+                    );
+                }
+            } else {
+                config.check_command_line().unwrap();
+                assert_eq!(
+                    values(&rendered.unwrap(), "--cmdline"),
+                    [OsStr::new(&command_line)]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_argument_listener_names_are_distinct() {
+    let config = cold(blockless());
+    let endpoint = r"\\.\pipe\nvx-console";
+    for hypervisor in [Hypervisor::Kvm, Hypervisor::Mshv, Hypervisor::Whp] {
+        let runtime = Runtime {
+            hypervisor,
+            ..runtime()
+        };
+        for console_endpoint in [endpoint, r"\\.\PIPE\NVX-CONSOLE", r"\\.\pipe\nvx-boot"] {
+            let rendered = config.openvmm_arguments(
+                &runtime,
+                endpoint,
+                Path::new("/missing/report"),
+                Some(console_endpoint),
+            );
+            if console_endpoint == endpoint
+                || (hypervisor == Hypervisor::Whp
+                    && console_endpoint.eq_ignore_ascii_case(endpoint))
+            {
+                let error = rendered.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported);
+                assert!(error.to_string().contains("distinct endpoints"));
+            } else {
+                let arguments = rendered.unwrap();
+                assert_eq!(
+                    values(&arguments, "--virtio-console"),
+                    [OsStr::new(&format!("listen={console_endpoint}"))]
+                );
+            }
+        }
+        let disconnected = VmConfig {
+            console: ConsoleAttachment::Disconnected,
+            ..config.clone()
+        };
+        let arguments = disconnected
+            .openvmm_arguments(&runtime, endpoint, Path::new("/missing/report"), None)
+            .unwrap();
+        assert_eq!(values(&arguments, "--virtio-console"), [OsStr::new("none")]);
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn native_argument_paths_require_unicode() {
+    #[cfg(unix)]
+    let invalid = {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(OsString::from_vec(vec![b'i', 0xff]))
+    };
+    #[cfg(windows)]
+    let invalid = {
+        use std::os::windows::ffi::OsStringExt;
+        PathBuf::from(OsString::from_wide(&[105, 0xd800]))
+    };
+    for scratch in [false, true] {
+        let mut root = erofs();
+        if scratch {
+            root.upper = UpperConfig::Scratch {
+                path: invalid.clone(),
+                journal: Journal::Forbidden,
+            };
+        } else {
+            root.image = invalid.clone();
+        }
+        let config = cold(layered(root));
+        config.check().unwrap();
+        config.kernel_command_line().unwrap();
+        for result in [
+            config.check_command_line(),
+            config
+                .openvmm_arguments(
+                    &runtime(),
+                    "/missing/control",
+                    Path::new("/missing/report"),
+                    Some("/missing/console"),
+                )
+                .map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported);
+            assert!(error.to_string().contains("Unicode"));
+        }
+    }
+
+    let image = PathBuf::from("image-\u{e9} with [nested[1]].erofs");
+    let scratch = PathBuf::from("scratch-\u{f1} with spaces.ext4");
+    let config = cold(layered(LayeredRoot {
+        image: image.clone(),
+        upper: UpperConfig::Scratch {
+            path: scratch.clone(),
+            journal: Journal::Forbidden,
+        },
+        ..erofs()
+    }));
+    config.check_command_line().unwrap();
+    let arguments = config
+        .openvmm_arguments(
+            &runtime(),
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        )
+        .unwrap();
+    assert_eq!(
+        values(&arguments, "--microvm-sandbox-block"),
+        [
+            OsStr::new(&format!("distro:file:{},ro", image.display())),
+            OsStr::new(&format!("scratch:file:{}", scratch.display())),
+        ]
+    );
 }
 
 #[test]
@@ -678,7 +843,7 @@ fn cold_boot_arguments_select_the_configured_guest_without_managed_tokens() {
                 OsStr::new("--kernel"), runtime.kernel.as_os_str(),
                 OsStr::new("--initrd"), runtime.initramfs.as_os_str(),
                 OsStr::new("--cmdline"),
-                OsStr::new("nvx_hostname=626f78 nvx_machine_id=image quiet nvx_entrypoint=/bin/work nvx_arg=\"a b\""),
+                OsStr::new("nvx_hostname=626f78 nvx_machine_id=image quiet nvx_entrypoint=/bin/work nvx_arg=ab"),
                 OsStr::new("--virtio-console"), OsStr::new(console_backend),
                 OsStr::new("--microvm-control-console"), OsStr::new("listen=/missing/control.sock"),
                 OsStr::new("--microvm-control-auth-stdin"),
