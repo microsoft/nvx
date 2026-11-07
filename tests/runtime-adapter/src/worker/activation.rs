@@ -78,16 +78,18 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///   record's GPT disk before it, as [`ApplyError::Assembly`] and [`ApplyError::Gpt`] tell, or
 ///   the application failed otherwise, as this build of the adapter does not know;
 /// - [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD): the machine ID that the record asks the
-///   guest to generate cannot be written, as [`ApplyError::MachineId`] tells, or the record's
-///   hostname or that machine ID cannot be set for every execution, as [`ApplyError::View`]
-///   tells;
+///   guest to generate cannot be written, or the record's hostname or that machine ID cannot be
+///   set for every execution, as [`ApplyError::View`] tells, or as the legacy
+///   [`ApplyError::MachineId`] tells;
 /// - [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT): the host export of the record cannot be
 ///   mounted, as [`ApplyError::Export`] tells;
 /// - [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK): the resolver file that names the DNS
-///   server of the record's network cannot be written or set for every execution, or the
-///   announcer of the workload's listeners, which the network publishes, cannot start, as
-///   [`ApplyError::Network`] tells. The worker also ends a clone whose announcer ended with it,
-///   whether the clone was ready or not, outside the activation;
+///   server of the record's network cannot be written or set for every execution, or the network
+///   publishes the workload's listeners but the template names no gateway, as
+///   [`ApplyError::Network`] tells, or the announcer of those listeners, which the worker starts
+///   once the application succeeded, cannot start, as its
+///   [`StartError`](nvx::guest::ingress::StartError) tells. The worker also ends a clone whose
+///   announcer ended with it, whether the clone was ready or not, outside the activation;
 /// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
 ///   activation that did not run, or started the sandbox before the clone was ready, or again.
 ///
