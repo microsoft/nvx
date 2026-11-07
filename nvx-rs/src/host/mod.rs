@@ -29,13 +29,12 @@
 //!   with a bounded forced step on request, and reattaches to it after the orchestrator restarts
 //!   within the same host boot. The private `spawn` module, whose items `supervisor` re-exports,
 //!   starts the VMM detached, with no other descriptor or handle of the caller's.
-//! - [`template`] holds the metadata of templates, captures from which clones are restored: the
-//!   compatibility key of a template, [`TemplateKey`](template::TemplateKey), which it derives
-//!   from the [`CaptureClass`](template::CaptureClass) of the capture and the capture's
-//!   [`TemplateManifest`](template::TemplateManifest), the [`Store`](template::Store) of the
-//!   generations of templates that a host published, which leases them to clones, and the plan
-//!   of a template's capture, [`TemplatePlan`](template::TemplatePlan), which it lowers from an
-//!   adapter's plan.
+//! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
+//!   from a [`CaptureClass`](snapshot::CaptureClass) and [`SnapshotManifest`](snapshot::SnapshotManifest),
+//!   the strict manifest reader, and the capture's public time and eligibility information.
+//! - [`template`] retains the legacy capture and clone plans, the [`Store`](template::Store) of
+//!   published generations and their leases, and aliases of the snapshot metadata. Its
+//!   [`TemplatePlan`](template::TemplatePlan) lowers an adapter's plan for a capture.
 //! - [`session`] speaks NVX's control protocol, `NVXC`, over [`nvxs`], which runs the host's role
 //!   of the NVXS session for it and for any other application protocol, over a platform
 //!   transport. [`platform`] holds the primitives of Linux and Windows hosts. Other hosts compile

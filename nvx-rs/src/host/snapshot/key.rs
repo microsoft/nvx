@@ -211,7 +211,7 @@ identity!(
     /// [`activation::Identity`] by which a clone's lease and durable records name the key of its
     /// template, in their [`TemplateReference`](activation::TemplateReference), without loss.
     KeyIdentity,
-    "a snapshot key's identity"
+    "a template key's identity"
 );
 
 impl From<KeyIdentity> for activation::Identity {
