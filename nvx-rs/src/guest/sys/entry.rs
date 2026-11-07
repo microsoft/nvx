@@ -61,6 +61,9 @@ const MOUNT_ATTR_NOEXEC: u64 = 0x8;
 /// The attributes of every read-only bind of an entry.
 const READ_ONLY_BIND: u64 =
     MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC;
+/// The attributes that every mount of an entry's root takes, as every mount of a layered root's
+/// tree does before its runtime file systems: `nosuid` and `nodev`.
+const TREE_ATTRIBUTES: u64 = MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV;
 /// `openat2`'s resolution of an entry's paths: below the starting directory, through no symbolic
 /// link or magic link, and on the starting directory's mount.
 const BENEATH: u64 = libc::RESOLVE_BENEATH
@@ -92,6 +95,69 @@ const DEVICE_LINKS: [(&CStr, &CStr); 5] = [
     (c"stdout", c"/proc/self/fd/1"),
     (c"stderr", c"/proc/self/fd/2"),
 ];
+
+/// A file system that an entry mounts in its root, as a layered root's
+/// [`mount_runtime`](crate::guest::root::Root::mount_runtime) does in its own: its type, its
+/// string parameters, and its mount's attributes.
+#[derive(Debug)]
+pub(crate) struct FileSystem {
+    /// The type, which `fsopen` takes.
+    pub(crate) kind: &'static CStr,
+    /// The parameters, which `fsconfig` sets.
+    pub(crate) parameters: &'static [(&'static CStr, &'static CStr)],
+    /// The mount's attributes, `MOUNT_ATTR_*`, which `fsmount` sets.
+    pub(crate) attributes: u64,
+}
+
+/// procfs at `/proc`: `nosuid`, `nodev`, and `noexec`.
+pub(crate) const PROC: FileSystem = FileSystem {
+    kind: c"proc",
+    parameters: &[(c"source", c"proc")],
+    attributes: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
+};
+/// sysfs at `/sys`: read-only, `nosuid`, `nodev`, and `noexec`.
+pub(crate) const SYS: FileSystem = FileSystem {
+    kind: c"sysfs",
+    parameters: &[(c"source", c"sysfs")],
+    attributes: READ_ONLY_BIND,
+};
+/// The tmpfs at `/dev`: `nosuid`, with mode 0755.
+pub(crate) const DEV: FileSystem = FileSystem {
+    kind: c"tmpfs",
+    parameters: &[(c"source", c"tmpfs"), (c"mode", c"0755")],
+    attributes: MOUNT_ATTR_NOSUID,
+};
+/// devpts at `/dev/pts`, an instance of its own: `nosuid` and `noexec`, with mode 0666 for
+/// `ptmx` and 0620 for the terminals.
+pub(crate) const DEV_PTS: FileSystem = FileSystem {
+    kind: c"devpts",
+    parameters: &[
+        (c"source", c"devpts"),
+        (c"ptmxmode", c"0666"),
+        (c"mode", c"0620"),
+    ],
+    attributes: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NOEXEC,
+};
+/// The tmpfs at `/dev/shm`: `nosuid` and `nodev`, with mode 1777.
+pub(crate) const DEV_SHM: FileSystem = FileSystem {
+    kind: c"tmpfs",
+    parameters: &[(c"source", c"tmpfs"), (c"mode", c"1777")],
+    attributes: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+};
+/// The tmpfs at `/run`, which a layered root mounts, and an entry does not: `nosuid` and
+/// `nodev`, with mode 0755.
+pub(crate) const RUN: FileSystem = FileSystem {
+    kind: c"tmpfs",
+    parameters: &[(c"source", c"tmpfs"), (c"mode", c"0755")],
+    attributes: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+};
+/// The tmpfs of the source of the masks of an execution as user ID 0: `nosuid`, `nodev`, and
+/// `noexec`, with mode 0555.
+const MASK_SOURCE: FileSystem = FileSystem {
+    kind: c"tmpfs",
+    parameters: &[(c"source", c"tmpfs"), (c"mode", c"0555")],
+    attributes: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
+};
 /// The procfs entries that an execution as user ID 0 sees read-only.
 const PROC_READ_ONLY: [&CStr; 5] = [c"sys", c"sysrq-trigger", c"bus", c"fs", c"irq"];
 /// The procfs entries that an execution as user ID 0 sees masked: as an empty, read-only file or
@@ -306,6 +372,14 @@ impl EntryChild {
     }
 }
 
+/// Takes a plain workload's IDs with empty groups and capabilities, without an entry or mounts.
+pub(super) fn take_workload_identity(uid: u32, gid: u32) -> Result<(), (LaunchStage, Errno)> {
+    drop_bounding(0).map_err(|error| (LaunchStage::Bounding, error))?;
+    set_identity(uid, gid, &[]).map_err(|error| (LaunchStage::Identity, error))?;
+    set_capabilities(0).map_err(|error| (LaunchStage::Capabilities, error))?;
+    prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0).map_err(|error| (LaunchStage::NoNewPrivileges, error))
+}
+
 /// Starts a child in the namespaces that `flags` names, as `fork` starts one otherwise, and
 /// returns its process ID in the parent, or `None` in the child. The child's end sends its
 /// parent `SIGCHLD`, and the child keeps a copy of its parent's memory and descriptors.
@@ -409,12 +483,7 @@ fn set_hostname(hostname: &[u8]) -> Result<(), Errno> {
 /// top of the former root.
 fn move_root(root: &CStr) -> Result<(), Errno> {
     nix::unistd::chdir(root)?;
-    mount_setattr(
-        libc::AT_FDCWD,
-        c".",
-        AT_RECURSIVE,
-        MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
-    )?;
+    mount_setattr(libc::AT_FDCWD, c".", AT_RECURSIVE, TREE_ATTRIBUTES)?;
     nix::mount::mount(
         Some(c"."),
         c"/",
@@ -445,11 +514,7 @@ fn set_umask(mask: libc::mode_t) -> Result<libc::mode_t, Errno> {
 /// `noexec`, and returns its mount's descriptor.
 fn mount_proc() -> Result<RawFd, Errno> {
     let target = directory_target(libc::AT_FDCWD, c"proc")?;
-    let proc = new_mount(
-        c"proc",
-        &[(c"source", c"proc")],
-        MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
-    )?;
+    let proc = new_mount(&PROC)?;
     move_mount(proc, target)?;
     Ok(proc)
 }
@@ -480,7 +545,7 @@ fn restrict_proc(proc: RawFd, source: RawFd) -> Result<(), Errno> {
 /// mount's descriptor.
 fn mount_sys() -> Result<RawFd, Errno> {
     let target = directory_target(libc::AT_FDCWD, c"sys")?;
-    let sys = new_mount(c"sysfs", &[(c"source", c"sysfs")], READ_ONLY_BIND)?;
+    let sys = new_mount(&SYS)?;
     move_mount(sys, target)?;
     Ok(sys)
 }
@@ -489,11 +554,7 @@ fn mount_sys() -> Result<RawFd, Errno> {
 /// and `noexec`, that holds one empty file and one empty directory, and that is read-only once
 /// it holds them. It returns the tmpfs's mount descriptor, of which each mask binds one entry.
 fn mask_source() -> Result<RawFd, Errno> {
-    let source = new_mount(
-        c"tmpfs",
-        &[(c"source", c"tmpfs"), (c"mode", c"0555")],
-        MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
-    )?;
+    let source = new_mount(&MASK_SOURCE)?;
     let file = descriptor(
         // SAFETY: the path is a NUL-terminated string, and the mode an integer.
         unsafe {
@@ -538,12 +599,18 @@ fn mask_entry(directory: RawFd, name: &CStr, source: RawFd) -> Result<(), Errno>
 /// `nodev`, and with mode 1777.
 fn mount_devices(devices: u8) -> Result<(), Errno> {
     let target = directory_target(libc::AT_FDCWD, c"dev")?;
-    let dev = new_mount(
-        c"tmpfs",
-        &[(c"source", c"tmpfs"), (c"mode", c"0755")],
-        MOUNT_ATTR_NOSUID,
-    )?;
+    let dev = new_mount(&DEV)?;
     move_mount(dev, target)?;
+    populate_devices(dev, devices)?;
+    let pts = new_mount(&DEV_PTS)?;
+    move_mount(pts, directory_target(dev, c"pts")?)?;
+    let shm = new_mount(&DEV_SHM)?;
+    move_mount(shm, directory_target(dev, c"shm")?)
+}
+
+/// Creates, in the directory `dev`, the device nodes of [`DEVICE_NODES`] that `devices` selects,
+/// with mode 0666 but for what the umask withholds, and the symbolic links of [`DEVICE_LINKS`].
+fn populate_devices(dev: RawFd, devices: u8) -> Result<(), Errno> {
     for (bit, (name, major, minor)) in DEVICE_NODES.iter().enumerate() {
         if devices & (1 << bit) == 0 {
             continue;
@@ -565,22 +632,35 @@ fn mount_devices(devices: u8) -> Result<(), Errno> {
         // SAFETY: both strings are NUL-terminated.
         unit(unsafe { libc::symlinkat(link.as_ptr(), dev, name.as_ptr()) }.into())?;
     }
-    let pts = new_mount(
-        c"devpts",
-        &[
-            (c"source", c"devpts"),
-            (c"ptmxmode", c"0666"),
-            (c"mode", c"0620"),
-        ],
-        MOUNT_ATTR_NOSUID | MOUNT_ATTR_NOEXEC,
-    )?;
-    move_mount(pts, directory_target(dev, c"pts")?)?;
-    let shm = new_mount(
-        c"tmpfs",
-        &[(c"source", c"tmpfs"), (c"mode", c"1777")],
-        MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
-    )?;
-    move_mount(shm, directory_target(dev, c"shm")?)
+    Ok(())
+}
+
+/// Mounts a new instance of `file_system`, detached, and returns its mount's descriptor, which a
+/// layered root owns, unlike an entry's child.
+pub(crate) fn mount_detached(file_system: &FileSystem) -> Result<FileDescriptor, Errno> {
+    let mount = new_mount(file_system)?;
+    // SAFETY: `fsmount` returned a new descriptor that nothing else owns.
+    Ok(unsafe { FileDescriptor::from_raw(mount) })
+}
+
+/// Sets `nosuid` and `nodev` on the mount whose root `directory` refers to, and on every mount
+/// below it, as an entry does on its root.
+pub(crate) fn restrict_tree(directory: &FileDescriptor) -> Result<(), Errno> {
+    let flags = AT_RECURSIVE | libc::AT_EMPTY_PATH as c_uint;
+    mount_setattr(directory.raw(), c"", flags, TREE_ATTRIBUTES)
+}
+
+/// Creates in the directory `dev` every device node of [`DEVICE_NODES`], with mode 0666 whatever
+/// the umask, which an entry's child clears and a layered root's caller keeps, and the symbolic
+/// links of [`DEVICE_LINKS`].
+pub(crate) fn create_devices(dev: &FileDescriptor) -> Result<(), Errno> {
+    populate_devices(dev.raw(), u8::MAX)?;
+    let mode = nix::sys::stat::Mode::from_bits_truncate(DEVICE_MODE);
+    let follow = nix::sys::stat::FchmodatFlags::FollowSymlink;
+    for (name, _, _) in DEVICE_NODES {
+        nix::sys::stat::fchmodat(dev.borrowed(), name, mode, follow)?;
+    }
+    Ok(())
 }
 
 /// Drops from the bounding set every capability that `capabilities` does not hold, up to the
@@ -682,13 +762,14 @@ fn file_kind(descriptor: RawFd) -> Result<libc::mode_t, Errno> {
     Ok(unsafe { status.assume_init() }.st_mode & libc::S_IFMT)
 }
 
-/// Creates the file system `kind` with the string parameters `parameters`, mounts it detached
-/// with the mount attributes `attributes`, and returns the mount's descriptor.
-fn new_mount(kind: &CStr, parameters: &[(&CStr, &CStr)], attributes: u64) -> Result<RawFd, Errno> {
+/// Creates the file system `file_system` with its string parameters, mounts it detached with its
+/// mount attributes, and returns the mount's descriptor.
+fn new_mount(file_system: &FileSystem) -> Result<RawFd, Errno> {
     // SAFETY: the name is a NUL-terminated string.
-    let context =
-        descriptor(unsafe { libc::syscall(libc::SYS_fsopen, kind.as_ptr(), FSOPEN_CLOEXEC) })?;
-    let mount = configure_and_mount(context, parameters, attributes);
+    let context = descriptor(unsafe {
+        libc::syscall(libc::SYS_fsopen, file_system.kind.as_ptr(), FSOPEN_CLOEXEC)
+    })?;
+    let mount = configure_and_mount(context, file_system.parameters, file_system.attributes);
     close(context);
     mount
 }

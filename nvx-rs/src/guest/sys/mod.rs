@@ -89,7 +89,10 @@ pub(crate) use clock::{Clock, clock_time, monotonic_ms, sleep_once, sleep_until_
 #[cfg(target_arch = "x86_64")]
 pub(crate) use clock::{monotonic_ns, syscall_monotonic_nanoseconds};
 pub(crate) use discipline::{ClockAdjustment, ClockDiscipline, FrequencyHold, adjust_clock};
-pub(crate) use entry::{EntryChild, file_size};
+pub(crate) use entry::{
+    DEV, DEV_PTS, DEV_SHM, EntryChild, FileSystem, PROC, RUN, SYS, create_devices, file_size,
+    mount_detached, restrict_tree,
+};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use fd::close_inherited_descriptors;
 pub(crate) use fd::{
@@ -145,7 +148,7 @@ pub(crate) use sock_diag::{
     INET_DIAG_BUFFER_LENGTH, InetDiagMessage, decode_inet_diag_dump, dump_ipv6_tcp_sockets,
 };
 pub(crate) use socket::{UdpSocket, connect_datagram};
-pub(crate) use spawn::{ChildSpec, PreparedChild, REPORT_LENGTH};
+pub(crate) use spawn::{ChildSpec, PreparedChild, REPORT_LENGTH, enter_root};
 pub(crate) use terminal::{configure_raw, drain};
 pub(crate) use timer::Timer;
 

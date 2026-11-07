@@ -22,10 +22,11 @@ use windows_sys::Win32::System::Threading::{
 use super::identity::status_error;
 use super::log_claim::{local_directory, log_job_id, log_job_name, log_job_processes, object_name};
 pub(crate) use super::private::tests::set_access;
+pub(crate) use super::private::tests::{access, user_sid};
 use super::process::{end_process, wait_step};
 use super::spawn::command_line;
 use super::*;
-use crate::host::platform::inherit::{Inherited, lock_spawns, spawn_command};
+use crate::host::platform::inherit::{Inherited, lock_spawns};
 
 thread_local! {
     /// What a spawn of this thread runs in its window, once its handles are inheritable and
@@ -106,7 +107,7 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
 
 #[test]
 fn windows_refuses_to_terminate_a_process_that_exited_with_access_denied() {
-    let mut child = spawn_command(&mut sleeper()).unwrap();
+    let mut child = spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let start_time = process_start_time(pid).unwrap().unwrap();
     let process = open_process(pid, start_time).unwrap().unwrap();
@@ -135,7 +136,7 @@ fn a_wait_sleeps_a_remainder_below_a_millisecond_instead_of_waiting_a_tick() {
 
 #[test]
 fn a_wait_with_less_than_a_millisecond_left_ends_at_its_deadline() {
-    let mut child = spawn_command(&mut sleeper()).unwrap();
+    let mut child = spawn_locked(&mut sleeper()).unwrap();
     let pid = child.id();
     let start_time = process_start_time(pid).unwrap().unwrap();
     let process = open_process(pid, start_time).unwrap().unwrap();
@@ -539,6 +540,13 @@ fn sleeper() -> std::process::Command {
     command
 }
 
+/// Spawns `command` under a `SpawnLock`, which it releases once the process exists, so that
+/// the process inherits no handle that a spawn of a VMM makes inheritable meanwhile.
+fn spawn_locked(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    let _lock = lock_spawns();
+    command.spawn()
+}
+
 /// A spawn of a stand-in VMM, with a log as its standard output and error, as
 /// `supervisor::spawn` passes the VMM its launch's log, that another thread runs and holds in
 /// its window, with the log's handles inheritable, until it is released.
@@ -659,7 +667,7 @@ fn a_process_spawned_under_the_spawn_lock_does_not_inherit_a_vmms_log() {
     let directory = tempfile::tempdir().unwrap();
     let held = HeldSpawn::start(directory.path());
     // The spawn of the other process waits for the window to close.
-    let other = thread::spawn(|| spawn_command(&mut sleeper()).map(Running));
+    let other = thread::spawn(|| spawn_locked(&mut sleeper()).map(Running));
     thread::sleep(Duration::from_millis(500));
     let waited = !other.is_finished();
     let (log, identity) = held.finish();
@@ -1081,7 +1089,7 @@ fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dro
         None,
     )
     .unwrap();
-    let other = spawn_command(&mut sleeper()).map(Running).unwrap();
+    let other = spawn_locked(&mut sleeper()).map(Running).unwrap();
     // The hold lasts until the thread's last lock is dropped, whichever that is.
     let (taken, acquired) = std::sync::mpsc::channel();
     let waiter = thread::spawn(move || {

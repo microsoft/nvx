@@ -7,18 +7,18 @@
   `b2676222b383bf50c7022f6a5983920421469a47`; see [Upstream status](#upstream-status).
 - Mapped fork tip: `3cdf4fe3834cfb90b9ee685875493bc9bff1b7a4`, position 135. The graph, PR
   summary, and commit mapping below cover positions 001-135 and the PR20 fixup at position 152.
-- NVX's pinned OpenVMM revision: `9cec2b89245f41f2126f9a787c5e43a0d84b7154`, position 214.
-  Position 214, which microsoft/openvmm#4916 proposes for `feature/microvm/dev`, is one commit on
-  position 213, `4713c539a`, the head of `feature/microvm/dev`. microsoft/openvmm#4894,
-  microsoft/openvmm#4886, and microsoft/openvmm#4887 landed positions 211-213 there by
-  fast-forward, on position 210, `eda13d80a`, the head of the `feature/microvm/release/v4.0`
-  branch of microsoft/openvmm. The v4.0 reorganization moved the 205 commits of
-  `feature/microvm/release/v3.0` and the NVX pin before it, `35e76265f`, onto `c6d3da0ff`. It
-  dropped the eight commits whose changes upstream had landed or superseded, retired the fallible
-  device start that microsoft/nvx#1232 replaces with awaited device restoration, folded that
-  restoration into the commits that it changes, and added 14 commits that give each ABI that the
-  chain introduces a single version; see [The v4.0 reorganization](#the-v40-reorganization). The
-  pin is 79 commits past the mapped tip on the same first-parent chain. Positions 136-214, except
+- NVX's pinned OpenVMM revision: `14dc4116ec7e57567633c4b7b07892aca3a58522`, position 216. Positions
+  215 and 216, which microsoft/openvmm#4921 proposes for `feature/microvm/dev`, are two commits on
+  position 214, `9cec2b892`, the head of `feature/microvm/dev`. microsoft/openvmm#4916 landed
+  position 214 there by fast-forward, as microsoft/openvmm#4894, microsoft/openvmm#4886, and
+  microsoft/openvmm#4887 landed positions 211-213 on position 210, `eda13d80a`, the head of the
+  `feature/microvm/release/v4.0` branch of microsoft/openvmm. The v4.0 reorganization moved the 205
+  commits of `feature/microvm/release/v3.0` and the NVX pin before it, `35e76265f`, onto
+  `c6d3da0ff`. It dropped the eight commits whose changes upstream had landed or superseded, retired
+  the fallible device start that microsoft/nvx#1232 replaces with awaited device restoration, folded
+  that restoration into the commits that it changes, and added 14 commits that give each ABI that
+  the chain introduces a single version; see [The v4.0 reorganization](#the-v40-reorganization). The
+  pin is 81 commits past the mapped tip on the same first-parent chain. Positions 136-216, except
   the PR20 fixup at position 152, are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ca6b2b177da5e33ae1bcac72986b31d6b039811c` (2026-11-02), one commit past the
@@ -174,8 +174,8 @@ and 023 is in an open upstream pull request; the commits that upstream has since
 [Landed upstream](#landed-upstream), and PR08 has landed whole. Each pull request carries one
 commit, except microsoft/openvmm#4554, which carries positions 055-057 after the `boot_params`
 field that microsoft/openvmm#4661 has since landed; its ELF and initrd validation was split out
-during review and landed as microsoft/openvmm#4667 (`a87971184`). One of the 21 pull requests,
-microsoft/openvmm#4625, is a draft, and none has an approving review yet.
+during review and landed as microsoft/openvmm#4667 (`a87971184`). One of those 21 pull requests,
+microsoft/openvmm#4625, was a draft, and none had an approving review yet.
 microsoft/openvmm#4451, which proposed position 001, was closed without merging, and neither the
 remainder of position 006 nor position 023, which the v3.0 reorganization moved into PR09, has
 been proposed. microsoft/openvmm#4619, microsoft/openvmm#4622, and microsoft/openvmm#4623, which
@@ -184,6 +184,17 @@ closed in favor of microsoft/nvx#1232: position 018 now only rolls back a partia
 position 027 is retired, and position 019's resume stays fallible; see
 [The v4.0 reorganization](#the-v40-reorganization). PR10-PR13 and PR15-PR27 have no upstream pull
 requests yet.
+
+On 2026-11-04, microsoft/nvx#1260 withdrew position 021 from PR09, since the deadline of the
+snapshot quiesce added no safety: microsoft/openvmm#4625, which proposed position 021's bounded
+quiesce transactions, was closed, and position 216 removes them, so the next reorganization drops
+position 021. microsoft/openvmm#4872, opened on 2026-11-03, proposes position 018's rollback of a
+partial start, with review changes that the chain lacks, and microsoft/openvmm#4626, which proposes
+position 022's input gate without the deadline that position 216 removes from it, builds on it. So
+does microsoft/openvmm#4937, which proposes no chain commit: it makes `StateUnits::stop` fail
+instead of panicking when a unit's task has ended, so a rebase onto it adapts the chain's own
+callers of `StateUnits::stop`, in the microVM worker's `dispatch/microvm.rs` and
+`dispatch/restore.rs`.
 
 | Roadmap PR | Positions | Upstream pull requests, in position order |
 | --- | ---: | --- |
@@ -194,13 +205,12 @@ requests yet.
 | PR05 | 011-013 | microsoft/openvmm#4536, microsoft/openvmm#4607, microsoft/openvmm#4613 |
 | PR06 | 014-016 | microsoft/openvmm#4597, microsoft/openvmm#4605, microsoft/openvmm#4609 |
 | PR07 | 017 | microsoft/openvmm#4600 |
-| PR09 | 020-022 | microsoft/openvmm#4624, microsoft/openvmm#4625, microsoft/openvmm#4626 |
+| PR09 | 018, 020, 022 | microsoft/openvmm#4872, microsoft/openvmm#4624, microsoft/openvmm#4626 |
 | PR14 | 055-058 | microsoft/openvmm#4554 (055-057), microsoft/openvmm#4611 |
 
 Stacked pull requests carry their prerequisites' commits: microsoft/openvmm#4609 builds on
 microsoft/openvmm#4585, which has merged; microsoft/openvmm#4613 builds on microsoft/openvmm#4536;
-and microsoft/openvmm#4625 builds on the closed microsoft/openvmm#4619, as microsoft/openvmm#4626
-builds on microsoft/openvmm#4625, so both need a rebase that drops the fallible unit start.
+and microsoft/openvmm#4626 builds on microsoft/openvmm#4872.
 Most of these pull requests have gained review commits that the fork chain does not carry. When
 one merges, the next rebase should drop its fork commit, as the `microvm/v2.2`,
 `feature/microvm/release/v2.3`, and `feature/microvm/release/v2.4` rebases and the v3.0 and v4.0
@@ -647,8 +657,8 @@ c6d3da0ff
   -> sandbox block roles [192] -> virtio feature masks [193-194]
   -> IOAPIC interrupt lines [195-196] -> ABI restart [197-210]
   -> boot console exit drain [211] -> portb without host input [212-213]
-  -> long Windows paths [214]
-  -> 9cec2b892 (NVX pin)
+  -> long Windows paths [214] -> snapshot quiesce without a deadline [215-216]
+  -> 14dc4116e (NVX pin)
 ```
 
 For upstream review, PR01-PR07 and PR14 can be rebased independently onto current upstream main,
@@ -664,12 +674,12 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 135 without merges. Of the 79 later commits, position
+The NVX pin extends the chain past position 135 without merges. Of the 81 later commits, position
 152 is a PR20 fixup, and the others are not yet classified or assigned to PRs. Each of positions
 136-191 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 192-196
 followed the v3.0 reorganization, positions 197-210 are the ABI restart of the v4.0
-reorganization, and positions 211-214 followed it, so they combine none.
+reorganization, and positions 211-216 followed it, so they combine none.
 
 | Position | Commit | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | --- | --- |
@@ -752,6 +762,8 @@ reorganization, and positions 211-214 followed it, so they combine none.
 | 212 | `de29849a4` | - | - | vmm_tests: drive the microVM guests without portb input (microsoft/openvmm#4886) |
 | 213 | `4713c539a` | - | - | microVM: remove portb's host input (microsoft/openvmm#4887) |
 | 214 | `9cec2b892` | - | - | pal: support long paths in secure file and directory creation (microsoft/openvmm#4916) |
+| 215 | `1108c05c7` | - | - | state_unit: log the units that a state change waits for (microsoft/openvmm#4921) |
+| 216 | `14dc4116e` | - | - | microVM: quiesce snapshots without a deadline (microsoft/openvmm#4921) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -788,7 +800,18 @@ then removes that input: the receive path of the portb console of PR15's positio
 PR20's position 098 shares with the restore records and PR20's position 099 gates, and the
 console input that PR15's position 068 gives the device on the CLI. Since those reads also
 noticed a departed peer of a listening endpoint, position 213 has the device poll the backend for
-it instead. Assigning the later
+it instead. Position 216 removes the bounded quiesce transactions that PR09's position 021 adds,
+so that the next reorganization drops position 021, and the uncertain quiesce that PR17's
+positions 076 and 080 handle in the worker and the controller, whose capture now quiesces and
+rolls back with the start rollback of PR09's position 018. It also removes the capture's other
+bounds. The input gate of PR09's position 022, whose module it makes private, loses its timeout,
+and so do the snapshot-request port of PR17's position 075, its handles in OpenVMM and petri from
+PR17's position 080, the worker of PR17's position 076, and the post-restore input gate of PR20's
+position 099, which passed it on; the console flush of PR24's position 123 loses its own. The CLI
+option of PR17's position 080 that set both goes, and the management RPC's field of PR25's
+position 128 is reserved. The dispatcher test of PR17's position 077 builds the RPCs and the port
+without durations, the boot console flush test of position 211 calls the flush without one, and
+the input gate's tests reuse the log of position 215's test. Assigning the later
 commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 182, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -845,6 +868,12 @@ but position 214 changes nothing that they add. Replaying it on upstream main co
 publication file, whose new tests use the paired scratch of PR19's position 096 and the exact-file
 RAM of PR11's position 038. Its `pal` change alone applies to upstream main without conflicts, and
 `pal` builds there and passes its tests on Windows, so that change can go upstream on its own.
+
+Position 215 changes only `state_unit`'s state change requests and its tests: replaying it on
+upstream main conflicts only where its test module joins those of positions 018, 020, and 021 in
+`lib.rs`. Position 216 changes the microVM capture of PR09, PR17, PR20, PR24, and PR25, its CLI
+and management RPC, and their Guide pages: replaying it on upstream main conflicts in all 24 of
+its files, 18 of which upstream main lacks, so it follows those PRs upstream.
 
 ## PR summary
 
@@ -1040,11 +1069,11 @@ Landed upstream and dropped from the chain:
 <details>
 <summary><strong>PR09 - Fallible and bounded VM lifecycle (U)</strong> - 6 commits + 1 retired</summary>
 
-- 018 `a1a72fa96` - state_unit: roll back a partial start instead of panicking (v3.0 026, v2.4 027; **closed upstream**: microsoft/openvmm#4619 proposed the fallible unit start that the v4.0 reorganization retired, in favor of microsoft/nvx#1232; see [The v4.0 reorganization](#the-v40-reorganization))
+- 018 `a1a72fa96` - state_unit: roll back a partial start instead of panicking (v3.0 026, v2.4 027; **open upstream**: microsoft/openvmm#4872, with review changes that the chain lacks; microsoft/openvmm#4619 proposed the fallible unit start that the v4.0 reorganization retired, in favor of microsoft/nvx#1232; see [The v4.0 reorganization](#the-v40-reorganization))
 - 019 `4b98c153d` - openvmm: make VM resume fallible (v3.0 028, v2.4 029; **closed upstream**: microsoft/openvmm#4623 was closed in favor of microsoft/nvx#1232, but the resume stays fallible: the post-restore input gate, the restore readiness event, and the time ABI's TSC offset measurement fail it)
 - 020 `6fedcc054` - state_unit: record the exact unit inventory in saved state (v3.0 029, v2.4 030; **open upstream**: microsoft/openvmm#4624)
-- 021 `03291e1ea` - state_unit: add bounded quiesce transactions with rollback classification (v3.0 030, v2.4 031; **open upstream**: microsoft/openvmm#4625, a draft stacked on the closed microsoft/openvmm#4619; folds v2.4 371 (part))
-- 022 `cc2108a97` - vmcore: add device input quiesce and resume (v3.0 031, v2.4 032; **open upstream**: microsoft/openvmm#4626, stacked on microsoft/openvmm#4625)
+- 021 `03291e1ea` - state_unit: add bounded quiesce transactions with rollback classification (v3.0 030, v2.4 031; **withdrawn**: microsoft/openvmm#4625 was closed in favor of microsoft/nvx#1260, and position 216 removes these transactions, so the next reorganization drops this commit; folds v2.4 371 (part))
+- 022 `cc2108a97` - vmcore: add device input quiesce and resume (v3.0 031, v2.4 032; **open upstream**: microsoft/openvmm#4626, stacked on microsoft/openvmm#4872, without the input gate's deadline, which position 216 removes here)
 - 023 `0692a461c` - openvmm_core: stop the devices before tearing down the VM (v3.0 032, v2.4 301)
 
 Retired by the v4.0 reorganization:

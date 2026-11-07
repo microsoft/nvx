@@ -7,7 +7,8 @@
 //! or a read of a GPT disk's partition table at the geometry that its block device reports, and
 //! the writes to the kernel's control files, the check for a mount point, and the options of a
 //! mount, whose effects and answers a test simulates, go through a [`Kernel`], which also performs
-//! the mapper's operations for the root's live shares and mappings.
+//! the mapper's operations for the root's live shares and mappings, the runtime's mounts, and the
+//! switch into the root.
 
 use std::ffi::CStr;
 use std::fs::{self, File};
@@ -19,7 +20,7 @@ use crate::gpt::{Disk, Expected};
 use crate::guest::gpt::{self, DeviceError};
 use crate::guest::mappings::Kernel as MappingKernel;
 use crate::guest::parse::parse_decimal;
-use crate::guest::sys::{self, Errno, Mode, MountFlags, OpenFlags};
+use crate::guest::sys::{self, Errno, FileDescriptor, FileSystem, Mode, MountFlags, OpenFlags};
 
 pub(crate) use crate::guest::mappings::SystemKernel;
 
@@ -30,8 +31,10 @@ const MOUNT_TABLE: &str = "/proc/thread-self/mountinfo";
 /// unmounts, flushes of a block device's buffers, syncs of a mounted file system, rereads of a
 /// disk's partition table, writes of a control file, and the sleeps between two polls for a block
 /// device; the check for a mount point and the options of a mount, which depend on them; since
-/// only a block device reports its geometry, the read of a GPT disk's partition table; and the
-/// mapper's operations, through which the root mounts its live shares and mappings.
+/// only a block device reports its geometry, the read of a GPT disk's partition table; the
+/// mapper's operations, through which the root mounts its live shares and mappings; the new
+/// mounts, the restriction of the root's tree, and the device nodes of the runtime's file systems;
+/// and the change of root directory into a switched root.
 ///
 /// [`SystemKernel`] performs them. The tests' fake records the operations, simulates the effect
 /// of a cgroup's membership file and its own mounts, reads a GPT disk's table from a regular
@@ -88,6 +91,22 @@ pub(super) trait Kernel: MappingKernel + Send + Sync {
 
     /// Sleeps for `duration`.
     fn sleep(&mut self, duration: Duration);
+
+    /// Mounts a new instance of `file_system`, detached, as `fsopen`, `fsconfig`, and `fsmount`
+    /// do, and returns its mount's descriptor, which [`MappingKernel::move_mount`] attaches.
+    fn new_mount(&mut self, file_system: &FileSystem) -> Result<FileDescriptor, Errno>;
+
+    /// Sets `nosuid` and `nodev` on the mount whose root `directory` refers to, and on every
+    /// mount below it.
+    fn restrict_tree(&mut self, directory: &FileDescriptor) -> Result<(), Errno>;
+
+    /// Creates the device nodes and the symbolic links of an execution's `/dev` in the directory
+    /// `dev`, the nodes with mode 0666 whatever the umask.
+    fn create_devices(&mut self, dev: &FileDescriptor) -> Result<(), Errno>;
+
+    /// Makes the directory `root` the calling process's root directory, then its working
+    /// directory the new root's top: `chroot`, then `chdir`.
+    fn enter_root(&mut self, root: &FileDescriptor) -> Result<(), Errno>;
 }
 
 impl Kernel for SystemKernel {
@@ -170,6 +189,23 @@ impl Kernel for SystemKernel {
 
     fn sleep(&mut self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+
+    fn new_mount(&mut self, file_system: &FileSystem) -> Result<FileDescriptor, Errno> {
+        sys::mount_detached(file_system)
+    }
+
+    fn restrict_tree(&mut self, directory: &FileDescriptor) -> Result<(), Errno> {
+        sys::restrict_tree(directory)
+    }
+
+    fn create_devices(&mut self, dev: &FileDescriptor) -> Result<(), Errno> {
+        sys::create_devices(dev)
+    }
+
+    fn enter_root(&mut self, root: &FileDescriptor) -> Result<(), Errno> {
+        sys::enter_root(root)?;
+        nix::unistd::chdir(c"/")
     }
 }
 

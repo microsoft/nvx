@@ -139,6 +139,7 @@ MICROVM_TEST_SCENARIOS = (
     "smp",
     "smp-snapshot",
     "snapshot-core",
+    "snapshot-rollback",
     "snapshot-tiers",
     "structured-outcome",
     "time-abi-conformance",
@@ -8166,7 +8167,12 @@ def canceled_capture_checks() -> str:
     )
 
 
-def check_canceled_capture(output: bytes, command: Sequence[str]) -> None:
+def check_canceled_capture(
+    output: bytes,
+    command: Sequence[str],
+    *,
+    context: str = "after the released snapshot request",
+) -> None:
     """Check that a released snapshot request left the source as it was.
 
     The snapshot agent saves and overrides the stall detectors' settings
@@ -8175,7 +8181,6 @@ def check_canceled_capture(output: bytes, command: Sequence[str]) -> None:
     source then reports a passing status at generation 0 with no restore, and
     RCU stall detection is no longer suppressed.
     """
-    context = "after the released snapshot request"
     monitor = TimeAbiMonitor(command)
     try:
         monitor.feed(output)
@@ -8385,6 +8390,171 @@ def run_snapshot_core(
             raise RuntimeError("restored clones reused a kernel UUID")
         if temp_ids[0] == temp_ids[1]:
             raise RuntimeError("restored clones reused a temporary-file ID")
+
+
+SNAPSHOT_ROLLBACK_STATUS_PREFIX = b"NVX-SNAPSHOT-ROLLBACK-STATUS-"
+SNAPSHOT_ROLLBACK_CONTINUED_MARKER = b"NVX-SNAPSHOT-ROLLBACK-CONTINUED"
+SNAPSHOT_ROLLBACK_RESTORED_STATUS_PREFIX = b"NVX-SNAPSHOT-ROLLBACK-RESTORED-STATUS-"
+SNAPSHOT_ROLLBACK_RESTORED_MARKER = b"NVX-SNAPSHOT-ROLLBACK-RESTORED"
+CAPTURE_PROFILE_PHASE = re.compile(
+    rb"OPENVMM_SNAPSHOT_PROFILE_V1 operation=capture phase=([a-z_]+) "
+)
+
+
+def snapshot_request_line(status_prefix: bytes, done_marker: bytes) -> str:
+    """Return a console line that requests a snapshot, then prints
+    ``status_prefix`` with the request's exit status and, on a line of its
+    own, ``done_marker``.
+
+    A quote pair splits each marker, so the console's echo of the line, which
+    the tty may wrap, never contains it.
+    """
+    status = status_prefix.decode()
+    done = done_marker.decode()
+    return (
+        f'nvx-snapshot; echo "{status[:4]}""{status[4:]}$?"; '
+        f'echo "{done[:4]}""{done[4:]}"'
+    )
+
+
+def capture_profile_phases(output: bytes) -> list[str]:
+    """Return the phases of the capture profile records in ``output``, in the
+    order in which OpenVMM wrote them.
+
+    OpenVMM writes a record and its newline separately, so console output can
+    share its line; the records are found wherever they are.
+    """
+    return [match.group(1).decode() for match in CAPTURE_PROFILE_PHASE.finditer(output)]
+
+
+def run_snapshot_rollback(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Fail a capture after a complete quiesce, and check that the source
+    resumes and can capture again.
+
+    The snapshot destination's parent disappears after boot, so the capture
+    quiesces and saves the VM, and then fails to publish, which rolls it back:
+    the guest's request returns in the source, as for a request that OpenVMM
+    releases (``snapshot-core``), and the capture's profile records show the
+    quiesce and the save, but no publication. Once the parent is back, a
+    second request of the same source publishes a snapshot, whose restore
+    continues past that request.
+    """
+    with tempfile.TemporaryDirectory(prefix="nvx-snapshot-rollback-") as temporary:
+        root = Path(temporary)
+        parent = root / "parent"
+        snapshot_path = parent / "snapshot"
+        parent.mkdir()
+        capture_command = [
+            *workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+            ),
+            "--snapshot-destination",
+            str(snapshot_path),
+        ]
+        # OpenVMM's own RAM backing would live in the destination's parent and
+        # keep it from going away, so the RAM has a file of its own.
+        memory = capture_command.index("--memory") + 1
+        capture_command[memory] = f"size={memory_mib}M,file={root / 'memory.bin'}"
+        with OpenvmmProcess(
+            capture_command,
+            output_dir / "snapshot-rollback-capture.log",
+            environment={SNAPSHOT_PROFILE_ENV: "1"},
+        ) as process:
+            process.wait_for(BOOT_MARKER, timeout)
+            parent.rmdir()
+            process.send_line(
+                snapshot_request_line(
+                    SNAPSHOT_ROLLBACK_STATUS_PREFIX, SNAPSHOT_ROLLBACK_CONTINUED_MARKER
+                )
+            )
+            process.wait_for_line(SNAPSHOT_ROLLBACK_CONTINUED_MARKER, timeout)
+            failed = process.output
+            status = _single_marker_value(failed, SNAPSHOT_ROLLBACK_STATUS_PREFIX)
+            if status != b"0":
+                raise RuntimeError(
+                    "the snapshot request that OpenVMM rolled back exited with "
+                    f"{status.decode(errors='replace')}"
+                )
+            phases = capture_profile_phases(failed)
+            if phases.count("quiesce") != 1 or phases.count("save_state") != 1:
+                raise RuntimeError(
+                    "the failed capture did not quiesce and save the VM once "
+                    f"before it returned: capture phases {phases}"
+                )
+            if "publication" in phases or "publication_commit" in phases:
+                raise RuntimeError(
+                    f"the failed capture published a snapshot: capture phases {phases}"
+                )
+            if parent.exists():
+                raise RuntimeError("the failed capture recreated its parent directory")
+            checks_start = len(process.output)
+            process.send_bytes(canceled_capture_checks().encode())
+            process.wait_for_line(
+                CANCELED_CAPTURE_DONE_MARKER, max(timeout, STATUS_TIMEOUT_SECONDS)
+            )
+            check_canceled_capture(
+                process.output[checks_start:],
+                capture_command,
+                context="after the rolled-back capture",
+            )
+            parent.mkdir()
+            process.send_line(
+                snapshot_request_line(
+                    SNAPSHOT_ROLLBACK_RESTORED_STATUS_PREFIX,
+                    SNAPSHOT_ROLLBACK_RESTORED_MARKER,
+                )
+                + "; nvx-exit 0"
+            )
+            source = process.wait(timeout)
+        if source.returncode != 0:
+            raise RuntimeError(
+                f"snapshot source OpenVMM exited with {source.returncode}"
+            )
+        if SNAPSHOT_ROLLBACK_RESTORED_MARKER in _output_lines(source.output):
+            raise RuntimeError("snapshot source crossed its terminal capture boundary")
+        phases = capture_profile_phases(source.output)
+        if phases.count("quiesce") != 2 or phases.count("publication_commit") != 1:
+            raise RuntimeError(
+                "the source did not quiesce twice and publish once: "
+                f"capture phases {phases}"
+            )
+        if list(parent.iterdir()) != [snapshot_path]:
+            raise RuntimeError(
+                "the snapshot's parent holds more than the snapshot: "
+                f"{sorted(path.name for path in parent.iterdir())}"
+            )
+        with OpenvmmProcess(
+            snapshot_restore_command(executable, backend, snapshot_path),
+            output_dir / "snapshot-rollback-restore.log",
+        ) as process:
+            process.wait_for_line(SNAPSHOT_ROLLBACK_RESTORED_MARKER, timeout)
+            restored = process.wait(timeout)
+        if restored.returncode != 0:
+            raise RuntimeError(f"snapshot restore exited with {restored.returncode}")
+        status = _single_marker_value(
+            restored.output, SNAPSHOT_ROLLBACK_RESTORED_STATUS_PREFIX
+        )
+        if status != b"0":
+            raise RuntimeError(
+                "the restored snapshot request exited with "
+                f"{status.decode(errors='replace')}"
+            )
+        if _output_lines(restored.output).count(SNAPSHOT_ROLLBACK_RESTORED_MARKER) != 1:
+            raise RuntimeError("snapshot restore did not continue exactly once")
 
 
 def run_console_snapshot(
@@ -11325,6 +11495,20 @@ def _run_scenarios(
             f"Running microVM snapshot-core correctness on OpenVMM/{args.backend}",
         )
         run_snapshot_core(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            memory_mib=args.memory_mib,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "snapshot-rollback" in scenarios:
+        report.start(
+            "snapshot-rollback",
+            f"Running microVM snapshot rollback correctness on OpenVMM/{args.backend}",
+        )
+        run_snapshot_rollback(
             executable,
             kernel,
             initrd,

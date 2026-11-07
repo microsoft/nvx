@@ -242,6 +242,16 @@ settings, and it must restore them when the request returns
 (`nvx-time cancel-capture`). Afterwards, `nvx-time status` must exit 0 with a
 passing boot line at generation 0 and no restore line, and
 `/sys/module/rcupdate/parameters/rcu_cpu_stall_suppress` must read 0.
+The `snapshot-rollback` scenario fails a capture after its quiesce. The
+guest's RAM has a file of its own, so the snapshot destination's parent holds
+nothing, and it disappears after boot: the capture quiesces and saves the VM,
+then fails to publish, and OpenVMM rolls it back. The request must return in
+the source with status 0, after OpenVMM's capture profile records exactly one
+quiesce and one save but no publication, and the source must pass the checks
+that `snapshot-core` runs after its released request. Once the parent is back,
+a second request of the same source must publish a snapshot and end the
+source with status 0, leaving only the snapshot in the parent, and the
+snapshot's restore must continue past that request exactly once.
 The `platform-zero-fill` scenario covers a platform restore whose `distro`
 image is shorter than the snapshot's and whose fresh scratch is absent. It
 captures a platform snapshot with a 1 MiB `distro` placeholder and a 1 MiB
@@ -376,7 +386,7 @@ boot check of those detectors passes vacuously. To bound the cost, pull requests
 run the debug kernel on MSHV only, rather than on KVM, whose general runners
 queue the most (see
 [Job graph and runner capacity](#job-graph-and-runner-capacity)), while merge
-groups run it on KVM alone and `dev` pushes and full runs run it on every
+groups run it on KVM alone and pushes and full runs run it on every
 backend. Each job takes about five minutes on its own runner, in parallel with
 the other microVM jobs. The jobs gate the required status check, the
 development release, and the recording of the performance results. The GitHub-hosted `debug-kernel` job
@@ -725,7 +735,7 @@ from, so queueing a fork's pull request runs its code on the fleet, as the
 
 ## Job graph and runner capacity
 
-A `dev` push, a pull request that is ready for review, a merge group, or a
+A push, a pull request that is ready for review, a merge group, or a
 scheduled or manually dispatched full run starts these jobs at once: `quality`,
 `nvx-rs`, `build-nvx-rs-linux-musl`, and `build-nvx-rs-windows-msvc` on
 GitHub-hosted runners, and `openvmm-changes`, which classifies a push, pull
@@ -868,15 +878,15 @@ beside the default suite after a setup of its own, so it holds one more
 general runner per backend for about three to five minutes. The default suite
 waits only for `artifacts`, so a cold build of the Ubuntu or Azure Linux
 images, about 4 minutes, delays only the guest and sandbox job, which takes
-about as long as a shard of the default suite. A `dev` push, full run, or
+about as long as a shard of the default suite. A push, full run, or
 merge group then fills KVM's four general runners with the two shards, the
 guest and sandbox job, and the debug-kernel job, and a pull request, which
 runs the debug kernel on MSHV, needs three of them. MSHV's four hold the two
-shards, the guest and sandbox job, and, for a pull request, `dev` push, or
+shards, the guest and sandbox job, and, for a pull request, push, or
 full run, the debug-kernel job. On WHP, which runs the runtime adapter
 scenarios in a job of their own, as the next paragraphs describe, a pull
 request or merge group needs four of the six general runners at once, for the
-microVM jobs, and a `dev` push or full run, which also runs the debug kernel
+microVM jobs, and a push or full run, which also runs the debug kernel
 there, five. When a pool has fewer
 free general runners than a backend's microVM jobs, the jobs that start last
 wait for the first to end, so the backend's microVM tests take up to about
@@ -988,7 +998,7 @@ The guest and sandbox jobs, WHP's runtime adapter job, and the debug-kernel
 jobs are not sharded: the
 debug-kernel jobs take three to five minutes, about as long as a shard, and
 still run on MSHV only for pull requests, on KVM only for merge groups, and on
-every backend for `dev` pushes and full runs.
+every backend for pushes and full runs.
 
 The first plan took the medians of the reports of 13 runs from October 21 and
 22, 2026. It started each backend from the two shards that
@@ -1221,7 +1231,9 @@ previous commit, the run that followed classified only its own changes.
 GitHub rejects `queue: max` together with `cancel-in-progress: true`, so the
 workflow derives both settings from the event. Each scheduled or manually
 dispatched full run has a group of its own (see
-[Change classification](#change-classification)).
+[Change classification](#change-classification)). Pushes to
+`feature/nvx-refactor` share a group of their own and queue as `dev`'s do
+(see [Feature branch pushes](#feature-branch-pushes)).
 
 A queued run waits for the runs ahead of it. Replaying the `dev` pushes of
 October 4 to 21 one at a time, at their measured durations and the median one
@@ -1292,6 +1304,32 @@ tests the pull request merged into the latest `dev`, checks the result before
 the queue merges it (see [Merge queue](#merge-queue)). To start a run for a pull
 request whose head has none, push to it, close and reopen it, or mark it ready
 for review.
+
+## Feature branch pushes
+
+`ci.yml` also runs on each push to `feature/nvx-refactor`, so that the branch
+gets CI without a pull request. Such a push runs as a `dev` push does: the
+detector compares it with the commit that the branch held before it, it runs
+the platform and package jobs for every change but documentation and the
+debug kernel on every backend, and `Required status check` expects of it what
+it expects of a `dev` push (see [Change classification](#change-classification)).
+Its runs share a concurrency group of their own and run one at a time in the
+order in which the pushes arrive (see [Run concurrency](#run-concurrency)). Its
+[OpenVMM CI](#openvmm-ci) check doesn't wait for OpenVMM's CI either, so a push
+that moves the pin before OpenVMM's CI passes the new revision fails the check;
+rerun its failed jobs once OpenVMM's CI has passed.
+
+Such a push publishes and records nothing: `Publish development release`,
+`Record performance results`, the package uploads, and the OpenVMM binary cache
+saves all require `dev`. The performance regression gate runs only for pull
+requests and merge groups, so the branch's pull request into `dev` is the first
+run that compares its benchmarks with the history. GitHub scopes the guest
+artifact and pip caches that the push saves to the branch, as it scopes a pull
+request's to the pull request. Its guest artifact jobs reuse the artifacts of a
+pull request that the push merges, as a `dev` push does, and otherwise build
+the components that miss the cache and say why in a notice (see
+[Guest artifact reuse](#guest-artifact-reuse)). Remove the branch from the
+trigger, and this section, in its pull request into `dev`.
 
 ## Merge queue
 
