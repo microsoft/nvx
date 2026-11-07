@@ -1279,6 +1279,82 @@ fn cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path() {
 }
 
 #[test]
+fn cold_boot_arguments_refuse_disk_syntax_in_image_and_scratch_paths() {
+    let runtime = runtime();
+    for name in [
+        "disk;direct",
+        "disk;create=1M",
+        "disk,ro",
+        "disk[",
+        "disk]",
+        "disk][",
+    ] {
+        for scratch in [false, true] {
+            let mut root = erofs();
+            if scratch {
+                root.upper = UpperConfig::Scratch {
+                    path: missing(name),
+                    journal: Journal::Forbidden,
+                };
+            } else {
+                root.image = missing(name);
+            }
+            let config = cold(layered(root));
+            for result in [
+                config.check_command_line(),
+                config
+                    .openvmm_arguments(
+                        &runtime,
+                        "/missing/control",
+                        Path::new("/missing/report"),
+                        Some("/missing/console"),
+                    )
+                    .map(|_| ()),
+            ] {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported);
+                assert!(
+                    error
+                        .to_string()
+                        .contains("commas, semicolons, or unbalanced brackets"),
+                    "{name}: {error}"
+                );
+            }
+        }
+    }
+
+    let image = missing("image with spaces[1].erofs");
+    let scratch = missing("scratch with [nested[1]] brackets.ext4");
+    let config = cold(layered(LayeredRoot {
+        image: image.clone(),
+        upper: UpperConfig::Scratch {
+            path: scratch.clone(),
+            journal: Journal::Forbidden,
+        },
+        ..erofs()
+    }));
+    config.check_command_line().unwrap();
+    let arguments = config
+        .openvmm_arguments(
+            &runtime,
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        )
+        .unwrap();
+    let blocks: Vec<OsString> = [
+        format!("distro:file:{},ro", image.display()),
+        format!("scratch:file:{}", scratch.display()),
+    ]
+    .map(OsString::from)
+    .into();
+    assert_eq!(
+        values(&arguments, "--microvm-sandbox-block"),
+        blocks.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn an_explicit_deny_all_network_keeps_its_nic() {
     let mut config = cold(blockless());
     config.network = Some(NetworkConfig {
