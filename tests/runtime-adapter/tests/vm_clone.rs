@@ -257,6 +257,7 @@ use runtime_adapter::runtime::Runtime;
 use runtime_adapter::sharing::HostFsSharing;
 use runtime_adapter::staged::Staged;
 use serde_json::{Value, json};
+use socket2::SockRef;
 
 use common::gpt::{self, Contents, Layout, Partition, hexadecimal, small_layer};
 use common::{Fixtures, Printed, Sandbox, Started};
@@ -428,8 +429,13 @@ const GATEWAY: &str = "192.0.2.1";
 /// one of its ports, and hold until they end.
 static HOST_SIDE: LazyLock<HostSide> = LazyLock::new(HostSide::bind);
 /// The first and the last of the ports that the host draws for a listener of a clone's guest and
-/// for a forward: the dynamic range.
+/// for a forward: the dynamic range. On Linux, the host draws above its ephemeral range; see
+/// [`first_port`].
 const PORTS: (u16, u16) = (49152, 65535);
+/// The file that names Linux's ephemeral port range, as its first and last ports: the host draws
+/// the ports of a listener of a clone's guest and of a forward above the range's end; see
+/// [`first_port`].
+const IP_LOCAL_PORT_RANGE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
 /// The number of ports that the host draws for each before it gives up. Windows excludes ports per
 /// protocol, in blocks, and gives consecutive ports to consecutive binds of port 0, so the host
 /// draws each port independently.
@@ -875,8 +881,29 @@ impl HostSide {
     }
 }
 
-/// Returns a port that the host draws from [`PORTS`], independently each time, at most
-/// [`PORT_ATTEMPTS`] times, but none of `taken`, and none that a socket holds: OpenVMM publishes a
+/// Returns the first port that the host draws: above the host's ephemeral range on Linux, so that
+/// no `connect()` takes a drawn port as its source port and opens a connection to itself, which
+/// would leave a `TIME_WAIT` at the port for OpenVMM's bind to trip over. On Linux, the range ends
+/// at [`IP_LOCAL_PORT_RANGE`], which leaves 61000-65535 by default. Windows's
+/// ephemeral range is its whole dynamic range, so whether it needs the same is open, and the host
+/// draws from the dynamic range there.
+fn first_port() -> u16 {
+    if cfg!(target_os = "linux")
+        && let Ok(range) = fs::read_to_string(IP_LOCAL_PORT_RANGE)
+        && let Some(end) = range
+            .split_whitespace()
+            .nth(1)
+            .and_then(|end| end.parse::<u16>().ok())
+            .and_then(|end| end.checked_add(1))
+    {
+        return PORTS.0.max(end);
+    }
+    PORTS.0
+}
+
+/// Returns a port that the host draws from [`first_port`] to the last of [`PORTS`], independently
+/// each time, at most [`PORT_ATTEMPTS`] times, but none of `taken`, and none that a socket holds:
+/// OpenVMM publishes a
 /// listener of the guest at the same port of host IPv4 and IPv6 loopback, for TCP and UDP, after
 /// it checks, on Windows, every host address of each family there, and binds a forward's port on
 /// host IPv4 loopback. Windows lets a socket bind every host address beside one that binds loopback
@@ -893,7 +920,8 @@ fn free_port(taken: &[u16]) -> u16 {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ]);
     }
-    let (first, last) = PORTS;
+    let first = first_port();
+    let last = PORTS.1;
     let random = RandomState::new();
     let mut refused = Vec::new();
     for attempt in 0..PORT_ATTEMPTS {
@@ -4797,6 +4825,18 @@ fn a_clone_whose_mapping_fails_ends_before_its_sandbox_starts() {
 fn reach_guest(address: SocketAddr, stop: &AtomicBool) -> bool {
     while !stop.load(Ordering::SeqCst) {
         if let Ok(mut stream) = TcpStream::connect(address) {
+            // The connection opened to itself when its local and peer addresses are the same:
+            // drop it at once, with SO_LINGER 0, so that it leaves no TIME_WAIT at the port for
+            // OpenVMM's bind to trip over.
+            if matches!(
+                (stream.local_addr(), stream.peer_addr()),
+                (Ok(local), Ok(peer)) if local == peer
+            ) {
+                SockRef::from(&stream)
+                    .set_linger(Some(Duration::ZERO))
+                    .unwrap();
+                continue;
+            }
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
