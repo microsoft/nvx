@@ -21,12 +21,16 @@ struct CaptureSystem {
     generation: Option<Result<GenerationId, TimeError>>,
     /// The next request's outcome.
     outcome: Option<Result<CaptureOutcome, TimeError>>,
+    /// A failure before the request begins.
+    preflight_error: Option<TimeError>,
     /// Whether detector restoration fails.
     release_fails: bool,
     /// Whether the generation read deliberately completes after the deadline.
     expire_generation: bool,
     /// Whether the unbounded request deliberately completes after the original deadline.
     expire_request: bool,
+    /// Whether final capture preflight completes after the deadline.
+    expire_preflight: bool,
 }
 
 impl CaptureSystem {
@@ -40,9 +44,11 @@ impl CaptureSystem {
             preparation: Some(Ok(())),
             generation: Some(Ok(GenerationId::from_bytes([7; GenerationId::LENGTH]))),
             outcome: Some(Ok(CaptureOutcome::Continued)),
+            preflight_error: None,
             release_fails: false,
             expire_generation: false,
             expire_request: false,
+            expire_preflight: false,
         }
     }
 }
@@ -72,11 +78,6 @@ impl System for CaptureSystem {
         self.preparation.take().expect("preparation runs once")
     }
 
-    fn clear_deadline(&mut self) {
-        self.calls.push("unbounded");
-        self.deadline = None;
-    }
-
     fn cancel_capture(&mut self) -> Result<(), Vec<u8>> {
         self.calls.push("release");
         sys::FileLock::check_deadline(self.deadline)
@@ -96,8 +97,17 @@ impl System for CaptureSystem {
         self.generation.take().expect("generation is read once")
     }
 
-    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
-        assert_eq!(self.deadline, None);
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, (TimeError, bool)> {
+        assert_eq!(self.deadline, Some(self.original_deadline));
+        if self.expire_preflight {
+            expire(self.original_deadline);
+        }
+        sys::FileLock::check_deadline(self.deadline).map_err(|_| (TimeError::Deadline, false))?;
+        if let Some(error) = self.preflight_error.take() {
+            return Err((error, false));
+        }
+        self.calls.push("unbounded");
+        self.deadline = None;
         assert_eq!(
             request,
             CaptureRequest::in_memory(
@@ -109,7 +119,10 @@ impl System for CaptureSystem {
         if self.expire_request {
             expire(self.original_deadline);
         }
-        self.outcome.take().expect("capture is requested once")
+        self.outcome
+            .take()
+            .expect("capture is requested once")
+            .map_err(|error| (error, true))
     }
 }
 
@@ -176,6 +189,55 @@ fn a_pre_request_failure_resumes_only_after_its_detector_restoration_succeeds() 
         assert_eq!(system.calls.last(), Some(&"release"));
         assert!(!system.calls.contains(&"request"));
     }
+}
+
+#[test]
+fn final_capture_preflight_keeps_the_deadline_and_resumes_only_after_rollback() {
+    for release_fails in [false, true] {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut system = CaptureSystem::new(deadline);
+        system.preflight_error = Some(TimeError::PortLock(io::Error::from_raw_os_error(
+            Errno::EACCES as i32,
+        )));
+        system.release_fails = release_fails;
+        let failure = capture_with(&mut system, &capture_devices(), deadline).unwrap_err();
+        assert_eq!(system.deadline, Some(deadline));
+        assert!(!system.calls.contains(&"request"));
+        assert_eq!(system.calls.last(), Some(&"release"));
+        if release_fails {
+            assert_eq!(failure.stage, CaptureStage::Release);
+            assert_eq!(
+                failure.disposition,
+                Disposition::MustEnd {
+                    status: status::TIME_REPAIR
+                }
+            );
+        } else {
+            assert_eq!(failure.stage, CaptureStage::CaptureChecks);
+            assert_eq!(failure.disposition, Disposition::Resumed);
+            assert!(matches!(
+                failure.cause,
+                CaptureCause::Time(TimeError::PortLock(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn final_capture_preflight_expiry_never_requests_or_extends_rollback() {
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let mut system = CaptureSystem::new(deadline);
+    system.expire_preflight = true;
+    let failure = capture_with(&mut system, &capture_devices(), deadline).unwrap_err();
+    assert_eq!(system.deadline, Some(deadline));
+    assert!(!system.calls.contains(&"request"));
+    assert_eq!(failure.stage, CaptureStage::Release);
+    assert_eq!(
+        failure.disposition,
+        Disposition::MustEnd {
+            status: status::TIME_REPAIR
+        }
+    );
 }
 
 #[test]

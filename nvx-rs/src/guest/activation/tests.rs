@@ -295,8 +295,6 @@ impl System for FakeSystem {
         result.map_err(|error| (error, held))
     }
 
-    fn clear_deadline(&mut self) {}
-
     fn generation_id(&mut self) -> Result<GenerationId, TimeError> {
         self.calls.push(Call::GenerationId);
         if self.generation_fails {
@@ -306,15 +304,15 @@ impl System for FakeSystem {
         }
     }
 
-    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, (TimeError, bool)> {
         self.calls.push(Call::Capture(request));
         match self.outcome {
             Outcome::Continued => Ok(CaptureOutcome::Continued),
             Outcome::Restored => Ok(CaptureOutcome::Restored(
                 Restore::to(RESTORED).holding(seed()),
             )),
-            Outcome::Fails => Err(TimeError::StateUnavailable),
-            Outcome::PortRelease => Err(PortError::Revoke(Errno::ENOMEM).into()),
+            Outcome::Fails => Err((TimeError::StateUnavailable, true)),
+            Outcome::PortRelease => Err((PortError::Revoke(Errno::ENOMEM).into(), true)),
         }
     }
 }
