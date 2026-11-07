@@ -2,12 +2,29 @@ name: nvx-rs coverage
 
 # Measures which code of the nvx crate its own tests reach, on Linux and
 # Windows, with scripts/nvx_rs_coverage.py (doc/ci.md, "nvx-rs coverage"). It
-# runs for the pushes to dev that change the crate or how it is measured, and
-# on demand, never for pull requests, so no required check depends on it.
+# runs for the pushes to dev and the ready pull requests that change the crate
+# or how it is measured, and on demand. A pull request's summary also lists the
+# lines of production code that it adds or changes and that no test reaches.
+# Draft pull requests skip it, as they skip CI's other jobs, and no required
+# check depends on it.
 on:
   push:
     branches:
       - dev
+    paths:
+      - nvx-rs/**
+      - rust-toolchain.toml
+      - scripts/nvx_rs_coverage.py
+      - scripts/setup/tool-versions.conf
+      - .github/workflows/nvx-rs-coverage.yml
+  # As in ci.yml, a pull request runs for any base, so that one stacked on
+  # another pull request's branch lists the lines of its own changes.
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
     paths:
       - nvx-rs/**
       - rust-toolchain.toml
@@ -19,7 +36,8 @@ on:
 permissions:
   contents: read
 
-# A push replaces the measurement of an earlier push that is still running.
+# A push replaces the measurement of an earlier push to the same branch or pull
+# request that is still running.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -27,6 +45,7 @@ concurrency:
 jobs:
   measure:
     name: measure / ${{ matrix.os }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -34,9 +53,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
+      # A pull request measures its head, rather than its merge with its base,
+      # so that the summary names the lines of its own changes, and fetches the
+      # history that their merge base needs. The expression gives a pull request
+      # the string '0', which, unlike the number 0, is truthy.
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
 
       - name: Set up Python
@@ -72,10 +97,21 @@ jobs:
           cargo "+${TOOLCHAIN}" install --locked cargo-llvm-cov --version "${CARGO_LLVM_COV}"
 
       # Fails when the measurement misses something, such as what tests that
-      # failed twice would have reached, after it writes the reports.
+      # failed twice would have reached, after it writes the reports. For a
+      # pull request, the summary also lists the lines of production code that
+      # it adds or changes since its merge base with its base and that no test
+      # reaches.
       - name: Measure
         shell: bash
-        run: python scripts/nvx_rs_coverage.py --output build/nvx-rs-coverage
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          options=(--output build/nvx-rs-coverage)
+          if [[ -n "${BASE}" ]]; then
+            options+=(--base "${BASE}")
+          fi
+          python scripts/nvx_rs_coverage.py "${options[@]}"
 
       - name: Write the summary
         if: ${{ !cancelled() && hashFiles('build/nvx-rs-coverage/summary.md') != '' }}

@@ -2394,10 +2394,13 @@ trigger the NVX microVM test matrix.
 [`nvx-rs-coverage.yml`](../.github/workflows/nvx-rs-coverage.yml) measures which
 lines, functions, and regions of the production code of the `nvx` crate its own
 tests reach, on GitHub-hosted Ubuntu and Windows runners. It runs for every push
-to `dev` that changes `nvx-rs/`, `rust-toolchain.toml`, the setup tool manifest,
-the workflow, or its script, and on a manual dispatch, but never for pull
-requests, so no required check depends on it, and a push cancels the measurement
-of an earlier push that still runs. Coverage tells which code the tests run;
+to `dev`, and every ready pull request to any branch, that changes `nvx-rs/`,
+`rust-toolchain.toml`, the setup tool manifest, the workflow, or its script, and
+on a manual dispatch. Draft pull requests skip it, as they skip CI's other
+jobs, and merge groups never run it. No required check depends on it:
+`Required status check`, the only check that `dev` requires, is a job of
+`ci.yml`. A push cancels the measurement of an earlier push to the same branch
+or pull request that still runs. Coverage tells which code the tests run;
 [mutation testing](#nvx-rs-mutation-testing) tells whether they check what it
 does. Each job installs the Rust release that `rust-toolchain.toml` pins with
 its `llvm-tools` component, and
@@ -2448,19 +2451,44 @@ The job also writes `summary.md` to the run's summary: the totals of the
 production code and of the test doubles, the binaries whose processes wrote
 profiles, the tests that ran again, and a table with a row for each top-level
 module, and for each of its submodules that has submodules of its own, that
-counts the files that no other row counts.
+counts the files that no other row counts. For a pull request, it also lists
+the [changed lines that no test reaches](#changed-lines-that-no-test-reaches).
 
 To measure on a development host, add the `llvm-tools` component to the pinned
 release and install the pinned cargo-llvm-cov, as the setup scripts do, then
-run the script, which writes the reports to `build/nvx-rs-coverage`:
+run the script, which writes the reports to `build/nvx-rs-coverage`. With
+`--base`, as below, its summary also lists the changed lines that no test
+reaches, as a pull request's does, of the changes that the working tree holds
+since the merge base of the named branch and `HEAD`: those that no commit
+holds yet too, but not untracked files, which no diff holds.
 
 ```bash
 toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
 rustup component add --toolchain "$toolchain" llvm-tools
 cargo "+$toolchain" install --locked cargo-llvm-cov --version \
   "$(sed -n 's/^cargo_llvm_cov\.version=//p' scripts/setup/tool-versions.conf)"
-python3 scripts/nvx_rs_coverage.py
+python3 scripts/nvx_rs_coverage.py --base origin/dev
 ```
+
+### Changed lines that no test reaches
+
+For a pull request, the job measures the pull request's head, rather than its
+merge with its base, so that the lines that its summary names are those of the
+pull request's changes, and passes the base's commit to the script with
+`--base`. The script compares the working tree with the merge base of that
+commit and `HEAD`, with Git's rename detection, whatever Git's configuration
+says of diffs. Before the table of modules, the summary then lists by file the
+lines of production code that the changes add or change and that no test
+reaches, after the share of the changed lines that the LCOV report instruments
+that the tests reach. A renamed file counts only the lines that its changes add
+or change. Deleted lines count for nothing, and neither do the lines that the
+report doesn't instrument: comments, blank lines, declarations, and the lines
+of test code, test data, test doubles, and the files that the job's OS doesn't
+compile, so a changed line of code that only Windows compiles shows only in the
+Windows job's summary. When the compiler measures branches, which the pinned
+release doesn't, the summary also lists the branches on the changed lines that
+no test takes. A pull request whose changes add or change no instrumented line
+of production code, such as one that changes only the workflow, lists none.
 
 ## nvx-rs mutation testing
 

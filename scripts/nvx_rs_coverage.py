@@ -19,8 +19,15 @@ Production code is every source file of the crate but its test code and test
 data, its tests directories and tests.rs files, and its test doubles, the fake
 OpenVMM of src/testing/ and its binary, which the summary counts apart. The
 tests that fail run once more, and the summary names those that passed only
-then. The "nvx-rs coverage" section of doc/ci.md describes the measurement and
-the workflow that runs it.
+then.
+
+With --base REVISION, the summary also lists, by file, the lines of production
+code that the working tree adds or changes since the merge base of REVISION and
+HEAD and that no test reaches, with the share of those of them that the LCOV
+report instruments that the tests reach, and, when the compiler measures
+branches, the branches on the changed lines that no test takes. The "nvx-rs
+coverage" section of doc/ci.md describes the measurement and the workflow that
+runs it.
 """
 
 from __future__ import annotations
@@ -79,6 +86,20 @@ METRICS = ("lines", "functions", "regions", "branches")
 # more characters than this, which keeps the command within Windows' limit;
 # otherwise the whole target runs again.
 RETRY_NAMES_LIMIT = 8192
+# How --base compares the working tree with the merge base: without context,
+# with Git's rename detection, and with the colors, prefixes, external diff
+# drivers, text conversions, and relative paths that the parser expects,
+# whatever the Git configuration says.
+DIFF_OPTIONS = (
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-relative",
+    "--find-renames",
+    "--unified=0",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
 
 
 class MeasurementError(Exception):
@@ -466,6 +487,255 @@ def analyze(report: Any) -> Coverage:
     return Coverage(production, test_doubles, modules, binaries)
 
 
+def git(repository: Path, *arguments: str) -> bytes:
+    """Runs git with `arguments` in `repository` and returns its output."""
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        errors = result.stderr.decode("utf-8", errors="replace").strip()
+        failed = f"git {shlex.join(arguments)} failed with status {result.returncode}"
+        raise MeasurementError(f"{failed}: {errors}" if errors else failed)
+    return result.stdout
+
+
+# The escapes with which Git quotes the bytes of unusual file names, besides
+# the octal ones.
+_GIT_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "t": 0x09,
+    "n": 0x0A,
+    "v": 0x0B,
+    "f": 0x0C,
+    "r": 0x0D,
+    '"': 0x22,
+    "\\": 0x5C,
+}
+_OCTAL = re.compile(r"[0-3][0-7]{2}")
+_HUNK = re.compile(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _unquote(name: str) -> str:
+    """Returns the file name that `name` gives in a diff's header: `name`
+    itself, or, if Git quoted it, what the C-style string between the quotes
+    says, whose escapes stand for bytes of the name's UTF-8."""
+    if len(name) < 2 or not (name.startswith('"') and name.endswith('"')):
+        return name
+    text = name[1:-1]
+    data = bytearray()
+    index = 0
+    while index < len(text):
+        character = text[index]
+        escape = text[index + 1 : index + 2]
+        if character != "\\":
+            data += character.encode("utf-8")
+            index += 1
+        elif escape in _GIT_ESCAPES:
+            data.append(_GIT_ESCAPES[escape])
+            index += 2
+        elif _OCTAL.fullmatch(text, index + 1, index + 4):
+            data.append(int(text[index + 1 : index + 4], 8))
+            index += 4
+        else:
+            raise MeasurementError(f"the diff quotes the file name {name} oddly")
+    return data.decode("utf-8", errors="replace")
+
+
+def _new_path(name: str) -> str | None:
+    """Returns the path that the name of a diff's +++ line gives the file in
+    the new tree, or None if the line names none, as for a deleted file."""
+    # Git ends a name that holds a space with a tab, as patch expects.
+    name = _unquote(name.removesuffix("\t"))
+    if name == "/dev/null":
+        return None
+    if not name.startswith("b/"):
+        raise MeasurementError(f"the diff names the file {name} without its prefix")
+    return name.removeprefix("b/")
+
+
+def added_lines(diff: str) -> dict[str, set[int]]:
+    """Returns the lines that `diff`, a unified diff of Git, adds or changes in
+    each file, by the file's path in the new tree. A file that it deletes, or
+    only renames or changes the mode of, has none."""
+    added: dict[str, set[int]] = {}
+    path: str | None = None
+    lines = diff.split("\n")
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if line.startswith("diff --git "):
+            path = None
+        elif line.startswith("+++ "):
+            path = _new_path(line[4:])
+        elif hunk := _HUNK.match(line):
+            old = 1 if hunk.group(1) is None else int(hunk.group(1))
+            number = int(hunk.group(2))
+            new = 1 if hunk.group(3) is None else int(hunk.group(3))
+            # A hunk holds as many lines of each side as its header says,
+            # whatever they hold, such as an added line that begins with "++".
+            while old or new:
+                if index == len(lines):
+                    raise MeasurementError("the diff ends within a hunk")
+                body = lines[index]
+                index += 1
+                if body.startswith("+") and new:
+                    if path is None:
+                        raise MeasurementError("the diff adds lines to no file")
+                    added.setdefault(path, set()).add(number)
+                    number += 1
+                    new -= 1
+                elif body.startswith("-") and old:
+                    old -= 1
+                elif body.startswith(" ") and old and new:
+                    number += 1
+                    old -= 1
+                    new -= 1
+                elif not body.startswith("\\"):
+                    raise MeasurementError(
+                        f"the diff holds a line that its hunk lacks: {body!r}"
+                    )
+    return added
+
+
+@dataclass(frozen=True)
+class Changes:
+    """The lines that the working tree adds or changes in each file of the
+    crate since a merge base, by the file's path relative to the crate."""
+
+    merge_base: str
+    lines: dict[str, frozenset[int]]
+
+
+def changes_since(
+    base: str, repository: Path = REPO_ROOT, crate: Path = CRATE_DIR
+) -> Changes:
+    """Returns the lines of the crate's files that the working tree of
+    `repository` adds or changes since the merge base of `base` and HEAD.
+
+    The measurement builds the working tree, so the changes include those that
+    no commit holds yet, but not untracked files, which no diff holds.
+    """
+    merge_base = git(repository, "merge-base", base, "HEAD").decode().strip()
+    prefix = crate.relative_to(repository).as_posix() + "/"
+    diff = git(repository, "diff", *DIFF_OPTIONS, merge_base, "--", prefix)
+    lines = added_lines(diff.decode("utf-8", errors="replace"))
+    return Changes(
+        merge_base,
+        {
+            path.removeprefix(prefix): frozenset(numbers)
+            for path, numbers in lines.items()
+            if path.startswith(prefix)
+        },
+    )
+
+
+@dataclass(frozen=True)
+class FileLines:
+    """What an LCOV report says of a file: how many times the tests ran each
+    line that it instruments, and, if the compiler measured branches, whether
+    they took each branch of a line, by the branch's block and number."""
+
+    hits: dict[int, int]
+    branches: dict[int, dict[tuple[str, str], bool]]
+
+
+def read_lcov(text: str) -> dict[str, FileLines]:
+    """Reads an LCOV report: what it says of each of its files, by the file's
+    path with `/` as its separators."""
+    files: dict[str, FileLines] = {}
+    file: FileLines | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        record, _, value = line.partition(":")
+        try:
+            if record == "SF":
+                file = files.setdefault(source_path(value), FileLines({}, {}))
+            elif record == "end_of_record":
+                file = None
+            elif record in ("DA", "BRDA"):
+                if file is None:
+                    raise ValueError(f"{record} outside of a file's record")
+                fields = value.split(",")
+                if record == "DA":
+                    hit, count = int(fields[0]), int(fields[1])
+                    file.hits[hit] = file.hits.get(hit, 0) + count
+                else:
+                    branched, block, branch, taken = fields
+                    flags = file.branches.setdefault(int(branched), {})
+                    # A branch whose block never ran was not taken: "-".
+                    flags[(block, branch)] = flags.get((block, branch), False) or (
+                        taken != "-" and int(taken) > 0
+                    )
+        except (ValueError, IndexError) as error:
+            raise MeasurementError(
+                f"line {number} of the LCOV report: {error}"
+            ) from error
+    return files
+
+
+@dataclass(frozen=True)
+class ChangedFile:
+    """What the tests reached of the lines that changes add or change in a
+    file of production code: how many of those that the report instruments
+    they reached, the others, and the changed lines with branches that they
+    did not all take, with how many of the line's branches they took."""
+
+    path: str
+    lines: Count
+    missed: tuple[int, ...]
+    branches: tuple[tuple[int, Count], ...]
+
+
+@dataclass(frozen=True)
+class ChangedCoverage:
+    """What the tests reached of the lines that the changes since a merge base
+    add or change, by file, and whether the report measures branches, which
+    only some compilers do."""
+
+    merge_base: str
+    files: tuple[ChangedFile, ...]
+    branches: bool
+
+    def lines(self) -> Count:
+        """Returns how many of the changed lines the report instruments, and
+        how many of them the tests reached."""
+        total = Count(0, 0)
+        for file in self.files:
+            total += file.lines
+        return total
+
+
+def changed_coverage(
+    changes: Changes, report: Mapping[str, FileLines]
+) -> ChangedCoverage:
+    """Returns what the tests reached of the lines that `changes` add or
+    change in the files of `report`, an LCOV report of production code. A line
+    that the report does not instrument counts for nothing: a comment, a blank
+    line, a declaration, or a line of a file that the report lacks, such as a
+    test, or code that this host doesn't compile."""
+    files: list[ChangedFile] = []
+    for path, numbers in sorted(changes.lines.items()):
+        found = report.get(path)
+        if found is None:
+            continue
+        instrumented = sorted(number for number in numbers if number in found.hits)
+        if not instrumented:
+            continue
+        missed = tuple(number for number in instrumented if found.hits[number] <= 0)
+        branches: list[tuple[int, Count]] = []
+        for number in instrumented:
+            taken = found.branches.get(number, {})
+            if not all(taken.values()):
+                branches.append((number, Count(sum(taken.values()), len(taken))))
+        reached = Count(len(instrumented) - len(missed), len(instrumented))
+        files.append(ChangedFile(path, reached, missed, tuple(branches)))
+    measured = any(found.branches for found in report.values())
+    return ChangedCoverage(changes.merge_base, tuple(files), measured)
+
+
 def _share(count: Count) -> str:
     """Returns the share of `count` that the tests reached, rounded down, so
     that only code that they reached entirely shows 100%."""
@@ -524,8 +794,77 @@ def problems(measurement: Mapping[str, Any], coverage: Coverage) -> list[str]:
     return found
 
 
-def render(measurement: Mapping[str, Any], coverage: Coverage) -> str:
-    """Returns the Markdown summary of a measurement and of its coverage."""
+def _ranges(numbers: Iterable[int]) -> str:
+    """Returns line numbers as sorted ranges, such as `3-5, 9`."""
+    ranges: list[tuple[int, int]] = []
+    for number in sorted(numbers):
+        if ranges and number == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], number)
+        else:
+            ranges.append((number, number))
+    return ", ".join(
+        str(first) if first == last else f"{first}-{last}" for first, last in ranges
+    )
+
+
+def render_changes(changed: ChangedCoverage) -> list[str]:
+    """Returns the lines of the summary's Markdown section on the lines that
+    the changes since a merge base add or change and that no test reaches."""
+    since = f"since `{changed.merge_base[:12]}`"
+    lines = ["### Changed lines that no test reaches", ""]
+    total = changed.lines()
+    if total.count == 0:
+        return [
+            *lines,
+            f"The changes {since} add or change no instrumented line of "
+            "production code.",
+            "",
+        ]
+    lines += [
+        f"Tests reach {_share(total)} instrumented lines of production code that "
+        f"the changes {since} add or change.",
+        "",
+    ]
+    rows = [file for file in changed.files if file.missed or file.branches]
+    if not rows:
+        return lines
+    if changed.branches:
+        lines += [
+            "By file, the lines that no test reaches, and the changed lines with "
+            "branches that no test takes, with how many of the line's branches no "
+            "test takes:",
+            "",
+            "| File | Lines that no test reaches | Branches that no test takes |",
+            "| --- | --- | --- |",
+        ]
+        for file in rows:
+            branches = ", ".join(
+                f"{number} ({count.count - count.covered} of {count.count})"
+                for number, count in file.branches
+            )
+            missed = _ranges(file.missed)
+            lines.append(
+                f"| `{file.path}` | {missed or 'none'} | {branches or 'none'} |"
+            )
+    else:
+        lines += [
+            "By file, the lines that no test reaches:",
+            "",
+            "| File | Lines |",
+            "| --- | --- |",
+        ]
+        lines += [f"| `{file.path}` | {_ranges(file.missed)} |" for file in rows]
+    lines.append("")
+    return lines
+
+
+def render(
+    measurement: Mapping[str, Any],
+    coverage: Coverage,
+    changed: ChangedCoverage | None = None,
+) -> str:
+    """Returns the Markdown summary of a measurement and of its coverage, and
+    of what the tests reached of the changes in `changed`, if any."""
     host = _string(measurement.get("host"), "host")
     commit = _string(measurement.get("commit"), "commit")
     rustc = _string(measurement.get("rustc"), "rustc")
@@ -576,6 +915,8 @@ def render(measurement: Mapping[str, Any], coverage: Coverage) -> str:
         lines += ["The measurement misses what these reached:", ""]
         lines += [f"- {problem}" for problem in found]
         lines.append("")
+    if changed is not None:
+        lines += render_changes(changed)
     lines += [
         "### Production code by module",
         "",
@@ -600,10 +941,16 @@ def _version(run: Runner, command: Sequence[str]) -> str:
     return output.splitlines()[0] if output else "unknown"
 
 
-def measure(output: Path, run: Runner = run_command, crate: Path = CRATE_DIR) -> int:
+def measure(
+    output: Path,
+    run: Runner = run_command,
+    crate: Path = CRATE_DIR,
+    changes: Changes | None = None,
+) -> int:
     """Measures the coverage of the crate's tests into `output`, and returns
     0, or 1 if the measurement misses something, as problems() tells. It
-    writes the reports either way."""
+    writes the reports either way, and the summary lists the lines of
+    `changes`, if any, that no test reaches."""
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     cargo = ["cargo", "llvm-cov"]
@@ -671,7 +1018,16 @@ def measure(output: Path, run: Runner = run_command, crate: Path = CRATE_DIR) ->
     except (OSError, ValueError) as error:
         raise MeasurementError(f"{output / COVERAGE_FILE}: {error}") from error
     coverage = analyze(report_data)
-    (output / SUMMARY_FILE).write_text(render(measurement, coverage), encoding="utf-8")
+    changed = None
+    if changes is not None:
+        try:
+            lcov = (output / LCOV_FILE).read_text(encoding="utf-8")
+        except OSError as error:
+            raise MeasurementError(f"{output / LCOV_FILE}: {error}") from error
+        changed = changed_coverage(changes, read_lcov(lcov))
+    (output / SUMMARY_FILE).write_text(
+        render(measurement, coverage, changed), encoding="utf-8"
+    )
     found = problems(measurement, coverage)
     for problem in found:
         print(f"error: {problem}", file=sys.stderr)
@@ -688,9 +1044,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_OUTPUT,
         help="directory of the reports (default: build/nvx-rs-coverage)",
     )
+    parser.add_argument(
+        "--base",
+        metavar="REVISION",
+        help="also list the lines of production code that the working tree adds "
+        "or changes since the merge base of REVISION and HEAD and that no test "
+        "reaches",
+    )
     arguments = parser.parse_args(argv)
     try:
-        status = measure(cast(Path, arguments.output))
+        base = cast(str | None, arguments.base)
+        changes = None if base is None else changes_since(base)
+        status = measure(cast(Path, arguments.output), changes=changes)
     except (MeasurementError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
