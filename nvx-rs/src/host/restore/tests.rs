@@ -7,6 +7,10 @@ use std::time::Instant;
 
 use super::*;
 use crate::ErrorKind;
+use crate::activation::{
+    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode,
+    OverlayMode, ReadyActivation, RestoreSection, TransactionId, Upper, View,
+};
 use crate::host::platform::inherit::spawn_command;
 use crate::host::process::BootId;
 use crate::host::vm::create_private_dir;
@@ -560,4 +564,245 @@ fn read_native_pipe(pipe: std::os::windows::io::OwnedHandle, process: &Process) 
         used += transferred as usize;
     }
     data
+}
+
+fn restore_record() -> ActivationRecord {
+    ActivationRecord::new(
+        Some(RestoreSection {
+            transaction: TransactionId::from_bytes([1; 16]),
+        }),
+        Configuration {
+            image: Image::Erofs { uuid: None },
+            upper: Upper::Tmpfs {
+                max_memory_percent: 50,
+            },
+            overlay: OverlayMode::TrustedLowers,
+            export: Some(Export {
+                kind: ExportKind::Aggregate,
+            }),
+            mappings: 1,
+            network: None,
+            view: View {
+                hostname: b"restore-test".to_vec(),
+                machine_id: MachineIdMode::Generated,
+            },
+            resources: ExpectedResources {
+                cpus: 2,
+                memory: 1 << 30,
+            },
+        },
+    )
+    .unwrap()
+}
+
+fn restore_machine_at(phase: RestorePhase) -> RestoreMachine {
+    let mut machine = RestoreMachine::new(&restore_record());
+    machine.input(RestoreInput::Spawned(ProcessRef {
+        pid: 7,
+        start_time: 11,
+        boot: BootId::from_bytes([3; 16]),
+    }));
+    assert!(matches!(
+        machine.next_action(),
+        Some(RestoreAction::AwaitReadyEvent)
+    ));
+    if phase == RestorePhase::ReadyEvent {
+        return machine;
+    }
+    machine.input(RestoreInput::ReadyEvent(
+        b"OPENVMM_RESTORE_READY_V1\n".to_vec(),
+    ));
+    assert!(matches!(
+        machine.next_action(),
+        Some(RestoreAction::Connect)
+    ));
+    if phase == RestorePhase::Connect {
+        return machine;
+    }
+    machine.input(RestoreInput::Connected);
+    assert!(matches!(
+        machine.next_action(),
+        Some(RestoreAction::SendActivate(_))
+    ));
+    if phase == RestorePhase::Ready {
+        machine.input(RestoreInput::ActivateSent);
+    }
+    machine
+}
+
+fn restore_failure(machine: &mut RestoreMachine) -> RestoreError {
+    let Some(RestoreAction::Fail(error)) = machine.next_action() else {
+        panic!("the restore did not fail");
+    };
+    assert!(machine.next_action().is_none());
+    error
+}
+
+#[test]
+fn restore_machine_resends_canonical_bytes_and_stops_at_ready() {
+    let record = restore_record();
+    let mut machine = restore_machine_at(RestorePhase::Connect);
+    for _ in 0..5 {
+        machine.input(RestoreInput::Connected);
+        let Some(RestoreAction::SendActivate(bytes)) = machine.next_action() else {
+            panic!("the session received no activation");
+        };
+        assert_eq!(bytes, record.encode());
+        assert!(machine.next_action().is_none());
+        machine.input(RestoreInput::ActivateSent);
+        machine.input(RestoreInput::SessionLost);
+        assert!(matches!(
+            machine.next_action(),
+            Some(RestoreAction::Connect)
+        ));
+    }
+    machine.input(RestoreInput::Connected);
+    assert!(matches!(
+        machine.next_action(),
+        Some(RestoreAction::SendActivate(_))
+    ));
+    machine.input(RestoreInput::GuestReady(ReadyActivation::of(&record)));
+    assert!(matches!(machine.next_action(), Some(RestoreAction::Done)));
+    machine.input(RestoreInput::SessionLost);
+    machine.input(RestoreInput::Cancelled);
+    assert!(machine.next_action().is_none());
+}
+
+#[test]
+fn restore_machine_checks_the_transaction_and_refuses_a_cold_record() {
+    for transaction in [None, Some(TransactionId::from_bytes([2; 16]))] {
+        let mut machine = restore_machine_at(RestorePhase::Ready);
+        machine.input(RestoreInput::GuestReady(ReadyActivation { transaction }));
+        let error = restore_failure(&mut machine);
+        assert_eq!(error.phase, RestorePhase::Ready);
+        assert_eq!(error.evidence, RestoreEvidence::Malformed);
+        assert!(error.source.is_some());
+    }
+    let cold = ActivationRecord::new(None, restore_record().configuration().clone()).unwrap();
+    let error = restore_failure(&mut RestoreMachine::new(&cold));
+    assert_eq!(error.phase, RestorePhase::ReadyEvent);
+    assert_eq!(error.evidence, RestoreEvidence::Malformed);
+}
+
+#[test]
+fn restore_machine_session_loss_invalidates_each_session_phase() {
+    for phase in [
+        RestorePhase::Connect,
+        RestorePhase::Activate,
+        RestorePhase::Ready,
+    ] {
+        let mut machine = restore_machine_at(phase);
+        machine.input(RestoreInput::SessionLost);
+        assert!(matches!(
+            machine.next_action(),
+            Some(RestoreAction::Connect)
+        ));
+        assert!(machine.next_action().is_none());
+        machine.input(RestoreInput::Connected);
+        let Some(RestoreAction::SendActivate(bytes)) = machine.next_action() else {
+            panic!("the replacement session received no activation");
+        };
+        assert_eq!(bytes, restore_record().encode());
+    }
+}
+
+#[test]
+fn restore_machine_keeps_operation_phase_evidence_and_original_source() {
+    for phase in [
+        RestorePhase::ReadyEvent,
+        RestorePhase::Connect,
+        RestorePhase::Activate,
+        RestorePhase::Ready,
+    ] {
+        let mut machine = restore_machine_at(phase);
+        let source = Box::new(io::Error::other("original operation failure"));
+        let original: *const io::Error = &*source;
+        machine.input(RestoreInput::OperationFailed {
+            phase: RestorePhase::Activate,
+            evidence: RestoreEvidence::PeerMismatch,
+            source: Some(source),
+        });
+        let error = restore_failure(&mut machine);
+        assert_eq!(error.phase, RestorePhase::Activate);
+        assert_eq!(error.evidence, RestoreEvidence::PeerMismatch);
+        let returned = StdError::source(&error)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert!(std::ptr::eq(original, returned));
+
+        let mut machine = restore_machine_at(phase);
+        machine.input(RestoreInput::OperationFailed {
+            phase,
+            evidence: RestoreEvidence::Io,
+            source: None,
+        });
+        let error = restore_failure(&mut machine);
+        assert_eq!(error.phase, phase);
+        assert_eq!(error.evidence, RestoreEvidence::Io);
+        assert!(error.source.is_none());
+    }
+}
+
+#[test]
+fn restore_machine_expiry_cancellation_and_exit_fail_every_pending_phase() {
+    for phase in [
+        RestorePhase::ReadyEvent,
+        RestorePhase::Connect,
+        RestorePhase::Activate,
+        RestorePhase::Ready,
+    ] {
+        for (input, evidence) in [
+            (RestoreInput::Expired, RestoreEvidence::Expired),
+            (RestoreInput::Cancelled, RestoreEvidence::Cancelled),
+            (RestoreInput::Exited(None), RestoreEvidence::Exited),
+            (
+                RestoreInput::Exited(Some(Report {
+                    status_code: Some(0),
+                    ..Report::default()
+                })),
+                RestoreEvidence::Exited,
+            ),
+        ] {
+            let mut machine = restore_machine_at(phase);
+            machine.input(input);
+            machine.input(RestoreInput::Connected);
+            machine.input(RestoreInput::GuestReady(ReadyActivation::of(
+                &restore_record(),
+            )));
+            let error = restore_failure(&mut machine);
+            assert_eq!(error.phase, phase);
+            assert_eq!(error.evidence, evidence);
+        }
+    }
+}
+
+#[test]
+fn restore_machine_refuses_malformed_events_and_out_of_order_progress() {
+    for event in [
+        b"OPENVMM_RESTORE_READY_V1".to_vec(),
+        b"OPENVMM_RESTORE_READY_V1\nx".to_vec(),
+    ] {
+        let mut machine = restore_machine_at(RestorePhase::ReadyEvent);
+        machine.input(RestoreInput::ReadyEvent(event));
+        let error = restore_failure(&mut machine);
+        assert_eq!(error.phase, RestorePhase::ReadyEvent);
+        assert_eq!(error.evidence, RestoreEvidence::Malformed);
+        assert!(error.source.is_some());
+    }
+    let mut machine = RestoreMachine::new(&restore_record());
+    machine.input(RestoreInput::Connected);
+    assert_eq!(
+        restore_failure(&mut machine).evidence,
+        RestoreEvidence::Malformed
+    );
+    let mut machine = restore_machine_at(RestorePhase::Connect);
+    machine.input(RestoreInput::Connected);
+    machine.input(RestoreInput::GuestReady(ReadyActivation::of(
+        &restore_record(),
+    )));
+    assert_eq!(
+        restore_failure(&mut machine).evidence,
+        RestoreEvidence::Malformed
+    );
 }
