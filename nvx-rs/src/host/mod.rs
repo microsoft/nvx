@@ -52,8 +52,8 @@
 //!   opened, which it inherits through the [`supervisor`]'s allowlist.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
 //!   its files and endpoints, and its control credential, which the library never writes.
-//! - [`restore`] listens for OpenVMM's restore-ready event and verifies its client against the
-//!   held VM process.
+//! - [`restore`] orders caller-driven activation to Ready without I/O or a clock, and listens for
+//!   OpenVMM's restore-ready event from the held VM process.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!

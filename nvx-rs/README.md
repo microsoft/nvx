@@ -125,7 +125,7 @@ changes only when the module's purpose does.
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig`, a VM's configuration as one value, and `CaptureConfig`, what a capture adds and the identity of its snapshots, checked without reading the host |
-| [`nvx::host::restore`](#nvxhostrestore) | The restore-ready listener, with native ownership transfer for a caller's own I/O |
+| [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -539,6 +539,22 @@ of the VM's root is part of it, nor the VM's own processors and memory, for
 which the capture's count.
 
 ### `nvx::host::restore`
+
+`RestoreMachine::new(&ActivationRecord)` latches one canonical record and its
+transaction. After `Spawned`, its actions await the restore-ready event,
+connect a verified control session, and send the same activation bytes on
+every session. `ActivateSent` marks a completed write before waiting for
+Ready; a caller that combines the write and Ready read may supply `GuestReady`
+directly. `GuestReady` must echo the transaction. A lost session offers
+`Connect` again, with no built-in retry count, delay or deadline; the caller
+may instead feed `Expired` or `Cancelled`.
+
+The caller drives every I/O operation and peer check and supplies verified
+`Exited` events. `OperationFailed` keeps its explicit `RestorePhase`,
+`RestoreEvidence` and original error source in `RestoreError`; expiry,
+cancellation and exit fail every pending phase. Failure stops no process and
+writes no record. A matching Ready ends at `Done`, without sending mappings or
+Start. Terminal results are offered once and absorb later inputs.
 
 `ReadyListener` owns a restore-ready endpoint: a mode-0600 Unix socket in the
 private VM directory on Linux, or a fresh first-instance named pipe with an
