@@ -13,7 +13,7 @@ pub(crate) use super::port::tests::PortBackend;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::process::tests::forbid_system_calls;
 pub(crate) use super::process::tests::{
-    continue_traced, deny_system_call, fork_isolated_test, has_exited,
+    BEFORE_LINUX_6_16, continue_traced, deny_system_call, fork_isolated_test, has_exited,
     spawn_child_without_exit_signal, spawn_traced_child,
 };
 pub(crate) use super::rooted::tests::{

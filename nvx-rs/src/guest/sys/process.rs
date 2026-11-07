@@ -435,11 +435,26 @@ pub(crate) fn is_unreaped(pidfd: BorrowedFd<'_>) -> Result<bool, Errno> {
 /// Opens a close-on-exec pidfd that refers to `process`, which polls readable once the process
 /// ends, and keeps naming it after it is reaped.
 ///
+/// An ID that no process has fails with `ESRCH` on every kernel: once a collector has taken the
+/// status of the process that had it, the ID may name another process, which the caller must not
+/// take for it. `pidfd_open` answers `ESRCH` for an ID that nothing holds any more, but an ID
+/// outlives its process while a process group or a session that the process led keeps it, and a
+/// thread that leads no process has an ID too. For those, a kernel before Linux 6.16 answers
+/// `EINVAL`, and a later one `ESRCH`, or `ENOENT` for a thread's ID, so `EINVAL` and `ENOENT` fail
+/// with `ESRCH` too: for a positive ID and valid flags, they mean nothing else. A test may have
+/// `pidfd_open` answer as a kernel before Linux 6.16 does.
+///
 /// libc's `syscall` is used because neither `nix` nor musl wraps `pidfd_open`.
 pub(crate) fn open_pidfd(process: ProcessId) -> Result<FileDescriptor, Errno> {
     // SAFETY: `pidfd_open` reads only its integer arguments, and returns a new descriptor or -1.
-    let descriptor = Errno::result(unsafe {
+    let opened = Errno::result(unsafe {
         nix::libc::syscall(nix::libc::SYS_pidfd_open, process.0.as_raw(), 0)
+    });
+    #[cfg(test)]
+    let opened = tests::as_before_linux_6_16(process, opened);
+    let descriptor = opened.map_err(|error| match error {
+        Errno::EINVAL | Errno::ENOENT => Errno::ESRCH,
+        error => error,
     })?;
     // A descriptor number fits a `RawFd`.
     let descriptor = descriptor as RawFd;
