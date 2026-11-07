@@ -124,10 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
-<<<<<<< HEAD
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: one VM configuration, pure cold-boot kernel and OpenVMM arguments, and the portable command-line check |
-=======
->>>>>>> b93206ab3804792116ac4aae0451aa0f70892e8d
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -482,7 +479,6 @@ credential that the host presents at a VM's control endpoint: `as_bytes`
 returns it, and its `Debug` form hides it. The library never writes it to a
 file; a caller that reconnects after a restart keeps it.
 
-<<<<<<< HEAD
 ### `nvx::host::config`
 
 `VmConfig`: the configuration of a VM as one value, its processors, its memory
@@ -567,8 +563,6 @@ line without a reserve too. `PROCESS_COMMAND_LINE_LIMIT`,
 `nvx::host::config`; their existing `nvx::host::launch` paths remain usable,
 with the same Windows quoting and terminating-NUL count.
 
-=======
->>>>>>> b93206ab3804792116ac4aae0451aa0f70892e8d
 ### `nvx::host::artifacts`
 
 `Artifacts` (also `nvx::Artifacts`): the OpenVMM executable, guest kernel, and
