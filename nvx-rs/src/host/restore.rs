@@ -1,4 +1,8 @@
-//! A restore-ready endpoint whose client must be the held VM process.
+//! Caller-driven restores and their peer-verified restore-ready endpoint.
+//!
+//! [`RestoreMachine`] orders activation without I/O or a clock. The caller supplies every
+//! [`RestoreInput`], performs each [`RestoreAction`], and owns retries, timing and the VM process.
+//! Success ends at Ready: mappings and workload startup remain the caller's protocol.
 //!
 //! A launch binds before spawning the VM and receives through its verified [`Process`].
 //! Parse the completed bytes with
@@ -6,15 +10,306 @@
 //! External I/O users take the native listener with `ReadyListener::into_std` on Linux or
 //! Windows and check its client's process identity before reading the event.
 
-use std::io;
+use std::error::Error as StdError;
 #[cfg(not(windows))]
 use std::path::Path;
 use std::time::Duration;
+use std::{fmt, io};
 
 use super::platform;
 use super::process::{Process, ProcessRef};
+use super::report::Report;
 use super::vm::VmDir;
+use crate::activation::{ActivationRecord, ReadyActivation};
+use crate::protocol::restore_ready::parse_ready_event;
 use crate::{Error, Result};
+
+/// The pending part of a restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RestorePhase {
+    /// Waiting for the launched VM's restore-ready event.
+    ReadyEvent,
+    /// Connecting and preparing the caller's verified control session.
+    Connect,
+    /// Sending the canonical activation record.
+    Activate,
+    /// Waiting for Ready to echo the activation's transaction.
+    Ready,
+}
+
+/// An observed fact about a failed restore, without attribution or cleanup policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RestoreEvidence {
+    /// A caller's peer check refused a process.
+    PeerMismatch,
+    /// A caller's I/O operation failed.
+    Io,
+    /// An event, response or ordering violated the restore protocol.
+    Malformed,
+    /// The caller could not read the VM's outcome report.
+    ReportUnreadable,
+    /// The caller's budget expired.
+    Expired,
+    /// The caller cancelled the restore.
+    Cancelled,
+    /// The caller verified that the VM exited before Ready.
+    Exited,
+}
+
+/// A restore's failure phase, evidence and original cause.
+///
+/// This error neither stops the VM nor records a disposition. The caller retains its process,
+/// session and storage and decides what to do with them.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct RestoreError {
+    /// The phase of the failed operation.
+    pub phase: RestorePhase,
+    /// What the caller or the machine observed.
+    pub evidence: RestoreEvidence,
+    /// The original cause, when the failed operation supplied one.
+    pub source: Option<Box<dyn StdError + Send + Sync>>,
+}
+
+impl fmt::Display for RestoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "restore failed during {:?}: {:?}",
+            self.phase, self.evidence
+        )?;
+        if let Some(source) = &self.source {
+            write!(formatter, ": {source}")?;
+        }
+        Ok(())
+    }
+}
+
+impl StdError for RestoreError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn StdError + 'static))
+    }
+}
+
+/// A caller's result or observation for a restore's pending step.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RestoreInput {
+    /// The caller launched and holds the VM named by this reference.
+    Spawned(ProcessRef),
+    /// Completed bytes read from the caller's peer-verified restore-ready listener.
+    ReadyEvent(Vec<u8>),
+    /// The caller prepared a new, peer-verified control session.
+    Connected,
+    /// The activation write completed; Ready is still pending.
+    ///
+    /// A caller that combines the write and Ready read may supply GuestReady directly instead.
+    ActivateSent,
+    /// The control session was lost; the caller decides whether to reconnect.
+    SessionLost,
+    /// The activation reported by the guest's Ready.
+    GuestReady(ReadyActivation),
+    /// A final operation failure, preserving its explicit phase, evidence and original source.
+    OperationFailed {
+        /// The operation's phase, including a write failure after taking SendActivate.
+        phase: RestorePhase,
+        /// What the caller observed.
+        evidence: RestoreEvidence,
+        /// The operation's original cause.
+        source: Option<Box<dyn StdError + Send + Sync>>,
+    },
+    /// A verified VM exit and an already-read outcome report, when available.
+    Exited(Option<Report>),
+    /// The caller's budget for the pending step expired.
+    Expired,
+    /// The caller gave up.
+    Cancelled,
+}
+
+/// An operation for the caller, or the terminal result of a restore.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RestoreAction {
+    /// Receive the complete, peer-verified restore-ready event.
+    AwaitReadyEvent,
+    /// Prepare a new, peer-verified control session.
+    Connect,
+    /// Send these canonical record bytes as the first request of the session and await Ready.
+    SendActivate(Vec<u8>),
+    /// Ready echoed the expected transaction; no mappings or workload Start were sent.
+    Done,
+    /// The restore failed; its VM process remains the caller's.
+    Fail(RestoreError),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MachineState {
+    Spawn,
+    Event,
+    Connect,
+    ActivateQueued,
+    Activate,
+    Ready,
+    Finished,
+}
+
+impl MachineState {
+    fn phase(self) -> Option<RestorePhase> {
+        match self {
+            Self::Spawn | Self::Event => Some(RestorePhase::ReadyEvent),
+            Self::Connect => Some(RestorePhase::Connect),
+            Self::ActivateQueued | Self::Activate => Some(RestorePhase::Activate),
+            Self::Ready => Some(RestorePhase::Ready),
+            Self::Finished => None,
+        }
+    }
+}
+
+/// The ordered rules of one restore, without I/O, a clock or a retry budget.
+///
+/// Feed [`RestoreInput::Spawned`] after launching the VM, then perform the offered actions and
+/// supply their results. Every session receives the same canonical activation bytes. A lost
+/// session offers Connect again; the caller may instead cancel or report an expired budget.
+/// Terminal success or failure absorbs later inputs and is offered only once.
+#[derive(Debug)]
+pub struct RestoreMachine {
+    encoded: Vec<u8>,
+    expected: ReadyActivation,
+    state: MachineState,
+    action: Option<RestoreAction>,
+}
+
+impl RestoreMachine {
+    /// Latches the record's canonical encoding and expected transaction.
+    ///
+    /// A cold record without a restore transaction queues Fail immediately. A valid restore
+    /// waits for Spawned; it never reads a record file or changes its record between sessions.
+    pub fn new(record: &ActivationRecord) -> Self {
+        let mut machine = Self {
+            encoded: record.encode(),
+            expected: ReadyActivation::of(record),
+            state: MachineState::Spawn,
+            action: None,
+        };
+        if record.restore().is_none() {
+            machine.fail(
+                RestorePhase::ReadyEvent,
+                RestoreEvidence::Malformed,
+                Some(Box::new(Error::unsupported(
+                    "a restore needs an activation record with a transaction",
+                ))),
+            );
+        }
+        machine
+    }
+
+    /// Applies an observation, replacing any action invalidated by failure or session loss.
+    ///
+    /// OperationFailed keeps the caller's phase even when it differs from the machine's pending
+    /// phase. Expiry, cancellation and verified exit fail every pending phase. An unexpected
+    /// progress input fails explicitly; inputs after a terminal result are ignored.
+    pub fn input(&mut self, input: RestoreInput) {
+        let Some(phase) = self.state.phase() else {
+            return;
+        };
+        match (self.state, input) {
+            (MachineState::Spawn, RestoreInput::Spawned(_)) => {
+                self.state = MachineState::Event;
+                self.action = Some(RestoreAction::AwaitReadyEvent);
+            }
+            (MachineState::Event, RestoreInput::ReadyEvent(bytes)) => {
+                if let Err(source) = parse_ready_event(&bytes) {
+                    self.fail(phase, RestoreEvidence::Malformed, Some(Box::new(source)));
+                } else {
+                    self.state = MachineState::Connect;
+                    self.action = Some(RestoreAction::Connect);
+                }
+            }
+            (MachineState::Connect, RestoreInput::Connected) => {
+                self.state = MachineState::ActivateQueued;
+                self.action = Some(RestoreAction::SendActivate(self.encoded.clone()));
+            }
+            (MachineState::Activate, RestoreInput::ActivateSent) => {
+                self.state = MachineState::Ready;
+            }
+            (MachineState::Activate | MachineState::Ready, RestoreInput::GuestReady(reported)) => {
+                if reported == self.expected {
+                    self.state = MachineState::Finished;
+                    self.action = Some(RestoreAction::Done);
+                } else {
+                    self.fail(
+                        RestorePhase::Ready,
+                        RestoreEvidence::Malformed,
+                        Some(Box::new(Error::protocol(format!(
+                            "Ready echoed transaction {:?}, not {:?}",
+                            reported.transaction, self.expected.transaction
+                        )))),
+                    );
+                }
+            }
+            (
+                MachineState::Connect
+                | MachineState::ActivateQueued
+                | MachineState::Activate
+                | MachineState::Ready,
+                RestoreInput::SessionLost,
+            ) => {
+                self.state = MachineState::Connect;
+                self.action = Some(RestoreAction::Connect);
+            }
+            (
+                _,
+                RestoreInput::OperationFailed {
+                    phase,
+                    evidence,
+                    source,
+                },
+            ) => {
+                self.fail(phase, evidence, source);
+            }
+            (_, RestoreInput::Expired) => self.fail(phase, RestoreEvidence::Expired, None),
+            (_, RestoreInput::Cancelled) => self.fail(phase, RestoreEvidence::Cancelled, None),
+            (_, RestoreInput::Exited(_)) => self.fail(phase, RestoreEvidence::Exited, None),
+            _ => self.fail(
+                phase,
+                RestoreEvidence::Malformed,
+                Some(Box::new(Error::protocol(
+                    "unexpected progress input during restore",
+                ))),
+            ),
+        }
+    }
+
+    /// Takes the next action once, or returns None while awaiting a caller input.
+    ///
+    /// Taking SendActivate starts the pending Activate phase. ActivateSent advances to the Ready
+    /// wait; a caller that combines the write and Ready read can report GuestReady directly.
+    pub fn next_action(&mut self) -> Option<RestoreAction> {
+        let action = self.action.take()?;
+        if matches!(&action, RestoreAction::SendActivate(_)) {
+            self.state = MachineState::Activate;
+        }
+        Some(action)
+    }
+
+    fn fail(
+        &mut self,
+        phase: RestorePhase,
+        evidence: RestoreEvidence,
+        source: Option<Box<dyn StdError + Send + Sync>>,
+    ) {
+        self.state = MachineState::Finished;
+        self.action = Some(RestoreAction::Fail(RestoreError {
+            phase,
+            evidence,
+            source,
+        }));
+    }
+}
 
 /// The listener of one restore, bound before its VM starts.
 ///
