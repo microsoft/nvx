@@ -3,21 +3,26 @@
 //! of it, its [`NetworkConfig`], the host paths that it exports, its [`ConsoleAttachment`], and
 //! what only its cold boot takes, a [`Boot`], with what a capture of the VM adds, a
 //! [`CaptureConfig`], whose [`CaptureIdentity`] names the capture's snapshots.
+//! [`VmConfig::openvmm_arguments`] renders a whole cold launch from that configuration and a
+//! [`Runtime`], with caller-supplied output names, without opening paths or allocating endpoints.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use super::filesystem::{ExportPlan, ReservedTargets};
-use super::network::NetworkPolicy;
+use super::network::{self, NetworkPolicy};
 use super::platform::parse_hex32;
-use super::runtime::Runtime;
+use super::runtime::{GuestPowerAction, Runtime};
 use crate::activation::{self, Journal, MAX_HOSTNAME_BYTES, OverlayMode, View};
 use crate::contract;
 use crate::error::{Error, Result};
+use crate::hypervisor::Hypervisor;
 use crate::net::Ipv4Cidr;
 use crate::protocol::cmdline::{self, Parameter};
 use crate::protocol::maps::HostMap;
@@ -26,6 +31,14 @@ use crate::protocol::view;
 
 /// Bytes of the x86 kernel command line available to caller tokens, including the NUL.
 pub const COMMAND_LINE_BUDGET: usize = 1024;
+
+/// Longest Windows process command line, in UTF-16 code units, including the terminating NUL.
+///
+/// OpenVMM's command line is held to it on every host, so a policy behaves alike on all of them.
+pub const PROCESS_COMMAND_LINE_LIMIT: usize = 32_767;
+
+/// Room for the runtime's files and the VM's output paths, as legacy adapter planning reserves.
+pub(crate) const OPENVMM_COMMAND_LINE_RESERVE: usize = 2048;
 
 /// The guest address of a VM's NIC at a cold boot whose configuration names none, in the form
 /// that [`Ipv4Cidr::parse`] reads.
@@ -422,6 +435,171 @@ impl VmConfig {
         Ok(tokens.join(" "))
     }
 
+    /// Renders a cold boot's complete OpenVMM arguments from this configuration and `runtime`.
+    ///
+    /// `endpoint`, `report` and `console_endpoint` are already chosen output names, not launch
+    /// settings: this method creates no directory, file, listener, or process, and uses paths as
+    /// given. A [`ConsoleAttachment::Listener`] needs a nonempty `console_endpoint`; a
+    /// [`ConsoleAttachment::Disconnected`] needs none and retains the console device with a
+    /// discarded attachment. The control endpoint always listens and authenticates from stdin.
+    /// The caller runs `runtime.openvmm` with these arguments.
+    ///
+    /// This whole-config entry point is temporarily public. SL2.8 makes it internal when
+    /// `host::vm::create` calls it. Individual device lowerings stay internal. Neither managed
+    /// lifecycle nor workload-identity flags are rendered; the caller owns its guest tokens.
+    /// `runtime.windows_breakaway` is process-launch behavior, not an OpenVMM argument.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
+    /// configuration, no [`Boot`], empty or NUL-containing required names or runtime paths, an
+    /// invalid authentication timeout, or a complete command line beyond the Windows limit.
+    /// The complete limit check runs on every host, without a reserve.
+    pub fn openvmm_arguments(
+        &self,
+        runtime: &Runtime,
+        endpoint: &str,
+        report: &Path,
+        console_endpoint: Option<&str>,
+    ) -> Result<Vec<OsString>> {
+        let command_line = self.kernel_command_line()?;
+        check_endpoint(endpoint, "endpoint")?;
+        for (name, path) in [
+            ("Runtime.openvmm", runtime.openvmm.as_path()),
+            ("Runtime.kernel", runtime.kernel.as_path()),
+            ("Runtime.initramfs", runtime.initramfs.as_path()),
+            ("report", report),
+        ] {
+            if path.as_os_str().is_empty() || path.as_os_str().to_string_lossy().contains('\0') {
+                return Err(Error::unsupported(format!(
+                    "{name} must name a path without a NUL"
+                )));
+            }
+        }
+        let console = match (self.console, console_endpoint) {
+            (ConsoleAttachment::Listener, Some(endpoint)) => {
+                check_endpoint(endpoint, "console_endpoint")?;
+                format!("listen={endpoint}")
+            }
+            (ConsoleAttachment::Disconnected, None) => "none".to_owned(),
+            (ConsoleAttachment::Listener, None) => {
+                return Err(Error::unsupported(
+                    "a console listener needs console_endpoint",
+                ));
+            }
+            (ConsoleAttachment::Disconnected, Some(_)) => {
+                return Err(Error::unsupported(
+                    "a disconnected console takes no console_endpoint",
+                ));
+            }
+        };
+        let mut arguments = self.device_arguments()?;
+        arguments.extend(boot_arguments(
+            runtime.hypervisor,
+            self.memory_mib,
+            &runtime.kernel,
+            &runtime.initramfs,
+            &command_line,
+        ));
+        arguments.extend(console_arguments(&console, endpoint, report));
+        if let Some(profile) = &runtime.cpu_profile {
+            if profile.is_empty() {
+                return Err(Error::unsupported("Runtime.cpu_profile must not be empty"));
+            }
+            arguments.extend(["--cpu-profile".into(), profile.as_str().into()]);
+        }
+        let shutdown = match runtime.options.guest_shutdown {
+            GuestPowerAction::Exit => "exit",
+            GuestPowerAction::Halt => "halt",
+            GuestPowerAction::Reset => "reset",
+        };
+        arguments.extend(["--guest-shutdown-action".into(), shutdown.into()]);
+        if let Some(timeout) = runtime.options.control_auth_timeout {
+            if timeout < Duration::from_millis(1)
+                || timeout > Duration::from_secs(60)
+                || timeout.subsec_nanos() % 1_000_000 != 0
+            {
+                return Err(Error::unsupported(
+                    "LaunchOptions.control_auth_timeout must be whole milliseconds from 1 to 60000",
+                ));
+            }
+            arguments.extend([
+                "--microvm-control-auth-timeout-ms".into(),
+                timeout.as_millis().to_string().into(),
+            ]);
+        }
+        check_argument_nuls(&arguments)?;
+        fit_process_command_line(runtime.openvmm.as_os_str(), &arguments, 0)?;
+        Ok(arguments)
+    }
+
+    /// Checks the configuration's part of a cold boot's OpenVMM command line on every host,
+    /// without reading or changing the host, with 2048 UTF-16 code units reserved for the
+    /// runtime's files, launch options, and the VM's output paths.
+    ///
+    /// Like legacy adapter planning, the reserve foresees runtime-file and output names of up to
+    /// 260 code units each, Windows' `MAX_PATH`. It does not certify arbitrary runtime paths or
+    /// CPU-profile names: [`openvmm_arguments`](Self::openvmm_arguments) checks the complete
+    /// command line with the actual runtime and output names, without a reserve.
+    /// A listener's backend prefix is counted here; its endpoint name stays in the reserve.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
+    /// configuration or no [`Boot`], an unlowerable network policy, a NUL-containing argument,
+    /// or insufficient room for the reserve.
+    pub fn check_command_line(&self) -> Result<()> {
+        let command_line = self.kernel_command_line()?;
+        let mut arguments = self.device_arguments()?;
+        arguments.extend([
+            "--memory".into(),
+            format!("{}M", self.memory_mib).into(),
+            "--cmdline".into(),
+            command_line.into(),
+            "--virtio-console".into(),
+            match self.console {
+                ConsoleAttachment::Listener => "listen=",
+                ConsoleAttachment::Disconnected => "none",
+            }
+            .into(),
+        ]);
+        check_argument_nuls(&arguments)?;
+        fit_arguments(&arguments, OPENVMM_COMMAND_LINE_RESERVE)
+    }
+
+    /// Renders only the configuration's devices; no runtime or output name is needed.
+    fn device_arguments(&self) -> Result<Vec<OsString>> {
+        let mut arguments = vec![
+            "--machine".into(),
+            "microvm".into(),
+            "--processors".into(),
+            self.processors.to_string().into(),
+        ];
+        if let RootConfig::Layered(root) = &self.root {
+            let mut image = OsString::from("distro:file:");
+            image.push(&root.image);
+            image.push(",ro");
+            arguments.extend(["--microvm-sandbox-block".into(), image]);
+            if let UpperConfig::Scratch { path, .. } = &root.upper {
+                let mut scratch = OsString::from("scratch:file:");
+                scratch.push(path);
+                arguments.extend(["--microvm-sandbox-block".into(), scratch]);
+            }
+        }
+        if let Some(network) = &self.network {
+            let guest_network = network.guest_network.map_or_else(
+                || DEFAULT_GUEST_NETWORK.to_owned(),
+                |address| address.to_string(),
+            );
+            let mut nic = network::openvmm_arguments(Some(&network.policy), &guest_network)?;
+            if nic.is_empty() {
+                // A configured NIC remains present even under the deny-all posture.
+                nic = network::template_arguments(&guest_network);
+            }
+            arguments.extend(nic.into_iter().map(OsString::from));
+        }
+        if let Some(export) = &self.filesystem {
+            arguments.extend(export.openvmm_arguments().into_iter().map(OsString::from));
+        }
+        Ok(arguments)
+    }
+
     /// Checks the whole configuration without reading the host: it opens no path, and checks no
     /// support of the host.
     ///
@@ -684,6 +862,162 @@ impl Identifying {
         self.number(u64::from(geometry.logical_block_size));
         self.number(u64::from(geometry.physical_block_size));
     }
+}
+
+/// Common cold-boot inputs, shared with the legacy VmmLaunch without narrowing its public types.
+pub(crate) fn boot_arguments(
+    hypervisor: Hypervisor,
+    memory_mib: u64,
+    kernel: &Path,
+    initrd: &Path,
+    kernel_command_line: &str,
+) -> Vec<OsString> {
+    let memory = format!("{memory_mib}M");
+    [
+        OsStr::new("--single-process"),
+        OsStr::new("--hypervisor"),
+        OsStr::new(hypervisor.as_str()),
+        OsStr::new("--memory"),
+        OsStr::new(&memory),
+        OsStr::new("--kernel"),
+        kernel.as_os_str(),
+        OsStr::new("--initrd"),
+        initrd.as_os_str(),
+        OsStr::new("--cmdline"),
+        OsStr::new(kernel_command_line),
+    ]
+    .map(OsStr::to_os_string)
+    .into()
+}
+
+/// Common console, control authentication, and report arguments of a cold launch.
+pub(crate) fn console_arguments(console: &str, endpoint: &str, report: &Path) -> Vec<OsString> {
+    let control = format!("listen={endpoint}");
+    [
+        OsStr::new("--virtio-console"),
+        OsStr::new(console),
+        OsStr::new("--microvm-control-console"),
+        OsStr::new(&control),
+        OsStr::new("--microvm-control-auth-stdin"),
+        OsStr::new("--microvm-report"),
+        report.as_os_str(),
+    ]
+    .map(OsStr::to_os_string)
+    .into()
+}
+
+fn check_endpoint(endpoint: &str, name: &str) -> Result<()> {
+    if endpoint.is_empty() || endpoint.contains('\0') {
+        return Err(Error::unsupported(format!(
+            "{name} must name a nonempty endpoint without a NUL",
+        )));
+    }
+    Ok(())
+}
+
+fn check_argument_nuls(arguments: &[OsString]) -> Result<()> {
+    if arguments
+        .iter()
+        .any(|argument| argument.to_string_lossy().contains('\0'))
+    {
+        return Err(Error::unsupported(
+            "OpenVMM's arguments must not contain a NUL",
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the length in UTF-16 code units, including the terminating NUL, of the Windows command
+/// line that runs `program` with `arguments`, quoted the way the Windows platform quotes it: the
+/// program always in quotes, and each argument in quotes if it is empty or holds a space or a
+/// tab, with a backslash before each quote that it holds and a backslash before each backslash
+/// that precedes a quote, its closing quote included, and one space between them.
+///
+/// It is the length that [`PROCESS_COMMAND_LINE_LIMIT`] bounds, whatever the host:
+/// [`fit_process_command_line`] checks it.
+pub fn process_command_line_units(program: &OsStr, arguments: &[OsString]) -> usize {
+    argument_units(program, true) + arguments_units(arguments)
+}
+
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless the Windows command
+/// line that runs `program`, such as OpenVMM, with `arguments`, as [`process_command_line_units`]
+/// counts it, leaves `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] unused: none for the
+/// complete command line of a launch about to spawn OpenVMM, and some for what may change before
+/// then, such as the paths of the artifacts.
+///
+/// The error says how long the command line is, and how to shorten it.
+pub fn fit_process_command_line(
+    program: &OsStr,
+    arguments: &[OsString],
+    reserve: usize,
+) -> Result<()> {
+    let length = process_command_line_units(program, arguments);
+    let held = if reserve == 0 {
+        String::new()
+    } else {
+        format!(", with {reserve} held in reserve")
+    };
+    fit("OpenVMM's command line", length, reserve, &held)
+}
+
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless OpenVMM's
+/// `arguments`, which a plan renders, without the program and the rest of the launch, leave
+/// `reserve` code units of [`PROCESS_COMMAND_LINE_LIMIT`] to that rest.
+pub(crate) fn fit_arguments(arguments: &[OsString], reserve: usize) -> Result<()> {
+    let held = format!(", with {reserve} held in reserve for the rest of the launch");
+    fit(
+        "OpenVMM's arguments",
+        arguments_units(arguments),
+        reserve,
+        &held,
+    )
+}
+
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported), saying that `subject`
+/// would take `length` code units, `held` describing `reserve`, unless they leave `reserve` of
+/// [`PROCESS_COMMAND_LINE_LIMIT`] unused.
+fn fit(subject: &str, length: usize, reserve: usize, held: &str) -> Result<()> {
+    if length.saturating_add(reserve) <= PROCESS_COMMAND_LINE_LIMIT {
+        return Ok(());
+    }
+    Err(Error::unsupported(format!(
+        "{subject} would take {length} of the {PROCESS_COMMAND_LINE_LIMIT} characters that a \
+         Windows process command line allows{held}; map, hide, or allow fewer or shorter \
+         filesystem paths, or use fewer network rules"
+    )))
+}
+
+/// Returns the length in UTF-16 code units of `arguments` on a Windows command line, quoted as
+/// [`process_command_line_units`] quotes them, each with the space before it.
+pub(crate) fn arguments_units(arguments: &[OsString]) -> usize {
+    arguments
+        .iter()
+        .map(|argument| argument_units(argument, false))
+        .sum()
+}
+
+/// Returns the length in UTF-16 code units of `argument` on a Windows command line, quoted as
+/// [`process_command_line_units`] quotes it, always if it is the `program`, with one separating
+/// space, or the terminating NUL after the last argument.
+fn argument_units(argument: &OsStr, program: bool) -> usize {
+    let text = argument.to_string_lossy();
+    let quoted = program || text.is_empty() || text.contains([' ', '\t']);
+    let mut length = 1 + text.encode_utf16().count() + if quoted { 2 } else { 0 };
+    let mut backslashes = 0;
+    for character in text.chars() {
+        match character {
+            '\\' => backslashes += 1,
+            '"' => {
+                length += backslashes + 1;
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
+    }
+    if quoted {
+        length += backslashes;
+    }
+    length
 }
 
 #[cfg(test)]
