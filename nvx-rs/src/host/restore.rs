@@ -104,6 +104,7 @@ pub enum RestoreEvidence {
 }
 
 impl RestoreEvidence {
+    /// Attributes evidence without prescribing a retry or disposition.
     fn attribution(self) -> Attribution {
         match self {
             Self::InvalidTargets
@@ -137,6 +138,7 @@ impl RestoreEvidence {
         }
     }
 
+    /// Classifies only a caller-supplied guest outcome before workload Start.
     fn reported(report: &Report) -> Option<Self> {
         if !matches!(report.category.as_deref(), Some("guest-exit" | "success")) {
             return None;
@@ -200,6 +202,7 @@ pub struct RestoreError {
 }
 
 impl RestoreError {
+    /// Captures failure facts while retaining the original cause and its complete messages.
     fn new(
         phase: RestorePhase,
         evidence: RestoreEvidence,
@@ -489,6 +492,7 @@ impl RestoreMachine {
         )));
     }
 
+    /// Latches one terminal action without inspecting or changing caller-owned resources.
     fn finish(&mut self, action: RestoreAction) {
         self.state = MachineState::Finished;
         self.action = Some(action);
