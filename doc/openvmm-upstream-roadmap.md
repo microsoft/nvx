@@ -7,23 +7,24 @@
   `c6d3da0ffc520d1386c314503ea07c506a3b866b`; see [Upstream status](#upstream-status).
 - Mapped fork tip: `0962b79c477588bfb3cc7d1b0be2699e6e65ca36`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131 and the PR20 fixup at position 148.
-- NVX's pinned OpenVMM revision: `c0241aa609dca9ade7018c70622e7824bd293670`, position 217.
-  Positions 216 and 217, which microsoft/openvmm#4970 proposes for `feature/microvm/dev`, are two
-  commits on position 215, `bdea9ab19`, the head of `feature/microvm/dev`. microsoft/openvmm#4953,
-  microsoft/openvmm#4954, and microsoft/openvmm#4955 landed positions 213-215 there by
-  fast-forward, one commit each, on position 212, `f1e1d8545`, the head of the
-  `feature/microvm/release/v5.0` branch of microsoft/openvmm. The v5.0 reorganization moved the
-  220 commits of `feature/microvm/dev` at the NVX pin before it, `e1ca353eb`, onto `61994293a`:
-  the 210 of `feature/microvm/release/v4.0` and the ten that microsoft/openvmm#4894,
-  microsoft/openvmm#4886, microsoft/openvmm#4887, microsoft/openvmm#4916, microsoft/openvmm#4921,
-  microsoft/openvmm#4952, and microsoft/openvmm#4951 landed after it. It dropped the four commits
-  whose changes upstream had landed or superseded, retired PR09's bounded quiesce transactions,
-  folded the snapshot quiesce without a deadline into the commits that it changes, moved PR13's
-  write handling at position 041 ahead of the console policy that needs it, and folded the fixups
-  that adapted the chain to upstream; see [The v5.0 reorganization](#the-v50-reorganization). The
-  pin is 86 commits past the mapped tip on the same first-parent chain. Positions 132-217, except
-  the PR20 fixup at position 148, are not yet assigned to PRs; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- NVX's pinned OpenVMM revision: `db42fde0444ca6e1a05cfd7c1124e995ffe78638`, position 219.
+  Positions 218 and 219, which microsoft/openvmm#4968 and microsoft/openvmm#4969 propose for
+  `feature/microvm/dev` as a stack, one commit each, are two commits on position 217, `c0241aa60`,
+  the head of `feature/microvm/dev`. microsoft/openvmm#4970 landed positions 216 and 217 there by
+  fast-forward on position 215, `bdea9ab19`, and microsoft/openvmm#4953, microsoft/openvmm#4954,
+  and microsoft/openvmm#4955 landed positions 213-215, one commit each, on position 212,
+  `f1e1d8545`, the head of the `feature/microvm/release/v5.0` branch of microsoft/openvmm. The v5.0
+  reorganization moved the 220 commits of `feature/microvm/dev` at the NVX pin before it,
+  `e1ca353eb`, onto `61994293a`: the 210 of `feature/microvm/release/v4.0` and the ten that
+  microsoft/openvmm#4894, microsoft/openvmm#4886, microsoft/openvmm#4887, microsoft/openvmm#4916,
+  microsoft/openvmm#4921, microsoft/openvmm#4952, and microsoft/openvmm#4951 landed after it. It
+  dropped the four commits whose changes upstream had landed or superseded, retired PR09's bounded
+  quiesce transactions, folded the snapshot quiesce without a deadline into the commits that it
+  changes, moved PR13's write handling at position 041 ahead of the console policy that needs it,
+  and folded the fixups that adapted the chain to upstream; see
+  [The v5.0 reorganization](#the-v50-reorganization). The pin is 88 commits past the mapped tip on
+  the same first-parent chain. Positions 132-219, except the PR20 fixup at position 148, are not yet
+  assigned to PRs; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `61994293a9e5e3bcc1d685d708cf462920eed030` (2026-11-05), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -453,16 +454,23 @@ restore errors:
   the restore readiness event, the TSC offset measurement, and a unit task that does not answer
   fail it. The hardware reseal unit of microsoft/openvmm#4415 keeps its infallible start.
 
-A queue or host backend that fails to start after a successful restore still lets the resume
-succeed: the device marks itself `DEVICE_NEEDS_RESET`, which a driver that has set `DRIVER_OK`
-sees, and the host logs the failure. Until v5.0 position 213, virtio-net's host backend did not
-even do that: its coordinator created the endpoint queues after the start and only logged a
-failure, leaving workers that wait for a queue forever. v5.0 position 213 creates them in the queue
-start, and v5.0 position 215 documents in the Guide that neither the resume nor the restore
-readiness event waits for the queues to start. microsoft/nvx#1232 requires that a partially
-activated VM never report success, which needs the queues prepared at restore, as
-microsoft/openvmm#4713 proposes, and their host backends too, which microsoft/openvmm#4713 still
-creates at activation, so that requirement remains open.
+After the v4.0 reorganization, a queue or host backend that failed to start after a successful
+restore still let the resume succeed: the device marked itself `DEVICE_NEEDS_RESET`, which a
+driver that has set `DRIVER_OK` sees, and the host logged the failure. Until v5.0 position 213,
+virtio-net's host backend did not even do that: its coordinator created the endpoint queues after
+the start and only logged a failure, leaving workers that wait for a queue forever. v5.0 position
+213 creates them in the queue start, and v5.0 position 215 documented in the Guide that neither
+the resume nor the restore readiness event waited for the queues to start. microsoft/nvx#1232
+requires that a partially activated VM never report success. Preparing the queues at restore, as
+microsoft/openvmm#4713 proposes, would not meet it alone, since microsoft/openvmm#4713 still creates
+their host backends at activation. v5.0 position 219 instead confirms each device's start before
+the VM runs: `StateUnits::start` awaits a confirmation of each unit's start, which reports success
+by default, before it starts the unit's dependents, and the virtio transports confirm with their
+device task's answer. Since the partition depends on the chipset devices, a device that fails to
+start fails the resume before any vCPU runs, stops again with the units that started, and keeps the
+progress of its queues, which v5.0 position 218 preserves, and a restore publishes no readiness
+event. The starts themselves stay notifications, as upstream's are, so v3.0 position 027's fallible
+device start stays retired.
 
 The fold changed the patches of 27 commits, positions 018, 021, 022, 024, 044, 045, 047, 051,
 052, 072, 093, 094, 110, 111, 118, 128, 139, 143, 151, 165, 168-170, 174, 179, 185, and 188,
@@ -857,7 +865,8 @@ The physical branch is one first-parent chain:
   -> long Windows paths [210] -> state change wait logging [211]
   -> port forward bind code [212] -> virtio queue starts after restore [213-215]
   -> storage generation block identity [216-217]
-  -> c0241aa60 (NVX pin)
+  -> device start confirmation [218-219]
+  -> db42fde04 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -873,12 +882,12 @@ see [The v3.0 reorganization](#the-v30-reorganization).
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 86 later commits, position
+The NVX pin extends the chain past position 131 without merges. Of the 88 later commits, position
 148 is a PR20 fixup, and the others are not yet classified or assigned to PRs. Each of positions
 132-187 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 188-192
 followed the v3.0 reorganization, positions 193-206 are the ABI restart of the v4.0
-reorganization, positions 207-212 followed it, and positions 213-217 followed the v5.0
+reorganization, positions 207-212 followed it, and positions 213-219 followed the v5.0
 reorganization, so they combine none. A v4.0 position counts in `feature/microvm/dev` at
 `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4.0`.
 
@@ -970,6 +979,8 @@ reorganization, so they combine none. A v4.0 position counts in `feature/microvm
 | 215 | `bdea9ab19` | - | - | - | virtio: document how a queue that fails to start after restore is reported (microsoft/openvmm#4955) |
 | 216 | `c4dfc7e73` | - | - | - | microVM: identify snapshot blocks only by storage generation (microsoft/openvmm#4970) |
 | 217 | `c0241aa60` | - | - | - | microVM: check the storage generation of a restore's sandbox blocks (microsoft/openvmm#4970) |
+| 218 | `d8e8f271c` | - | - | - | virtio: keep the progress of queues that a failed start stops (microsoft/openvmm#4968) |
+| 219 | `db42fde04` | - | - | - | vmcore: confirm device starts before the VM runs (microsoft/openvmm#4969) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1017,8 +1028,14 @@ with the whole-file hashing and the verified copy that PR19's position 092 adds,
 becomes a bound block's only identity. It also has the block contract of position 167 record a
 platform capture's layers unbound, which PR19's position 093 did in the capture, and changes
 position 177's test of an absent scratch. Position 217 adds a restore-time check of that generation
-to position 167's restore. Assigning the later commits therefore means revisiting those PRs, not
-only appending new ones.
+to position 167's restore. Position 218 changes the failed start that PR13's position 039 gives the
+virtio device task, which now keeps the progress of the queues that it stops. Position 219 changes
+PR09's position 015, whose start now confirms each unit's start before it starts the unit's
+dependents, and PR13's position 039, whose transports now leave a start's answer to that
+confirmation instead of taking it in `poll_device`, and replaces one of position 039's tests; it
+adds its confirmation next to the input quiesce of PR09's position 018 in the files that position
+018 changes, and rewrites position 215's documentation. Assigning the later commits therefore means
+revisiting those PRs, not only appending new ones.
 
 Position 178, by contrast, changes only `disk_blob`, which upstream main and the fork base
 have alike and no other commit of the chain changes, so it can go upstream on its own. Position
@@ -1107,6 +1124,15 @@ block contracts, and manifest validation, and the Guide pages that describe them
 upstream main conflicts in all 13 of their files, eight of which upstream main lacks, those that
 PR11's position 032, PR15's position 064, PR17's positions 074, 076, and 079, PR19's position 091,
 and PR25's position 124 add, so they follow those PRs upstream.
+
+Positions 218 and 219 build on the chain too. Replaying position 218 on upstream main conflicts in
+two of its three files: the device task, whose failed start PR13's position 039 adds, and the list
+of the virtio test modules that the chain extends. Replaying position 219 on upstream main after it
+conflicts in 15 of its 19 files, four of which upstream main lacks: `state_unit`'s start module
+and its tests, which PR09's position 015 adds, the virtio saved-state tests of PR13's position 039,
+and position 218's tests. Only `state_unit`'s requests, the virtio test transports, the chipset
+device unit, and the device worker's request loop apply there. So both follow PR09 and PR13
+upstream.
 
 ## PR summary
 
@@ -1326,7 +1352,7 @@ Retired by the v4.0 and v5.0 reorganizations:
 - ~~`03291e1ea` - state_unit: add bounded quiesce transactions with rollback classification~~
   (**retired** by the v5.0 reorganization: microsoft/openvmm#4625 was closed in favor of microsoft/nvx#1260, and a snapshot quiesce stops the state units and a failed capture starts them again instead, with no deadline; v4.0 position 021)
 - ~~`d94e7b9b3` - vmcore: add fallible device start through chipset device workers~~
-  (**retired** by the v4.0 reorganization: microsoft/openvmm#4622 was closed in favor of microsoft/nvx#1232, and chipset device workers start their devices without an acknowledgement, as upstream's do; v3.0 position 027)
+  (**retired** by the v4.0 reorganization: microsoft/openvmm#4622 was closed in favor of microsoft/nvx#1232, and chipset device workers start their devices without an acknowledgement, as upstream's do; position 219 has them carry a separate confirmation of the start instead; v3.0 position 027)
 
 </details>
 
