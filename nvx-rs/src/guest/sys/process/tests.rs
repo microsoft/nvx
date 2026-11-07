@@ -1,9 +1,43 @@
+use std::cell::Cell;
 use std::io::{Seek, Write};
 use std::os::fd::{AsFd, AsRawFd};
 
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 
 use super::*;
+
+thread_local! {
+    /// Whether a test has `pidfd_open` answer this thread as a kernel before Linux 6.16 does.
+    pub(crate) static BEFORE_LINUX_6_16: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Returns `opened`, this kernel's answer to `pidfd_open` for `process`, as a kernel before Linux
+/// 6.16 gives it, if a test has asked for one on this thread.
+///
+/// For an ID that no thread-group leader has, but that something still holds, such a kernel
+/// answers `EINVAL`, where a later one answers `ENOENT` if a thread has the ID, and `ESRCH` if a
+/// process group or a session that a reaped process led keeps it. Only a process group is looked
+/// for, as the tests leave no other trace of a reaped process. Every other answer, such as
+/// `ESRCH` for an ID that nothing holds, is the same before Linux 6.16.
+pub(super) fn as_before_linux_6_16(
+    process: ProcessId,
+    opened: Result<nix::libc::c_long, Errno>,
+) -> Result<nix::libc::c_long, Errno> {
+    if !BEFORE_LINUX_6_16.get() {
+        return opened;
+    }
+    match opened {
+        Err(Errno::ENOENT) => Err(Errno::EINVAL),
+        Err(Errno::ESRCH) if process_group_exists(process) => Err(Errno::EINVAL),
+        opened => opened,
+    }
+}
+
+/// Returns whether a process group has the ID of `process`, as a signal 0 to the group tells,
+/// even one whose processes the caller may not signal.
+fn process_group_exists(process: ProcessId) -> bool {
+    signal_process_group(process, 0) != Err(Errno::ESRCH)
+}
 
 /// Forks a test's process, which the harness's threads keep [`fork`] from forking, for a test
 /// that the process runs alone, as `isolate_process_test` starts one. The child has only the
@@ -358,4 +392,48 @@ fn a_group_signal_through_a_pidfd_reaches_the_group_once_its_leader_is_collected
         crate::guest::sys::readable_or_hung_up(&[member_pidfd.borrowed()], 20_000).unwrap(),
         [true]
     );
+}
+
+#[test]
+fn an_id_that_no_process_has_opens_no_pidfd_on_any_kernel() {
+    use std::io::BufRead;
+    use std::os::unix::process::CommandExt;
+
+    // The leader leaves a member in its process group, which keeps the leader's ID once its
+    // status is collected, and tells its ID.
+    let mut leader = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 30 </dev/null >/dev/null 2>&1 & echo $!"])
+        .process_group(0)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let reaped = ProcessId::from_child(&leader);
+    let mut line = String::new();
+    std::io::BufReader::new(leader.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let member = ProcessId::from_positive(line.trim().parse().unwrap()).unwrap();
+    assert!(leader.wait().unwrap().success());
+    // A thread of this process, which leads no process, has an ID of its own.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
+        sender
+            .send(ProcessId::from_pid(nix::unistd::gettid()))
+            .unwrap();
+        let _ = released.recv();
+    });
+    let other_thread = receiver.recv().unwrap();
+    // Whatever this kernel answers, and as a kernel before Linux 6.16 answers, `EINVAL` for
+    // both IDs, where a later one answers `ESRCH` and `ENOENT`.
+    let mut answers = Vec::new();
+    for before_linux_6_16 in [false, true] {
+        BEFORE_LINUX_6_16.set(before_linux_6_16);
+        answers.push([open_pidfd(reaped).err(), open_pidfd(other_thread).err()]);
+    }
+    BEFORE_LINUX_6_16.set(false);
+    drop(release);
+    thread.join().unwrap();
+    kill_process(member).unwrap();
+    assert_eq!(answers, [[Some(Errno::ESRCH); 2]; 2]);
 }

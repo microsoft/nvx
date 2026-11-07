@@ -560,10 +560,26 @@ fn runtime_binds_need_a_mount_root_unless_there_are_none() {
     let result = Entry::new(root.path(), identity())
         .machine_id(machine_id)
         .bind_runtime();
-    assert!(
-        matches!(&result, Err(Error::Root(error)) if error.kind() == io::ErrorKind::InvalidInput),
-        "{result:?}"
+    // Only the unique mount IDs of `statx`, which Linux 6.8 added, tell whether the root is a
+    // mount's root, so an earlier kernel fails the root's check as `file_status` fails there.
+    let flags = OpenFlags::O_PATH | OpenFlags::O_CLOEXEC;
+    let path = sys::path_c_string(root.path()).unwrap();
+    let unique_mount_ids = !matches!(
+        sys::file_status(&sys::open(&path, flags, Mode::empty()).unwrap()),
+        Err(Errno::EOPNOTSUPP)
     );
+    let Err(Error::Root(error)) = &result else {
+        panic!("{result:?}");
+    };
+    if unique_mount_ids {
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+    } else {
+        assert_eq!(
+            error.raw_os_error(),
+            Some(Errno::EOPNOTSUPP as i32),
+            "{error}"
+        );
+    }
     let result = Entry::new(root.path(), identity())
         .time_status(root.path().join("etc"))
         .bind_runtime();

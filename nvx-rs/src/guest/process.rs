@@ -100,7 +100,9 @@ impl Child {
     /// collector takes its status. The pidfd is opened at once, while the process ID still names
     /// the child.
     ///
-    /// An ID of 0, or one above `i32::MAX`, is `EINVAL`, and one that names no process `ESRCH`.
+    /// An ID of 0, or one above `i32::MAX`, is `EINVAL`, and one that names no process `ESRCH`,
+    /// on every kernel, even while a process group or a session that a reaped process led keeps
+    /// its ID, or a thread that leads no process has it.
     pub fn with_pidfd(id: u32) -> io::Result<Self> {
         let process = process_id(id)?;
         let pidfd = sys::open_pidfd(process)?;
