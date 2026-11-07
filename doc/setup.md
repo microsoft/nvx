@@ -208,6 +208,10 @@ Install the pinned Python development tools:
 python3 -m pip install --requirement requirements-dev.txt
 ```
 
+With Python 3.11 or later, this also installs coverage.py, with which
+[scripts coverage](ci.md#scripts-coverage) measures the unit tests of
+`scripts/`.
+
 Install ShellCheck 0.11.0 and shfmt 3.12.0 using the platform package manager
 to match the versions enforced in CI.
 

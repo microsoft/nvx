@@ -2500,6 +2500,61 @@ comm -23 replaced.txt replacement.txt  # The mutants that only the replaced test
 A push that changes the workflow checks it on `src/gpt/crc.rs` with the
 library's `gpt::crc::` tests, in two jobs.
 
+## scripts coverage
+
+[`scripts-coverage.yml`](../.github/workflows/scripts-coverage.yml) measures
+which statements and branches of the Python host tooling in `scripts/` its unit
+tests reach, on a GitHub-hosted Ubuntu runner. It runs for every push to `dev`
+that changes `scripts/`, `requirements-dev.txt`, the
+[validate-nvx](../.github/actions/validate-nvx/action.yml) action, or the
+workflow, and on a manual dispatch, but never for pull requests, so no required
+check depends on it, and a push cancels the measurement of an earlier push that
+still runs. Its job prepares the tests as the `NVX CLI / Linux` job prepares
+them: it checks out OpenVMM, sets up Python 3.12, and builds `nvx-rs` as the
+`nvx-rs binary / Linux musl` job does, for the tests that `NVX_RS` enables. It
+installs the requirements that validate-nvx installs, and
+[coverage.py](https://coverage.readthedocs.io/) at the release that
+`requirements-dev.txt` pins. That release needs Python 3.11, so the pin applies
+only from 3.11, and the quality checks, which run on Python 3.10, go without it.
+
+[`scripts_coverage.py`](../scripts/scripts_coverage.py) runs the commands with
+which the Linux step of validate-nvx runs unit tests, the `test_*.py` modules,
+under `coverage run`, with branch coverage. Its configuration's
+`patch = subprocess` measures the Python processes that the tests start too, as
+long as they inherit the environment variables with which coverage.py starts
+them. The measurement leaves out the unit tests and their PowerShell test
+support, `powershell_testing.py`, as
+[`check_test_layout.py`](../scripts/check_test_layout.py) names them. It
+measures the end-to-end scenario drivers, the `*_tests.py` modules of
+`scripts/nvx_tools/`, but reports them apart from the host tooling, every other
+module of `scripts/`, since only a hypervisor runs them end to end, in the
+microVM test jobs. A command whose tests fail fails the job, after it writes the
+reports, whose summary names the command. A process writes what it reached when
+it exits, so what a process that a test kills reached is missing, and the code
+that a race between a test and the processes that it starts decides runs in
+only some runs, so the counts can differ slightly between runs of one commit.
+
+Each job uploads, as the 30-day artifact `scripts-coverage-<run-id>`, which a
+rerun of the job replaces, `host-tooling/` and `scenario-drivers/`, each with the
+JSON, LCOV, and HTML reports of its modules, `coverage.json`, `lcov.info`, and
+`html/`, with paths relative to the repository; `measurement.json`, which
+records the commit, the Python and coverage.py releases, how each command of the
+tests went, and the totals; `tests.log`; and `summary.md`. The job also writes
+`summary.md` to the run's summary: the totals of the host tooling and of the
+scenario drivers, how each command of the tests went, and a table of each
+group's modules.
+
+To measure on a development host, install `requirements-dev.txt` with Python
+3.11 or later, and run the script, which writes the reports to
+`build/scripts-coverage`. As in validate-nvx, the tests that run `nvx-rs` need
+`NVX_RS` to name a build of it, and the tests that read OpenVMM's sources need
+the `openvmm` submodule:
+
+```bash
+python3 -m pip install --requirement requirements-dev.txt
+NVX_RS="$PWD/nvx-rs/target/release/nvx-rs" python3 scripts/scripts_coverage.py
+```
+
 ## Module diagrams
 
 [`doc/modules`](modules/README.md) publishes diagrams of the modules of the

@@ -1,0 +1,102 @@
+name: scripts coverage
+
+# Measures which statements and branches of the Python host tooling in scripts/
+# the unit tests that validate-nvx runs reach, with scripts/scripts_coverage.py
+# (doc/ci.md, "scripts coverage"). It runs for the pushes to dev that change the
+# tooling, its tests, or how they are measured, and on demand, never for pull
+# requests, so no required check depends on it.
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - scripts/**
+      - requirements-dev.txt
+      - .github/actions/validate-nvx/action.yml
+      - .github/workflows/scripts-coverage.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A push replaces the measurement of an earlier push that is still running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The tests run as the NVX CLI / Linux job of ci.yml runs them, with the
+  # OpenVMM checkout, the Python release, and the nvx-rs build that it has.
+  measure:
+    name: measure
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NVX_RS: ${{ github.workspace }}/nvx-rs/target/release/nvx-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Checkout OpenVMM
+        uses: ./.github/actions/checkout-openvmm
+        with:
+          ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # As the nvx-rs binary / Linux musl job of ci.yml builds it.
+      - name: Build nvx-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          test -n "${toolchain}"
+          rustup toolchain install "${toolchain}" --profile minimal --no-self-update \
+            --target x86_64-unknown-linux-musl
+          cargo "+${toolchain}" build --release --locked --features cli \
+            --manifest-path nvx-rs/Cargo.toml --target x86_64-unknown-linux-musl
+          install -D -m 0755 nvx-rs/target/x86_64-unknown-linux-musl/release/nvx-rs \
+            nvx-rs/target/release/nvx-rs
+
+      - name: Record nvx-rs provenance
+        shell: bash
+        run: >-
+          python3 scripts/nvx.py record-nvx-rs-provenance
+          --target x86_64-unknown-linux-musl
+
+      # The requirements that validate-nvx installs, and the coverage.py
+      # release that requirements-dev.txt pins.
+      - name: Install coverage.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          coverage=$(grep -E '^coverage==' requirements-dev.txt)
+          test -n "${coverage}"
+          python3 -m pip install --requirement scripts/setup/azure/requirements.txt \
+            "${coverage}"
+
+      # Fails when the tests of a command fail, after it writes the reports.
+      - name: Measure
+        shell: bash
+        run: python3 scripts/scripts_coverage.py --output build/scripts-coverage
+
+      - name: Write the summary
+        if: ${{ !cancelled() && hashFiles('build/scripts-coverage/summary.md') != '' }}
+        shell: bash
+        run: cat build/scripts-coverage/summary.md >> "${GITHUB_STEP_SUMMARY}"
+
+      # A rerun of the job replaces the reports of its earlier attempt.
+      - name: Upload the reports
+        if: ${{ !cancelled() && hashFiles('build/scripts-coverage/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: scripts-coverage-${{ github.run_id }}
+          path: build/scripts-coverage
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
