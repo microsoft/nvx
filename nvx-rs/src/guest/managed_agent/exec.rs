@@ -54,6 +54,9 @@ pub(crate) fn run(
             }
         }
     }
+    if config.direct {
+        session.collect(|_, _| {})?;
+    }
     let mut workload = match launch(system, session, config, execution) {
         Ok(launched) => launched,
         Err(LaunchError::Entry(error)) => {
@@ -654,7 +657,6 @@ fn launch(
     execution: &GuestExecPayload,
 ) -> Result<Workload, LaunchError> {
     if config.direct {
-        session.collect(|_, _| {})?;
         let workload = system
             .start_direct(launch::direct_request(config, execution)?)
             .map_err(LaunchError::Start)?;
