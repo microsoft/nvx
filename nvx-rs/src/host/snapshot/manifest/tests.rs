@@ -1,4 +1,4 @@
-//! Tests of [`TemplateManifest`]: what it reads of a template's manifest, and what it refuses, and
+//! Tests of [`SnapshotManifest`]: what it reads of a template's manifest, and what it refuses, and
 //! of `read_attachments`, which reads the host attachments of any snapshot's manifest for the CLI.
 
 use std::fs;
@@ -6,16 +6,16 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use super::*;
-use crate::host::template::tests::{MIB, ManifestSpec, Proto};
+use crate::host::snapshot::tests::{MIB, ManifestSpec, Proto};
 
 /// Returns the manifest that the encoding of `spec` parses to.
-fn parse(spec: &ManifestSpec) -> TemplateManifest {
-    TemplateManifest::parse(&spec.encode()).unwrap()
+fn parse(spec: &ManifestSpec) -> SnapshotManifest {
+    SnapshotManifest::parse(&spec.encode()).unwrap()
 }
 
 /// Returns the message of the refusal of `bytes`, which must have the code `code`.
 fn refusal(bytes: &[u8], code: ErrorCode) -> String {
-    let error = TemplateManifest::parse(bytes).expect_err("the manifest is refused");
+    let error = SnapshotManifest::parse(bytes).expect_err("the manifest is refused");
     assert_eq!(error.code(), code, "{error}");
     error.message().to_owned()
 }
@@ -247,7 +247,7 @@ fn the_fields_of_a_manifest_need_not_be_written_in_their_order() {
     spec.magic.clear();
     let bytes = spec.encode_with(reversed);
     assert_eq!(
-        TemplateManifest::parse(&bytes).unwrap(),
+        SnapshotManifest::parse(&bytes).unwrap(),
         parse(&ManifestSpec::template())
     );
 }
@@ -429,7 +429,7 @@ fn truncated_manifests_are_refused() {
     let bytes = ManifestSpec::template().encode();
     for len in 0..bytes.len() {
         let error =
-            TemplateManifest::parse(&bytes[..len]).expect_err("a truncated manifest is refused");
+            SnapshotManifest::parse(&bytes[..len]).expect_err("a truncated manifest is refused");
         // A manifest that ends between its fields lacks some, such as its format magic.
         assert!(
             matches!(error.code(), ErrorCode::Io | ErrorCode::FormatUnsupported),
@@ -865,7 +865,7 @@ fn the_manifests_that_openvmm_writes_are_read() {
         ("platform-kvm", ManifestSpec::template()),
         ("platform-mshv-network", ManifestSpec::with_network()),
     ] {
-        let manifest = TemplateManifest::read(&fixture(name)).unwrap();
+        let manifest = SnapshotManifest::read(&fixture(name)).unwrap();
         let machine = &manifest.machine;
         assert_eq!(machine.cpu.id(), "intel.icelake-sp.v1", "{name}");
         assert_eq!(machine.cpu.effective_cpuid.len() % CPUID_ENTRY_LEN, 0);
@@ -1018,7 +1018,7 @@ fn the_attachments_of_unreadable_manifests_are_refused() {
 /// Returns the message of the refusal of the manifest of the snapshot directory `directory`,
 /// which must have the code `code`, and the error that caused it.
 fn read_refusal(directory: &Path, code: ErrorCode) -> (String, String) {
-    let error = TemplateManifest::read(directory).expect_err("the manifest is refused");
+    let error = SnapshotManifest::read(directory).expect_err("the manifest is refused");
     assert_eq!(error.code(), code, "{error}");
     let cause = std::error::Error::source(&error)
         .map(ToString::to_string)
@@ -1031,7 +1031,7 @@ fn read_reads_the_manifest_of_a_snapshot() {
     let spec = ManifestSpec::with_network();
     let directory = snapshot(&spec.encode());
     assert_eq!(
-        TemplateManifest::read(directory.path()).unwrap(),
+        SnapshotManifest::read(directory.path()).unwrap(),
         parse(&spec)
     );
     // The messages of a manifest that is read name its path.
@@ -1132,7 +1132,7 @@ fn read_refuses_a_fifo_without_waiting_for_a_writer() {
     let path = directory.path().to_owned();
     thread::spawn(move || {
         sender
-            .send(TemplateManifest::read(&path).map(drop))
+            .send(SnapshotManifest::read(&path).map(drop))
             .unwrap()
     });
     let error = receiver

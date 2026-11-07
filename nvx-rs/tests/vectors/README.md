@@ -12,7 +12,7 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
 | [`activation-v2.txt`](activation-v2.txt) | Version 2 of the activation record of a layered root, and what Ready reports about an activation |
-| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key and of a capture class, with their identities |
+| [`snapshot-key-v1.txt`](snapshot-key-v1.txt) | Version 1 of the canonical encodings of a snapshot's compatibility key and of a capture class, with their identities |
 | [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier and the error of a port forward that it cannot bind, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
@@ -23,7 +23,7 @@ describe the protocols, and the documentation of `nvx::activation`, in
 
 ## Line format
 
-`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v2.txt`, and `template-key-v1.txt`
+`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v2.txt`, and `snapshot-key-v1.txt`
 share one line format. A line that starts with `#` is a comment, and an empty
 line is ignored. Every other line is one vector, whose fields `|` separates:
 
@@ -50,9 +50,9 @@ must encode the values to exactly its bytes. A kind whose name starts with
 `INVALID_` has no values: every decoder must refuse the bytes of its vectors.
 
 A key or a class holds too many values for one line, so the value of each
-vector of `template-key-v1.txt` is its identity, and the file's header names
+vector of `snapshot-key-v1.txt` is its identity, and the file's header names
 the captures whose keys and classes the vectors encode. The tests of
-`nvx::host::template` derive each key from its capture, and check that it is
+`nvx::host::snapshot` derive each key from its capture, and check that it is
 the key that the vector's bytes decode to.
 
 ## Rules
@@ -61,18 +61,20 @@ the key that the vector's bytes decode to.
   its own, such as `nvxc-v2.txt` for the exec v2 of
   [microsoft/nvx#623](https://github.com/microsoft/nvx/issues/623), and the
   bytes of an earlier version that it refuses become its rejection vectors.
-  Version 1 has two exceptions. `MAPS|ROOT_SOURCE` of `nvxc-v1.txt` was the
+  Version 1 has three exceptions. `MAPS|ROOT_SOURCE` of `nvxc-v1.txt` was the
   rejection vector `INVALID_MAPS|EMPTY_SOURCE` until an empty source came to
   name the export's root, for a host whose export is one directory. NVX's
   hosts, whose exports are aggregates, send none, and a host whose export is
   one directory sends one only to a guest that deploys with it, so the C agent
   of earlier releases, which refuses it, never receives one. And
   `CLASS|NETWORK` of
-  `template-key-v1.txt` came to encode its network in place as the template
+  `snapshot-key-v1.txt` came to encode its network in place as the template
   captures it, under the complete deny-all policy: the encodings of a key and
   of a class have not been released, so a template store that an earlier build
   created is not supported, and is deleted and created again, since nothing
-  migrates it.
+  migrates it. The snapshot key also drops the obsolete guest-build field and
+  uses the `nvx snapshot key` hash domain in place: no snapshot outlives a
+  deployment, and the prior key encoding is not supported.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 
