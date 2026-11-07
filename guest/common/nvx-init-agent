@@ -229,6 +229,7 @@ read_root_tokens() {
     scratch_seen=false
     ram_seen=false
     layer_uuid=
+    first_root_parameter=
     # The names of the settings that the command line names, and the values of
     # three of them.
     settings=
@@ -250,6 +251,7 @@ read_root_tokens() {
                 read_layer_token "${token#*=}"
                 ;;
             nvx_scratch=*)
+                [ -n "$first_root_parameter" ] || first_root_parameter=nvx_scratch
                 [ "$scratch_seen" = false ] ||
                     fatal "the nvx_scratch kernel parameter is repeated"
                 scratch_seen=true
@@ -257,6 +259,7 @@ read_root_tokens() {
                     fatal "the nvx_scratch kernel parameter must be 0xd0006000,ext4, not '${token#*=}'"
                 ;;
             nvx_overlay_upper=*)
+                [ -n "$first_root_parameter" ] || first_root_parameter=nvx_overlay_upper
                 [ "$ram_seen" = false ] ||
                     fatal "the nvx_overlay_upper kernel parameter is repeated"
                 ram_seen=true
@@ -265,6 +268,7 @@ read_root_tokens() {
                 ;;
             nvx_overlay_mode=* | nvx_scratch_journal=* | nvx_first_partition_bound=* | nvx_ram_upper_percent=*)
                 setting=${token%%=*}
+                [ -n "$first_root_parameter" ] || first_root_parameter=$setting
                 case " $settings " in *" $setting "*) fatal "the $setting kernel parameter is repeated" ;; esac
                 settings="$settings $setting"
                 case "$token" in
@@ -300,6 +304,8 @@ read_root_tokens() {
     set +f
     [ "$scratch_seen" = false ] || [ "$ram_seen" = false ] ||
         fatal "a layered root has one upper, but the command line names both nvx_scratch and nvx_overlay_upper"
+    [ "$layer_seen" = true ] || [ -z "$first_root_parameter" ] ||
+        fatal "the $first_root_parameter kernel parameter needs an image, which nvx_layer names"
     [ "$layer_seen" = true ] ||
         fatal "the command line names no distro layer: this init needs nvx_layer=distro,0xd0003000,erofs[:UUID]"
     if [ "$scratch_seen" = true ]; then
