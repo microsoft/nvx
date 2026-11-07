@@ -124,7 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, and caller-saved reattachment |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, confirmed stop, and caller-saved reattachment |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Snapshot compatibility keys, strict manifests, restore-time eligibility, and the opaque input of a future VM restore |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
@@ -499,6 +499,20 @@ or reading runtime files.
 `transport::connect_verified`, and attaches with the saved capability. Its
 `Reattached` holds both the process and authenticated connection. Failures
 retain their original kinds and sources and leave the saved values unchanged.
+
+`stop(process, outputs, graceful, grace, deadline)` waits through the verified
+process, first after the caller's graceful request, then after forced termination
+if needed. It returns `Stopped` only after confirmed exit. `self_exited` records
+confirmation before a forced attempt, and `forced` records that attempt, not
+proof from kill success. An unconfirmed exit is `StillRunning`, and the caller
+keeps the process. The callback receives the bounded grace deadline and must
+respect it; its boolean result is never exit proof.
+
+`Process::wait(deadline)` returns `Some(Exited)` only after verified exit, or
+`None` when the deadline passes without confirmation. `Exited` cannot be made
+by a caller. `report::read` returns `Ok(None)` for a missing report, and an
+`Io` error for an unreadable or malformed report. `Stopped::report` retains
+that read's result separately, so report failure never hides confirmed exit.
 
 `vm::create(&runtime, &config, None, &dir)` creates an inspectable cold
 `Prepared` launch without starting a process or binding a listener. It requires
@@ -3087,6 +3101,7 @@ usage errors, which no library error has.
 | `unavailable` | `Unavailable` | A dependency is missing or unusable, other than as a finer code says: install metadata, the hypervisor, a release, a distro layer or scratch image that the request names, or a host that NVX does not support |
 | `unsupported` | `Unsupported` | NVX refuses the request: options that it cannot combine, a value that it does not accept, or a policy that it cannot represent or enforce. The message names the option or field |
 | `exited` | `Exited` | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one |
+| `still-running` | `StillRunning` | A stop could not confirm the VM process's exit, so the caller keeps its verified process |
 | `io` | `Io` | A host I/O operation failed, or state that NVX recorded on the host is unreadable or malformed |
 | `not-found` | `NotFound` | Other state that the operation names does not exist on the host |
 | `protocol` | `Protocol` | The control session failed otherwise: the peer violated the protocol, reset the session, or failed authentication |

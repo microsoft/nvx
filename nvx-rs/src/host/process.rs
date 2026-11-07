@@ -188,6 +188,12 @@ pub struct Process {
     handle: platform::ProcessHandle,
 }
 
+/// Proof that a verified process exited, produced only by [`Process::wait`].
+///
+/// It proves exit, not the process's exit status, and cannot be constructed by a caller.
+#[derive(Debug)]
+pub struct Exited(());
+
 impl Process {
     /// Finds the process that `reference` names, and returns `None` if it has exited.
     ///
@@ -241,13 +247,14 @@ impl Process {
         })
     }
 
-    /// Waits until the process exits or `deadline` passes, and returns whether it exited.
+    /// Waits until the process exits or `deadline` passes, returning exit proof or `None`.
     ///
     /// A process exits with its last thread. The wait sleeps until the exit event of the
     /// process, or with [`WaitMethod::Polling`], checks its identity at a short interval. An
     /// error means that the wait cannot determine whether the process exited.
-    pub fn wait(&self, deadline: Instant) -> io::Result<bool> {
+    pub fn wait(&self, deadline: Instant) -> io::Result<Option<Exited>> {
         self.wait_bool(deadline)
+            .map(|exited| exited.then(|| Exited(())))
     }
 
     /// Keeps the boolean wait result for the legacy lifecycle callers.
@@ -262,7 +269,7 @@ impl Process {
 
     /// Returns whether the process has exited, without waiting.
     pub fn has_exited(&self) -> io::Result<bool> {
-        self.wait(Instant::now())
+        self.wait(Instant::now()).map(|exited| exited.is_some())
     }
 
     /// Ends the process at once, unless it has exited or is exiting: with `SIGKILL` on Linux, and

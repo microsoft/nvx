@@ -16,7 +16,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE, TerminateProcess,
+    CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, TerminateProcess,
 };
 
 pub(crate) use super::endpoint::tests::{accept_control, control_server};
@@ -36,6 +37,16 @@ pub(crate) fn wait_exit_handle(process: OwnedHandle, deadline: Instant) -> io::R
     }
     .wait(deadline)
     .map(|exited| exited.expect("Windows process handles always provide an exit event"))
+}
+
+impl ProcessHandle {
+    pub(crate) fn wait_only(pid: u32) -> Self {
+        Self {
+            process: open_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)
+                .unwrap(),
+            terminate: false,
+        }
+    }
 }
 
 thread_local! {
