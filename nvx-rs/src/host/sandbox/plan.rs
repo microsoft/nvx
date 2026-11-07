@@ -495,11 +495,16 @@ impl SandboxPlan {
         self.network.as_ref().and_then(SandboxNetwork::proxy_url)
     }
 
-    /// Returns the layout of the root that the plan boots: its image and its upper.
+    /// Returns the layout of the root that the plan boots: its image and its upper. It names none
+    /// of the root's settings, so the guest assembles the root with its own defaults.
     pub fn layout(&self) -> RootLayout {
         RootLayout {
             image: self.distro.image,
             upper: self.upper.kind(),
+            overlay: None,
+            journal: None,
+            gpt_first_partition_bound: None,
+            max_memory_percent: None,
         }
     }
 

@@ -5203,6 +5203,9 @@ class MicrovmTests(unittest.TestCase):
                 .replace(
                     "/tmp/nvx-host-loopback-", f"{root.as_posix()}/nvx-host-loopback-"
                 )
+                # Fixture inputs never change, so repeated polling only adds
+                # process-launch overhead, especially with Git's Windows shell.
+                .replace('[ "$tries" -lt 100 ]', '[ "$tries" -lt 1 ]')
                 # The stubbed servers finish at once; wait for their output
                 # before releasing the guest.
                 .replace("read -r release", "wait; read -r release")
@@ -7479,6 +7482,272 @@ class MicrovmTests(unittest.TestCase):
                         "after the released snapshot request: "
                     )
                 )
+
+    def test_snapshot_request_line_prints_its_markers_whole(self):
+        status = microvm_tests.SNAPSHOT_ROLLBACK_STATUS_PREFIX
+        done = microvm_tests.SNAPSHOT_ROLLBACK_CONTINUED_MARKER
+        line = microvm_tests.snapshot_request_line(status, done)
+        self.assertTrue(line.startswith("nvx-snapshot; "))
+        self.assertNotIn("\n", line)
+        # The line never contains a whole marker, so the console's echo of
+        # it, wrapped or not, can't stand in for the guest's answers.
+        for marker in (status, done):
+            self.assertNotIn(marker.decode(), line)
+        shell = shutil.which("sh")
+        if shell is None:
+            self.skipTest("no POSIX shell")
+        for request, code in (("true", b"0"), ("false", b"1")):
+            with self.subTest(request=request):
+                answers = subprocess.run(
+                    [shell, "-c", line.replace("nvx-snapshot", request, 1)],
+                    capture_output=True,
+                    check=True,
+                ).stdout
+                self.assertEqual(answers.splitlines(), [status + code, done])
+
+    def test_capture_profile_phases_find_records_that_share_a_line(self):
+        record = b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=%s phase=%s exclusive=1 pid=7"
+        output = (
+            record % (b"capture", b"input_gate")
+            + b"\n~ # "
+            + record % (b"capture", b"quiesce")
+            + b"guest bytes\r\n"
+            + record % (b"restore", b"artifact_open")
+            + b"\n"
+            + record % (b"capture", b"save_state")
+            + b"\n"
+        )
+        self.assertEqual(
+            microvm_tests.capture_profile_phases(output),
+            ["input_gate", "quiesce", "save_state"],
+        )
+        self.assertEqual(microvm_tests.capture_profile_phases(b"~ # quiesce\n"), [])
+
+    def _run_snapshot_rollback(
+        self,
+        *,
+        status: int = 0,
+        failed_phases: Sequence[str] = (
+            "input_gate",
+            "quiesce",
+            "save_state",
+            "memory_handle_flush",
+        ),
+        source_continues: bool = False,
+    ) -> list[tuple[str, object]]:
+        """Run snapshot-rollback against fake OpenVMM processes and return
+        what the scenario did, in order.
+
+        The source's first request fails after `failed_phases` and returns
+        with `status`; its second publishes a snapshot, unless
+        `source_continues` makes it return in the source.
+        """
+        events: list[tuple[str, object]] = []
+        boot_command = [
+            "openvmm",
+            "--hypervisor",
+            "kvm",
+            "--memory",
+            "128M",
+            "--kernel",
+            "vmlinux",
+        ]
+
+        def profile(*phases: str) -> bytes:
+            return b"".join(
+                b"OPENVMM_SNAPSHOT_PROFILE_V1 operation=capture phase=%s "
+                b"exclusive=1 duration_ns=1 process_elapsed_ns=2 pid=3\n"
+                % phase.encode()
+                for phase in phases
+            )
+
+        class FakeProcess:
+            def __init__(
+                self,
+                command: Sequence[str],
+                log_path: Path,
+                *,
+                environment: Mapping[str, str] | None = None,
+            ) -> None:
+                self.command = list(command)
+                self.console = bytearray()
+                events.append(("start", log_path.name))
+                if "--snapshot-destination" in command:
+                    destination = command[command.index("--snapshot-destination") + 1]
+                    self.destination: Path | None = Path(destination)
+                    events.append(("environment", environment))
+                    events.append(("memory", command[command.index("--memory") + 1]))
+                else:
+                    self.destination = None
+                    restored = microvm_tests.SNAPSHOT_ROLLBACK_RESTORED_STATUS_PREFIX
+                    self.console.extend(
+                        restored
+                        + b"0\r\n"
+                        + microvm_tests.SNAPSHOT_ROLLBACK_RESTORED_MARKER
+                        + b"\r\n"
+                    )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(
+                self,
+                _exception_type: type[BaseException] | None,
+                _exception: BaseException | None,
+                _traceback: object | None,
+            ) -> None:
+                return None
+
+            @property
+            def output(self) -> bytes:
+                return bytes(self.console)
+
+            def wait_for(self, expected: bytes, _timeout: float) -> None:
+                events.append(("wait_for", expected))
+
+            def wait_for_line(self, expected: bytes, _timeout: float) -> None:
+                events.append(("wait_for_line", expected))
+
+            def send_line(self, line: str) -> None:
+                assert self.destination is not None
+                parent = self.destination.parent
+                events.append(("send_line", line))
+                events.append(
+                    ("parent", sorted(parent.iterdir()) if parent.exists() else None)
+                )
+                if (
+                    microvm_tests.SNAPSHOT_ROLLBACK_CONTINUED_MARKER.decode()[4:]
+                    in line
+                ):
+                    self.console.extend(
+                        profile(*failed_phases)
+                        + microvm_tests.SNAPSHOT_ROLLBACK_STATUS_PREFIX
+                        + str(status).encode()
+                        + b"\r\n"
+                        + microvm_tests.SNAPSHOT_ROLLBACK_CONTINUED_MARKER
+                        + b"\r\n"
+                    )
+                elif source_continues:
+                    self.console.extend(
+                        profile("input_gate", "quiesce", "save_state")
+                        + microvm_tests.SNAPSHOT_ROLLBACK_RESTORED_STATUS_PREFIX
+                        + b"0\r\n"
+                        + microvm_tests.SNAPSHOT_ROLLBACK_RESTORED_MARKER
+                        + b"\r\n"
+                    )
+                else:
+                    self.destination.mkdir()
+                    self.console.extend(
+                        profile(
+                            "input_gate",
+                            "quiesce",
+                            "save_state",
+                            "publication_commit",
+                            "publication",
+                        )
+                    )
+
+            def send_bytes(self, data: bytes) -> None:
+                events.append(("send_bytes", data.decode()))
+                self.console.extend(_canceled_capture_output("kvm"))
+
+            def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
+                events.append(("wait", None))
+                return openvmm_process.OpenvmmProcessResult(0, bytes(self.console))
+
+        with (
+            patch.object(
+                microvm_tests, "workload_boot_command", return_value=boot_command
+            ),
+            patch.object(microvm_tests, "OpenvmmProcess", side_effect=FakeProcess),
+        ):
+            microvm_tests.run_snapshot_rollback(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs"),
+                "kvm",
+                memory_mib=128,
+                timeout=1,
+                output_dir=Path("logs"),
+            )
+        return events
+
+    def test_snapshot_rollback_fails_a_capture_after_its_quiesce_and_captures_again(
+        self,
+    ):
+        events = self._run_snapshot_rollback()
+
+        memory = cast(str, dict(events)["memory"])
+        self.assertTrue(memory.startswith("size=128M,file="), memory)
+        # The RAM file lies outside the destination's parent.
+        self.assertEqual(
+            Path(memory.removeprefix("size=128M,file=")).name, "memory.bin"
+        )
+        first = microvm_tests.snapshot_request_line(
+            microvm_tests.SNAPSHOT_ROLLBACK_STATUS_PREFIX,
+            microvm_tests.SNAPSHOT_ROLLBACK_CONTINUED_MARKER,
+        )
+        second = (
+            microvm_tests.snapshot_request_line(
+                microvm_tests.SNAPSHOT_ROLLBACK_RESTORED_STATUS_PREFIX,
+                microvm_tests.SNAPSHOT_ROLLBACK_RESTORED_MARKER,
+            )
+            + "; nvx-exit 0"
+        )
+        self.assertEqual(
+            events,
+            [
+                ("start", "snapshot-rollback-capture.log"),
+                ("environment", {"OPENVMM_STARTUP_PROFILE": "1"}),
+                ("memory", memory),
+                ("wait_for", microvm_tests.BOOT_MARKER),
+                # The parent is gone when the guest requests the first capture.
+                ("send_line", first),
+                ("parent", None),
+                ("wait_for_line", microvm_tests.SNAPSHOT_ROLLBACK_CONTINUED_MARKER),
+                ("send_bytes", microvm_tests.canceled_capture_checks()),
+                ("wait_for_line", microvm_tests.CANCELED_CAPTURE_DONE_MARKER),
+                # It is back, and empty, for the second.
+                ("send_line", second),
+                ("parent", []),
+                ("wait", None),
+                ("start", "snapshot-rollback-restore.log"),
+                ("wait_for_line", microvm_tests.SNAPSHOT_ROLLBACK_RESTORED_MARKER),
+                ("wait", None),
+            ],
+        )
+
+    def test_snapshot_rollback_requires_a_rollback_after_a_complete_quiesce(self):
+        run = self._run_snapshot_rollback
+        cases: tuple[tuple[Callable[[], object], str], ...] = (
+            (
+                lambda: run(status=1),
+                "the snapshot request that OpenVMM rolled back exited with 1",
+            ),
+            (
+                lambda: run(failed_phases=("input_gate", "output_flush")),
+                "the failed capture did not quiesce and save the VM once",
+            ),
+            (
+                lambda: run(
+                    failed_phases=(
+                        "input_gate",
+                        "quiesce",
+                        "save_state",
+                        "publication_commit",
+                    )
+                ),
+                "the failed capture published a snapshot",
+            ),
+            (
+                lambda: run(source_continues=True),
+                "snapshot source crossed its terminal capture boundary",
+            ),
+        )
+        for case, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(RuntimeError, re.escape(message)):
+                    case()
 
     def test_snapshot_marker_parsers_require_single_well_formed_values(self):
         output = b"PREFIX-12\r\nPAIR-4-5\n"

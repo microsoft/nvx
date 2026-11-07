@@ -1,11 +1,11 @@
 //! The lowering of egress rules into OpenVMM's native rules, which the egress policy compiler of
-//! [`policy`](super::policy) and [`openvmm_arguments`](super::openvmm_arguments) share.
+//! [`policy`](super::policy), [`openvmm_arguments`](super::openvmm_arguments), and
+//! [`NetworkPolicy::native_egress_rules`](super::NetworkPolicy::native_egress_rules) share.
 //!
 //! It ports the former `scripts/nvx_tools/egress_policy.py` exactly. Rules of one action, allow
 //! or deny, become [`Rule`]s: one address family, the address intervals that the rule's
 //! destinations select once their exceptions are subtracted, and a protocol and port range.
-//! [`lower`] then emits the native rules of each family, within one budget of
-//! [`MAX_RULES_PER_ACTION`]:
+//! [`lower`] then emits the native rules of each family, within one budget of [`MAX_RULES`]:
 //!
 //! 1. the union of the rules for every protocol, as the fewest networks that cover it;
 //! 2. for ICMP, TCP, and UDP, the union of the rules for every port of the protocol, as the
@@ -22,8 +22,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use super::MAX_RULES;
 use super::address::{self, Family, InterfaceError, Interval, Network};
-use super::policy::MAX_RULES_PER_ACTION;
 use crate::error::{Error, Result};
 
 /// A protocol that a native rule can select.
@@ -64,17 +64,6 @@ pub(crate) enum RuleProtocol {
 }
 
 impl RuleProtocol {
-    /// Parses one of `tcp`, `udp`, `icmp`, and `any`, which must be lowercase.
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        match text {
-            "tcp" => Some(Self::Tcp),
-            "udp" => Some(Self::Udp),
-            "icmp" => Some(Self::Icmp),
-            "any" => Some(Self::Any),
-            _ => None,
-        }
-    }
-
     /// Returns the native protocol, or `None` for `any`.
     pub(crate) fn native(self) -> Option<NativeProtocol> {
         match self {
@@ -109,9 +98,6 @@ pub(crate) type Selector = (Option<NativeProtocol>, Option<PortRange>);
 pub(crate) enum PortValue {
     /// An integer, saturated to the range of `i128`.
     Integer(i128),
-    /// Anything else, including a Boolean, which Python's `_port` refuses although `bool` is a
-    /// subclass of `int`.
-    Other,
 }
 
 /// A rule of one action, as the compiler lowers it.
@@ -148,11 +134,6 @@ pub(crate) fn network(value: &str, description: &str) -> Result<Network> {
             }
         })
     })
-}
-
-/// Returns the error for a CIDR field whose value is not a string.
-pub(crate) fn not_a_cidr_string(description: &str) -> Error {
-    invalid(format!("{description} must be an IPv4 or IPv6 CIDR string"))
 }
 
 /// Returns the family of the destination `description`, whose network is `parent`, and the
@@ -202,7 +183,6 @@ pub(crate) fn group_destinations(
 /// Checks the port `value` of the field `description`, as `_port` does.
 fn port(value: PortValue, description: &str) -> Result<u16> {
     match value {
-        PortValue::Other => Err(invalid(format!("{description} must be an integer"))),
         PortValue::Integer(port) => u16::try_from(port)
             .ok()
             .filter(|&port| port != 0)
@@ -297,20 +277,18 @@ type NativeRule = (Network, Option<NativeProtocol>, Option<PortRange>);
 /// Returns the error of an action `category` whose rules need more native rules than OpenVMM
 /// accepts.
 fn too_many_rules(category: &str) -> Error {
-    invalid(format!(
-        "{category} emits at most {MAX_RULES_PER_ACTION} native rules"
-    ))
+    invalid(format!("{category} emits at most {MAX_RULES} native rules"))
 }
 
 /// Lowers the rules of the action `category` into native rules, in the order in which the
 /// compiler sorts them, as `_compile_category` does once it has parsed them.
 pub(crate) fn lower(rules: &[Rule], category: &str) -> Result<Vec<String>> {
-    lower_within(rules, category, MAX_RULES_PER_ACTION)
+    lower_within(rules, category, MAX_RULES)
 }
 
 /// Lowers the rules of the action `category` as [`lower`] does, but fails once they need more
-/// than `limit` native rules rather than [`MAX_RULES_PER_ACTION`]: tests lift the limit to learn
-/// how many native rules an action needs.
+/// than `limit` native rules rather than [`MAX_RULES`]: tests lift the limit to learn how many
+/// native rules an action needs.
 pub(crate) fn lower_within(rules: &[Rule], category: &str, limit: usize) -> Result<Vec<String>> {
     // A native rule matches only its own family, so each family is lowered on its own, within
     // the action's shared limit.

@@ -2,6 +2,14 @@
 //!
 //! - [`artifacts`] locates the OpenVMM executable and the guest kernel and initramfs, and every
 //!   artifact of the guests that `nvx.py` runs, in a repository checkout or a release.
+//! - [`runtime`] holds what every launch shares: the paths of those three files and their
+//!   [`RuntimeIdentity`](runtime::RuntimeIdentity), the hypervisor, which
+//!   [`probe_hypervisor`](runtime::probe_hypervisor) checks, and the
+//!   [`LaunchOptions`](runtime::LaunchOptions).
+//! - [`config`] holds the configuration of a VM as one value, a [`VmConfig`](config::VmConfig),
+//!   which it checks without reading the host: the VM's processors and memory, its root, the view
+//!   that its workload has of it, its network, its export, its boot console, and what only its
+//!   cold boot takes.
 //! - [`launch`] builds OpenVMM's command line from a [`LaunchSpec`](launch::LaunchSpec): the
 //!   managed lifecycle, the workload identity, the kernel command line, and the network and
 //!   filesystem options.
@@ -41,6 +49,8 @@
 //!   and [`sandbox::scratch`] binds and claims a scratch image. A
 //!   [`PreparedLaunch`](sandbox::PreparedLaunch) hands the VMM the files that those checks
 //!   opened, which it inherits through the [`supervisor`]'s allowlist.
+//! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
+//!   its files and endpoints, and its control credential, which the library never writes.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
@@ -64,6 +74,7 @@ pub mod artifacts;
 #[cfg(feature = "cli")]
 #[doc(hidden)]
 pub mod cli;
+pub mod config;
 pub mod filesystem;
 pub mod instance;
 pub mod launch;
@@ -73,6 +84,7 @@ pub(crate) mod paths;
 pub mod platform;
 pub mod process;
 pub mod report;
+pub mod runtime;
 pub mod sandbox;
 pub mod seal;
 pub mod session;
@@ -85,3 +97,4 @@ mod sys;
 pub mod template;
 #[cfg(test)]
 pub(crate) mod tests;
+pub mod vm;

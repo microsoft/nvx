@@ -17,9 +17,13 @@ on:
       - checks_requested
     branches:
       - dev
+  # A dev push publishes its release and records its performance results. A
+  # push to feature/nvx-refactor gets the same checks without a pull request,
+  # but publishes and records nothing (doc/ci.md#feature-branch-pushes).
   push:
     branches:
       - dev
+      - feature/nvx-refactor
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
@@ -27,12 +31,12 @@ on:
 concurrency:
   group: ci-${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.run_id) || github.event_name == 'merge_group' && format('merge-group-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-  # dev pushes wait in order instead of cancelling the run that waits. GitHub
-  # rejects queueing together with cancel-in-progress, so pull requests keep
-  # the single waiting run that a newer push replaces. Each merge group's run
-  # has a group of its own: a pull request that returns to the queue on the
-  # same base gets its earlier group's ref again, whose run must not hold the
-  # new one.
+  # Pushes wait in order, in a group per branch, instead of cancelling the run
+  # that waits. GitHub rejects queueing together with cancel-in-progress, so
+  # pull requests keep the single waiting run that a newer push replaces. Each
+  # merge group's run has a group of its own: a pull request that returns to
+  # the queue on the same base gets its earlier group's ref again, whose run
+  # must not hold the new one.
   queue: ${{ github.event_name == 'pull_request' && 'single' || 'max' }}
 
 permissions:

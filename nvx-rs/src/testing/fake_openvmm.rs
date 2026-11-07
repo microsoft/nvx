@@ -109,6 +109,21 @@
 //! writes no report. Since it restores no saved state, the fake takes a snapshot directory without
 //! a manifest for one without a boot console.
 //!
+//! A run's kernel command line may also give the guest the CLI's own tokens of a blockless launch,
+//! which the shell `/init` reads in place of the tokens that OpenVMM adds for its
+//! `--microvm-lifecycle` and `--microvm-workload-identity`: the mode, `nvx_mode=one-shot` or
+//! `nvx_mode=managed`, and the workload identity, `nvx_identity=UID:GID` of decimal IDs, which
+//! both modes require of a workload, beside `nvx_workload_account=create` and the `nvx_share=`
+//! tokens of its shares.
+//! In the one-shot mode, the default, a run whose command line names one absolute
+//! `nvx_entrypoint=` runs it with its `nvx_arg=` arguments, as a one-shot sandbox does, and one
+//! that names none boots on the terminal, as above. In the managed mode, a run takes the options of
+//! a managed launch, with `--virtio-console none` in place of the boot console, serves the control
+//! console as a managed launch does, and the guest targets of its directory shares are
+//! directories that a workload can enter. A restore resumes the guest that its snapshot saved,
+//! whatever CLI tokens its command line has.
+//! The fake keeps literals of its own of the NVX tokens that it emulates.
+//!
 //! The fake also runs the VMs of templates' captures, whose command lines have no
 //! `--microvm-lifecycle`, a `distro` layer and a `scratch` disk on sandbox block devices and no
 //! share, `--snapshot-destination`, `--snapshot-tier platform`,
@@ -170,13 +185,22 @@ use crate::protocol::{
     APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, BUSY, CAPABILITY_LEN, CWD_FAILED, ExitCategory,
     GuestFeatures, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED, MAPPINGS_INCOMPLETE, MAPS_TOKEN,
     MAX_HOST_MAPPINGS, MAX_OUTPUT_BYTES, MapsPayload, OUTER_DATA, OUTER_ERROR, OUTER_HEADER_LEN,
-    OUTER_HOST_ATTACH, OUTER_READY, OuterHeader, UNSUPPORTED_OPERATION, WORKLOAD_ACCOUNT_TOKEN,
-    decode_app, decode_exec_payload, decode_maps_payload, decode_outer_header, encode_app,
-    encode_outer,
+    OUTER_HOST_ATTACH, OUTER_READY, OuterHeader, UNSUPPORTED_OPERATION, decode_app,
+    decode_exec_payload, decode_maps_payload, decode_outer_header, encode_app, encode_outer,
 };
 
 /// Largest workload-output frame emitted by the fake guest.
 const OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
+/// The token with which a launch asks the guest for a workload account.
+const WORKLOAD_ACCOUNT_TOKEN: &str = "nvx_workload_account=create";
+/// The CLI's token of the mode of a blockless launch, `one-shot` or `managed`, which the guest
+/// reads in place of the lifecycle of OpenVMM's `--microvm-lifecycle`.
+const MODE_TOKEN: &str = "nvx_mode=";
+/// The CLI's token of the workload identity of a blockless launch, `UID:GID`, which the guest
+/// reads in place of the identity of OpenVMM's `--microvm-workload-identity`.
+const IDENTITY_TOKEN: &str = "nvx_identity=";
+/// The UID of the workloads of a launch that names no identity: the guest's `nobody`.
+const DEFAULT_WORKLOAD_UID: u32 = 65534;
 
 /// Control features of the current guest: cancellation, workload accounts, workload
 /// containment, per-execution environments, working directories, and host path mapping tables.
@@ -288,14 +312,15 @@ fn atoi(value: &str) -> i32 {
 /// The lifecycle that the command line selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lifecycle {
-    /// `--microvm-lifecycle managed`: the guest serves the control console until a stop.
+    /// `--microvm-lifecycle managed`, or `nvx_mode=managed` of a run: the guest serves the control
+    /// console until a stop.
     Managed,
-    /// `--microvm-lifecycle one-shot`: the guest runs its entrypoint once, and OpenVMM exits with
-    /// its status. Only the sandbox profile uses it.
+    /// `--microvm-lifecycle one-shot` of a sandbox, or a run that names a workload in the CLI's
+    /// one-shot mode: the guest runs its entrypoint once, and OpenVMM exits with its status.
     OneShot,
-    /// Neither a lifecycle nor a sandbox block device: the microVM that `nvx-rs run`
-    /// boots, or restores from a snapshot, on the terminal, which OpenVMM runs until
-    /// the guest shuts down.
+    /// Neither a lifecycle, a sandbox block device, nor a workload of the CLI's tokens: the
+    /// microVM that `nvx-rs run` boots, or restores from a snapshot, on the terminal, which
+    /// OpenVMM runs until the guest shuts down.
     Run,
     /// No lifecycle, sandbox block devices, and a snapshot destination: the VM of a template's
     /// capture, which its guest captures, after which OpenVMM exits.
@@ -322,6 +347,9 @@ struct Options {
     /// Whether the command line launches the sandbox profile of `nvx-rs sandbox`: a container
     /// over EROFS layers and an ext4 scratch disk.
     sandbox: bool,
+    /// Whether the command line is a run of `nvx-rs run`, with neither a `--microvm-lifecycle`
+    /// nor a sandbox block device, whatever the mode that the CLI's tokens name.
+    run: bool,
     /// The snapshot directory that a run restores, or `None` for a cold boot.
     restore: Option<PathBuf>,
     /// The `--virtio-console` of a run's restore, which the restore checks against its snapshot.
@@ -370,9 +398,11 @@ struct Options {
     children: Vec<PathBuf>,
     /// Number of host mappings that the kernel command line announces.
     maps: usize,
-    /// The guest directories at which a sandbox's directory shares appear.
+    /// The guest directories at which the directory shares of a sandbox, or of a run in a mode of
+    /// the CLI's tokens, appear.
     share_targets: Vec<String>,
-    /// The entrypoint and arguments of a sandbox, from its kernel command line.
+    /// The entrypoint and arguments of a sandbox, or of a run's one-shot workload, from its kernel
+    /// command line.
     workload: Vec<String>,
     /// The network policy of the command line, as OpenVMM summarizes it in its report.
     network: NetworkSummary,
@@ -684,9 +714,9 @@ fn writers_of(_reader: &fs::File) -> Option<bool> {
     None
 }
 
-/// Runs the entrypoint of a one-shot sandbox with its output on the fake's own, as OpenVMM runs
-/// the guest on its console, writes the outcome report, and returns the status with which
-/// OpenVMM exits: the workload's.
+/// Runs the entrypoint of a one-shot sandbox, or of a run's one-shot workload, with its output on
+/// the fake's own, as OpenVMM runs the guest on its console, writes the outcome report, and returns
+/// the status with which OpenVMM exits: the workload's.
 ///
 /// The entrypoint is `/bin/echo`, which prints its arguments, `/bin/sleep`, which sleeps for its
 /// argument in seconds, `/bin/true` or `/bin/false`, or any other program, which is not found;
@@ -1240,13 +1270,24 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     // The sandbox profile of `nvx-rs sandbox` puts its layers and scratch disk on sandbox block
     // devices, and may run one-shot.
     let sandbox = values.contains_key("--microvm-sandbox-block");
+    // A run takes its mode and its workload's UID from the CLI's tokens, if its kernel command
+    // line, which it may omit, has any. A restore resumes the guest that its snapshot saved,
+    // whatever tokens its command line has.
+    let run_mode = if run && values.contains_key("--restore-snapshot") {
+        Some((Lifecycle::Run, DEFAULT_WORKLOAD_UID))
+    } else if run {
+        let command_line = values.get("--cmdline").and_then(|given| given.first());
+        Some(run_lifecycle(command_line.copied().unwrap_or_default())?)
+    } else {
+        None
+    };
     let lifecycle = if capture {
         if values.contains_key("--microvm-lifecycle") {
             return Err("a capture takes no --microvm-lifecycle".to_owned());
         }
         Lifecycle::Capture
-    } else if run {
-        Lifecycle::Run
+    } else if let Some((lifecycle, _)) = run_mode {
+        lifecycle
     } else {
         match single("--microvm-lifecycle")? {
             "managed" => Lifecycle::Managed,
@@ -1312,8 +1353,9 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     if !["kvm", "mshv", "whp"].contains(&hypervisor) {
         return Err(format!("unsupported hypervisor {hypervisor}"));
     }
-    // A run, or a capture, uses the default workload identity of the guest, and records its
-    // command line next to the kernel of a cold boot or to the snapshot of a restore.
+    // A run uses the workload identity that the CLI's tokens name, or else, like a capture, the
+    // default workload identity of the guest, and records its command line next to the kernel of
+    // a cold boot or to the snapshot of a restore.
     let (workload_uid, anchor, restore) = if run || capture {
         if values.contains_key("--microvm-workload-identity") {
             return Err(format!(
@@ -1329,7 +1371,8 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         if capture && restore.is_some() {
             return Err("a capture boots its VM cold".to_owned());
         }
-        (65534, anchor, restore)
+        let uid = run_mode.map_or(DEFAULT_WORKLOAD_UID, |(_, uid)| uid);
+        (uid, anchor, restore)
     } else {
         let (workload_uid, kernel) = check_boot(&values)?;
         (workload_uid, kernel, None)
@@ -1368,6 +1411,15 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             .iter()
             .filter_map(|token| token.strip_prefix(name))
             .collect()
+    };
+    // The entrypoint and the arguments of a sandbox, or of a run's one-shot workload.
+    let entrypoint_and_arguments = || -> Result<Vec<String>, String> {
+        let mut workload: Vec<String> = match token_values("nvx_entrypoint=").as_slice() {
+            [entrypoint] => vec![(*entrypoint).to_owned()],
+            _ => return Err("the kernel command line must set one nvx_entrypoint".to_owned()),
+        };
+        workload.extend(token_values("nvx_arg=").into_iter().map(str::to_owned));
+        Ok(workload)
     };
     let (maps, children, share_targets, workload, blocks) = if sandbox {
         if !tokens.contains(&"nvx_sandbox=1") {
@@ -1419,11 +1471,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             }
             (0, Vec::new(), Vec::new(), Vec::new(), blocks)
         } else {
-            let mut workload: Vec<String> = match token_values("nvx_entrypoint=").as_slice() {
-                [entrypoint] => vec![(*entrypoint).to_owned()],
-                _ => return Err("the kernel command line must set one nvx_entrypoint".to_owned()),
-            };
-            workload.extend(token_values("nvx_arg=").into_iter().map(str::to_owned));
+            let workload = entrypoint_and_arguments()?;
             if token_values("nvx_hostname=").len() != 1 {
                 return Err("the kernel command line must set one nvx_hostname".to_owned());
             }
@@ -1446,15 +1494,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
                         return Err(format!("a one-shot sandbox takes no {MAPS_TOKEN}"));
                     }
                     let (children, mut share_targets) = sandbox_shares(&values)?;
-                    // The guest binds each directory child of an aggregate at the target of its
-                    // `nvx_share=NAME,TARGET,ACCESS[,file]` token.
-                    for share in token_values("nvx_share=") {
-                        match share.split(',').collect::<Vec<_>>().as_slice() {
-                            [_, target, _] => share_targets.push((*target).to_owned()),
-                            [_, _, _, "file"] => {}
-                            _ => return Err(format!("invalid nvx_share={share}")),
-                        }
-                    }
+                    share_targets.extend(bound_targets(&token_values("nvx_share="))?);
                     (0, children, share_targets)
                 }
                 // A sandbox block device makes a command line no run, and a capture was handled above.
@@ -1465,9 +1505,27 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             (maps, children, share_targets, workload, blocks)
         }
     } else if run {
-        // A run shares as a sandbox does, and its kernel command line is its user's.
-        let (children, _) = sandbox_shares(&values)?;
-        (0, children, Vec::new(), Vec::new(), Vec::new())
+        // A run shares as a sandbox does, and its kernel command line is its user's, in which the
+        // CLI's tokens may name a one-shot workload and place the children of an aggregate. The
+        // guest of a workload of either mode has the targets of its directory shares, as a
+        // one-shot sandbox's has: a direct share's, and those that the tokens place.
+        let (children, mut share_targets) = sandbox_shares(&values)?;
+        match lifecycle {
+            Lifecycle::Run => share_targets.clear(),
+            _ => share_targets.extend(bound_targets(&token_values("nvx_share="))?),
+        }
+        let workload = match lifecycle {
+            Lifecycle::OneShot => {
+                let workload = entrypoint_and_arguments()?;
+                // The shell `/init` runs only an absolute entrypoint.
+                if run && !workload[0].starts_with('/') {
+                    return Err("nvx_entrypoint must be an absolute path".to_owned());
+                }
+                workload
+            }
+            _ => Vec::new(),
+        };
+        (0, children, share_targets, workload, Vec::new())
     } else {
         for option in ["--mount", "--mount-owner"] {
             if values.contains_key(option) {
@@ -1589,6 +1647,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         program: program.to_owned(),
         lifecycle,
         sandbox,
+        run,
         restore,
         restore_console,
         endpoint,
@@ -1649,13 +1708,7 @@ fn check_boot(values: &BTreeMap<&str, Vec<&str>>) -> Result<(u32, PathBuf), Stri
     if !exactly_once(values, "--memory")?.ends_with('M') {
         return Err("--memory must be given in MiB".to_owned());
     }
-    let identity = exactly_once(values, "--microvm-workload-identity")?;
-    let workload_uid = identity
-        .split_once(':')
-        .and_then(|(uid, gid)| Some((uid.parse::<u32>().ok()?, gid.parse::<u32>().ok()?)))
-        .filter(|&(uid, gid)| uid != 0 && gid != 0)
-        .map(|(uid, _)| uid)
-        .ok_or_else(|| format!("invalid workload identity {identity}"))?;
+    let workload_uid = workload_uid(exactly_once(values, "--microvm-workload-identity")?)?;
     let kernel = PathBuf::from(exactly_once(values, "--kernel")?);
     for path in [&kernel, &PathBuf::from(exactly_once(values, "--initrd")?)] {
         if !path.is_file() {
@@ -1663,6 +1716,55 @@ fn check_boot(values: &BTreeMap<&str, Vec<&str>>) -> Result<(u32, PathBuf), Stri
         }
     }
     Ok((workload_uid, kernel))
+}
+
+/// Returns the UID of the non-root workload identity `identity`, `UID:GID`, as OpenVMM's
+/// `--microvm-workload-identity` and the CLI's `nvx_identity=` give it.
+fn workload_uid(identity: &str) -> Result<u32, String> {
+    identity
+        .split_once(':')
+        .and_then(|(uid, gid)| Some((uid.parse::<u32>().ok()?, gid.parse::<u32>().ok()?)))
+        .filter(|&(uid, gid)| uid != 0 && gid != 0)
+        .map(|(uid, _)| uid)
+        .ok_or_else(|| format!("invalid workload identity {identity}"))
+}
+
+/// Returns the lifecycle of a run of `nvx-rs run` whose kernel command line is `command_line`,
+/// and the UID of its workloads, as the shell `/init` reads them from the CLI's tokens: the mode
+/// of `nvx_mode=`, one-shot by default, in which a run that names an `nvx_entrypoint=` runs that
+/// workload, and one that names none boots on the terminal, or managed, in which it serves the
+/// control console. A workload of either mode runs as the non-root identity of `nvx_identity=`.
+fn run_lifecycle(command_line: &str) -> Result<(Lifecycle, u32), String> {
+    let tokens: Vec<&str> = command_line.split_whitespace().collect();
+    let token_values = |name: &str| -> Vec<&str> {
+        tokens
+            .iter()
+            .filter_map(|token| token.strip_prefix(name))
+            .collect()
+    };
+    let workload = !token_values("nvx_entrypoint=").is_empty();
+    let lifecycle = match token_values(MODE_TOKEN).as_slice() {
+        [] | ["one-shot"] if workload => Lifecycle::OneShot,
+        [] | ["one-shot"] => return Ok((Lifecycle::Run, DEFAULT_WORKLOAD_UID)),
+        ["managed"] => Lifecycle::Managed,
+        [mode] => return Err(format!("unsupported mode {mode}")),
+        _ => return Err(format!("{MODE_TOKEN} must be given at most once")),
+    };
+    match token_values(IDENTITY_TOKEN).as_slice() {
+        // The shell `/init` reads IDs of decimal digits only, without the sign that Rust's parser
+        // takes.
+        [identity]
+            if identity
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b':') =>
+        {
+            Ok((lifecycle, workload_uid(identity)?))
+        }
+        [identity] => Err(format!("invalid workload identity {identity}")),
+        _ => Err(format!(
+            "the kernel command line must set one {IDENTITY_TOKEN}"
+        )),
+    }
 }
 
 /// Checks how a run of `nvx-rs run` starts its microVM, and returns the path next to which the
@@ -1962,6 +2064,22 @@ fn sandbox_shares(
         return Err("--mount-child requires --mount-aggregate".to_owned());
     }
     Ok((roots, targets))
+}
+
+/// Returns the guest targets of the directory shares that the
+/// `nvx_share=NAME,TARGET,ACCESS[,file]` tokens of a kernel command line, whose values are
+/// `shares`, place: the guest binds each directory child of an aggregate at the target of its
+/// token.
+fn bound_targets(shares: &[&str]) -> Result<Vec<String>, String> {
+    let mut targets = Vec::new();
+    for share in shares {
+        match share.split(',').collect::<Vec<_>>().as_slice() {
+            [_, target, _] => targets.push((*target).to_owned()),
+            [_, _, _, "file"] => {}
+            _ => return Err(format!("invalid nvx_share={share}")),
+        }
+    }
+    Ok(targets)
 }
 
 /// Returns the host directories that the aggregate export of the host mapping table shares, in
@@ -2675,7 +2793,7 @@ fn write_report(options: &Options, operation: &str, category: &str, status_code:
     let Some(path) = &options.report else {
         return;
     };
-    let report = if options.sandbox || options.lifecycle == Lifecycle::Run {
+    let report = if options.sandbox || options.run {
         let mut instance = [0u8; 16];
         let _ = getrandom::fill(&mut instance);
         let instance: String = instance.iter().map(|byte| format!("{byte:02x}")).collect();

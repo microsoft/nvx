@@ -235,10 +235,11 @@ initramfs builds, plus the Azure Linux variants of the container-entry
 scripts. The ten compiled `/sbin/nvx-*` programs live under `nvx-rs/src/guest`
 and `nvx-rs/src/bin`. `init` controls early boot and then starts an
 initramfs program named by `nvx_exec=`, the Alpine-only `nvx-init-agent`
-sandbox profile, `nvx-managed-agent` for a managed workload, a virtio restore
-probe for benchmark profiling, or the interactive shell. On an interactive
-boot, `init` prints a stable distribution boot marker for Alpine and Azure
-Linux, and `guest/ubuntu/nvx-bashrc` prints Ubuntu's. `guest/alpine` contains
+sandbox profile, `nvx-managed-agent` for a managed workload, a one-shot
+workload named by `nvx_entrypoint=`, a virtio restore probe for benchmark
+profiling, or the interactive shell. On an interactive boot, `init` prints a
+stable distribution boot marker for Alpine and Azure Linux, and
+`guest/ubuntu/nvx-bashrc` prints Ubuntu's. `guest/alpine` contains
 the container launch and entry scripts that only the Alpine initramfs installs;
 the entry script stages Alpine's musl loader and `setpriv` inside the
 workload's root.

@@ -1125,3 +1125,308 @@ fn the_dns_server_is_the_first_gateway_whose_dns_service_the_policy_reaches() {
     let error = dns_server(&invalid, gateway, None).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unsupported);
 }
+
+/// Returns the native rules of the policy that permits `allow` and blocks `deny` under a deny
+/// default.
+fn rules_of(allow: Vec<EgressRule>, deny: Vec<EgressRule>) -> Result<NativeEgressRules> {
+    let mut policy = NetworkPolicy::new(Access::Deny);
+    policy.allow.rules = allow;
+    policy.deny.rules = deny;
+    policy.native_egress_rules()
+}
+
+/// Returns the rule that matches TCP ports `port` through `end_port` of `cidr`.
+fn tcp(cidr: &str, port: u16, end_port: u16) -> EgressRule {
+    EgressRule::to(cidr).on_port_range(Protocol::Tcp, port, end_port)
+}
+
+// The egress policy compiler's tests of the same names, through
+// `NetworkPolicy::native_egress_rules`, with the same canonical rules.
+
+#[test]
+fn test_merges_adjacent_and_overlapping_ranges_of_one_network() {
+    let ranges = |bounds: &[(u16, u16)]| -> Vec<EgressRule> {
+        bounds
+            .iter()
+            .map(|&(port, end_port)| tcp("192.0.2.7", port, end_port))
+            .collect()
+    };
+    let singles: Vec<(u16, u16)> = (8000..=8010).map(|port| (port, port)).collect();
+    for (allow, expected) in [
+        (
+            ranges(&[(8000, 8004), (8005, 8010)]),
+            vec!["192.0.2.7/32:tcp:8000-8010"],
+        ),
+        (
+            ranges(&[(8000, 8008), (8003, 8010)]),
+            vec!["192.0.2.7/32:tcp:8000-8010"],
+        ),
+        (
+            [ranges(&[(8000, 8010)]), ranges(&singles)].concat(),
+            vec!["192.0.2.7/32:tcp:8000-8010"],
+        ),
+        (
+            ranges(&[(8000, 8004), (8006, 8010)]),
+            vec!["192.0.2.7/32:tcp:8000-8004", "192.0.2.7/32:tcp:8006-8010"],
+        ),
+    ] {
+        assert_eq!(rules_of(allow, Vec::new()).unwrap().allow, expected);
+    }
+    // Networks keep their own ranges where their segments differ.
+    let allow = vec![
+        EgressRule::to("192.0.2.7").on_port_range(Protocol::Udp, 1, 10),
+        EgressRule::to("198.51.100.9").on_port_range(Protocol::Udp, 5, 20),
+    ];
+    assert_eq!(
+        rules_of(allow, Vec::new()).unwrap().allow,
+        ["192.0.2.7/32:udp:1-10", "198.51.100.9/32:udp:5-20"]
+    );
+}
+
+#[test]
+fn test_subtracts_rule_local_cidr_exclusions() {
+    let excluding = |cidr: &str, excluded: &str| EgressRule {
+        to: vec![Destination {
+            cidr: cidr.to_owned(),
+            except: vec![excluded.to_owned()],
+        }],
+        ports: Vec::new(),
+    };
+    let policy = NetworkPolicy::new(Access::Deny)
+        .with_allow(excluding("192.0.2.0/24", "192.0.2.128/25"))
+        .with_allow(EgressRule::to("192.0.2.200/32"))
+        .with_deny(excluding("198.51.100.0/24", "198.51.100.128/25"));
+    let native = policy.native_egress_rules().unwrap();
+    assert_eq!(native.allow, ["192.0.2.0/25", "192.0.2.200/32"]);
+    assert_eq!(native.deny, ["198.51.100.0/25"]);
+}
+
+#[test]
+fn test_accepts_exact_256_rule_boundaries() {
+    // Ranges with a port between them cannot merge.
+    let separate_ranges = |cidr: &str, protocol: Protocol| -> Vec<EgressRule> {
+        (0..u16::try_from(MAX_RULES).unwrap())
+            .map(|index| {
+                let port = 3 * index + 1;
+                EgressRule::to(cidr).on_port_range(protocol, port, port + 1)
+            })
+            .collect()
+    };
+    let allow = separate_ranges("192.0.2.1", Protocol::Tcp);
+    let deny = separate_ranges("198.51.100.1", Protocol::Udp);
+    let native = rules_of(allow, deny).unwrap();
+    assert_eq!(native.allow.len(), MAX_RULES);
+    assert_eq!(native.deny.len(), MAX_RULES);
+    assert_eq!(
+        native.allow[..2],
+        ["192.0.2.1/32:tcp:1-2", "192.0.2.1/32:tcp:4-5"]
+    );
+    assert_eq!(native.deny.last().unwrap(), "198.51.100.1/32:udp:766-767");
+}
+
+#[test]
+fn test_rejects_257_rules_before_materializing_them() {
+    let ports: Vec<EgressRule> = (0..=u16::try_from(MAX_RULES).unwrap())
+        .map(|index| EgressRule::to("192.0.2.1").on_port(Protocol::Tcp, 2 * index + 1))
+        .collect();
+    for (allow, deny, action) in [
+        (ports.clone(), Vec::new(), "egress.allow"),
+        (Vec::new(), ports, "egress.deny"),
+    ] {
+        let error = rules_of(allow, deny).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{action}");
+        assert_eq!(
+            error.to_string(),
+            format!("{action} emits at most 256 native rules")
+        );
+    }
+}
+
+#[test]
+fn native_egress_rules_merge_destinations_and_sort_them() {
+    // Adjacent networks merge, and so do overlapping ones, but a gap keeps two networks apart.
+    let allow = vec![
+        EgressRule::to("2001:db8::/48").on_port(Protocol::Tcp, 443),
+        EgressRule::to("203.0.113.128/26"),
+        EgressRule::to("198.51.100.128/25"),
+        EgressRule::to("192.0.2.128/25"),
+        EgressRule::to("203.0.113.0/26"),
+        EgressRule::to("198.51.100.0/24"),
+        EgressRule::to("192.0.2.0/25"),
+    ];
+    assert_eq!(
+        rules_of(allow, Vec::new()).unwrap().allow,
+        [
+            "192.0.2.0/24",
+            "198.51.100.0/24",
+            "203.0.113.0/26",
+            "203.0.113.128/26",
+            "2001:db8::/48:tcp:443",
+        ]
+    );
+    // A policy without rules has none.
+    let empty = NetworkPolicy::new(Access::Allow).native_egress_rules();
+    assert_eq!(
+        empty.unwrap(),
+        NativeEgressRules {
+            allow: Vec::new(),
+            deny: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn native_egress_rules_share_one_budget_between_the_families_of_an_action() {
+    // Hosts in separate networks, which cannot merge.
+    let ipv4 = |index: usize| EgressRule::to(format!("10.0.{index}.1"));
+    let ipv6 = |index: usize| EgressRule::to(format!("2001:db8:{index:x}::1"));
+    let mut allow: Vec<EgressRule> = (0..200).map(ipv4).chain((0..56).map(ipv6)).collect();
+    let native = rules_of(allow.clone(), allow.clone()).unwrap();
+    assert_eq!(native.allow.len(), MAX_RULES);
+    assert_eq!(native.allow[199], "10.0.199.1/32");
+    assert_eq!(native.allow[200], "2001:db8::1/128");
+    assert_eq!(native.deny, native.allow);
+    // One more network of either family is one too many for its action.
+    allow.push(ipv6(56));
+    let error = rules_of(allow, Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        error.to_string(),
+        "egress.allow emits at most 256 native rules"
+    );
+}
+
+#[test]
+fn native_egress_rules_count_native_rules_not_source_rules() {
+    // 300 rules collapse into one network.
+    let collapsing: Vec<EgressRule> = (0..300)
+        .map(|index| EgressRule::to(format!("10.0.{}.0/24", index % 256)))
+        .collect();
+    assert_eq!(
+        rules_of(collapsing, Vec::new()).unwrap().allow,
+        ["10.0.0.0/16"]
+    );
+    // One rule whose exceptions split the address space into 512 * 23 networks is too many.
+    let peer = Destination {
+        cidr: "0.0.0.0/0".to_owned(),
+        except: (0..512u32)
+            .map(|index| Ipv4Addr::from(index << 23).to_string())
+            .collect(),
+    };
+    let rule = EgressRule {
+        to: vec![peer],
+        ports: Vec::new(),
+    };
+    let error = rules_of(Vec::new(), vec![rule]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        error.to_string(),
+        "egress.deny emits at most 256 native rules"
+    );
+}
+
+#[test]
+fn native_egress_rules_refuse_malformed_rules_as_the_openvmm_options_do() {
+    let port = |protocol, port, end_port| EgressRule {
+        to: vec![Destination::new("10.0.0.0/8")],
+        ports: vec![PortSelector {
+            protocol,
+            port,
+            end_port,
+        }],
+    };
+    let excluding = |cidr: &str, excluded: &str| EgressRule {
+        to: vec![Destination {
+            cidr: cidr.to_owned(),
+            except: vec![excluded.to_owned()],
+        }],
+        ports: Vec::new(),
+    };
+    for rule in [
+        port(Protocol::Icmp, Some(8), None),
+        port(Protocol::Tcp, Some(90), Some(80)),
+        port(Protocol::Udp, None, Some(80)),
+        port(Protocol::Tcp, Some(0), None),
+        port(Protocol::Any, Some(80), Some(0)),
+        EgressRule::to("example.com"),
+        EgressRule::to("fe80::1%eth0/64"),
+        excluding("10.0.0.0/8", "11.0.0.0/16"),
+        excluding("10.0.0.0/8", "10.1.0.0/+16"),
+    ] {
+        // Each fails with the code and the message of the OpenVMM options of the same policy.
+        let policy = NetworkPolicy::new(Access::Deny).with_allow(rule.clone());
+        let expected = openvmm_arguments(Some(&policy), "10.0.0.2/24").unwrap_err();
+        let error = policy.native_egress_rules().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{rule:?}");
+        assert_eq!(error.code(), expected.code(), "{rule:?}");
+        assert_eq!(error.message(), expected.message(), "{rule:?}");
+    }
+    // The allow rules are checked before the deny rules.
+    let both = NetworkPolicy::new(Access::Allow)
+        .with_allow(EgressRule::to("10.0.0.0/33"))
+        .with_deny(port(Protocol::Icmp, Some(8), None));
+    assert_eq!(
+        both.native_egress_rules().unwrap_err().to_string(),
+        "egress.allow[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: \"10.0.0.0/33\""
+    );
+    // An action's rules are all parsed before they are lowered, and the allow rules are lowered
+    // before the deny rules are parsed.
+    let ports: Vec<EgressRule> = (0..=u16::try_from(MAX_RULES).unwrap())
+        .map(|index| EgressRule::to("192.0.2.1").on_port(Protocol::Tcp, 2 * index + 1))
+        .collect();
+    let malformed = EgressRule::to("10.0.0.0/33");
+    let mut allow = ports.clone();
+    allow.push(malformed.clone());
+    assert_eq!(
+        rules_of(allow, Vec::new()).unwrap_err().to_string(),
+        "egress.allow[257].to[0].cidr is not a valid IPv4 or IPv6 CIDR: \"10.0.0.0/33\""
+    );
+    assert_eq!(
+        rules_of(ports, vec![malformed]).unwrap_err().to_string(),
+        "egress.allow emits at most 256 native rules"
+    );
+    // Deny rules are checked even where the OpenVMM options leave them out.
+    let denied = NetworkPolicy::new(Access::Deny).with_deny(EgressRule::to("example.com"));
+    assert!(
+        openvmm_arguments(Some(&denied), "10.0.0.2/24")
+            .unwrap()
+            .is_empty()
+    );
+    let error = denied.native_egress_rules().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert_eq!(
+        error.to_string(),
+        "egress.deny[0].to[0].cidr is not a valid IPv4 or IPv6 CIDR: \"example.com\""
+    );
+}
+
+#[test]
+fn native_egress_rules_are_the_rules_of_the_openvmm_options() {
+    let policies = [
+        NetworkPolicy::new(Access::Deny)
+            .with_allow(EgressRule::to("192.0.2.7").on_port(Protocol::Any, 53))
+            .with_allow(EgressRule::to("198.51.100.0/24").on_protocol(Protocol::Icmp))
+            .with_allow(EgressRule::to("203.0.113.9").on_port_range(Protocol::Tcp, 8000, 8010))
+            .with_deny(EgressRule::to("192.0.2.7").on_port(Protocol::Tcp, 22)),
+        NetworkPolicy::new(Access::Allow)
+            .with_allow(EgressRule::to("2001:db8:1::/64").on_port(Protocol::Tcp, 443))
+            .with_allow(EgressRule::to("::/0").on_protocol(Protocol::Icmp))
+            .with_deny(EgressRule::to("2001:db8:1::123"))
+            .with_deny(EgressRule::default().on_port_range(Protocol::Udp, 1, 1023)),
+    ];
+    for policy in policies {
+        let arguments = openvmm_arguments(Some(&policy), "10.0.0.2/24").unwrap();
+        let native = policy.native_egress_rules().unwrap();
+        assert!(!native.allow.is_empty() && !native.deny.is_empty());
+        assert_eq!(
+            native.allow,
+            rules(&arguments, "--network-egress-allow"),
+            "{policy:?}"
+        );
+        assert_eq!(
+            native.deny,
+            rules(&arguments, "--network-egress-deny"),
+            "{policy:?}"
+        );
+    }
+}

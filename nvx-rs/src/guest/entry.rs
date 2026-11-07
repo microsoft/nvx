@@ -126,6 +126,7 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use super::mappings::mapper::{AttachFailure, bind_retained_with};
 use super::mappings::{
     self, Access, Kernel, Kind, Mapped, Mapping, MappingError, SourceRoot, Step, SystemKernel,
     TargetRoot, TeardownError,
@@ -155,8 +156,9 @@ const UNCHANGED_ID: u32 = u32::MAX;
 const MACHINE_ID_MODE: u32 = 0o444;
 /// Where [`Entry::bind_runtime`] binds a generated machine ID in the root.
 const MACHINE_ID_TARGET: &str = "/etc/machine-id";
-/// Where [`Entry::bind_runtime`] binds the time status in the root.
-const TIME_STATUS_TARGET: &str = "/run/nvx/time";
+/// Where [`Entry::bind_runtime`] binds the time status in the root, as a layered root's
+/// [`mount_runtime`](super::root::Root::mount_runtime) does.
+pub(crate) const TIME_STATUS_TARGET: &str = "/run/nvx/time";
 /// Where [`Entry::bind_runtime`] binds the resolver file in the root.
 const RESOLVER_TARGET: &str = "/etc/resolv.conf";
 
@@ -876,13 +878,35 @@ fn bind_file(
 /// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
 /// `root`, with `kernel`, through the walk and attach of [`mappings::bind`] from a source root at
 /// `path`'s parent directory, and returns the bind.
-fn bind_runtime_file(
+pub(crate) fn bind_runtime_file(
     kernel: &mut dyn Kernel,
     root: &TargetRoot,
     path: &Path,
     target: &str,
     kind: Kind,
 ) -> Result<Mapped, MappingError> {
+    let (source, mapping) = runtime_mapping(path, target, kind)?;
+    mappings::bind_with(kernel, root, &source, &mapping)
+}
+
+/// Binds as [`bind_runtime_file`] does, retaining a failed bind that its caller must detach.
+pub(crate) fn bind_runtime_file_retained(
+    kernel: &mut dyn Kernel,
+    root: &TargetRoot,
+    path: &Path,
+    target: &str,
+    kind: Kind,
+) -> Result<Mapped, AttachFailure> {
+    let (source, mapping) = runtime_mapping(path, target, kind)?;
+    bind_retained_with(kernel, root, &source, &mapping)
+}
+
+/// Prepares the source root and read-only mapping for a runtime bind.
+fn runtime_mapping(
+    path: &Path,
+    target: &str,
+    kind: Kind,
+) -> Result<(SourceRoot, Mapping), MappingError> {
     let source_error = |error: i32| MappingError::System {
         step: Step::Source,
         error,
@@ -895,7 +919,7 @@ fn bind_runtime_file(
     let mapping = Mapping::new(name, target, Access::ReadOnly)
         .map_err(|_| source_error(Errno::EINVAL as i32))?
         .with_kind(kind);
-    mappings::bind_with(kernel, root, &source, &mapping)
+    Ok((source, mapping))
 }
 
 /// Returns the directory that holds the runtime file at `path`, the current directory for a
