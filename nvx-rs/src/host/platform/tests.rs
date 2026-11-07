@@ -5,7 +5,9 @@ pub(crate) use super::linux::tests::{
 #[cfg(windows)]
 pub(crate) use super::windows::tests::set_access;
 #[cfg(windows)]
-pub(crate) use super::windows::tests::{access, user_sid};
+pub(crate) use super::windows::tests::{
+    access, inherits_file, untrusted_log_job, user_sid, with_spawn_window,
+};
 use super::*;
 
 #[cfg(any(target_os = "linux", windows))]

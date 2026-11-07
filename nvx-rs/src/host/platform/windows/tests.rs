@@ -16,7 +16,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, INFINITE, TerminateProcess,
+    CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE, TerminateProcess,
 };
 
 use super::identity::status_error;
@@ -42,6 +42,28 @@ pub(super) fn in_window() {
             hook();
         }
     });
+}
+
+pub(crate) fn with_spawn_window<T>(
+    hook: impl FnMut() + 'static,
+    operation: impl FnOnce() -> T,
+) -> T {
+    IN_WINDOW.set(Some(Box::new(hook)));
+    let result = operation();
+    IN_WINDOW.set(None);
+    result
+}
+
+pub(crate) fn inherits_file(pid: u32, value: usize, file: &fs::File) -> bool {
+    // SAFETY: opens only the test's already verified child to inspect its handle table.
+    let child = owned(unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) })
+        .unwrap_or_else(|| panic!("cannot inspect the child: {}", io::Error::last_os_error()));
+    holds(&child, value as HANDLE, file)
+}
+
+pub(crate) fn untrusted_log_job(log: &fs::File) -> OwnedHandle {
+    let id = log_job_id(log).unwrap().unwrap();
+    job_with_descriptor(&log_job_name(id), "D:P(A;;GA;;;WD)")
 }
 
 fn line(program: &str, arguments: &[&str]) -> String {

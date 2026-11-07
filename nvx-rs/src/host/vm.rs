@@ -26,6 +26,8 @@ use crate::host::platform::{check_store_dir as check_dir, create_store_dir as cr
 use crate::host::platform::{check_vm_dir as check_dir, create_vm_dir as create_dir};
 use crate::host::runtime::Runtime;
 use crate::host::snapshot::Snapshot;
+use crate::host::spawn::{self, VmmCommand};
+use crate::host::{platform::inherit::Inherited, process::Process};
 use crate::protocol::CAPABILITY_LEN;
 use crate::{Error, Result};
 
@@ -199,6 +201,12 @@ impl fmt::Debug for Capability {
 /// Dropping a successful preparation closes its files but leaves its output paths to the caller.
 #[derive(Debug)]
 pub struct Prepared {
+    /// The executable checked during creation.
+    program: PathBuf,
+    /// The private VM directory in which the child starts.
+    working_dir: PathBuf,
+    /// Whether the child leaves the caller's Windows job.
+    windows_breakaway: bool,
     /// The control credential, never written to disk.
     capability: Capability,
     /// The launch's fixed file paths and chosen endpoints.
@@ -337,6 +345,9 @@ pub fn create(
     })();
     match checked {
         Ok((capability, arguments)) => Ok(Prepared {
+            program: runtime.openvmm.clone(),
+            working_dir: dir.path().to_owned(),
+            windows_breakaway: runtime.windows_breakaway,
             capability,
             outputs,
             log,
@@ -359,6 +370,87 @@ pub fn create(
             }
         }
     }
+}
+
+/// A detached VM owned by its caller.
+///
+/// Dropping this value closes the process handle, not the VM. Its outputs remain caller-owned,
+/// and its capability is the same credential returned by the preparation.
+#[derive(Debug)]
+pub struct Launched {
+    /// The verified process, held independently of the child handle used during spawn.
+    pub process: Process,
+    /// The preparation's output files and endpoints.
+    pub outputs: VmOutputs,
+    /// The control credential, never written to disk.
+    pub capability: Capability,
+}
+
+/// Starts a prepared cold launch and returns its verified, detached process.
+///
+/// The capability reaches OpenVMM only on standard input, followed by end-of-file. The opened
+/// log becomes standard output and error without reopening its path. Only the preparation's
+/// owned inheritance allowlist and standard streams reach the child.
+///
+/// On Linux the child starts in a new session, with the caller's umask without its owner's bits;
+/// the caller's umask is unchanged. On Windows it starts without a console, in its log-named
+/// job, outside the caller's job when the runtime requests breakaway. A taken or untrusted log
+/// job name is refused. Other processes started during its inheritance window never join that
+/// job, but may inherit its handles: Windows callers coordinate their own other spawns, for
+/// example with their own lock around this function and their other process starts. The
+/// library's inheritance lock remains internal to this spawn.
+///
+/// The caller keeps the directory and runtime inputs stable through creation and spawn.
+/// A failure after child creation terminates only that child and waits for its confirmed exit.
+/// Output paths are not removed. Host failures have kind [`ErrorKind::Io`](crate::ErrorKind::Io),
+/// retaining their source; an exit-confirmation failure is reported with the original error.
+pub fn spawn(prepared: Prepared) -> Result<Launched> {
+    spawn_verified(prepared, spawn::Launched::process)
+}
+
+/// Keeps the child owned until its process identity is verified, or its exit is confirmed.
+fn spawn_verified(
+    prepared: Prepared,
+    verify: impl FnOnce(&spawn::Launched) -> io::Result<Process>,
+) -> Result<Launched> {
+    let Prepared {
+        program,
+        working_dir,
+        windows_breakaway,
+        capability,
+        outputs,
+        log,
+        arguments,
+        inherit,
+    } = prepared;
+    let command = VmmCommand {
+        program,
+        arguments,
+        working_dir,
+        breakaway_from_job: windows_breakaway,
+        inherit: inherit.iter().map(Inherited::new).collect(),
+    };
+    let child = spawn::spawn_vm(&command, capability.as_bytes(), log)
+        .map_err(|error| Error::io("cannot spawn the VM").with_source(error))?;
+    let process = match verify(&child) {
+        Ok(process) => process,
+        Err(error) => {
+            let cleanup = child.kill_and_confirm_exit();
+            let message = match cleanup {
+                Ok(()) => "cannot verify the spawned VM".to_owned(),
+                Err(cleanup) => {
+                    format!("cannot verify the spawned VM; cannot confirm its exit: {cleanup}")
+                }
+            };
+            return Err(Error::io(message).with_source(error));
+        }
+    };
+    child.detach();
+    Ok(Launched {
+        process,
+        outputs,
+        capability,
+    })
 }
 
 /// Refuses an existing output entry without opening, replacing, or removing it.
