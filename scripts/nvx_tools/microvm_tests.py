@@ -430,6 +430,25 @@ PLATFORM_ZERO_FILL_REJECTED = (
 PAIRED_ABSENT_SCRATCH_REJECTION = (
     b"--restore-absent-scratch requires the fresh scratch of a platform snapshot"
 )
+# The storage generation to which the paired scratch snapshot binds its
+# blocks, which each of its restores states again, and another one. OpenVMM
+# reads no block to verify its content, which the generation alone vouches
+# for, so it refuses a restore that states another generation or none, and
+# one of a layer or a scratch.img of another length.
+SCRATCH_PAIRED_GENERATION = "00112233445566778899aabbccddee10"
+SCRATCH_PAIRED_OTHER_GENERATION = "00112233445566778899aabbccddee11"
+SCRATCH_PAIRED_GENERATION_REJECTIONS = (
+    (
+        "wrong",
+        SCRATCH_PAIRED_OTHER_GENERATION,
+        b"the snapshot binds its sandbox blocks to storage generation "
+        + SCRATCH_PAIRED_GENERATION.encode()
+        + b", not "
+        + SCRATCH_PAIRED_OTHER_GENERATION.encode(),
+    ),
+    ("missing", None, b"pass it with --restore-generation-id"),
+)
+SCRATCH_PAIRED_WRONG_LAYER_REJECTION = b"doesn't match the requested machine"
 # A NIC template is a platform snapshot whose NIC was captured with a complete
 # deny-all policy. Each clone restores it with a policy of its own, and must
 # keep the template's NIC identity, which the portable profile derives from the
@@ -10083,7 +10102,7 @@ def run_scratch_snapshot(
         wrong_layer = root / "wrong-distro.erofs"
         source_scratch = root / "source-scratch.raw"
         _write_pattern(layer, 1024 * 1024, 0x3C)
-        _write_pattern(wrong_layer, 1024 * 1024, 0xC3)
+        _write_pattern(wrong_layer, 2 * 1024 * 1024, 0x3C)
         _write_pattern(source_scratch, 8 * 1024 * 1024, 0xA5)
 
         paired_snapshot = root / "paired-snapshot"
@@ -10100,6 +10119,8 @@ def run_scratch_snapshot(
             str(paired_snapshot),
             "--snapshot-tier",
             "workload-start",
+            "--snapshot-generation-id",
+            SCRATCH_PAIRED_GENERATION,
             "--microvm-sandbox-block",
             _block_arg("distro", layer, read_only=True),
             "--microvm-sandbox-block",
@@ -10132,7 +10153,10 @@ def run_scratch_snapshot(
         )
         paired_fingerprint = _scratch_snapshot_fingerprint(paired_snapshot)
 
-        def paired_restore_command(selected_layer: Path) -> list[str]:
+        def paired_restore_command(
+            selected_layer: Path,
+            generation: str | None = SCRATCH_PAIRED_GENERATION,
+        ) -> list[str]:
             command = snapshot_restore_command(executable, backend, paired_snapshot)
             command.extend(
                 (
@@ -10140,6 +10164,8 @@ def run_scratch_snapshot(
                     _block_arg("distro", selected_layer, read_only=True),
                 )
             )
+            if generation is not None:
+                command.extend(("--restore-generation-id", generation))
             return command
 
         for restore_index in range(2):
@@ -10166,10 +10192,19 @@ def run_scratch_snapshot(
             SCRATCH_PAIRED_POST_MARKER,
             SCRATCH_PAIRED_RESTORED_MARKER,
         )
+        for name, generation, rejection in SCRATCH_PAIRED_GENERATION_REJECTIONS:
+            _expect_process_failure(
+                paired_restore_command(layer, generation),
+                output_dir / f"scratch-paired-{name}-generation.log",
+                timeout,
+                rejection,
+                forbidden_markers=forbidden_paired,
+            )
         _expect_process_failure(
             paired_restore_command(wrong_layer),
             output_dir / "scratch-paired-wrong-layer.log",
             timeout,
+            SCRATCH_PAIRED_WRONG_LAYER_REJECTION,
             forbidden_markers=forbidden_paired,
         )
         # Only a platform snapshot's fresh scratch may be absent.
@@ -10191,14 +10226,15 @@ def run_scratch_snapshot(
             )
         finally:
             published_scratch.write_bytes(scratch_bytes)
-        corrupt = bytearray(scratch_bytes)
-        corrupt[0] ^= 0xFF
-        published_scratch.write_bytes(corrupt)
+        with published_scratch.open("ab") as scratch_file:
+            scratch_file.write(bytes(512))
         try:
             _expect_process_failure(
                 paired_restore_command(layer),
-                output_dir / "scratch-paired-corrupt.log",
+                output_dir / "scratch-paired-extended.log",
                 timeout,
+                f"scratch.img size ({len(scratch_bytes) + 512} bytes) doesn't match "
+                f"manifest ({len(scratch_bytes)} bytes)".encode(),
                 forbidden_markers=forbidden_paired,
             )
         finally:
@@ -10454,25 +10490,36 @@ echo {repair_marker}"""
     )
 
 
-def _snapshot_storage_policy(tier: str) -> tuple[str, ...]:
-    if tier == "platform":
-        return ()
-    if tier == "workload-start":
-        generation = "00112233445566778899aabbccddee01"
-        restore_mode = "private-copy"
-    elif tier == "instance-checkpoint":
-        generation = "00112233445566778899aabbccddee02"
-        restore_mode = "direct-claimed"
-    else:
+def _snapshot_storage_generation(tier: str) -> str | None:
+    """Return the storage generation to which a capture of ``tier`` binds its
+    sandbox blocks, and which its restore states again: none of the platform
+    tier, which binds no block."""
+    generations = {
+        "platform": None,
+        "workload-start": "00112233445566778899aabbccddee01",
+        "instance-checkpoint": "00112233445566778899aabbccddee02",
+    }
+    if tier not in generations:
         raise ValueError(f"unsupported snapshot tier {tier!r}")
+    return generations[tier]
+
+
+def _snapshot_storage_policy(tier: str) -> tuple[str, ...]:
+    generation = _snapshot_storage_generation(tier)
+    if generation is None:
+        return ()
+    restore_mode = "private-copy" if tier == "workload-start" else "direct-claimed"
     return (
-        "--snapshot-block-identity",
-        "generation",
         "--snapshot-generation-id",
         generation,
         "--snapshot-scratch-restore-mode",
         restore_mode,
     )
+
+
+def _snapshot_restore_policy(tier: str) -> tuple[str, ...]:
+    generation = _snapshot_storage_generation(tier)
+    return () if generation is None else ("--restore-generation-id", generation)
 
 
 def _run_snapshot_tier(
@@ -10596,6 +10643,7 @@ def _run_snapshot_tier(
             (
                 "--allow-host",
                 "10.0.0.1",
+                *_snapshot_restore_policy(tier),
                 "--microvm-sandbox-block",
                 _block_arg("distro", restore_layer, read_only=True),
             )
@@ -10625,6 +10673,22 @@ def _run_snapshot_tier(
             )
             if (snapshot / "resume.claim").exists():
                 raise RuntimeError("wrong-profile restore consumed instance checkpoint")
+            # A restore of storage of another generation fails before it
+            # claims the checkpoint.
+            wrong_generation = list(restore_command)
+            wrong_generation[wrong_generation.index("--restore-generation-id") + 1] = (
+                "00112233445566778899aabbccddee0f"
+            )
+            _expect_process_failure(
+                wrong_generation,
+                output_dir / f"snapshot-tier-{tier}-wrong-generation.log",
+                timeout,
+                b"the snapshot binds its sandbox blocks to storage generation",
+            )
+            if (snapshot / "resume.claim").exists():
+                raise RuntimeError(
+                    "wrong-generation restore consumed instance checkpoint"
+                )
 
         expected_layer = layer_marker + (b"195" if platform else b"60")
         restore_console_path = output_dir / f"snapshot-tier-{tier}-restore-console.log"

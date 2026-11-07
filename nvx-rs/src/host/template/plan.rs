@@ -38,10 +38,6 @@ const BOOT_PROCESSORS: &str = "maxcpus";
 /// configuration alone.
 const TIER: &str = "platform";
 
-/// The block identity of a template's capture: the bound-block storage generation, which OpenVMM
-/// takes in place of a digest of each block's content.
-const BLOCK_IDENTITY: &str = "generation";
-
 /// The logical block size that OpenVMM presents for a sandbox block device, of which the device's
 /// length is a multiple.
 const LOGICAL_BLOCK_SIZE: u64 = 512;
@@ -118,10 +114,10 @@ pub struct TemplateResources {
 ///
 /// The capture's options are `--snapshot-tier platform`; `--snapshot-destination`, the
 /// destination [`SNAPSHOT_NAME`] in the capture's transaction directory, by which a generation of
-/// a [`Store`](super::Store) names its snapshot too; and `--snapshot-block-identity generation`,
-/// with the capture's [`StorageGeneration`] as `--snapshot-generation-id`, so that the capture
-/// hashes no block device. The template keeps no storage generation: OpenVMM unbinds its
-/// `distro`, and its scratch is fresh.
+/// a [`Store`](super::Store) names its snapshot too; and the capture's [`StorageGeneration`] as
+/// `--snapshot-generation-id`. OpenVMM reads no block device to identify it, and the template
+/// keeps no storage generation: a platform capture binds no block, so OpenVMM unbinds its
+/// `distro`, its scratch is fresh, and it records no generation.
 ///
 /// The transaction directory is the capture's own, and the destination must not exist when the
 /// capture launches. OpenVMM backs the VM's RAM with a file that it creates beside the
@@ -396,9 +392,8 @@ impl TemplatePlan {
 
     /// Returns OpenVMM's arguments of the capture besides those of its devices: `--processors`
     /// with the processor capacity, `--memory` and `--memory-capacity` in MiB, and the capture's
-    /// options, `--snapshot-destination`, `--snapshot-tier platform`,
-    /// `--snapshot-block-identity generation`, and `--snapshot-generation-id`. The processors
-    /// online at boot are the kernel command line's.
+    /// options, `--snapshot-destination`, `--snapshot-tier platform`, and
+    /// `--snapshot-generation-id`. The processors online at boot are the kernel command line's.
     ///
     /// A caller that renders the arguments of the devices itself adds these to them.
     pub fn capture_arguments(&self) -> Vec<String> {
@@ -417,7 +412,6 @@ impl TemplatePlan {
                 self.destination.display().to_string(),
             ),
             ("--snapshot-tier", TIER.to_owned()),
-            ("--snapshot-block-identity", BLOCK_IDENTITY.to_owned()),
             ("--snapshot-generation-id", self.generation.to_string()),
         ]
         .into_iter()

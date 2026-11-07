@@ -84,7 +84,7 @@ const DESTINATION: &str = if cfg!(windows) {
 const GENERATION: &str = "000102030405060708090a0b0c0d0e0f";
 
 /// The options of templates' arguments, each of which takes one value.
-const OPTIONS: [&str; 14] = [
+const OPTIONS: [&str; 13] = [
     "--machine",
     "--microvm-sandbox-block",
     "--net",
@@ -97,7 +97,6 @@ const OPTIONS: [&str; 14] = [
     "--memory-capacity",
     "--snapshot-destination",
     "--snapshot-tier",
-    "--snapshot-block-identity",
     "--snapshot-generation-id",
 ];
 
@@ -367,8 +366,6 @@ fn templates_render_their_devices_resources_and_capture_options() {
         DESTINATION,
         "--snapshot-tier",
         "platform",
-        "--snapshot-block-identity",
-        "generation",
         "--snapshot-generation-id",
         GENERATION,
     ]);

@@ -518,8 +518,6 @@ const CAPTURE: &[&str] = &[
     "{dir}/transaction/snapshot",
     "--snapshot-tier",
     "platform",
-    "--snapshot-block-identity",
-    "generation",
     "--snapshot-generation-id",
     "0123456789abcdef0123456789ABCDEF",
     "--single-process",
@@ -737,6 +735,10 @@ fn captures_refuse_what_a_template_does_not_take() {
     aggregate.extend(["--mount-aggregate", "/run/nvx/shares"]);
     let mut identity = CAPTURE.to_vec();
     identity.extend(["--microvm-workload-identity", "1000:1000"]);
+    // OpenVMM identifies sandbox blocks by their storage generation alone, and takes no block
+    // identity.
+    let mut block_identity = CAPTURE.to_vec();
+    block_identity.extend(["--snapshot-block-identity", "generation"]);
     let mut unbounded = CAPTURE.to_vec();
     let at = unbounded
         .iter()
@@ -782,8 +784,8 @@ fn captures_refuse_what_a_template_does_not_take() {
             "--snapshot-tier must be platform, not process".to_owned(),
         ),
         (
-            capture_with("--snapshot-block-identity", "path"),
-            "--snapshot-block-identity must be generation, not path".to_owned(),
+            block_identity,
+            "unsupported argument --snapshot-block-identity".to_owned(),
         ),
         (
             capture_with(
