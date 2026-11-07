@@ -26,7 +26,10 @@
 - Treat [check-quality](./actions/check-quality/action.yml) and
   [validate-nvx](./actions/validate-nvx/action.yml) as the authoritative local
   quality and CLI test definitions. Start with the narrowest affected test, then
-  run the applicable commands from those actions.
+  run the applicable commands from those actions:
+  `python3 scripts/local_gates.py --base origin/dev` lists the gates that a
+  change selects, with their commands read from the actions, and `--run` runs
+  them.
 - For changes under `nvx-rs/`, run the commands in
   [check-nvx-rs](./actions/check-nvx-rs/action.yml). It also checks the
   runtime adapter in `tests/runtime-adapter/`, which builds on `nvx`; run its
@@ -63,8 +66,8 @@
   explicitly for runtime operations.
 - A performance platform is `<os>-<backend>-<host-type>`. The Azure CI runners are
   `virtual-machine`; configured SSH profiles use the `host_type` returned by
-  `.github/skills/nvx-host-connect/scripts/hosts.py`. For local measurements, ask
-  for the host type when it is not explicit. Never default it to `baremetal`.
+  `scripts/nvx_hosts.py`. For local measurements, ask for the host type when it
+  is not explicit. Never default it to `baremetal`.
 - Use `nvx-host-connect` before remote work, then exactly one of `nvx-run`,
   `nvx-debug`, or `nvx-benchmark`. Never expose `.nvx-hosts.json` or authentication
   material.
@@ -140,7 +143,8 @@
 - Pull-request concurrency cancels superseded runs, while `dev` pushes queue in
   order and never cancel one another. Before debugging a cancelled pull-request
   run, compare its head SHA with the current pull-request head and classify an
-  expected supersession separately from a failure. Use `nvx-ci-investigation` for
+  expected supersession separately from a failure;
+  `python3 scripts/ci_triage.py RUN` does both. Use `nvx-ci-investigation` for
   failed or unexpectedly cancelled runs.
 - `dev` requires GitHub's merge queue. Merge a pull request by queueing it with
   `gh pr merge NUMBER`, which queues it once it can merge.

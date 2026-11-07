@@ -80,7 +80,10 @@ runner pools, so:
 
 CI runs these checks on GitHub-hosted runners. Run the ones that cover your
 change before you push; [Setup](setup.md#development) lists the commands for
-the Python, shell, and link checks.
+the Python, shell, and link checks, and
+`python3 scripts/local_gates.py --base origin/dev` lists the gates that a
+change selects, with the commands of the actions below, and runs them with
+`--run`.
 
 | Code | Checks | Definition |
 | --- | --- | --- |

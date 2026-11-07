@@ -22,18 +22,15 @@ Before asking for an SSH target, list the configured profiles from the local
 workspace:
 
 ```bash
-python3 .github/skills/nvx-host-connect/scripts/hosts.py
+python3 scripts/nvx_hosts.py
 ```
 
 ```powershell
-python .github\skills\nvx-host-connect\scripts\hosts.py
+python scripts\nvx_hosts.py
 ```
 
-From a linked worktree, pass the main worktree's inventory to every `hosts.py`
-command with `--file <main-worktree>/.nvx-hosts.json`, where `<main-worktree>` is
-the first path that `git worktree list` prints. Git does not copy the ignored
-inventory into linked worktrees, and `hosts.py` reads the one at the root of its
-own worktree, so without `--file` it reports `remote_enabled` as `false` there.
+From a linked worktree, `nvx_hosts.py` reads the main worktree's inventory,
+since Git does not copy the ignored inventory into linked worktrees.
 
 Treat the resolver output as authoritative:
 
@@ -53,12 +50,12 @@ Example profile resolution:
 
 ```bash
 profile=kvm-lab # Replace with a configured profile name.
-python3 .github/skills/nvx-host-connect/scripts/hosts.py "$profile"
+python3 scripts/nvx_hosts.py "$profile"
 ```
 
 ```powershell
 $profile = 'kvm-lab' # Replace with a configured profile name.
-python .github\skills\nvx-host-connect\scripts\hosts.py $profile
+python scripts\nvx_hosts.py $profile
 ```
 
 ## Required Inputs

@@ -188,17 +188,20 @@ private keys, passphrases, or SSH options in `.nvx-hosts.json`. The file is igno
 List and validate the configured profiles on Linux with:
 
 ```bash
-python3 .github/skills/nvx-host-connect/scripts/hosts.py
+python3 scripts/nvx_hosts.py
 ```
 
 On Windows PowerShell, use:
 
 ```powershell
-python .github\skills\nvx-host-connect\scripts\hosts.py
+python scripts\nvx_hosts.py
 ```
 
 If the inventory is absent or contains no hosts, the resolver disables remote access and reports
-that only local NVX development is enabled.
+that only local NVX development is enabled. A linked worktree has no copy of the ignored inventory,
+so the resolver reads the main worktree's. `nvx_hosts.py show PROFILE` resolves one profile, and
+`exec`, `run`, and `probe` run a command, a script, or `host_probe.py` in the host's checkout over
+SSH, without prompts for secrets.
 
 ## Development
 
