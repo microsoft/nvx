@@ -1,0 +1,94 @@
+name: nvx-rs coverage
+
+# Measures which code of the nvx crate its own tests reach, on Linux and
+# Windows, with scripts/nvx_rs_coverage.py (doc/ci.md, "nvx-rs coverage"). It
+# runs for the pushes to dev that change the crate or how it is measured, and
+# on demand, never for pull requests, so no required check depends on it.
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - nvx-rs/**
+      - rust-toolchain.toml
+      - scripts/nvx_rs_coverage.py
+      - scripts/setup/tool-versions.conf
+      - .github/workflows/nvx-rs-coverage.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A push replaces the measurement of an earlier push that is still running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    name: measure / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # The Rust release that rust-toolchain.toml pins, and the cargo-llvm-cov
+      # release that the setup tool manifest pins.
+      - name: Resolve the pinned tools
+        id: tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          cargo_llvm_cov=$(sed -n 's/^cargo_llvm_cov\.version=//p' \
+            scripts/setup/tool-versions.conf)
+          test -n "${toolchain}"
+          test -n "${cargo_llvm_cov}"
+          {
+            echo "toolchain=${toolchain}"
+            echo "cargo_llvm_cov=${cargo_llvm_cov}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Install Rust, its llvm-tools, and cargo-llvm-cov
+        shell: bash
+        env:
+          TOOLCHAIN: ${{ steps.tools.outputs.toolchain }}
+          CARGO_LLVM_COV: ${{ steps.tools.outputs.cargo_llvm_cov }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${TOOLCHAIN}" --profile minimal --component llvm-tools
+          cargo "+${TOOLCHAIN}" install --locked cargo-llvm-cov --version "${CARGO_LLVM_COV}"
+
+      # Fails when the measurement misses something, such as what tests that
+      # failed twice would have reached, after it writes the reports.
+      - name: Measure
+        shell: bash
+        run: python scripts/nvx_rs_coverage.py --output build/nvx-rs-coverage
+
+      - name: Write the summary
+        if: ${{ !cancelled() && hashFiles('build/nvx-rs-coverage/summary.md') != '' }}
+        shell: bash
+        run: cat build/nvx-rs-coverage/summary.md >> "${GITHUB_STEP_SUMMARY}"
+
+      # A rerun of the job replaces the reports of its earlier attempt.
+      - name: Upload the reports
+        if: ${{ !cancelled() && hashFiles('build/nvx-rs-coverage/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvx-rs-coverage-${{ runner.os }}-${{ github.run_id }}
+          path: build/nvx-rs-coverage
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30

@@ -2389,6 +2389,79 @@ of its guest agent, run in the `nvx-rs` job. Changes under
 `tests/runtime-adapter/` or `nvx-rs/`, which the adapter builds on, therefore
 trigger the NVX microVM test matrix.
 
+## nvx-rs coverage
+
+[`nvx-rs-coverage.yml`](../.github/workflows/nvx-rs-coverage.yml) measures which
+lines, functions, and regions of the production code of the `nvx` crate its own
+tests reach, on GitHub-hosted Ubuntu and Windows runners. It runs for every push
+to `dev` that changes `nvx-rs/`, `rust-toolchain.toml`, the setup tool manifest,
+the workflow, or its script, and on a manual dispatch, but never for pull
+requests, so no required check depends on it, and a push cancels the measurement
+of an earlier push that still runs. Coverage tells which code the tests run;
+[mutation testing](#nvx-rs-mutation-testing) tells whether they check what it
+does. Each job installs the Rust release that `rust-toolchain.toml` pins with
+its `llvm-tools` component, and
+[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) at the release that
+the [setup tool manifest](../scripts/setup/README.md#tool-versions) pins, which
+the setup scripts install on development hosts and self-hosted runners too.
+Branches go unmeasured: their coverage still needs a nightly compiler.
+
+[`nvx_rs_coverage.py`](../scripts/nvx_rs_coverage.py) runs the crate's tests
+with `--all-features` and `NVX_BUNDLE=skip` under cargo-llvm-cov, with the
+crate's paths remapped to paths relative to it. The tests that fail run once
+more, by name, or with the rest of their target when its harness named none,
+as when it crashed, and the summary names those that passed only then. Tests
+that fail again, a profile in the crate's directory, which a process that a
+test starts there without `LLVM_PROFILE_FILE` writes, and a run in which no
+process of `nvx-rs`, or none of `nvx-fake-openvmm`, wrote a profile all fail
+the job, after it writes the reports, whose summary names what each misses.
+
+Production code is every source file of the crate but its test code and test
+data, its `tests` directories and `tests.rs` files, and its test doubles, the
+fake OpenVMM of `src/testing/` and its `nvx-fake-openvmm` binary, which the
+summary counts apart. cargo-llvm-cov leaves out test code only where its path
+has the host's separators, so the script leaves it out whichever separators its
+path has: a unit test includes a vector of `tests/vectors/openvmm/` through a
+path that keeps `/` on Windows. Some code runs in only some runs, such as a loop
+that waits for a process that may already have exited, so the counts can differ
+slightly between runs of one commit.
+
+The reports include the profiles of the processes that the tests start:
+`nvx-rs`, `nvx-fake-openvmm`, and, on Linux, the guest binaries that
+`tests/guest_tools.rs` runs, Cargo's instrumented builds of them, since the
+script leaves `NVX_GUEST_BINARIES` out of the tests' environment.
+A process writes its profile only when it exits, so what a process that a test
+kills reaches is missing. On Windows, `std::process::exit` also ends a process
+without its profile, because it skips the C runtime's exit handlers, so
+`nvx-rs` and `nvx-fake-openvmm` return their statuses from `main` instead, but
+for statuses outside 0 to 255, which `ExitCode` can't hold. A process writes its
+profile under its umask too, so before the reports, the script lets the owner
+read and write every profile: the store tests run processes whose umasks clear
+these permissions, and `llvm-profdata` crashes on a profile that it can't read.
+
+Each job uploads `lcov.info` and `html/`, the LCOV and HTML reports of the
+production code, `coverage.json`, llvm-cov's summary of each file of production
+code and of the test doubles, `measurement.json`, which records the commit, the
+tools, and the tests that ran again, `tests.log`, and `summary.md` as the 30-day
+artifact `nvx-rs-coverage-<os>-<run-id>`, which a rerun of the job replaces.
+The job also writes `summary.md` to the run's summary: the totals of the
+production code and of the test doubles, the binaries whose processes wrote
+profiles, the tests that ran again, and a table with a row for each top-level
+module, and for each of its submodules that has submodules of its own, that
+counts the files that no other row counts.
+
+To measure on a development host, add the `llvm-tools` component to the pinned
+release and install the pinned cargo-llvm-cov, as the setup scripts do, then
+run the script, which writes the reports to `build/nvx-rs-coverage`:
+
+```bash
+toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
+rustup component add --toolchain "$toolchain" llvm-tools
+cargo "+$toolchain" install --locked cargo-llvm-cov --version \
+  "$(sed -n 's/^cargo_llvm_cov\.version=//p' scripts/setup/tool-versions.conf)"
+python3 scripts/nvx_rs_coverage.py
+```
+
 ## nvx-rs mutation testing
 
 Mutation testing tells whether one selection of the `nvx` crate's tests catches

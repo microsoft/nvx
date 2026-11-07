@@ -35,6 +35,7 @@ LINUX = SETUP / "setup-linux.sh"
 WINDOWS = SETUP / "setup-windows-whp.ps1"
 SPECULA = REPO_ROOT / ".github" / "specula" / "setup-runner.sh"
 COPILOT_SETUP = REPO_ROOT / ".github" / "workflows" / "copilot-setup-steps.yml"
+COVERAGE = REPO_ROOT / ".github" / "workflows" / "nvx-rs-coverage.yml"
 GUIDES = (
     SETUP / "README.md",
     REPO_ROOT / "doc" / "setup.md",
@@ -1087,7 +1088,7 @@ class ToolManifestReaderTests(unittest.TestCase):
 
 class ToolManifestConsumerTests(unittest.TestCase):
     def test_consumers_read_the_manifest(self):
-        for path in (LINUX, WINDOWS, SPECULA, COPILOT_SETUP):
+        for path in (LINUX, WINDOWS, SPECULA, COPILOT_SETUP, COVERAGE):
             with self.subTest(path=path.name):
                 self.assertIn("tool-versions.conf", path.read_text(encoding="utf-8"))
 
@@ -1095,7 +1096,7 @@ class ToolManifestConsumerTests(unittest.TestCase):
         words = re.compile("|".join(TOOL_WORDS.values()), re.IGNORECASE)
         paths = {
             path
-            for path in (*SETUP.iterdir(), SPECULA, COPILOT_SETUP, *GUIDES)
+            for path in (*SETUP.iterdir(), SPECULA, COPILOT_SETUP, COVERAGE, *GUIDES)
             if path.is_file() and path != MANIFEST
         }
         for path in sorted(paths):
