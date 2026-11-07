@@ -130,6 +130,27 @@ pub fn spawn(
     capability: &[u8; CAPABILITY_LEN],
     log: File,
 ) -> io::Result<Launched> {
+    spawn_inner(command, capability, log, false)
+}
+
+/// Starts a library VM only with a trusted log-named job on Windows.
+pub(crate) fn spawn_vm(
+    command: &VmmCommand<'_>,
+    capability: &[u8; CAPABILITY_LEN],
+    log: File,
+) -> io::Result<Launched> {
+    spawn_inner(command, capability, log, true)
+}
+
+/// Shares the legacy spawn mechanics without its optional Windows log-job fallback for a VM.
+fn spawn_inner(
+    command: &VmmCommand<'_>,
+    capability: &[u8; CAPABILITY_LEN],
+    log: File,
+    require_log_job: bool,
+) -> io::Result<Launched> {
+    #[cfg(not(windows))]
+    let _ = require_log_job;
     let (stdin, mut writer) = io::pipe()?;
     writer.write_all(capability)?;
     drop(writer);
@@ -137,6 +158,12 @@ pub fn spawn(
     #[cfg(windows)]
     {
         let job = platform::create_log_job(&log)?;
+        if require_log_job && job.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the VM log has no trusted log-named job",
+            ));
+        }
         platform::spawn_detached(
             &command.program,
             &command.arguments,
@@ -281,6 +308,26 @@ impl Launched {
             }
             .detach();
             false
+        }
+    }
+
+    /// Terminates this owned child and waits without a deadline for proof of its exit.
+    ///
+    /// Unlike legacy cleanup's timeout, this never detaches a child after a failed verification.
+    pub(crate) fn kill_and_confirm_exit(self) -> io::Result<()> {
+        #[cfg(windows)]
+        return self.process.terminate_and_wait();
+        #[cfg(not(windows))]
+        {
+            let mut child = self.child;
+            let termination = child.kill();
+            // A refused signal needs no repair when the wait proves the child already exited.
+            child.wait().map(|_| ()).map_err(|wait| match termination {
+                Ok(()) => wait,
+                Err(termination) => io::Error::other(format!(
+                    "cannot terminate the child: {termination}; cannot wait for its exit: {wait}"
+                )),
+            })
         }
     }
 
