@@ -46,7 +46,7 @@ impl Vmm {
     /// Waits until the VMM exits or `deadline` passes, and returns whether it exited, as
     /// [`Process::wait`] does.
     pub fn wait(&self, deadline: Instant) -> io::Result<bool> {
-        self.process.wait(deadline)
+        self.process.wait_bool(deadline)
     }
 
     /// Returns whether the VMM has exited, without waiting.
@@ -290,7 +290,7 @@ impl Stoppable for Process {
     }
 
     fn wait(&self, deadline: Instant) -> io::Result<bool> {
-        Process::wait(self, deadline)
+        Process::wait_bool(self, deadline)
     }
 
     fn kill(&self) -> io::Result<()> {

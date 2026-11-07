@@ -347,7 +347,7 @@ fn run_supervised(locked: &mut LockedStore, vm: &Vm<'_>) -> Result<()> {
         &capability,
         |endpoint| vm.command(endpoint, &report, &dir),
     )?;
-    let exited = starting.process().wait(vm.deadline).map_err(|error| {
+    let exited = starting.process().wait_bool(vm.deadline).map_err(|error| {
         Error::io(format!(
             "cannot wait for the VMM of the capture in {}",
             dir.display()

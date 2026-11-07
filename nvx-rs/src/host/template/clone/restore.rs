@@ -928,7 +928,7 @@ fn wait_event(
         if !open {
             if received.is_empty() {
                 let wait = deadline.min(Instant::now() + CLOSED_EXIT_WAIT);
-                let exited = process.wait(wait).map_err(|error| {
+                let exited = process.wait_bool(wait).map_err(|error| {
                     Fault::host(
                         Error::io("cannot tell whether the clone's VMM still runs")
                             .with_source(error),
