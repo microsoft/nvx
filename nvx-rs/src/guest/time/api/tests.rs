@@ -406,13 +406,13 @@ fn the_daemon_does_not_start_while_the_thread_may_hold_port_permission() {
 #[test]
 fn a_capture_refuses_an_entropy_path_with_a_nul_byte_before_its_transaction() {
     let ops = FakeOps::new([]);
-    let runtime = Runtime::new(&ops, true);
+    let mut runtime = Runtime::new(&ops, true);
     let request = CaptureRequest::new(
         ScratchPolicy::Fresh,
         GenerationId::from_bytes([1; GenerationId::LENGTH]),
         PathBuf::from(OsStr::from_bytes(b"restore\0entropy")),
     );
-    let error = capture(&runtime, request).unwrap_err();
+    let error = capture(&mut runtime, request).unwrap_err();
     assert!(
         matches!(&error, TimeError::EntropyFile { source, .. } if source.kind() == io::ErrorKind::InvalidInput),
         "{error:?}"
@@ -613,13 +613,43 @@ fn capture_in_each_mode() {
     system::make_runtime_directories();
     state_store(&TimeState::default()).unwrap();
     let previous = GenerationId::from_bytes([1; GenerationId::LENGTH]);
+    let held = system::lock_portb().unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        drop(held);
+    });
+    let ops = FakeOps::new([0]);
+    let mut runtime = Runtime::new(&ops, true);
+    let deadline = Instant::now() + std::time::Duration::from_millis(250);
+    runtime.deadline = Some(deadline);
+    let result = capture(
+        &mut runtime,
+        CaptureRequest::in_memory(ScratchPolicy::Fresh, previous),
+    );
+    holder.join().unwrap();
+    assert!(
+        matches!(result, Err(TimeError::PortLock(ref error))
+        if error.kind() == io::ErrorKind::TimedOut),
+        "{result:?}"
+    );
+    assert_eq!(runtime.deadline, Some(deadline));
+    assert_eq!(ops.transactions(), 1);
+    assert!(
+        !ops.output
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(port, _)| *port == Port::Snapshot)
+    );
+    assert!(sys::check_released().is_ok());
+    eprintln!("FINAL_CAPTURE_PORTB_DEADLINE_REGRESSION_EXERCISED");
     let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 + 2);
     let secret = &entropy[GenerationId::LENGTH..];
     let path = Path::new("/run/nvx/restore-entropy");
     // Returns the capture's outcome, and what it wrote to the kernel log and the console.
     let capture_with = |input: Vec<u32>, request| {
         let ops = FakeOps::new(input);
-        let outcome = capture(&Runtime::new(&ops, true), request).unwrap();
+        let outcome = capture(&mut Runtime::new(&ops, true), request).unwrap();
         let mut logged = ops.kernel_log.lock().unwrap().clone();
         logged.extend_from_slice(&ops.console.lock().unwrap());
         (outcome, logged)
