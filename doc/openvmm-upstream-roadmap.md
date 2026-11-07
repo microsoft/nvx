@@ -6,20 +6,21 @@
   The `feature/microvm/release/v5.1` rebase moved the chain there from
   `61994293a9e5e3bcc1d685d708cf462920eed030`; see [Upstream status](#upstream-status).
 - Mapped fork tip: `18f4039db9511a3db59a847e95fb1f1f06f2f235`, position 131. The graph, PR
-  summary, and commit mapping below cover positions 001-131 and the PR20 fixup at position 148.
-- NVX's pinned OpenVMM revision: `3cf58a5234ed824435825c9f87187f5129219724`, position 220.
-  Position 220, which microsoft/openvmm#4981 proposes for `feature/microvm/dev`, is one commit on
-  position 219, `bced18bec`, the head of `feature/microvm/dev` and of the
-  `feature/microvm/release/v5.1` branch of microsoft/openvmm. The v5.1 rebase moved the 219
-  commits of `feature/microvm/dev` at the NVX pin before that rebase, `db42fde04`, onto `ba105dd7f`
-  without dropping any: the 212 of `feature/microvm/release/v5.0` and the seven that
-  microsoft/openvmm#4953, microsoft/openvmm#4954, microsoft/openvmm#4955, microsoft/openvmm#4970,
-  microsoft/openvmm#4968, and microsoft/openvmm#4969 landed after it. Every commit keeps its
-  position, and only position 183, which conflicted with upstream, changed its patch; see
-  [Conflicts of the v5.1 rebase](#conflicts-of-the-v51-rebase). The pin is 89 commits past the
-  mapped tip on the same first-parent chain. Positions 132-220, except the PR20 fixup at position
-  148, are not yet assigned to PRs; see
-  [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  summary, and commit mapping below cover positions 001-131, the PR20 fixup at position 148, and
+  the PR12 fixup at position 221.
+- NVX's pinned OpenVMM revision: `0e46a01edadcf01af3ccc633f817026ecfe60e9a`, position 221.
+  Position 221, which microsoft/openvmm#4983 proposes for `feature/microvm/dev`, is one commit on
+  position 220, `3cf58a523`, the head of `feature/microvm/dev`, which microsoft/openvmm#4981 landed
+  on position 219, `bced18bec`, the head of the `feature/microvm/release/v5.1` branch of
+  microsoft/openvmm. The v5.1 rebase moved the 219 commits of `feature/microvm/dev` at the NVX pin
+  before that rebase, `db42fde04`, onto `ba105dd7f` without dropping any: the 212 of
+  `feature/microvm/release/v5.0` and the seven that microsoft/openvmm#4953, microsoft/openvmm#4954,
+  microsoft/openvmm#4955, microsoft/openvmm#4970, microsoft/openvmm#4968, and microsoft/openvmm#4969
+  landed after it. Every commit keeps its position, and only position 183, which conflicted with
+  upstream, changed its patch; see [Conflicts of the v5.1 rebase](#conflicts-of-the-v51-rebase).
+  The pin is 90 commits past the mapped tip on the same first-parent chain. Positions 132-220,
+  except the PR20 fixup at position 148, are not yet assigned to PRs, and position 221 is a PR12
+  fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -766,7 +767,7 @@ flowchart TB
         P09["PR09<br/>Fallible VM lifecycle<br/>U - 4 commits, 3 in review"]
         P10["PR10<br/>CPU/clock state<br/>U - 11 commits"]
         P11["PR11<br/>Snapshot publication<br/>U - 4 commits"]
-        P12["PR12<br/>Private-CoW restore<br/>U - 5 commits"]
+        P12["PR12<br/>Private-CoW restore<br/>U - 5 commits + fixup"]
         P13["PR13<br/>Virtio persistence<br/>U - 12 commits"]
     end
 
@@ -882,7 +883,8 @@ ba105dd7f
   -> port forward bind code [212] -> virtio queue starts after restore [213-215]
   -> storage generation block identity [216-217]
   -> device start confirmation [218-219] -> long Windows report paths [220]
-  -> 3cf58a523 (NVX pin)
+  -> PR12 fixup [221]
+  -> 0e46a01ed (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -894,20 +896,23 @@ prepared after PR13; PR23's protocol and broker commits can be prepared after PR
 The fork tail, positions 127-129, remains outside the upstream queue. PR27 can be prepared once
 PR22 lands; its generic confinement commit can be submitted independently if preferred. Fold
 position 148 into PR20's position 097 before submission, re-expressed for 097's tier check;
-see [The v3.0 reorganization](#the-v30-reorganization).
+see [The v3.0 reorganization](#the-v30-reorganization). Fold position 221 into PR12 before
+submission: its change of the file generation, with its test, into position 035, which adds the
+generation, re-expressed for the snapshot publication that 035 builds on, and its Guide sentence
+into position 036, which adds the sentence that it replaces.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 89 later commits, position
-148 is a PR20 fixup, and the others are not yet classified or assigned to PRs. Each of positions
-132-187 combines the v2.4 commits that the table lists, as v3.0 positions 145-200 did, which
-developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 188-192
-followed the v3.0 reorganization, positions 193-206 are the ABI restart of the v4.0
-reorganization, positions 207-212 followed it, positions 213-219 followed the v5.0
-reorganization, and position 220 followed the v5.1 rebase, so they combine none. Each commit
-through position 219 has the position that it had in v5.0, since the v5.1 rebase dropped none. A
-v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are those of
-`feature/microvm/release/v4.0`.
+The NVX pin extends the chain past position 131 without merges. Of the 90 later commits, position
+148 is a PR20 fixup and position 221 a PR12 fixup, and the others are not yet classified or
+assigned to PRs. Each of positions 132-187 combines the v2.4 commits that the table lists, as v3.0
+positions 145-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
+commits. Positions 188-192 followed the v3.0 reorganization, positions 193-206 are the ABI restart
+of the v4.0 reorganization, positions 207-212 followed it, positions 213-219 followed the v5.0
+reorganization, and positions 220 and 221 followed the v5.1 rebase, so they combine none. Each
+commit through position 219 has the position that it had in v5.0, since the v5.1 rebase dropped
+none. A v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are
+those of `feature/microvm/release/v4.0`.
 
 | Position | Commit | v4.0 position | v3.0 position | v2.4 positions | Topic |
 | ---: | --- | ---: | ---: | --- | --- |
@@ -1000,6 +1005,7 @@ v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 co
 | 218 | `dbec9b624` | - | - | - | virtio: keep the progress of queues that a failed start stops (microsoft/openvmm#4968) |
 | 219 | `bced18bec` | - | - | - | vmcore: confirm device starts before the VM runs (microsoft/openvmm#4969) |
 | 220 | `3cf58a523` | - | - | - | microVM: publish the outcome report below long Windows paths (microsoft/openvmm#4981) |
+| 221 | `0e46a01ed` | - | - | - | openvmm_helpers: leave the change time out of snapshot file generations (microsoft/openvmm#4983); fold into 035 and 036 |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1056,8 +1062,12 @@ adds its confirmation next to the input quiesce of PR09's position 018 in the fi
 018 changes, and rewrites position 215's documentation. Position 220 changes the outcome report
 publication of PR24's position 122, which on Windows now publishes the report through the
 extended-length form of its path, and moves the extended-length encoding that position 210 gives
-`pal`'s secure creation into `pal`'s file system module, which both now use. Assigning the later
-commits therefore means revisiting those PRs, not only appending new ones.
+`pal`'s secure creation into `pal`'s file system module, which both now use. Position 221 leaves
+the change time out of the file generation that PR12's position 035 records for the snapshot files
+that a Linux restore opens, since the source of a capture whose RAM PR11's position 033 publishes as
+`memory.bin` moves that time as it tears down, and rewrites the sentence of the snapshot format
+guide that PR12's position 036 adds and PR19's position 093 rewraps. Assigning the later commits
+therefore means revisiting those PRs, not only appending new ones.
 
 Position 178, by contrast, changes only `disk_blob`, which upstream main and the fork base
 have alike and no other commit of the chain changes, so it can go upstream on its own. Position
@@ -1162,6 +1172,11 @@ files: the outcome report module, which PR24's position 122 adds and upstream ma
 module applies there. So its report change follows PR24 upstream, and its `pal` change follows
 position 210's.
 
+Position 221 builds on the chain too. Replaying it on upstream main conflicts in all three of its
+files: the snapshot file system module, which PR11's position 032 adds and upstream main lacks, and
+the snapshot restore module and the snapshot format guide, which the chain changes. So it follows
+PR12 upstream, folded into positions 035 and 036.
+
 ## PR summary
 
 Each count is of v5.1 commits, which include the fixups that the v3.0, v4.0, and v5.0
@@ -1182,7 +1197,7 @@ reorganizations folded into them; see [The v5.0 reorganization](#the-v50-reorgan
 | PR09 | U | Fallible VM lifecycle | 015-018 | `179106cd9..07a98b977` | 4 | Current upstream |
 | PR10 | U | Portable CPU and clock state | 019-029 | `a1e113d12..ab67f39e2` | 11 | PR09 |
 | PR11 | U | Snapshot publication protocol | 030-033 | `23e759e74..112512c35` | 4 | PR10 |
-| PR12 | U | Immutable private-CoW restore | 034-038 | `6c89f4c94..81210e3e9` | 5 | PR10 |
+| PR12 | U | Immutable private-CoW restore | 034-038; 221 (fixup) | `6c89f4c94..81210e3e9`; `0e46a01ed` | 6 | PR10 |
 | PR13 | U | Generic virtio persistence | 039-050 | `8260d32d9..9545b9ecb` | 12 | PR11 + PR12 |
 | PR14 | U | Firmware-less direct boot, loader half | 051-054 | `7f1aadb82..9cc9dbe47` | 4 | Current upstream |
 | PR15 | P | microVM machine profile and minimal chipset | 055-065 | `ab45eb42b..3d22803c3` | 11 | Foundation fan-in |
@@ -1204,7 +1219,8 @@ reorganizations folded into them; see [The v5.0 reorganization](#the-v50-reorgan
 
 Each entry, at the position that the commit had in v5.0 too, names the v4.0 position of the commit,
 the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4 fixups that it folds; "(part)" marks a
-fixup that split across commits. A
+fixup that split across commits. Position 221, which followed the v5.1 rebase, names its OpenVMM
+pull request instead. A
 v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are those of
 `feature/microvm/release/v4.0`. Landed entries name the commits and positions of the branch that
 the rebase started from, `microvm/v2.1`, `feature/microvm/release/v2.2`,
@@ -1413,13 +1429,14 @@ Retired by the v4.0 and v5.0 reorganizations:
 </details>
 
 <details>
-<summary><strong>PR12 - Immutable private-CoW restore (U)</strong> - 5 commits</summary>
+<summary><strong>PR12 - Immutable private-CoW restore (U)</strong> - 6 commits</summary>
 
 - 034 `6c89f4c94` - membacking: map guest RAM privately copy-on-write with fault accounting (v4.0 039, v3.0 048, v2.4 048; folds v2.4 375 (part))
 - 035 `47e3c81d3` - openvmm_helpers: open snapshots once and read artifacts relative to the directory (v4.0 040, v3.0 049, v2.4 049)
 - 036 `95db7ca80` - openvmm: restore RAM through a private CoW mapping and retain generation handles (v4.0 041, v3.0 050, v2.4 050; folds v2.4 375 (part))
 - 037 `29840d8c9` - openvmm: signal restore readiness to a local socket or pipe (v4.0 042, v3.0 051, v2.4 051)
 - 038 `81210e3e9` - virt_whp: resolve unmapped-GPA faults and register restored RAM lazily (v4.0 043, v3.0 052, v2.4 052; folds v2.4 313 and 382 (part))
+- 221 `0e46a01ed` - openvmm_helpers: leave the change time out of snapshot file generations (microsoft/openvmm#4983; **fold into 035 and 036**, its test re-expressed for 035's publication)
 
 </details>
 
