@@ -35,8 +35,9 @@
 //! - [`template`] retains the legacy capture and clone plans, the [`Store`](template::Store) of
 //!   published generations and their leases, and aliases of the snapshot metadata. Its
 //!   [`TemplatePlan`](template::TemplatePlan) lowers an adapter's plan for a capture.
-//! - [`session`] speaks NVX's control protocol, `NVXC`, over [`nvxs`], which runs the host's role
-//!   of the NVXS session for it and for any other application protocol, over a platform
+//! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session.
+//!   [`nvxs`] retains compatibility paths. [`session`] speaks NVX's control protocol, `NVXC`,
+//!   over that connection for it and for any other application protocol, over a platform
 //!   transport. [`platform`] holds the primitives of Linux and Windows hosts. Other hosts compile
 //!   but report NVX as unavailable.
 //! - [`process`] names processes by verified references: their ID, start time, and host boot,
@@ -103,4 +104,5 @@ mod sys;
 pub mod template;
 #[cfg(test)]
 pub(crate) mod tests;
+pub mod transport;
 pub mod vm;
