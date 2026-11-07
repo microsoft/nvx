@@ -92,13 +92,61 @@ impl MachineId {
 /// or a root whose view has already been attempted. System failures have kind `Io`; refusals
 /// have kind `Unsupported`. An error does not restore the previous hostname or remove files.
 pub fn apply(root: &mut Root, view: &View, dns: Option<IpAddr>) -> Result<MachineId> {
+    apply_staged(root, view, dns).map_err(ApplyFailure::into_error)
+}
+
+/// A view failure with the resolver's original cause distinguished for activation.
+#[derive(Debug)]
+pub(crate) enum ApplyFailure {
+    /// A hostname, root, or machine-ID failure.
+    View(Error),
+    /// The resolver file could not be written.
+    ResolverWrite(io::Error),
+    /// The resolver file could not be bound.
+    ResolverBind(Error),
+}
+
+impl From<Error> for ApplyFailure {
+    fn from(error: Error) -> Self {
+        Self::View(error)
+    }
+}
+
+impl ApplyFailure {
+    /// Returns the public view API's original error.
+    fn into_error(self) -> Error {
+        match self {
+            Self::View(error) | Self::ResolverBind(error) => error,
+            Self::ResolverWrite(error) => {
+                Error::io(format!("failed to write the VM resolver file: {error}"))
+                    .with_source(error)
+            }
+        }
+    }
+}
+
+/// Applies the same view while retaining the resolver failure stage for activation.
+pub(crate) fn apply_staged(
+    root: &mut Root,
+    view: &View,
+    dns: Option<IpAddr>,
+) -> std::result::Result<MachineId, ApplyFailure> {
     if !activation::is_hostname(&view.hostname) {
-        return Err(Error::unsupported("the view's hostname is not valid"));
+        return Err(Error::unsupported("the view's hostname is not valid").into());
     }
     root.begin_view()?;
     sys::set_hostname(&view.hostname).map_err(|error| {
         Error::io(format!("failed to set the VM hostname: {error}")).with_source(error)
     })?;
+    apply_files(root, view, dns)
+}
+
+/// Applies files after the root's view has been reserved and its hostname set.
+pub(crate) fn apply_files(
+    root: &mut Root,
+    view: &View,
+    dns: Option<IpAddr>,
+) -> std::result::Result<MachineId, ApplyFailure> {
     let machine_id = match view.machine_id {
         MachineIdMode::Image => MachineId::Image,
         MachineIdMode::Generated => MachineId::generate(root.runtime().join(MACHINE_ID_FILE))
@@ -113,10 +161,10 @@ pub fn apply(root: &mut Root, view: &View, dns: Option<IpAddr>) -> Result<Machin
             write_resolver_file(&path, server).map(|()| path)
         })
         .transpose()
-        .map_err(|error| {
-            Error::io(format!("failed to write the VM resolver file: {error}")).with_source(error)
-        })?;
-    root.bind_view(&machine_id, resolver.as_deref())?;
+        .map_err(ApplyFailure::ResolverWrite)?;
+    root.bind_view(&machine_id, None)?;
+    root.bind_view(&MachineId::Image, resolver.as_deref())
+        .map_err(ApplyFailure::ResolverBind)?;
     Ok(machine_id)
 }
 

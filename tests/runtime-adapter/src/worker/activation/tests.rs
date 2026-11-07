@@ -5,7 +5,7 @@ use nvx::activation::{
     Configuration, ExpectedResources, Image, MachineIdMode, OverlayMode, RestoreSection,
     TransactionId, Upper, View,
 };
-use nvx::guest::clone::{AdmissionFence, NetworkError};
+use nvx::guest::clone::NetworkError;
 use nvx::guest::entry;
 use nvx::guest::ingress::StartError;
 use nvx::guest::mappings::MappingError;
@@ -44,17 +44,15 @@ fn record(transaction: u8, hostname: &[u8]) -> ActivationRecord {
     ActivationRecord::new(Some(restore), configuration).unwrap()
 }
 
-/// Returns a clone's activation, in its transport bootstrap, behind a closed fence, with
+/// Returns a clone's activation, in its transport bootstrap, with
 /// `resources`, which the deadline ends `timeout` after now.
-fn activation(resources: ExpectedResources, timeout: Duration) -> Activation<Admission> {
-    let mut fence = Admission::default();
-    fence.close().unwrap();
+fn activation(resources: ExpectedResources, timeout: Duration) -> Activation {
     let now = Instant::now();
-    Activation::with_resources(resources, Some(now), fence, timeout, now)
+    Activation::with_resources(resources, Some(now), timeout, now)
 }
 
 /// Returns an activation that took the session's reset, and is restricted.
-fn restricted() -> Activation<Admission> {
+fn restricted() -> Activation {
     let mut activation = activation(RESOURCES, ACTIVATION_TIMEOUT);
     let action = activation.input(Instant::now(), ActivationInput::Reset);
     assert_eq!(action.unwrap(), ActivationAction::Acknowledge);
@@ -62,7 +60,7 @@ fn restricted() -> Activation<Admission> {
 }
 
 /// Returns an activation that accepted the record of the transaction 1.
-fn activating() -> Activation<Admission> {
+fn activating() -> Activation {
     let mut activation = restricted();
     let bytes = record(1, b"clone").encode();
     let action = activation.input(Instant::now(), ActivationInput::Activate(&bytes));
@@ -158,7 +156,7 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     let workload = activating().complete(now(), Err(generated.into()));
     cases.push((failed(workload), status::ACTIVATION_WORKLOAD));
     let view = ApplyError::View {
-        error: entry::Error::Hostname,
+        error: nvx::Error::unsupported("the hostname is invalid"),
         teardown: None,
     };
     let workload = activating().complete(now(), Err(view.into()));
@@ -181,22 +179,26 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     let network = activating().complete(now(), Err(unwritten.into()));
     cases.push((failed(network), status::ACTIVATION_NETWORK));
     let unbound = ApplyError::Network {
-        error: NetworkError::Bind(entry::Error::Resolver(MappingError::TargetKind)),
+        error: NetworkError::Bind(
+            nvx::Error::io("the resolver bind failed")
+                .with_source(entry::Error::Resolver(MappingError::TargetKind)),
+        ),
         teardown: None,
     };
     let network = activating().complete(now(), Err(unbound.into()));
     cases.push((failed(network), status::ACTIVATION_NETWORK));
-    for error in [
-        NetworkError::Gateway,
-        NetworkError::Announcer(StartError::NoPrivilegedPort),
-    ] {
-        let unannounced = ApplyError::Network {
-            error,
-            teardown: None,
-        };
-        let network = activating().complete(now(), Err(unannounced.into()));
-        cases.push((failed(network), status::ACTIVATION_NETWORK));
-    }
+    let gateway = ApplyError::Network {
+        error: NetworkError::Gateway,
+        teardown: None,
+    };
+    let network = activating().complete(now(), Err(gateway.into()));
+    cases.push((failed(network), status::ACTIVATION_NETWORK));
+    let unannounced = super::super::AnnounceFailure {
+        error: StartError::NoPrivilegedPort,
+        teardown: None,
+    };
+    let network = activating().complete(now(), Err(unannounced.into()));
+    cases.push((failed(network), status::ACTIVATION_NETWORK));
     let other = activating().complete(now(), Err("another failure of the application".into()));
     cases.push((failed(other), status::ACTIVATION_ROOT));
     // The worker's own order.

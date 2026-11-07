@@ -107,9 +107,8 @@
 //! # Activation
 //!
 //! A repaired clone then takes its own configuration from the host, in one Activate, on a
-//! restricted control session, through an [`Activation`] of the [`Repaired`] clone and of the
-//! caller's fence, which stays closed until the activation is ready, so that no execution starts
-//! before. The activation is a state machine without I/O, independent of any framing: the adapter
+//! restricted control session, through an [`Activation`] of the [`Repaired`] clone. Activation
+//! holds no admission fence and makes no system call. It is independent of any framing: the adapter
 //! passes it what it receives on the clone's NVXS session, each an [`ActivationInput`], and does
 //! what each [`ActivationAction`] that it returns says. Its [`ActivationState`]s, in order, are:
 //!
@@ -126,7 +125,7 @@
 //!    activates the root and the workload with its settings, as below, passes the activation
 //!    what the session received meanwhile, which came before Ready, then reports the result to
 //!    [`Activation::complete`];
-//! 4. ready, with the mappings pending: the activation completed, opened the fence, and returned
+//! 4. ready, with the mappings pending: the activation completed and returned
 //!    what Ready reports beside the adapter's own identities, such as its build, a
 //!    [`ReadyActivation`](crate::activation::ReadyActivation): that the activation applied, with
 //!    the record's transaction ID. The host's mapping table, which the record announced, and the
@@ -167,34 +166,23 @@
 //! sandbox's scratch keeps its upper across boots; the check reads at most one entry of each, and
 //! no file. The record holds no execution identity: the adapter gives each execution the identity
 //! that the execution names, which [`Entry::check`](super::entry::Entry::check) checks, as for a sandbox
-//! without a workload identity at a cold boot. If the record asks for a generated machine
-//! ID, it then generates one, once, with
-//! [`MachineId::generate`](super::entry::MachineId::generate), after the repair's reseed, so that
-//! no two clones of a template share it, to [`MACHINE_ID_FILE`] in the template's runtime
-//! directory. If the record has an export, it mounts the host export through the template's
+//! without a workload identity at a cold boot. If the record has an export, it mounts the host
+//! export through the template's
 //! filesystem device, with `Root::mount_export`, read-write, at
 //! `hostfs/root` in the runtime directory, outside the root, where only the guest's root user
 //! reaches it: the record names no mode, and OpenVMM limits each of the export's children to its
-//! own access. If the record's network names a DNS server, it writes a resolver file that names
-//! it to [`RESOLVER_FILE`] in the runtime directory. If the network publishes the workload's
-//! listeners, it starts their announcer, with
-//! [`Announcer::start`](super::ingress::Announcer::start), to the template's gateway: the
-//! template captured its NIC under a policy that publishes nothing, so that no announcer ran in
-//! it. It then binds the runtime's files into the root for every execution, with one
-//! [`Entry::bind_runtime`](super::entry::Entry::bind_runtime), in the caller's mount namespace:
-//! the generated machine ID's file, read-only over the root's `/etc/machine-id`, and the
-//! resolver file, read-only over the root's `/etc/resolv.conf`, or, with neither, nothing. The
-//! entry checks the record's hostname first, which every execution's entry then takes. It returns
+//! own access. It applies the record's VM-wide view through `view::apply`, with the record's
+//! DNS server, if any. The root owns the machine-ID and resolver binds, including any made
+//! before a later failure. The view sets the VM's hostname and generates an ID only when the
+//! record requests one, after the repair's reseed. Application starts no process. It returns
 //! the `Applied` root and workload, which the adapter keeps, with the export's root, from which
 //! the adapter maps the host's mapping table once the clone is ready, the network's proxy
-//! endpoint, which the adapter tells its workloads as at a cold boot, and the announcer, which the
-//! adapter watches, and must end the clone once the announcer ended: the gateway then keeps
-//! publishing the listeners that the announcer last announced until the VM ends, and learns of no
-//! later change of them. The `teardown` of the `Applied` stops the
-//! announcer, closes the export's root, and removes the binds before it tears the root down. An
+//! endpoint, which the adapter tells its workloads as at a cold boot, and the publication and
+//! gateway with which the caller starts and supervises ingress. The `teardown` of the `Applied`
+//! closes the export's root, then tears the root down with its view binds. Its `into_parts`
+//! returns the root and machine ID, with every bind still owned by the root. An
 //! application that fails returns an `ApplyError` instead, after which nothing that it mounted or
-//! bound stays mounted, unless the error holds the unmounts that failed, and no announcer that it
-//! started runs.
+//! bound stays mounted, unless the error holds the unmounts that failed.
 //!
 //! # Example
 //!
@@ -202,7 +190,7 @@
 //! use std::io;
 //! use std::time::{Duration, Instant};
 //!
-//! use nvx::guest::clone::{
+//! use nvx::guest::activation::{
 //!     self, Activation, AdmissionFence, CapturePreparation, Captured, Devices,
 //! };
 //! use nvx::guest::root::Device;
@@ -242,8 +230,8 @@
 //!     Captured::Restored(restored) => {
 //!         // A clone continues here, with its wall clock repaired. Its repair activates its
 //!         // memory, reseeds it, and acknowledges the restore, while its fence stays closed.
-//!         let (restore, fence) = restored.into_parts();
-//!         let repaired = match clone::repair(restore) {
+//!         let (restore, _fence) = restored.into_parts();
+//!         let repaired = match activation::repair(restore) {
 //!             Ok(repaired) => repaired,
 //!             Err(error) => {
 //!                 // The agent ends the VM with the failure's status, after an error line.
@@ -252,10 +240,10 @@
 //!             }
 //!         };
 //!         println!("{} CPUs, {} bytes of memory", repaired.cpus(), repaired.memory());
-//!         // Its activation takes the host's Activate, and opens the fence once the clone is
-//!         // ready: the agent drives it with what its control session receives.
+//!         // Its fence-free activation takes the host's Activate: the agent drives it with
+//!         // what its control session receives and admits executions only after Ready.
 //!         let timeout = Duration::from_secs(30);
-//!         let activation = Activation::new(&repaired, fence, timeout, Instant::now());
+//!         let activation = Activation::new(&repaired, timeout, Instant::now());
 //!         println!("activate by {:?}", activation.deadline());
 //!     }
 //! }
@@ -276,20 +264,18 @@
 //! the time ABI in the capture's preparation, which stops the VM unless the ABI is report-only,
 //! as [strict mode](#strict-mode) tells, they never power the VM off, so a caller that is not
 //! PID 1 keeps its own reaping, transport, and shutdown. The activation needs no privilege, and
-//! makes no system call: of the clone, it changes only the caller's fence, which it opens. Its
+//! makes no system call and changes no admission fence. Its
 //! application, `apply`, needs the guest's root user, in the guest's initial mount
 //! namespace, as `root::assemble` does: for a GPT disk, it asks the kernel to reread the disk's
-//! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, reads the account databases
-//! below it, and, if it fails, tears it down. It starts no process but the announcer of a record
-//! whose network publishes the workload's listeners, whose socket it binds to a privileged source
-//! port, and whose status it collects through the `Applied`, and it generates at most one ID, a
+//! partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, applies its VM-wide view,
+//! and, if it fails, tears it down. It starts no process and generates at most one ID, a
 //! machine ID that the record asks for. It mounts the host export of a record that has one, and
 //! writes the machine ID's and the resolver's files in the runtime directory, whose binds over
 //! the root's `/etc/machine-id` and `/etc/resolv.conf` need Linux 6.8 or later.
 
-mod activation;
 mod mounts;
 mod repair;
+mod state;
 #[cfg(test)]
 mod tests;
 
@@ -307,17 +293,17 @@ use super::time::{
     CaptureOutcome, CaptureRequest, PreCaptureError, Restore, ScratchPolicy, TimeAbi, TimeError,
 };
 
-pub use self::activation::{
+pub use self::mounts::{Mounted, Origin};
+pub use self::repair::{
+    RangeFault, Repair, RepairCause, RepairError, RepairProgress, RepairStage, Repaired, repair,
+};
+pub use self::state::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
     ActivationState, MACHINE_ID_FILE, RESOLVER_FILE,
 };
 #[doc(hidden)]
-pub use self::activation::{
+pub use self::state::{
     Applied, AppliedTeardownError, ApplyError, NetworkError, RootTemplate, apply,
-};
-pub use self::mounts::{Mounted, Origin};
-pub use self::repair::{
-    RangeFault, Repair, RepairCause, RepairError, RepairProgress, RepairStage, Repaired, repair,
 };
 
 /// The most bytes of the mount table that a [`CapturePreparation`] reads: 1 MiB, the lines of

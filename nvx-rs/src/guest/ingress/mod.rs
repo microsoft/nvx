@@ -7,8 +7,8 @@
 //! A clone of a template restores the template's NIC, which the template
 //! captured under a policy that publishes nothing, so its init started no
 //! announcer, with a policy of its own, which may publish the clone's
-//! listeners. The clone's application then starts the announcer itself, with
-//! [`Announcer::start`]: as root, it binds the announcer's UDP socket to a
+//! listeners. After the process-free application succeeds, its caller starts
+//! the announcer with [`Announcer::start`]: as root, it binds its UDP socket to a
 //! privileged source port, and runs `nvx-ingress inherit GATEWAY_IPV4`, which
 //! announces from that socket, its standard input, rather than from one of its
 //! own. A failure to bind the socket, or to run the program, is the start's

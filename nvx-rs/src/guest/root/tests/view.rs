@@ -4,6 +4,7 @@ use crate::{
     ErrorKind,
     activation::{MachineIdMode, View},
 };
+use std::error::Error as _;
 
 #[test]
 fn runtime_sources_are_the_directories_beside_their_files() {
@@ -94,6 +95,38 @@ fn the_root_removes_its_view_binds_in_reverse_order_before_the_overlay() {
     );
 }
 
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn an_applied_root_keeps_its_view_binds_when_transferred_into_parts() {
+    for switched in [false, true] {
+        let (guest, mut root, machine_id, resolver) = prepared();
+        root.begin_view().unwrap();
+        root.bind_view(&machine_id, Some(&resolver)).unwrap();
+        if switched {
+            root.switch().unwrap();
+        }
+        let calls = guest.kernel.calls();
+        let applied = crate::guest::activation::Applied::from_test_root(root, machine_id.clone());
+        let (root, returned_id) = applied.into_parts();
+        assert_eq!(returned_id, machine_id);
+        assert_eq!(guest.kernel.calls(), calls);
+        assert_eq!(root.view_binds.as_ref().unwrap().1.len(), 2);
+        if switched {
+            assert!(root.teardown().unwrap_err().is_switched());
+            assert!(guest.kernel.unmounts().is_empty());
+        } else {
+            root.teardown().unwrap();
+            assert_eq!(
+                &guest.kernel.unmounts()[..2],
+                [
+                    guest.text("run/nvx/rootfs/etc/resolv.conf"),
+                    guest.text("run/nvx/rootfs/etc/machine-id"),
+                ]
+            );
+        }
+    }
+}
+
 #[test]
 fn image_mode_without_dns_binds_nothing_and_a_second_view_is_refused() {
     let (guest, mut root, _, _) = prepared();
@@ -148,6 +181,65 @@ fn a_later_bind_failure_stays_owned_and_its_teardown_removes_the_earlier_bind() 
     assert!(guest.kernel.mount_at(&target).is_none());
     root.teardown().unwrap();
     assert!(guest.kernel.mount_at(&machine).is_none());
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn actual_resolver_failures_keep_the_network_class_and_root_owned_bind() {
+    use crate::guest::activation::{ApplyError, NetworkError};
+
+    for write_failure in [false, true] {
+        let (guest, mut root, _, resolver) = prepared();
+        fs::remove_file(root.runtime().join(MACHINE_ID_FILE)).unwrap();
+        if !write_failure {
+            fs::remove_file(&resolver).unwrap();
+            guest.kernel.fail(
+                Operation::MoveMount,
+                root.path().join("etc/resolv.conf"),
+                Errno::EPERM,
+            );
+        }
+        root.begin_view().unwrap();
+        let view = View {
+            hostname: b"clone".to_vec(),
+            machine_id: MachineIdMode::Generated,
+        };
+        let failure = vm_view::apply_files(&mut root, &view, Some("192.0.2.53".parse().unwrap()))
+            .unwrap_err();
+        let error = ApplyError::from_test_view_failure(failure);
+        match error {
+            ApplyError::Network {
+                error: NetworkError::Write(error),
+                teardown: None,
+            } => {
+                assert!(write_failure);
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            }
+            ApplyError::Network {
+                error: NetworkError::Bind(error),
+                teardown: None,
+            } => {
+                assert!(!write_failure);
+                assert_eq!(error.kind(), ErrorKind::Io);
+                let cause = error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<MappingError>()
+                    .unwrap();
+                assert_eq!(cause.raw_os_error(), Errno::EPERM as i32);
+                assert!(root.is_latched());
+            }
+            error => panic!("a real resolver failure lost its network class: {error}"),
+        }
+        let machine = root.path().join("etc/machine-id");
+        assert_eq!(guest.kernel.mount_at(&machine).is_some(), !write_failure);
+        assert_eq!(
+            root.view_binds.as_ref().unwrap().1.len(),
+            usize::from(!write_failure)
+        );
+        root.teardown().unwrap();
+        assert!(guest.kernel.mount_at(&machine).is_none());
+    }
 }
 
 #[test]

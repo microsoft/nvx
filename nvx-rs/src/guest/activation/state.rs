@@ -12,7 +12,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{AdmissionFence, Repaired};
+use super::Repaired;
 use crate::activation::{
     ActivationError, ActivationRecord, ExpectedResources, ReadyActivation, TransactionId,
 };
@@ -24,8 +24,8 @@ pub use self::apply::{
 
 /// The activation of a repaired clone: the state machine, without I/O and independent of any
 /// framing, of the clone's control session, which takes the clone's configuration from the host
-/// in one Activate, behind the caller's fence of workload admission, which it opens once the
-/// activation is ready; see the [module](super#activation).
+/// in one Activate. It holds no admission fence and makes no system call; see the
+/// [module](super#activation).
 ///
 /// The adapter passes it what it receives on the session, each an [`ActivationInput`], through
 /// [`input`](Self::input), and does what the [`ActivationAction`] that it returns says. The
@@ -48,9 +48,8 @@ pub use self::apply::{
 /// | [`Ready`](ActivationState::Ready), [`Started`](ActivationState::Started) | [`Acknowledge`](ActivationAction::Acknowledge), a later session | [`Continue`](ActivationAction::Continue) | [`Ready`](ActivationAction::Ready) if byte-equal | [`Serve`](ActivationAction::Serve) |
 ///
 /// Every failure is final, and leaves the activation [failed](ActivationState::Failed): every
-/// later call returns the same [`ActivationFailure`]. A failure before the activation is ready
-/// leaves the fence closed, and one after it leaves the fence open. The activation never powers
-/// the VM off: the adapter reports the failure and ends the VM.
+/// later call returns the same [`ActivationFailure`]. The activation never starts a process or
+/// powers the VM off: the adapter reports the failure and ends the VM.
 ///
 /// # Example
 ///
@@ -58,8 +57,8 @@ pub use self::apply::{
 /// use std::time::Instant;
 ///
 /// use nvx::activation::ReadyActivation;
-/// use nvx::guest::clone::{
-///     self, Activation, ActivationAction, ActivationFailure, ActivationInput, AdmissionFence,
+/// use nvx::guest::activation::{
+///     self, Activation, ActivationAction, ActivationFailure, ActivationInput,
 ///     Applied, RootTemplate,
 /// };
 ///
@@ -104,10 +103,10 @@ pub use self::apply::{
 ///
 /// /// Serves the control session of the clone whose activation is `activation`, and whose
 /// /// template captured `template`, the inputs of its root's assembly, until it fails.
-/// fn serve<F: AdmissionFence>(
+/// fn serve(
 ///     agent: &mut impl Agent,
 ///     template: &RootTemplate,
-///     mut activation: Activation<F>,
+///     mut activation: Activation,
 /// ) -> Result<(), ActivationFailure> {
 ///     loop {
 ///         let Some(received) = agent.receive(activation.deadline()) else {
@@ -120,10 +119,10 @@ pub use self::apply::{
 ///             ActivationAction::Continue | ActivationAction::Join => {}
 ///             ActivationAction::Apply(record) => {
 ///                 // The record is valid, and nothing happened before: the activation's side
-///                 // effects start here, and the fence opens once they all succeeded. The
+///                 // effects start here. The
 ///                 // application waits for the devices until the activation's deadline at the
 ///                 // latest, so that it ends by then.
-///                 let applied = clone::apply(&record, template, activation.deadline());
+///                 let applied = activation::apply(&record, template, activation.deadline());
 ///                 // What the host sent meanwhile came before Ready: a retry of the Activate,
 ///                 // byte for byte, joins the application, and anything else, a reset included,
 ///                 // fails the activation, which drops what the application assembled.
@@ -139,7 +138,7 @@ pub use self::apply::{
 ///                         agent.keep(applied);
 ///                         activation.complete(Instant::now(), Ok(()))?
 ///                     }
-///                     // A failed application fails the activation: the fence stays closed.
+///                     // A failed application fails the activation.
 ///                     Err(error) => activation.complete(Instant::now(), Err(error.into()))?,
 ///                 };
 ///                 // Ready answers the Activate, and each retry that joined its application.
@@ -171,9 +170,7 @@ pub use self::apply::{
 ///     }
 /// }
 /// ```
-pub struct Activation<F> {
-    /// The caller's fence of workload admission, closed until the activation is ready.
-    fence: F,
+pub struct Activation {
     /// The resources that the clone has, as its repair reports them, which the record of an
     /// Activate must expect.
     resources: ExpectedResources,
@@ -183,23 +180,22 @@ pub struct Activation<F> {
     state: State,
 }
 
-impl<F: AdmissionFence> Activation<F> {
+impl Activation {
     /// Returns the activation of the clone that `repaired` describes, in its
-    /// [transport bootstrap](ActivationState::Bootstrap), behind the caller's `fence`, which
-    /// [`Restored::into_parts`](super::Restored::into_parts) handed over closed, and which the
-    /// activation opens once it is ready.
+    /// [transport bootstrap](ActivationState::Bootstrap), without holding or changing an
+    /// admission fence.
     ///
     /// The activation must be ready by its deadline: `timeout`, which the caller chooses, after
     /// the repair acknowledged the restore, as [`Repaired::acknowledged_at`] tells, or after `now`
     /// for a restore that the host did not gate until an acknowledgement, whose repair
     /// acknowledged nothing. No input or retry extends it. A deadline that no instant can hold
     /// never passes.
-    pub fn new(repaired: &Repaired, fence: F, timeout: Duration, now: Instant) -> Self {
+    pub fn new(repaired: &Repaired, timeout: Duration, now: Instant) -> Self {
         let resources = ExpectedResources {
             cpus: repaired.cpus(),
             memory: repaired.memory(),
         };
-        Self::with_resources(resources, repaired.acknowledged_at(), fence, timeout, now)
+        Self::with_resources(resources, repaired.acknowledged_at(), timeout, now)
     }
 
     /// Returns the activation of a clone that has `resources`, and whose repair acknowledged its
@@ -209,13 +205,11 @@ impl<F: AdmissionFence> Activation<F> {
     pub fn with_resources(
         resources: ExpectedResources,
         acknowledged_at: Option<Instant>,
-        fence: F,
         timeout: Duration,
         now: Instant,
     ) -> Self {
         let start = acknowledged_at.unwrap_or(now);
         Self {
-            fence,
             resources,
             deadline: start.checked_add(timeout),
             state: State::Bootstrap,
@@ -302,10 +296,10 @@ impl<F: AdmissionFence> Activation<F> {
     /// the adapter's application of the record, and returns what Ready reports: that the
     /// activation applied, with the record's transaction ID.
     ///
-    /// A result that succeeded by the deadline makes the activation ready: it opens the fence,
-    /// which no input before opened, and the adapter reports Ready. A failure, which may have
+    /// A result that succeeded by the deadline makes the activation ready, and the adapter
+    /// reports Ready. A failure, which may have
     /// applied part of the record, is final, with [`ActivationCause::Failed`], so that no retry
-    /// activates the record again, and the fence stays closed. Past the deadline, the activation
+    /// activates the record again. Past the deadline, the activation
     /// fails with [`ActivationCause::Expired`] instead, whatever the result. Without an activation
     /// that runs, it fails with [`ActivationCause::Completion`].
     pub fn complete(
@@ -323,7 +317,6 @@ impl<F: AdmissionFence> Activation<F> {
         }
         let ready = accepted.ready;
         self.state = State::Ready(accepted);
-        self.fence.open();
         Ok(ready)
     }
 
@@ -444,7 +437,7 @@ impl<F: AdmissionFence> Activation<F> {
     }
 }
 
-impl<F> fmt::Debug for Activation<F> {
+impl fmt::Debug for Activation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Activation")
@@ -520,7 +513,7 @@ pub enum ActivationState {
     Restricted,
     /// The adapter applies the accepted Activate's record.
     Activating,
-    /// Ready, with the mappings pending: the activation completed, which opened the fence, and
+    /// Ready, with the mappings pending: the activation completed, and
     /// returned what Ready reports. The host's mapping table, which the record announced, and the
     /// start of the sandbox follow in the adapter's order, as after a cold boot.
     Ready,

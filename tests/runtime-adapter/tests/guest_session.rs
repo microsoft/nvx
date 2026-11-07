@@ -1129,11 +1129,10 @@ enum Operation {
     /// A clone's reread of its GPT disk's partition table, before its assembly.
     #[cfg(target_arch = "x86_64")]
     Reread,
-    /// A clone's generation of the machine ID that its record asks for, once its root's account
-    /// was checked.
+    /// A clone's generation of the machine ID that its view asks for, after its hostname.
     #[cfg(target_arch = "x86_64")]
     MachineId,
-    /// A clone's setting of its record's hostname and machine ID for every execution, last.
+    /// A clone's reservation of its root's view and setting of its VM-wide hostname.
     #[cfg(target_arch = "x86_64")]
     View,
     /// A clone's write of the resolver file that names its record's DNS server, once it mounted
@@ -1201,6 +1200,8 @@ struct FakeRoot {
     gate: Option<Receiver<()>>,
     /// The worker's calls, in order.
     calls: Vec<Call>,
+    /// The operations attempted by the fake, in order.
+    steps: Vec<Operation>,
     /// The deadline of each of a clone's applications, in order, until which it waits for the
     /// devices at the latest.
     #[cfg(target_arch = "x86_64")]
@@ -1251,6 +1252,7 @@ impl FakeRoot {
             assembly: Duration::ZERO,
             gate: None,
             calls: Vec::new(),
+            steps: Vec::new(),
             #[cfg(target_arch = "x86_64")]
             deadlines: Vec::new(),
             workload,
@@ -1298,7 +1300,8 @@ impl FakeRoot {
     }
 
     /// Fails if `operation` fails.
-    fn result(&self, operation: Operation) -> Result<(), String> {
+    fn result(&mut self, operation: Operation) -> Result<(), String> {
+        self.steps.push(operation);
         match self.failing {
             Some((failing, problem)) if failing == operation => Err(problem.to_owned()),
             _ => Ok(()),
@@ -1396,22 +1399,20 @@ impl RootOperations for FakeRoot {
     /// table first, which fails as the kernel does while a partition is open if the test fails
     /// [`Operation::Reread`]; it then takes as long as the assembly, but no longer than until
     /// `deadline`, as the waits for the devices do; like the application, it checks no account.
-    /// It then stands for the generation of the machine ID
-    /// that the record asks for, if any, the mount of the record's export through the template's
-    /// host filesystem device, if it has one, the write of the resolver file that names the DNS
-    /// server of the record's network, if it names one, the start of the announcer of the
-    /// workload's listeners, if the network publishes them, and the setting of the record's
-    /// hostname and machine ID for every execution, which fail if the test fails
+    /// It then stands for the mount of the record's export through the template's host filesystem
+    /// device, if any, the gateway refusal before view effects, the view's hostname, generation of
+    /// the machine ID, and write of the resolver file when requested. After application
+    /// succeeds, it stands for this caller's announcer start when listeners are published.
+    /// These fail if the test fails
     /// [`Operation::MachineId`], [`Operation::MountExport`], [`Operation::Resolver`],
-    /// [`Operation::Announce`], and [`Operation::View`]. A failure after the start stops the
-    /// announcer.
+    /// [`Operation::View`], and [`Operation::Announce`].
     #[cfg(target_arch = "x86_64")]
     fn apply(
         &mut self,
         record: &nvx::activation::ActivationRecord,
         template: &nvx::guest::clone::RootTemplate,
         deadline: Option<Instant>,
-    ) -> Result<(), nvx::guest::clone::ApplyError> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use nvx::activation::{self, MachineIdMode};
         use nvx::guest::clone::{ApplyError, NetworkError};
         use nvx::guest::ingress::StartError;
@@ -1442,14 +1443,6 @@ impl RootOperations for FakeRoot {
             None => self.assembly,
         };
         thread::sleep(assembly);
-        let view = &configuration.view;
-        if view.machine_id == MachineIdMode::Generated {
-            self.result(Operation::MachineId)
-                .map_err(|problem| ApplyError::MachineId {
-                    error: io::Error::other(problem),
-                    teardown: None,
-                })?;
-        }
         if configuration.export.is_some() {
             self.result(Operation::MountExport)
                 .map_err(|problem| ApplyError::Export {
@@ -1463,6 +1456,27 @@ impl RootOperations for FakeRoot {
                 })?;
         }
         let network = configuration.network.as_ref();
+        let published = network
+            .is_some_and(|network| network.publication == activation::Publication::Published);
+        if published && template.gateway.is_none() {
+            return Err(ApplyError::Network {
+                error: NetworkError::Gateway,
+                teardown: None,
+            }
+            .into());
+        }
+        self.result(Operation::View)
+            .map_err(|problem| ApplyError::View {
+                error: nvx::Error::io(problem),
+                teardown: None,
+            })?;
+        if configuration.view.machine_id == MachineIdMode::Generated {
+            self.result(Operation::MachineId)
+                .map_err(|problem| ApplyError::View {
+                    error: nvx::Error::io(problem),
+                    teardown: None,
+                })?;
+        }
         if network.is_some_and(|network| network.dns.is_some()) {
             self.result(Operation::Resolver)
                 .map_err(|problem| ApplyError::Network {
@@ -1470,19 +1484,9 @@ impl RootOperations for FakeRoot {
                     teardown: None,
                 })?;
         }
-        if network.is_some_and(|network| network.publication == activation::Publication::Published)
-        {
-            if template.gateway.is_none() {
-                return Err(ApplyError::Network {
-                    error: NetworkError::Gateway,
-                    teardown: None,
-                });
-            }
+        if published {
             self.result(Operation::Announce)
-                .map_err(|problem| ApplyError::Network {
-                    error: NetworkError::Announcer(StartError::Spawn(io::Error::other(problem))),
-                    teardown: None,
-                })?;
+                .map_err(|problem| StartError::Spawn(io::Error::other(problem)))?;
             self.announcer = Some(match self.ending.take() {
                 Some(read) => (read, None),
                 None => {
@@ -1491,13 +1495,6 @@ impl RootOperations for FakeRoot {
                 }
             });
         }
-        self.result(Operation::View).map_err(|problem| {
-            self.announcer = None;
-            ApplyError::View {
-                error: entry::Error::Root(io::Error::other(problem)),
-                teardown: None,
-            }
-        })?;
         Ok(())
     }
 }
@@ -4130,13 +4127,13 @@ mod clones {
         self, ActivationRecord, Configuration, ExpectedResources, MachineIdMode, ReadyActivation,
         RestoreSection, TransactionId, View,
     };
-    use nvx::guest::clone::{Activation, AdmissionFence, RootTemplate};
+    use nvx::guest::clone::{Activation, RootTemplate};
     use nvx::protocol::nvxs::{GuestEvent, GuestSession};
     use nvx::protocol::status;
     use runtime_adapter::frame::MAX_ACTIVATE_BODY;
     use runtime_adapter::worker::UNACTIVATED_DRAIN;
     use runtime_adapter::worker::activation::{ACTIVATION_PROBE, ACTIVATION_TIMEOUT};
-    use runtime_adapter::worker::capture::{self, Admission};
+    use runtime_adapter::worker::capture;
 
     use super::*;
 
@@ -4233,10 +4230,8 @@ mod clones {
     /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], behind the
     /// worker's fence, which the capture's barrier handed over closed, and whose deadline ends
     /// `timeout` after `acknowledged`, as from the repair's acknowledgement of the restore.
-    fn repaired(acknowledged: Instant, timeout: Duration) -> Activation<Admission> {
-        let mut fence = Admission::default();
-        fence.close().unwrap();
-        Activation::with_resources(RESOURCES, Some(acknowledged), fence, timeout, acknowledged)
+    fn repaired(acknowledged: Instant, timeout: Duration) -> Activation {
+        Activation::with_resources(RESOURCES, Some(acknowledged), timeout, acknowledged)
     }
 
     /// Returns the inputs of the activation of the clones that their template captured: those of
@@ -4587,6 +4582,60 @@ mod clones {
             let root = unactivated(&mut broker, working, expected);
             assert_eq!(root.calls, [applied(&record)]);
         }
+    }
+
+    #[test]
+    fn application_failures_follow_export_gateway_and_view_order() {
+        use nvx::guest::clone::{ApplyError, NetworkError};
+
+        let record = changed(&published(&exported(&record(1), 1)), |configuration| {
+            configuration.view.machine_id = MachineIdMode::Generated;
+        });
+        let mut root = FakeRoot::booting(&layout());
+        root.apply(&record, &template(), None).unwrap();
+        assert_eq!(
+            root.steps,
+            [
+                Operation::MountExport,
+                Operation::View,
+                Operation::MachineId,
+                Operation::Resolver,
+                Operation::Announce,
+            ]
+        );
+        let mut root = FakeRoot::failing(Operation::MachineId, "generation failed");
+        let error = root.apply(&record, &template(), None).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ApplyError>(),
+            Some(ApplyError::View { .. })
+        ));
+        assert_eq!(
+            root.steps,
+            [
+                Operation::MountExport,
+                Operation::View,
+                Operation::MachineId
+            ]
+        );
+        let mut root = FakeRoot::failing(Operation::View, "view must not run");
+        let error = root
+            .apply(
+                &record,
+                &RootTemplate {
+                    gateway: None,
+                    ..template()
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ApplyError>(),
+            Some(ApplyError::Network {
+                error: NetworkError::Gateway,
+                ..
+            })
+        ));
+        assert_eq!(root.steps, [Operation::MountExport]);
     }
 
     #[test]

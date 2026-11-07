@@ -1,11 +1,7 @@
-//! Tests of a clone's activation, with a fake fence that counts how often it opened, records that
-//! each test builds with `nvx::activation`, a fake clock, whose instants each test takes after a
+//! Tests of a clone's fence-free activation, with records that each test builds with
+//! `nvx::activation`, a fake clock, whose instants each test takes after a
 //! base instant, and a fake adapter of a framing of the tests' own, whose transport delivers the
 //! host's bytes when and as a test chooses, and whose output takes nothing.
-
-use std::cell::Cell;
-use std::io;
-use std::rc::Rc;
 
 use super::*;
 use crate::activation::{
@@ -27,37 +23,11 @@ const ACTIVATE: u8 = 1;
 /// The kind of any other request of the host in the tests' framing.
 const PING: u8 = 2;
 
-/// Returns the activation, behind a fence, in a state that each such function chooses, that it
-/// reached at an instant.
-type Setup = fn(&FakeFence, Instant) -> Activation<FakeFence>;
+/// Returns the activation in a state that it reached at an instant.
+type Setup = fn(Instant) -> Activation;
 
 /// Returns whether a failure's cause is the one that a test expects.
 type Expected = fn(&ActivationCause) -> bool;
-
-/// A fence that a restore handed over closed, which counts how often it opened, and which a test
-/// shares with the activation that holds it.
-#[derive(Clone, Default)]
-struct FakeFence {
-    /// How often the fence opened.
-    opened: Rc<Cell<u32>>,
-}
-
-impl FakeFence {
-    /// Returns how often the fence opened.
-    fn opened(&self) -> u32 {
-        self.opened.get()
-    }
-}
-
-impl AdmissionFence for FakeFence {
-    fn close(&mut self) -> io::Result<()> {
-        unreachable!("an activation never closes the fence");
-    }
-
-    fn open(&mut self) {
-        self.opened.set(self.opened.get() + 1);
-    }
-}
 
 /// Returns the instant `seconds` seconds after `base`.
 fn after(base: Instant, seconds: u64) -> Instant {
@@ -119,21 +89,15 @@ fn reported() -> ReadyActivation {
     ReadyActivation::of(&accepted())
 }
 
-/// Returns the activation, in its transport bootstrap, of the clone behind `fence`, whose repair
+/// Returns the activation, in its transport bootstrap, of the clone whose repair
 /// acknowledged its restore at `acknowledged`.
-fn bootstrap(fence: &FakeFence, acknowledged: Instant) -> Activation<FakeFence> {
-    Activation::with_resources(
-        resources(),
-        Some(acknowledged),
-        fence.clone(),
-        TIMEOUT,
-        acknowledged,
-    )
+fn bootstrap(acknowledged: Instant) -> Activation {
+    Activation::with_resources(resources(), Some(acknowledged), TIMEOUT, acknowledged)
 }
 
 /// Returns the activation of [`bootstrap`] once the session's reset at `at` restricted it.
-fn restricted(fence: &FakeFence, at: Instant) -> Activation<FakeFence> {
-    let mut activation = bootstrap(fence, at);
+fn restricted(at: Instant) -> Activation {
+    let mut activation = bootstrap(at);
     let action = activation.input(at, ActivationInput::Reset).unwrap();
     assert_eq!(action, ActivationAction::Acknowledge);
     assert_eq!(activation.state(), ActivationState::Restricted);
@@ -141,8 +105,8 @@ fn restricted(fence: &FakeFence, at: Instant) -> Activation<FakeFence> {
 }
 
 /// Returns the activation of [`restricted`] once it accepted the host's Activate at `at`.
-fn activating(fence: &FakeFence, at: Instant) -> Activation<FakeFence> {
-    let mut activation = restricted(fence, at);
+fn activating(at: Instant) -> Activation {
+    let mut activation = restricted(at);
     let action = activation
         .input(at, ActivationInput::Activate(&record()))
         .unwrap();
@@ -153,31 +117,24 @@ fn activating(fence: &FakeFence, at: Instant) -> Activation<FakeFence> {
 
 /// Returns the activation of [`activating`] once its application of the record completed at
 /// `at`.
-fn ready(fence: &FakeFence, at: Instant) -> Activation<FakeFence> {
-    let mut activation = activating(fence, at);
+fn ready(at: Instant) -> Activation {
+    let mut activation = activating(at);
     assert_eq!(activation.complete(at, Ok(())).unwrap(), reported());
     assert_eq!(activation.state(), ActivationState::Ready);
     activation
 }
 
 /// Returns the activation of [`ready`] once the adapter's order started the sandbox.
-fn started(fence: &FakeFence, at: Instant) -> Activation<FakeFence> {
-    let mut activation = ready(fence, at);
+fn started(at: Instant) -> Activation {
+    let mut activation = ready(at);
     activation.start().unwrap();
     assert_eq!(activation.state(), ActivationState::Started);
     activation
 }
 
-/// Checks that `activation`, behind `fence`, failed finally with `failure` at `now`: it has no
-/// deadline and no established activation, every later call returns the same failure, and the
-/// fence opened `opened` times, as it had before the failure.
-fn assert_final(
-    activation: &mut Activation<FakeFence>,
-    fence: &FakeFence,
-    failure: &ActivationFailure,
-    now: Instant,
-    opened: u32,
-) {
+/// Checks that `activation` failed finally with `failure` at `now`: it has no deadline or
+/// established activation, and every later call returns the same failure.
+fn assert_final(activation: &mut Activation, failure: &ActivationFailure, now: Instant) {
     assert_ne!(failure.state(), ActivationState::Failed);
     assert_eq!(activation.state(), ActivationState::Failed);
     assert_eq!(activation.deadline(), None);
@@ -198,14 +155,13 @@ fn assert_final(
         assert_eq!(later.state(), failure.state());
         assert!(Arc::ptr_eq(&later.cause, &failure.cause));
     }
-    assert_eq!(fence.opened(), opened);
 }
 
 #[test]
-fn a_clone_bootstraps_takes_one_activate_and_opens_the_fence_once_ready() {
+fn a_clone_bootstraps_takes_one_activate_and_becomes_ready_without_a_fence() {
     let t0 = Instant::now();
-    let fence = FakeFence::default();
-    let mut activation = bootstrap(&fence, t0);
+
+    let mut activation = bootstrap(t0);
     assert_eq!(activation.state(), ActivationState::Bootstrap);
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
     // Bytes of the session's reset arrive before it completes, and then the reset.
@@ -225,15 +181,15 @@ fn a_clone_bootstraps_takes_one_activate_and_opens_the_fence_once_ready() {
     assert_eq!(activation.state(), ActivationState::Activating);
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
     assert_eq!(activation.established(), None);
-    assert_eq!(fence.opened(), 0);
+
     let flow = activation.input(after(t0, 3), ActivationInput::Flow);
     assert_eq!(flow.unwrap(), ActivationAction::Continue);
-    // Once the application succeeded, the fence opens, and Ready reports the activation, with the
+    // Once the application succeeded, Ready reports the activation, with the
     // record's transaction.
     let ready = activation.complete(after(t0, 4), Ok(())).unwrap();
     assert_eq!(ready, reported());
     assert_eq!(ready.transaction, Some(TRANSACTION));
-    assert_eq!(fence.opened(), 1);
+
     assert_eq!(activation.state(), ActivationState::Ready);
     assert_eq!(activation.established(), Some(reported()));
     // No deadline holds a ready clone: the host's mapping table and its start go to the adapter's
@@ -249,7 +205,6 @@ fn a_clone_bootstraps_takes_one_activate_and_opens_the_fence_once_ready() {
     assert_eq!(request.unwrap(), ActivationAction::Serve);
     let flow = activation.input(after(t0, 7200), ActivationInput::Flow);
     assert_eq!(flow.unwrap(), ActivationAction::Continue);
-    assert_eq!(fence.opened(), 1);
 }
 
 #[test]
@@ -265,13 +220,12 @@ fn no_request_is_accepted_before_activate() {
         (activating, ActivationInput::Request),
     ];
     for (activation, input) in cases {
-        let fence = FakeFence::default();
-        let mut activation = activation(&fence, t0);
+        let mut activation = activation(t0);
         let state = activation.state();
         let failure = activation.input(after(t0, 1), input).unwrap_err();
         assert_eq!(failure.state(), state, "{input:?}");
         assert!(matches!(failure.cause(), ActivationCause::Request));
-        assert_final(&mut activation, &fence, &failure, after(t0, 2), 0);
+        assert_final(&mut activation, &failure, after(t0, 2));
     }
 }
 
@@ -281,21 +235,19 @@ fn a_reset_before_ready_is_final_and_one_after_it_starts_a_later_session() {
     // Only the reset that the restore queued bootstraps the session: another, such as once the
     // host's attachment ended, fails the activation before it is ready.
     for activation in [restricted, activating] {
-        let fence = FakeFence::default();
-        let mut activation = activation(&fence, t0);
+        let mut activation = activation(t0);
         let state = activation.state();
         let failure = activation
             .input(after(t0, 1), ActivationInput::Reset)
             .unwrap_err();
         assert_eq!(failure.state(), state);
         assert!(matches!(failure.cause(), ActivationCause::Reset));
-        assert_final(&mut activation, &fence, &failure, after(t0, 1), 0);
+        assert_final(&mut activation, &failure, after(t0, 1));
     }
     // Once the clone is ready, or started, a reset starts a later session, which gets the
     // established activation and transaction without activating again.
     for activation in [ready, started] {
-        let fence = FakeFence::default();
-        let mut activation = activation(&fence, t0);
+        let mut activation = activation(t0);
         let state = activation.state();
         for session in 1..=3 {
             let now = after(t0, 60 * session);
@@ -308,15 +260,14 @@ fn a_reset_before_ready_is_final_and_one_after_it_starts_a_later_session() {
             let request = activation.input(now, ActivationInput::Request);
             assert_eq!(request.unwrap(), ActivationAction::Serve);
         }
-        assert_eq!(fence.opened(), 1);
     }
 }
 
 #[test]
 fn retries_join_the_running_activation_and_get_its_cached_result() {
     let t0 = Instant::now();
-    let fence = FakeFence::default();
-    let mut activation = activating(&fence, t0);
+
+    let mut activation = activating(t0);
     // A retry of the same transaction, with a byte-equal record, joins the activation that runs,
     // whose deadline stays where it was.
     for second in 1..=3 {
@@ -325,20 +276,19 @@ fn retries_join_the_running_activation_and_get_its_cached_result() {
         assert_eq!(activation.state(), ActivationState::Activating);
         assert_eq!(activation.deadline(), Some(after(t0, 10)));
     }
-    assert_eq!(fence.opened(), 0);
+
     assert_eq!(
         activation.complete(after(t0, 4), Ok(())).unwrap(),
         reported()
     );
     // Afterwards, one gets the cached result, before and after the start, without applying the
-    // record again or opening the fence again.
+    // record again.
     let retry = activation.input(after(t0, 5), ActivationInput::Activate(&record()));
     assert_eq!(retry.unwrap(), ActivationAction::Ready(reported()));
     activation.start().unwrap();
     let retry = activation.input(after(t0, 6), ActivationInput::Activate(&record()));
     assert_eq!(retry.unwrap(), ActivationAction::Ready(reported()));
     assert_eq!(activation.state(), ActivationState::Started);
-    assert_eq!(fence.opened(), 1);
 }
 
 #[test]
@@ -367,19 +317,18 @@ fn a_changed_record_or_a_new_transaction_is_final() {
             matches!(cause, ActivationCause::Record(ActivationError::Truncated))
         }),
     ];
-    // While the activation runs, and once it is ready, or started, whose fence stays open.
-    let states: [(Setup, u32); 3] = [(activating, 0), (ready, 1), (started, 1)];
-    for (activation, opened) in states {
+    // While the activation runs, and once it is ready or started.
+    let states: [Setup; 3] = [activating, ready, started];
+    for activation in states {
         for (retry, cause) in retries {
-            let fence = FakeFence::default();
-            let mut activation = activation(&fence, t0);
+            let mut activation = activation(t0);
             let state = activation.state();
             let failure = activation
                 .input(after(t0, 1), ActivationInput::Activate(retry))
                 .unwrap_err();
             assert_eq!(failure.state(), state);
             assert!(cause(failure.cause()), "{state}: {failure}");
-            assert_final(&mut activation, &fence, &failure, after(t0, 2), opened);
+            assert_final(&mut activation, &failure, after(t0, 2));
         }
     }
 }
@@ -388,22 +337,20 @@ fn a_changed_record_or_a_new_transaction_is_final() {
 fn an_activate_too_long_to_read_fails_as_a_record_that_long() {
     let t0 = Instant::now();
     // In the transport bootstrap, as any Activate.
-    let fence = FakeFence::default();
-    let mut activation = bootstrap(&fence, t0);
+
+    let mut activation = bootstrap(t0);
     let failure = activation
         .input(after(t0, 1), ActivationInput::TooLong(MAX_RECORD_BYTES + 1))
         .unwrap_err();
     assert_eq!(failure.state(), ActivationState::Bootstrap);
     assert!(matches!(failure.cause(), ActivationCause::Request));
-    assert_final(&mut activation, &fence, &failure, after(t0, 2), 0);
+    assert_final(&mut activation, &failure, after(t0, 2));
     // From then on, as an Activate whose record has that many bytes, which no record has: while
-    // restricted, while the activation runs, and once it is ready, or started, whose fence stays
-    // open.
-    let states: [(Setup, u32); 4] = [(restricted, 0), (activating, 0), (ready, 1), (started, 1)];
-    for (activation, opened) in states {
+    // restricted, while the activation runs, and once it is ready or started.
+    let states: [Setup; 4] = [restricted, activating, ready, started];
+    for activation in states {
         for length in [MAX_RECORD_BYTES + 1, usize::MAX] {
-            let fence = FakeFence::default();
-            let mut activation = activation(&fence, t0);
+            let mut activation = activation(t0);
             let state = activation.state();
             let failure = activation
                 .input(after(t0, 1), ActivationInput::TooLong(length))
@@ -416,12 +363,12 @@ fn an_activate_too_long_to_read_fails_as_a_record_that_long() {
                 ),
                 "{state}: {failure}"
             );
-            assert_final(&mut activation, &fence, &failure, after(t0, 2), opened);
+            assert_final(&mut activation, &failure, after(t0, 2));
         }
     }
     // Past the deadline, before the clone is ready, it fails as every input does.
-    let fence = FakeFence::default();
-    let mut activation = restricted(&fence, t0);
+
+    let mut activation = restricted(t0);
     let failure = activation
         .input(
             after(t0, 10),
@@ -429,14 +376,14 @@ fn an_activate_too_long_to_read_fails_as_a_record_that_long() {
         )
         .unwrap_err();
     assert!(matches!(failure.cause(), ActivationCause::Expired));
-    assert_final(&mut activation, &fence, &failure, after(t0, 11), 0);
+    assert_final(&mut activation, &failure, after(t0, 11));
 }
 
 #[test]
 fn a_failed_application_is_final_and_no_retry_applies_the_record_again() {
     let t0 = Instant::now();
-    let fence = FakeFence::default();
-    let mut activation = activating(&fence, t0);
+
+    let mut activation = activating(t0);
     let failure = activation
         .complete(after(t0, 1), Err("the root's assembly failed".into()))
         .unwrap_err();
@@ -450,7 +397,7 @@ fn a_failed_application_is_final_and_no_retry_applies_the_record_again() {
         "the root's assembly failed"
     );
     // A byte-equal retry neither joins nor applies the record again: it gets the failure.
-    assert_final(&mut activation, &fence, &failure, after(t0, 2), 0);
+    assert_final(&mut activation, &failure, after(t0, 2));
 }
 
 #[test]
@@ -519,33 +466,30 @@ fn an_activate_is_decoded_and_validated_before_any_side_effect() {
         ),
     ];
     for (bytes, cause) in cases {
-        let fence = FakeFence::default();
-        let mut activation = restricted(&fence, t0);
+        let mut activation = restricted(t0);
         let failure = activation
             .input(after(t0, 1), ActivationInput::Activate(&bytes))
             .unwrap_err();
         assert_eq!(failure.state(), ActivationState::Restricted);
         assert!(cause(failure.cause()), "{failure}");
-        assert_final(&mut activation, &fence, &failure, after(t0, 2), 0);
+        assert_final(&mut activation, &failure, after(t0, 2));
     }
     // A valid record goes to the adapter exactly as it decodes, and opens nothing yet.
-    let fence = FakeFence::default();
-    let mut activation = restricted(&fence, t0);
+
+    let mut activation = restricted(t0);
     let action = activation.input(after(t0, 1), ActivationInput::Activate(&record()));
     assert_eq!(
         action.unwrap(),
         ActivationAction::Apply(Box::new(ActivationRecord::decode(&record()).unwrap()))
     );
-    assert_eq!(fence.opened(), 0);
 }
 
 #[test]
 fn the_deadline_starts_at_the_acknowledgement_and_retries_never_extend_it() {
     let t0 = Instant::now();
-    let fence = FakeFence::default();
+
     // The repair acknowledged the restore at `t0`, and the adapter made the activation later.
-    let mut activation =
-        Activation::with_resources(resources(), Some(t0), fence.clone(), TIMEOUT, after(t0, 3));
+    let mut activation = Activation::with_resources(resources(), Some(t0), TIMEOUT, after(t0, 3));
     assert_eq!(activation.deadline(), Some(after(t0, 10)));
     activation
         .input(after(t0, 8), ActivationInput::Reset)
@@ -564,11 +508,10 @@ fn the_deadline_starts_at_the_acknowledgement_and_retries_never_extend_it() {
     let failure = activation.tick(after(t0, 10)).unwrap_err();
     assert_eq!(failure.state(), ActivationState::Activating);
     assert!(matches!(failure.cause(), ActivationCause::Expired));
-    assert_final(&mut activation, &fence, &failure, after(t0, 11), 0);
+    assert_final(&mut activation, &failure, after(t0, 11));
     // An application that completes at the deadline completes too late, as does any input.
     for complete in [true, false] {
-        let fence = FakeFence::default();
-        let mut activation = activating(&fence, t0);
+        let mut activation = activating(t0);
         let failure = if complete {
             activation.complete(after(t0, 10), Ok(())).unwrap_err()
         } else {
@@ -577,17 +520,16 @@ fn the_deadline_starts_at_the_acknowledgement_and_retries_never_extend_it() {
         };
         assert_eq!(failure.state(), ActivationState::Activating);
         assert!(matches!(failure.cause(), ActivationCause::Expired));
-        assert_final(&mut activation, &fence, &failure, after(t0, 11), 0);
+        assert_final(&mut activation, &failure, after(t0, 11));
     }
 }
 
 #[test]
 fn an_ungated_restore_s_deadline_starts_at_the_activation() {
     let t0 = Instant::now();
-    let fence = FakeFence::default();
+
     // Without an acknowledgement, the deadline starts when the adapter makes the activation.
-    let mut activation =
-        Activation::with_resources(resources(), None, fence.clone(), TIMEOUT, after(t0, 5));
+    let mut activation = Activation::with_resources(resources(), None, TIMEOUT, after(t0, 5));
     assert_eq!(activation.deadline(), Some(after(t0, 15)));
     activation.tick(after(t0, 14)).unwrap();
     let failure = activation
@@ -595,10 +537,9 @@ fn an_ungated_restore_s_deadline_starts_at_the_activation() {
         .unwrap_err();
     assert_eq!(failure.state(), ActivationState::Bootstrap);
     assert!(matches!(failure.cause(), ActivationCause::Expired));
-    assert_final(&mut activation, &fence, &failure, after(t0, 16), 0);
+    assert_final(&mut activation, &failure, after(t0, 16));
     // A deadline that no instant can hold never passes.
-    let mut activation =
-        Activation::with_resources(resources(), Some(t0), fence.clone(), Duration::MAX, t0);
+    let mut activation = Activation::with_resources(resources(), Some(t0), Duration::MAX, t0);
     assert_eq!(activation.deadline(), None);
     activation.tick(after(t0, 1 << 30)).unwrap();
     let reset = activation.input(after(t0, 1 << 30), ActivationInput::Reset);
@@ -609,32 +550,24 @@ fn an_ungated_restore_s_deadline_starts_at_the_activation() {
 fn out_of_order_completions_and_starts_are_final() {
     let t0 = Instant::now();
     // An activation completes only while it runs, and the sandbox starts only once it is ready,
-    // and once: the fence opens no sooner, and no more than once.
-    let completions: [(Setup, u32); 4] =
-        [(bootstrap, 0), (restricted, 0), (ready, 1), (started, 1)];
-    for (activation, opened) in completions {
-        let fence = FakeFence::default();
-        let mut activation = activation(&fence, t0);
+    // and once.
+    let completions: [Setup; 4] = [bootstrap, restricted, ready, started];
+    for activation in completions {
+        let mut activation = activation(t0);
         let state = activation.state();
         let failure = activation.complete(after(t0, 1), Ok(())).unwrap_err();
         assert_eq!(failure.state(), state);
         assert!(matches!(failure.cause(), ActivationCause::Completion));
-        assert_final(&mut activation, &fence, &failure, after(t0, 2), opened);
+        assert_final(&mut activation, &failure, after(t0, 2));
     }
-    let starts: [(Setup, u32); 4] = [
-        (bootstrap, 0),
-        (restricted, 0),
-        (activating, 0),
-        (started, 1),
-    ];
-    for (activation, opened) in starts {
-        let fence = FakeFence::default();
-        let mut activation = activation(&fence, t0);
+    let starts: [Setup; 4] = [bootstrap, restricted, activating, started];
+    for activation in starts {
+        let mut activation = activation(t0);
         let state = activation.state();
         let failure = activation.start().unwrap_err();
         assert_eq!(failure.state(), state);
         assert!(matches!(failure.cause(), ActivationCause::Start));
-        assert_final(&mut activation, &fence, &failure, after(t0, 2), opened);
+        assert_final(&mut activation, &failure, after(t0, 2));
     }
 }
 
@@ -665,7 +598,7 @@ enum Reply {
 /// which it never waits for.
 struct Adapter {
     /// The activation.
-    activation: Activation<FakeFence>,
+    activation: Activation,
     /// The bytes of the host's message in progress.
     message: Vec<u8>,
     /// The replies that wait for the output.
@@ -676,7 +609,7 @@ struct Adapter {
 
 impl Adapter {
     /// Returns the adapter that drives `activation`.
-    fn new(activation: Activation<FakeFence>) -> Self {
+    fn new(activation: Activation) -> Self {
         Self {
             activation,
             message: Vec::new(),
@@ -737,8 +670,8 @@ fn the_deadline_stays_live_under_trickled_input_and_blocked_output() {
     assert!(activate.len() > 10);
     // A host that trickles its Activate, a byte a second, never completes it by the deadline:
     // the byte at the deadline fails the activation, while the output took nothing.
-    let fence = FakeFence::default();
-    let mut adapter = Adapter::new(bootstrap(&fence, t0));
+
+    let mut adapter = Adapter::new(bootstrap(t0));
     adapter.reset(t0).unwrap();
     let mut failure = None;
     for (second, byte) in (1..).zip(&activate) {
@@ -753,11 +686,11 @@ fn the_deadline_stays_live_under_trickled_input_and_blocked_output() {
     assert!(matches!(failure.cause(), ActivationCause::Expired));
     assert!(adapter.applied.is_empty());
     assert_eq!(adapter.output, [Reply::Acknowledgement]);
-    assert_final(&mut adapter.activation, &fence, &failure, after(t0, 11), 0);
+    assert_final(&mut adapter.activation, &failure, after(t0, 11));
     // A host that sends nothing leaves the adapter only its wake at the deadline, which fails the
     // activation as well.
-    let fence = FakeFence::default();
-    let mut adapter = Adapter::new(bootstrap(&fence, t0));
+
+    let mut adapter = Adapter::new(bootstrap(t0));
     adapter.reset(after(t0, 1)).unwrap();
     let deadline = adapter.activation.deadline().unwrap();
     assert_eq!(deadline, after(t0, 10));
@@ -768,12 +701,12 @@ fn the_deadline_stays_live_under_trickled_input_and_blocked_output() {
     let failure = adapter.activation.tick(deadline).unwrap_err();
     assert_eq!(failure.state(), ActivationState::Restricted);
     assert!(matches!(failure.cause(), ActivationCause::Expired));
-    assert_final(&mut adapter.activation, &fence, &failure, after(t0, 11), 0);
+    assert_final(&mut adapter.activation, &failure, after(t0, 11));
     // A host whose Activate arrives at once, and that trickles a retry while the record's
     // application runs, gets the retry joined, without another application or a later deadline,
     // and an application that completes after the deadline fails.
-    let fence = FakeFence::default();
-    let mut adapter = Adapter::new(bootstrap(&fence, t0));
+
+    let mut adapter = Adapter::new(bootstrap(t0));
     adapter.reset(t0).unwrap();
     adapter.receive(after(t0, 1), &activate).unwrap();
     assert_eq!(adapter.applied, [accepted()]);
@@ -790,21 +723,21 @@ fn the_deadline_stays_live_under_trickled_input_and_blocked_output() {
     assert_eq!(failure.state(), ActivationState::Activating);
     assert!(matches!(failure.cause(), ActivationCause::Expired));
     assert_eq!(adapter.output, [Reply::Acknowledgement]);
-    assert_final(&mut adapter.activation, &fence, &failure, after(t0, 12), 0);
+    assert_final(&mut adapter.activation, &failure, after(t0, 12));
     // Another message of the framing, whole, while the record's application runs fails the
     // activation, as it would before the Activate.
-    let fence = FakeFence::default();
-    let mut adapter = Adapter::new(activating(&fence, t0));
+
+    let mut adapter = Adapter::new(activating(t0));
     let failure = adapter
         .receive(after(t0, 1), &message(PING, b""))
         .unwrap_err();
     assert_eq!(failure.state(), ActivationState::Activating);
     assert!(matches!(failure.cause(), ActivationCause::Request));
-    assert_final(&mut adapter.activation, &fence, &failure, after(t0, 2), 0);
+    assert_final(&mut adapter.activation, &failure, after(t0, 2));
 }
 
 /// A call that fails an activation.
-type Failing = Box<dyn Fn(&mut Activation<FakeFence>) -> Result<(), ActivationFailure>>;
+type Failing = Box<dyn Fn(&mut Activation) -> Result<(), ActivationFailure>>;
 
 #[test]
 fn strict_failures_are_returned_and_never_power_off() {
@@ -870,14 +803,13 @@ fn strict_failures_are_returned_and_never_power_off() {
     ];
     let mut causes = Vec::new();
     for (activation, fail) in failures {
-        let fence = FakeFence::default();
-        let mut activation = activation(&fence, t0);
-        let opened = fence.opened();
+        let mut activation = activation(t0);
+
         let failure = fail(&mut activation).unwrap_err();
         let cause = std::mem::discriminant(failure.cause());
         assert!(!causes.contains(&cause), "{failure}");
         causes.push(cause);
-        assert_final(&mut activation, &fence, &failure, after(t0, 11), opened);
+        assert_final(&mut activation, &failure, after(t0, 11));
     }
 }
 
@@ -994,7 +926,7 @@ fn failures_name_their_state_and_their_cause() {
 }
 
 #[test]
-fn an_activation_debugs_its_state_resources_and_deadline_without_its_fence() {
+fn an_activation_debugs_its_state_resources_and_deadline() {
     let t0 = Instant::now();
     let activation = Activation::with_resources(
         ExpectedResources {
@@ -1002,7 +934,6 @@ fn an_activation_debugs_its_state_resources_and_deadline_without_its_fence() {
             memory: 2 << 30,
         },
         Some(t0),
-        FakeFence::default(),
         TIMEOUT,
         after(t0, 1),
     );

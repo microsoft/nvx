@@ -1,4 +1,4 @@
-//! The announcer of a clone's listeners, which the clone's application starts, as the
+//! The announcer of a clone's listeners, which its caller starts after application, as the
 //! [module documentation](super) describes.
 
 use std::ffi::{CStr, CString};

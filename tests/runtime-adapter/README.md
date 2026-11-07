@@ -845,29 +845,24 @@ after the repair's acknowledgement of the restore:
    block devices of its partitions are the clone's disk's, not the template's
    placeholder's. The upper must be fresh: the assembly refuses one whose
    `upper` or `work` directory exists and is not empty. If the record asks for
-   a generated machine ID, the application then generates one, once, after the
-   repair's reseed, in `nvx::guest::clone::MACHINE_ID_FILE` of the runtime
-   directory. If the record has an export, it mounts the host export through the
+   an export, the application mounts the host export through the
    host filesystem device, read-write, at `hostfs/root` of the runtime
    directory, outside the root, where only the guest's root user reaches it, as
    the worker of a VM that boots cold mounts the one that its kernel command
-   line names. If the record's network names a DNS server, it writes a resolver
-   file that names it, of mode 0444, in `nvx::guest::clone::RESOLVER_FILE` of
-   the runtime directory. If the record's network publishes the workload's
-   listeners, it starts their announcer,
+   line names. It applies the record's VM-wide view and DNS server through
+   `view::apply`: the hostname, generated machine ID when requested, and resolver
+   file, with every bind owned by the root. The library starts no process.
+   After successful application this temporary adapter uses the returned
+   publication and gateway to start its announcer,
    `/sbin/nvx-ingress inherit GATEWAY_IPV4`, with
    `nvx::guest::ingress::Announcer::start`: it binds a UDP socket to a
    privileged source port, from which alone OpenVMM's gateway takes
    announcements, and runs the program with that socket as its standard input,
    to the template's gateway, waiting until the program runs, but for no
    announcement. The template, captured under a policy that publishes nothing,
-   runs no announcer of its own. It then binds the generated machine ID
-   read-only over the root's `/etc/machine-id`, and the resolver file read-only
-   over its `/etc/resolv.conf`, in the worker's mount namespace, for every
-   execution; with the image's own machine ID and without a DNS server, it binds
-   nothing.
+   runs no announcer of its own.
 4. Once it took what the session received while the application ran, which came
-   before `Ready`, it completes the activation, which opens the fence, and
+   before `Ready`, it completes the fence-free activation and
    answers `Ready`, which reports the activation after the guest agent's build,
    to the `Activate` and to each retry of it, byte for byte, that came
    meanwhile, which joins the application. Anything else that came meanwhile, a
@@ -886,12 +881,13 @@ after the repair's acknowledgement of the restore:
    published under a policy that publishes them, which refuses
    `CAP_NET_BIND_SERVICE` and `CAP_NET_RAW`, and unpublished otherwise, a clone
    without a network included. The worker polls the pidfd of the announcer that
-   the application started with the session's stream: once the announcer ended,
-   before the clone was ready or after, the clone ends with status 57, as one
+   this caller started after application with the session's stream: once the
+   announcer ended, before the clone was ready or after, the clone ends with status 57, as one
    whose announcer could not start. On the stop, the worker stops the announcer,
-   closes the export's root, and removes the application's binds, which keep the
-   root's mounts busy, before it tears the root down, through
-   `nvx::guest::clone::Applied::teardown`. It also answers the
+   closes the export's root, and tears the root down, which removes its own
+   view binds before unmounting it, through
+   `nvx::guest::clone::Applied::teardown`. A failed announcer stop is reported
+   as a teardown failure. It also answers the
    [`activation` probe](#probes), with when the events of its activation and
    order happened after the repair's acknowledgement of the restore.
 
@@ -908,8 +904,9 @@ status 1, once the worker dropped its executions, and waited for its stream,
 and then the tty, to take what it wrote, for at most
 `worker::UNACTIVATED_DRAIN`, a second each, whatever the stream does, so that a
 stream that takes nothing, as once the broker failed, does not keep the clone
-from ending; the fence stays closed if the clone was not ready. Once the clone
-is ready, a broker that closes the stream ends it as it ends the worker of a VM
+from ending. Activation owns no fence; the caller admits no workload before
+`Ready`. Once the clone is ready, a broker that closes the stream ends it as it
+ends the worker of a VM
 that boots cold. The worker of a VM that boots cold refuses an `Activate` as
 any message that it does not take in its state. The worker, and with it the VM,
 ends with one of these statuses, after a diagnostic on standard error:
@@ -2423,8 +2420,8 @@ checks too.
 On x86_64, `tests/guest_session.rs` also runs the worker of a clone, which a
 restore of a template's snapshot started, with `worker::work_clone`, behind its
 test broker, with the session that the template's VM attached, active in the
-epoch of its broker's first reset, and the clone's activation,
-`nvx::guest::clone::Activation::with_resources`, behind a closed fence. The fake
+epoch of its broker's first reset, and the clone's fence-free activation,
+`nvx::guest::activation::Activation::with_resources`. The fake
 root applies each record as `nvx::guest::clone::apply` does, without a root: for
 a GPT disk, it stands for the kernel's reread of the disk's partition table,
 which a test may fail; it takes as long as a test asks, but no longer than until

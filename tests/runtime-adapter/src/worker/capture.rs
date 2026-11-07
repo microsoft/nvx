@@ -43,7 +43,7 @@
 //!
 //! Once the worker repaired a clone, it serves the clone's session on the same tty, with
 //! [`work_clone`]: through the clone's activation, `nvx::guest::clone::Activation` of the repaired
-//! clone and of the fence, whose deadline ends [`ACTIVATION_TIMEOUT`] after the repair's
+//! clone, without an activation fence, whose deadline ends [`ACTIVATION_TIMEOUT`] after the repair's
 //! acknowledgement, it answers the reset that the restore queued for the session that the snapshot
 //! holds, takes the host's `Activate`, and applies its record with [`root_template`] of the
 //! template's configuration and its NIC's gateway, then serves the host's order as after a cold
@@ -121,7 +121,8 @@ pub fn root_template(config: &RootConfig, gateway: Option<Ipv4Addr>) -> RootTemp
 /// preparation.
 ///
 /// The worker of a template's VM admits no execution before the capture, nor in a clone, which it
-/// repairs behind the fence, before the clone's activation opens it, once the clone is ready.
+/// repairs behind the capture's fence. Its activation then serves executions only after Ready;
+/// the library activation does not hold or open this legacy capture fence.
 /// Closing the fence acquires it, as `nvx::guest::clone` requires:
 /// [`close`](AdmissionFence::close) fails while the fence is closed, whoever closed it, and leaves
 /// it closed.
@@ -306,7 +307,7 @@ enum Capture {
     Repaired {
         /// The repaired clone, with its resources.
         repaired: Repaired,
-        /// The worker's fence of workload admission, still closed: opening it is the activation's.
+        /// The legacy capture fence, still closed; the worker's activation order gates executions.
         fence: Admission,
     },
 }
@@ -366,13 +367,13 @@ pub fn capture_on_terminal(
                 Err(error) => Capture::Ended(Templated::Failed(error)),
             }
         })?;
-        let (repaired, fence) = match captured {
+        let (repaired, _fence) = match captured {
             Capture::Ended(templated) => return Ok((templated, None)),
             Capture::Repaired { repaired, fence } => (repaired, fence),
         };
         // The activation's deadline starts at the repair's acknowledgement of the restore.
         let acknowledged = repaired.acknowledged_at();
-        let activation = Activation::new(&repaired, fence, ACTIVATION_TIMEOUT, Instant::now());
+        let activation = Activation::new(&repaired, ACTIVATION_TIMEOUT, Instant::now());
         let template = root_template(&config, gateway);
         let worked = work_clone(
             open_tty(tty)?,
