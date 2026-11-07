@@ -677,12 +677,21 @@ fn restore_machine_checks_the_transaction_and_refuses_a_cold_record() {
         let error = restore_failure(&mut machine);
         assert_eq!(error.phase, RestorePhase::Ready);
         assert_eq!(error.evidence, RestoreEvidence::Malformed);
+        assert_eq!(error.attribution, Attribution::Unknown);
+        assert!(error.guest_may_have_run);
         assert!(error.source.is_some());
     }
     let cold = ActivationRecord::new(None, restore_record().configuration().clone()).unwrap();
     let error = restore_failure(&mut RestoreMachine::new(&cold));
     assert_eq!(error.phase, RestorePhase::ReadyEvent);
-    assert_eq!(error.evidence, RestoreEvidence::Malformed);
+    assert_eq!(error.evidence, RestoreEvidence::InvalidActivate);
+    assert_eq!(error.attribution, Attribution::Request);
+    assert!(!error.guest_may_have_run);
+    assert!(
+        error
+            .message
+            .contains("activation record with a transaction")
+    );
 }
 
 #[test]
@@ -739,6 +748,12 @@ fn restore_machine_keeps_operation_phase_evidence_and_original_source() {
         let error = restore_failure(&mut machine);
         assert_eq!(error.phase, RestorePhase::Activate);
         assert_eq!(error.evidence, RestoreEvidence::PeerMismatch);
+        assert_eq!(error.attribution, Attribution::Unknown);
+        assert!(error.guest_may_have_run);
+        assert_eq!(
+            error.message,
+            "restore failed during Activate: PeerMismatch: original operation failure"
+        );
         let returned = StdError::source(&error)
             .unwrap()
             .downcast_ref::<io::Error>()
@@ -758,6 +773,8 @@ fn restore_machine_keeps_operation_phase_evidence_and_original_source() {
         let error = restore_failure(&mut machine);
         assert_eq!(error.phase, phase);
         assert_eq!(error.evidence, RestoreEvidence::Io);
+        assert_eq!(error.attribution, Attribution::Host);
+        assert!(error.guest_may_have_run);
         assert!(error.source.is_none());
     }
 }
@@ -791,6 +808,292 @@ fn restore_machine_expiry_cancellation_and_exit_fail_every_pending_phase() {
             let error = restore_failure(&mut machine);
             assert_eq!(error.phase, phase);
             assert_eq!(error.evidence, evidence);
+            assert_eq!(error.attribution, Attribution::Unknown);
+            assert!(error.guest_may_have_run);
+            assert!(error.message.contains(&format!("{phase:?}")));
+            assert!(error.source.is_none());
+        }
+
+        #[test]
+        fn restore_failures_attribute_the_existing_policy_free_evidence_classes() {
+            let classes: [(&[RestoreEvidence], Attribution); 5] = [
+                (
+                    &[
+                        RestoreEvidence::InvalidTargets,
+                        RestoreEvidence::InvalidSettings,
+                        RestoreEvidence::InvalidActivate,
+                        RestoreEvidence::InvalidMappings,
+                        RestoreEvidence::UnservableImage,
+                        RestoreEvidence::UnusableScratch,
+                        RestoreEvidence::UnusableRoot,
+                        RestoreEvidence::SuppliedIdentity,
+                        RestoreEvidence::SuppliedLength,
+                        RestoreEvidence::SuppliedGeometry,
+                    ],
+                    Attribution::Request,
+                ),
+                (
+                    &[
+                        RestoreEvidence::Io,
+                        RestoreEvidence::ReportUnreadable,
+                        RestoreEvidence::EndpointBind,
+                        RestoreEvidence::ForwardBind,
+                        RestoreEvidence::ResourceExhaustion,
+                        RestoreEvidence::IncompatibleHost,
+                        RestoreEvidence::RuntimeMismatch,
+                        RestoreEvidence::HostFailure,
+                    ],
+                    Attribution::Host,
+                ),
+                (
+                    &[
+                        RestoreEvidence::PeerMismatch,
+                        RestoreEvidence::Malformed,
+                        RestoreEvidence::Expired,
+                        RestoreEvidence::Cancelled,
+                        RestoreEvidence::Exited,
+                        RestoreEvidence::LostStatus,
+                        RestoreEvidence::Reset,
+                        RestoreEvidence::ForcedKill,
+                    ],
+                    Attribution::Unknown,
+                ),
+                (
+                    &[
+                        RestoreEvidence::MalformedSnapshot,
+                        RestoreEvidence::SnapshotDefect,
+                    ],
+                    Attribution::Snapshot,
+                ),
+                (&[RestoreEvidence::RepairStatus], Attribution::Repair),
+            ];
+            for phase in [
+                RestorePhase::ReadyEvent,
+                RestorePhase::Connect,
+                RestorePhase::Activate,
+                RestorePhase::Ready,
+            ] {
+                for (evidence, attribution) in classes {
+                    for &evidence in evidence {
+                        let mut machine = restore_machine_at(phase);
+                        machine.input(RestoreInput::OperationFailed {
+                            phase,
+                            evidence,
+                            source: None,
+                        });
+                        let error = restore_failure(&mut machine);
+                        assert_eq!(error.phase, phase);
+                        assert_eq!(error.evidence, evidence);
+                        assert_eq!(error.attribution, attribution);
+                        assert!(error.guest_may_have_run);
+                        assert!(!error.message.is_empty());
+                        assert!(error.source.is_none());
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn restore_exit_reports_keep_guest_status_classification_and_actual_details() {
+            let classes = [
+                (
+                    status::ACTIVATION_DEADLINE,
+                    RestoreEvidence::Expired,
+                    Attribution::Unknown,
+                ),
+                (
+                    status::ACTIVATION_PROTOCOL,
+                    RestoreEvidence::Malformed,
+                    Attribution::Unknown,
+                ),
+                (
+                    status::ACTIVATION_ORDER,
+                    RestoreEvidence::Malformed,
+                    Attribution::Unknown,
+                ),
+                (
+                    status::ACTIVATION_RECORD,
+                    RestoreEvidence::InvalidActivate,
+                    Attribution::Request,
+                ),
+                (
+                    status::ACTIVATION_RESOURCES,
+                    RestoreEvidence::InvalidTargets,
+                    Attribution::Request,
+                ),
+                (
+                    status::ACTIVATION_ROOT,
+                    RestoreEvidence::UnusableRoot,
+                    Attribution::Request,
+                ),
+                (
+                    status::ACTIVATION_WORKLOAD,
+                    RestoreEvidence::InvalidSettings,
+                    Attribution::Request,
+                ),
+                (
+                    status::ACTIVATION_NETWORK,
+                    RestoreEvidence::InvalidSettings,
+                    Attribution::Request,
+                ),
+                (
+                    status::ACTIVATION_EXPORT,
+                    RestoreEvidence::InvalidMappings,
+                    Attribution::Request,
+                ),
+            ];
+            for phase in [
+                RestorePhase::ReadyEvent,
+                RestorePhase::Connect,
+                RestorePhase::Activate,
+                RestorePhase::Ready,
+            ] {
+                for category in ["guest-exit", "success"] {
+                    let repair = status::TIME_STATUSES
+                        .chain(status::REPAIR_STATUSES)
+                        .map(|code| (code, RestoreEvidence::RepairStatus, Attribution::Repair));
+                    for (code, evidence, attribution) in classes.into_iter().chain(repair) {
+                        let mut machine = restore_machine_at(phase);
+                        machine.input(RestoreInput::Exited(Some(Report {
+                            category: Some(category.to_owned()),
+                            status_code: Some(i64::from(code)),
+                            teardown_complete: Some(true),
+                        })));
+                        let error = restore_failure(&mut machine);
+                        assert_eq!(error.phase, phase);
+                        assert_eq!(error.evidence, evidence);
+                        assert_eq!(error.attribution, attribution);
+                        assert!(error.guest_may_have_run);
+                        assert!(error.message.contains(category));
+                        assert!(error.message.contains(&format!("status Some({code})")));
+                        assert!(error.source.is_none());
+                    }
+                }
+            }
+            for (category, code) in [
+                (None, Some(195)),
+                (Some("vmm-failure"), Some(195)),
+                (Some("teardown-failure"), Some(195)),
+                (Some("guest-exit"), None),
+                (Some("guest-exit"), Some(-1)),
+                (Some("guest-exit"), Some(256)),
+                (Some("guest-exit"), Some(0)),
+                (Some("guest-exit"), Some(137)),
+            ] {
+                let mut machine = restore_machine_at(RestorePhase::Ready);
+                machine.input(RestoreInput::Exited(Some(Report {
+                    category: category.map(str::to_owned),
+                    status_code: code,
+                    teardown_complete: None,
+                })));
+                let error = restore_failure(&mut machine);
+                assert_eq!(error.evidence, RestoreEvidence::Exited);
+                assert_eq!(error.attribution, Attribution::Unknown);
+                assert!(error.message.contains(&format!("status {code:?}")));
+            }
+        }
+
+        #[test]
+        fn restore_guest_execution_possibility_is_false_before_spawn_and_sticky_after_it() {
+            let mut machine = RestoreMachine::new(&restore_record());
+            machine.input(RestoreInput::Cancelled);
+            machine.input(RestoreInput::Spawned(
+                held_process(std::process::id()).reference().clone(),
+            ));
+            assert!(!restore_failure(&mut machine).guest_may_have_run);
+
+            for phase in [
+                RestorePhase::Connect,
+                RestorePhase::Activate,
+                RestorePhase::Ready,
+            ] {
+                let mut machine = restore_machine_at(phase);
+                machine.input(RestoreInput::SessionLost);
+                assert!(matches!(
+                    machine.next_action(),
+                    Some(RestoreAction::Connect)
+                ));
+                machine.input(RestoreInput::OperationFailed {
+                    phase: RestorePhase::ReadyEvent,
+                    evidence: RestoreEvidence::Io,
+                    source: None,
+                });
+                let error = restore_failure(&mut machine);
+                assert_eq!(error.phase, RestorePhase::ReadyEvent);
+                assert!(error.guest_may_have_run);
+            }
+        }
+
+        #[test]
+        fn restore_failure_messages_keep_the_original_cause_chain_without_replacing_it() {
+            let source = Box::new(Error::io("activation write failed").with_source(
+                Error::io("transport failed").with_source(io::Error::other("root cause")),
+            ));
+            let original: *const Error = &*source;
+            let mut machine = restore_machine_at(RestorePhase::Ready);
+            machine.input(RestoreInput::OperationFailed {
+                phase: RestorePhase::Activate,
+                evidence: RestoreEvidence::Io,
+                source: Some(source),
+            });
+            let error = restore_failure(&mut machine);
+            assert_eq!(error.attribution, Attribution::Host);
+            assert!(error.message.contains("activation write failed"));
+            assert!(error.message.contains("transport failed"));
+            assert!(error.message.ends_with("root cause"));
+            assert_eq!(error.to_string(), error.message);
+            let returned = StdError::source(&error)
+                .unwrap()
+                .downcast_ref::<Error>()
+                .unwrap();
+            assert!(std::ptr::eq(original, returned));
+        }
+
+        #[test]
+        fn restore_failure_and_drop_leave_real_running_or_exited_processes_and_caller_files_unchanged()
+         {
+            use std::collections::BTreeSet;
+            use std::fs;
+
+            for exited in [false, true] {
+                let (_temporary, directory) = vm_directory();
+                let state = directory.path().join("caller-state");
+                fs::write(&state, b"caller-owned").unwrap();
+                let listener = ReadyListener::bind(&directory).unwrap();
+                let mut client =
+                    Client::start(listener.endpoint(), b"OPENVMM_RESTORE_READY_V1\n", false);
+                if exited {
+                    client.stop();
+                }
+                let entries = || {
+                    fs::read_dir(directory.path())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().file_name())
+                        .collect::<BTreeSet<_>>()
+                };
+                let before = entries();
+                let mut machine = RestoreMachine::new(&restore_record());
+                machine.input(RestoreInput::Spawned(client.process.reference().clone()));
+                assert!(matches!(
+                    machine.next_action(),
+                    Some(RestoreAction::AwaitReadyEvent)
+                ));
+                machine.input(if exited {
+                    RestoreInput::Exited(None)
+                } else {
+                    RestoreInput::Cancelled
+                });
+                let error = restore_failure(&mut machine);
+                assert!(error.guest_may_have_run);
+                drop(machine);
+                drop(error);
+                assert_eq!(client.process.has_exited().unwrap(), exited);
+                assert_eq!(client.child.try_wait().unwrap().is_some(), exited);
+                assert_eq!(entries(), before);
+                assert_eq!(fs::read(&state).unwrap(), b"caller-owned");
+                client.stop();
+                assert!(client.process.has_exited().unwrap());
+            }
         }
     }
 }
