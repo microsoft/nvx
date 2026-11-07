@@ -210,6 +210,8 @@ read_tool_versions() {
     RUST_TOOLCHAIN=$tool_value
     tool_manifest_value cargo_nextest.version
     CARGO_NEXTEST_VERSION=$tool_value
+    tool_manifest_value cargo_llvm_cov.version
+    CARGO_LLVM_COV_VERSION=$tool_value
     tool_manifest_artifact rustup
     RUSTUP_VERSION=$tool_version
     RUSTUP_ARTIFACT=$tool_artifact
@@ -808,9 +810,10 @@ install_sccache() {
     fi
 }
 
-# Installs the pinned Rust release with this mode's targets and the pinned
-# cargo-nextest: for the current user on a development host, or, for runner
-# jobs, with the pinned sccache as a toolchain that only root can modify.
+# Installs the pinned Rust release with this mode's targets and its llvm-tools
+# component, and the pinned cargo-nextest and cargo-llvm-cov: for the current
+# user on a development host, or, for runner jobs, with the pinned sccache as a
+# toolchain that only root can modify.
 install_rust_tools() {
     rust_bin=
     if [ "$runner_only" = true ]; then
@@ -829,17 +832,27 @@ install_rust_tools() {
         --profile minimal --no-self-update
     with_rust_targets run_rust_tool "${rust_bin}rustup" target add \
         --toolchain "$RUST_TOOLCHAIN"
+    # cargo-llvm-cov merges and reports coverage profiles with the release's
+    # own llvm-profdata and llvm-cov.
+    run_rust_tool "${rust_bin}rustup" component add \
+        --toolchain "$RUST_TOOLCHAIN" llvm-tools
     rust_version=$(run_rust_tool env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
         "${rust_bin}rustc" --version | awk '{print $2}')
     [ "$rust_version" = "$RUST_TOOLCHAIN" ] ||
         die "Rust ${RUST_TOOLCHAIN} is required, found ${rust_version}"
-    # Run cargo-nextest itself, as the invoking user: cargo reads the
-    # configuration of the current directory, such as its aliases, which
-    # another user, such as a runner's job, may control.
+    # Run cargo-nextest and cargo-llvm-cov themselves, as the invoking user:
+    # cargo reads the configuration of the current directory, such as its
+    # aliases, which another user, such as a runner's job, may control.
     if ! "${rust_bin}cargo-nextest" --version 2>/dev/null |
         grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}"; then
         run_rust_tool "${rust_bin}cargo" +"$RUST_TOOLCHAIN" install --locked \
             --force cargo-nextest --version "$CARGO_NEXTEST_VERSION"
+    fi
+    # Alone, cargo-llvm-cov takes the name of its subcommand first.
+    if ! "${rust_bin}cargo-llvm-cov" llvm-cov --version 2>/dev/null |
+        grep -Fxq "cargo-llvm-cov ${CARGO_LLVM_COV_VERSION}"; then
+        run_rust_tool "${rust_bin}cargo" +"$RUST_TOOLCHAIN" install --locked \
+            --force cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION"
     fi
     if [ "$runner_only" = true ]; then
         install_sccache
@@ -968,8 +981,9 @@ check_platform() {
 # Checks the Python release and the commands that both modes need, and those
 # that the caller names.
 check_host_tools() {
-    for command_name in python3 git curl rustup cargo cargo-nextest gcc make ld \
-        bison flex cpio gzip sha256sum tar xz zstd "$@"; do
+    for command_name in python3 git curl rustup cargo cargo-nextest \
+        cargo-llvm-cov gcc make ld bison flex cpio gzip sha256sum tar xz zstd \
+        "$@"; do
         require_command "$command_name"
     done
     python_version=$(python3 -c \
@@ -987,7 +1001,8 @@ check_rust_targets() {
 }
 
 # Checks that whoever builds NVX on this host runs the pinned Rust release,
-# with this mode's targets, and the pinned cargo-nextest.
+# with this mode's targets and its llvm-tools component, and the pinned
+# cargo-nextest and cargo-llvm-cov.
 check_rust_tools() {
     rust_version=$(run_as_builder env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
         rustc --version | awk '{print $2}')
@@ -996,6 +1011,12 @@ check_rust_tools() {
     run_as_builder cargo nextest --version |
         grep -Fq "cargo-nextest ${CARGO_NEXTEST_VERSION}" ||
         die "cargo-nextest ${CARGO_NEXTEST_VERSION} is not installed"
+    run_as_builder cargo llvm-cov --version |
+        grep -Fxq "cargo-llvm-cov ${CARGO_LLVM_COV_VERSION}" ||
+        die "cargo-llvm-cov ${CARGO_LLVM_COV_VERSION} is not installed"
+    run_as_builder env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
+        rustup component list --installed | grep -q '^llvm-tools-' ||
+        die "the llvm-tools component of Rust ${RUST_TOOLCHAIN} is not installed"
     installed_targets=$(run_as_builder env RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN" \
         rustup target list --installed)
     with_rust_targets check_rust_targets

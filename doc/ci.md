@@ -2226,7 +2226,8 @@ cannot link OpenVMM's `guest_test_uefi`, failing with `undefined symbol: wcslen`
 
 Self-hosted runners keep the release in a trusted `RUSTUP_HOME` that jobs
 cannot modify, so the [runner setup scripts](../scripts/setup/README.md#rust-toolchain)
-install it with its OpenVMM targets. `validate-runner` disables rustup's
+install it with its OpenVMM targets and its `llvm-tools` component.
+`validate-runner` disables rustup's
 automatic installation and fails a job before it builds anything when its runner
 lacks the release, naming the setup script to rerun. The OpenVMM binary cache
 key includes a hash of the file, so a new release rebuilds OpenVMM, and a change
