@@ -34,7 +34,7 @@ pub(super) fn serves_launch(process: &Process, log: (u64, u64)) -> io::Result<bo
 /// [`KILL_TIMEOUT`], the wait that the termination of other OpenVMM processes allows.
 pub(super) fn terminate(process: &Process) -> io::Result<bool> {
     process.kill()?;
-    process.wait(Instant::now() + KILL_TIMEOUT)
+    process.wait_bool(Instant::now() + KILL_TIMEOUT)
 }
 
 /// Holds the process that serves a launch's control endpoint, whose ID `server_pid` returns, with
