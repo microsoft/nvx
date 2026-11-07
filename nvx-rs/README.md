@@ -516,8 +516,9 @@ when needed, so storage paths may exceed the legacy 248-character directory and
 260-character file limits without enabling a machine-wide long-path setting.
 The filesystem's component limits and Windows' extended-length path limit
 (about 32,767 UTF-16 code units, including the resolved root and internal file
-names) still apply. VM launches have a separate
-[working-directory limit](#windows-working-directory-limit).
+names) still apply. VM launches start their VMMs outside the store, so Windows'
+[working-directory limit](#windows-working-directory-limit) does not bound
+storage paths.
 
 ### `nvx::host::instance`
 
@@ -541,10 +542,11 @@ instance, with the caller's files and its directory, through the store.
 `write_json` and `read_json` keep the configuration records that callers store
 beside an instance.
 
-An instance's directory is also its VMM's working directory. `check_launch` and
-`LockedInstance::start` apply the
-[Windows working-directory limit](#windows-working-directory-limit) before
-instance creation or launch records, respectively.
+`LockedInstance::start` starts OpenVMM in the working directory that
+`supervisor::vmm_working_dir` chooses for the instance's directory: on Windows,
+the system directory, so that the
+[Windows working-directory limit](#windows-working-directory-limit) does not
+bound the instance's directory.
 
 ### `nvx::host::nvxs`
 
@@ -649,10 +651,18 @@ reattach has verified the VM's exit.
 
 Windows' process-creation API limits `VmmCommand::working_dir` to 258 UTF-16
 code units in its absolute path, including any verbatim prefix and trailing
-separator. It may name a shorter directory than the store. A raw `spawn`
-refuses an overlong working directory with `InvalidInput`; high-level instance,
-capture, and clone preflight return `Unsupported` with the limit in the
-top-level message. Neither silently changes the requested directory.
+separator, whatever the prefix and the host's long-path setting. A raw `spawn`
+refuses an overlong working directory with `InvalidInput`, and never changes the
+requested directory.
+
+`vmm_working_dir` chooses the working directory of the VMM of a sandbox store:
+on Windows, the system directory, such as `C:\Windows\System32`, which every
+host has, whose path is short, and which only administrators may change, and on
+other hosts, the store itself. OpenVMM resolves only the relative paths of its
+arguments against its working directory, and every launch gives it absolute
+ones. Instances, template captures, and clones start their VMMs there, so their
+stores' paths may exceed the limit, and an orchestrator that launches a VMM
+itself, as the supervisor's example does, starts it there too.
 
 ### `nvx::host::template`
 
@@ -991,13 +1001,10 @@ report, the snapshot's manifest and artifacts, and the key, and publishes the
 transaction in two commits, a rename into `generations/` that replaces nothing,
 then the index.
 
-Capture preflight applies the
-[Windows working-directory limit](#windows-working-directory-limit) to
-`<template-store>\captures\<16-hex-slot>\transaction` before creating the slot
-or scratch. Without a trailing separator this leaves 220 units for the absolute
-template-store path, or 210 for a state root whose store is `<state>\templates`.
-A clone's sandbox directory is also its VMM's working directory, which
-`ClonePlan::launch` checks before writing launch records.
+The VMMs of captures and clones start in the working directory that
+`vmm_working_dir` chooses, the system directory on Windows, so the
+[Windows working-directory limit](#windows-working-directory-limit) bounds
+neither the template store's paths nor a clone's sandbox directory.
 
 A capture that fails publishes nothing, and `Store::recover_captures` ends the
 captures that a crash interrupted, publishing those that were checked, and

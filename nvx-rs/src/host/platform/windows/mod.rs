@@ -7,17 +7,18 @@ mod private;
 mod process;
 mod spawn;
 
-use std::ffi::{OsStr, c_void};
+use std::ffi::{OsStr, OsString, c_void};
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
-use std::path::{Component, Path, Prefix};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{FreeLibrary, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::LibraryLoader::{
     GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
 };
+use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::OpenProcess;
 
 use crate::hypervisor::Hypervisor;
@@ -85,6 +86,27 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
         .encode_utf16()
         .chain(name.into_iter().skip(skip))
         .collect())
+}
+
+/// Returns the system directory, such as `C:\Windows\System32`, as `GetSystemDirectoryW` names
+/// it: a directory of every Windows host that only administrators may change.
+pub(crate) fn system_directory() -> io::Result<PathBuf> {
+    let mut buffer = vec![0u16; 260];
+    loop {
+        // SAFETY: the buffer holds `buffer.len()` units.
+        let length =
+            unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // The directory fits, and the length leaves out the NUL that follows it; or the buffer is
+        // too small, and the length is what the directory needs, with its NUL.
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+        }
+        buffer.resize(length, 0);
+    }
 }
 
 /// Returns the calling thread's Win32 last-error code.

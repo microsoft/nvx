@@ -426,6 +426,34 @@ fn refreshes_publish_new_generations_and_leave_the_older_ones() {
     assert_eq!(bench.create().unwrap(), Created::Existing(second));
 }
 
+#[cfg(windows)]
+#[test]
+fn captures_in_stores_beyond_the_working_directory_limit_publish() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let _spawns = serialized();
+    let bench = Bench::new(&json!({}));
+    // The capture's transaction exceeds the 258 UTF-16 code units of a process's working
+    // directory, so its VMM starts in the system directory.
+    let mut parent = bench.directory.path().to_path_buf();
+    while parent.as_os_str().encode_wide().count() < 300 {
+        parent.push("long-state-root-component");
+    }
+    fs::create_dir_all(&parent).unwrap();
+    let bench = Bench {
+        store: Store::create(parent.join("store")).unwrap(),
+        ..bench
+    };
+    let generation = bench.refresh().unwrap();
+    assert_eq!(bench.indexed(), [number(&generation)]);
+    let snapshot = bench.store.snapshot_dir(&generation).unwrap();
+    assert_eq!(
+        sorted(&snapshot),
+        ["manifest.bin", "memory.bin", "state.bin"]
+    );
+    bench.assert_idle();
+}
+
 #[test]
 fn vms_that_end_without_a_capture_publish_nothing() {
     let _spawns = serialized();

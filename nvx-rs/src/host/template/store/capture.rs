@@ -283,8 +283,9 @@ struct Vm<'a> {
 }
 
 impl Vm<'_> {
-    /// Returns the command of the capture's VMM, run in the capture's transaction `dir`, whose
-    /// control console listens on `endpoint`, and whose outcome report goes to `report`.
+    /// Returns the command of the VMM of the capture in its transaction `dir`, in the working
+    /// directory that [`supervisor::vmm_working_dir`] chooses for the transaction, whose control
+    /// console listens on `endpoint`, and whose outcome report goes to `report`.
     ///
     /// Its arguments are the template's, as [`TemplatePlan::openvmm_arguments`] renders them,
     /// then the backend, the CPU profile, the kernel and the initramfs, the template's kernel
@@ -321,7 +322,18 @@ impl Vm<'_> {
         ] {
             arguments.push(argument.to_owned());
         }
-        Ok(VmmCommand::new(&self.artifacts.openvmm, arguments, dir))
+        let working_dir = supervisor::vmm_working_dir(dir).map_err(|error| {
+            Error::io(format!(
+                "cannot find the working directory of the VMM of the capture in {}",
+                dir.display()
+            ))
+            .with_source(error)
+        })?;
+        Ok(VmmCommand::new(
+            &self.artifacts.openvmm,
+            arguments,
+            working_dir,
+        ))
     }
 }
 
@@ -928,7 +940,6 @@ impl Store {
     fn open_slot(&self, class: ClassIdentity) -> Result<SandboxStore> {
         let captures = self.captures_dir();
         let slot = captures.join(slot_name(class));
-        platform::check_working_dir(&slot.join(TRANSACTION_NAME))?;
         create_private_dir(&captures, CAPTURES_WHAT)?;
         let slot = SandboxStore::create(slot)?;
         // A capture's VM listens in its transaction, the sandbox store from which it launches.
