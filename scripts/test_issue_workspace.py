@@ -424,6 +424,55 @@ class IssueWorkspaceTests(unittest.TestCase):
         self.assertFalse(cleaned.restored)
         self.assertEqual(_git(path, "rev-parse", "HEAD"), local)
 
+    def test_cleanup_keeps_openvmm_commits_that_only_its_repository_holds(
+        self,
+    ) -> None:
+        repo = self.repository.path
+        (repo / "README").write_text("local change\n", encoding="utf-8")
+        # The issue branch records the gitlink of a local OpenVMM commit, or git
+        # submodule deinit removes OpenVMM's checkout once it returns to its
+        # pin and leaves the commit on a branch. Either leaves both statuses
+        # clean, and removing the worktree would delete the OpenVMM repository
+        # that alone holds the commit.
+        for number, case in ((74, "gitlink"), (75, "deinit")):
+            with self.subTest(case=case):
+                path = self.root / f"issue-{number}"
+                created = issue_workspace.create_workspace(
+                    repo,
+                    number,
+                    f"openvmm-{case}",
+                    path=path,
+                    verify=False,
+                    git_runner=self.repository.runner,
+                )
+                self.assertEqual(created.mode, "worktree")
+                openvmm = path / "openvmm"
+                module = Path(
+                    _git(openvmm, "rev-parse", "--path-format=absolute", "--git-dir")
+                )
+                _configure(openvmm)
+                local = _commit(openvmm, "local", "local OpenVMM change")
+                if case == "gitlink":
+                    _git(path, "commit", "--quiet", "-am", "pin local OpenVMM work")
+                else:
+                    _git(openvmm, "branch", "work")
+                    _git(
+                        openvmm,
+                        "switch",
+                        "--quiet",
+                        "--detach",
+                        self.repository.openvmm_pin,
+                    )
+                    _git(path, "submodule", "deinit", "openvmm")
+                cleaned = issue_workspace.cleanup_workspace(
+                    repo, number, git_runner=self.repository.runner
+                )
+                self.assertFalse(cleaned.restored)
+                self.assertTrue(
+                    any(str(path) in item for item in cleaned.kept), cleaned.kept
+                )
+                self.assertEqual(_git(module, "cat-file", "-t", local), "commit")
+
     def test_create_checks_out_openvmm_whatever_its_update_setting(self) -> None:
         repo = self.repository.path
         # submodule.openvmm.update=none makes git submodule update skip

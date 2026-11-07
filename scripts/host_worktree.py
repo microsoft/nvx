@@ -4,8 +4,8 @@
 Test-host workflows use this tool to materialize an exact NVX revision beside an
 existing checkout. It validates repository URLs, initializes the pinned OpenVMM
 submodule while borrowing local objects when possible, and removes only clean
-linked worktrees whose commits other references keep, unless discarding them
-was explicitly requested.
+linked worktrees whose commits, and those of their OpenVMM repository, other
+references keep, unless discarding them was explicitly requested.
 """
 
 from __future__ import annotations
@@ -37,8 +37,9 @@ class GitRunner(Protocol):
     def __call__(self, repo: Path, *args: str) -> str: ...
 
 
-# The file in a worktree's private Git directory that records the commit that
-# add checked out, which git worktree remove deletes with that directory.
+# The file that records the commit that add checked out, in the worktree's
+# private Git directory and in that of its OpenVMM repository, which lies
+# inside it; git worktree remove deletes both with that directory.
 START_FILE = "nvx-host-worktree-start"
 
 
@@ -251,6 +252,9 @@ def add_worktree(
             f"OpenVMM initialization failed in {worktree_path}; the worktree was "
             f"kept for inspection: {error}"
         ) from error
+    (_git_dir(openvmm_path, git_runner) / START_FILE).write_text(
+        f"{openvmm_commit}\n", encoding="utf-8"
+    )
     return WorktreeInfo(worktree_path, commit, branch, openvmm_commit)
 
 
@@ -299,6 +303,14 @@ def _git_dir(worktree: Path, runner: GitRunner) -> Path:
     return Path(runner(worktree, "rev-parse", "--path-format=absolute", "--git-dir"))
 
 
+def _start(git_dir: Path) -> list[str]:
+    try:
+        text = (git_dir / START_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return text.split()
+
+
 def unpreserved_commits(worktree: Path, runner: GitRunner) -> int:
     """Count the commits that only the worktree's HEAD reaches, which removing
     it, with its HEAD and reflog, would leave unreachable.
@@ -307,12 +319,57 @@ def unpreserved_commits(worktree: Path, runner: GitRunner) -> int:
     as a pull request's head fetched by name, preserves the commits that it
     reaches.
     """
-    try:
-        start = (_git_dir(worktree, runner) / START_FILE).read_text(encoding="utf-8")
-    except OSError:
-        start = ""
-    preserved = ["--branches", "--tags", "--remotes", *start.split()]
+    start = _start(_git_dir(worktree, runner))
+    preserved = ["--branches", "--tags", "--remotes", *start]
     return int(runner(worktree, "rev-list", "--count", "HEAD", "--not", *preserved))
+
+
+def _openvmm_repositories(worktree: Path, runner: GitRunner) -> set[Path]:
+    """Return the Git directories that hold OpenVMM's repository, and any other
+    submodule's, and that removing the worktree deletes.
+
+    git submodule update keeps a submodule's repository in the worktree's
+    private Git directory, where git submodule deinit leaves it after removing
+    the submodule's checkout.
+    """
+    repositories: set[Path] = set()
+    modules = _git_dir(worktree, runner) / "modules"
+    if modules.is_dir():
+        repositories.update(
+            head.parent.resolve()
+            for head in modules.rglob("HEAD")
+            if (head.parent / "objects").is_dir()
+        )
+    openvmm = worktree / "openvmm"
+    if _submodule_is_initialized(openvmm):
+        repositories.add(_git_dir(openvmm, runner).resolve())
+    return repositories
+
+
+def unpreserved_openvmm_commits(worktree: Path, runner: GitRunner) -> int:
+    """Count the commits that only the worktree's OpenVMM repository holds,
+    which removing the worktree deletes, even once git submodule deinit has
+    removed OpenVMM's checkout.
+
+    Its HEAD, branches, tags, and stash can reach such commits, such as one
+    whose gitlink an NVX branch records, or one on a branch that OpenVMM left
+    when it returned to its pin. A remote branch, or the commit that add
+    checked out, preserves the commits that it reaches.
+    """
+    return sum(
+        int(
+            runner(
+                repository,
+                "rev-list",
+                "--count",
+                "--all",
+                "--not",
+                "--remotes",
+                *_start(repository),
+            )
+        )
+        for repository in sorted(_openvmm_repositories(worktree, runner))
+    )
 
 
 def remove_worktree(
@@ -322,8 +379,9 @@ def remove_worktree(
     discard: bool = False,
     git_runner: GitRunner = git,
 ) -> RemovalInfo:
-    """Remove a linked worktree, preserving its changes and the commits that
-    only its HEAD reaches, unless discard is set."""
+    """Remove a linked worktree, preserving its changes, the commits that only
+    its HEAD reaches, and those that only its OpenVMM repository holds, unless
+    discard is set."""
     checkout = _checkout(repo.resolve(), git_runner)
     entries = _worktrees(checkout, git_runner)
     target = path.expanduser().resolve()
@@ -369,6 +427,13 @@ def remove_worktree(
                 f"refusing to remove {target}, whose HEAD reaches {unpreserved} "
                 "commit(s) that no branch, tag, or remote branch holds; create "
                 "a branch for them, or pass --discard"
+            )
+        unpreserved = unpreserved_openvmm_commits(target, git_runner)
+        if unpreserved:
+            raise GitError(
+                f"refusing to remove {target}, which deletes its OpenVMM "
+                f"repository, whose HEAD and refs reach {unpreserved} commit(s) "
+                "that no remote branch holds; push them, or pass --discard"
             )
     # worktree remove deletes the target's records itself; git worktree prune
     # would also delete those of every other worktree that looks missing, such

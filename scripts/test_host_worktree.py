@@ -479,6 +479,96 @@ class HostWorktreeTests(unittest.TestCase):
         host_worktree.remove_worktree(repo, path)
         self.assertFalse(path.exists())
 
+    def test_remove_refuses_openvmm_commits_that_only_its_repository_holds(
+        self,
+    ) -> None:
+        # Removing a linked worktree deletes its OpenVMM repository, which
+        # alone holds a local OpenVMM commit, while both statuses stay clean
+        # once an NVX branch records the commit's gitlink, or once OpenVMM
+        # returns to the pin and leaves the commit on a branch.
+        for case in ("gitlink", "branch"):
+            with self.subTest(case=case):
+                path = self.root / f"openvmm-{case}"
+                host_worktree.add_worktree(
+                    self.repository.path,
+                    "HEAD",
+                    path=path,
+                    branch=f"agents/openvmm-{case}",
+                    git_runner=self.repository.runner,
+                )
+                openvmm = path / "openvmm"
+                _configure(openvmm)
+                if case == "branch":
+                    _git(openvmm, "switch", "--quiet", "-c", "work")
+                (openvmm / "work").write_text("keep me\n", encoding="utf-8")
+                _git(openvmm, "add", "work")
+                _git(openvmm, "commit", "--quiet", "-m", "local OpenVMM work")
+                work = _git(openvmm, "rev-parse", "HEAD")
+                if case == "gitlink":
+                    _git(path, "commit", "--quiet", "-am", "pin local OpenVMM work")
+                else:
+                    _git(
+                        openvmm,
+                        "switch",
+                        "--quiet",
+                        "--detach",
+                        self.repository.openvmm_commit,
+                    )
+                for checkout in (path, openvmm):
+                    self.assertEqual(
+                        _git(
+                            checkout,
+                            "status",
+                            "--porcelain",
+                            "--ignore-submodules=none",
+                        ),
+                        "",
+                    )
+                with self.assertRaisesRegex(GitError, "OpenVMM .* 1 commit"):
+                    host_worktree.remove_worktree(self.repository.path, path)
+                self.assertEqual(_git(openvmm, "cat-file", "-t", work), "commit")
+                host_worktree.remove_worktree(self.repository.path, path, discard=True)
+
+    def test_remove_refuses_openvmm_commits_that_deinit_leaves(self) -> None:
+        path = self.root / "openvmm-deinit"
+        host_worktree.add_worktree(
+            self.repository.path,
+            "HEAD",
+            path=path,
+            git_runner=self.repository.runner,
+        )
+        openvmm = path / "openvmm"
+        module = Path(_git(openvmm, "rev-parse", "--path-format=absolute", "--git-dir"))
+        _configure(openvmm)
+        _git(openvmm, "switch", "--quiet", "-c", "work")
+        (openvmm / "work").write_text("keep me\n", encoding="utf-8")
+        _git(openvmm, "add", "work")
+        _git(openvmm, "commit", "--quiet", "-m", "local OpenVMM work")
+        work = _git(openvmm, "rev-parse", "HEAD")
+        _git(openvmm, "switch", "--quiet", "--detach", self.repository.openvmm_commit)
+        # git submodule deinit removes OpenVMM's checkout, but keeps its
+        # repository, with the branch, in the worktree's private Git directory.
+        _git(path, "submodule", "deinit", "openvmm")
+        self.assertFalse((openvmm / ".git").exists())
+        with self.assertRaisesRegex(GitError, "OpenVMM .* 1 commit"):
+            host_worktree.remove_worktree(self.repository.path, path)
+        self.assertEqual(_git(module, "rev-parse", "work"), work)
+        host_worktree.remove_worktree(self.repository.path, path, discard=True)
+
+    def test_remove_accepts_the_openvmm_commit_that_add_checked_out(self) -> None:
+        path = self.root / "openvmm-pin"
+        host_worktree.add_worktree(
+            self.repository.path,
+            "HEAD",
+            path=path,
+            git_runner=self.repository.runner,
+        )
+        # A pin fetched by object name, such as an OpenVMM pull request's
+        # head, need not be on a remote branch.
+        _git(path / "openvmm", "remote", "remove", "origin")
+        host_worktree.remove_worktree(self.repository.path, path)
+        self.assertFalse(path.exists())
+
     def test_add_checks_the_gitmodules_url_of_the_requested_revision(self) -> None:
         repo = self.repository.path
         revisions: dict[str, str] = {}
