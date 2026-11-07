@@ -1753,15 +1753,23 @@ fn nvx::host::artifacts::openvmm_executable
 mod nvx::host::cli (hidden)
 fn nvx::host::cli::main (hidden)
 mod nvx::host::config
+struct nvx::host::config::Boot
+field nvx::host::config::Boot::command_line
 enum nvx::host::config::ConsoleAttachment
 variant nvx::host::config::ConsoleAttachment::Disconnected
 variant nvx::host::config::ConsoleAttachment::Listener
+const nvx::host::config::DEFAULT_GUEST_NETWORK
 struct nvx::host::config::LayeredRoot
 field nvx::host::config::LayeredRoot::format
 field nvx::host::config::LayeredRoot::gpt_first_partition_bound
 field nvx::host::config::LayeredRoot::image
 field nvx::host::config::LayeredRoot::overlay
 field nvx::host::config::LayeredRoot::upper
+struct nvx::host::config::NetworkConfig
+field nvx::host::config::NetworkConfig::guest_network
+field nvx::host::config::NetworkConfig::policy
+struct nvx::host::config::NicConfig
+field nvx::host::config::NicConfig::guest_network
 enum nvx::host::config::RootConfig
 variant nvx::host::config::RootConfig::Blockless
 variant nvx::host::config::RootConfig::Layered
@@ -1774,10 +1782,12 @@ variant nvx::host::config::UpperConfig::Scratch
 field nvx::host::config::UpperConfig::Scratch::journal
 field nvx::host::config::UpperConfig::Scratch::path
 struct nvx::host::config::VmConfig
+field nvx::host::config::VmConfig::boot
 method nvx::host::config::VmConfig::check
 field nvx::host::config::VmConfig::console
 field nvx::host::config::VmConfig::filesystem
 field nvx::host::config::VmConfig::memory_mib
+field nvx::host::config::VmConfig::network
 field nvx::host::config::VmConfig::processors
 field nvx::host::config::VmConfig::root
 field nvx::host::config::VmConfig::view
@@ -3173,6 +3183,11 @@ method nvx::net::Cidr::is_ipv6
 method nvx::net::Cidr::parse
 method nvx::net::Cidr::parse_masked
 method nvx::net::Cidr::subtract
+struct nvx::net::Ipv4Cidr
+method nvx::net::Ipv4Cidr::address
+method nvx::net::Ipv4Cidr::new
+method nvx::net::Ipv4Cidr::parse
+method nvx::net::Ipv4Cidr::prefix_len
 mod nvx::net::cidr
 struct nvx::net::cidr::Cidr
 method nvx::net::cidr::Cidr::contains

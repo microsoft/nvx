@@ -27,6 +27,10 @@
 //!   as an init does once for its VM, before the root's first live share or mapping: it makes
 //!   every mount of the root's tree `nosuid` and `nodev`, then mounts `/proc`, `/sys`, `/dev` with
 //!   `/dev/pts` and `/dev/shm`, and `/run`, and binds the guest's time status at `/run/nvx/time`.
+//! - `Root::switch`, which is crate-private, switches into the root, as an init does once for its
+//!   VM: it moves the root's mount onto `/`, then makes the root the caller's root directory and
+//!   working directory. The root's mounts stay from then on: its teardown refuses, and dropping it
+//!   unmounts nothing.
 //! - [`Root::teardown`] unmounts, in order, the live shares and mappings in reverse order, the
 //!   mounts of an aggregate live share, of the host export, and of the runtime, the later first,
 //!   the overlay, the layers from the top down, and the upper, whose file system it syncs first
@@ -36,8 +40,9 @@
 //!
 //! A failure is an [`Error`] that names what failed. The operations need the guest's root user,
 //! in the guest's initial mount and cgroup namespaces. They never collect a child's status,
-//! change the caller's root directory or credentials, start an async runtime, or power the VM
-//! off, so a caller that is not PID 1 keeps its own reaping, transport, and shutdown.
+//! change the caller's credentials, start an async runtime, or power the VM off, and only
+//! `Root::switch` changes the caller's root directory, so a caller that is not PID 1 keeps its own
+//! reaping, transport, and shutdown.
 //!
 //! # Runtime directory
 //!
@@ -643,6 +648,7 @@ fn assemble_with(
         mapper: None,
         mapped: Vec::new(),
         latched: false,
+        switched: false,
         reservation: None,
     };
     match root.mount_layers(paths, assembly, deadline, contents) {
@@ -696,8 +702,9 @@ impl Lower {
 /// those of its live shares, host export, and mappings, and reports what the assembly mounted.
 ///
 /// [`teardown`](Self::teardown) unmounts them and reports each failure. Dropping the root
-/// unmounts them the same way, and ignores failures. Until then, the root holds the lock of its
-/// runtime directory, where no other root assembles.
+/// unmounts them the same way, and ignores failures, unless `Root::switch` has switched into the
+/// root: it then unmounts nothing. Until then, the root holds the lock of its runtime directory,
+/// where no other root assembles.
 pub struct Root {
     /// The kernel that mounts and unmounts.
     kernel: Box<dyn Kernel>,
@@ -733,13 +740,17 @@ pub struct Root {
     /// Whether a share, the export, or a mapping failed, after which the root refuses every later
     /// one.
     latched: bool,
+    /// Whether the root's mount has moved onto `/`, after which the root refuses another switch
+    /// and its teardown, and unmounts nothing.
+    switched: bool,
     /// The exclusive lock of the runtime directory, from the start of the assembly; dropping the
     /// root releases it after the unmounts.
     reservation: Option<sys::FileLock>,
 }
 
 impl Root {
-    /// Returns the root: the overlay's mount point, `rootfs` in the runtime directory.
+    /// Returns the root's original overlay mount point, `rootfs` in the runtime directory.
+    /// This path is unchanged by `Root::switch`; paths then resolve inside the switched root.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -798,6 +809,9 @@ impl Root {
     /// goes, which may be after the VM powers off. So a teardown that succeeds leaves every write
     /// to the root on the scratch device. A scratch whose sync fails is not unmounted, and the
     /// failure is reported as its own.
+    ///
+    /// Once `Root::switch` has switched into the root, the teardown refuses: it unmounts nothing,
+    /// and its error's `TeardownError::is_switched` is true.
     pub fn teardown(mut self) -> Result<(), TeardownError> {
         self.unmount()
     }
@@ -953,6 +967,44 @@ impl Root {
             self.shares.push((mount, path));
         }
         Ok(())
+    }
+
+    /// Switches into the root, as an init does once for its VM, after the mounts and the
+    /// descriptors that it needs: it moves the root's mount onto `/`, as an execution's child
+    /// moves its root in its own mount namespace, then makes the root the calling process's root
+    /// directory, with `chroot`, and its working directory, with `chdir`. The move is in the
+    /// caller's mount namespace, and the root and working directories are those that the caller's
+    /// threads share, but for a thread that unshared them.
+    ///
+    /// A root switches once, for good: a second switch is refused as [`SwitchError::Switched`].
+    /// Once its mount is on `/`, the root has switched, even if entering it then fails: from then
+    /// on its [`teardown`](Self::teardown) refuses and dropping it unmounts nothing, so its mounts
+    /// stay until the VM powers off. A move that fails leaves the root where it was, unswitched.
+    ///
+    /// Paths resolve in the root from then on, but descriptors opened before the switch stay
+    /// usable: a [`Mapper`] still maps from a [`SourceRoot`](super::mappings::SourceRoot) beneath
+    /// a [`TargetRoot`] opened before it, as [`map`](Self::map) does if the root had mounted a
+    /// live share or a mapping before it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "nvx-init calls it (#1115)"))]
+    pub(crate) fn switch(&mut self) -> Result<(), SwitchError> {
+        if self.switched {
+            return Err(SwitchError::Switched);
+        }
+        let moved = |error: Errno| SwitchError::Move {
+            error: error.into(),
+        };
+        // The root is entered through its descriptor, so a move that fails changes nothing.
+        let directory = share::open_mount_point(&self.path).map_err(moved)?;
+        let root = sys::path_c_string(&self.path).map_err(moved)?;
+        self.kernel
+            .mount(Some(root.as_c_str()), c"/", None, MountFlags::MS_MOVE, None)
+            .map_err(moved)?;
+        self.switched = true;
+        self.kernel
+            .enter_root(&directory)
+            .map_err(|error| SwitchError::Enter {
+                error: error.into(),
+            })
     }
 
     /// Implements [`assemble`]'s steps after the first, waiting for each device until `deadline`
@@ -1302,8 +1354,14 @@ impl Root {
     }
 
     /// Unmounts what the root has mounted, as [`teardown`](Self::teardown) describes, and
-    /// forgets it, failed unmounts included.
+    /// forgets it, failed unmounts included, unless the root has switched.
     fn unmount(&mut self) -> Result<(), TeardownError> {
+        if self.switched {
+            // An empty list of failures is a switched root's refusal.
+            return Err(TeardownError {
+                failures: Vec::new(),
+            });
+        }
         let mut failures = Vec::new();
         // The mapper's descriptor of the root keeps the overlay busy, so it goes first.
         if let Some(mut mapper) = self.mapper.take() {
@@ -1374,7 +1432,8 @@ impl Root {
 }
 
 impl Drop for Root {
-    /// Unmounts what the root has mounted, as [`Root::teardown`] does, and ignores failures.
+    /// Unmounts what the root has mounted, as [`Root::teardown`] does, and ignores failures. A
+    /// root that has switched unmounts nothing.
     fn drop(&mut self) {
         let _ = self.unmount();
     }
@@ -1399,6 +1458,7 @@ impl fmt::Debug for Root {
             .field("runtime_stray", &self.runtime_stray)
             .field("mapped", &self.mapped)
             .field("latched", &self.latched)
+            .field("switched", &self.switched)
             .finish_non_exhaustive()
     }
 }
@@ -2178,24 +2238,69 @@ impl fmt::Display for AssemblyError {
 
 impl std::error::Error for AssemblyError {}
 
-/// The syncs and unmounts of a teardown that failed, in the order in which they were attempted.
+/// Why [`Root::switch`] failed. Its text names the step that failed, and the system's error, if
+/// any.
+#[derive(Debug)]
+pub(crate) enum SwitchError {
+    /// The root has switched already, and a root switches once.
+    Switched,
+    /// Opening the root or moving its mount onto `/` failed: the root stays where it was, and
+    /// has not switched.
+    Move {
+        /// The system's error.
+        error: io::Error,
+    },
+    /// Making the root the caller's root directory and working directory failed once its mount
+    /// was on `/`: the root has switched.
+    Enter {
+        /// The system's error.
+        error: io::Error,
+    },
+}
+
+impl fmt::Display for SwitchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Switched => formatter.write_str("the root has switched already"),
+            Self::Move { error } => write!(formatter, "failed to move the root onto /: {error}"),
+            Self::Enter { error } => write!(
+                formatter,
+                "failed to enter the root, whose mount is on / already: {error}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SwitchError {}
+
+/// The syncs and unmounts of a teardown that failed, in the order in which they were attempted,
+/// or the refusal of a root that has switched.
 #[derive(Debug)]
 pub struct TeardownError {
-    /// The failures, which is never empty.
+    /// The failures, which is empty only for the refusal of a root that has switched.
     failures: Vec<Unmount>,
 }
 
 impl TeardownError {
     /// Returns the failures, each of a mount that stays in place, in the order in which they were
-    /// attempted.
+    /// attempted: none if the root had switched.
     pub fn failures(&self) -> &[Unmount] {
         &self.failures
+    }
+
+    /// Returns whether the teardown was refused because the root had
+    /// [switched](Root::switch), so that it unmounted nothing.
+    pub(crate) fn is_switched(&self) -> bool {
+        self.failures.is_empty()
     }
 }
 
 impl fmt::Display for TeardownError {
-    /// Writes each failure, separated by `; `.
+    /// Writes each failure, separated by `; `, or the refusal.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_switched() {
+            return formatter.write_str("the root has switched, so its mounts stay");
+        }
         for (index, failure) in self.failures.iter().enumerate() {
             if index > 0 {
                 formatter.write_str("; ")?;

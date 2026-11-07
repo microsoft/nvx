@@ -8,7 +8,8 @@
 //!   [`LaunchOptions`](runtime::LaunchOptions).
 //! - [`config`] holds the configuration of a VM as one value, a [`VmConfig`](config::VmConfig),
 //!   which it checks without reading the host: the VM's processors and memory, its root, the view
-//!   that its workload has of it, its export, and its boot console.
+//!   that its workload has of it, its network, its export, its boot console, and what only its
+//!   cold boot takes.
 //! - [`launch`] builds OpenVMM's command line from a [`LaunchSpec`](launch::LaunchSpec): the
 //!   managed lifecycle, the workload identity, the kernel command line, and the network and
 //!   filesystem options.

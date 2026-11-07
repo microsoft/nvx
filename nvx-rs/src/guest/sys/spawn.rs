@@ -91,6 +91,8 @@ pub(crate) struct ChildSpec {
     reset_signals: bool,
     /// The execution that the child enters, if any.
     entry: Option<EntryChild>,
+    /// The identity of an init workload, without an entry or per-execution containment.
+    workload: Option<(u32, u32)>,
     /// Test-only outcome of the credential system calls, which the child then skips:
     /// `Some(None)` succeeds, and `Some(Some(error))` fails the first one with `error`.
     #[cfg(test)]
@@ -118,6 +120,7 @@ impl ChildSpec {
             barrier: false,
             reset_signals: false,
             entry: None,
+            workload: None,
             #[cfg(test)]
             simulated_credentials: None,
         }
@@ -193,6 +196,13 @@ impl ChildSpec {
     /// Makes the child enter the execution that `entry` prepares.
     pub(crate) fn set_entry(&mut self, entry: EntryChild) {
         self.entry = Some(entry);
+    }
+
+    /// Gives an init workload its identity, its own process group, and reset signals.
+    pub(crate) fn set_workload(&mut self, uid: u32, gid: u32) {
+        self.workload = Some((uid, gid));
+        self.process_group = true;
+        self.reset_signals = true;
     }
 }
 
@@ -314,6 +324,8 @@ pub(crate) struct PreparedChild {
     reset_signals: bool,
     /// The execution that the child enters, if any.
     entry: Option<EntryChild>,
+    /// The identity of an init workload, whose priority is reset before it takes it.
+    workload: Option<(u32, u32)>,
     /// Reader of the launch report, which the caller receives.
     report_reader: FileDescriptor,
     /// Writer of the launch report, which only the child keeps.
@@ -434,6 +446,7 @@ impl PreparedChild {
             barrier,
             reset_signals: spec.reset_signals || entry.is_some(),
             entry,
+            workload: spec.workload,
             report_reader,
             report_writer,
             used,
@@ -604,7 +617,13 @@ impl PreparedChild {
             // SAFETY: as above.
             unsafe { fail(report, stage, error) }
         }
-        if self.entry.is_some() {
+        if let Some((uid, gid)) = self.workload
+            && let Err((stage, error)) = self.take_workload(uid, gid)
+        {
+            // SAFETY: as above.
+            unsafe { fail(report, stage, error) }
+        }
+        if self.entry.is_some() || self.workload.is_some() {
             // An entry's child closes every descriptor that its stages used or opened, but its
             // program's, and resolves its working directory, `/` unless the command names
             // another, through no magic link: no `/proc` link to a descriptor, a working
@@ -682,6 +701,16 @@ impl PreparedChild {
         unsafe { fail(report, LaunchStage::Exec, error) }
     }
 
+    /// Resets priority before taking a plain workload's identity, without allocating.
+    fn take_workload(&self, uid: u32, gid: u32) -> Result<(), (LaunchStage, Errno)> {
+        #[cfg(test)]
+        if let Some(simulated) = self.simulated_credentials {
+            return simulated.map_or(Ok(()), |error| Err((LaunchStage::Identity, error)));
+        }
+        reset_workload_priority().map_err(|error| (LaunchStage::Identity, error))?;
+        super::entry::take_workload_identity(uid, gid)
+    }
+
     /// Places the standard streams and clears close-on-exec on the inherited descriptors.
     ///
     /// Every source has a number above the standard streams', so `dup2` replaces each stream
@@ -689,7 +718,7 @@ impl PreparedChild {
     /// first closes every descriptor that it does not use, those that its caller opened without
     /// close-on-exec too, so that its program holds none of the caller's.
     fn place_descriptors(&self) -> Result<(), Errno> {
-        if self.entry.is_some() {
+        if self.entry.is_some() || self.workload.is_some() {
             close_other_descriptors(&self.used)?;
         }
         let [stdin, stdout, stderr] = &self.streams;
@@ -735,6 +764,24 @@ impl PreparedChild {
         nix::unistd::setegid(gid)?;
         nix::unistd::setgroups(&credentials.groups)
     }
+}
+
+/// Resets an init workload's out-of-memory adjustment and nice value before it loses privilege.
+///
+/// The child opens its own procfs entry: a descriptor opened before `fork` would still name
+/// the parent's adjustment. These operations allocate nothing after `fork`.
+fn reset_workload_priority() -> Result<(), Errno> {
+    let adjustment = super::open(
+        super::kernel::OOM_SCORE_ADJUSTMENT,
+        super::OpenFlags::O_WRONLY | super::OpenFlags::O_CLOEXEC,
+        super::Mode::empty(),
+    )?;
+    let written = write_decimal(&adjustment, 0);
+    let closed = adjustment.close();
+    written.and(closed)?;
+    let process = nix::unistd::getpid().as_raw().unsigned_abs();
+    // SAFETY: `setpriority`, which `nix` does not wrap, reads only these integers.
+    Errno::result(unsafe { nix::libc::setpriority(nix::libc::PRIO_PROCESS, process, 0) }).map(drop)
 }
 
 /// Returns `descriptor` with close-on-exec set and a number above the standard streams',
@@ -793,7 +840,7 @@ fn close_range(first: c_uint, last: c_uint) -> Result<(), Errno> {
 }
 
 /// Makes `root` the calling process's root directory and working directory.
-fn enter_root(root: &FileDescriptor) -> Result<(), Errno> {
+pub(crate) fn enter_root(root: &FileDescriptor) -> Result<(), Errno> {
     nix::unistd::fchdir(root.borrowed())?;
     nix::unistd::chroot(c".")
 }

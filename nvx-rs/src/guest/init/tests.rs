@@ -7,6 +7,9 @@
 //! PID 1 theirs, and the check of the real priority needs the privileges of a guest's PID 1. No
 //! check stops a VM: each records the status with which PID 1 would.
 
+mod exec;
+pub(super) use exec::prepare_child;
+
 use std::collections::VecDeque;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
@@ -79,10 +82,15 @@ impl System for Fake {
             .map_or(Ok(None), |(_, answer)| *answer)
     }
 
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)> {
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
         self.calls.push(Call::Reap);
         let (process, status) = self.reaped.pop_front().flatten()?;
-        Some((pid(process), status))
+        let raw = match status {
+            ChildStatus::Exited(code) => code << 8,
+            ChildStatus::Signaled(signal) => signal,
+            ChildStatus::Other => 0x7f,
+        };
+        Some((pid(process), status, raw))
     }
 
     fn wait_signal(&mut self) -> Option<Signal> {
@@ -102,6 +110,83 @@ impl System for Fake {
     fn shut_down(&mut self, status: u8) {
         self.calls.push(Call::ShutDown(status));
     }
+}
+
+#[test]
+fn the_shared_collector_forwards_workload_status_and_keeps_helper_failure_fatal() {
+    let helpers = Helpers {
+        time: pid(42),
+        announcer: Some(pid(43)),
+    };
+    let mut system = Fake {
+        reaped: [
+            Some((51, ChildStatus::Exited(7))),
+            Some((52, ChildStatus::Signaled(35))),
+            Some((43, ChildStatus::Exited(0))),
+        ]
+        .into(),
+        ..Fake::default()
+    };
+    let mut observed = Vec::new();
+    let error = collect(&mut system, helpers, |id, status| {
+        observed.push((id, status))
+    })
+    .unwrap_err();
+    assert_eq!(observed[0].0, 51);
+    assert_eq!(observed[0].1.code(), Some(7));
+    assert_eq!(observed[1].0, 52);
+    assert_eq!(observed[1].1.signal(), Some(35));
+    assert_eq!(observed.len(), 2);
+    assert_eq!(error, "the announcer, process 43, exited with status 0");
+}
+
+#[test]
+fn the_runtime_wakes_for_children_without_control_input_and_prioritizes_a_helper_over_sigterm() {
+    let name = "guest::init::tests::the_runtime_wakes_for_children_without_control_input_and_prioritizes_a_helper_over_sigterm";
+    if isolate_process_test("NVX_INIT_RUNTIME_WAKE_TEST", name) {
+        return;
+    }
+    in_child(|| {
+        sys::reset_child_signal();
+        let signals = SignalDescriptor::new(&SIGNALS).unwrap();
+        let mut helper = Command::new("sleep").arg("30").spawn().unwrap();
+        let helper_id = ProcessId::from_child(&helper);
+        let descriptor = sys::open_pidfd(helper_id).unwrap();
+        let mut runtime = Runtime {
+            system: RealSystem {
+                signals: Some(signals),
+            },
+            helpers: Helpers {
+                time: helper_id,
+                announcer: None,
+            },
+            terminating: false,
+        };
+        let mut execution = Exec::start_simulated(exec::request("exit 7"), None).unwrap();
+        let [wake] = sys::poll([runtime.wake()], Some(Duration::from_secs(5))).unwrap();
+        assert!(
+            wake.readable && !wake.error,
+            "the child's end did not wake init"
+        );
+        assert!(
+            !runtime
+                .service(|id, status| {
+                    execution.observe(id, status);
+                })
+                .unwrap()
+        );
+        assert_eq!(execution.status().unwrap().code(), Some(7));
+        helper.kill().unwrap();
+        assert!(sys::readable_or_hung_up(&[descriptor.borrowed()], 1000).unwrap()[0]);
+        nix::sys::signal::kill(nix::unistd::getpid(), Signal::SIGTERM).unwrap();
+        let error = runtime.service(|_, _| {}).unwrap_err();
+        assert!(error.contains("the time daemon"));
+        assert!(error.contains("signal 9"));
+        assert_eq!(
+            helper.wait().unwrap_err().raw_os_error(),
+            Some(Errno::ECHILD as i32)
+        );
+    });
 }
 
 /// A system whose signals, children, and statuses are the real ones, which changes no priority,
@@ -151,7 +236,7 @@ impl System for Subreaper {
         self.real.adopt(process)
     }
 
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)> {
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
         let child = self.real.reap()?;
         self.reaped.push(child.0.raw());
         Some(child)
@@ -204,7 +289,7 @@ impl System for Observer {
         self.real.adopt(process)
     }
 
-    fn reap(&mut self) -> Option<(ProcessId, ChildStatus)> {
+    fn reap(&mut self) -> Option<(ProcessId, ChildStatus, i32)> {
         self.real.reap()
     }
 
@@ -267,7 +352,7 @@ fn failure(text: &str) -> Call {
 ///
 /// The checks block signals, collect the status of every child that ends, or replace standard
 /// error, which would disturb the harness's other tests.
-fn in_child(check: fn()) {
+fn in_child(check: impl FnOnce() + std::panic::UnwindSafe) {
     match fork_isolated_test().unwrap() {
         ForkResult::Child => {
             let outcome = std::panic::catch_unwind(check);
