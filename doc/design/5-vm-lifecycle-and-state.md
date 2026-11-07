@@ -21,7 +21,7 @@ stateDiagram-v2
    Published --> [*]: source generation terminates
    Published --> Constructing: clone or resume
    Running --> Stopping: guest exit or host stop
-   Constructing --> Failed: validation or reconstruction fails
+   Constructing --> Failed: validation, reconstruction, or device start fails
    Capturing --> Failed: boundary becomes uncertain
    Stopping --> [*]
    Failed --> [*]
