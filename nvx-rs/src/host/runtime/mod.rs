@@ -47,22 +47,24 @@ pub struct Runtime {
 /// attaches its own.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LaunchOptions {
-    /// What OpenVMM does when the guest powers off.
+    /// What OpenVMM does on a plain guest power-off or hibernate event. A guest power-off that
+    /// reports an exit status always exits OpenVMM with that status, regardless of this action.
     pub guest_shutdown: GuestPowerAction,
     /// How long OpenVMM waits for the host to authenticate on the control console, or `None` for
-    /// OpenVMM's default.
+    /// OpenVMM's default. The cold-boot renderer accepts whole milliseconds from 1 to 60000.
     pub control_auth_timeout: Option<Duration>,
 }
 
-/// What OpenVMM does when the guest powers off.
+/// What OpenVMM does on a plain guest power-off or hibernate event. A power-off with an exit
+/// status always exits OpenVMM with that status instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GuestPowerAction {
-    /// OpenVMM exits, which ends the VM: the default, on which stopping a VM relies.
+    /// OpenVMM exits, which ends the VM: the default.
     #[default]
     Exit,
-    /// OpenVMM halts the VM and keeps running.
+    /// OpenVMM halts the VM and keeps running, unless the power-off reports an exit status.
     Halt,
-    /// OpenVMM restarts the guest.
+    /// OpenVMM restarts the guest, unless the power-off reports an exit status.
     Reset,
 }
 

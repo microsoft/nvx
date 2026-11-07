@@ -124,7 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
-| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: one VM configuration, checked and lowered into cold-boot kernel tokens without reading the host |
+| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`: one VM configuration, pure cold-boot kernel and OpenVMM arguments, and the portable command-line check |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
@@ -422,11 +422,13 @@ generation tells stale messages from foreign ones.
 `Runtime`: what every launch shares, the paths of the OpenVMM executable, guest
 kernel, and guest initramfs, their `RuntimeIdentity`, the hypervisor, an
 optional CPU profile, whether OpenVMM breaks away from the caller's Windows job
-object, and the `LaunchOptions`. Those are what OpenVMM does when the guest
-powers off, a `GuestPowerAction`, by default `Exit`, which ends the VM, or
+object, and the `LaunchOptions`. Those are what OpenVMM does on a plain guest
+power-off or hibernate event, a `GuestPowerAction`, by default `Exit`, or
 `Halt` or `Reset`, and how long OpenVMM waits for the host to authenticate on
-the control console. The boot console is not among them: each VM attaches its
-own.
+the control console, in whole milliseconds from 1 to 60000. A power-off that
+reports an exit status always exits OpenVMM with that status, regardless of
+the selected action. The boot console is not among the options: each VM
+attaches its own.
 
 `RuntimeIdentity` labels the three files with the `ArtifactIdentity` tokens that
 their install or staging metadata gives, such as `sha256:` and a digest, which
@@ -538,6 +540,29 @@ entries. The table's `HostMap` and its wire codecs are accessible through
 command-line budget, including the terminating NUL. The legacy launch checks
 continue to use it.
 
+`VmConfig::openvmm_arguments` renders a cold boot's whole OpenVMM argument list
+from `Runtime` and `VmConfig`. Its borrowed control endpoint, report path, and
+optional boot-console endpoint are already chosen output names, not additional
+launch settings. It opens no path, allocates no endpoint, and starts no process.
+It renders processors, memory without narrowing it, kernel and initramfs paths,
+the kernel command line, layered-root block devices by path, network and export
+arguments, console attachment, the CPU profile, and every `LaunchOptions` value.
+A configured NIC remains attached even under deny-all policy. A listener needs
+its supplied console name; a disconnected attachment retains the device and
+discards its output. The renderer emits neither `--microvm-lifecycle` nor
+`--microvm-workload-identity`. The whole-config entry point is temporarily
+public: SL2.8 makes it internal when `host::vm::create` calls it.
+
+`VmConfig::check_command_line()` checks the configuration's known arguments on
+every host, before any host change, with 2048 UTF-16 code units reserved for the
+runtime's files, launch options, and VM output names. The reserve foresees file
+and endpoint names of up to 260 code units, not arbitrary runtime paths or
+CPU-profile strings. The whole renderer checks the complete actual command
+line without a reserve too. `PROCESS_COMMAND_LINE_LIMIT`,
+`process_command_line_units` and `fit_process_command_line` now belong to
+`nvx::host::config`; their existing `nvx::host::launch` paths remain usable,
+with the same Windows quoting and terminating-NUL count.
+
 ### `nvx::host::artifacts`
 
 `Artifacts` (also `nvx::Artifacts`): the OpenVMM executable, guest kernel, and
@@ -577,7 +602,8 @@ specification's.
 `process_command_line_units` counts the Windows command line that runs a program
 with its arguments, in UTF-16 code units, as Windows quotes them, and
 `fit_process_command_line` checks it against `PROCESS_COMMAND_LINE_LIMIT`, on
-every host, with the reserve that its caller keeps.
+every host, with the reserve that its caller keeps. The helpers live in
+`nvx::host::config` and remain re-exported here for existing callers.
 `LaunchSpec::check_process_command_line`, which a caller runs before it
 provisions an instance, keeps 1024 code units for what may change before the
 instance starts, whose own check keeps none.

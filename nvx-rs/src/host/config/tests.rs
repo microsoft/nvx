@@ -9,7 +9,8 @@ use crate::activation::MachineIdMode;
 use crate::host::artifacts::Artifacts;
 use crate::host::filesystem::{Bind, ExportChild, Owner};
 use crate::host::launch::LaunchSpec;
-use crate::host::network::Access;
+use crate::host::network::{Access, EgressRule, Protocol};
+use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
 use crate::host::sandbox::{SandboxDistro, SandboxPlan, SandboxSettings, SandboxUpper};
 use crate::hypervisor::Hypervisor;
 use crate::protocol::{cmdline, parse_host_mapping_count};
@@ -609,4 +610,517 @@ fn public_maps_codec_keeps_the_protocol_root_reexports_usable() {
     let decoded: crate::protocol::maps::MapsPayload =
         crate::protocol::decode_maps_payload(&payloads[0]).unwrap();
     assert_eq!(decoded.maps, table);
+}
+
+fn runtime() -> Runtime {
+    let artifact = ArtifactIdentity::new("fixture").unwrap();
+    Runtime {
+        openvmm: missing("openvmm"),
+        kernel: missing("vmlinux"),
+        initramfs: missing("initramfs.cpio.gz"),
+        identity: RuntimeIdentity::new(artifact.clone(), artifact.clone(), artifact),
+        hypervisor: Hypervisor::Kvm,
+        cpu_profile: None,
+        windows_breakaway: false,
+        options: LaunchOptions::default(),
+    }
+}
+
+fn cold(config: VmConfig) -> VmConfig {
+    VmConfig {
+        boot: Some(Boot {
+            command_line: "quiet nvx_entrypoint=/bin/work nvx_arg=\"a b\"".to_owned(),
+        }),
+        ..config
+    }
+}
+
+fn values<'a>(arguments: &'a [OsString], option: &str) -> Vec<&'a OsStr> {
+    arguments
+        .windows(2)
+        .filter(|pair| pair[0] == option)
+        .map(|pair| pair[1].as_os_str())
+        .collect()
+}
+
+#[test]
+fn cold_boot_arguments_select_the_configured_guest_without_managed_tokens() {
+    for hypervisor in [Hypervisor::Kvm, Hypervisor::Mshv, Hypervisor::Whp] {
+        for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+            let config = cold(VmConfig {
+                processors: 4,
+                memory_mib: u64::from(u32::MAX) + 1,
+                console,
+                ..blockless()
+            });
+            let runtime = Runtime {
+                hypervisor,
+                ..runtime()
+            };
+            let endpoint = "/missing/control.sock";
+            let report = Path::new("/missing/outcome.json");
+            let console_endpoint =
+                (console == ConsoleAttachment::Listener).then_some("/missing/console.sock");
+            let arguments = config
+                .openvmm_arguments(&runtime, endpoint, report, console_endpoint)
+                .unwrap();
+            let console_backend = if console_endpoint.is_some() {
+                "listen=/missing/console.sock"
+            } else {
+                "none"
+            };
+            let expected: Vec<OsString> = [
+                OsStr::new("--machine"), OsStr::new("microvm"),
+                OsStr::new("--processors"), OsStr::new("4"),
+                OsStr::new("--single-process"),
+                OsStr::new("--hypervisor"), OsStr::new(hypervisor.as_str()),
+                OsStr::new("--memory"), OsStr::new("4294967296M"),
+                OsStr::new("--kernel"), runtime.kernel.as_os_str(),
+                OsStr::new("--initrd"), runtime.initramfs.as_os_str(),
+                OsStr::new("--cmdline"),
+                OsStr::new("nvx_hostname=626f78 nvx_machine_id=image quiet nvx_entrypoint=/bin/work nvx_arg=\"a b\""),
+                OsStr::new("--virtio-console"), OsStr::new(console_backend),
+                OsStr::new("--microvm-control-console"), OsStr::new("listen=/missing/control.sock"),
+                OsStr::new("--microvm-control-auth-stdin"),
+                OsStr::new("--microvm-report"), report.as_os_str(),
+                OsStr::new("--guest-shutdown-action"), OsStr::new("exit"),
+            ].into_iter().map(OsStr::to_os_string).collect();
+            assert_eq!(arguments, expected);
+            for forbidden in [
+                "--microvm-lifecycle",
+                "--microvm-workload-identity",
+                "--microvm-sandbox-block",
+            ] {
+                assert!(!arguments.iter().any(|argument| argument == forbidden));
+            }
+        }
+    }
+}
+
+#[test]
+fn cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path() {
+    for format in [
+        RootImage::erofs(None),
+        RootImage::gpt(Some(Uuid::from_bytes([7; 16]))),
+    ] {
+        for upper in [
+            UpperConfig::Ram {
+                max_memory_percent: 37,
+            },
+            UpperConfig::Scratch {
+                path: missing("scratch with spaces.ext4"),
+                journal: Journal::Forbidden,
+            },
+        ] {
+            for address in [None, Some(Ipv4Cidr::parse("172.16.8.2/24").unwrap())] {
+                let config = cold(VmConfig {
+                    root: RootConfig::Layered(LayeredRoot {
+                        image: missing("root with spaces.img"),
+                        format,
+                        gpt_first_partition_bound: (format.format == ImageFormat::Gpt)
+                            .then_some(65536),
+                        upper: upper.clone(),
+                        overlay: OverlayMode::UntrustedLowers,
+                    }),
+                    network: Some(NetworkConfig {
+                        guest_network: address,
+                        policy: NetworkPolicy::new(Access::Deny)
+                            .with_allow(EgressRule::to("192.0.2.0/24").on_port(Protocol::Tcp, 443)),
+                    }),
+                    filesystem: Some(export("/work")),
+                    ..blockless()
+                });
+                let arguments = config
+                    .openvmm_arguments(
+                        &runtime(),
+                        "/missing/control",
+                        Path::new("/missing/report"),
+                        Some("/missing/console"),
+                    )
+                    .unwrap();
+                let mut image = OsString::from("distro:file:");
+                image.push(missing("root with spaces.img"));
+                image.push(",ro");
+                let mut blocks = vec![image];
+                if let UpperConfig::Scratch { path, .. } = &upper {
+                    let mut scratch = OsString::from("scratch:file:");
+                    scratch.push(path);
+                    blocks.push(scratch);
+                }
+                assert_eq!(
+                    values(&arguments, "--microvm-sandbox-block"),
+                    blocks.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    values(&arguments, "--cmdline"),
+                    [OsStr::new(&config.kernel_command_line().unwrap())]
+                );
+                assert_eq!(
+                    values(&arguments, "--net"),
+                    [OsStr::new(if address.is_some() {
+                        "172.16.8.2/24"
+                    } else {
+                        DEFAULT_GUEST_NETWORK
+                    })]
+                );
+                assert_eq!(
+                    values(&arguments, "--network-profile"),
+                    [OsStr::new("portable")]
+                );
+                assert_eq!(values(&arguments, "--network-egress"), [OsStr::new("deny")]);
+                assert_eq!(
+                    values(&arguments, "--network-egress-allow"),
+                    [OsStr::new("192.0.2.0/24:tcp:443")]
+                );
+                assert_eq!(
+                    values(&arguments, "--mount-aggregate"),
+                    [OsStr::new(crate::host::filesystem::GUEST_EXPORT)]
+                );
+                let mut child = OsString::from("0,");
+                child.push(missing("export"));
+                child.push(",ro");
+                assert_eq!(values(&arguments, "--mount-child"), [child.as_os_str()]);
+                for forbidden in ["--microvm-lifecycle", "--microvm-workload-identity"] {
+                    assert!(!arguments.iter().any(|argument| argument == forbidden));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn an_explicit_deny_all_network_keeps_its_nic() {
+    let mut config = cold(blockless());
+    config.network = Some(NetworkConfig {
+        guest_network: None,
+        policy: NetworkPolicy::new(Access::Deny),
+    });
+    let arguments = config
+        .openvmm_arguments(
+            &runtime(),
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        )
+        .unwrap();
+    assert_eq!(
+        values(&arguments, "--net"),
+        [OsStr::new(DEFAULT_GUEST_NETWORK)]
+    );
+    for option in ["--network-egress", "--network-ingress", "--host-loopback"] {
+        assert_eq!(values(&arguments, option), [OsStr::new("deny")]);
+    }
+}
+
+#[test]
+fn cold_boot_arguments_render_every_launch_option_without_process_side_effects() {
+    for (action, text) in [
+        (GuestPowerAction::Exit, "exit"),
+        (GuestPowerAction::Halt, "halt"),
+        (GuestPowerAction::Reset, "reset"),
+    ] {
+        for timeout in [
+            None,
+            Some(Duration::from_millis(1)),
+            Some(Duration::from_millis(59999)),
+            Some(Duration::from_millis(60000)),
+        ] {
+            for profile in [None, Some("auto".to_owned())] {
+                let mut runtime = Runtime {
+                    cpu_profile: profile.clone(),
+                    options: LaunchOptions {
+                        guest_shutdown: action,
+                        control_auth_timeout: timeout,
+                    },
+                    ..runtime()
+                };
+                let config = cold(blockless());
+                let render = |runtime: &Runtime| {
+                    config
+                        .openvmm_arguments(
+                            runtime,
+                            "/missing/control",
+                            Path::new("/missing/report"),
+                            Some("/missing/console"),
+                        )
+                        .unwrap()
+                };
+                let arguments = render(&runtime);
+                assert_eq!(
+                    values(&arguments, "--guest-shutdown-action"),
+                    [OsStr::new(text)]
+                );
+                assert_eq!(
+                    values(&arguments, "--cpu-profile"),
+                    profile
+                        .as_deref()
+                        .map(OsStr::new)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                );
+                let milliseconds = timeout.map(|value| value.as_millis().to_string());
+                assert_eq!(
+                    values(&arguments, "--microvm-control-auth-timeout-ms"),
+                    milliseconds
+                        .as_deref()
+                        .map(OsStr::new)
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                );
+                runtime.windows_breakaway = true;
+                assert_eq!(arguments, render(&runtime));
+            }
+        }
+    }
+}
+
+#[test]
+fn authentication_timeout_refuses_fractional_and_out_of_range_milliseconds() {
+    for timeout in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_micros(999),
+        Duration::from_nanos(1_000_001),
+        Duration::from_nanos(60_000_000_001),
+        Duration::from_millis(60001),
+        Duration::from_secs(u64::MAX),
+    ] {
+        let runtime = Runtime {
+            options: LaunchOptions {
+                control_auth_timeout: Some(timeout),
+                ..LaunchOptions::default()
+            },
+            ..runtime()
+        };
+        let error = cold(blockless())
+            .openvmm_arguments(
+                &runtime,
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console"),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(
+            error.to_string().contains("control_auth_timeout"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn required_output_names_and_cold_boot_inputs_are_refused_without_host_io() {
+    let config = cold(blockless());
+    let runtime = runtime();
+    for (endpoint, report, console) in [
+        ("", Path::new("/missing/report"), Some("/missing/console")),
+        (
+            "/missing/control\0",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        ),
+        ("/missing/control", Path::new(""), Some("/missing/console")),
+        ("/missing/control", Path::new("/missing/report"), None),
+        ("/missing/control", Path::new("/missing/report"), Some("")),
+        (
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console\0"),
+        ),
+    ] {
+        assert_eq!(
+            config
+                .openvmm_arguments(&runtime, endpoint, report, console)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::Unsupported
+        );
+    }
+    assert_eq!(
+        blockless()
+            .openvmm_arguments(
+                &runtime,
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console")
+            )
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        blockless().check_command_line().unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+    let disconnected = cold(VmConfig {
+        console: ConsoleAttachment::Disconnected,
+        ..blockless()
+    });
+    assert!(
+        disconnected
+            .openvmm_arguments(
+                &runtime,
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console")
+            )
+            .is_err()
+    );
+    let invalid = cold(VmConfig {
+        processors: 0,
+        ..blockless()
+    });
+    assert!(
+        invalid
+            .openvmm_arguments(
+                &runtime,
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console")
+            )
+            .is_err()
+    );
+    assert!(invalid.check_command_line().is_err());
+}
+
+#[test]
+fn configuration_command_lines_keep_the_same_reserve_on_every_host() {
+    let hidden = |padding| {
+        let mut plan = export("/work");
+        let root = if cfg!(windows) {
+            r"D:\host\work"
+        } else {
+            "/host/work"
+        };
+        plan.children[0].root = PathBuf::from(root).join("r".repeat(padding));
+        plan.children[0].denied = (0..128)
+            .map(|index| {
+                plan.children[0]
+                    .root
+                    .join(format!("{index:03}-{}", "x".repeat(120)))
+            })
+            .collect();
+        plan.children[0].denied_identities = vec![None; 128];
+        cold(VmConfig {
+            filesystem: Some(plan),
+            ..blockless()
+        })
+    };
+    hidden(80).check_command_line().unwrap();
+    let reserved = hidden(95);
+    let error = reserved.check_command_line().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(
+        error.to_string().contains("2048 held in reserve"),
+        "{error}"
+    );
+    reserved
+        .openvmm_arguments(
+            &runtime(),
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        )
+        .unwrap();
+    let oversized = hidden(110);
+    assert_eq!(
+        oversized.check_command_line().unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        oversized
+            .openvmm_arguments(
+                &runtime(),
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console"),
+            )
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unsupported
+    );
+    let config = cold(blockless());
+    config.check_command_line().unwrap();
+    let runtime = Runtime {
+        openvmm: PathBuf::from("x".repeat(PROCESS_COMMAND_LINE_LIMIT)),
+        ..runtime()
+    };
+    assert!(
+        config
+            .openvmm_arguments(
+                &runtime,
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console"),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn process_command_lines_are_measured_as_windows_quotes_them() {
+    let cases: [(&str, &[&str], &str); 8] = [
+        (
+            r"C:\Program Files\openvmm.exe",
+            &["--a", "b c", ""],
+            r#""C:\Program Files\openvmm.exe" --a "b c" """#,
+        ),
+        ("x", &[r#"say "hi""#], r#""x" "say \"hi\"""#),
+        ("x", &[r#"a"b"#], r#""x" a\"b"#),
+        ("x", &[r"dir\ with\"], r#""x" "dir\ with\\""#),
+        ("x", &[r"a\\b", "é"], r#""x" a\\b é"#),
+        ("", &[""], r#""" """#),
+        ("x", &["a\tb"], "\"x\" \"a\tb\""),
+        ("x", &["\u{1f680}"], "\"x\" \u{1f680}"),
+    ];
+    for (program, arguments, line) in cases {
+        let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        assert_eq!(
+            process_command_line_units(OsStr::new(program), &arguments),
+            line.encode_utf16().count() + 1,
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn a_process_command_line_fits_while_it_leaves_its_reserve() {
+    // Any program and arguments, such as an adapter's: a command line of the limit fits,
+    // one more code unit does not, and a reserve takes its part of the limit.
+    let arguments: Vec<OsString> = ["--a", "b c"].map(OsString::from).into();
+    let base = process_command_line_units(OsStr::new("/o"), &arguments);
+    let program = |extra: usize| OsString::from(format!("/o{}", "o".repeat(extra)));
+    let fitting = program(PROCESS_COMMAND_LINE_LIMIT - base);
+    assert_eq!(
+        process_command_line_units(&fitting, &arguments),
+        PROCESS_COMMAND_LINE_LIMIT
+    );
+    fit_process_command_line(&fitting, &arguments, 0).unwrap();
+    let held = fit_process_command_line(&fitting, &arguments, 1).unwrap_err();
+    assert_eq!(held.kind(), ErrorKind::Unsupported);
+    assert!(
+        held.to_string()
+            .contains("would take 32767 of the 32767 characters"),
+        "{held}"
+    );
+    assert!(
+        held.to_string().contains("with 1 held in reserve"),
+        "{held}"
+    );
+    let longer = program(PROCESS_COMMAND_LINE_LIMIT - base + 1);
+    let error = fit_process_command_line(&longer, &arguments, 0).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    // A reserve past the limit leaves no room for any command line.
+    assert!(fit_process_command_line(OsStr::new("o"), &[], usize::MAX).is_err());
+    // The arguments alone, which a plan renders, take what they take on the command line.
+    let alone = process_command_line_units(OsStr::new(""), &arguments)
+        - process_command_line_units(OsStr::new(""), &[]);
+    let reserve = PROCESS_COMMAND_LINE_LIMIT - alone;
+    fit_arguments(&arguments, reserve).unwrap();
+    let held = fit_arguments(&arguments, reserve + 1).unwrap_err();
+    assert!(
+        held.to_string()
+            .contains("held in reserve for the rest of the launch"),
+        "{held}"
+    );
 }
