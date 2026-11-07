@@ -202,13 +202,12 @@ const IDENTITY_TOKEN: &str = "nvx_identity=";
 /// The UID of the workloads of a launch that names no identity: the guest's `nobody`.
 const DEFAULT_WORKLOAD_UID: u32 = 65534;
 
-/// Control features of the current guest: cancellation, workload accounts, workload
-/// containment, per-execution environments, working directories, and host path mapping tables.
+/// Control features of the current guest: cancellation, workload accounts,
+/// per-execution environments, working directories, and host path mapping tables.
 /// Bit 1 is retired.
 const GUEST_FEATURES: GuestFeatures = GuestFeatures::from_bits(
     GuestFeatures::CANCEL.bits()
         | GuestFeatures::WORKLOAD_ACCOUNT.bits()
-        | GuestFeatures::EXEC_CGROUP.bits()
         | GuestFeatures::EXEC_ENVIRONMENT.bits()
         | GuestFeatures::EXEC_CWD.bits()
         | GuestFeatures::HOST_MAPPING_TABLE.bits(),

@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString};
 
 use crate::guest::entry::Prepared;
+use crate::guest::init::{AccountMode, ExecRequest};
 use crate::guest::parse::parse_decimal;
 use crate::guest::spawn::Command;
 use crate::guest::sys::{self, Errno, FileDescriptor, Mode, OpenFlags, c_string};
@@ -22,64 +23,36 @@ pub(crate) struct LaunchRequest<'a> {
     pub(crate) stderr: FileDescriptor,
 }
 
-/// Builds the command that launches one workload of the direct agent.
+/// Describes one workload for the init-owned plain-process core.
 ///
 /// The workload's standard input is the null device, its standard output and error are the
-/// request's pipes, the sealed configuration `config_fd` stays open at its descriptor number, and
-/// the child leads a new process group. It runs `setpriv`, which takes the workload's identity
-/// and runs the helper; the child first joins the execution cgroup, then enters the working
-/// directory as the workload and records the physical path in `PWD` for a noncanonical name. The
-/// helper then applies the request's environment entries.
-pub(crate) fn direct_command(
-    paths: &Paths,
-    request: LaunchRequest<'_>,
-    config_fd: FileDescriptor,
-) -> Result<Command, Errno> {
-    let config = request.config;
-    let directory = working_directory(request.execution)?;
-    let uid = parse_id(config.uid.as_bytes())?;
-    let gid = parse_id(config.gid.as_bytes())?;
-    let helper = path_c_string(&paths.helper)?;
-    let setpriv = path_c_string(&paths.setpriv)?;
-    let config_argument = config_fd.argument();
-    let mut arguments = Vec::new();
-    for value in [
-        b"setpriv".as_slice(),
-        b"--reuid",
-        config.uid.as_bytes(),
-        b"--regid",
-        config.gid.as_bytes(),
-        b"--clear-groups",
-        b"--no-new-privs",
-        b"--bounding-set=-all",
-        b"--inh-caps=-all",
-        b"--ambient-caps=-all",
-        helper.as_bytes(),
-        b"--exec-config-fd",
-        config_argument.as_bytes(),
-        b"--",
-    ] {
-        arguments.push(c_string(value)?);
-    }
-    for argument in &request.execution.argv {
-        arguments.push(c_string(argument)?);
-    }
-    let (environment, physical_pwd) = defaults(config, request.execution, &directory)?;
-    let cgroup = super::cgroup::placement(paths)?;
-    let mut command = Command::new(setpriv, arguments)
-        .environment(environment)
-        .stdin(null_device(paths)?)
-        .stdout(request.stdout)
-        .stderr(request.stderr)
-        .inherit(config_fd)
-        .new_process_group()
-        .working_directory(directory)
-        .check_working_directory_as(uid, gid)
-        .cgroup(cgroup);
-    if physical_pwd {
-        command = command.export_physical_working_directory();
-    }
-    Ok(command)
+/// core's pipes. The plain-process core resets the child's priority and credentials, enters
+/// its working directory, and executes the workload in its own process group.
+pub(crate) fn direct_request(
+    config: &AgentConfig,
+    execution: &GuestExecPayload,
+) -> Result<ExecRequest, Errno> {
+    let directory = working_directory(execution)?;
+    let (environment, physical_pwd) = workload_environment(config, execution, &directory)?;
+    let arguments = execution
+        .argv
+        .iter()
+        .map(|argument| c_string(argument))
+        .collect::<Result<Vec<_>, _>>()?;
+    let program = arguments.first().cloned().ok_or(Errno::EINVAL)?;
+    Ok(ExecRequest {
+        program,
+        arguments,
+        environment,
+        directory,
+        uid: parse_id(config.uid.as_bytes())?,
+        gid: parse_id(config.gid.as_bytes())?,
+        account: AccountMode::Numeric,
+        timeout: None,
+        input: false,
+        search_path: None,
+        physical_pwd,
+    })
 }
 
 /// Builds the command that launches one workload of the sandbox agent, which enters `prepared`.
@@ -89,7 +62,7 @@ pub(crate) fn direct_command(
 /// and then enters the execution, as the first process of its PID namespace and the leader of a
 /// new session, enters the working directory as the workload, records the physical path in `PWD`
 /// for a noncanonical name, and runs the workload itself. The agent builds the environment as the
-/// direct agent and its helper do: its own, with the workload's `HOME`, `USER`, `LOGNAME`, and
+/// direct agent does: its own, with the workload's `HOME`, `USER`, `LOGNAME`, and
 /// `PWD`, and then the request's entries in order, which replace it unless they layer over it.
 pub(crate) fn sandbox_command(
     paths: &Paths,
@@ -98,22 +71,7 @@ pub(crate) fn sandbox_command(
 ) -> Result<Command, Errno> {
     let execution = request.execution;
     let directory = working_directory(execution)?;
-    let (mut environment, mut physical_pwd) = defaults(request.config, execution, &directory)?;
-    if let Some(entries) = &execution.environment {
-        if !execution.inherit_default_env {
-            environment.clear();
-        }
-        for entry in entries {
-            let equals = entry
-                .iter()
-                .position(|&byte| byte == b'=')
-                .ok_or(Errno::EINVAL)?;
-            let (name, value) = (&entry[..equals], &entry[equals + 1..]);
-            // An entry's `PWD` replaces the physical path, as it replaced the helper's.
-            physical_pwd &= name != b"PWD";
-            environment::set(&mut environment, name, value)?;
-        }
-    }
+    let (environment, physical_pwd) = workload_environment(request.config, execution, &directory)?;
     let arguments = execution
         .argv
         .iter()
@@ -166,6 +124,30 @@ fn defaults(
         let directory = directory.to_bytes();
         environment::set(&mut environment, b"PWD", directory)?;
         physical_pwd = directory != b"/" && !safe_path(directory);
+    }
+    Ok((environment, physical_pwd))
+}
+
+/// Applies the request's exact or layered entries after the workload defaults, in order.
+fn workload_environment(
+    config: &AgentConfig,
+    execution: &GuestExecPayload,
+    directory: &CStr,
+) -> Result<(Vec<CString>, bool), Errno> {
+    let (mut environment, mut physical_pwd) = defaults(config, execution, directory)?;
+    if let Some(entries) = &execution.environment {
+        if !execution.inherit_default_env {
+            environment.clear();
+        }
+        for entry in entries {
+            let equals = entry
+                .iter()
+                .position(|&byte| byte == b'=')
+                .ok_or(Errno::EINVAL)?;
+            let (name, value) = (&entry[..equals], &entry[equals + 1..]);
+            physical_pwd &= name != b"PWD";
+            environment::set(&mut environment, name, value)?;
+        }
     }
     Ok((environment, physical_pwd))
 }
