@@ -1201,6 +1201,7 @@ struct FakeRoot {
     /// The worker's calls, in order.
     calls: Vec<Call>,
     /// The operations attempted by the fake, in order.
+    #[cfg(target_arch = "x86_64")]
     steps: Vec<Operation>,
     /// The deadline of each of a clone's applications, in order, until which it waits for the
     /// devices at the latest.
@@ -1209,10 +1210,10 @@ struct FakeRoot {
     /// The workload cgroup of the test's own, below which the worker runs its executions in
     /// cgroups of their own, where the test can create cgroups.
     workload: Option<Workload>,
-    /// The read end of a pipe whose write end the test holds, which the application takes as the
-    /// announcer that it starts, if the test made one with [`ending`](Self::ending).
+    /// The read end of a pipe whose write end the test holds, which the fake takes as the
+    /// announcer that the worker starts, if the test made one with [`ending`](Self::ending).
     ending: Option<OwnedFd>,
-    /// The announcer that a clone's application started, for a record whose network publishes
+    /// The announcer that the worker started, for a record whose network publishes
     /// the workload's listeners, until the worker collected its end: the read end of a pipe,
     /// which polls readable, hung up, once its write end closes, as an announcer's pidfd polls
     /// readable once the announcer ended, with that write end, unless the test holds it.
@@ -1252,6 +1253,7 @@ impl FakeRoot {
             assembly: Duration::ZERO,
             gate: None,
             calls: Vec::new(),
+            #[cfg(target_arch = "x86_64")]
             steps: Vec::new(),
             #[cfg(target_arch = "x86_64")]
             deadlines: Vec::new(),
@@ -1283,7 +1285,7 @@ impl FakeRoot {
         self
     }
 
-    /// Makes the announcer that a clone's application starts end once the test drops the returned
+    /// Makes the announcer that the worker starts end once the test drops the returned
     /// write end of its pipe.
     fn ending(mut self) -> (Self, OwnedFd) {
         let (read, write) = announcer_pipe();
@@ -1301,6 +1303,7 @@ impl FakeRoot {
 
     /// Fails if `operation` fails.
     fn result(&mut self, operation: Operation) -> Result<(), String> {
+        #[cfg(target_arch = "x86_64")]
         self.steps.push(operation);
         match self.failing {
             Some((failing, problem)) if failing == operation => Err(problem.to_owned()),
@@ -1402,7 +1405,9 @@ impl RootOperations for FakeRoot {
     /// It then stands for the mount of the record's export through the template's host filesystem
     /// device, if any, the gateway refusal before view effects, the view's hostname, generation of
     /// the machine ID, and write of the resolver file when requested. After application
-    /// succeeds, it stands for this caller's announcer start when listeners are published.
+    /// succeeds, it stands for this caller's announcer start when listeners are published, and
+    /// fails with that start's bare `StartError`: unlike the worker, which wraps it with its
+    /// teardown of the applied root, the fake holds no root to tear down.
     /// These fail if the test fails
     /// [`Operation::MachineId`], [`Operation::MountExport`], [`Operation::Resolver`],
     /// [`Operation::View`], and [`Operation::Announce`].
@@ -4227,9 +4232,9 @@ mod clones {
         })
     }
 
-    /// Returns the activation of a clone that the worker repaired, with [`RESOURCES`], behind the
-    /// worker's fence, which the capture's barrier handed over closed, and whose deadline ends
-    /// `timeout` after `acknowledged`, as from the repair's acknowledgement of the restore.
+    /// Returns the fence-free activation of a clone that the worker repaired, with
+    /// [`RESOURCES`], whose deadline ends `timeout` after `acknowledged`, as from the repair's
+    /// acknowledgement of the restore.
     fn repaired(acknowledged: Instant, timeout: Duration) -> Activation {
         Activation::with_resources(RESOURCES, Some(acknowledged), timeout, acknowledged)
     }
@@ -4556,7 +4561,7 @@ mod clones {
             ),
             (
                 generated,
-                FakeRoot::failing(Operation::View, "the image's machine ID is a directory"),
+                FakeRoot::failing(Operation::View, "the VM hostname cannot be set"),
                 status::ACTIVATION_WORKLOAD,
             ),
             (
@@ -4837,7 +4842,7 @@ mod clones {
     fn a_clone_whose_broker_closes_the_stream_before_it_is_ready_is_abandoned() {
         // Whether the restore's reset came or not, or part of an Activate, a broker that closes
         // the stream before the clone is ready ends the clone with the status of the host's
-        // session, with nothing applied, and its fence closed.
+        // session, with nothing applied.
         let record = record(1);
         let bytes = activate(&record).encode().unwrap();
         let cases: [Option<&[u8]>; 3] = [None, Some(&[]), Some(&bytes[..bytes.len() / 2])];
@@ -5031,7 +5036,7 @@ mod clones {
 
     #[test]
     fn a_clone_whose_announcer_ends_ends_with_the_network_s_status() {
-        // The application started the announcer of the listeners that the record's network
+        // The worker started the announcer of the listeners that the record's network
         // publishes, whose end, once the clone is ready, before its sandbox started or after, and
         // with an execution running, ends the clone with the network's status, once the worker
         // dropped its executions: the gateway would keep publishing the listeners that the

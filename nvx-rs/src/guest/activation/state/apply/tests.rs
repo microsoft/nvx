@@ -773,7 +773,15 @@ fn publication_and_gateway_are_reported_without_starting_or_stopping_a_process()
             teardown: None
         }
     ));
-    assert!(system.effects.ends_with(&[Effect::Close, Effect::Teardown]));
+    assert_eq!(
+        system.effects,
+        [
+            Effect::Assemble(accepted_assembly()),
+            Effect::MountExport(TAG.to_owned(), Access::ReadWrite),
+            Effect::Close,
+            Effect::Teardown,
+        ]
+    );
     let mut system = FakeSystem::new();
     let applied = apply_with(&mut system, &accepted(), &gatewayless, None).unwrap();
     assert_eq!(applied.publication, Publication::Unpublished);

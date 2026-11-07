@@ -647,8 +647,9 @@ credit that it needs, never keeps the others' output from the host.
   session creates, and, as PID 1 of its PID namespace, its end ends every
   process of the namespace. The guest's network device, its addresses, and the
   announcer of its listeners stay with NVX's `/init`, which configures them
-  before PID 1 starts, but for the announcer of a clone, which the clone's
-  application starts; see [Networks](#networks) and
+  before PID 1 starts, but for the announcer of a clone, which this temporary
+  adapter starts after the clone's process-free application and the worker
+  supervises; see [Networks](#networks) and
   [Template mode](#template-mode).
 - Each execution runs in a cgroup of its own below the workload cgroup of the
   root configuration, `execution-N`, where N counts the cgroups that the worker
