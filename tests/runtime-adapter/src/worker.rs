@@ -577,7 +577,8 @@ pub fn work<S: Read + Write + AsFd>(
 /// activation fails, or the broker closes the stream.
 ///
 /// `activation` is `nvx::guest::clone::Activation::new` of the clone that the worker repaired
-/// in its transport bootstrap. Activation owns no admission fence; the capture barrier does.
+/// in its transport bootstrap. Activation owns no admission fence: the capture's barrier handed
+/// the legacy fence over closed, and the capture holds it closed until this function returns.
 /// `session` is the guest's role of the session that the template's VM attached on the same tty
 /// before its capture, and whose first epoch it acknowledged, which the reset that the restore
 /// queued starts again: the worker attaches no session. `template` holds the inputs of the root's
