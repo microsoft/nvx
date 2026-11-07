@@ -1,4 +1,4 @@
-//! Snapshot metadata: compatibility keys, strict manifests and restore-time eligibility.
+//! Snapshot metadata and the opaque input of a future VM restore.
 //!
 //! [`SnapshotKey`] derives a compatibility key from a capture's class and manifest.
 //! [`SnapshotManifest::read`] reads the manifest that OpenVMM wrote, and
@@ -36,3 +36,10 @@ pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, Snapsh
 pub use self::manifest::{
     BlockGeometry, HostClock, MANIFEST_NAME, MAX_MANIFEST_LEN, SnapshotManifest, TimeContract,
 };
+
+/// An opaque snapshot input. Creating a VM from a snapshot is not supported yet.
+#[derive(Debug)]
+pub struct Snapshot {
+    /// Reserved for snapshot metadata.
+    pub(crate) _private: (),
+}

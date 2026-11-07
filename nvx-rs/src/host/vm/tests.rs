@@ -2,6 +2,12 @@ use std::fs;
 
 use super::*;
 use crate::ErrorKind;
+use crate::activation::{MachineIdMode, View};
+use crate::host::config::{
+    Boot, PROCESS_COMMAND_LINE_LIMIT, RootConfig, process_command_line_units,
+};
+use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
+use crate::hypervisor::Hypervisor;
 
 fn is_fresh_pipe(endpoint: &str, prefix: &str) -> bool {
     endpoint
@@ -398,4 +404,182 @@ fn creating_and_opening_a_vm_directory_writes_no_capability_file_or_output() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(entries, ["vm"]);
+}
+
+fn cold_config() -> VmConfig {
+    VmConfig {
+        processors: 1,
+        memory_mib: 256,
+        root: RootConfig::Blockless,
+        view: View {
+            hostname: b"box".to_vec(),
+            machine_id: MachineIdMode::Image,
+        },
+        network: None,
+        filesystem: None,
+        console: ConsoleAttachment::Listener,
+        boot: Some(Boot {
+            command_line: "nvx_entrypoint=/bin/sh nvx_arg=-c nvx_arg=exit".to_owned(),
+        }),
+        capture: None,
+    }
+}
+
+fn cold_runtime() -> Runtime {
+    let identity = ArtifactIdentity::new("test-runtime").unwrap();
+    Runtime {
+        openvmm: PathBuf::from("missing-openvmm"),
+        kernel: PathBuf::from("missing-kernel"),
+        initramfs: PathBuf::from("missing-initramfs"),
+        identity: RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
+        hypervisor: if cfg!(windows) {
+            Hypervisor::Whp
+        } else {
+            Hypervisor::Mshv
+        },
+        cpu_profile: None,
+        windows_breakaway: false,
+        options: LaunchOptions::default(),
+    }
+}
+
+#[test]
+fn cold_creation_is_inspectable_without_a_process_listener_or_capability_file() {
+    for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+        let (_directory, vm) = vm_dir();
+        let runtime = cold_runtime();
+        let config = VmConfig {
+            console,
+            ..cold_config()
+        };
+        let prepared = create(&runtime, &config, None, &vm).unwrap();
+        let outputs = prepared.outputs();
+        assert_eq!(outputs.log, vm.path().join("openvmm.log"));
+        assert_eq!(
+            outputs.console.is_some(),
+            console == ConsoleAttachment::Listener
+        );
+        assert!(!outputs.outcome.exists());
+        assert_eq!(prepared.capability().as_bytes().len(), CAPABILITY_LEN);
+        assert_ne!(prepared.capability().as_bytes(), &[0; CAPABILITY_LEN]);
+        assert_eq!(
+            prepared.arguments(),
+            config
+                .openvmm_arguments(
+                    &runtime,
+                    &outputs.endpoint,
+                    &outputs.outcome,
+                    outputs.console.as_deref()
+                )
+                .unwrap()
+        );
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+        drop(prepared);
+        assert!(vm.path().join(LOG).exists());
+    }
+}
+
+#[test]
+fn a_missing_boot_and_a_snapshot_are_refused_before_any_output_is_created() {
+    let (_directory, vm) = vm_dir();
+    let runtime = cold_runtime();
+    let mut config = cold_config();
+    config.boot = None;
+    let snapshot = Snapshot { _private: () };
+    for (from, config, expected) in [
+        (None, &config, "Boot"),
+        (Some(&snapshot), &cold_config(), "Snapshot"),
+    ] {
+        let error = create(&runtime, config, from, &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn creation_rolls_back_its_log_and_never_removes_preexisting_outputs_or_inputs() {
+    let mut names = vec![LOG, OUTCOME];
+    if !cfg!(windows) {
+        names.extend([CONTROL, CONSOLE]);
+    }
+    for name in names {
+        let (_directory, vm) = vm_dir();
+        let existing = vm.path().join(name);
+        let input = vm.path().join("caller-input");
+        fs::write(&existing, b"preexisting output").unwrap();
+        fs::write(&input, b"borrowed input").unwrap();
+        let error = create(&cold_runtime(), &cold_config(), None, &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+        assert_eq!(fs::read(&existing).unwrap(), b"preexisting output");
+        assert_eq!(fs::read(&input).unwrap(), b"borrowed input");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 2);
+    }
+}
+
+#[test]
+fn the_log_and_inherited_resources_stay_open_without_reopening_their_paths() {
+    use std::io::Write;
+    let (_directory, vm) = vm_dir();
+    let mut prepared = create(&cold_runtime(), &cold_config(), None, &vm).unwrap();
+    let log = prepared.outputs().log.clone();
+    let moved_log = vm.path().join("original-log");
+    fs::rename(&log, &moved_log).unwrap();
+    fs::write(&log, b"replacement log").unwrap();
+    prepared
+        .log()
+        .try_clone()
+        .unwrap()
+        .write_all(b"original log")
+        .unwrap();
+    assert_eq!(fs::read(&moved_log).unwrap(), b"original log");
+    assert_eq!(fs::read(&log).unwrap(), b"replacement log");
+    let input = vm.path().join("caller-input");
+    let moved_input = vm.path().join("original-input");
+    let file = File::create(&input).unwrap();
+    prepared.inherit(file);
+    fs::rename(&input, &moved_input).unwrap();
+    fs::write(&input, b"replacement input").unwrap();
+    prepared.inherit[0].write_all(b"original input").unwrap();
+    assert_eq!(fs::read(&moved_input).unwrap(), b"original input");
+    assert_eq!(fs::read(&input).unwrap(), b"replacement input");
+}
+
+#[test]
+fn creation_checks_the_complete_actual_command_line_at_the_windows_boundary() {
+    let (_directory, vm) = vm_dir();
+    let config = cold_config();
+    config.check_command_line().unwrap();
+    let mut runtime = cold_runtime();
+    let outputs = vm.outputs(true).unwrap();
+    let arguments = config
+        .openvmm_arguments(
+            &runtime,
+            &outputs.endpoint,
+            &outputs.outcome,
+            outputs.console.as_deref(),
+        )
+        .unwrap();
+    let length = process_command_line_units(runtime.openvmm.as_os_str(), &arguments);
+    runtime
+        .openvmm
+        .as_mut_os_string()
+        .push("x".repeat(PROCESS_COMMAND_LINE_LIMIT - length));
+    let prepared = create(&runtime, &config, None, &vm).unwrap();
+    assert_eq!(
+        process_command_line_units(runtime.openvmm.as_os_str(), prepared.arguments()),
+        PROCESS_COMMAND_LINE_LIMIT
+    );
+    let log = prepared.outputs().log.clone();
+    drop(prepared);
+    fs::remove_file(&log).unwrap();
+    let input = vm.path().join("caller-input");
+    fs::write(&input, b"borrowed input").unwrap();
+    runtime.openvmm.as_mut_os_string().push("x");
+    let error = create(&runtime, &config, None, &vm).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(error.to_string().contains("32768"), "{error}");
+    assert!(!log.exists());
+    assert_eq!(fs::read(&input).unwrap(), b"borrowed input");
+    assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
 }
