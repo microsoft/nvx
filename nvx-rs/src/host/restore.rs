@@ -146,18 +146,27 @@ pub enum RestoreAction {
     Fail(RestoreError),
 }
 
+/// Progress that distinguishes queued actions from the caller's pending operations.
 #[derive(Clone, Copy, Debug)]
 enum MachineState {
+    /// Awaiting the caller's spawn notification.
     Spawn,
+    /// Awaiting the restore-ready event.
     Event,
+    /// Awaiting a verified control session.
     Connect,
+    /// The activation has not yet been offered to the caller.
     ActivateQueued,
+    /// The activation write or combined write-and-Ready operation is pending.
     Activate,
+    /// The write completed and Ready is pending.
     Ready,
+    /// A terminal result was reached.
     Finished,
 }
 
 impl MachineState {
+    /// Returns the pending phase, or None after the terminal result.
     fn phase(self) -> Option<RestorePhase> {
         match self {
             Self::Spawn | Self::Event => Some(RestorePhase::ReadyEvent),
@@ -177,9 +186,13 @@ impl MachineState {
 /// Terminal success or failure absorbs later inputs and is offered only once.
 #[derive(Debug)]
 pub struct RestoreMachine {
+    /// The one canonical record sent in every session.
     encoded: Vec<u8>,
+    /// The activation that a successful Ready must report.
     expected: ReadyActivation,
+    /// The pending operation or terminal state.
     state: MachineState,
+    /// The next action, which an input may invalidate before it is taken.
     action: Option<RestoreAction>,
 }
 
@@ -296,6 +309,7 @@ impl RestoreMachine {
         Some(action)
     }
 
+    /// Queues the terminal failure and invalidates any pending action without cleanup.
     fn fail(
         &mut self,
         phase: RestorePhase,
