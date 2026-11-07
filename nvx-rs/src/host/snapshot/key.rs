@@ -634,6 +634,7 @@ impl SnapshotKey {
         self.contracts == Contracts::CURRENT
     }
 
+    /// Checks the manifest's complete machine, the current key contracts and the filesystem tag.
     pub(super) fn check_manifest(&self, manifest: &SnapshotManifest) -> Result<()> {
         if self.machine != manifest.machine
             || !self.speaks_current_contracts()

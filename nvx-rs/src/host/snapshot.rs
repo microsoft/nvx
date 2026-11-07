@@ -64,12 +64,15 @@ pub const OPENVMM_DIR: &str = "openvmm";
 /// value. Opening checks them once; it neither watches them nor holds their files open.
 #[derive(Debug)]
 pub struct Snapshot {
+    /// The absolute directory path, with its components preserved rather than its links resolved.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "SL2.15 uses the snapshot directory (#1103)")
     )]
     pub(crate) dir: PathBuf,
+    /// The bounded canonical key checked against the manifest.
     key: SnapshotKey,
+    /// The strictly parsed metadata of OpenVMM's snapshot.
     manifest: SnapshotManifest,
 }
 
@@ -139,10 +142,12 @@ impl Snapshot {
     }
 }
 
+/// Names the failing snapshot entry while retaining its I/O error.
 fn entry_error(path: &Path, error: io::Error) -> Error {
     Error::io(format!("cannot examine snapshot entry {}", path.display())).with_source(error)
 }
 
+/// Checks one private directory and its exact fixed entry-name inventory.
 fn check_directory(path: &Path, expected: &[&str]) -> Result<()> {
     if let Some(problem) =
         platform::check_snapshot_dir(path).map_err(|error| entry_error(path, error))?
@@ -171,6 +176,7 @@ fn check_directory(path: &Path, expected: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Checks a regular private file from metadata alone, without reading its contents.
 fn check_file(path: &Path) -> Result<fs::Metadata> {
     #[cfg(windows)]
     let file = {
