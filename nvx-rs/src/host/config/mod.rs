@@ -519,6 +519,7 @@ pub(crate) fn console_arguments(console: &str, endpoint: &str, report: &Path) ->
     .into()
 }
 
+/// Refuses empty or NUL-containing caller-selected endpoint names.
 fn check_endpoint(endpoint: &str, name: &str) -> Result<()> {
     if endpoint.is_empty() || endpoint.contains('\0') {
         return Err(Error::unsupported(format!(
@@ -528,6 +529,7 @@ fn check_endpoint(endpoint: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Checks OpenVMM arguments for NULs that cannot be passed to a process.
 fn check_argument_nuls(arguments: &[OsString]) -> Result<()> {
     if arguments
         .iter()
