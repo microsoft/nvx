@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -642,7 +643,11 @@ fn capture_in_each_mode() {
             .any(|(port, _)| *port == Port::Snapshot)
     );
     assert!(sys::check_released().is_ok());
-    eprintln!("FINAL_CAPTURE_PORTB_DEADLINE_REGRESSION_EXERCISED");
+    writeln!(
+        io::stderr(),
+        "FINAL_CAPTURE_PORTB_DEADLINE_REGRESSION_EXERCISED"
+    )
+    .unwrap();
     let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 + 2);
     let secret = &entropy[GenerationId::LENGTH..];
     let path = Path::new("/run/nvx/restore-entropy");
