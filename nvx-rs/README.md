@@ -124,7 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory and its fixed outputs, and an inspectable cold launch with its opened log and control credential |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, an inspectable cold preparation, and an owned, verified detached launch |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Snapshot compatibility keys, strict manifests, restore-time eligibility, and the opaque input of a future VM restore |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
@@ -511,6 +511,31 @@ including quoting and the terminating NUL, on every host. Callers keep the
 directory and runtime inputs stable through creation and a later spawn.
 Dropping a successful preparation closes its resources but leaves its output
 paths owned by the caller.
+
+`vm::spawn(prepared)` consumes that preparation and returns `Launched` with
+its verified `process`, the same `outputs`, and the same `capability`. The log
+and inherited resources are passed as already opened objects, never reopened
+by name. The capability reaches OpenVMM only on standard input, then
+end-of-file, not in arguments, environment variables, or a file. A failure
+after child creation terminates that child and confirms its exit; a cleanup
+failure is reported with the original error. Spawn removes no output path.
+Dropping `Launched` closes the process handle but does not stop the VM.
+
+On Linux the detached child gets the caller's umask with the owner's bits
+cleared; the caller's own umask is unchanged. On Windows it starts without a
+console in its log-named job, refusing a taken or untrusted job name, and
+leaves the caller's job when the runtime requests breakaway. The inheritance
+lock is internal to spawn. Windows callers coordinate their own other spawns,
+for example with their own lock around VM and other process starts: an
+unrelated process started during the inheritance window may inherit handles,
+but never the VM's job claim.
+
+The [VM tests](src/host/vm/tests.rs) cover cleanup after child creation,
+ownership, caller survival, the Linux umask, and Windows job claims. Their
+ignored cold-spawn smoke test runs the current library against explicit
+`NVX_VM_SPAWN_OPENVMM`, `NVX_VM_SPAWN_KERNEL`, and `NVX_VM_SPAWN_INITRAMFS`
+paths, using a fresh `NVX_VM_SPAWN_PROOF_DIR`. It checks a guest boot marker,
+responsive shell input, and a verified clean exit; it downloads no artifact.
 
 ### `nvx::host::snapshot`
 
