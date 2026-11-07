@@ -218,7 +218,8 @@ impl VmConfig {
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration, no [`Boot`], empty or NUL-containing required names or runtime paths,
     /// block paths with disk-option delimiters or unbalanced brackets, an invalid authentication
-    /// timeout, or a complete command line beyond the Windows limit.
+    /// timeout, kernel text with double quotes or the standalone `--` delimiter, or a complete
+    /// command line beyond the Windows limit.
     /// The complete limit check runs on every host, without a reserve.
     pub(crate) fn openvmm_arguments(
         &self,
@@ -227,7 +228,7 @@ impl VmConfig {
         report: &Path,
         console_endpoint: Option<&str>,
     ) -> Result<Vec<OsString>> {
-        let command_line = self.kernel_command_line()?;
+        let command_line = self.control_kernel_command_line()?;
         check_endpoint(endpoint, "endpoint")?;
         for (name, path) in [
             ("Runtime.openvmm", runtime.openvmm.as_path()),
@@ -310,10 +311,10 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration or no [`Boot`], an unlowerable network policy, a NUL-containing argument,
-    /// a block path that OpenVMM's disk syntax cannot hold literally, or insufficient room
-    /// for the reserve.
+    /// a block path that OpenVMM's disk syntax cannot hold literally, kernel text with double
+    /// quotes or the standalone `--` delimiter, or insufficient room for the reserve.
     pub fn check_command_line(&self) -> Result<()> {
-        let command_line = self.kernel_command_line()?;
+        let command_line = self.control_kernel_command_line()?;
         let mut arguments = self.device_arguments()?;
         arguments.extend([
             "--memory".into(),
@@ -329,6 +330,22 @@ impl VmConfig {
         ]);
         check_argument_nuls(&arguments)?;
         fit_arguments(&arguments, OPENVMM_COMMAND_LINE_RESERVE)
+    }
+
+    /// Renders kernel text without the double quotes or delimiter OpenVMM's control console refuses.
+    fn control_kernel_command_line(&self) -> Result<String> {
+        let command_line = self.kernel_command_line()?;
+        if command_line.contains('"')
+            || command_line
+                .split_ascii_whitespace()
+                .any(|token| token == "--")
+        {
+            return Err(Error::unsupported(
+                "boot.command_line cannot contain double quotes or a standalone -- with the \
+                 OpenVMM control console",
+            ));
+        }
+        Ok(command_line)
     }
 
     /// Renders only the configuration's devices; no runtime or output name is needed.
