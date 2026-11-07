@@ -450,8 +450,9 @@ impl VmConfig {
     /// `runtime.windows_breakaway` is process-launch behavior, not an OpenVMM argument.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
-    /// configuration, no [`Boot`], empty or NUL-containing required names or runtime paths, an
-    /// invalid authentication timeout, or a complete command line beyond the Windows limit.
+    /// configuration, no [`Boot`], empty or NUL-containing required names or runtime paths,
+    /// block paths with disk-option delimiters or unbalanced brackets, an invalid authentication
+    /// timeout, or a complete command line beyond the Windows limit.
     /// The complete limit check runs on every host, without a reserve.
     pub fn openvmm_arguments(
         &self,
@@ -543,7 +544,8 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration or no [`Boot`], an unlowerable network policy, a NUL-containing argument,
-    /// or insufficient room for the reserve.
+    /// a block path that OpenVMM's disk syntax cannot hold literally, or insufficient room
+    /// for the reserve.
     pub fn check_command_line(&self) -> Result<()> {
         let command_line = self.kernel_command_line()?;
         let mut arguments = self.device_arguments()?;
@@ -572,11 +574,13 @@ impl VmConfig {
             self.processors.to_string().into(),
         ];
         if let RootConfig::Layered(root) = &self.root {
+            reject_disk_path(&root.image, &root.image.display().to_string())?;
             let mut image = OsString::from("distro:file:");
             image.push(&root.image);
             image.push(",ro");
             arguments.extend(["--microvm-sandbox-block".into(), image]);
             if let UpperConfig::Scratch { path, .. } = &root.upper {
+                reject_disk_path(path, &path.display().to_string())?;
                 let mut scratch = OsString::from("scratch:file:");
                 scratch.push(path);
                 arguments.extend(["--microvm-sandbox-block".into(), scratch]);
@@ -862,6 +866,27 @@ impl Identifying {
         self.number(u64::from(geometry.logical_block_size));
         self.number(u64::from(geometry.physical_block_size));
     }
+}
+
+/// Refuses a disk path that OpenVMM's `--microvm-sandbox-block` value could not hold: one with
+/// a comma, semicolon, or improperly nested brackets. The message shows `path` as `shown`.
+pub(crate) fn reject_disk_path(path: &Path, shown: &str) -> Result<()> {
+    let depth = path
+        .to_string_lossy()
+        .bytes()
+        .try_fold(0_usize, |depth, byte| match byte {
+            b'[' => Some(depth + 1),
+            b']' => depth.checked_sub(1),
+            b',' | b';' => None,
+            _ => Some(depth),
+        });
+    if depth != Some(0) {
+        return Err(Error::unsupported(format!(
+            "disk paths containing commas, semicolons, or unbalanced brackets are unsupported: \
+             {shown}"
+        )));
+    }
+    Ok(())
 }
 
 /// Common cold-boot inputs, shared with the legacy VmmLaunch without narrowing its public types.

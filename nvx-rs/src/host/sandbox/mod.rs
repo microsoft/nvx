@@ -75,6 +75,7 @@ pub use self::plan::{
 pub use self::prepared::PreparedLaunch;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::artifacts::require_existing;
+pub(crate) use crate::host::config::reject_disk_path;
 use crate::host::filesystem::ExportPlan;
 use crate::net::is_valid_hostname;
 use crate::protocol::cmdline;
@@ -160,27 +161,6 @@ pub(crate) fn has_kernel_separator(value: &str) -> bool {
 /// [`Path::components`] reads them.
 pub fn require_file(path: &Path, description: &str) -> Result<()> {
     require_existing(path, description, ErrorCode::Unavailable)
-}
-
-/// Refuses a disk path that OpenVMM's `--microvm-sandbox-block` value could not hold: one with
-/// a comma, semicolon, or improperly nested brackets. The message shows `path` as `shown`.
-pub(crate) fn reject_disk_path(path: &Path, shown: &str) -> Result<()> {
-    let depth = path
-        .to_string_lossy()
-        .bytes()
-        .try_fold(0_usize, |depth, byte| match byte {
-            b'[' => Some(depth + 1),
-            b']' => depth.checked_sub(1),
-            b',' | b';' => None,
-            _ => Some(depth),
-        });
-    if depth != Some(0) {
-        return Err(refused(format!(
-            "disk paths containing commas, semicolons, or unbalanced brackets are unsupported: \
-             {shown}"
-        )));
-    }
-    Ok(())
 }
 
 /// The extensions of the files that OpenVMM does not attach as the raw image of a sandbox block
