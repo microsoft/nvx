@@ -12,7 +12,6 @@ use super::manifest::{HostClock, TimeContract};
 use crate::error::{Error, ErrorKind, Result};
 use crate::host::platform;
 use crate::host::process::BootId;
-use crate::host::template::Generation;
 
 /// The longest interval by which a restore advances a clone's VM time, from the cut of the
 /// captured VM's time to the restoring host's time, in nanoseconds: 30 days, the bound that every
@@ -220,14 +219,5 @@ impl TimeContract {
         } else {
             Eligibility::Expired(downtime)
         }
-    }
-}
-
-impl Generation {
-    /// Returns whether a clone may restore the generation at the host's time `now`, by the
-    /// restore window of its capture's time contract, as [`TimeContract::eligibility`] decides
-    /// it.
-    pub fn eligibility(&self, now: &HostTime) -> Eligibility {
-        self.time().eligibility(now)
     }
 }

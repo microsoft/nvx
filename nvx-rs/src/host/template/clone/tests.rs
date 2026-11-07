@@ -1356,7 +1356,7 @@ fn keys_of_another_encoding_version_are_failures_of_the_host_that_quarantine_not
     );
     assert_eq!(failure.code(), ErrorCode::FormatUnsupported, "{failure}");
     let unread = format!(
-        "the template key has encoding version {version}; this build reads version {} only",
+        "the snapshot key has encoding version {version}; this build reads version {} only",
         TemplateKey::VERSION
     );
     assert!(failure.message().contains(&unread), "{failure}");

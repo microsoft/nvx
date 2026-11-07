@@ -1448,8 +1448,7 @@ command's options choose of the template, and `Request::capture` returns NVX's
   capture refuses one that anyone else may change;
 - the capture class, from which the store takes the slot that serializes the
   class's captures, and the template's compatibility key: the runtime identity
-  of the adapter's VMs, with the guest agent's build,
-  `runtime-adapter-guest/BUILD`, the backend and the CPU profile, the
+  of the adapter's VMs, the backend and the CPU profile, the
   processors, those online at boot, 1 unless the command names more, the
   fewest that the template's clones take, the RAM and its capacity, the
   geometries of the placeholder and of the dormant scratch, as OpenVMM presents
@@ -1457,7 +1456,9 @@ command's options choose of the template, and `Request::capture` returns NVX's
   the capture attaches its NIC, which no network's policy changes, and, for a
   template whose clones delay their repair, for tests, the delay, in
   milliseconds, as its one invariant setting,
-  `runtime-adapter.repair-delay-ms`, so that the class is one of its own;
+  `runtime-adapter.repair-delay-ms`, so that the class is one of its own. The
+  class also records the guest agent's build, `runtime-adapter-guest/BUILD`,
+  which the compatibility key does not hold;
 - NVX's artifacts, with the initramfs that puts the guest agent in place of
   NVX's agents, and holds the file of the delay of each clone's repair, if the
   template has one, which the command writes into a directory of its own in the
@@ -2905,7 +2906,7 @@ Unless a test says otherwise, a template has 1 processor, online at boot, 256
 MiB of RAM, its capacity, and a 64 MiB scratch. A captured template is the
 store's one generation, whose payload holds the record of its capture, its key,
 and its snapshot, and whose key holds what the test asked for: the runtime
-identity of the adapter's VMs with the guest agent's build, the backend, the
+identity of the adapter's VMs, the backend, the
 processors and those online at boot, none for a template whose processors are
 all online at boot, the RAM and its capacity, the geometries of the placeholder
 and of the scratch, the NIC, and a kernel command line of the platform tier's
