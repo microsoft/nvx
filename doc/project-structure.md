@@ -10,7 +10,7 @@ are build products or caches and are not part of the tracked source tree. The
 | --- | --- |
 | `.github/workflows` | CI, nightly failure report, test change flag, module diagram, release verification, adversarial campaign, and Copilot environment workflows |
 | `.github/actions` | Reusable local CI actions |
-| `.github/skills` | Copilot agent skills for common development workflows, among them the issue fixer |
+| `.github/skills` | Copilot agent skills for NVX's own workflows, among them the issue fixer |
 | `.github/agents` | Copilot custom agent: the bounded adversarial strategist |
 | `.github/specula` | Incremental formal verification adapter and runner setup |
 | `doc` | User and contributor documentation |
@@ -38,7 +38,7 @@ nvx/
 |   |-- ISSUE_TEMPLATE/          CPU profile request issue form
 |   |-- actions/                 Reusable local CI actions
 |   |-- agents/                  Copilot custom agents
-|   |-- skills/                  Copilot development workflow skills
+|   |-- skills/                  Copilot skills for NVX's own workflows
 |   |-- specula/                 Incremental formal verification integration
 |   |-- workflows/               GitHub Actions workflows
 |   |   |-- adversarial.yml      Trusted scheduled/manual adversarial campaigns
@@ -57,7 +57,8 @@ nvx/
 |   |   |-- specula-release.yml  Specula verification of published releases
 |   |   `-- test-changes.yml     Label and comment for pull requests that change existing tests
 |   |-- actionlint.yaml          Self-hosted runner labels for actionlint
-|   `-- copilot-instructions.md  Repository-wide Copilot instructions
+|   |-- copilot-instructions.md  Repository-wide Copilot instructions
+|   `-- pull_request_template.md Sections of a pull request's description
 |-- .vscode/settings.json        Shared VS Code settings
 |-- guest/                       Guest-owned scripts
 |   |-- common/                  Shared init, agent, snapshot, and probe scripts
@@ -236,13 +237,17 @@ Copilot cloud agent and code review environments. See
 
 The `actions/` directory contains the reusable implementations for validation,
 artifact builds, benchmarks, packaging, releases, and performance history
-management. The `skills/` directory defines Copilot agent skills for common
-development workflows, among them `nvx-issue-fixer`, which composes the others
-to take an issue from its reproduction on the configured hosts to a pull
-request with green CI and resolved review threads, and runs only when a user
-invokes it. `copilot-instructions.md` holds the repository-wide Copilot
-instructions. The `agents/` directory defines `nvx-adversary`, the Copilot
-custom agent that is the bounded strategist of
+management. The `skills/` directory defines Copilot agent skills for NVX's own
+workflows, which run their deterministic steps through the tools in `scripts/`:
+preparing a host, running and benchmarking microVMs on it, triaging CI runs,
+promoting OpenVMM pins, and rebasing the OpenVMM chain. Among them,
+`nvx-fix-issue` takes an issue from its reproduction on the configured hosts to
+a pull request with green CI and resolved review threads, and runs only when a
+user invokes it. Generic workflows, such as commits, pull requests, reviews,
+and rebases, are left to the agents' own skills, which follow
+`copilot-instructions.md`, the repository-wide Copilot instructions, and
+`pull_request_template.md`. The `agents/` directory defines `nvx-adversary`, the
+Copilot custom agent that is the bounded strategist of
 [adversarial testing](adversarial-testing.md). The `specula/` directory contains
 the adapter, tests, and dedicated runner setup for incremental formal
 verification of the pinned OpenVMM release.

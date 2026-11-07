@@ -8,16 +8,19 @@
 - `openvmm/` is a Git submodule that tracks the `feature/microvm/dev` branch of
   `microsoft/openvmm`. For OpenVMM source changes, work in the nested repository
   and follow [its instructions](../openvmm/.github/copilot-instructions.md). For
-  an NVX pin promotion, use the `nvx-openvmm-promote` skill: keep the gitlink
+  an NVX pin promotion, use the `nvx-promote-openvmm-pin` skill: keep the gitlink
   commit gitlink-only unless the task explicitly requires coordinated NVX
   changes, and map the pinned commits in
   [the OpenVMM upstream roadmap](../doc/openvmm-upstream-roadmap.md) in a
   separate commit. To rebase or reorganize the microVM chain onto a newer
   upstream `main` as a new `feature/microvm/release/vX.Y` branch, use the
-  `nvx-openvmm-rebase` skill, which fast-forwards the previous release branch to
-  `feature/microvm/dev` before it moves that branch to the new release.
+  `nvx-rebase-openvmm-chain` skill, which fast-forwards the previous release
+  branch to `feature/microvm/dev` before it moves that branch to the new release.
 - Preserve dirty state in both repositories. Do not reset, clean, switch, update,
-  or synchronize the submodule over uncommitted work.
+  or synchronize the submodule over uncommitted work. Stage files by name, never
+  with `git add -A`, which also stages `openvmm/` and unrelated work.
+- When a rebase or merge conflicts on the `openvmm` gitlink, stop and ask; never
+  pick either side, since combining both usually needs a new OpenVMM revision.
 
 ## Validation
 
@@ -68,9 +71,9 @@
   `virtual-machine`; configured SSH profiles use the `host_type` returned by
   `scripts/nvx_hosts.py`. For local measurements, ask for the host type when it
   is not explicit. Never default it to `baremetal`.
-- Use `nvx-host-connect` before remote work, then exactly one of `nvx-run`,
-  `nvx-debug`, or `nvx-benchmark`. Never expose `.nvx-hosts.json` or authentication
-  material.
+- Use `nvx-prepare-host` before host work, then `nvx-run-microvm` to run or
+  debug NVX, or `nvx-collect-benchmarks` to measure it. Never expose
+  `.nvx-hosts.json` or authentication material.
 
 ## Copilot Cloud Agent Sessions
 
@@ -140,11 +143,19 @@
   pass. A pull request stacked on another's branch gets CI too, and keeps its
   checks when GitHub retargets it to `dev`, which starts no run (see
   [Stacked pull requests](../doc/ci.md#stacked-pull-requests)).
+- Write commit messages, pull-request titles and bodies, and issue references as
+  [Commits and pull requests](../doc/contribute.md#commits-and-pull-requests)
+  describes, and fill the [pull request template](./pull_request_template.md).
+- Reply to a review thread with `Fixed in <commit URL>. <what changed>` or
+  `No change needed here. <evidence>`, and resolve it only once the pull
+  request's head holds that outcome, never for a fix that exists only locally.
+  `python3 scripts/pr_threads.py` lists threads, reviews, and conversation
+  comments, and replies to and resolves threads with those checks.
 - Pull-request concurrency cancels superseded runs, while `dev` pushes queue in
   order and never cancel one another. Before debugging a cancelled pull-request
   run, compare its head SHA with the current pull-request head and classify an
   expected supersession separately from a failure;
-  `python3 scripts/ci_triage.py RUN` does both. Use `nvx-ci-investigation` for
+  `python3 scripts/ci_triage.py RUN` does both. Use `nvx-triage-ci-run` for
   failed or unexpectedly cancelled runs.
 - `dev` requires GitHub's merge queue. Merge a pull request by queueing it with
   `gh pr merge NUMBER`, which queues it once it can merge.

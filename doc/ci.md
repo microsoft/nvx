@@ -1682,7 +1682,7 @@ a developer's host.
 Nothing on OpenVMM's side requires its gates to pass: `feature/microvm/dev`
 has no required status check, and an OpenVMM pull request lands by a push of
 its head (see the
-[promotion skill](../.github/skills/nvx-openvmm-promote/SKILL.md)). Nor is
+[promotion skill](../.github/skills/nvx-promote-openvmm-pin/SKILL.md)). Nor is
 the outcome of a run a gate: from October 25 to 30, 2026, every OpenVMM CI run
 of the branch failed, in the VMM tests of OpenHCL and confidential VMs on its
 TDX and SEV-SNP hosts, which NVX does not use. The `openvmm-ci` job
