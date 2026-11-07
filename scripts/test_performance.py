@@ -4812,6 +4812,12 @@ CI_WORKFLOW = ".github/workflows/ci.yml"
 SERIES_FILE = f"{KVM_SERIES}-microvm-v2-1vcpu.csv"
 
 
+class _WindowsRenameDenial(PermissionError):
+    def __init__(self, winerror: int) -> None:
+        super().__init__("access denied")
+        self.winerror = winerror
+
+
 class _RunsApi:
     """Serves the CI runs of dev pushes, newest first and `page_size` to a
     page, at most `limit` for a search of their creation times, as GitHub
@@ -5034,6 +5040,88 @@ class RecordedPerformanceTests(unittest.TestCase):
 
     def commits(self, path: str = SERIES_FILE) -> list[str]:
         return [row.commit for row in performance.read_results(self.history / path)]
+
+    def test_transient_windows_rename_denials_retry_only_publication(self):
+        b = self.commit("b")
+        self.record(1, b)
+        denials = [_WindowsRenameDenial(5), _WindowsRenameDenial(32)]
+        original_rename = Path.rename
+        attempts = 0
+
+        def rename(source: Path, destination: Path) -> Path:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= len(denials):
+                raise denials[attempts - 1]
+            return original_rename(source, destination)
+
+        with patch.object(Path, "rename", autospec=True, side_effect=rename):
+            outcome = self.persist()
+
+        self.assertFalse(outcome.failed)
+        self.assertEqual([run.sha for run in outcome.persisted], [b])
+        self.assertEqual(self.commits(), ["seed", b])
+        self.assertEqual(self.api.downloads, [1001])
+        self.assertGreaterEqual(attempts, 3)
+
+    def test_persistent_windows_rename_denial_stops_before_the_next_run(self):
+        b = self.commit("b")
+        c = self.commit("c")
+        self.record(1, b)
+        self.record(2, c)
+        error = _WindowsRenameDenial(5)
+
+        with patch.object(Path, "rename", side_effect=error) as rename:
+            outcome = self.persist()
+
+        self.assertTrue(outcome.failed)
+        self.assertIn("access denied", outcome.stopped or "")
+        self.assertEqual(outcome.persisted, [])
+        self.assertEqual(self.commits(), ["seed"])
+        self.assertEqual(self.api.downloads, [1001])
+        self.assertGreater(rename.call_count, 1)
+
+    def test_windows_rename_denial_does_not_extend_the_fetch_deadline(self):
+        b = self.commit("b")
+        self.record(1, b)
+        error = _WindowsRenameDenial(5)
+
+        with (
+            patch.object(Path, "rename", side_effect=error) as rename,
+            self.assertRaises(PermissionError) as refused,
+        ):
+            performance_history._fetch(
+                self.api,
+                REPOSITORY,
+                performance_history.RecordedRun(1, b, ""),
+                self.api.artifacts[1][0],
+                self.downloads,
+                time.monotonic(),
+            )
+
+        self.assertIs(refused.exception, error)
+        rename.assert_called_once()
+        self.assertEqual(self.commits(), ["seed"])
+
+    def test_windows_rename_denial_does_not_replace_an_existing_destination(self):
+        b = self.commit("b")
+        self.record(1, b)
+        error = _WindowsRenameDenial(5)
+
+        def rename(source: Path, destination: Path) -> Path:
+            destination.mkdir()
+            (destination / "preserved").write_bytes(b"another download")
+            raise error
+
+        with patch.object(Path, "rename", autospec=True, side_effect=rename) as publish:
+            outcome = self.persist()
+
+        self.assertTrue(outcome.failed)
+        self.assertEqual(self.commits(), ["seed"])
+        publish.assert_called_once()
+        self.assertEqual(
+            (self.downloads / "1" / "preserved").read_bytes(), b"another download"
+        )
 
     def test_runs_newer_than_the_history_persist_oldest_first(self):
         a = self.commit("a")
