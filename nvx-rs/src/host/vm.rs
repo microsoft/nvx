@@ -10,15 +10,21 @@
 //! which OpenVMM gives its temporary files. [`Capability`] holds the credential of a VM's control
 //! endpoint, which the library never writes to a file.
 
+use std::ffi::OsString;
 use std::fmt;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::host::config::{ConsoleAttachment, VmConfig};
 use crate::host::paths::{absolute, normalized};
+use crate::host::platform;
 #[cfg(not(windows))]
 use crate::host::platform::{check_store_dir as check_dir, create_store_dir as create_dir};
 #[cfg(windows)]
 use crate::host::platform::{check_vm_dir as check_dir, create_vm_dir as create_dir};
+use crate::host::runtime::Runtime;
+use crate::host::snapshot::Snapshot;
 use crate::protocol::CAPABILITY_LEN;
 use crate::{Error, Result};
 
@@ -98,10 +104,6 @@ impl VmDir {
     }
 
     /// Returns a launch's outputs, with a boot-console endpoint if requested. Creates nothing.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "SL2.8's vm::create calls it (#1099)")
-    )]
     pub(crate) fn outputs(&self, console: bool) -> Result<VmOutputs> {
         Ok(VmOutputs {
             log: self.path.join(LOG),
@@ -187,6 +189,164 @@ impl fmt::Debug for Capability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Capability").finish_non_exhaustive()
     }
+}
+
+/// A checked cold launch, with its capability, chosen outputs, and already opened log.
+///
+/// Creation starts no process and binds no listener. The caller keeps the VM directory and
+/// runtime inputs stable, and may journal the capability and outputs before a later spawn.
+/// Dropping a successful preparation closes its files but leaves its output paths to the caller.
+#[derive(Debug)]
+pub struct Prepared {
+    /// The control credential, never written to disk.
+    capability: Capability,
+    /// The launch's fixed file paths and chosen endpoints.
+    outputs: VmOutputs,
+    /// The newly created log, kept open rather than reopened by name.
+    log: File,
+    /// The complete arguments, checked against the actual runtime and output paths.
+    arguments: Vec<OsString>,
+    /// Already opened resources added by the caller, retained until the preparation is dropped.
+    inherit: Vec<File>,
+}
+
+impl Prepared {
+    /// Returns the credential to journal before a spawn or use when attaching a session.
+    pub fn capability(&self) -> &Capability {
+        &self.capability
+    }
+
+    /// Returns the launch's log, outcome, control, and optional boot-console names.
+    pub fn outputs(&self) -> &VmOutputs {
+        &self.outputs
+    }
+
+    /// Adds an already opened resource to the inheritance allowlist, transferring ownership.
+    ///
+    /// The resource is not reopened, and remains open for the lifetime of this preparation.
+    pub fn inherit(&mut self, file: File) {
+        self.inherit.push(file);
+    }
+
+    /// Returns the same opened log that creation made, for example to take a liveness claim.
+    pub fn log(&self) -> &File {
+        &self.log
+    }
+
+    /// Returns the complete, checked OpenVMM arguments without starting a process.
+    pub fn arguments(&self) -> &[OsString] {
+        &self.arguments
+    }
+}
+
+/// Creates an inspectable cold launch in `dir`, without starting a process or binding endpoints.
+///
+/// A cold launch needs [`VmConfig::boot`]. Restoring `from` a [`Snapshot`] is not supported yet.
+/// The caller keeps the directory and runtime inputs stable during creation and a later spawn.
+/// Runtime and configuration paths are used as supplied; output paths come from `dir`.
+///
+/// The log is created anew, privately, and kept open in [`Prepared`]. Other outputs are reserved
+/// names that OpenVMM creates when it runs: existing entries at those names are refused, not
+/// replaced. A failure closes and removes only the log that this invocation created, preserving
+/// every pre-existing entry and the caller's inputs. The capability is never written to disk.
+///
+/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a restore, a missing
+/// boot, a refused configuration, or a complete Windows command line beyond the portable limit.
+/// The final check includes the actual runtime and output paths, with no reserve, on every host.
+/// Filesystem failures have kind [`ErrorKind::Io`](crate::ErrorKind::Io), retaining their source;
+/// a rollback failure is reported along with the original error.
+pub fn create(
+    runtime: &Runtime,
+    config: &VmConfig,
+    from: Option<&Snapshot>,
+    dir: &VmDir,
+) -> Result<Prepared> {
+    if from.is_some() {
+        return Err(Error::unsupported(
+            "creating a VM from a Snapshot is not supported yet",
+        ));
+    }
+    if config.boot.is_none() {
+        return Err(Error::unsupported("creating a cold VM needs Boot"));
+    }
+    VmDir::open(dir.path())?;
+    platform::check_working_dir(dir.path())?;
+    let outputs = dir.outputs(config.console == ConsoleAttachment::Listener)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let log = options.open(&outputs.log).map_err(|error| {
+        Error::io(format!(
+            "cannot create the VM log {}",
+            outputs.log.display()
+        ))
+        .with_source(error)
+    })?;
+    let checked = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            log.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| {
+                    Error::io("cannot make the new VM log private").with_source(error)
+                })?;
+        }
+        if let Some(problem) = platform::private_file_problem(&log)
+            .map_err(|error| Error::io("cannot check the new VM log").with_source(error))?
+        {
+            return Err(Error::io(format!("the new VM log {problem}")));
+        }
+        unused_output(&outputs.outcome)?;
+        if !cfg!(windows) {
+            unused_output(Path::new(&outputs.endpoint))?;
+            if let Some(console) = &outputs.console {
+                unused_output(Path::new(console))?;
+            }
+        }
+        let capability = Capability(crate::host::instance::generate_capability()?);
+        let arguments = config.openvmm_arguments(
+            runtime,
+            &outputs.endpoint,
+            &outputs.outcome,
+            outputs.console.as_deref(),
+        )?;
+        Ok((capability, arguments))
+    })();
+    match checked {
+        Ok((capability, arguments)) => Ok(Prepared {
+            capability,
+            outputs,
+            log,
+            arguments,
+            inherit: Vec::new(),
+        }),
+        Err(error) => {
+            drop(log);
+            match fs::remove_file(&outputs.log) {
+                Ok(()) => Err(error),
+                Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => Err(error),
+                Err(cleanup) => Err(Error::new(
+                    error.kind(),
+                    format!(
+                        "{error}; cannot remove the created VM log {}: {cleanup}",
+                        outputs.log.display()
+                    ),
+                )
+                .with_source(error)),
+            }
+        }
+    }
+}
+
+/// Refuses an existing output entry without opening, replacing, or removing it.
+fn unused_output(path: &Path) -> Result<()> {
+    let error = match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => error,
+        Ok(_) => io::Error::new(io::ErrorKind::AlreadyExists, "the output already exists"),
+    };
+    Err(Error::io(format!("cannot reserve VM output {}", path.display())).with_source(error))
 }
 
 /// Retains the host's I/O failure, or classifies an unsupported host as unavailable.
