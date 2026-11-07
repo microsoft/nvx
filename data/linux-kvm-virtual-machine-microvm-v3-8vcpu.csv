@@ -33,3 +33,11 @@ linux-kvm-virtual-machine,3,8,4cfe8330e7193f03dccb2c0d39420f3ab7d74bea,shell_sna
 linux-kvm-virtual-machine,3,8,53ad09678bc146880097ef8f3937f97a2719b014,shell_snapshot_restore_512_mib,ms,lower,82.6
 linux-kvm-virtual-machine,3,8,cbfe738d4ca82de92122ed1d5a38b7a2dc96bd35,shell_snapshot_restore_512_mib,ms,lower,90.7
 linux-kvm-virtual-machine,3,8,82d763575a6c1ba04bf68515863d1e800276ac90,shell_snapshot_restore_512_mib,ms,lower,70.5
+linux-kvm-virtual-machine,3,8,7b53459fe7b4deb4f69f90ee4d09b25d49c74b4f,shell_snapshot_restore_512_mib,ms,lower,72.7
+linux-kvm-virtual-machine,3,8,ab97477a9c7e3a3365f6834950615395b320ff38,shell_snapshot_restore_512_mib,ms,lower,77.4
+linux-kvm-virtual-machine,3,8,a1b2485c0f758175ba9482a3e64db8f1182ae230,shell_snapshot_restore_512_mib,ms,lower,61.9
+linux-kvm-virtual-machine,3,8,8b6257acba71254aa8ec9ff01ea4926b786a1e9e,shell_snapshot_restore_512_mib,ms,lower,72.7
+linux-kvm-virtual-machine,3,8,8cfc8445409bc2e207e643a40faac063415bd6fb,shell_snapshot_restore_512_mib,ms,lower,71.2
+linux-kvm-virtual-machine,3,8,82c15cdec7d52ddc58de2b89c3940c23c48c5bcb,shell_snapshot_restore_512_mib,ms,lower,67.8
+linux-kvm-virtual-machine,3,8,4932616ba559bec65a8907fe2a9ac4d5ea20506f,shell_snapshot_restore_512_mib,ms,lower,71.8
+linux-kvm-virtual-machine,3,8,e9ce2daa627686668ee1615933488c96e3b6988f,shell_snapshot_restore_512_mib,ms,lower,70.5
