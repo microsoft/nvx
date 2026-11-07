@@ -91,8 +91,8 @@ The builder then:
    write to the root does not recompile the modules at every start;
 6. creates `/root`, `/tmp`, `/run`, and `/nonexistent` with fixed modes,
    leaves an empty `/etc/resolv.conf` for the network bootstrap, and adds the
-   `nc`, `netcat`, `wget`, and `mdev` links, and a `python` link to `python3`
-   when the root has `python3`;
+   `nc`, `netcat`, and `mdev` links, a BusyBox `wget` link when the root has
+   no `wget`, and a `python` link to `python3` when the root has `python3`;
 7. removes package caches, logs, temporary files, machine IDs, random seeds,
    and SSH host keys;
 8. requires one `root` account, a `nobody` account with UID 65534 and home

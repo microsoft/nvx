@@ -16225,6 +16225,52 @@ class BuildTests(unittest.TestCase):
 
             ensure_symlink.assert_any_call(root, "usr/bin/wget", "busybox")
 
+    def test_ubuntu_customization_keeps_wget_installed_by_a_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            root = directory / "root"
+            (root / "etc").mkdir(parents=True)
+            executable = b"#!/bin/sh\nprintf 'package wget\\n'\n"
+            package, archive = self._ubuntu_deb(
+                directory, "wget", (), {"usr/bin/wget": executable}
+            )
+            ubuntu._install_deb(root, package, archive)
+            wget = root / "usr/bin/wget"
+            wget.chmod(0o755)
+            before = wget.stat().st_mode
+            with (
+                patch.object(ubuntu, "_validate_accounts"),
+                patch.object(ubuntu, "_validate_usr_merge"),
+            ):
+                ubuntu._customize_root(root)
+
+            self.assertFalse(wget.is_symlink())
+            self.assertEqual(wget.read_bytes(), executable)
+            self.assertEqual(wget.stat().st_mode, before)
+            self.assertIn(
+                "/usr/bin/wget",
+                (root / "var/lib/dpkg/info/wget.list").read_text(encoding="utf-8"),
+            )
+
+    def test_ubuntu_customization_keeps_an_existing_wget_link(self):
+        for target in ("busybox", "wget.real"):
+            with self.subTest(target=target):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    (root / "etc").mkdir()
+                    (root / "usr/bin").mkdir(parents=True)
+                    wget = root / "usr/bin/wget"
+                    # Preserve the link itself, even before its target is installed.
+                    wget.symlink_to(target)
+                    with (
+                        patch.object(ubuntu, "_validate_accounts"),
+                        patch.object(ubuntu, "_validate_usr_merge"),
+                    ):
+                        ubuntu._customize_root(root)
+
+                    self.assertTrue(wget.is_symlink())
+                    self.assertEqual(os.readlink(wget), target)
+
     def test_ubuntu_package_lock_accepts_architecture_independent_packages(self):
         document = json.loads(UbuntuBuildConstants.PACKAGE_LOCK.read_text("utf-8"))
         package = dict(document["packages"][0])

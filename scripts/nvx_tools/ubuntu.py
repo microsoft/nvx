@@ -746,7 +746,8 @@ def _customize_root(root: Path) -> None:
             host_key.unlink()
     _ensure_symlink(root, "usr/bin/nc", "nc.openbsd")
     _ensure_symlink(root, "usr/bin/netcat", "nc.openbsd")
-    _ensure_symlink(root, "usr/bin/wget", "busybox")
+    if not path_exists(root / "usr/bin/wget"):
+        _ensure_symlink(root, "usr/bin/wget", "busybox")
     _ensure_symlink(root, "usr/sbin/mdev", "../bin/busybox")
     if path_exists(root / "usr" / "bin" / "python3"):
         _ensure_symlink(root, "usr/bin/python", "python3")
