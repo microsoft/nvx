@@ -79,11 +79,7 @@ impl fmt::Display for RestoreError {
             formatter,
             "restore failed during {:?}: {:?}",
             self.phase, self.evidence
-        )?;
-        if let Some(source) = &self.source {
-            write!(formatter, ": {source}")?;
-        }
-        Ok(())
+        )
     }
 }
 
