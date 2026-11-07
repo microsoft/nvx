@@ -19,6 +19,7 @@ use crate::activation::{ReadyActivation, StoreGeneration, TransactionId};
 use crate::host::artifacts;
 use crate::host::platform::Transport;
 use crate::host::process::{BootId, Process, ProcessRef};
+use crate::host::snapshot::tests::artifact;
 use crate::host::store::files::{sync_dir, write_private};
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME,
@@ -31,7 +32,6 @@ use crate::host::template::clone::launch::{Hooks, Point};
 use crate::host::template::clone::reattach::{reattach_clone_syncing, reattach_clone_with};
 use crate::host::template::clone::records::{read_failure, read_progress, write_failure};
 use crate::host::template::store::tests::SNAPSHOT_ARTIFACTS;
-use crate::host::template::tests::artifact;
 
 /// The environment variable that names the template store of a [`launch_role`].
 const ROLE_STORE: &str = "NVX_CLONE_LAUNCH_TEST_STORE";

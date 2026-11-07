@@ -92,6 +92,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod seal;
 pub mod session;
+pub mod snapshot;
 mod spawn;
 pub mod store;
 pub mod supervisor;

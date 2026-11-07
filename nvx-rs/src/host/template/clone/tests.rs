@@ -27,12 +27,12 @@ use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{SandboxDistro, SandboxNetwork, SandboxSettings, SandboxUpper};
 use crate::host::seal::FileSeal;
 use crate::host::seal::tests::open_metadata_only;
+use crate::host::snapshot::tests::{MIB, ManifestSpec, class, network_class};
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_SCRATCH_NAME, CallerFiles, LOG_NAME,
     SandboxStore,
 };
 use crate::host::template::store::{CAPTURES_NAME, SNAPSHOT_NAME, TRANSACTION_NAME};
-use crate::host::template::tests::{MIB, ManifestSpec, class, network_class};
 use crate::host::template::{CaptureClass, HostTime, KEY_NAME};
 #[cfg(windows)]
 use crate::host::tests::junction;

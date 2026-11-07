@@ -1,4 +1,4 @@
-//! The compatibility key of a template, [`TemplateKey`], and the [`CaptureClass`] of the capture
+//! The compatibility key of a snapshot, [`SnapshotKey`], and the [`CaptureClass`] of the capture
 //! that makes one.
 
 use std::fmt;
@@ -12,7 +12,7 @@ use super::manifest::{
     FILESYSTEM_SLOT_VERSION, Interrupts, Ipv6Identity, MAX_COMMAND_LINE_LEN, MAX_CPUID_ENTRIES,
     MAX_DEVICE_RANGES, MAX_DEVICE_WORDS, MAX_DEVICES, MAX_MEMORY_RANGES, MAX_PROCESSORS,
     MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic, PROCESSOR_COUNTS, PolicyIdentity, Rates,
-    TemplateManifest, Topology, parse_profile_id,
+    SnapshotManifest, Topology, parse_profile_id,
 };
 use crate::activation;
 use crate::contract;
@@ -27,7 +27,7 @@ use crate::hypervisor::Hypervisor;
 pub use crate::host::config::Invariants;
 
 /// The domain of a key's identity: the bytes that precede its canonical encoding in the digest.
-const KEY_DOMAIN: &[u8] = b"nvx template key\0";
+const KEY_DOMAIN: &[u8] = b"nvx snapshot key\0";
 
 /// The domain of a capture class's identity: the bytes that precede its canonical encoding in the
 /// digest.
@@ -203,15 +203,15 @@ macro_rules! identity {
 }
 
 identity!(
-    /// The identity of a [`TemplateKey`]: the SHA-256 digest of its canonical encoding, after the
-    /// domain `nvx template key` and a NUL, so that it names a key of one encoding version alone.
+    /// The identity of a [`SnapshotKey`]: the SHA-256 digest of its canonical encoding, after the
+    /// domain `nvx snapshot key` and a NUL, so that it names a key of one encoding version alone.
     ///
     /// Its text form, which `Display` writes and `FromStr` parses, is 64 lowercase hexadecimal
     /// digits; parsing also accepts uppercase ones. It converts to and from the
     /// [`activation::Identity`] by which a clone's lease and durable records name the key of its
     /// template, in their [`TemplateReference`](activation::TemplateReference), without loss.
     KeyIdentity,
-    "a template key's identity"
+    "a snapshot key's identity"
 );
 
 impl From<KeyIdentity> for activation::Identity {
@@ -290,8 +290,8 @@ fn guest_network_of(nic: &Nic) -> String {
 /// The invariant inputs of a template's capture, known before it: what a template's adapter
 /// requests, and the class of the templates that the capture makes.
 ///
-/// A capture whose manifest matches its class makes a template whose [`TemplateKey`] combines
-/// them: [`TemplateKey::new`] checks that the machine of the manifest is the class's, and takes
+/// A capture whose manifest matches its class makes a template whose [`SnapshotKey`] combines
+/// them: [`SnapshotKey::new`] checks that the machine of the manifest is the class's, and takes
 /// the rest of the key from it. Captures of one class make templates of one key, unless something
 /// that the class does not fix changed between them, such as the host's CPU, which its effective
 /// CPUID and its rates follow.
@@ -443,7 +443,7 @@ impl CaptureClass {
 /// A key holds, and nothing else:
 ///
 /// - **Bundle and contracts:** the identities of OpenVMM, the guest kernel, and the guest
-///   initramfs, and the build of the guest's agent, which the adapter supplies; and the versions
+///   initramfs; and the versions
 ///   of the key's encoding and of the boot, snapshot, device-state, time, restore-packet,
 ///   control, and activation contracts.
 /// - **CPU and time:** the backend; the CPU profile's vendor, generation, revision, and the digest
@@ -465,7 +465,7 @@ impl CaptureClass {
 ///
 /// A capture's own metadata is not part of it, so the generations of one key differ in it: when
 /// the capture was taken, its time contract's anchor, host, boot, and lineage counter, and the
-/// lengths of its artifacts. [`TemplateManifest`] keeps them. Nothing of a clone is part of it
+/// lengths of its artifacts. [`SnapshotManifest`] keeps them. Nothing of a clone is part of it
 /// either: its image, upper, export, network policy and settings, identity, and activation
 /// targets. So a template with a NIC serves the clones of every network policy at its guest's
 /// address.
@@ -478,11 +478,9 @@ impl CaptureClass {
 /// Its [`identity`](Self::identity) is the SHA-256 digest of its
 /// [canonical encoding](Self::to_bytes), after a domain that no other digest of this crate shares.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TemplateKey {
+pub struct SnapshotKey {
     /// The runtime: OpenVMM, the guest kernel and initramfs, and the boot and control contracts.
     runtime: RuntimeIdentity,
-    /// The build of the guest's agent.
-    guest_build: ArtifactIdentity,
     /// The versions of the other contracts.
     contracts: Contracts,
     /// The machine, as the manifest describes it.
@@ -493,10 +491,13 @@ pub struct TemplateKey {
     invariants: Invariants,
 }
 
-impl TemplateKey {
+pub(in crate::host) use SnapshotKey as TemplateKey;
+
+impl SnapshotKey {
     /// Version of the canonical encoding of a key, its first two bytes.
     ///
-    /// Version 1 holds the template's NIC, if it has one, with the identity of the complete
+    /// Version 1 omits the guest build and holds the snapshot's NIC, if it has one, with the
+    /// identity of the complete
     /// deny-all policy under which the capture attached it, but no network policy of its clones.
     /// It has not been released, so a template store that an earlier build created is not
     /// supported: delete it and create a new one. There is no migration.
@@ -514,7 +515,7 @@ impl TemplateKey {
     /// NIC, and the NIC's address and prefix, and a CPU profile that the class's request selects.
     /// A manifest whose machine has no processors online at boot activates all of them at boot,
     /// which a class whose processors are all online at boot requests. The key takes the class's
-    /// runtime, guest build, and invariant settings, and this crate's versions of the other
+    /// runtime and invariant settings, and this crate's versions of the other
     /// contracts.
     ///
     /// The key also takes the identity of the network policy that OpenVMM enforced on the NIC,
@@ -529,7 +530,7 @@ impl TemplateKey {
     /// [`CaptureClass::check`] does, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for a
     /// manifest whose machine is not the class's, as a capture that did not do what its class
     /// requested.
-    pub fn new(class: &CaptureClass, manifest: &TemplateManifest) -> Result<Self> {
+    pub fn new(class: &CaptureClass, manifest: &SnapshotManifest) -> Result<Self> {
         class.check()?;
         let machine = &manifest.machine;
         let mismatch = |found: String, requested: String| {
@@ -609,7 +610,6 @@ impl TemplateKey {
         }
         Ok(Self {
             runtime: class.runtime.clone(),
-            guest_build: class.guest_build.clone(),
             contracts: Contracts::CURRENT,
             machine: machine.clone(),
             filesystem_tag: MOUNT_TAG.to_owned(),
@@ -626,11 +626,6 @@ impl TemplateKey {
     /// and the versions of the boot and control contracts.
     pub fn runtime(&self) -> &RuntimeIdentity {
         &self.runtime
-    }
-
-    /// Returns the build of the guest's agent.
-    pub fn guest_build(&self) -> &ArtifactIdentity {
-        &self.guest_build
     }
 
     /// Returns whether the versions of the snapshot, device-state, time, restore-packet, and
@@ -732,7 +727,7 @@ impl TemplateKey {
     /// 1. [`VERSION`](Self::VERSION), a `u16`.
     /// 2. The bundle and contracts: the OpenVMM, kernel, and initramfs identities, texts; the boot
     ///    contract version, a `u64`; the control contract revision, a text; the control session
-    ///    version, a `u64`; the guest build, a text; and the snapshot format, device-state schema,
+    ///    version, a `u64`; and the snapshot format, device-state schema,
     ///    time ABI, restore packet, and activation contract versions, `u64`s.
     /// 3. CPU and time: the backend, a text, as OpenVMM spells it; the CPU profile's vendor and
     ///    generation, texts, its revision, a `u32`, and its digest, 32 bytes; the effective
@@ -763,7 +758,6 @@ impl TemplateKey {
         let mut writer = Writer::default();
         writer.u16(Self::VERSION);
         write_runtime(&mut writer, &self.runtime);
-        writer.text(self.guest_build.as_str());
         self.contracts.write(&mut writer);
         write_machine(&mut writer, &self.machine, &self.filesystem_tag);
         self.invariants.write(&mut writer);
@@ -781,20 +775,20 @@ impl TemplateKey {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > Self::MAX_LEN {
             return Err(Error::io(format!(
-                "a template key of {} bytes is longer than the {} bytes that a key may hold",
+                "a snapshot key of {} bytes is longer than the {} bytes that a key may hold",
                 bytes.len(),
                 Self::MAX_LEN
             )));
         }
         let mut reader = Reader::new(bytes);
         let malformed =
-            |error: CanonicalError| Error::io(format!("the template key is malformed: {error}"));
+            |error: CanonicalError| Error::io(format!("the snapshot key is malformed: {error}"));
         let version = reader.u16("the version").map_err(malformed)?;
         if version != Self::VERSION {
             return Err(Error::new(
                 crate::ErrorCode::FormatUnsupported,
                 format!(
-                    "the template key has encoding version {version}; this build reads version {} \
+                    "the snapshot key has encoding version {version}; this build reads version {} \
                      only",
                     Self::VERSION
                 ),
@@ -802,13 +796,11 @@ impl TemplateKey {
         }
         let read = |reader: &mut Reader<'_>| -> Result<Self, CanonicalError> {
             let runtime = read_runtime(reader)?;
-            let guest_build = read_artifact(reader, "the guest build")?;
             let contracts = Contracts::read(reader)?;
             let (machine, filesystem_tag) = read_machine(reader)?;
             let invariants = Invariants::read(reader)?;
             Ok(Self {
                 runtime,
-                guest_build,
                 contracts,
                 machine,
                 filesystem_tag,
@@ -822,7 +814,7 @@ impl TemplateKey {
 }
 
 /// Writes the machine `machine`, whose filesystem slot has the tag `tag`, as
-/// [`TemplateKey::to_bytes`] describes it.
+/// [`SnapshotKey::to_bytes`] describes it.
 fn write_machine(writer: &mut Writer, machine: &Machine, tag: &str) {
     writer.text(machine.hypervisor.as_str());
     let cpu = &machine.cpu;
