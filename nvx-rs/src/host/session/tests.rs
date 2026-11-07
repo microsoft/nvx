@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::*;
 use crate::protocol::nvxs::{ErrorCode, Identity};
@@ -64,27 +65,6 @@ impl Transport for Scripted {
         self.0.lock().unwrap().output.extend_from_slice(data);
         Ok(())
     }
-}
-
-#[test]
-fn a_connection_is_the_recorded_process_s_only_if_its_start_time_says_so() {
-    let connection = || -> Box<dyn Transport> { Box::new(Scripted::default()) };
-    assert!(verified(connection(), Ok(Some(7)), 7).is_ok());
-    // Another process took the recorded ID, or none has it.
-    for current in [Some(8), None] {
-        let refused = verified(connection(), Ok(current), 7);
-        assert!(
-            matches!(refused, Err(SessionError::ProcessExited)),
-            "{current:?}"
-        );
-    }
-    // A start time that cannot be read verifies nothing, and the connection is refused.
-    let unread = verified(connection(), Err(io::ErrorKind::PermissionDenied.into()), 7);
-    assert!(
-        matches!(&unread, Err(SessionError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied),
-        "{:?}",
-        unread.map(|_| ())
-    );
 }
 
 fn outer(record_type: u8, epoch: u64, sequence: u64, payload: &[u8]) -> Vec<u8> {

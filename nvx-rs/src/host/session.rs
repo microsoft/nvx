@@ -3,11 +3,10 @@
 
 use std::fmt;
 use std::io;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use super::nvxs::{HostConnection, HostConnectionError};
-use super::platform::{self, Transport};
+use super::process::{BootId, ProcessRef};
+use super::transport::{self, HostConnection, HostConnectionError, Transport};
 use crate::protocol::nvxs::{self, RecordError, RecordType};
 use crate::protocol::{
     self, APP_CANCEL, APP_CAPTURE, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN,
@@ -15,6 +14,7 @@ use crate::protocol::{
     ExitCategory, GuestFeatures, HostMap, OUTER_MAX_PAYLOAD, ProtocolError, UNSUPPORTED_OPERATION,
     Workload,
 };
+use crate::{Error, ErrorKind};
 
 /// Failure of a control session.
 #[derive(Debug)]
@@ -72,64 +72,39 @@ impl From<io::Error> for SessionError {
     }
 }
 
-/// Connects to an endpoint that OpenVMM process `pid` serves, its control endpoint, or the boot
-/// console of a clone,
-/// [`Store::clone_console_endpoint`](crate::host::template::Store::clone_console_endpoint),
-/// retrying until `deadline` while the endpoint is not yet available and the process is still
-/// alive. An endpoint that another process serves is [`SessionError::Refused`]. Once connected, it
-/// checks that the process with the ID `pid` still started at `start_time`, as the caller recorded
-/// it: one that took the ID of the recorded process once that process exited is another, whose
-/// endpoint the caller must not take for its own, since a clone's boot console authenticates
-/// no one, so the connection then fails with [`SessionError::ProcessExited`], as one to a process
-/// that exited does, and with [`SessionError::Io`] if the start time cannot be read, rather than
-/// return an endpoint that it could not verify.
+/// Connects to the control endpoint of OpenVMM process `pid`, retrying until `deadline` while
+/// the endpoint is not yet available and the process is still alive.
 pub fn connect(
     endpoint: &str,
     pid: u32,
     start_time: u64,
     deadline: Instant,
 ) -> Result<Box<dyn Transport>, SessionError> {
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match platform::connect_endpoint(endpoint, pid, remaining.min(Duration::from_millis(250))) {
-            Ok(transport) => {
-                return verified(transport, platform::process_start_time(pid), start_time);
-            }
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                return Err(SessionError::Refused(error));
-            }
-            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                return Err(SessionError::Io(error));
-            }
-            Err(_) => {}
-        }
-        match platform::process_start_time(pid) {
-            Ok(Some(current)) if current == start_time => {}
-            // An inconclusive check keeps waiting for the endpoint until the deadline.
-            Err(_) => {}
-            Ok(_) => return Err(SessionError::ProcessExited),
-        }
-        if Instant::now() >= deadline {
-            return Err(SessionError::TimedOut);
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
+    let reference = ProcessRef {
+        pid,
+        start_time,
+        boot: BootId::current()?,
+    };
+    transport::connect_verified(endpoint, &reference, deadline).map_err(connect_failure)
 }
 
-/// Returns `transport`, a connection to an endpoint that the process with a recorded ID serves,
-/// if `current`, the start time of the process that has that ID now, is the recorded
-/// `start_time`, as [`connect`] checks it. Fails with [`SessionError::ProcessExited`] if another
-/// process has the ID, or none does, and with [`SessionError::Io`] if the start time cannot be
-/// read, which verifies nothing.
-fn verified(
-    transport: Box<dyn Transport>,
-    current: io::Result<Option<u64>>,
-    start_time: u64,
-) -> Result<Box<dyn Transport>, SessionError> {
-    match current {
-        Ok(Some(current)) if current == start_time => Ok(transport),
-        Ok(_) => Err(SessionError::ProcessExited),
-        Err(error) => Err(SessionError::Io(error)),
+fn connect_failure(error: Error) -> SessionError {
+    let (kind, message, source) = error.into_parts();
+    match kind {
+        ErrorKind::TimedOut => SessionError::TimedOut,
+        ErrorKind::Exited => SessionError::ProcessExited,
+        _ => {
+            let Some(source) = source else {
+                return SessionError::Protocol(message);
+            };
+            match source.downcast::<io::Error>() {
+                Ok(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                    SessionError::Refused(*error)
+                }
+                Ok(error) => SessionError::Io(*error),
+                Err(source) => SessionError::Io(io::Error::other(source)),
+            }
+        }
     }
 }
 
@@ -424,7 +399,29 @@ enum Stage {
 /// A violation keeps the message of the check that it fails: a malformed or oversized header, a
 /// payload in WAIT or READY, an empty DATA record, which carries no frame, and otherwise an
 /// invalid attach response or data record. A stream that ends inside a record has closed.
-fn failure(error: HostConnectionError, stage: Stage) -> SessionError {
+fn failure(error: Error, stage: Stage) -> SessionError {
+    let (kind, message, source) = error.into_parts();
+    let Some(source) = source else {
+        return match kind {
+            ErrorKind::TimedOut => SessionError::TimedOut,
+            ErrorKind::Exited => SessionError::ProcessExited,
+            _ => SessionError::Protocol(message),
+        };
+    };
+    let error = match source.downcast::<HostConnectionError>() {
+        Ok(error) => *error,
+        Err(source) => match source.downcast::<nvxs::SessionError>() {
+            Ok(error) => HostConnectionError::Protocol(*error),
+            Err(source) => match source.downcast::<io::Error>() {
+                Ok(error) => HostConnectionError::Io(*error),
+                Err(source) => HostConnectionError::Io(io::Error::other(source)),
+            },
+        },
+    };
+    connection_failure(error, stage)
+}
+
+fn connection_failure(error: HostConnectionError, stage: Stage) -> SessionError {
     let violation = match error {
         HostConnectionError::TimedOut => return SessionError::TimedOut,
         HostConnectionError::Closed => return SessionError::Closed,

@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Instant;
 
+use nvx::ErrorKind;
 use nvx::exec::{Key, Timers, Unit, Violation};
-use nvx::host::nvxs::HostConnectionError;
 
 use super::{Client, ClientError};
 use crate::exec::{GuestMessage, HostExecution, MAX_EXECUTIONS, Start, name};
@@ -226,7 +226,7 @@ impl Executions {
                 .fold(deadline, Instant::min);
             match client.receive(Some(wake)) {
                 Ok(message) => self.dispatch(&message, Instant::now())?,
-                Err(ClientError::Session(HostConnectionError::TimedOut)) => {}
+                Err(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -290,7 +290,9 @@ impl Executions {
 /// once the send's deadline, the run's, passed.
 fn failed(error: ClientError) -> ExecutionsError {
     match error {
-        ClientError::Session(HostConnectionError::TimedOut) => ExecutionsError::TimedOut,
+        ClientError::Session(error) if error.kind() == ErrorKind::TimedOut => {
+            ExecutionsError::TimedOut
+        }
         error => ExecutionsError::Client(error),
     }
 }

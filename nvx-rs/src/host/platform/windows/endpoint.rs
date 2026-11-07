@@ -386,4 +386,4 @@ impl Transport for PipeTransport {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
