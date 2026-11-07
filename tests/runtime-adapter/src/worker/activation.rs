@@ -38,7 +38,6 @@ use nvx::guest::clone::{
 use nvx::guest::entry::Publication;
 use nvx::protocol::status;
 
-use super::capture::Admission;
 use super::connection::Connection;
 use super::executions::{Executions, Sandbox};
 use super::order::Order;
@@ -102,6 +101,12 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
         | ActivationCause::Changed => status::ACTIVATION_PROTOCOL,
         ActivationCause::Record(_) | ActivationCause::Cold => status::ACTIVATION_RECORD,
         ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
+        ActivationCause::Failed(error)
+            if error.is::<super::AnnounceFailure>()
+                || error.is::<nvx::guest::ingress::StartError>() =>
+        {
+            status::ACTIVATION_NETWORK
+        }
         ActivationCause::Failed(error) => match error.downcast_ref::<ApplyError>() {
             Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => status::ACTIVATION_ROOT,
             Some(ApplyError::MachineId { .. } | ApplyError::View { .. }) => {
@@ -121,8 +126,8 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
 /// assembly that the clone's template captured, the application that awaits the activation's
 /// completion, if any, and the worker's order once the clone is ready.
 pub(super) struct CloneState {
-    /// The clone's activation, behind the worker's fence of workload admission.
-    activation: Activation<Admission>,
+    /// The clone's fence-free activation, which admits no request before Ready.
+    activation: Activation,
     /// The inputs of the root's assembly that the clone's template captured.
     template: RootTemplate,
     /// The application of the accepted record, once it ran, until the worker
@@ -138,7 +143,7 @@ pub(super) struct CloneState {
 /// and which awaits the activation's completion.
 struct Applied {
     /// Whether the application succeeded, or why it failed.
-    result: Result<(), ApplyError>,
+    result: Result<(), Box<dyn std::error::Error + Send + Sync>>,
     /// The number of mappings that the record announces.
     mappings: u32,
     /// The hostname of every execution: the record's.
@@ -157,7 +162,7 @@ impl CloneState {
     /// the repair, if the template set a delay, and whose repair acknowledged the restore at
     /// `acknowledged`, if it did.
     pub(super) fn new(
-        activation: Activation<Admission>,
+        activation: Activation,
         template: RootTemplate,
         acknowledged: Option<Instant>,
         repair_delay: Option<Duration>,
@@ -337,7 +342,7 @@ impl CloneState {
         executions: &mut Executions,
     ) -> Option<Step<Worked>> {
         let applied = self.applied.take()?;
-        let result = applied.result.map_err(Into::into);
+        let result = applied.result;
         Some(match self.activation.complete(Instant::now(), result) {
             Ok(activation) => {
                 self.timeline.ready = Some(Instant::now());
