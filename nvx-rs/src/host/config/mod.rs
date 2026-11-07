@@ -3,8 +3,9 @@
 //! of it, its [`NetworkConfig`], the host paths that it exports, its [`ConsoleAttachment`], and
 //! what only its cold boot takes, a [`Boot`], with what a capture of the VM adds, a
 //! [`CaptureConfig`], whose [`CaptureIdentity`] names the capture's snapshots.
-//! [`VmConfig::openvmm_arguments`] renders a whole cold launch from that configuration and a
-//! [`Runtime`], with caller-supplied output names, without opening paths or allocating endpoints.
+//! An internal renderer builds a whole cold launch for [`crate::host::vm::create`],
+//! from that configuration and a
+//! [`Runtime`], without opening runtime paths or allocating endpoints.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -447,8 +448,7 @@ impl VmConfig {
     /// contain neither commas nor equals signs, which delimit OpenVMM's serial options.
     /// The caller runs `runtime.openvmm` with these arguments.
     ///
-    /// This whole-config entry point is temporarily public. SL2.8 makes it internal when
-    /// `host::vm::create` calls it. Individual device lowerings stay internal. Neither managed
+    /// [`crate::host::vm::create`] calls this internal whole-config renderer. Neither managed
     /// lifecycle nor workload-identity flags are rendered; the caller owns its guest tokens.
     /// `runtime.windows_breakaway` is process-launch behavior, not an OpenVMM argument.
     ///
@@ -461,7 +461,7 @@ impl VmConfig {
     /// kernel text with double quotes or the standalone `--` delimiter, or a complete command line
     /// beyond the Windows limit.
     /// The complete limit check runs on every host, without a reserve.
-    pub fn openvmm_arguments(
+    pub(crate) fn openvmm_arguments(
         &self,
         runtime: &Runtime,
         endpoint: &str,
@@ -553,8 +553,8 @@ impl VmConfig {
     ///
     /// Like legacy adapter planning, the reserve foresees runtime-file and output names of up to
     /// 260 code units each, Windows' `MAX_PATH`. It does not certify arbitrary runtime paths or
-    /// CPU-profile names: [`openvmm_arguments`](Self::openvmm_arguments) checks the complete
-    /// command line with the actual runtime and output names, without a reserve.
+    /// CPU-profile names: [`crate::host::vm::create`] checks the complete command line with the
+    /// actual runtime and output names, without a reserve.
     /// A listener's backend prefix is counted here; its endpoint name stays in the reserve.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
