@@ -135,7 +135,8 @@ changes only when the module's purpose does.
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
 | [`nvx::host::store`](#nvxhoststore) | `SandboxStore`: the runtime records of one sandbox, which every host that supervises it shares under one lock |
 | [`nvx::host::instance`](#nvxhostinstance) | `Instance`: a VM in a sandbox store of its own, which the store, the supervisor, and the control session drive |
-| [`nvx::host::nvxs`](#nvxhostnvxs) | `HostConnection`: the host's role of the NVXS session over a platform transport |
+| [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
+| [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::supervisor`](#nvxhostsupervisor) | The supervisor of a sandbox's VMM, beneath the CLI, `Instance`, and external orchestrators |
 | [`nvx::host::template`](#nvxhosttemplate) | Legacy template capture and clone plans and store, with aliases of the snapshot metadata |
@@ -908,12 +909,35 @@ instance creation or launch records, respectively.
 
 ### `nvx::host::nvxs`
 
+Compatibility paths for `HostConnection` and its retained cause details, now
+owned by [`nvx::host::transport`](#nvxhosttransport).
+
+### `nvx::host::transport`
+
+`connect_verified` opens and holds the recorded process by its boot, ID and
+start time, retries while the endpoint is unavailable until the caller's
+deadline, and checks its server before authentication: Unix peer credentials
+on Linux and the named-pipe server process ID on Windows. An indeterminate
+process check remains an error, never exit proof.
+
 `HostConnection`: the host's role of the NVXS session over a platform transport,
 on which `nvx::host::session` and other host applications run their protocols.
 It attaches with the launch capability, waiting while the broker asks it to,
 sends application bytes in as many DATA records as they take, and returns each
 DATA payload from the guest, with deadlines; a receive that times out keeps a
 partial record.
+
+These APIs return the crate's `Result`: a deadline is `TimedOut`, an exited
+recorded VM `Exited`, a refused, closed, reset or broken session `Protocol`,
+and another transport failure `Io`. Original I/O and protocol causes are
+retained directly; attachment refusal, reset and ended-connection details
+remain available as sources.
+
+`Transport` and `TransportHandle` re-export the existing platform types, with
+one definition beneath the OS adapters. Timed reads and writes, native-handle
+duplication and `unread` are unchanged: Linux reports Unix `SIOCOUTQ` charges,
+and Windows reports `None`. The old `host::session::connect` remains a
+compatibility wrapper.
 
 ### `nvx::host::process`
 

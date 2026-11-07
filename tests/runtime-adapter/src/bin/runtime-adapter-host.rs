@@ -446,13 +446,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use nvx::ErrorKind;
 use nvx::activation::{MachineIdMode, StoreGeneration};
 use nvx::exec::{Cause, Key, Limits, Outcome, Status, Stream, Timers, Window};
 use nvx::host::artifacts::{Artifacts, absolute};
 use nvx::host::filesystem::ExportPlan;
 use nvx::host::instance::generate_capability;
 use nvx::host::launch::{DEFAULT_MEMORY_MIB, LaunchSpec};
-use nvx::host::nvxs::HostConnectionError;
 use nvx::host::report::{self, Report};
 use nvx::host::sandbox::SandboxPlan;
 use nvx::host::session;
@@ -2784,7 +2784,8 @@ fn unanswered(
     deadline: Instant,
 ) -> (Evidence, nvx::Error) {
     const PROBLEM: &str = "the guest agent did not answer once the clone's sandbox started";
-    let timed_out = matches!(error, ClientError::Session(HostConnectionError::TimedOut));
+    let timed_out =
+        matches!(&error, ClientError::Session(error) if error.kind() == ErrorKind::TimedOut);
     if timed_out || Instant::now() >= deadline {
         return (
             Evidence::Timeout,

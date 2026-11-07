@@ -22,6 +22,7 @@
 #![cfg(feature = "host")]
 
 use std::collections::{BTreeMap, VecDeque};
+use std::error::Error as _;
 use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -42,6 +43,7 @@ use nvx::protocol::{
     CAPABILITY_LEN, HostMap, MAX_HOST_MAPPINGS, MAX_MAP_PATH_BYTES, OUTER_HEADER_LEN,
     OUTER_MAX_PAYLOAD, OUTER_MIN_RECEIVE_WINDOW,
 };
+use nvx::{Error, ErrorKind};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_EXECUTIONS, Start};
 use runtime_adapter::frame::{
@@ -55,6 +57,10 @@ use runtime_adapter::probe::{Facts, Probe, ProbeReply};
 use runtime_adapter::root::{
     MapFailure, Ready, RootConfig, RootFailure, RootReply, RootStage, decode_maps, encode_maps,
 };
+
+fn cause<T: std::error::Error + 'static>(error: &Error) -> Option<&T> {
+    error.source().and_then(|cause| cause.downcast_ref())
+}
 
 /// Launch capability that the test broker accepts.
 const CAPABILITY: [u8; CAPABILITY_LEN] = [0xa5; CAPABILITY_LEN];
@@ -668,8 +674,8 @@ fn the_client_reassembles_messages_from_partial_and_shared_records() {
         // Nothing more arrives.
         let timed_out = client.receive(Some(Instant::now() + SHORT));
         let nothing = matches!(
-            timed_out,
-            Err(ClientError::Session(HostConnectionError::TimedOut))
+            &timed_out,
+            Err(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut
         );
         assert!(nothing, "{timed_out:?}");
     }
@@ -693,8 +699,8 @@ fn a_receive_that_times_out_keeps_the_partial_message() {
     broker.write(&rest[..20]);
     let timed_out = client.receive(Some(Instant::now() + SHORT));
     let kept = matches!(
-        timed_out,
-        Err(ClientError::Session(HostConnectionError::TimedOut))
+        &timed_out,
+        Err(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut
     );
     assert!(kept, "{timed_out:?}");
 
@@ -720,8 +726,8 @@ fn a_send_that_fails_or_times_out_ends_the_client_with_what_it_holds() {
     let echo = Message::Echo(vec![0; 1000]);
     let timed_out = client.send(&echo, Some(Instant::now() + SHORT));
     let late = matches!(
-        timed_out,
-        Err(ClientError::Session(HostConnectionError::TimedOut))
+        &timed_out,
+        Err(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut
     );
     assert!(late, "{timed_out:?}");
     assert_ended(&mut client);
@@ -734,8 +740,8 @@ fn a_send_that_fails_or_times_out_ends_the_client_with_what_it_holds() {
     let failed = client.send(&Message::Ping, Some(deadline()));
     let broken = matches!(
         &failed,
-        Err(ClientError::Session(HostConnectionError::Io(error)))
-            if error.kind() == io::ErrorKind::BrokenPipe
+        Err(ClientError::Session(error)) if error.kind() == ErrorKind::Protocol
+            && matches!(cause::<io::Error>(error), Some(error) if error.kind() == io::ErrorKind::BrokenPipe)
     );
     assert!(broken, "{failed:?}");
     assert_ended(&mut client);
@@ -754,8 +760,9 @@ fn a_reset_or_a_disconnect_in_the_middle_of_a_message_drops_it() {
     broker.send(RecordType::Reset, &[]);
     let reset = client.receive(Some(deadline()));
     let ended = matches!(
-        reset,
-        Err(ClientError::Session(HostConnectionError::Reset(identity))) if identity == next
+        &reset,
+        Err(ClientError::Session(error))
+            if matches!(cause(error), Some(HostConnectionError::Reset(identity)) if *identity == next)
     );
     assert!(ended, "{reset:?}");
     assert_ended(&mut client);
@@ -773,8 +780,9 @@ fn a_reset_or_a_disconnect_in_the_middle_of_a_message_drops_it() {
     broker.close();
     let closed = client.receive(Some(deadline()));
     let ended = matches!(
-        closed,
-        Err(ClientError::Session(HostConnectionError::Closed))
+        &closed,
+        Err(ClientError::Session(error))
+            if matches!(cause(error), Some(HostConnectionError::Closed))
     );
     assert!(ended, "{closed:?}");
     assert_ended(&mut client);
@@ -796,10 +804,9 @@ fn a_reset_or_a_disconnect_in_the_middle_of_a_message_drops_it() {
     broker.close();
     let truncated = client.receive(Some(deadline()));
     let ended = matches!(
-        truncated,
-        Err(ClientError::Session(HostConnectionError::Protocol(
-            SessionError::Truncated { buffered: 30 }
-        )))
+        &truncated,
+        Err(ClientError::Session(error))
+            if matches!(cause(error), Some(SessionError::Truncated { buffered: 30 }))
     );
     assert!(ended, "{truncated:?}");
     assert_ended(&mut client);
@@ -826,8 +833,8 @@ fn the_client_waits_for_the_guest_and_reports_refusals_while_attaching() {
     broker.send(RecordType::Wait, &[]);
     let timed_out = joined(attach(transport, Instant::now() + SHORT));
     let late = matches!(
-        timed_out,
-        Err(ClientError::Session(HostConnectionError::TimedOut))
+        &timed_out,
+        Err(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut
     );
     assert!(late, "{timed_out:?}");
 
@@ -843,10 +850,9 @@ fn the_client_waits_for_the_guest_and_reports_refusals_while_attaching() {
         broker.send(RecordType::Error, &code);
         let refused = joined(attaching);
         let rejected = matches!(
-            refused,
-            Err(ClientError::Session(HostConnectionError::Rejected(
-                ErrorCode::Authentication
-            )))
+            &refused,
+            Err(ClientError::Session(error))
+                if matches!(cause(error), Some(HostConnectionError::Rejected(ErrorCode::Authentication)))
         );
         assert!(rejected, "after {waits} WAIT records: {refused:?}");
     }
@@ -858,8 +864,9 @@ fn the_client_waits_for_the_guest_and_reports_refusals_while_attaching() {
     broker.close();
     let refused = joined(attaching);
     let closed = matches!(
-        refused,
-        Err(ClientError::Session(HostConnectionError::Closed))
+        &refused,
+        Err(ClientError::Session(error))
+            if matches!(cause(error), Some(HostConnectionError::Closed))
     );
     assert!(closed, "{refused:?}");
 }
@@ -1016,7 +1023,7 @@ fn the_client_fails_on_records_that_the_protocol_does_not_allow() {
         let refused = joined(attaching);
         let failed = matches!(
             &refused,
-            Err(ClientError::Session(HostConnectionError::Protocol(error))) if *error == expected
+            Err(ClientError::Session(error)) if cause::<SessionError>(error) == Some(&expected)
         );
         assert!(failed, "{name}: {refused:?}");
     }
@@ -1137,7 +1144,7 @@ fn the_client_fails_on_records_that_the_protocol_does_not_allow() {
         let refused = client.receive(Some(deadline()));
         let failed = matches!(
             &refused,
-            Err(ClientError::Session(HostConnectionError::Protocol(error))) if *error == expected
+            Err(ClientError::Session(error)) if cause::<SessionError>(error) == Some(&expected)
         );
         assert!(failed, "{name}: {refused:?}");
         assert_ended(&mut client);
@@ -1421,8 +1428,8 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
     assert_eq!(broker.messages(1), [Message::Ping]);
     let (mut client, result) = joined(requesting);
     let late = matches!(
-        result,
-        Err(ClientError::Session(HostConnectionError::TimedOut))
+        &result,
+        Err(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut
     );
     assert!(late, "{result:?}");
     broker.send_data(&Message::Pong.encode().unwrap(), OUTER_MAX_PAYLOAD);
@@ -2089,10 +2096,9 @@ fn only_a_session_that_ended_is_lost_to_a_clone_s_order() {
     );
     let error = joined(attaching).unwrap_err();
     let rejected = matches!(
-        error,
-        OrderError::Client(ClientError::Session(HostConnectionError::Rejected(
-            ErrorCode::Authentication
-        )))
+        &error,
+        OrderError::Client(ClientError::Session(error))
+            if matches!(cause(error), Some(HostConnectionError::Rejected(ErrorCode::Authentication)))
     );
     assert!(rejected && not_lost(&error), "{error:?}");
 
@@ -2103,8 +2109,8 @@ fn only_a_session_that_ended_is_lost_to_a_clone_s_order() {
         thread::spawn(move || clone_order().attach(transport, &CAPABILITY, Instant::now() + SHORT));
     let error = joined(attaching).unwrap_err();
     let late = matches!(
-        error,
-        OrderError::Client(ClientError::Session(HostConnectionError::TimedOut))
+        &error,
+        OrderError::Client(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut
     );
     assert!(late && not_lost(&error), "{error:?}");
 
@@ -2139,8 +2145,8 @@ fn only_a_session_that_ended_is_lost_to_a_clone_s_order() {
     let (mut client, activated) = joined(activation);
     let error = activated.unwrap_err();
     let late = matches!(
-        error,
-        OrderError::Client(ClientError::Session(HostConnectionError::TimedOut))
+        &error,
+        OrderError::Client(ClientError::Session(error)) if error.kind() == ErrorKind::TimedOut
     );
     assert!(late && not_lost(&error), "{error:?}");
     assert_ended(&mut client);
@@ -2566,10 +2572,9 @@ fn the_driver_ends_its_run_on_a_message_that_breaks_the_rules() {
     broker.close();
     let (_, ran) = joined(running);
     let closed = matches!(
-        ran,
-        Err(ExecutionsError::Client(ClientError::Session(
-            HostConnectionError::Closed
-        )))
+        &ran,
+        Err(ExecutionsError::Client(ClientError::Session(error)))
+            if matches!(cause(error), Some(HostConnectionError::Closed))
     );
     assert!(closed, "{:?}", ran.err());
 }
