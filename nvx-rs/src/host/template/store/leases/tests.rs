@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::activation::TemplateReference;
 use crate::host::process::{Process, ProcessRef};
+use crate::host::snapshot::tests::{ManifestSpec, artifact, network_class};
 use crate::host::store::files::write_private;
 use crate::host::store::{
     CLONE_ACTIVATION_NAME, CLONE_FAILURE_NAME, CLONE_PROGRESS_NAME, CLONE_SCRATCH_NAME, FORMAT,
@@ -28,7 +29,6 @@ use crate::host::template::store::tests::{
     cause, link_dir, link_file, publish, publish_with, remove, storage, store as new_store,
     unlink_dir,
 };
-use crate::host::template::tests::{ManifestSpec, artifact, network_class};
 use crate::host::tests::released;
 use crate::protocol::CAPABILITY_LEN;
 

@@ -14,13 +14,13 @@ use serde_json::{Value, json};
 use super::*;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::{SandboxDistro, SandboxUpper};
+use crate::host::snapshot::tests::{MIB, ManifestSpec, class, network_class};
 use crate::host::store::{CallerFiles, JOURNAL_NAME, LaunchId};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
 use crate::host::template::store::Lease;
 use crate::host::template::store::tests::{
     cause, link_dir, link_file, private_dir, publish_with, storage, store,
 };
-use crate::host::template::tests::{MIB, ManifestSpec, class, network_class};
 use crate::protocol::root::RootImage;
 use crate::uuid::Uuid;
 

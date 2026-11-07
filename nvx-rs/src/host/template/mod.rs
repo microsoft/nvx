@@ -64,35 +64,21 @@
 //!   what the clone's sandbox keeps of it, for the operations that list, inspect, or remove
 //!   clones.
 //!
-//! # Canonical encoding
+//! # Snapshot metadata
 //!
-//! A key and a class each have one canonical encoding, which [`TemplateKey::to_bytes`] and
-//! [`CaptureClass::to_bytes`] write, and whose SHA-256 digest, after a domain of its own, is its
-//! identity, a [`KeyIdentity`] or a [`ClassIdentity`]. The encoding starts with its version, and
-//! each value in it has exactly one encoding:
-//!
-//! - An integer is its fixed number of little-endian bytes: one for a `u8`, two for a `u16`, four
-//!   for a `u32`, and eight for a `u64`.
-//! - A boolean is one byte, 0 or 1.
-//! - A byte string of fixed length, such as a digest or an address, is its bytes.
-//! - A byte string of variable length is its length, a `u32`, then its bytes. A text is the byte
-//!   string of its UTF-8 encoding.
-//! - An optional value is one byte: 0 without the value, and 1 before it.
-//! - A list is its count, a `u32`, then its items in order.
-//!
-//! [`TemplateKey::from_bytes`] refuses any other encoding, and bytes left after it. The vectors in
-//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding and of a class's.
+//! The metadata types remain aliases of [`snapshot`](super::snapshot)'s types for template
+//! users. That module describes their canonical encoding and conformance vectors.
 
-mod canonical;
 mod clone;
-mod eligibility;
-mod key;
-mod manifest;
 mod plan;
 mod store;
-#[cfg(test)]
-pub(crate) mod tests;
-mod wire;
+
+pub use super::snapshot::{
+    BlockGeometry, CaptureClass, ClassIdentity, Downtime, DowntimeSource, Eligibility, HostClock,
+    HostTime, Invariants, KeyIdentity, MANIFEST_NAME, MAX_DOWNTIME_NS, MAX_MANIFEST_LEN,
+    SnapshotKey as TemplateKey, SnapshotManifest as TemplateManifest, TimeContract,
+};
+pub(super) use super::snapshot::{eligibility, key, manifest};
 
 pub use self::clone::{
     Activated, CloneControl, CloneFailure, ClonePlan, CloneRecords, CloneRequest, CloneUpper,
@@ -100,13 +86,8 @@ pub use self::clone::{
     READY_TO_START_TIMEOUT, RESTORE_READY_EVENT, RESTORE_TO_READY_TIMEOUT, ReattachedClone,
     RestoreDeadlines, Restoring, Stage, Started, Teardown, reattach_clone, status_evidence,
 };
-pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
-pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
 #[cfg(feature = "cli")]
 pub(crate) use self::manifest::read_attachments;
-pub use self::manifest::{
-    BlockGeometry, HostClock, MANIFEST_NAME, MAX_MANIFEST_LEN, TemplateManifest, TimeContract,
-};
 pub use self::plan::{MEMORY_BLOCK_SIZE, SCRATCH_NAME, TemplatePlan, TemplateResources};
 pub use self::store::{
     Acquired, CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, GENERATIONS_NAME, Generation,

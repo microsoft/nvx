@@ -9,10 +9,10 @@ use std::io;
 use std::time::SystemTime;
 
 use super::manifest::{HostClock, TimeContract};
-use super::store::Generation;
 use crate::error::{Error, ErrorKind, Result};
 use crate::host::platform;
 use crate::host::process::BootId;
+use crate::host::template::Generation;
 
 /// The longest interval by which a restore advances a clone's VM time, from the cut of the
 /// captured VM's time to the restoring host's time, in nanoseconds: 30 days, the bound that every

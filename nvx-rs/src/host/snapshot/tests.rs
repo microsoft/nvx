@@ -1,4 +1,4 @@
-//! Builders of the manifests and capture classes of templates, for their tests.
+//! Builders of the manifests and capture classes of snapshots, for their tests.
 //!
 //! [`Proto`] writes the protobuf wire format as OpenVMM's `mesh` does, independently of the reader
 //! that the tests check, and [`ManifestSpec`] holds each field of a manifest, so that a test
@@ -13,18 +13,18 @@ use crate::host::store::{ArtifactIdentity, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
 
 /// Bytes in a MiB.
-pub(super) const MIB: u64 = 1024 * 1024;
+pub(in crate::host) const MIB: u64 = 1024 * 1024;
 
 /// A protobuf message under construction, whose fields are written in the order of the calls.
 ///
 /// Like `mesh`, the typed methods omit a field whose value is zero or empty, but for
 /// [`message`](Self::message) and [`some`](Self::some), which write an `Option` that is `Some`.
 #[derive(Debug, Clone, Default)]
-pub(super) struct Proto(Vec<u8>);
+pub(in crate::host) struct Proto(Vec<u8>);
 
 impl Proto {
     /// Appends `value` to `bytes` as a varint.
-    pub(super) fn put_varint(bytes: &mut Vec<u8>, mut value: u64) {
+    pub(in crate::host) fn put_varint(bytes: &mut Vec<u8>, mut value: u64) {
         loop {
             let byte = (value & 0x7f) as u8;
             value >>= 7;
@@ -37,20 +37,20 @@ impl Proto {
     }
 
     /// Appends the key of field `number` of wire type `wire_type`.
-    pub(super) fn key(mut self, number: u32, wire_type: u8) -> Self {
+    pub(in crate::host) fn key(mut self, number: u32, wire_type: u8) -> Self {
         Self::put_varint(&mut self.0, u64::from(number) << 3 | u64::from(wire_type));
         self
     }
 
     /// Appends field `number` as the varint `value`, even if it is 0.
-    pub(super) fn some(self, number: u32, value: u64) -> Self {
+    pub(in crate::host) fn some(self, number: u32, value: u64) -> Self {
         let mut message = self.key(number, 0);
         Self::put_varint(&mut message.0, value);
         message
     }
 
     /// Appends field `number` as the varint `value`, unless it is 0.
-    pub(super) fn varint(self, number: u32, value: u64) -> Self {
+    pub(in crate::host) fn varint(self, number: u32, value: u64) -> Self {
         if value == 0 {
             self
         } else {
@@ -59,7 +59,7 @@ impl Proto {
     }
 
     /// Appends field `number` as the bytes `bytes`, even if they are empty.
-    pub(super) fn always_bytes(self, number: u32, bytes: &[u8]) -> Self {
+    pub(in crate::host) fn always_bytes(self, number: u32, bytes: &[u8]) -> Self {
         let mut message = self.key(number, 2);
         Self::put_varint(&mut message.0, bytes.len() as u64);
         message.0.extend_from_slice(bytes);
@@ -67,7 +67,7 @@ impl Proto {
     }
 
     /// Appends field `number` as the bytes `bytes`, unless they are empty.
-    pub(super) fn bytes(self, number: u32, bytes: &[u8]) -> Self {
+    pub(in crate::host) fn bytes(self, number: u32, bytes: &[u8]) -> Self {
         if bytes.is_empty() {
             self
         } else {
@@ -76,18 +76,18 @@ impl Proto {
     }
 
     /// Appends field `number` as the text `text`, unless it is empty.
-    pub(super) fn text(self, number: u32, text: &str) -> Self {
+    pub(in crate::host) fn text(self, number: u32, text: &str) -> Self {
         self.bytes(number, text.as_bytes())
     }
 
     /// Appends field `number` as the message `message`, even if it is empty, as `mesh` writes an
     /// `Option` that is `Some`, or an element of a repeated field.
-    pub(super) fn message(self, number: u32, message: Proto) -> Self {
+    pub(in crate::host) fn message(self, number: u32, message: Proto) -> Self {
         self.always_bytes(number, &message.0)
     }
 
     /// Appends field `number` as the packed varints `values`, unless there are none.
-    pub(super) fn packed(self, number: u32, values: &[u32]) -> Self {
+    pub(in crate::host) fn packed(self, number: u32, values: &[u32]) -> Self {
         let mut packed = Vec::new();
         for &value in values {
             Self::put_varint(&mut packed, u64::from(value));
@@ -96,40 +96,40 @@ impl Proto {
     }
 
     /// Appends `bytes` as they are.
-    pub(super) fn raw(mut self, bytes: &[u8]) -> Self {
+    pub(in crate::host) fn raw(mut self, bytes: &[u8]) -> Self {
         self.0.extend_from_slice(bytes);
         self
     }
 
     /// Returns the message's bytes.
-    pub(super) fn finish(self) -> Vec<u8> {
+    pub(in crate::host) fn finish(self) -> Vec<u8> {
         self.0
     }
 }
 
 /// `openvmm.snapshot.SnapshotDevice`.
 #[derive(Debug, Clone)]
-pub(super) struct DeviceSpec {
+pub(in crate::host) struct DeviceSpec {
     /// Field 1.
-    pub(super) stable_id: String,
+    pub(in crate::host) stable_id: String,
     /// Field 2.
-    pub(super) state_unit: String,
+    pub(in crate::host) state_unit: String,
     /// Field 3.
-    pub(super) kind: String,
+    pub(in crate::host) kind: String,
     /// Field 4.
-    pub(super) order: u32,
+    pub(in crate::host) order: u32,
     /// Field 5: each range's address space, start, and length.
-    pub(super) ranges: Vec<(String, u64, u64)>,
+    pub(in crate::host) ranges: Vec<(String, u64, u64)>,
     /// Field 6.
-    pub(super) irq: Option<u32>,
+    pub(in crate::host) irq: Option<u32>,
     /// Field 7.
-    pub(super) transport: String,
+    pub(in crate::host) transport: String,
     /// Field 8.
-    pub(super) feature_banks: Vec<u32>,
+    pub(in crate::host) feature_banks: Vec<u32>,
     /// Field 9.
-    pub(super) queue_count: u32,
+    pub(in crate::host) queue_count: u32,
     /// Field 10.
-    pub(super) queue_max_sizes: Vec<u32>,
+    pub(in crate::host) queue_max_sizes: Vec<u32>,
 }
 
 impl DeviceSpec {
@@ -211,23 +211,23 @@ impl DeviceSpec {
 
 /// `openvmm.snapshot.SnapshotAttachment`.
 #[derive(Debug, Clone)]
-pub(super) struct AttachmentSpec {
+pub(in crate::host) struct AttachmentSpec {
     /// Field 1.
-    pub(super) stable_id: String,
+    pub(in crate::host) stable_id: String,
     /// Field 2.
-    pub(super) kind: String,
+    pub(in crate::host) kind: String,
     /// Field 3.
-    pub(super) required: bool,
+    pub(in crate::host) required: bool,
     /// Field 4.
-    pub(super) reconnect_policy: String,
+    pub(in crate::host) reconnect_policy: String,
     /// Field 5.
-    pub(super) identity_kind: String,
+    pub(in crate::host) identity_kind: String,
     /// Field 6.
-    pub(super) identity: Vec<u8>,
+    pub(in crate::host) identity: Vec<u8>,
     /// Field 7.
-    pub(super) length: u64,
+    pub(in crate::host) length: u64,
     /// Field 8.
-    pub(super) reconnect_timeout_ms: u64,
+    pub(in crate::host) reconnect_timeout_ms: u64,
 }
 
 impl AttachmentSpec {
@@ -267,33 +267,33 @@ impl AttachmentSpec {
 
 /// `openvmm.snapshot.SnapshotMicrovmNetwork`.
 #[derive(Debug, Clone)]
-pub(super) struct NetworkSpec {
+pub(in crate::host) struct NetworkSpec {
     /// Field 1.
-    pub(super) ipv4: [u8; 4],
+    pub(in crate::host) ipv4: [u8; 4],
     /// Field 2.
-    pub(super) prefix_length: u32,
+    pub(in crate::host) prefix_length: u32,
     /// Field 3.
-    pub(super) gateway: [u8; 4],
+    pub(in crate::host) gateway: [u8; 4],
     /// Field 4.
-    pub(super) guest_mac: Vec<u8>,
+    pub(in crate::host) guest_mac: Vec<u8>,
     /// Field 5.
-    pub(super) gateway_mac: Vec<u8>,
+    pub(in crate::host) gateway_mac: Vec<u8>,
     /// Field 6.
-    pub(super) policy_mode: String,
+    pub(in crate::host) policy_mode: String,
     /// Field 7.
-    pub(super) policy_digest: Vec<u8>,
+    pub(in crate::host) policy_digest: Vec<u8>,
     /// Field 8.
-    pub(super) policy_required: bool,
+    pub(in crate::host) policy_required: bool,
     /// Field 9.
-    pub(super) profile: String,
+    pub(in crate::host) profile: String,
     /// Field 10.
-    pub(super) policy_encoding_version: u32,
+    pub(in crate::host) policy_encoding_version: u32,
     /// Field 11.
-    pub(super) ipv6: Vec<u8>,
+    pub(in crate::host) ipv6: Vec<u8>,
     /// Field 12.
-    pub(super) ipv6_prefix_length: u32,
+    pub(in crate::host) ipv6_prefix_length: u32,
     /// Field 13.
-    pub(super) ipv6_gateway: Vec<u8>,
+    pub(in crate::host) ipv6_gateway: Vec<u8>,
 }
 
 impl NetworkSpec {
@@ -318,25 +318,25 @@ impl NetworkSpec {
 
 /// `openvmm.snapshot.SnapshotMicrovmSandboxBlock`.
 #[derive(Debug, Clone)]
-pub(super) struct BlockSpec {
+pub(in crate::host) struct BlockSpec {
     /// Field 1.
-    pub(super) role: String,
+    pub(in crate::host) role: String,
     /// Field 2.
-    pub(super) read_only: bool,
+    pub(in crate::host) read_only: bool,
     /// Field 3.
-    pub(super) length: u64,
+    pub(in crate::host) length: u64,
     /// Field 4.
-    pub(super) identity_kind: String,
+    pub(in crate::host) identity_kind: String,
     /// Field 5.
-    pub(super) identity: Vec<u8>,
+    pub(in crate::host) identity: Vec<u8>,
     /// Field 6.
-    pub(super) artifact: String,
+    pub(in crate::host) artifact: String,
     /// Field 7.
-    pub(super) logical_block_size: u32,
+    pub(in crate::host) logical_block_size: u32,
     /// Field 8.
-    pub(super) physical_block_size: u32,
+    pub(in crate::host) physical_block_size: u32,
     /// Field 9.
-    pub(super) restore_mode: String,
+    pub(in crate::host) restore_mode: String,
 }
 
 impl BlockSpec {
@@ -357,31 +357,31 @@ impl BlockSpec {
 
 /// `openvmm.snapshot.SnapshotTimeContract`.
 #[derive(Debug, Clone)]
-pub(super) struct TimeSpec {
+pub(in crate::host) struct TimeSpec {
     /// Field 1.
-    pub(super) abi_version: u32,
+    pub(in crate::host) abi_version: u32,
     /// Field 2.
-    pub(super) tsc_hz: u64,
+    pub(in crate::host) tsc_hz: u64,
     /// Field 3.
-    pub(super) tolerance_ppm: u32,
+    pub(in crate::host) tolerance_ppm: u32,
     /// Field 4.
-    pub(super) apic_hz: u64,
+    pub(in crate::host) apic_hz: u64,
     /// Field 5.
-    pub(super) capture_tsc: u64,
+    pub(in crate::host) capture_tsc: u64,
     /// Field 6.
-    pub(super) capture_utc_ns: u64,
+    pub(in crate::host) capture_utc_ns: u64,
     /// Field 7.
-    pub(super) capture_monotonic_ns: u64,
+    pub(in crate::host) capture_monotonic_ns: u64,
     /// Field 8.
-    pub(super) host_clock: String,
+    pub(in crate::host) host_clock: String,
     /// Field 9.
-    pub(super) host_id: Vec<u8>,
+    pub(in crate::host) host_id: Vec<u8>,
     /// Field 10.
-    pub(super) boot_id: Vec<u8>,
+    pub(in crate::host) boot_id: Vec<u8>,
     /// Field 11.
-    pub(super) lineage: u32,
+    pub(in crate::host) lineage: u32,
     /// Field 12.
-    pub(super) cut_to_anchor_ns: Option<u64>,
+    pub(in crate::host) cut_to_anchor_ns: Option<u64>,
 }
 
 impl TimeSpec {
@@ -408,17 +408,17 @@ impl TimeSpec {
 
 /// `openvmm.snapshot.SnapshotCpuProfile`.
 #[derive(Debug, Clone)]
-pub(super) struct CpuSpec {
+pub(in crate::host) struct CpuSpec {
     /// Field 1.
-    pub(super) id: String,
+    pub(in crate::host) id: String,
     /// Field 2.
-    pub(super) digest: Vec<u8>,
+    pub(in crate::host) digest: Vec<u8>,
     /// Field 3.
-    pub(super) document: Vec<u8>,
+    pub(in crate::host) document: Vec<u8>,
     /// Field 4.
-    pub(super) effective_cpuid: Vec<u8>,
+    pub(in crate::host) effective_cpuid: Vec<u8>,
     /// Field 6.
-    pub(super) signature: u32,
+    pub(in crate::host) signature: u32,
 }
 
 impl CpuSpec {
@@ -435,61 +435,61 @@ impl CpuSpec {
 
 /// `openvmm.snapshot.SnapshotMachineContract`.
 #[derive(Debug, Clone)]
-pub(super) struct ContractSpec {
+pub(in crate::host) struct ContractSpec {
     /// Field 1.
-    pub(super) machine_profile: String,
+    pub(in crate::host) machine_profile: String,
     /// Field 2.
-    pub(super) abi_version: u32,
+    pub(in crate::host) abi_version: u32,
     /// Field 3.
-    pub(super) source_hypervisor: String,
+    pub(in crate::host) source_hypervisor: String,
     /// Field 4.
-    pub(super) command_line: String,
+    pub(in crate::host) command_line: String,
     /// Field 5, or `None` for the SHA-256 digest of the command line.
-    pub(super) command_line_digest: Option<Vec<u8>>,
+    pub(in crate::host) command_line_digest: Option<Vec<u8>>,
     /// Field 6: each range's start, length, and file offset.
-    pub(super) memory_ranges: Vec<(u64, u64, u64)>,
+    pub(in crate::host) memory_ranges: Vec<(u64, u64, u64)>,
     /// Field 7: the sockets, the dies of each socket, the cores of each die, the threads of each
     /// core, and the APIC IDs.
-    pub(super) topology: (u32, u32, u32, u32, Vec<u32>),
+    pub(in crate::host) topology: (u32, u32, u32, u32, Vec<u32>),
     /// Field 8.
-    pub(super) devices: Vec<DeviceSpec>,
+    pub(in crate::host) devices: Vec<DeviceSpec>,
     /// Field 9.
-    pub(super) state_units: Vec<String>,
+    pub(in crate::host) state_units: Vec<String>,
     /// Field 10.
-    pub(super) attachments: Vec<AttachmentSpec>,
+    pub(in crate::host) attachments: Vec<AttachmentSpec>,
     /// Field 16.
-    pub(super) boot_layout_version: u32,
+    pub(in crate::host) boot_layout_version: u32,
     /// Field 18.
-    pub(super) network: Option<NetworkSpec>,
+    pub(in crate::host) network: Option<NetworkSpec>,
     /// Field 19: the encoded policy of an attached filesystem.
-    pub(super) filesystem: Option<Vec<u8>>,
+    pub(in crate::host) filesystem: Option<Vec<u8>>,
     /// Field 21.
-    pub(super) blocks: Vec<BlockSpec>,
+    pub(in crate::host) blocks: Vec<BlockSpec>,
     /// Field 22.
-    pub(super) filesystem_slot_version: u32,
+    pub(in crate::host) filesystem_slot_version: u32,
     /// Field 23.
-    pub(super) boot_online_vp_count: u32,
+    pub(in crate::host) boot_online_vp_count: u32,
     /// Field 24.
-    pub(super) interrupt_mode: String,
+    pub(in crate::host) interrupt_mode: String,
     /// Fields 25 and 26: the start and the length of the shared interrupt-status page.
-    pub(super) status_page: (u64, u64),
+    pub(in crate::host) status_page: (u64, u64),
     /// Field 27.
-    pub(super) expansion_version: u32,
+    pub(in crate::host) expansion_version: u32,
     /// Field 28.
-    pub(super) memory_capacity: u64,
+    pub(in crate::host) memory_capacity: u64,
     /// Field 29.
-    pub(super) memory_block_size: u64,
+    pub(in crate::host) memory_block_size: u64,
     /// Field 30: each range's start and length.
-    pub(super) expansion_ranges: Vec<(u64, u64)>,
+    pub(in crate::host) expansion_ranges: Vec<(u64, u64)>,
     /// Field 31.
-    pub(super) time: Option<TimeSpec>,
+    pub(in crate::host) time: Option<TimeSpec>,
     /// Field 32.
-    pub(super) cpu: Option<CpuSpec>,
+    pub(in crate::host) cpu: Option<CpuSpec>,
 }
 
 impl ContractSpec {
     /// Gives each device its index as its order.
-    pub(super) fn renumber(&mut self) {
+    pub(in crate::host) fn renumber(&mut self) {
         for (index, device) in self.devices.iter_mut().enumerate() {
             device.order = index as u32;
         }
@@ -569,39 +569,39 @@ impl ContractSpec {
 
 /// `openvmm.snapshot.SnapshotManifest`.
 #[derive(Debug, Clone)]
-pub(super) struct ManifestSpec {
+pub(in crate::host) struct ManifestSpec {
     /// Field 1.
-    pub(super) version: u32,
+    pub(in crate::host) version: u32,
     /// Field 2: seconds and nanoseconds.
-    pub(super) created_at: (i64, i32),
+    pub(in crate::host) created_at: (i64, i32),
     /// Field 3.
-    pub(super) openvmm_version: String,
+    pub(in crate::host) openvmm_version: String,
     /// Field 4.
-    pub(super) memory_size: u64,
+    pub(in crate::host) memory_size: u64,
     /// Field 5.
-    pub(super) vp_count: u32,
+    pub(in crate::host) vp_count: u32,
     /// Field 6.
-    pub(super) page_size: u32,
+    pub(in crate::host) page_size: u32,
     /// Field 7.
-    pub(super) architecture: String,
+    pub(in crate::host) architecture: String,
     /// Field 8.
-    pub(super) state_size: u64,
+    pub(in crate::host) state_size: u64,
     /// Field 11.
-    pub(super) contract: Option<ContractSpec>,
+    pub(in crate::host) contract: Option<ContractSpec>,
     /// Field 12.
-    pub(super) magic: Vec<u8>,
+    pub(in crate::host) magic: Vec<u8>,
     /// Field 13.
-    pub(super) schema_version: u32,
+    pub(in crate::host) schema_version: u32,
     /// Field 14.
-    pub(super) root_type: String,
+    pub(in crate::host) root_type: String,
     /// Field 15.
-    pub(super) tier: String,
+    pub(in crate::host) tier: String,
     /// Field 16.
-    pub(super) restore_policy: String,
+    pub(in crate::host) restore_policy: String,
     /// Field 17.
-    pub(super) consumed_sections: u32,
+    pub(in crate::host) consumed_sections: u32,
     /// Field 18: the snapshot ID, which a microVM capture leaves zero, if it is written.
-    pub(super) snapshot_id: Option<Vec<u8>>,
+    pub(in crate::host) snapshot_id: Option<Vec<u8>>,
 }
 
 /// The kernel command line of the template of [`ManifestSpec::template`].
@@ -617,7 +617,7 @@ impl ManifestSpec {
     /// Returns the manifest of a template: a KVM microVM of 2 processors, all online at boot, and
     /// 512 MiB of RAM, of a capacity of 2 GiB, with a `distro` of 1 GiB, a scratch of 64 MiB, the
     /// dormant filesystem slot, a console, a control console, and no NIC.
-    pub(super) fn template() -> Self {
+    pub(in crate::host) fn template() -> Self {
         let (pmio, mmio) = ("pmio", "mmio");
         let platform = DeviceSpec::platform;
         let mut contract = ContractSpec {
@@ -825,7 +825,7 @@ impl ManifestSpec {
 
     /// Returns the manifest of [`template`](Self::template) with a fixed NIC at `10.0.0.2/24`,
     /// with an IPv6 identity, under an allow-list policy.
-    pub(super) fn with_network() -> Self {
+    pub(in crate::host) fn with_network() -> Self {
         let mut spec = Self::template();
         let contract = spec.contract();
         contract.devices.insert(
@@ -885,12 +885,12 @@ impl ManifestSpec {
     }
 
     /// Returns the machine contract.
-    pub(super) fn contract(&mut self) -> &mut ContractSpec {
+    pub(in crate::host) fn contract(&mut self) -> &mut ContractSpec {
         self.contract.as_mut().expect("the spec has a contract")
     }
 
     /// Returns the time contract.
-    pub(super) fn time(&mut self) -> &mut TimeSpec {
+    pub(in crate::host) fn time(&mut self) -> &mut TimeSpec {
         self.contract()
             .time
             .as_mut()
@@ -898,7 +898,7 @@ impl ManifestSpec {
     }
 
     /// Returns the CPU profile record.
-    pub(super) fn cpu(&mut self) -> &mut CpuSpec {
+    pub(in crate::host) fn cpu(&mut self) -> &mut CpuSpec {
         self.contract()
             .cpu
             .as_mut()
@@ -906,7 +906,7 @@ impl ManifestSpec {
     }
 
     /// Returns the fixed NIC.
-    pub(super) fn network(&mut self) -> &mut NetworkSpec {
+    pub(in crate::host) fn network(&mut self) -> &mut NetworkSpec {
         self.contract()
             .network
             .as_mut()
@@ -914,7 +914,7 @@ impl ManifestSpec {
     }
 
     /// Encodes the manifest, with the fields of `extra` after the others.
-    pub(super) fn encode_with(&self, extra: Proto) -> Vec<u8> {
+    pub(in crate::host) fn encode_with(&self, extra: Proto) -> Vec<u8> {
         let (seconds, nanos) = self.created_at;
         // `mesh` writes an `i64` and an `i32` as varints of their two's complement in 64 bits.
         let created_at = Proto::default()
@@ -947,18 +947,18 @@ impl ManifestSpec {
     }
 
     /// Encodes the manifest.
-    pub(super) fn encode(&self) -> Vec<u8> {
+    pub(in crate::host) fn encode(&self) -> Vec<u8> {
         self.encode_with(Proto::default())
     }
 }
 
 /// Returns the artifact identity `sha256:` and 64 times `digit`.
-pub(super) fn artifact(digit: char) -> ArtifactIdentity {
+pub(in crate::host) fn artifact(digit: char) -> ArtifactIdentity {
     ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap()
 }
 
 /// Returns the class of the capture of [`ManifestSpec::template`].
-pub(super) fn class() -> CaptureClass {
+pub(in crate::host) fn class() -> CaptureClass {
     CaptureClass {
         runtime: RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c')),
         guest_build: ArtifactIdentity::new("guest-build-1").unwrap(),
@@ -984,7 +984,7 @@ pub(super) fn class() -> CaptureClass {
 }
 
 /// Returns the class of the capture of [`ManifestSpec::with_network`].
-pub(super) fn network_class() -> CaptureClass {
+pub(in crate::host) fn network_class() -> CaptureClass {
     CaptureClass {
         network: Some(
             SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(Access::Allow)).unwrap(),
