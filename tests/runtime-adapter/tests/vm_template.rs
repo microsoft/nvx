@@ -406,15 +406,10 @@ fn assert_captured(templates: &Templates, created: &Printed, template: &Template
     let key = store.read_key(generation).unwrap();
     assert_eq!(key.identity(), generation.key());
 
-    // The runtime of the adapter's VMs, with the guest agent's build, and the machine that the
-    // scenario asked for.
+    // The runtime of the adapter's VMs, and the machine that the scenario asked for.
     let artifacts = env::var_os(Artifacts::ENV_DIR).unwrap();
     let runtime = Runtime::from_dir(artifacts, GUEST_BUILD).unwrap();
     assert_eq!(key.runtime(), &runtime.identity);
-    assert_eq!(
-        key.guest_build().as_str(),
-        format!("runtime-adapter-guest/{GUEST_BUILD}")
-    );
     assert_eq!(key.hypervisor(), Hypervisor::from_env_or_default().unwrap());
     let processors = template.processors();
     assert_eq!(key.processors(), processors);

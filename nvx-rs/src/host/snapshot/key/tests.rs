@@ -1,4 +1,4 @@
-//! Tests of [`TemplateKey`] and [`CaptureClass`]: what a key holds, what it leaves out, and its
+//! Tests of [`SnapshotKey`] and [`CaptureClass`]: what a key holds, what it leaves out, and its
 //! canonical encoding.
 
 use std::collections::HashSet;
@@ -6,21 +6,21 @@ use std::collections::HashSet;
 use super::*;
 use crate::ErrorCode;
 use crate::host::network::{Access, EgressRule, HostLoopback, NetworkPolicy, NetworkProxy};
-use crate::host::template::tests::{self as support, MIB, ManifestSpec, artifact, network_class};
+use crate::host::snapshot::tests::{self as support, MIB, ManifestSpec, artifact, network_class};
 
 /// Returns the manifest that `spec` encodes.
-fn manifest(spec: &ManifestSpec) -> TemplateManifest {
-    TemplateManifest::parse(&spec.encode()).unwrap()
+fn manifest(spec: &ManifestSpec) -> SnapshotManifest {
+    SnapshotManifest::parse(&spec.encode()).unwrap()
 }
 
 /// Returns the key of the template that a capture of `class` made, whose manifest `spec`
 /// encodes.
-fn key(class: &CaptureClass, spec: &ManifestSpec) -> TemplateKey {
-    TemplateKey::new(class, &manifest(spec)).unwrap()
+fn key(class: &CaptureClass, spec: &ManifestSpec) -> SnapshotKey {
+    SnapshotKey::new(class, &manifest(spec)).unwrap()
 }
 
 /// Returns the key of the template with a NIC of the tests.
-fn network_key() -> TemplateKey {
+fn network_key() -> SnapshotKey {
     key(&network_class(), &ManifestSpec::with_network())
 }
 
@@ -59,9 +59,6 @@ fn each_part_of_the_key_changes_it() {
         }),
         ("control session", |class, _| {
             class.runtime.control_session += 1
-        }),
-        ("guest build", |class, _| {
-            class.guest_build = ArtifactIdentity::new("guest-build-2").unwrap();
         }),
         // CPU and time.
         ("backend", |class, spec| {
@@ -280,7 +277,7 @@ fn each_contract_version_changes_the_key() {
         assert!(!other.speaks_current_contracts());
         assert!(identities.insert(other.identity()));
         // A key of other versions reads back as it is, so that a store can name what it holds.
-        assert_eq!(TemplateKey::from_bytes(&other.to_bytes()).unwrap(), other);
+        assert_eq!(SnapshotKey::from_bytes(&other.to_bytes()).unwrap(), other);
     }
 }
 
@@ -333,11 +330,30 @@ fn a_generations_own_metadata_leaves_the_key_as_it_is() {
 }
 
 #[test]
+fn the_guest_build_is_not_part_of_a_snapshot_key() {
+    let class = network_class();
+    let spec = ManifestSpec::with_network();
+    let made = key(&class, &spec);
+    let other = CaptureClass {
+        guest_build: ArtifactIdentity::new("guest-build-2").unwrap(),
+        ..class.clone()
+    };
+    assert_ne!(class.identity().unwrap(), other.identity().unwrap());
+    let changed = key(&other, &spec);
+    assert_eq!(changed, made);
+    assert_eq!(changed.to_bytes(), made.to_bytes());
+    assert_eq!(changed.identity(), made.identity());
+    assert_eq!(
+        crate::host::template::TemplateKey::from_bytes(&changed.to_bytes()).unwrap(),
+        made
+    );
+}
+
+#[test]
 fn a_key_holds_what_its_capture_made() {
     let made = network_key();
     let class = network_class();
     assert_eq!(made.runtime(), &class.runtime);
-    assert_eq!(made.guest_build(), &class.guest_build);
     assert_eq!(made.hypervisor(), Hypervisor::Kvm);
     assert_eq!(made.cpu_profile(), "intel.icelake-sp.v1");
     assert_eq!((made.processors(), made.boot_processors()), (2, 0));
@@ -382,7 +398,7 @@ fn a_key_holds_what_its_capture_made() {
 /// Asserts that the capture of `class` whose manifest is `spec` does not match its class, with
 /// a message that holds `expected`.
 fn assert_mismatched(class: &CaptureClass, spec: &ManifestSpec, expected: &str) {
-    let error = TemplateKey::new(class, &manifest(spec)).unwrap_err();
+    let error = SnapshotKey::new(class, &manifest(spec)).unwrap_err();
     assert_eq!(error.code(), ErrorCode::Io, "{error}");
     assert!(
         error
@@ -439,7 +455,7 @@ fn a_capture_that_does_not_match_its_class_is_refused() {
         &spec,
         "it has 2 processors, 1 online at boot, but the class requests 2 processors, 2 online",
     );
-    assert!(TemplateKey::new(&class, &manifest(&spec)).is_ok());
+    assert!(SnapshotKey::new(&class, &manifest(&spec)).is_ok());
     class = base.clone();
     class.memory = 1024 * MIB;
     assert_mismatched(
@@ -547,7 +563,7 @@ fn invalid_classes_are_refused() {
             class.check().unwrap_err(),
             class.to_bytes().unwrap_err(),
             class.identity().unwrap_err(),
-            TemplateKey::new(&class, &manifest(&ManifestSpec::with_network())).unwrap_err(),
+            SnapshotKey::new(&class, &manifest(&ManifestSpec::with_network())).unwrap_err(),
         ] {
             assert_eq!(error.code(), ErrorCode::Unsupported, "{error}");
             assert!(
@@ -649,11 +665,11 @@ fn keys_read_back_from_their_canonical_encoding() {
     ] {
         let bytes = made.to_bytes();
         assert_eq!(&bytes[..2], &[1, 0]);
-        let read = TemplateKey::from_bytes(&bytes).unwrap();
+        let read = SnapshotKey::from_bytes(&bytes).unwrap();
         assert_eq!(read, made);
         assert_eq!(read.to_bytes(), bytes);
         let mut digest = Sha256::new();
-        digest.update(b"nvx template key\0");
+        digest.update(b"nvx snapshot key\0");
         digest.update(&bytes);
         assert_eq!(
             made.identity().as_bytes(),
@@ -662,9 +678,33 @@ fn keys_read_back_from_their_canonical_encoding() {
     }
 }
 
+#[test]
+fn keys_with_the_removed_guest_build_field_are_refused() {
+    let class = network_class();
+    let made = network_key();
+    let mut prefix = Writer::default();
+    prefix.u16(SnapshotKey::VERSION);
+    write_runtime(&mut prefix, made.runtime());
+    let offset = prefix.finish().len();
+    let mut field = Writer::default();
+    field.text(class.guest_build.as_str());
+    let mut old = made.to_bytes();
+    old.splice(offset..offset, field.finish());
+    assert_eq!(
+        SnapshotKey::from_bytes(&old).unwrap_err().code(),
+        ErrorCode::Io
+    );
+    assert_eq!(
+        crate::host::template::TemplateKey::from_bytes(&old)
+            .unwrap_err()
+            .code(),
+        ErrorCode::Io
+    );
+}
+
 /// Returns the message of the refusal of the key bytes `bytes`, which must have the code `code`.
 fn key_refusal(bytes: &[u8], code: ErrorCode) -> String {
-    let error = TemplateKey::from_bytes(bytes).unwrap_err();
+    let error = SnapshotKey::from_bytes(bytes).unwrap_err();
     assert_eq!(error.code(), code, "{error}");
     error.message().to_owned()
 }
@@ -679,7 +719,7 @@ fn other_encodings_of_a_key_are_refused() {
         assert_eq!(
             key_refusal(&other, ErrorCode::FormatUnsupported),
             format!(
-                "the template key has encoding version {version}; this build reads version 1 \
+                "the snapshot key has encoding version {version}; this build reads version 1 \
                  only"
             )
         );
@@ -688,16 +728,16 @@ fn other_encodings_of_a_key_are_refused() {
     longer.push(0);
     assert_eq!(
         key_refusal(&longer, ErrorCode::Io),
-        "the template key is malformed: a byte follows the value"
+        "the snapshot key is malformed: a byte follows the value"
     );
     for len in 0..bytes.len() {
         key_refusal(&bytes[..len], ErrorCode::Io);
     }
     assert_eq!(
         key_refusal(&[], ErrorCode::Io),
-        "the template key is malformed: the version is truncated"
+        "the snapshot key is malformed: the version is truncated"
     );
-    let oversized = vec![0; TemplateKey::MAX_LEN + 1];
+    let oversized = vec![0; SnapshotKey::MAX_LEN + 1];
     assert!(key_refusal(&oversized, ErrorCode::Io).contains("is longer than the"));
 }
 
@@ -726,7 +766,7 @@ fn a_key_that_holds_its_network_s_lowering_after_its_invariants_is_refused() {
         assert_eq!(
             key_refusal(&bytes, ErrorCode::Io),
             format!(
-                "the template key is malformed: {} bytes follow the value",
+                "the snapshot key is malformed: {} bytes follow the value",
                 part.len()
             )
         );
@@ -735,7 +775,7 @@ fn a_key_that_holds_its_network_s_lowering_after_its_invariants_is_refused() {
 
 #[test]
 fn keys_of_machines_that_no_manifest_describes_are_refused() {
-    type KeyChange = fn(&mut TemplateKey);
+    type KeyChange = fn(&mut SnapshotKey);
     let cases: &[(KeyChange, &str)] = &[
         (
             |key| key.machine.command_line.push_str(" quiet"),
@@ -775,7 +815,7 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         change(&mut changed);
         let message = key_refusal(&changed.to_bytes(), ErrorCode::Io);
         assert!(
-            message.starts_with(&format!("the template key is malformed: {expected}")),
+            message.starts_with(&format!("the snapshot key is malformed: {expected}")),
             "{message:?} lacks {expected:?}"
         );
     }
@@ -794,7 +834,7 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
     bytes[len - tail.len()..].copy_from_slice(&tail);
     assert_eq!(
         key_refusal(&bytes, ErrorCode::Io),
-        "the template key is malformed: the invariant settings are not in the strict order of \
+        "the snapshot key is malformed: the invariant settings are not in the strict order of \
          their names"
     );
     // An artifact identity that a runtime identity refuses.
@@ -849,7 +889,7 @@ fn identities_have_a_text_form() {
         assert_eq!(error.code(), ErrorCode::Unsupported);
         assert_eq!(
             error.message(),
-            format!("{invalid:?} is not a template key's identity, which is 64 hexadecimal digits")
+            format!("{invalid:?} is not a snapshot key's identity, which is 64 hexadecimal digits")
         );
     }
     let class = network_class().identity().unwrap();
@@ -863,7 +903,7 @@ fn identities_have_a_text_form() {
 }
 
 /// The conformance vectors of version 1 of the canonical encodings of keys and classes.
-const VECTORS: &str = include_str!("../../../../tests/vectors/template-key-v1.txt");
+const VECTORS: &str = include_str!("../../../../tests/vectors/snapshot-key-v1.txt");
 
 /// The versions of the contracts that the vectors hold.
 const VECTOR_CONTRACTS: Contracts = Contracts {
@@ -979,15 +1019,15 @@ fn the_conformance_vectors_decode_and_encode() {
     let names: Vec<&str> = keys.iter().map(|(name, ..)| *name).collect();
     assert_eq!(names, ["TEMPLATE", "NETWORK", "HOST_PROFILE", "MINIMAL"]);
     for (name, bytes, values) in keys {
-        let key = TemplateKey::from_bytes(&bytes).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let key = SnapshotKey::from_bytes(&bytes).unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(key.to_bytes(), bytes, "{name}");
         assert_eq!(values, [key.identity().to_string()], "{name}");
         if name != "MINIMAL" {
             // The key that this crate derives from the capture is the vector's, but for the
             // versions of the contracts, which are this crate's.
-            let derived = TemplateKey::new(&vector_class(name), &manifest(&vector_spec(name)))
+            let derived = SnapshotKey::new(&vector_class(name), &manifest(&vector_spec(name)))
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
-            let derived = TemplateKey {
+            let derived = SnapshotKey {
                 contracts: VECTOR_CONTRACTS,
                 ..derived
             };
@@ -1009,7 +1049,7 @@ fn the_conformance_vectors_decode_and_encode() {
     let versions = vectors("INVALID_KEY_VERSION");
     assert_eq!(versions.len(), 3);
     for (name, bytes, _) in versions {
-        let error = TemplateKey::from_bytes(&bytes).expect_err(name);
+        let error = SnapshotKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(
             error.code(),
             ErrorCode::FormatUnsupported,
@@ -1019,7 +1059,7 @@ fn the_conformance_vectors_decode_and_encode() {
     let invalid = vectors("INVALID_KEY");
     assert_eq!(invalid.len(), 23);
     for (name, bytes, _) in invalid {
-        let error = TemplateKey::from_bytes(&bytes).expect_err(name);
+        let error = SnapshotKey::from_bytes(&bytes).expect_err(name);
         assert_eq!(error.code(), ErrorCode::Io, "{name}: {error}");
     }
 }

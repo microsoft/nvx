@@ -1,4 +1,4 @@
-//! The manifest of a snapshot: a template's capture, which [`TemplateManifest::read`] reads, and
+//! The manifest of a snapshot: a template's capture, which [`SnapshotManifest::read`] reads, and
 //! the host attachments of any microVM snapshot, which `read_attachments` reads for the restores
 //! of `nvx-rs run`.
 //!
@@ -7,7 +7,7 @@
 //! most [`MAX_MANIFEST_LEN`] bytes. It describes the machine that the snapshot restores, its time
 //! contract and CPU profile, its sandbox blocks, the host attachments that a restore reconnects,
 //! and the lengths of its artifacts. Restore treats it as authoritative, and so does a template's
-//! [compatibility key](super::TemplateKey), which projects its machine. [`TemplateManifest`]
+//! [compatibility key](super::SnapshotKey), which projects its machine. [`SnapshotManifest`]
 //! describes what the reader refuses.
 
 use std::io;
@@ -28,7 +28,7 @@ use crate::hypervisor::Hypervisor;
 /// Name of the manifest in a snapshot's directory.
 pub const MANIFEST_NAME: &str = "manifest.bin";
 
-/// Longest manifest that [`TemplateManifest::read`] reads, in bytes: 1 MiB, the limit of
+/// Longest manifest that [`SnapshotManifest::read`] reads, in bytes: 1 MiB, the limit of
 /// OpenVMM's own reader.
 pub const MAX_MANIFEST_LEN: u64 = 1024 * 1024;
 
@@ -107,7 +107,7 @@ pub(super) const CPUID_ENTRY_LEN: usize = 44;
 /// Most entries of a CPU profile's effective CPUID record.
 pub(super) const MAX_CPUID_ENTRIES: usize = 1024;
 
-pub(super) use crate::host::config::PROCESSOR_COUNTS;
+pub(in crate::host) use crate::host::config::PROCESSOR_COUNTS;
 
 /// Bytes of a SHA-256 digest.
 const SHA256_LEN: usize = 32;
@@ -633,11 +633,11 @@ impl Machine {
 /// a read-only `distro` whose identity is unbound, a fresh scratch, and the dormant filesystem
 /// slot. It never reads another artifact of the snapshot.
 ///
-/// A template's [`TemplateKey`](super::TemplateKey) projects its machine. The rest is the
+/// A template's [`SnapshotKey`](super::SnapshotKey) projects its machine. The rest is the
 /// capture's own: when it was taken, its [`TimeContract`]'s anchor, host, boot, and lineage
 /// counter, and the lengths of its artifacts, in which the generations of one key differ.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TemplateManifest {
+pub struct SnapshotManifest {
     /// When OpenVMM created the snapshot.
     created_at: SystemTime,
     /// The version of the OpenVMM that captured it.
@@ -650,7 +650,9 @@ pub struct TemplateManifest {
     pub(super) machine: Machine,
 }
 
-impl TemplateManifest {
+pub(in crate::host) use SnapshotManifest as TemplateManifest;
+
+impl SnapshotManifest {
     /// Reads the manifest of the snapshot in the directory `snapshot`: its [`MANIFEST_NAME`].
     ///
     /// The file is opened without following a link, or on Windows any other reparse point, and
@@ -675,7 +677,7 @@ impl TemplateManifest {
     /// layout, or time ABI than this build reads, and with
     /// [`ErrorKind::Io`](crate::ErrorKind::Io) for more than [`MAX_MANIFEST_LEN`] bytes, bytes
     /// that are not such a manifest, and a manifest that is not a template's, as
-    /// [`TemplateManifest`] describes.
+    /// [`SnapshotManifest`] describes.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_described(bytes, "the snapshot manifest")
     }
@@ -796,11 +798,11 @@ pub(crate) struct Attachment {
 /// machine contract of its manifest, [`MANIFEST_NAME`]: those of any microVM snapshot, a
 /// template's or not, which `nvx-rs run` restores.
 ///
-/// It reads the manifest as [`TemplateManifest::read`] does, and checks its format and the form of
-/// its fields as [`TemplateManifest::parse`] does, but nothing that makes it a template's. A
+/// It reads the manifest as [`SnapshotManifest::read`] does, and checks its format and the form of
+/// its fields as [`SnapshotManifest::parse`] does, but nothing that makes it a template's. A
 /// manifest without a machine contract holds no attachments.
 ///
-/// Fails as [`TemplateManifest::read`] does, but for a manifest that is not a template's.
+/// Fails as [`SnapshotManifest::read`] does, but for a manifest that is not a template's.
 #[cfg(feature = "cli")]
 pub(crate) fn read_attachments(snapshot: &Path) -> Result<Vec<Attachment>> {
     let (bytes, description) = read_manifest(snapshot)?;
@@ -819,7 +821,7 @@ pub(crate) fn read_attachments(snapshot: &Path) -> Result<Vec<Attachment>> {
 const CAPTURE_TEMPLATE: &str = "the template again with the runtime of this build";
 
 /// Reads the manifest of the snapshot in the directory `snapshot`, its [`MANIFEST_NAME`], as
-/// [`TemplateManifest::read`] describes, and returns its bytes, with the description that names
+/// [`SnapshotManifest::read`] describes, and returns its bytes, with the description that names
 /// it in messages.
 fn read_manifest(snapshot: &Path) -> Result<(Vec<u8>, String)> {
     let path = snapshot.join(MANIFEST_NAME);
@@ -837,7 +839,7 @@ fn read_manifest(snapshot: &Path) -> Result<(Vec<u8>, String)> {
 }
 
 /// Checks the length and the format of the manifest `bytes`, with messages that call it
-/// `description`, and decodes it, as [`TemplateManifest::parse`] describes; a capture of `again`
+/// `description`, and decodes it, as [`SnapshotManifest::parse`] describes; a capture of `again`
 /// mends a format that this build does not read.
 fn decode_described(bytes: &[u8], description: &str, again: &str) -> Result<RawManifest> {
     if bytes.len() as u64 > MAX_MANIFEST_LEN {

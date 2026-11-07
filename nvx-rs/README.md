@@ -124,6 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
+| [`nvx::host::snapshot`](#nvxhostsnapshot) | Snapshot compatibility keys, strict manifests, and restore-time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig`, a VM's configuration as one value, and `CaptureConfig`, what a capture adds and the identity of its snapshots, checked without reading the host |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
@@ -136,7 +137,7 @@ changes only when the module's purpose does.
 | [`nvx::host::nvxs`](#nvxhostnvxs) | `HostConnection`: the host's role of the NVXS session over a platform transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::supervisor`](#nvxhostsupervisor) | The supervisor of a sandbox's VMM, beneath the CLI, `Instance`, and external orchestrators |
-| [`nvx::host::template`](#nvxhosttemplate) | Templates, captures of a microVM from which clones are restored: their plans, manifests, keys, and store |
+| [`nvx::host::template`](#nvxhosttemplate) | Legacy template capture and clone plans and store, with aliases of the snapshot metadata |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::session`, `platform`, `report`](#nvxhostsession-platform-report) | The authenticated control session, Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
@@ -472,6 +473,19 @@ endpoint, and the optional boot-console endpoint. `Capability` holds the
 credential that the host presents at a VM's control endpoint: `as_bytes`
 returns it, and its `Debug` form hides it. The library never writes it to a
 file; a caller that reconnects after a restart keeps it.
+
+### `nvx::host::snapshot`
+
+`SnapshotKey` and `SnapshotManifest` own the compatibility key and strict
+OpenVMM manifest reader. `SnapshotManifest::time` exposes the capture's
+`TimeContract`, whose `eligibility` checks its restore window at a `HostTime`;
+`HostTime::now` samples the host's clock and identities. The existing
+`host::template` names remain aliases of these same types.
+
+The key's canonical encoding and identity use the snapshot names and omit
+`guest_build`. Version 1 changes in place: no snapshot outlives a deployment,
+and no reader or migration of the prior encoding is supported. `CaptureClass`
+still records the legacy capture inputs, including its guest build.
 
 ### `nvx::host::config`
 
@@ -882,8 +896,9 @@ itself, as the supervisor's example does, starts it there too.
 
 ### `nvx::host::template`
 
-The metadata of templates, captures of a microVM from which independent clones
-are restored.
+The legacy plans and store of templates, captures of a microVM from which
+independent clones are restored. Their metadata names remain aliases of
+[`host::snapshot`](#nvxhostsnapshot)'s types.
 
 `TemplatePlan::new` lowers an adapter's `SandboxPlan` into the plan of a
 template's capture, without I/O: the placeholder `distro`, which its
@@ -944,7 +959,7 @@ domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
 to and from the `nvx::activation::Identity` by which a clone's lease and durable records
 name its template's key, or a `ClassIdentity`; the
 [conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/template-key-v1.txt`, pin both encodings and identities. The
+`tests/vectors/snapshot-key-v1.txt`, pin both encodings and identities. The
 key's encoding, version 1, leaves the network policy out, since templates
 capture their NIC under the complete deny-all policy, and has not been released,
 so a template store that an earlier build created is not supported: delete it
