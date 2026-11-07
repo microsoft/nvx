@@ -9,7 +9,8 @@ use proptest::prelude::*;
 
 use super::nvxs::{RecordParser, RecordType, encode_record};
 use super::*;
-use crate::tests::{NVXC_V1, Values, of_kind, vector, vectors};
+use crate::activation::ActivationRecord;
+use crate::tests::{ACTIVATION_V2, NVXC_V1, Values, of_kind, vector, vectors};
 
 /// A workload that runs `argv` without a timeout in `/` with the default environment.
 fn program<'a>(argv: &[&str]) -> Workload<'a> {
@@ -154,6 +155,112 @@ fn frames_match_their_vectors() {
             payload: &payload,
         };
         assert_eq!(decode_app(&vector.bytes).unwrap(), frame, "{name}");
+    }
+}
+
+#[test]
+fn capture_requests_round_trip_both_kill_flags() {
+    for (payload, kill_executions) in [([0], false), ([1], true)] {
+        assert_eq!(app::encode_capture_payload(kill_executions), payload);
+        let bytes = encode_app(app::APP_CAPTURE, 42, 0, &payload);
+        let frame = decode_app(&bytes).unwrap();
+        assert_eq!((frame.kind, frame.request_id, frame.status), (7, 42, 0));
+        assert_eq!(
+            app::decode_capture_payload(frame.payload).unwrap(),
+            kill_executions
+        );
+    }
+}
+
+#[test]
+fn capture_requests_refuse_unknown_or_mis_sized_flags() {
+    for payload in [&[][..], &[2], &[1, 0]] {
+        assert!(app::decode_capture_payload(payload).is_err());
+    }
+}
+
+#[test]
+fn activate_requests_round_trip_records_and_workload_identity() {
+    let names = [
+        "COLD",
+        "CLONE",
+        "SCRATCH_AGGREGATE",
+        "GPT_DIRECTORY",
+        "LARGEST",
+    ];
+    for vector in of_kind(ACTIVATION_V2, "RECORD", &names) {
+        let record = ActivationRecord::decode(&vector.bytes).unwrap();
+        for (flag, create_account) in [(0, false), (1, true)] {
+            let workload = app::workload::WorkloadIdentity {
+                uid: 0x0102_0304,
+                gid: 0x0506_0708,
+                create_account,
+            };
+            let payload = app::encode_activate_payload(&record, &workload).unwrap();
+            assert_eq!(payload[..9], [4, 3, 2, 1, 8, 7, 6, 5, flag]);
+            assert_eq!(payload[9..], vector.bytes);
+            let bytes = encode_app(app::APP_ACTIVATE, 42, 0, &payload);
+            let frame = decode_app(&bytes).unwrap();
+            assert_eq!((frame.kind, frame.request_id, frame.status), (8, 42, 0));
+            assert_eq!(
+                app::decode_activate_payload(frame.payload).unwrap(),
+                (record.clone(), workload)
+            );
+        }
+    }
+}
+
+#[test]
+fn activate_requests_refuse_truncated_or_malformed_payloads() {
+    let record = vector(ACTIVATION_V2, "RECORD", "GPT_DIRECTORY").bytes;
+    let prefix = [1, 0, 0, 0, 2, 0, 0, 0, 0];
+    let payload = [prefix.as_slice(), &record].concat();
+    for length in 0..payload.len() {
+        assert!(app::decode_activate_payload(&payload[..length]).is_err());
+    }
+    for flag in [2, u8::MAX] {
+        let mut invalid = payload.clone();
+        invalid[8] = flag;
+        assert!(app::decode_activate_payload(&invalid).is_err());
+    }
+    for name in ["VERSION_1", "TRUNCATED_FIELD_VALUE", "TOO_LONG"] {
+        let record = vector(ACTIVATION_V2, "INVALID_RECORD", name).bytes;
+        let invalid = [prefix.as_slice(), &record].concat();
+        assert!(app::decode_activate_payload(&invalid).is_err(), "{name}");
+    }
+    let mut trailing = payload;
+    trailing.push(0);
+    assert!(app::decode_activate_payload(&trailing).is_err());
+}
+
+#[test]
+fn activate_workload_ids_match_guest_credential_bounds() {
+    let record = ActivationRecord::decode(&vector(ACTIVATION_V2, "RECORD", "CLONE").bytes).unwrap();
+    for (uid, gid) in [(1, u32::MAX - 1), (u32::MAX - 1, 1)] {
+        let workload = app::workload::WorkloadIdentity {
+            uid,
+            gid,
+            create_account: false,
+        };
+        let payload = app::encode_activate_payload(&record, &workload).unwrap();
+        assert_eq!(
+            app::decode_activate_payload(&payload).unwrap(),
+            (record.clone(), workload)
+        );
+    }
+    for (uid, gid) in [(0u32, 1u32), (u32::MAX, 1), (1, 0), (1, u32::MAX)] {
+        let workload = app::workload::WorkloadIdentity {
+            uid,
+            gid,
+            create_account: true,
+        };
+        assert!(app::encode_activate_payload(&record, &workload).is_err());
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&uid.to_le_bytes());
+        payload.extend_from_slice(&gid.to_le_bytes());
+        payload.push(1);
+        payload.extend_from_slice(&record.encode());
+        assert!(app::decode_activate_payload(&payload).is_err());
     }
 }
 

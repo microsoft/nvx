@@ -59,6 +59,8 @@ pub use app::{
     BUSY, CWD_FAILED, ExitCategory, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED,
     MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION, decode_app, encode_app,
 };
+#[cfg(feature = "host")]
+pub(crate) use app::{APP_CAPTURE, encode_capture_payload, workload};
 pub use boot::{MAPS_TOKEN, WORKLOAD_ACCOUNT_TOKEN, parse_host_mapping_count};
 pub use exec::{
     EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
