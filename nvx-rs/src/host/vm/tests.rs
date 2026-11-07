@@ -494,7 +494,8 @@ fn a_missing_boot_and_a_snapshot_are_refused_before_any_output_is_created() {
     let runtime = cold_runtime();
     let mut config = cold_config();
     config.boot = None;
-    let snapshot = Snapshot { _private: () };
+    let fixture = crate::host::snapshot::tests::SnapshotFixture::new();
+    let snapshot = Snapshot::open(&fixture.dir).unwrap();
     for (from, config, expected) in [
         (None, &config, "Boot"),
         (Some(&snapshot), &cold_config(), "Snapshot"),

@@ -1,4 +1,8 @@
-//! Snapshot metadata and the opaque input of a future VM restore.
+//! Strict snapshot directories, compatibility keys, manifests and restore-time eligibility.
+//!
+//! [`Snapshot::open`] checks the one snapshot format without reading its informational
+//! description. The caller keeps the directory and its entries private and immutable while
+//! using the opened snapshot.
 //!
 //! [`SnapshotKey`] derives a compatibility key from a capture's class and manifest.
 //! [`SnapshotManifest::read`] reads the manifest that OpenVMM wrote, and
@@ -31,15 +35,186 @@ pub(super) mod manifest;
 pub(crate) mod tests;
 mod wire;
 
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::host::paths::{absolute, normalized};
+use crate::host::store::regular;
+use crate::host::{filesystem, platform};
+use crate::{Error, Result};
+
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, SnapshotKey};
 pub use self::manifest::{
     BlockGeometry, HostClock, MANIFEST_NAME, MAX_MANIFEST_LEN, SnapshotManifest, TimeContract,
 };
 
-/// An opaque snapshot input. Creating a VM from a snapshot is not supported yet.
+/// The canonical snapshot key.
+pub const KEY_FILE: &str = "key.bin";
+/// The informational description, whose contents [`Snapshot::open`] never reads.
+pub const DESCRIPTION_FILE: &str = "snapshot.json";
+/// The directory of OpenVMM's manifest, RAM and saved state.
+pub const OPENVMM_DIR: &str = "openvmm";
+
+/// A checked snapshot directory and its verified metadata, for a future VM restore.
+///
+/// The caller must keep the directory and its entries private and immutable while using this
+/// value. Opening checks them once; it neither watches them nor holds their files open.
 #[derive(Debug)]
 pub struct Snapshot {
-    /// Reserved for snapshot metadata.
-    pub(crate) _private: (),
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "SL2.15 uses the snapshot directory (#1103)")
+    )]
+    pub(crate) dir: PathBuf,
+    key: SnapshotKey,
+    manifest: SnapshotManifest,
+}
+
+impl Snapshot {
+    /// Opens the one strict snapshot format without changing any entry.
+    ///
+    /// `dir` must be a private directory containing exactly [`KEY_FILE`], [`DESCRIPTION_FILE`]
+    /// and [`OPENVMM_DIR`]. The latter must be a private directory containing exactly
+    /// [`MANIFEST_NAME`], `memory.bin` and `state.bin`. Every file must be regular, not a link or
+    /// reparse point, and private to its owner. The manifest is read by
+    /// [`SnapshotManifest::read`], its artifact lengths must match, and the bounded canonical
+    /// key must be consistent with it. The description is required but its contents are never
+    /// read, parsed or trusted.
+    ///
+    /// The caller must keep the directory and its entries private and immutable while using
+    /// the returned snapshot. This check retains no open file handles or lock.
+    ///
+    /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) for an unreadable or invalid directory,
+    /// entry, length or key relationship, and otherwise as [`SnapshotManifest::read`] and
+    /// [`SnapshotKey::from_bytes`] do.
+    pub fn open(dir: &Path) -> Result<Self> {
+        let dir = absolute(&normalized(dir)).map_err(|error| entry_error(dir, error))?;
+        check_directory(&dir, &[KEY_FILE, DESCRIPTION_FILE, OPENVMM_DIR])?;
+        let openvmm = dir.join(OPENVMM_DIR);
+        check_directory(&openvmm, &[MANIFEST_NAME, "memory.bin", "state.bin"])?;
+        for path in [
+            dir.join(KEY_FILE),
+            dir.join(DESCRIPTION_FILE),
+            openvmm.join(MANIFEST_NAME),
+        ] {
+            check_file(&path)?;
+        }
+        let manifest = SnapshotManifest::read(&openvmm)?;
+        for (name, expected) in [
+            ("memory.bin", manifest.memory_len()),
+            ("state.bin", manifest.state_len()),
+        ] {
+            let path = openvmm.join(name);
+            let found = check_file(&path)?.len();
+            if found != expected {
+                return Err(Error::io(format!(
+                    "the snapshot artifact {} is {found} bytes long, not the {expected} bytes \
+                     that its manifest records",
+                    path.display()
+                )));
+            }
+        }
+        let path = dir.join(KEY_FILE);
+        let bytes = regular::open_regular(&path)
+            .and_then(|file| {
+                regular::read_at_most(file, SnapshotKey::MAX_LEN as u64, "a snapshot key")
+            })
+            .map_err(|error| entry_error(&path, error))?;
+        let key = SnapshotKey::from_bytes(&bytes)?;
+        key.check_manifest(&manifest)?;
+        Ok(Self { dir, key, manifest })
+    }
+
+    /// Returns the verified snapshot key.
+    pub fn key(&self) -> &SnapshotKey {
+        &self.key
+    }
+
+    /// Returns the strictly parsed OpenVMM manifest.
+    pub fn manifest(&self) -> &SnapshotManifest {
+        &self.manifest
+    }
+}
+
+fn entry_error(path: &Path, error: io::Error) -> Error {
+    Error::io(format!("cannot examine snapshot entry {}", path.display())).with_source(error)
+}
+
+fn check_directory(path: &Path, expected: &[&str]) -> Result<()> {
+    if let Some(problem) =
+        platform::check_snapshot_dir(path).map_err(|error| entry_error(path, error))?
+    {
+        return Err(Error::io(format!(
+            "the snapshot directory {} {problem}",
+            path.display()
+        )));
+    }
+    let mut found = fs::read_dir(path)
+        .and_then(|entries| {
+            entries
+                .map(|entry| Ok(entry?.file_name()))
+                .collect::<io::Result<Vec<_>>>()
+        })
+        .map_err(|error| entry_error(path, error))?;
+    let mut expected: Vec<OsString> = expected.iter().map(|name| OsString::from(*name)).collect();
+    found.sort();
+    expected.sort();
+    if found != expected {
+        return Err(Error::io(format!(
+            "the snapshot directory {} holds {found:?}, not exactly {expected:?}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn check_file(path: &Path) -> Result<fs::Metadata> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, READ_CONTROL,
+        };
+
+        fs::OpenOptions::new()
+            .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|error| entry_error(path, error))?
+    };
+    #[cfg(windows)]
+    let metadata = file.metadata().map_err(|error| entry_error(path, error))?;
+    #[cfg(not(windows))]
+    let metadata = fs::symlink_metadata(path).map_err(|error| entry_error(path, error))?;
+    if !metadata.is_file() || filesystem::is_reparse_point(&metadata) {
+        return Err(Error::io(format!(
+            "the snapshot entry {} is not a regular file, or is a link or reparse point",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if metadata.uid() != nix::unistd::Uid::effective().as_raw() || metadata.mode() & 0o077 != 0
+        {
+            return Err(Error::io(format!(
+                "the snapshot file {} is not private to the current user",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(windows)]
+    if let Some(problem) =
+        platform::private_file_problem(&file).map_err(|error| entry_error(path, error))?
+    {
+        return Err(Error::io(format!(
+            "the snapshot file {} {problem}",
+            path.display()
+        )));
+    }
+    Ok(metadata)
 }

@@ -634,6 +634,18 @@ impl SnapshotKey {
         self.contracts == Contracts::CURRENT
     }
 
+    pub(super) fn check_manifest(&self, manifest: &SnapshotManifest) -> Result<()> {
+        if self.machine != manifest.machine
+            || !self.speaks_current_contracts()
+            || self.filesystem_tag != MOUNT_TAG
+        {
+            return Err(Error::io(
+                "the snapshot key is not consistent with its manifest and this format's contracts",
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns the backend.
     pub fn hypervisor(&self) -> Hypervisor {
         self.machine.hypervisor
