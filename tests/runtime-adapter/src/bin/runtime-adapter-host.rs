@@ -1924,7 +1924,12 @@ fn launch(
             layered: layered.as_ref(),
         };
         record.write(store.dir())?;
-        let mut command = VmmCommand::new(&spec.openvmm, arguments, store.dir());
+        // On Windows, the VMM starts in the system directory, whose path is short whatever the
+        // store's, as NVX's own launches start theirs.
+        let working_dir = supervisor::vmm_working_dir(store.dir()).map_err(|error| {
+            nvx::Error::io("cannot find the working directory of the VMM").with_source(error)
+        })?;
+        let mut command = VmmCommand::new(&spec.openvmm, arguments, working_dir);
         // OpenVMM inherits the checked files that the prepared launch passes, and nothing else.
         if let Some(prepared) = &prepared {
             command.inherit = prepared.inherited();

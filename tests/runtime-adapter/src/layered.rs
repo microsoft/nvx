@@ -382,8 +382,9 @@ pub fn with_proxy(mut start: Start, plan: &SandboxPlan) -> Start {
 /// the identity `identity`, over the ext4 scratch image at `scratch`, or over RAM without one,
 /// checked against the host with `SandboxPlan::validated`.
 ///
-/// OpenVMM runs in the sandbox's store, so the plan names the images by absolute paths, which it
-/// normalizes as `pathlib` does.
+/// OpenVMM does not run in the caller's directory, but in the one that NVX's
+/// `vmm_working_dir` chooses, so the plan names the images by absolute paths, which it normalizes
+/// as `pathlib` does.
 pub(crate) fn plan(
     distro: &Path,
     format: ImageFormat,
