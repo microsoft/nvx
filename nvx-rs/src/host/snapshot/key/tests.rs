@@ -889,7 +889,7 @@ fn identities_have_a_text_form() {
         assert_eq!(error.code(), ErrorCode::Unsupported);
         assert_eq!(
             error.message(),
-            format!("{invalid:?} is not a snapshot key's identity, which is 64 hexadecimal digits")
+            format!("{invalid:?} is not a template key's identity, which is 64 hexadecimal digits")
         );
     }
     let class = network_class().identity().unwrap();

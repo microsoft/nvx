@@ -95,3 +95,12 @@ pub use self::store::{
     Retirement, SNAPSHOT_NAME, STORE_FORMAT, STORE_RECORD_NAME, StorageGeneration, Store, StoreId,
     TOMBSTONES_NAME, TRANSACTION_NAME,
 };
+
+impl Generation {
+    /// Returns whether a clone may restore the generation at the host's time `now`, by the
+    /// restore window of its capture's time contract, as [`TimeContract::eligibility`] decides
+    /// it.
+    pub fn eligibility(&self, now: &HostTime) -> Eligibility {
+        self.time().eligibility(now)
+    }
+}

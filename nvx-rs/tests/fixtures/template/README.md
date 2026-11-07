@@ -3,7 +3,7 @@
 Each directory holds the `manifest.bin` of a template's capture, as OpenVMM
 writes it: one `openvmm.snapshot.SnapshotManifest` of version 2 of OpenVMM's
 snapshot format, in the protobuf wire format of its `mesh`. The tests of
-`nvx::host::template` read them with `TemplateManifest::read`, so that the
+`nvx::host::snapshot` read them with `SnapshotManifest::read`, so that the
 reader is checked against bytes that OpenVMM's own code wrote, rather than
 against its own idea of them.
 
