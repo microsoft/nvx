@@ -626,6 +626,43 @@ fn long_stores_launch_with_a_short_working_directory() {
 }
 
 #[test]
+fn vmms_start_in_the_system_directory_on_windows_and_in_their_store_elsewhere() {
+    let (_directory, store) = sandbox();
+    #[cfg(not(windows))]
+    assert_eq!(
+        supervisor::vmm_working_dir(store.dir()).unwrap(),
+        store.dir()
+    );
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut parent = root.path().to_path_buf();
+        while parent.as_os_str().encode_wide().count() < 320 {
+            parent.push("long-state-root-component");
+        }
+        fs::create_dir_all(&parent).unwrap();
+        let long = SandboxStore::create(parent.join("sandbox")).unwrap();
+        // Whatever the store's path, the VMM starts in the system directory, which every host
+        // has, and which Windows takes as a process's working directory.
+        let system = Path::new(&env::var_os("SystemRoot").unwrap()).join("System32");
+        assert!(system.is_dir());
+        assert!(system.as_os_str().encode_wide().count() <= 258);
+        for store in [&store, &long] {
+            let working_dir = supervisor::vmm_working_dir(store.dir()).unwrap();
+            assert!(
+                working_dir
+                    .as_os_str()
+                    .eq_ignore_ascii_case(system.as_os_str()),
+                "{}",
+                working_dir.display()
+            );
+        }
+    }
+}
+
+#[test]
 #[cfg(windows)]
 fn working_directory_limits_include_trailing_separators() {
     use std::os::windows::ffi::OsStrExt;

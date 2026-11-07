@@ -402,7 +402,8 @@ fn a_layered_launch_passes_what_the_guest_checks_as_it_is() {
         "{arguments:?}"
     );
 
-    // A relative image is planned by its absolute path, since OpenVMM runs in the sandbox's store.
+    // A relative image is planned by its absolute path, since OpenVMM does not run in the
+    // caller's directory.
     let relative = distro.strip_prefix(std::env::current_dir().unwrap());
     if let Ok(relative) = relative {
         let launch =

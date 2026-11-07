@@ -1411,7 +1411,7 @@ fn stores_too_deep_for_the_control_socket_of_a_capture_are_refused() {
 
 #[cfg(windows)]
 #[test]
-fn working_directory_limits_are_checked_before_captures() {
+fn captures_in_stores_beyond_the_working_directory_limit_publish() {
     use std::os::windows::ffi::OsStrExt;
 
     let bench = Bench::new();
@@ -1424,10 +1424,20 @@ fn working_directory_limits_are_checked_before_captures() {
         store: Store::create(parent.join("templates")).unwrap(),
         ..bench
     };
-    let error = bench.refresh(&Emulation::capture()).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unsupported);
-    assert!(error.message().contains("working directory"));
-    assert!(error.message().contains("258"));
-    assert_eq!(bench.runs.get(), 0);
-    assert!(!bench.store.captures_dir().exists());
+    let emulation = Emulation::capture();
+    let working_dir = RefCell::new(None);
+    let run = |locked: &mut LockedStore, vm: &Vm<'_>| {
+        let command = vm.command("control", &locked.outcome_path(), locked.dir())?;
+        working_dir.replace(Some(command.working_dir));
+        emulation.run(locked, vm)
+    };
+    bench.serve_with(None, &run, &uninterrupted, false).unwrap();
+    assert_eq!(bench.runs.get(), 1);
+    assert_eq!(bench.indexed(), [1]);
+    // The transaction exceeds the 258 UTF-16 code units of a process's working directory, so its
+    // VMM starts in the system directory.
+    assert_eq!(
+        working_dir.take().unwrap(),
+        platform::system_directory().unwrap()
+    );
 }

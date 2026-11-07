@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
 #[cfg(not(windows))]
@@ -31,11 +31,11 @@ pub struct VmmCommand<'a> {
     pub program: PathBuf,
     /// The VMM's arguments, after the name of its executable.
     pub arguments: Vec<OsString>,
-    /// The VMM's working directory.
+    /// The VMM's working directory, which [`vmm_working_dir`] chooses for the VMM of a sandbox
+    /// store.
     ///
     /// Windows permits at most 258 UTF-16 code units in its absolute path, including any verbatim
-    /// prefix and trailing separator. It may differ from the sandbox store, whose paths can be
-    /// longer.
+    /// prefix and trailing separator, which a store's paths may exceed.
     pub working_dir: PathBuf,
     /// Whether the VMM starts outside the caller's job object on Windows, which must permit
     /// breakaway, so that the VMM survives the job. Other hosts ignore it.
@@ -61,6 +61,29 @@ impl VmmCommand<'_> {
             inherit: Vec::new(),
         }
     }
+}
+
+/// Returns the working directory in which to start the VMM of the sandbox store `store`: on
+/// Windows, the system directory, such as `C:\Windows\System32`, and on other hosts, the store.
+///
+/// Windows starts no process in a directory whose absolute path exceeds 258 UTF-16 code units,
+/// whatever its prefix and whether the host enables long paths, as [`spawn`] refuses one, while a
+/// store's paths may be longer. OpenVMM uses its working directory only to resolve the relative
+/// paths of its arguments, and the launches of instances, template captures, and clones give it
+/// absolute ones, so a VMM on Windows starts in the system directory, which every host has, whose
+/// path is short, and which only administrators may change: a relative path that a caller lets
+/// through names no file that another user could have placed there, and OpenVMM cannot create a
+/// file there. On other hosts, which have no such limit, the VMM starts in its store.
+///
+/// Fails on Windows as `GetSystemDirectoryW` fails.
+pub fn vmm_working_dir(store: &Path) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let _ = store;
+        platform::system_directory()
+    }
+    #[cfg(not(windows))]
+    Ok(store.to_owned())
 }
 
 /// Starts the VMM that `command` describes, detached from the caller, with `capability` on its

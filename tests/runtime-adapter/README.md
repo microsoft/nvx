@@ -1198,7 +1198,9 @@ of a cold layered launch for an adapter's own guest,
 `SandboxPlan::validated`. The adapter's plan holds none of the settings of
 NVX's sandbox profile, such as a workload identity, since the guest agent runs
 its executions itself. The plan names the images by absolute paths, since
-OpenVMM runs in the sandbox's store, and the image's identity, which a launch
+OpenVMM does not run in the caller's directory, but in the one that NVX's
+`vmm_working_dir` chooses: on Windows, the system directory, and elsewhere, the
+sandbox's store. The plan also names the image's identity, which a launch
 requires, since a binding names it. The VM's kernel command line is
 `nvx_sandbox=1`, the launch's own token, with which NVX's `/init` hands the VM
 to NVX's init agent, which the guest agent replaces, then the plan's boot

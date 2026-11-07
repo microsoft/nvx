@@ -87,7 +87,7 @@ pub(crate) fn set_access(path: &Path, sddl: &str) -> io::Result<()> {
     use windows_sys::Win32::Security::{PROTECTED_DACL_SECURITY_INFORMATION, SetFileSecurityW};
 
     let sddl = wide(sddl);
-    let name = wide(path);
+    let name = wide_path(path)?;
     let mut descriptor = ptr::null_mut();
     // SAFETY: the string is NUL-terminated, and the output pointer is valid.
     let converted = unsafe {
