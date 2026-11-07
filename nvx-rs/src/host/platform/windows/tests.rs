@@ -19,6 +19,7 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, PROCESS_DUP_HANDLE, TerminateProcess,
 };
 
+pub(crate) use super::endpoint::tests::{accept_control, control_server};
 use super::identity::status_error;
 use super::log_claim::{local_directory, log_job_id, log_job_name, log_job_processes, object_name};
 pub(crate) use super::private::tests::set_access;

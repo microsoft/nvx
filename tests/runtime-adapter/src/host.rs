@@ -43,15 +43,16 @@ mod executions;
 mod map_reply;
 mod order_error;
 
+use std::error::Error as _;
 use std::fmt;
 use std::time::Instant;
 
 use nvx::activation::ReadyActivation;
-use nvx::host::nvxs::{HostConnection, HostConnectionError};
-use nvx::host::platform::Transport;
 use nvx::host::template::CloneControl;
+use nvx::host::transport::{HostConnection, HostConnectionError, Transport};
 use nvx::protocol::nvxs::Identity;
 use nvx::protocol::{CAPABILITY_LEN, HostMap};
+use nvx::{Error, ErrorKind};
 
 use crate::frame::{BodyError, Decoder, FrameError, Message};
 use crate::probe::{Facts, Probe, ProbeReply};
@@ -66,7 +67,7 @@ pub use order_error::OrderError;
 #[non_exhaustive]
 pub enum ClientError {
     /// The control session failed, or its deadline passed.
-    Session(HostConnectionError),
+    Session(Error),
     /// A malformed message: one that the guest agent sent, or one that the host program asked to
     /// send, which the client did not send.
     Frame(FrameError),
@@ -119,8 +120,8 @@ impl std::error::Error for ClientError {
     }
 }
 
-impl From<HostConnectionError> for ClientError {
-    fn from(error: HostConnectionError) -> Self {
+impl From<Error> for ClientError {
+    fn from(error: Error) -> Self {
         Self::Session(error)
     }
 }
@@ -146,9 +147,9 @@ impl From<FrameError> for ClientError {
 /// the body.
 ///
 /// A reset of the session ends the attachment, and the partial message with it: the session's next
-/// epoch starts with a new message, in a new attachment. `nvx::host::nvxs` reports a reset that
-/// the broker announces as [`HostConnectionError::Reset`], and the end of the stream, with which
-/// OpenVMM's broker ends an attachment instead, as [`HostConnectionError::Closed`].
+/// epoch starts with a new message, in a new attachment. `nvx::host::transport` reports both as
+/// [`ErrorKind::Protocol`], retaining [`HostConnectionError::Reset`] or
+/// [`HostConnectionError::Closed`] as the cause.
 ///
 /// A failure ends the client, and every later call fails with [`ClientError::Ended`]: a failure of
 /// the session, a send that fails or times out, because the session cannot resume a message that
@@ -245,8 +246,8 @@ impl Client {
             // The decoder took the whole payload, so the next one replaces it.
             self.payload = match self.connection.receive(deadline) {
                 Ok(payload) => payload,
-                Err(HostConnectionError::TimedOut) => {
-                    return Err(HostConnectionError::TimedOut.into());
+                Err(error) if error.kind() == ErrorKind::TimedOut => {
+                    return Err(error.into());
                 }
                 Err(error) => return Err(self.fail(error.into())),
             };
@@ -606,13 +607,17 @@ impl CloneControl for CloneOrder<'_> {
     }
 
     fn lost(&self, error: &OrderError) -> bool {
+        let OrderError::Client(ClientError::Session(error)) = error else {
+            return false;
+        };
         matches!(
-            error,
-            OrderError::Client(ClientError::Session(
-                HostConnectionError::Reset(_)
-                    | HostConnectionError::Closed
-                    | HostConnectionError::Io(_)
-            ))
-        )
+            error
+                .source()
+                .and_then(|cause| cause.downcast_ref::<HostConnectionError>()),
+            Some(HostConnectionError::Reset(_) | HostConnectionError::Closed)
+        ) || (error.kind() != ErrorKind::TimedOut
+            && error
+                .source()
+                .is_some_and(|cause| cause.is::<std::io::Error>()))
     }
 }
