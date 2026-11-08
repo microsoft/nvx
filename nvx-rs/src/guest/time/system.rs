@@ -283,6 +283,8 @@ pub(crate) struct Runtime<'a> {
     strict: bool,
     /// The first violation that the call reported in strict mode, which fails the call.
     violation: Mutex<Option<Violation>>,
+    /// The first diagnostic revocation errno, or `u32::MAX` when none occurred.
+    release_failure: AtomicU32,
     /// Current VM generation.
     generation: AtomicU32,
     /// The declared TSC rate, `F`, in Hz, once known, or zero.
@@ -303,6 +305,7 @@ impl<'a> Runtime<'a> {
             report_only,
             strict: false,
             violation: Mutex::new(None),
+            release_failure: AtomicU32::new(u32::MAX),
             generation: AtomicU32::new(0),
             tsc_hz: AtomicU64::new(0),
             async_output: AtomicBool::new(false),
@@ -385,7 +388,31 @@ impl<'a> Runtime<'a> {
     /// Takes the calling thread's permission for the time ABI's ports, for one transaction,
     /// which [`PortAccess::release`] ends.
     pub(crate) fn open_ports(&self) -> Result<PortAccess<'a>, PortError> {
-        self.ops.open_ports()
+        self.ops
+            .open_ports()
+            .inspect_err(|&error| self.retain_release_failure(error))
+    }
+
+    /// Reports the first diagnostic revocation failure, otherwise the thread's current
+    /// permission state. A later successful release cannot erase the call's original failure.
+    pub(crate) fn check_released(&self) -> Result<(), PortError> {
+        match self.release_failure.load(Ordering::Relaxed) {
+            u32::MAX => sys::check_released(),
+            errno => Err(PortError::Revoke(Errno::from_raw(errno as i32))),
+        }
+    }
+
+    /// Keeps the first revocation failure before diagnostics or later transactions can replace
+    /// the calling thread's current error.
+    fn retain_release_failure(&self, error: PortError) {
+        if let PortError::Revoke(errno) = error {
+            let _ = self.release_failure.compare_exchange(
+                u32::MAX,
+                errno as u32,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     /// Writes `error`, the failure of a transaction's end, to the kernel log, such as
@@ -394,6 +421,7 @@ impl<'a> Runtime<'a> {
     /// are on the null device. Until a later transaction revokes the permission, the thread
     /// starts nothing, as [`fork_process`] checks.
     pub(crate) fn log_release_failure(&self, error: PortError) {
+        self.retain_release_failure(error);
         let record = format!("nvx-time: {error}\n");
         self.ops.write_kernel_log(
             &[DIAGNOSTIC_PRIORITY, record.as_bytes()].concat(),
@@ -952,7 +980,10 @@ pub(crate) fn best_sample(
     let rates = clock_rates(runtime)?;
     let ports = runtime.open_ports().map_err(SampleError::Ports)?;
     let selected = select_sample(&ports, runtime.ops, attempts, bound_ns, generation, rates);
-    ports.release().map_err(SampleError::Ports)?;
+    ports
+        .release()
+        .inspect_err(|&error| runtime.retain_release_failure(error))
+        .map_err(SampleError::Ports)?;
     selected
 }
 
