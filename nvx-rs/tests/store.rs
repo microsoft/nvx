@@ -535,7 +535,12 @@ fn a_committed_launch_names_its_vm_for_another_build() {
         .expect("the recorded VMM runs");
     assert!(!reattached.has_exited().unwrap());
     drop(vmm);
-    assert!(reattached.wait(Instant::now() + RECOVERY_TIMEOUT).unwrap());
+    assert!(
+        reattached
+            .wait(Instant::now() + RECOVERY_TIMEOUT)
+            .unwrap()
+            .is_some()
+    );
     other.lock(None).unwrap().clear_runtime().unwrap();
     assert!(other.runtime().unwrap().is_none());
 }

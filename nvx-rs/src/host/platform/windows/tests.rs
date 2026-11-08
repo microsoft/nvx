@@ -1095,7 +1095,7 @@ fn a_launch_whose_vmm_exited_ends_while_a_process_spawned_in_its_window_holds_it
     let vmm = launch.record_process(&launched).unwrap();
     launched.detach();
     assert!(
-        vmm.wait(Instant::now() + WINDOW_TIMEOUT).unwrap(),
+        vmm.wait(Instant::now() + WINDOW_TIMEOUT).unwrap().is_some(),
         "the stand-in did not exit"
     );
     // The VMM has exited, so the launch ends, whatever the other process holds.

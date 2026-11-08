@@ -615,7 +615,13 @@ fn long_stores_launch_with_a_short_working_directory() {
     let mut vmm = VmmDirectory::new();
     let mut locked = store.lock(None).unwrap();
     let running = launch_vmm(&mut locked, &mut vmm);
-    assert!(!running.process().wait(Instant::now() + SHORT_WAIT).unwrap());
+    assert!(
+        running
+            .process()
+            .wait(Instant::now() + SHORT_WAIT)
+            .unwrap()
+            .is_none()
+    );
     let stopped = running
         .stop(&mut locked, Instant::now() + TIMEOUT, None, |_, _| {
             vmm.end();
