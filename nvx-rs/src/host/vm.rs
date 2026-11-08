@@ -33,7 +33,7 @@ use crate::host::spawn::{self, VmmCommand};
 use crate::host::transport::{self, HostConnection};
 use crate::host::{platform::inherit::Inherited, process::Process, process::ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
-use crate::{Error, ErrorKind, Result};
+use crate::{Error, Result};
 
 /// OpenVMM's log of a launch.
 const LOG: &str = "openvmm.log";
@@ -543,8 +543,9 @@ pub struct Stopped {
 /// forced termination and waits until `deadline`. A failed termination is harmless only
 /// when that final wait confirms exit.
 ///
-/// An unconfirmed exit fails with [`ErrorKind::StillRunning`], retaining host errors.
-/// The caller keeps the process in that case. Report-read errors have kind [`ErrorKind::Io`]
+/// An unconfirmed exit fails with [`ErrorKind::StillRunning`](crate::ErrorKind::StillRunning),
+/// retaining host errors. The caller keeps the process in that case.
+/// Report-read errors have kind [`ErrorKind::Io`](crate::ErrorKind::Io)
 /// inside [`Stopped::report`], never hiding confirmed exit.
 pub fn stop(
     process: &Process,
@@ -561,7 +562,7 @@ pub fn stop(
         if let Some(error) = kill_error {
             message.push_str(&format!("; forced termination failed: {error}"));
         }
-        Error::new(ErrorKind::StillRunning, message)
+        Error::new(crate::ErrorKind::StillRunning, message)
     };
     let wait = |until| {
         process
