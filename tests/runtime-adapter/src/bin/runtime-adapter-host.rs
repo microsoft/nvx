@@ -446,7 +446,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use nvx::ErrorKind;
 use nvx::activation::{MachineIdMode, StoreGeneration};
 use nvx::exec::{Cause, Key, Limits, Outcome, Status, Stream, Timers, Window};
 use nvx::host::artifacts::{Artifacts, absolute};
