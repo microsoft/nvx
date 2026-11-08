@@ -1594,6 +1594,16 @@ fn cold_boot_arguments_refuse_non_raw_block_extensions() {
 }
 
 #[test]
+fn legacy_container_path_preserves_its_extension_policy() {
+    for extension in ["vhd", "vhdx", "vmgs", "iso"] {
+        let name = format!("disk.{extension}");
+        let error = super::reject_container_path(Path::new(&name), &name).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+    }
+    super::reject_container_path(Path::new("disk.vmdk"), "disk.vmdk").unwrap();
+}
+
+#[test]
 fn an_explicit_deny_all_network_keeps_its_nic() {
     let mut config = cold(blockless());
     config.network = Some(NetworkConfig {
