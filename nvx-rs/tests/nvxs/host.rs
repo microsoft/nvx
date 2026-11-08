@@ -447,10 +447,7 @@ fn transport_timeouts_keep_the_original_read_and_write_causes() {
 fn other_transport_failures_keep_their_original_io_source() {
     let (transport, _) = scripted(vec![
         ready(),
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            "the original transport failure",
-        )),
+        Err(io::Error::other("the original transport failure")),
     ]);
     let mut connection = attach(transport);
     let error = connection.receive(Some(deadline())).unwrap_err();
