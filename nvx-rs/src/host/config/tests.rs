@@ -7,10 +7,14 @@ use std::time::Duration;
 
 use super::*;
 use crate::activation::MachineIdMode;
+use crate::host::artifacts::Artifacts;
 use crate::host::filesystem::{Bind, ExportChild, Owner};
+use crate::host::launch::LaunchSpec;
 use crate::host::network::Access;
 use crate::host::runtime::{ArtifactIdentity, GuestPowerAction, LaunchOptions, RuntimeIdentity};
+use crate::host::sandbox::{SandboxDistro, SandboxPlan, SandboxSettings, SandboxUpper};
 use crate::hypervisor::Hypervisor;
+use crate::protocol::{cmdline, parse_host_mapping_count};
 use crate::uuid::Uuid;
 use crate::{ErrorCode, ErrorKind};
 
@@ -460,6 +464,152 @@ fn each_refusal_of_a_capture_names_what_it_refuses() {
     }
 }
 
+impl VmConfig {
+    fn legacy_command_line(&self) -> String {
+        let hostname = String::from_utf8(self.view.hostname.clone()).unwrap();
+        match &self.root {
+            RootConfig::Blockless => {
+                let mut spec = LaunchSpec::new(
+                    Artifacts::new("/openvmm", "/vmlinux", "/initramfs"),
+                    Hypervisor::Kvm,
+                );
+                spec.hostname = hostname;
+                spec.filesystem = self.filesystem.clone();
+                spec.kernel_command_line().unwrap()
+            }
+            RootConfig::Layered(root) => {
+                let upper = match &root.upper {
+                    UpperConfig::Scratch { path, .. } => SandboxUpper::scratch_at(path.clone()),
+                    UpperConfig::Ram { .. } => SandboxUpper::RAM,
+                };
+                SandboxPlan::new(
+                    SandboxDistro::at(root.image.clone(), root.format),
+                    upper,
+                    SandboxSettings {
+                        hostname,
+                        ..SandboxSettings::default()
+                    },
+                )
+                .unwrap()
+                .with_export(self.filesystem.clone())
+                .unwrap()
+                .kernel_command_line("")
+                .unwrap()
+            }
+        }
+    }
+}
+
+#[test]
+fn cold_command_lines_keep_the_old_root_view_and_mapping_values() {
+    let mut configs = vec![blockless()];
+    let uppers = [
+        UpperConfig::Scratch {
+            path: missing("scratch.ext4"),
+            journal: Journal::Allowed,
+        },
+        UpperConfig::Scratch {
+            path: missing("scratch.ext4"),
+            journal: Journal::Forbidden,
+        },
+        UpperConfig::Ram {
+            max_memory_percent: 1,
+        },
+        UpperConfig::Ram {
+            max_memory_percent: 90,
+        },
+    ];
+    for format in [ImageFormat::Erofs, ImageFormat::Gpt] {
+        for identity in [None, Some(Uuid::from_bytes([7; 16]))] {
+            for overlay in [OverlayMode::TrustedLowers, OverlayMode::UntrustedLowers] {
+                for upper in &uppers {
+                    for bound in [None, Some(64 * 1024)] {
+                        if format == ImageFormat::Erofs && bound.is_some() {
+                            continue;
+                        }
+                        configs.push(layered(LayeredRoot {
+                            format: RootImage { format, identity },
+                            gpt_first_partition_bound: bound,
+                            upper: upper.clone(),
+                            overlay,
+                            ..erofs()
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    let mut mappings = export("/work");
+    mappings.binds.push(Bind {
+        target: "/zother".to_owned(),
+        ..mappings.binds[0].clone()
+    });
+    for config in configs {
+        for filesystem in [None, Some(mappings.clone())] {
+            for machine_id in [MachineIdMode::Image, MachineIdMode::Generated] {
+                let mut config = VmConfig {
+                    filesystem: filesystem.clone(),
+                    boot: Some(Boot {
+                        command_line: String::new(),
+                        capture: None,
+                    }),
+                    ..config.clone()
+                };
+                config.view.machine_id = machine_id;
+                let old = config.legacy_command_line();
+                let actual = config.kernel_command_line().unwrap();
+                let old_root = RootLayout::parse(old.as_bytes()).unwrap();
+                let root = RootLayout::parse(actual.as_bytes()).unwrap();
+                assert_eq!(
+                    root.map(|root| (root.image, root.upper)),
+                    old_root.map(|root| (root.image, root.upper))
+                );
+                if let Some(old_root) = old_root {
+                    assert!(actual.starts_with(&old_root.tokens().join(" ")));
+                }
+                if let RootConfig::Layered(configured) = &config.root {
+                    let root = root.unwrap();
+                    assert_eq!(root.overlay, Some(configured.overlay));
+                    assert_eq!(
+                        root.gpt_first_partition_bound,
+                        configured.gpt_first_partition_bound
+                    );
+                    match configured.upper {
+                        UpperConfig::Scratch { journal, .. } => {
+                            assert_eq!(root.journal, Some(journal));
+                            assert_eq!(root.max_memory_percent, None);
+                        }
+                        UpperConfig::Ram { max_memory_percent } => {
+                            assert_eq!(root.journal, None);
+                            assert_eq!(root.max_memory_percent, Some(max_memory_percent));
+                        }
+                    }
+                }
+                let decoded = view::parse(actual.as_bytes()).unwrap().unwrap();
+                assert_eq!(decoded, config.view);
+                let old_hostname = cmdline::init_tokens(old.as_bytes())
+                    .find(|token| matches!(token.name, b"hostname" | b"nvx_hostname"))
+                    .unwrap()
+                    .value
+                    .unwrap();
+                assert_eq!(decoded.hostname, old_hostname);
+                let count = parse_host_mapping_count(actual.as_bytes()).unwrap();
+                assert_eq!(count, parse_host_mapping_count(old.as_bytes()).unwrap());
+                assert_eq!(count, if filesystem.is_some() { 2 } else { 0 });
+                let names: Vec<_> = cmdline::init_tokens(actual.as_bytes())
+                    .skip(root.map_or(0, |root| root.tokens().len()))
+                    .map(|token| token.name)
+                    .collect();
+                let mut expected = vec![b"nvx_hostname".as_slice(), b"nvx_machine_id"];
+                if filesystem.is_some() {
+                    expected.push(b"nvx_maps");
+                }
+                assert_eq!(names, expected);
+            }
+        }
+    }
+}
+
 #[test]
 fn the_check_of_a_configuration_checks_its_boots_capture() {
     let booting = |capture: Option<CaptureConfig>| VmConfig {
@@ -739,4 +889,42 @@ fn what_each_launch_or_clone_sets_leaves_the_identity_alone() {
         capture().identity(&with_export("/mnt/a"), &runtime()),
         capture().identity(&with_export("/mnt/b"), &runtime())
     );
+}
+
+#[test]
+fn caller_tokens_follow_rendered_tokens_without_any_rewriting() {
+    let caller = " \tquiet nvx_entrypoint=/bin/work nvx_arg=\"x y\" nvx_share=0,/work\r\n ";
+    let mut config = VmConfig {
+        boot: Some(Boot {
+            command_line: String::new(),
+            capture: None,
+        }),
+        ..blockless()
+    };
+    let rendered = config.kernel_command_line().unwrap();
+    assert!(!rendered.ends_with(' '));
+    config.boot.as_mut().unwrap().command_line = caller.to_owned();
+    assert_eq!(
+        config.kernel_command_line().unwrap(),
+        format!("{rendered} {caller}")
+    );
+}
+
+#[test]
+fn only_a_checked_cold_boot_has_a_kernel_command_line() {
+    let config = blockless();
+    let error = config.kernel_command_line().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(error.to_string().contains("Boot"), "{error}");
+    let config = VmConfig {
+        processors: 0,
+        boot: Some(Boot {
+            command_line: String::new(),
+            capture: None,
+        }),
+        ..config
+    };
+    let error = config.kernel_command_line().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported);
+    assert!(error.to_string().contains("processor"), "{error}");
 }

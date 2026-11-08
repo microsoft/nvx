@@ -21,6 +21,7 @@
 //!   server, which OpenVMM's `virtnet_dns=` token names, with the resolver file that names it.
 //! - [`root`]: the boot tokens of a layered root, which name its image's format and identity and
 //!   its upper, with the host's renderer and the guest's parser.
+//! - [`view`]: a cold boot's hostname bytes and machine-ID mode, with their renderer and parser.
 //! - [`export`]: the boot tokens of the host export, the aggregate virtio-fs device from which a
 //!   guest maps host paths, and the guest's strict parser of them.
 //! - [`share`]: the guest targets that a sandbox's live shares may not take, which the host and
@@ -53,6 +54,7 @@ pub mod share;
 pub mod status;
 #[cfg(test)]
 mod tests;
+pub mod view;
 
 pub use app::{
     APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAGIC, APP_MAPS,
