@@ -73,5 +73,13 @@
       "name": "turin",
       "cpus": [{ "family": 26, "model": 2, "steppings": [0, 15] }]
     }
+  },
+  {
+    "id": "amd.turin.v2",
+    "vendor": "AuthenticAMD",
+    "generation": {
+      "name": "turin",
+      "cpus": [{ "family": 26, "model": 2, "steppings": [0, 15] }]
+    }
   }
 ]

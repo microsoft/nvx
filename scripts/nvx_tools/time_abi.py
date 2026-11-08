@@ -146,10 +146,12 @@ class CpuGeneration:
 # which have no profile. Model 173 is Granite Rapids-AP and -SP; Granite
 # Rapids-D, model 174, has no profile. AMD's family 25 model 1 is Milan's in
 # every stepping, Milan-X's 2 included, family 25 model 17 Genoa's, Genoa-X's
-# included, and family 26 model 2 Turin's. Genoa's latest profile,
-# amd.genoa.v2, leaves out what amd.genoa.v1 presents in CPUID 0x80000021 and
-# the basic leaves above 0xD, which the Microsoft hypervisor of the Azure Genoa
-# VMs fingerprinted so far does not present.
+# included, and family 26 model 2 Turin's. The latest profiles of Genoa and
+# Turin, amd.genoa.v2 and amd.turin.v2, leave out what their first revisions
+# present in CPUID 0x80000021 and the basic leaves above 0xD, which not every
+# Azure Genoa or Turin VM's hypervisor presents, and amd.turin.v2 also the
+# StibpAlwaysOn and IBPB_RET enumerations of 0x80000008, which the WHP of
+# Windows Server 2022 does not present, nor KVM IBPB_RET before Linux 6.13.
 CPU_GENERATIONS: tuple[CpuGeneration, ...] = (
     CpuGeneration("skylake-sp", "GenuineIntel", (CpuModel(6, 85, range(5)),)),
     CpuGeneration("icelake-sp", "GenuineIntel", (CpuModel(6, 106),)),
@@ -158,7 +160,7 @@ CPU_GENERATIONS: tuple[CpuGeneration, ...] = (
     CpuGeneration("alderlake", "GenuineIntel", (CpuModel(6, 151), CpuModel(6, 154))),
     CpuGeneration("milan", "AuthenticAMD", (CpuModel(25, 1),)),
     CpuGeneration("genoa", "AuthenticAMD", (CpuModel(25, 17),), revision=2),
-    CpuGeneration("turin", "AuthenticAMD", (CpuModel(26, 2),)),
+    CpuGeneration("turin", "AuthenticAMD", (CpuModel(26, 2),), revision=2),
 )
 
 

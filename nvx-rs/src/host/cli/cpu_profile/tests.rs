@@ -43,10 +43,11 @@ fn the_catalog_lists_the_built_in_profiles() {
             "amd.genoa.v1",
             "amd.genoa.v2",
             "amd.turin.v1",
+            "amd.turin.v2",
         ]
     );
-    // The two revisions of Genoa's profile share its generation, which the guidance lists
-    // once.
+    // The two revisions of Genoa's profile, and of Turin's, share their generation, which the
+    // guidance lists once.
     assert_eq!(
         describe_generations(&catalog),
         "skylake-sp 6/85 steppings 0-4, icelake-sp 6/106, emeraldrapids 6/207, graniterapids \
