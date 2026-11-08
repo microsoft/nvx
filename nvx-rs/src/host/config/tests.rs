@@ -1236,6 +1236,60 @@ fn native_argument_listener_names_are_distinct() {
     }
 }
 
+#[test]
+fn native_argument_listener_names_refuse_serial_delimiters() {
+    let config = cold(blockless());
+    let runtime = runtime();
+    for delimiter in [',', '='] {
+        let invalid = format!("/missing/nvx{delimiter}listener");
+        for control in [false, true] {
+            let endpoint = if control {
+                invalid.as_str()
+            } else {
+                "/missing/control"
+            };
+            let console = if control {
+                "/missing/console"
+            } else {
+                invalid.as_str()
+            };
+            let error = config
+                .openvmm_arguments(
+                    &runtime,
+                    endpoint,
+                    Path::new("/missing/report"),
+                    Some(console),
+                )
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported);
+            assert!(error.to_string().contains(if control {
+                "endpoint"
+            } else {
+                "console_endpoint"
+            }));
+        }
+    }
+
+    let endpoint = "/missing/control-\u{e9} with spaces";
+    let console = "/missing/console-\u{f1} with spaces";
+    let arguments = config
+        .openvmm_arguments(
+            &runtime,
+            endpoint,
+            Path::new("/missing/report"),
+            Some(console),
+        )
+        .unwrap();
+    assert_eq!(
+        values(&arguments, "--microvm-control-console"),
+        [OsStr::new(&format!("listen={endpoint}"))]
+    );
+    assert_eq!(
+        values(&arguments, "--virtio-console"),
+        [OsStr::new(&format!("listen={console}"))]
+    );
+}
+
 #[cfg(any(unix, windows))]
 #[test]
 fn native_argument_paths_require_unicode() {
@@ -1304,6 +1358,65 @@ fn native_argument_paths_require_unicode() {
             OsStr::new(&format!("distro:file:{},ro", image.display())),
             OsStr::new(&format!("scratch:file:{}", scratch.display())),
         ]
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn native_argument_exports_require_unicode() {
+    #[cfg(unix)]
+    let invalid = {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(vec![b'e', 0xff])
+    };
+    #[cfg(windows)]
+    let invalid = {
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&[101, 0xd800])
+    };
+    let mut plan = export("/work");
+    plan.children[0].root = missing("exports").join(invalid);
+    let config = cold(VmConfig {
+        filesystem: Some(plan),
+        ..blockless()
+    });
+    config.check().unwrap();
+    config.kernel_command_line().unwrap();
+    for result in [
+        config.check_command_line(),
+        config
+            .openvmm_arguments(
+                &runtime(),
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console"),
+            )
+            .map(|_| ()),
+    ] {
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(error.to_string().contains("Unicode"));
+    }
+
+    let root = missing("export-\u{e9} with spaces");
+    let mut plan = export("/work");
+    plan.children[0].root = root.clone();
+    let config = cold(VmConfig {
+        filesystem: Some(plan),
+        ..blockless()
+    });
+    config.check_command_line().unwrap();
+    let arguments = config
+        .openvmm_arguments(
+            &runtime(),
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        )
+        .unwrap();
+    assert_eq!(
+        values(&arguments, "--mount-child"),
+        [OsStr::new(&format!("0,{},ro", root.display()))]
     );
 }
 
