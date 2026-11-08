@@ -420,8 +420,8 @@ fn cold_config() -> VmConfig {
         console: ConsoleAttachment::Listener,
         boot: Some(Boot {
             command_line: "nvx_entrypoint=/bin/sh nvx_arg=-c nvx_arg=exit".to_owned(),
+            capture: None,
         }),
-        capture: None,
     }
 }
 
