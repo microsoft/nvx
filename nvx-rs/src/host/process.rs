@@ -159,6 +159,20 @@ pub enum WaitMethod {
     Polling,
 }
 
+/// An independently owned, close-on-exec copy of a process's pidfd, for a caller's exit waiter.
+///
+/// Implements the standard descriptor traits, including [`std::os::fd::AsFd`]. Dropping it closes
+/// only this copy, without keeping the process running or affecting the original [`Process`].
+#[cfg(target_os = "linux")]
+pub type ExitHandle = std::os::fd::OwnedFd;
+
+/// An independently owned, non-inheritable copy of a process handle, for a caller's exit waiter.
+///
+/// Implements the standard handle traits, including [`std::os::windows::io::AsHandle`]. Dropping it
+/// closes only this copy, without keeping the process running or affecting the original [`Process`].
+#[cfg(windows)]
+pub type ExitHandle = std::os::windows::io::OwnedHandle;
+
 /// A process that this host found running with the identity of a [`ProcessRef`], held through a
 /// handle of the operating system: a pidfd on Linux, and a process handle on Windows.
 ///
@@ -212,6 +226,18 @@ impl Process {
         } else {
             WaitMethod::Polling
         }
+    }
+
+    /// Duplicates the existing OS exit-wait handle for a caller to register with its own runtime.
+    ///
+    /// The returned handle is independent of this borrow and remains valid after this `Process`
+    /// is dropped. Returns `None` only on a Linux host that polls without a pidfd. Duplication
+    /// failures have kind [`ErrorKind::Io`](crate::ErrorKind::Io) and retain their original source.
+    #[cfg(any(target_os = "linux", windows))]
+    pub fn exit_handle(&self) -> crate::Result<Option<ExitHandle>> {
+        self.handle.exit_handle().map_err(|error| {
+            Error::io("cannot duplicate the process's exit handle").with_source(error)
+        })
     }
 
     /// Waits until the process exits or `deadline` passes, and returns whether it exited.
