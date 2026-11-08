@@ -366,13 +366,13 @@ fn strict_preparation_keeps_its_first_diagnostic_revocation_after_a_successful_r
     }
     assert_eq!(ops.transactions(), 3);
     assert_eq!(sys::check_released(), Ok(()));
-    let violation = runtime.take_violation().unwrap();
+    let violation = runtime.peek_violation().unwrap();
     assert_eq!(
         (violation.status(), violation.code(), violation.detail()),
         (193, "G_CONFORMANCE_C12", "first")
     );
-    let error =
-        released_preparation(Ok(()), runtime.check_released(), Some(violation)).unwrap_err();
+    let (error, suppressed) = finished_preparation(&runtime, Ok(())).unwrap_err();
+    assert!(suppressed);
     assert!(
         matches!(
             &error,
@@ -411,8 +411,8 @@ fn strict_preparation_keeps_a_partial_grants_failed_rollback_after_a_successful_
         b"later release",
     );
     assert_eq!(sys::check_released(), Ok(()));
-    let error = released_preparation(Ok(()), runtime.check_released(), runtime.take_violation())
-        .unwrap_err();
+    let (error, suppressed) = finished_preparation(&runtime, Ok(())).unwrap_err();
+    assert!(suppressed);
     assert!(
         matches!(
             &error,
@@ -445,8 +445,8 @@ fn strict_preparation_keeps_a_samples_failed_revocation_after_successful_diagnos
         b"sample release",
     );
     assert_eq!(sys::check_released(), Ok(()));
-    let error = released_preparation(Ok(()), runtime.check_released(), runtime.take_violation())
-        .unwrap_err();
+    let (error, suppressed) = finished_preparation(&runtime, Ok(())).unwrap_err();
+    assert!(suppressed);
     assert!(
         matches!(
             &error,
@@ -458,6 +458,38 @@ fn strict_preparation_keeps_a_samples_failed_revocation_after_successful_diagnos
         "{error:?}"
     );
     assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_bounded_capture_keeps_a_dropped_revocation_before_repair_diagnostics() {
+    for bounded in [true, false] {
+        let ops = FakeOps::new([]);
+        ops.revoke_errors
+            .lock()
+            .unwrap()
+            .extend([Some(Errno::ENOMEM), None]);
+        let runtime = Runtime::new(&ops, false).strict();
+        let ports = runtime.open_ports().unwrap();
+        drop(ports);
+        assert_eq!(sys::check_released(), Err(PortError::Revoke(Errno::ENOMEM)));
+        let failure = repair_failed(&runtime, ViolationCode::RepairPacket, "invalid packet");
+        assert_eq!(sys::check_released(), Ok(()));
+        let (error, unbounded) = finished_capture(&runtime, Err(failure), bounded).unwrap_err();
+        assert!(unbounded);
+        if bounded {
+            assert!(
+                matches!(&error, TimeError::PortRelease(source) if has_errno(source, Errno::ENOMEM)),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(&error, TimeError::Violation(violation)
+                    if violation.status() == status::TIME_REPAIR && violation.code() == "G_REPAIR_PACKET"),
+                "{error:?}"
+            );
+        }
+        assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+    }
 }
 
 #[test]
