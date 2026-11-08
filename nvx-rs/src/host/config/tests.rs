@@ -1520,6 +1520,80 @@ fn cold_boot_arguments_refuse_disk_syntax_in_image_and_scratch_paths() {
 }
 
 #[test]
+fn cold_boot_arguments_refuse_non_raw_block_extensions() {
+    let runtime = runtime();
+    for (extension, scratch_only) in [
+        ("vhd", false),
+        ("vhdx", false),
+        ("vmgs", false),
+        ("vmdk", false),
+        ("iso", true),
+    ] {
+        for scratch in [false, true] {
+            if scratch_only && !scratch {
+                continue;
+            }
+            let name = format!("disk.{extension}");
+            let mut root = erofs();
+            if scratch {
+                root.upper = UpperConfig::Scratch {
+                    path: missing(&name),
+                    journal: Journal::Forbidden,
+                };
+            } else {
+                root.image = missing(&name);
+            }
+            let config = cold(layered(root));
+            for result in [
+                config.check_command_line(),
+                config
+                    .openvmm_arguments(
+                        &runtime,
+                        "/missing/control",
+                        Path::new("/missing/report"),
+                        Some("/missing/console"),
+                    )
+                    .map(|_| ()),
+            ] {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported);
+                assert!(error.to_string().contains(&format!(".{extension}")));
+                assert!(error.to_string().contains("raw image"));
+            }
+        }
+    }
+
+    for (image, scratch) in [
+        ("distro.iso", "scratch.ext4"),
+        ("distro.VHD", "scratch.ISO"),
+    ] {
+        let config = cold(layered(LayeredRoot {
+            image: missing(image),
+            upper: UpperConfig::Scratch {
+                path: missing(scratch),
+                journal: Journal::Forbidden,
+            },
+            ..erofs()
+        }));
+        config.check_command_line().unwrap();
+        let arguments = config
+            .openvmm_arguments(
+                &runtime,
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console"),
+            )
+            .unwrap();
+        let image_block = format!("distro:file:{},ro", missing(image).display());
+        let scratch_block = format!("scratch:file:{}", missing(scratch).display());
+        assert_eq!(
+            values(&arguments, "--microvm-sandbox-block"),
+            [OsStr::new(&image_block), OsStr::new(&scratch_block),]
+        );
+    }
+}
+
+#[test]
 fn an_explicit_deny_all_network_keeps_its_nic() {
     let mut config = cold(blockless());
     config.network = Some(NetworkConfig {
