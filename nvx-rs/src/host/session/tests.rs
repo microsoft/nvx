@@ -11,6 +11,20 @@ use crate::protocol::{
 
 const INSTANCE: [u8; 16] = [7; 16];
 
+#[test]
+fn the_legacy_connect_wrapper_keeps_indeterminate_process_failures_as_io() {
+    let error = Error::io("cannot verify the VM process").with_source(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "the original process query failure",
+    ));
+    let error = connect_failure(error);
+    let SessionError::Io(source) = error else {
+        panic!("an indeterminate process check is not an endpoint refusal: {error}");
+    };
+    assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(source.to_string(), "the original process query failure");
+}
+
 /// What a test shares with a [`Scripted`] transport.
 #[derive(Default)]
 struct Wire {
