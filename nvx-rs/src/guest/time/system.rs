@@ -401,6 +401,8 @@ impl<'a> Runtime<'a> {
         );
     }
 
+    /// Acquires the reporting lock by the caller deadline. A poisoned lock keeps the legacy
+    /// guardless reporting behavior.
     fn lock_reports(&self) -> Result<Option<MutexGuard<'_, ()>>, Errno> {
         let Some(deadline) = self.deadline else {
             return Ok(self.report_lock.lock().ok());
