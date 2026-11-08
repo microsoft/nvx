@@ -217,8 +217,7 @@ impl TimeAbi {
         let mut runtime = self.runtime();
         runtime.deadline = deadline;
         let result = capture(&mut runtime, request);
-        let unbounded = runtime.deadline.is_none();
-        settled(&runtime, result).map_err(|error| (error, unbounded))
+        finished_capture(&runtime, result, deadline.is_some())
     }
 
     /// Finishes a restore that [`capture`](Self::capture) left unfinished, after the caller
@@ -269,12 +268,7 @@ impl TimeAbi {
     ) -> Result<(), (PreCaptureError, bool)> {
         let mut runtime = self.runtime();
         runtime.deadline = Some(deadline);
-        let result = pre_capture(&runtime);
-        let suppressed = result
-            .as_ref()
-            .map_or_else(PreCaptureError::holds_suppression, |()| true);
-        released_preparation(result, runtime.check_released(), runtime.take_violation())
-            .map_err(|error| (error, suppressed))
+        finished_preparation(&runtime, pre_capture(&runtime))
     }
 
     /// Restores the stall detectors' settings that [`pre_capture`](Self::pre_capture) saved, and
@@ -323,6 +317,34 @@ fn settled<T>(runtime: &Runtime<'_>, result: Result<T, TimeError>) -> Result<T, 
         Some(violation) => Err(TimeError::Violation(violation)),
         None => result,
     })
+}
+
+/// Ends a capture with its original revocation cause before strict violations, for bounded
+/// callers only. The request and its cleanup remain unbounded after the deadline was cleared.
+fn finished_capture(
+    runtime: &Runtime<'_>,
+    result: Result<CaptureOutcome, TimeError>,
+    bounded: bool,
+) -> Result<CaptureOutcome, (TimeError, bool)> {
+    let unbounded = runtime.deadline.is_none();
+    if bounded {
+        runtime
+            .check_released()
+            .map_err(|error| (TimeError::from(error), unbounded))?;
+    }
+    settled(runtime, result).map_err(|error| (error, unbounded))
+}
+
+/// Ends bounded preparation with its original revocation cause and suppression ownership.
+fn finished_preparation(
+    runtime: &Runtime<'_>,
+    result: Result<(), PreCaptureError>,
+) -> Result<(), (PreCaptureError, bool)> {
+    let suppressed = result
+        .as_ref()
+        .map_or_else(PreCaptureError::holds_suppression, |()| true);
+    released_preparation(result, runtime.check_released(), runtime.take_violation())
+        .map_err(|error| (error, suppressed))
 }
 
 /// Ends a preparation of a capture with `result`, unless the calling thread may still hold port
