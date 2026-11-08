@@ -241,6 +241,12 @@ ssh HOST powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File C:\setup-windows-whp.ps1 -RunnerOnly -RunnerName nvx-windows-3 -CheckOnly
 ```
 
+The same pass adds the `llvm-tools` component and the pinned cargo-llvm-cov to
+a runner whose setup predates them. The weekly
+[nvx-rs scenario coverage](../../doc/ci.md#nvx-rs-scenario-coverage) job needs
+both on the KVM runners, and fails its check of them on a runner that lacks
+either.
+
 ## Linux development hosts
 
 Development-host mode prepares a Linux/KVM or Linux/MSHV checkout for the user

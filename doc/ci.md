@@ -1621,16 +1621,24 @@ once the command in its foreground ends, so a harness that a Linux step ran in
 the foreground never learned of the cancellation: it ran on until the orphan
 cleanup killed it, which left the scratch directories of its scenario behind.
 The Linux steps that run `test-microvm` therefore `exec` it, so that it is the
-step's process. The Linux steps of `run-benchmark`, which run the harness among
-other commands, `exec` it as their last command or source
-`.github/actions/run-benchmark/forward-signals.sh`, whose `run_harness` runs
-the harness in the background, with the SIGINT that Bash ignores there
-restored, and passes SIGINT and SIGTERM on to it as SIGTERM, which, unlike
-SIGINT, the harness never ignores, not even before it has restored SIGINT. A
-signal that arrives as `run_harness` starts the harness, before it knows the
-harness's PID, reaches the harness once it does. The step then ends once the
-harness exits, even if the signal came too late to stop it, and a signal that
-arrives between two harness runs ends the step at once.
+step's process. The measure step of
+[nvx-rs scenario coverage](#nvx-rs-scenario-coverage) `exec`s its script,
+which passes the SIGINT and the SIGTERM on to `nvx.py test-microvm`, and ends
+once it ends. It ends its other commands at once, with every process that they
+started, since a signal that reached Cargo or `nvx.py test-runtime-adapter`
+alone would leave Cargo's tests running. It then ends each process whose
+environment gives `NVX_SCENARIO_COVERAGE_RUN` the value that it gives its runs,
+as the orphan cleanup ends a job's processes, such as the VMs that the runtime
+adapter starts in sessions of their own. The Linux steps of `run-benchmark`,
+which run the harness among other commands, `exec` it as their last command
+or source `.github/actions/run-benchmark/forward-signals.sh`, whose
+`run_harness` runs the harness in the background, with the SIGINT that Bash
+ignores there restored, and passes SIGINT and SIGTERM on to it as SIGTERM,
+which, unlike SIGINT, the harness never ignores, not even before it has
+restored SIGINT. A signal that arrives as `run_harness` starts the harness,
+before it knows the harness's PID, reaches the harness once it does. The step
+then ends once the harness exits, even if the signal came too late to stop
+it, and a signal that arrives between two harness runs ends the step at once.
 
 On Linux, OpenVMM also ends with `nvx.py` when something kills `nvx.py`
 before its cleanup runs, as the orphan cleanup does. Where the host has
@@ -2402,8 +2410,9 @@ jobs, and merge groups never run it. No required check depends on it:
 `ci.yml`. A push cancels the measurement of an earlier push to the same branch
 or pull request that still runs. Coverage tells which code the tests run;
 [mutation testing](#nvx-rs-mutation-testing) tells whether they check what it
-does. Each job installs the Rust release that `rust-toolchain.toml` pins with
-its `llvm-tools` component, and
+does, and [scenario coverage](#nvx-rs-scenario-coverage) adds what the KVM
+microVM scenarios reach. Each job installs the Rust release that
+`rust-toolchain.toml` pins with its `llvm-tools` component, and
 [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) at the release that
 the [setup tool manifest](../scripts/setup/README.md#tool-versions) pins, which
 the setup scripts install on development hosts and self-hosted runners too.
@@ -2489,6 +2498,125 @@ Windows job's summary. When the compiler measures branches, which the pinned
 release doesn't, the summary also lists the branches on the changed lines that
 no test takes. A pull request whose changes add or change no instrumented line
 of production code, such as one that changes only the workflow, lists none.
+
+## nvx-rs scenario coverage
+
+[`nvx-rs-scenario-coverage.yml`](../.github/workflows/nvx-rs-scenario-coverage.yml)
+measures which host code of the `nvx` crate the KVM microVM scenarios and the
+runtime adapter's suite reach, alone and together with the crate's own tests,
+so that the code that only a real VM reaches is measured too. It runs in
+`microsoft/nvx` every Sunday at 07:41 UTC and on a manual dispatch, never for
+pull requests, pushes, or merge groups, so no required check depends on it.
+MSHV and WHP aren't measured. Its first job restores the kernel, the Alpine
+initramfs, and the Ubuntu distro layer with the sandbox scratch template on a
+GitHub-hosted runner, from the caches that CI's runs save, or builds them
+without saving them, and uploads them as the
+[guest artifact handoff](#guest-artifact-handoff) does. The second runs on a
+`general` Linux/KVM runner. It restores or builds OpenVMM as the
+`OpenVMM binary / Linux GNU` job does, downloads the guest artifacts,
+qualifies the runner as the microVM jobs do, checks that the runner has the
+cargo-llvm-cov release that the
+[setup tool manifest](../scripts/setup/README.md#tool-versions) pins and the
+`llvm-tools` component of the pinned Rust release, builds the runtime adapter's
+guest agent, and runs
+[`nvx_rs_scenario_coverage.py`](../scripts/nvx_rs_scenario_coverage.py), which
+it `exec`s, as [Cancellation](#cancellation) describes. `setup-linux.sh
+--runner-only` installs both tools in the runner's root-owned toolchain, which
+the job can't change, so a runner whose setup predates them fails the check
+until its setup runs again.
+
+The script builds an instrumented `nvx-rs`, in release mode with the `cli`
+feature, as CI's build jobs build the one that the scenarios run, in the
+environment that `cargo llvm-cov show-env --no-rustc-wrapper
+--remap-path-prefix` prints: `-C instrument-coverage` for every crate that
+Cargo builds, with the crate's paths relative to it, as
+[nvx-rs coverage](#nvx-rs-coverage)'s reports have them, and every other path
+absolute, which the reports leave out. cargo-llvm-cov's rustc wrapper would
+instrument only the crates of `nvx-rs`'s workspace, so the runtime adapter's
+executables, which link the crate, would link no profiler runtime and write no
+profile. With that environment, a target directory of each run's own beneath
+`nvx-rs/target/scenario-coverage`, and an `LLVM_PROFILE_FILE` of
+`%p-%m.profraw`, which gives each process a profile of its own, in a directory
+of each run's own, the script runs `nvx.py test-microvm --backend kvm`, whose
+default suite, unsharded, includes the public sandbox scenarios, and
+`nvx.py test-runtime-adapter --backend kvm`. Their `NVX_RS` names a wrapper
+that appends a record of each `nvx-rs` process's start, its time and its
+arguments, and then executes the instrumented `nvx-rs` in its place, with the
+same process ID, and with an `LLVM_PROFILE_FILE` in a directory of the
+`nvx-rs` processes' own, even when the process's caller left it out of its
+environment. A profile's name holds the process's ID and the digits of its
+start's time, so that it names the start that wrote it even when processes
+reuse an ID. The test of the `managed-lifecycle` scenario, which Cargo builds,
+and the runtime adapter's host program and tests build with the same
+instrumentation. The script then runs the crate's own tests as nvx-rs coverage
+does, and merges the profiles of the scenarios, of the crate's tests, and of
+both, with `llvm-profdata`, whose reports with `llvm-cov` read every executable
+that the runs built.
+
+Production code leaves out test code, test data, and the test doubles, as
+nvx-rs coverage does. A line or a function counts once, as reached once any
+build of the crate ran it. The scenarios, the adapter, and the crate's tests
+build the crate with different features, so each build has its own copy of a
+function, and llvm-cov's summary counts, of the copies of a function, only the
+one that reaches the most of its lines and regions, and a line once for each
+function whose regions hold it. The script therefore counts lines by the LCOV
+report's records, which hold each line once, with the hits of every copy,
+functions by llvm-cov's summary, which counts a function as reached once any
+copy of it ran, and leaves regions out. Its counts of what the crate's tests
+reach can thus differ from nvx-rs coverage's.
+
+A process writes its profile only when it exits, so what a process reached is
+missing when a signal ended it, or when it still runs as the measurement ends.
+In a passing run, every `nvx-rs` process of the scenarios exits on its own:
+the harness kills the processes that it started only when a scenario fails or
+times out, or when the run is interrupted. The runtime adapter's tests wait for
+each command of the host program that they start too, and end one only when the
+test fails or the command outlives its deadline, which fails the test. So that
+a measurement shows what such kills miss, the summary lists, by span of
+`test-microvm`'s [scenario duration report](usage.md#scenario-duration-report)
+and by command, such as `nvx-rs run` or `nvx-rs sandbox start`, each `nvx-rs`
+process whose start the wrapper recorded and that wrote no profile, which it
+marks when the process still runs, and `processes.json` holds every start.
+
+The job fails, after it writes the reports, when a run fails, when tests of the
+crate fail again, when a process wrote its profile where the measurement
+doesn't merge it, as a process that starts without `LLVM_PROFILE_FILE` writes
+one into its working directory, when no `nvx-rs` process wrote a profile, or
+when no process of `nvx-rs`, of the crate's tests that the scenarios run, or of
+the runtime adapter's tests and host program wrote a profile that reaches the
+crate's production code. Each of those checks reads only the profiles of the
+executables' own directory, since llvm-cov counts what a profile reached of a
+function for every executable that holds the function under the same symbol.
+
+The job uploads `summary.md`; `measurement.json`, which records the commit, the
+tools, the instrumentation, and how the runs went; `processes.json`, which
+lists each `nvx-rs` process with its span, arguments, and profile;
+`crate-tests/`, `scenarios/`, and `together/`, with the LCOV report of each
+run's production code, `lcov.info`, llvm-cov's summary of each file,
+`coverage.json`, and, for the last two, an HTML report, `html/`; `microvm/`,
+the output directory of `test-microvm`; and the logs of the build and the runs
+as the 30-day artifact `nvx-rs-scenario-coverage-<run-id>`, which a rerun of
+the job replaces. It also writes `summary.md` to the run's summary: the lines
+and functions that the crate's tests, the scenarios, and both reach; how many
+lines only the scenarios reach; what the scenarios reach of the lines that
+their builds compile, which leave out code that only other builds compile,
+such as the guest code, which runs only in guests; the `nvx-rs` processes
+without a profile; and a table of the production lines of each module, as
+nvx-rs coverage's rows count them, with the lines that only the scenarios
+reach.
+
+To measure on a Linux/KVM development host, install the pinned cargo-llvm-cov
+and the `llvm-tools` component as the setup scripts do, stage the artifacts
+that the scenarios boot, such as with `nvx-rs download --hypervisor kvm`, and
+build the runtime adapter's guest agent; the script writes the reports to
+`build/nvx-rs-scenario-coverage`, and `--scenario NAME`, which repeats, runs
+only those scenarios of `test-microvm`:
+
+```bash
+(cd tests/runtime-adapter && cargo build --locked --release --features guest \
+  --target x86_64-unknown-linux-musl --bin runtime-adapter-guest)
+python3 scripts/nvx_rs_scenario_coverage.py
+```
 
 ## nvx-rs mutation testing
 
