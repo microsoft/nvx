@@ -569,6 +569,108 @@ fn cold_creation_checks_socket_path_byte_limits_before_creating_outputs() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_creation_checks_canonical_socket_byte_limits_through_ancestor_symlinks() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    for socket_bytes in [107usize, 108, 109] {
+        for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = fs::canonicalize(directory.path()).unwrap();
+            let name_bytes = socket_bytes
+                .checked_sub(root.as_os_str().len() + CONTROL.len() + 5)
+                .expect("a short temporary directory is needed for the socket boundary");
+            let prefix = "unicode space,= ";
+            let remaining = name_bytes.checked_sub(prefix.len()).unwrap();
+            let mut name = format!("{prefix}{}", "\u{e9}".repeat(remaining / 2));
+            name.push_str(&"x".repeat(remaining % 2));
+            let target = root.join(name);
+            fs::create_dir(&target).unwrap();
+            let path = target.join("vm");
+            create_private_dir(&path).unwrap();
+            let alias = root.join("alias");
+            symlink(&target, &alias).unwrap();
+            let vm = VmDir::open(&alias.join("vm")).unwrap();
+            let outputs = vm.outputs(console == ConsoleAttachment::Listener).unwrap();
+            assert!(outputs.endpoint.len() < socket_bytes);
+            assert_eq!(path.join(CONTROL).as_os_str().len(), socket_bytes);
+            let input = path.join("caller-input");
+            fs::write(&input, b"borrowed input").unwrap();
+            let config = VmConfig {
+                console,
+                ..cold_config()
+            };
+            let result = create(&cold_runtime(), &config, None, &vm);
+            if socket_bytes == 107 {
+                let prepared = result.unwrap();
+                assert_eq!(prepared.outputs(), &outputs);
+                for name in std::iter::once(CONTROL)
+                    .chain(prepared.outputs().console.as_ref().map(|_| CONSOLE))
+                {
+                    let resolved = path.join(name);
+                    let listener = UnixListener::bind(&resolved).unwrap();
+                    assert_eq!(
+                        listener.local_addr().unwrap().as_pathname(),
+                        Some(resolved.as_path())
+                    );
+                }
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+                assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+            }
+            assert_eq!(fs::read(&input).unwrap(), b"borrowed input");
+            assert!(
+                fs::symlink_metadata(&alias)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_creation_refuses_non_unicode_canonical_sockets_through_ancestor_symlinks() {
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+
+    for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory
+            .path()
+            .join(OsString::from_vec(b"parent-\xff".to_vec()));
+        fs::create_dir(&target).unwrap();
+        let path = target.join("vm");
+        create_private_dir(&path).unwrap();
+        let alias = directory.path().join("alias");
+        symlink(&target, &alias).unwrap();
+        let vm = VmDir::open(&alias.join("vm")).unwrap();
+        assert!(vm.path().to_str().is_some());
+        assert!(fs::canonicalize(vm.path()).unwrap().to_str().is_none());
+        let input = path.join("caller-input");
+        fs::write(&input, b"borrowed input").unwrap();
+        let config = VmConfig {
+            console,
+            ..cold_config()
+        };
+        let error = create(&cold_runtime(), &config, None, &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert!(error.to_string().contains("Unicode"), "{error}");
+        assert_eq!(fs::read(&input).unwrap(), b"borrowed input");
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+        assert!(
+            fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+}
+
 #[test]
 fn creation_rolls_back_its_log_and_never_removes_preexisting_outputs_or_inputs() {
     let mut names = vec![LOG, OUTCOME];
