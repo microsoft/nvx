@@ -2820,11 +2820,14 @@ updates them, as [Rust crates](../doc/ci.md#rust-crates) describes:
 python3 ../scripts/public_api.py --update
 ```
 
-Two other workflows measure the tests: one reports, on Linux and Windows,
+Three other workflows measure the tests: one reports, on Linux and Windows,
 which code of the crate they reach as `dev` changes, and the lines that a ready
-pull request adds or changes in the crate and that they don't reach, and the
-other runs cargo-mutants on the files and with the tests that a dispatch names;
-see [nvx-rs coverage](../doc/ci.md#nvx-rs-coverage) and
+pull request adds or changes in the crate and that they don't reach; another
+reports every week which host code of the crate the KVM microVM scenarios and
+the runtime adapter's suite reach, alone and together with the tests; and the
+last runs cargo-mutants on the files and with the tests that a dispatch names;
+see [nvx-rs coverage](../doc/ci.md#nvx-rs-coverage),
+[nvx-rs scenario coverage](../doc/ci.md#nvx-rs-scenario-coverage), and
 [nvx-rs mutation testing](../doc/ci.md#nvx-rs-mutation-testing).
 
 The guest's mount-ID tests also run from a thread with its own descriptor
