@@ -92,6 +92,7 @@
 #![deny(unsafe_code)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account;
 mod generation;
 mod parse;
 mod status;

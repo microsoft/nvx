@@ -7,6 +7,9 @@
 //! To hand PID 1 over to `nvx-init`, the early boot replaces itself with it, so that `nvx-init`
 //! inherits both helpers as its children, and passes it their process IDs: `TIME_DAEMON`, and
 //! `ANNOUNCER` when the announcer runs. Each is a decimal process ID above 1, and the two differ.
+//! It reads the layered root, decoded view, shares and mapping count from the kernel command
+//! line, mounts the root's runtime with the time status, and switches once. The control terminal,
+//! mapping descriptors, table and resolved account defaults stay open across that switch.
 //! As PID 1, `nvx-init`:
 //!
 //! - reads `SIGCHLD` and `SIGTERM` from a signal descriptor. `SIGCHLD` wakes it to collect the
@@ -45,6 +48,8 @@ use super::sys::{
     self, ChildStatus, Errno, FileDescriptor, Mode, OpenFlags, Pollable, ProcessId, Signal,
     SignalDescriptor, kernel,
 };
+
+mod boot;
 
 /// The process ID of the init process.
 const INIT_PROCESS: i32 = 1;
@@ -836,10 +841,6 @@ pub(crate) struct Runtime {
     terminating: bool,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL7.6b services the init runtime")
-)]
 impl Runtime {
     pub(crate) fn new(arguments: &[CString]) -> Result<Self, String> {
         let mut system = RealSystem { signals: None };
@@ -852,6 +853,10 @@ impl Runtime {
     }
 
     /// Poll alongside control input so a blocked peer cannot hide a helper's end.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "SL7.6b polls the init runtime with control input")
+    )]
     pub(crate) fn wake(&self) -> Pollable<'_> {
         Pollable::Signals(self.system.signals.as_ref().expect("listening"))
     }
@@ -881,17 +886,38 @@ pub fn main() -> ExitCode {
         return ExitStatus::Usage.into();
     }
     let arguments = sys::args();
-    init(
-        &mut RealSystem { signals: None },
-        arguments.get(1..).unwrap_or_default(),
-    );
+    match Runtime::new(arguments.get(1..).unwrap_or_default()) {
+        Ok(mut runtime) => {
+            let result = serve_layered(&mut runtime);
+            finish(&mut runtime.system, result);
+        }
+        Err(failure) => finish(&mut RealSystem { signals: None }, Err(failure)),
+    }
     ExitStatus::Failure.into()
 }
 
-/// Serves as PID 1 with the helpers that `arguments` name until the VM must end, and then ends
-/// it: with 0 after `SIGTERM`, or with [`FAILURE`] after the diagnostic of a failure.
-fn init(system: &mut impl System, arguments: &[CString]) {
-    let status = match serve(system, arguments) {
+fn serve_layered(runtime: &mut Runtime) -> Result<(), String> {
+    let command_line = std::fs::read("/proc/cmdline")
+        .map_err(|error| format!("cannot read the boot command line: {error}"))?;
+    let boot = boot::cold_boot(&command_line).map_err(|error| error.to_string())?;
+    runtime.system.report(
+        format!(
+            "NVX-INIT-ROOT: switched mappings={}\n",
+            boot.table.expected()
+        )
+        .as_bytes(),
+    );
+    loop {
+        if runtime.service(|_, _| {})? {
+            return Ok(());
+        }
+        runtime.terminating |= runtime.system.wait_signal() == Some(Signal::SIGTERM);
+    }
+}
+
+/// Keeps diagnostics, sync and direct power-off with the original PID-1 owner.
+fn finish(system: &mut impl System, result: Result<(), String>) {
+    let status = match result {
         Ok(()) => 0,
         Err(failure) => {
             system.report(format!("NVX-INIT-ERROR: {failure}\n").as_bytes());
@@ -945,22 +971,6 @@ fn collect(
         observed(process.raw().unsigned_abs(), ProcessStatus::from_raw(raw));
     }
     Ok(())
-}
-
-/// Serves the idle PID-1 path through the same status collector as the control loop.
-fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> {
-    let helpers = prepare(system, arguments)?;
-    let mut terminating = false;
-    loop {
-        collect(system, helpers, |_, _| {})?;
-        if terminating {
-            return Ok(());
-        }
-        // The descriptor returns the lower of two pending signals first, `SIGTERM` before
-        // `SIGCHLD`: a helper may have ended just before `SIGTERM` came, so PID 1 collects once
-        // more before it accepts `SIGTERM`.
-        terminating = system.wait_signal() == Some(Signal::SIGTERM);
-    }
 }
 
 /// Describes the end of the helper `name`, process `process`, with `status`.
