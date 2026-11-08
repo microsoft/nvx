@@ -913,7 +913,6 @@ impl Root {
     /// `nodev`. Each attachment is checked at its named target before it is recorded. A runtime
     /// mount whose attachment fails and which cannot be detached keeps its mount descriptor,
     /// so rollback and teardown can retry the detach without relying on its original path.
-    #[cfg_attr(not(test), expect(dead_code, reason = "nvx-init calls it (#1115)"))]
     pub(crate) fn mount_runtime(&mut self, time_status: Option<&Path>) -> Result<(), Error> {
         if let Some((runtime, _)) = &self.runtime_stray {
             return Err(Error::Occupied {
@@ -1048,7 +1047,6 @@ impl Root {
     /// usable: a [`Mapper`] still maps from a [`SourceRoot`](super::mappings::SourceRoot) beneath
     /// a [`TargetRoot`] opened before it, as [`map`](Self::map) does if the root had mounted a
     /// live share or a mapping before it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "nvx-init calls it (#1115)"))]
     pub(crate) fn switch(&mut self) -> Result<(), SwitchError> {
         if self.switched {
             return Err(SwitchError::Switched);
