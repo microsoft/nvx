@@ -2311,6 +2311,15 @@ method nvx::host::vm::Prepared::capability
 method nvx::host::vm::Prepared::inherit
 method nvx::host::vm::Prepared::log
 method nvx::host::vm::Prepared::outputs
+struct nvx::host::vm::Reattached
+field nvx::host::vm::Reattached::connection
+field nvx::host::vm::Reattached::process
+struct nvx::host::vm::SavedVm
+field nvx::host::vm::SavedVm::capability
+field nvx::host::vm::SavedVm::endpoint
+field nvx::host::vm::SavedVm::process
+field nvx::host::vm::SavedVm::runtime
+field nvx::host::vm::SavedVm::vm_dir
 struct nvx::host::vm::VmDir
 method nvx::host::vm::VmDir::open
 method nvx::host::vm::VmDir::path
@@ -2321,7 +2330,9 @@ field nvx::host::vm::VmOutputs::log
 field nvx::host::vm::VmOutputs::outcome
 fn nvx::host::vm::create
 fn nvx::host::vm::create_private_dir
+fn nvx::host::vm::reattach
 fn nvx::host::vm::spawn
+fn nvx::host::vm::verify
 mod nvx::net
 struct nvx::net::Cidr
 method nvx::net::Cidr::contains
