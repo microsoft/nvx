@@ -240,6 +240,29 @@ fn an_owned_vm_that_exited_is_reported_before_connecting() {
 }
 
 #[test]
+fn an_owned_vm_exit_interrupts_waiting_for_its_endpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint = endpoint(&directory);
+    let mut vm = Sleeper::new();
+    let process = reference(vm.0.id());
+    let ending = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        vm.0.kill().unwrap();
+        vm.0.wait().unwrap();
+    });
+    let error = connect_verified(
+        &endpoint,
+        &process,
+        Instant::now() + Duration::from_secs(10),
+    )
+    .err()
+    .unwrap();
+    ending.join().unwrap();
+    assert_eq!(error.kind(), ErrorKind::Exited);
+    assert!(error.source().is_some());
+}
+
+#[test]
 fn an_indeterminate_process_reference_retains_its_io_failure() {
     let directory = tempfile::tempdir().unwrap();
     let endpoint = endpoint(&directory);

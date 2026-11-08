@@ -88,6 +88,7 @@ pub fn connect(
     transport::connect_verified(endpoint, &reference, deadline).map_err(connect_failure)
 }
 
+/// Preserves the existing error type for callers of the temporary endpoint wrapper.
 fn connect_failure(error: Error) -> SessionError {
     let (kind, message, source) = error.into_parts();
     match kind {
@@ -98,7 +99,10 @@ fn connect_failure(error: Error) -> SessionError {
                 return SessionError::Protocol(message);
             };
             match source.downcast::<io::Error>() {
-                Ok(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                Ok(error)
+                    if kind == ErrorKind::Protocol
+                        && error.kind() == io::ErrorKind::PermissionDenied =>
+                {
                     SessionError::Refused(*error)
                 }
                 Ok(error) => SessionError::Io(*error),
@@ -421,6 +425,7 @@ fn failure(error: Error, stage: Stage) -> SessionError {
     connection_failure(error, stage)
 }
 
+/// Maps retained connection cause details to the legacy NVXC failure at `stage`.
 fn connection_failure(error: HostConnectionError, stage: Stage) -> SessionError {
     let violation = match error {
         HostConnectionError::TimedOut => return SessionError::TimedOut,
