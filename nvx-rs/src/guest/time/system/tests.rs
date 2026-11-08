@@ -15,6 +15,13 @@ use crate::guest::time::NSEC_PER_MSEC;
 use crate::guest::time::events::CheckId;
 use crate::guest::time::state::HostClockStatus;
 
+impl Runtime<'_> {
+    /// Reads the strict violation without consuming the production finalizer's input.
+    pub(crate) fn peek_violation(&self) -> Option<Violation> {
+        self.violation.lock().unwrap().clone()
+    }
+}
+
 impl Suppression<'_> {
     /// Runs the shared save without a caller deadline for the legacy cases below.
     fn save(&self) -> Result<(), SaveError> {
