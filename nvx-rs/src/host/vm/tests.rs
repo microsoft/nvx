@@ -15,6 +15,9 @@ use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
 use crate::protocol::root::RootImage;
 
+#[cfg(any(target_os = "linux", windows))]
+mod reattach;
+
 fn is_fresh_pipe(endpoint: &str, prefix: &str) -> bool {
     endpoint
         .strip_prefix(&format!("//./pipe/{prefix}-"))
