@@ -115,6 +115,7 @@ changes only when the module's purpose does.
 | [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles, where the root keeps its upper, and how the guest assembles them |
 | [`nvx::protocol::share`](#nvxprotocolshare) | The guest targets that a sandbox's live shares may not take, which the host and the guest both refuse |
 | [`nvx::protocol::status`](#nvxprotocolstatus) | The exit statuses with which a clone's guest ends its VM once it fails fast, and what each means |
+| [`nvx::protocol::view`](#nvxprotocolview) | A cold boot's hostname bytes and machine-ID mode, with their renderer and strict boot-token parser |
 | [`nvx::activation`](#nvxactivation) | The activation record of a layered root, which a clone reads in place of its captured configuration, and what Ready reports |
 | [`nvx::contract`](#nvxcontract) | The versions of the contracts that the crate speaks with OpenVMM and the guest, and the compatibility of releases with them |
 | [`nvx::net`](#nvxnet) | Network primitives that do not depend on the host: CIDR networks, hostnames, guest addresses, and gateways |
@@ -125,7 +126,7 @@ changes only when the module's purpose does.
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | The directory of a VM, private to the current user, with the fixed names of the files and endpoints of its launches |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Snapshot compatibility keys, strict manifests, and restore-time eligibility |
-| [`nvx::host::config`](#nvxhostconfig) | `VmConfig`, a VM's configuration as one value, and `CaptureConfig`, what a capture adds and the identity of its snapshots, checked without reading the host |
+| [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: VM/capture configuration, cold-boot kernel tokens and snapshot identity, without host I/O |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
@@ -289,6 +290,21 @@ class of a clone's activation's failures, `ACTIVATION_DEADLINE` to
 `ACTIVATION_ORDER`, 50 to 58.
 
 `describe` tells what a status means.
+
+### `nvx::protocol::view`
+
+`tokens` renders a cold boot's `activation::View`: `nvx_hostname=HEX`, always
+lowercase hexadecimal with two digits per hostname byte, then
+`nvx_machine_id=image` or `nvx_machine_id=generated`. The hostname keeps the
+view's 1 to 64 non-NUL bytes, including whitespace and non-UTF-8 bytes, without
+quoting. For example, `box` becomes `nvx_hostname=626f78`, not the legacy
+sandbox's raw `nvx_hostname=box`; consumers use the decoded bytes.
+
+`parse` reads the exact names through `cmdline::init_tokens`, in either order,
+and returns a `View`, or `None` when neither token is present. A partial pair,
+duplicate, missing value, malformed hexadecimal, overlong hostname, decoded
+NUL, or unknown machine-ID mode fails with `ProtocolError`. Restores receive
+their view through the activation record instead.
 
 ### `nvx::activation`
 
@@ -512,6 +528,12 @@ settled on, with its address. A `Boot` holds the caller's own kernel
 command-line tokens, to which NVX adds those of what it lowers: a VM that boots
 needs one, and a VM that a snapshot restores takes none.
 
+`VmConfig::kernel_command_line` checks the configuration and requires `Boot`,
+then renders the root's tokens and settings, the view's tokens, and `nvx_maps`
+when an export exists, followed by `Boot.command_line` unchanged. It neither
+reads the host nor checks or rewrites caller text. A restore has no kernel
+command line from this method and fails with kind `Unsupported`.
+
 `VmConfig::check` checks the whole value without reading the host: it opens no
 path and checks no support of the host. It fails with an `nvx::Error` of kind
 `Unsupported` that names the first refusal: no processor or no memory; a layered
@@ -519,9 +541,9 @@ root without an image or a scratch path, with a bound of an EROFS image or of 0,
 or with a RAM upper's cap outside 1 to 90 percent; a hostname that an activation
 record refuses; or an export that `ExportPlan::check` refuses for the guest
 targets that the root reserves. Last, it checks a boot's capture with
-`CaptureConfig::check`, below, and fails with its error. The network's policy
-and the boot's command line are checked where they are lowered, with the
-guest's address and NVX's own tokens.
+`CaptureConfig::check`, below, and fails with its error. The network's policy is
+checked where it is lowered, with the guest's address. This check does not
+inspect the boot's command-line text.
 
 A `Boot` may also hold a `CaptureConfig`, what a capture of the VM adds to the
 VM's configuration, which keeps the rest, such as the NIC, the console, and the
