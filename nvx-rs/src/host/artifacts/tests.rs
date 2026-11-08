@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::ErrorKind;
-use crate::host::store::ArtifactIdentity;
+use crate::host::runtime::ArtifactIdentity;
 
 const COMPATIBLE_MANIFEST: &str = r#"{"openvmm":{"microvm_abi_version":1,
         "time_abi_version":1,"restore_packet_version":1,
