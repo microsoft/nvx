@@ -1101,20 +1101,6 @@ fn public_maps_codec_keeps_the_protocol_root_reexports_usable() {
     assert_eq!(decoded.maps, table);
 }
 
-fn runtime() -> Runtime {
-    let artifact = ArtifactIdentity::new("fixture").unwrap();
-    Runtime {
-        openvmm: missing("openvmm"),
-        kernel: missing("vmlinux"),
-        initramfs: missing("initramfs.cpio.gz"),
-        identity: RuntimeIdentity::new(artifact.clone(), artifact.clone(), artifact),
-        hypervisor: Hypervisor::Kvm,
-        cpu_profile: None,
-        windows_breakaway: false,
-        options: LaunchOptions::default(),
-    }
-}
-
 fn cold(config: VmConfig) -> VmConfig {
     VmConfig {
         boot: Some(Boot {
@@ -1152,6 +1138,7 @@ fn cold_boot_command_lines_refuse_native_control_console_syntax() {
             let config = VmConfig {
                 boot: Some(Boot {
                     command_line: caller.to_owned(),
+                    capture: None,
                 }),
                 console,
                 ..blockless()
