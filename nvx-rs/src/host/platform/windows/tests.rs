@@ -29,6 +29,15 @@ use super::spawn::command_line;
 use super::*;
 use crate::host::platform::inherit::{Inherited, lock_spawns};
 
+pub(crate) fn wait_exit_handle(process: OwnedHandle, deadline: Instant) -> io::Result<bool> {
+    super::process::ProcessHandle {
+        process,
+        terminate: false,
+    }
+    .wait(deadline)
+    .map(|exited| exited.expect("Windows process handles always provide an exit event"))
+}
+
 thread_local! {
     /// What a spawn of this thread runs in its window, once its handles are inheritable and
     /// before it creates its process.

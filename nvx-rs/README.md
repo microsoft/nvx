@@ -975,6 +975,14 @@ and a process whose identity this user cannot check, such as another user's,
 makes `Process::open` fail rather than report an exit. Linux hosts without
 pidfds poll the reference instead, and cannot terminate the process.
 
+On Linux and Windows, `Process::exit_handle()` returns
+`Result<Option<ExitHandle>>`: an independently owned duplicate of the pidfd
+or process handle, or `Ok(None)` only on a polling-only Linux host. Callers
+register the standard owned descriptor or handle with their own runtime;
+dropping the original `Process` or another duplicate leaves it valid.
+Duplication failures have kind `Io` and retain their original I/O source.
+No watcher thread, future or callback is created by the library.
+
 `Process::bytes_read` reports how many bytes the process has read through the
 operating system's read calls, whether the host's cache served them or not:
 `rchar` of `/proc/<pid>/io` on Linux, which it reads only while the process

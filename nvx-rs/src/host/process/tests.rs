@@ -180,6 +180,66 @@ fn sleeper() -> std::process::Command {
 }
 
 #[cfg(any(target_os = "linux", windows))]
+struct ExitChild(std::process::Child);
+
+#[cfg(any(target_os = "linux", windows))]
+impl Drop for ExitChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().unwrap().is_none() {
+            self.0.kill().unwrap();
+            self.0.wait().unwrap();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_exit_handle(handle: ExitHandle, timeout: Duration) -> io::Result<bool> {
+    use std::os::fd::AsFd;
+
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+
+    let mut descriptors = [PollFd::new(handle.as_fd(), PollFlags::POLLIN)];
+    if poll(&mut descriptors, PollTimeout::try_from(timeout).unwrap())? == 0 {
+        return Ok(false);
+    }
+    let events = descriptors[0].revents().unwrap();
+    assert!(
+        events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP),
+        "duplicated pidfd reported {events:?}",
+    );
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn wait_exit_handle(handle: ExitHandle, timeout: Duration) -> io::Result<bool> {
+    platform::tests::wait_exit_handle(handle, Instant::now() + timeout)
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn exit_handles_are_independently_owned_and_exist_only_for_exit_events() {
+    let mut child = ExitChild(crate::host::tests::spawn_locked(&mut sleeper()).unwrap());
+    let reference = ProcessRef {
+        pid: child.0.id(),
+        start_time: platform::process_start_time(child.0.id()).unwrap().unwrap(),
+        boot: BootId::current().unwrap(),
+    };
+    let process = Process::open(&reference).unwrap().unwrap();
+    let handle = process.exit_handle().unwrap();
+    assert_eq!(handle.is_some(), process.wait_method() == WaitMethod::Event);
+    if handle.is_some() {
+        let probe = process.exit_handle().unwrap().unwrap();
+        assert!(!wait_exit_handle(probe, Duration::ZERO).unwrap());
+    }
+    drop(process);
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    if let Some(handle) = handle {
+        assert!(wait_exit_handle(handle, Duration::from_secs(10)).unwrap());
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn polling_follows_a_real_process_until_it_exits() {
     let mut child = crate::host::tests::spawn_locked(&mut sleeper()).unwrap();
@@ -208,6 +268,7 @@ fn hosts_without_pidfds_poll_and_never_signal() {
         handle: platform::ProcessHandle::without_pidfd(),
     };
     assert_eq!(process.wait_method(), WaitMethod::Polling);
+    assert!(process.exit_handle().unwrap().is_none());
     let running = process.wait(Instant::now() + Duration::from_millis(80));
     // Nothing holds the process, so it is not signaled.
     let refused = process.kill();

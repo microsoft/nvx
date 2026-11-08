@@ -66,6 +66,11 @@ impl PidFd {
         Ok(Self(unsafe { OwnedFd::from_raw_fd(descriptor as RawFd) }))
     }
 
+    /// Returns an independently owned, close-on-exec copy of this pidfd.
+    pub(crate) fn try_clone_handle(&self) -> io::Result<OwnedFd> {
+        self.0.try_clone()
+    }
+
     /// Waits up to `timeout` for the process to exit, and returns whether it has.
     ///
     /// The pidfd becomes readable once the whole process has exited: its last thread, not only

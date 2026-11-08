@@ -5,7 +5,7 @@ pub(crate) use super::linux::tests::{
 #[cfg(windows)]
 pub(crate) use super::windows::tests::set_access;
 #[cfg(windows)]
-pub(crate) use super::windows::tests::{accept_control, control_server};
+pub(crate) use super::windows::tests::{accept_control, control_server, wait_exit_handle};
 #[cfg(windows)]
 pub(crate) use super::windows::tests::{
     access, claim_released_within, inherits_file, untrusted_log_job, user_sid, with_spawn_window,
