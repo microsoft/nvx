@@ -161,6 +161,11 @@ impl ProcessHandle {
         true
     }
 
+    /// Returns an independently owned, non-inheritable copy of the existing process handle.
+    pub(crate) fn exit_handle(&self) -> io::Result<Option<OwnedHandle>> {
+        self.process.try_clone().map(Some)
+    }
+
     /// Waits until the process exits or `deadline` passes, and returns whether it exited.
     ///
     /// `WaitForSingleObject` waits for whole milliseconds, which the system timer rounds up to
