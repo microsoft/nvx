@@ -124,7 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, an inspectable cold preparation, and an owned, verified detached launch |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, and caller-saved reattachment |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Snapshot compatibility keys, strict manifests, restore-time eligibility, and the opaque input of a future VM restore |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
@@ -494,6 +494,17 @@ endpoint, and the optional boot-console endpoint. `Capability` holds the
 credential that the host presents at a VM's control endpoint: `as_bytes`
 returns it, and its `Debug` form hides it. The library never writes it to a
 file; a caller that reconnects after a restart keeps it.
+
+`SavedVm` bundles the caller's `VmDir`, the original control endpoint,
+capability bytes, `ProcessRef` and `RuntimeIdentity`. The caller owns saving
+and reloading these values; the library neither serializes nor locates them.
+`vm::verify(&saved, &identity)` compares the exact runtime identity, returning
+`RuntimeMismatch` before opening the process if it differs, then returns the
+verified held `Process` without opening an endpoint or reading runtime files.
+`vm::reattach(&saved, &runtime, deadline)` verifies, connects through
+`transport::connect_verified`, and attaches with the saved capability. Its
+`Reattached` holds both the process and authenticated connection. Failures
+retain their original kinds and sources and leave the saved values unchanged.
 
 `vm::create(&runtime, &config, None, &dir)` creates an inspectable cold
 `Prepared` launch without starting a process or binding a listener. It requires
