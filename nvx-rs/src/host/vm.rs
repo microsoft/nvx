@@ -8,7 +8,8 @@
 //!
 //! The library reserves the names documented below, and every name that starts with `.openvmm`,
 //! which OpenVMM gives its temporary files. [`Capability`] holds the credential of a VM's control
-//! endpoint, which the library never writes to a file.
+//! endpoint, which the library never writes to a file. A caller keeps its own [`SavedVm`] values
+//! for [`verify`] and [`reattach`] after a restart, without a library-owned store.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -24,12 +25,13 @@ use crate::host::platform;
 use crate::host::platform::{check_store_dir as check_dir, create_store_dir as create_dir};
 #[cfg(windows)]
 use crate::host::platform::{check_vm_dir as check_dir, create_vm_dir as create_dir};
-use crate::host::runtime::Runtime;
+use crate::host::runtime::{Runtime, RuntimeIdentity};
 use crate::host::snapshot::Snapshot;
 use crate::host::spawn::{self, VmmCommand};
-use crate::host::{platform::inherit::Inherited, process::Process};
+use crate::host::transport::{self, HostConnection};
+use crate::host::{platform::inherit::Inherited, process::Process, process::ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
-use crate::{Error, Result};
+use crate::{Error, ErrorKind, Result};
 
 /// OpenVMM's log of a launch.
 const LOG: &str = "openvmm.log";
@@ -192,6 +194,84 @@ impl fmt::Debug for Capability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Capability").finish_non_exhaustive()
     }
+}
+
+/// Launch values that the caller saves and reloads to verify or reattach its VM.
+///
+/// The library never serializes, stores or locates them. The endpoint is the name chosen at
+/// launch, not one newly generated from the directory. The `Debug` form hides the capability.
+#[derive(Clone)]
+pub struct SavedVm {
+    /// The caller-owned private VM directory.
+    pub vm_dir: VmDir,
+    /// The control endpoint chosen at launch.
+    pub endpoint: String,
+    /// The launch credential's bytes, from [`Capability::as_bytes`].
+    pub capability: [u8; CAPABILITY_LEN],
+    /// The process's recorded ID, start time and host boot.
+    pub process: ProcessRef,
+    /// The runtime identity that the VM was launched with.
+    pub runtime: RuntimeIdentity,
+}
+
+impl fmt::Debug for SavedVm {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SavedVm")
+            .field("vm_dir", &self.vm_dir)
+            .field("endpoint", &self.endpoint)
+            .field("capability", &Capability(self.capability))
+            .field("process", &self.process)
+            .field("runtime", &self.runtime)
+            .finish()
+    }
+}
+
+/// Checks the saved runtime and process, returning the verified held process.
+///
+/// Opens no endpoint and reads no runtime artifact. A different runtime is
+/// [`ErrorKind::RuntimeMismatch`], an exited recorded process is [`ErrorKind::Exited`], and an
+/// indeterminate process check is [`ErrorKind::Io`], retaining its original I/O source.
+pub fn verify(saved: &SavedVm, runtime: &RuntimeIdentity) -> Result<Process> {
+    if saved.runtime != *runtime {
+        return Err(Error::new(
+            ErrorKind::RuntimeMismatch,
+            "the saved VM runtime does not match the current runtime",
+        ));
+    }
+    Process::open(&saved.process)
+        .map_err(|error| Error::io("cannot verify the saved VM process").with_source(error))?
+        .ok_or_else(|| {
+            let message = "the saved VM process exited";
+            Error::exited(message).with_source(io::Error::new(io::ErrorKind::NotFound, message))
+        })
+}
+
+/// A verified held VM process and its authenticated control connection.
+pub struct Reattached {
+    /// The process that matched the saved identity.
+    pub process: Process,
+    /// The connection attached with the saved launch capability.
+    pub connection: HostConnection,
+}
+
+/// Verifies the saved VM, peer-verifies its endpoint and authenticates with its saved capability.
+///
+/// Uses `runtime`'s identity without reading its artifacts. Failures retain the kinds and sources
+/// of [`verify`], [`transport::connect_verified`] and [`HostConnection::attach`], and a failure
+/// neither signals the VM nor changes the caller's saved values.
+pub fn reattach(
+    saved: &SavedVm,
+    runtime: &Runtime,
+    deadline: std::time::Instant,
+) -> Result<Reattached> {
+    let process = verify(saved, &runtime.identity)?;
+    let transport = transport::connect_verified(&saved.endpoint, &saved.process, deadline)?;
+    let connection = HostConnection::attach(transport, &saved.capability, deadline)?;
+    Ok(Reattached {
+        process,
+        connection,
+    })
 }
 
 /// A checked cold launch, with its capability, chosen outputs, and already opened log.
