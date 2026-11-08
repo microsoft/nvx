@@ -736,13 +736,13 @@ def changed_coverage(
     return ChangedCoverage(changes.merge_base, tuple(files), measured)
 
 
-def _share(count: Count) -> str:
+def share(count: Count) -> str:
     """Returns the share of `count` that the tests reached, rounded down, so
     that only code that they reached entirely shows 100%."""
     if count.count == 0:
         return "none"
-    share = math.floor(1000 * count.covered / count.count) / 10
-    return f"{share:.1f}% of {count.count:,}"
+    percent = math.floor(1000 * count.covered / count.count) / 10
+    return f"{percent:.1f}% of {count.count:,}"
 
 
 def _table(
@@ -753,12 +753,14 @@ def _table(
         "| --- |" + " ---: |" * len(metrics),
     ]
     for name, counts in rows:
-        cells = (_share(counts.get(metric, Count(0, 0))) for metric in metrics)
+        cells = (share(counts.get(metric, Count(0, 0))) for metric in metrics)
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return lines
 
 
-def _names(names: Iterable[str]) -> str:
+def join_names(names: Iterable[str]) -> str:
+    """Returns `names` in code spans, as a list in a sentence: `a`, `a` and
+    `b`, or `a`, `b`, and `c`."""
     quoted = [f"`{name}`" for name in names]
     if len(quoted) < 3:
         return " and ".join(quoted)
@@ -773,7 +775,7 @@ def problems(measurement: Mapping[str, Any], coverage: Coverage) -> list[str]:
     for retried in _retries(measurement):
         if retried.failed:
             found.append(
-                f"The tests {_names(retried.failed)} of `{retried.target}` failed "
+                f"The tests {join_names(retried.failed)} of `{retried.target}` failed "
                 "when they ran again."
             )
         elif retried.status != 0:
@@ -781,7 +783,7 @@ def problems(measurement: Mapping[str, Any], coverage: Coverage) -> list[str]:
     missing = [name for name in TESTED_BINARIES if not coverage.binaries.get(name)]
     if missing:
         found.append(
-            f"No process of {_names(missing)} wrote a profile, though the tests "
+            f"No process of {join_names(missing)} wrote a profile, though the tests "
             "start them."
         )
     strays = _strings(measurement.get("stray_profiles"), "stray_profiles")
@@ -789,7 +791,7 @@ def problems(measurement: Mapping[str, Any], coverage: Coverage) -> list[str]:
         found.append(
             f"{len(strays):,} processes wrote their profiles into the crate's "
             "directory, as processes that a test starts there without "
-            f"`LLVM_PROFILE_FILE` do: {_names(strays)}."
+            f"`LLVM_PROFILE_FILE` do: {join_names(strays)}."
         )
     return found
 
@@ -821,7 +823,7 @@ def render_changes(changed: ChangedCoverage) -> list[str]:
             "",
         ]
     lines += [
-        f"Tests reach {_share(total)} instrumented lines of production code that "
+        f"Tests reach {share(total)} instrumented lines of production code that "
         f"the changes {since} add or change.",
         "",
     ]
@@ -892,15 +894,15 @@ def render(
     binaries = sorted(coverage.binaries.items())
     wrote = [name for name, profiles in binaries if profiles]
     other = [name for name, profiles in binaries if not profiles]
-    sentence = f"The profiles include processes of {_names(wrote) or 'no binary'}."
+    sentence = f"The profiles include processes of {join_names(wrote) or 'no binary'}."
     if other:
-        sentence += f" No process of {_names(other)} wrote one."
+        sentence += f" No process of {join_names(other)} wrote one."
     lines += [sentence, ""]
     for retried in _retries(measurement):
         passed = [test for test in retried.tests if test not in retried.failed]
         if passed:
             lines.append(
-                f"The tests {_names(passed)} of `{retried.target}` passed only when "
+                f"The tests {join_names(passed)} of `{retried.target}` passed only when "
                 "they ran again."
             )
         elif not retried.tests and retried.passed():
@@ -935,10 +937,66 @@ def render(
     return "\n".join(lines) + "\n"
 
 
-def _version(run: Runner, command: Sequence[str]) -> str:
+def version(run: Runner, command: Sequence[str]) -> str:
+    """Returns the first line that `command` prints, or "unknown" if it fails
+    or prints nothing."""
     result = run(command, False)
     output = result.stdout.strip() if result.returncode == 0 else ""
     return output.splitlines()[0] if output else "unknown"
+
+
+@dataclass(frozen=True)
+class TestRun:
+    """A run of the crate's tests under cargo-llvm-cov: the directory of its
+    profiles, the status of its first run, how its failed tests ran again,
+    the profiles that it left in the crate's directory, and how long it
+    took, in seconds."""
+
+    profiles: Path
+    status: int
+    retries: tuple[Retry, ...]
+    strays: tuple[str, ...]
+    seconds: float
+
+
+def run_tests(log: Path, run: Runner = run_command, crate: Path = CRATE_DIR) -> TestRun:
+    """Runs the crate's tests under cargo-llvm-cov, without a report, after it
+    removes what earlier runs built and measured, runs the tests that fail
+    once more, and lets the owner read and write every profile. It writes the
+    output of the tests to `log` as they run."""
+    cargo = ["cargo", "llvm-cov"]
+    _require(run([*cargo, "clean", "--workspace"], True), "cleaning")
+    profiles = profile_directory(run, crate)
+    earlier_strays = stray_profiles(crate)
+    transcript: list[str] = []
+
+    def run_logged(
+        command: Sequence[str], echo: bool
+    ) -> subprocess.CompletedProcess[str]:
+        result = run(command, echo)
+        transcript.append(f"+ {shlex.join(command)}\n{result.stdout}")
+        log.write_text("".join(transcript), encoding="utf-8")
+        return result
+
+    started = time.monotonic()
+    result = run_logged([*cargo, "--no-report", *RUN_OPTIONS], True)
+    failed = failed_targets(result.stdout)
+    if result.returncode != 0 and not failed:
+        raise MeasurementError(
+            f"the tests did not run: cargo llvm-cov failed with status "
+            f"{result.returncode}"
+        )
+    retries = tuple(retry(cargo, target, run_logged) for target in failed)
+    seconds = round(time.monotonic() - started, 1)
+    strays = tuple(sorted(stray_profiles(crate) - earlier_strays))
+    repaired = make_readable(profiles)
+    if repaired:
+        print(
+            f"Let the owner read and write {repaired:,} profiles",
+            file=sys.stderr,
+            flush=True,
+        )
+    return TestRun(profiles, result.returncode, retries, strays, seconds)
 
 
 def measure(
@@ -953,38 +1011,8 @@ def measure(
     `changes`, if any, that no test reaches."""
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    tests = run_tests(output / LOG_FILE, run, crate)
     cargo = ["cargo", "llvm-cov"]
-    _require(run([*cargo, "clean", "--workspace"], True), "cleaning")
-    profiles = profile_directory(run, crate)
-    earlier_strays = stray_profiles(crate)
-    transcript: list[str] = []
-
-    def run_tests(
-        command: Sequence[str], echo: bool
-    ) -> subprocess.CompletedProcess[str]:
-        result = run(command, echo)
-        transcript.append(f"+ {shlex.join(command)}\n{result.stdout}")
-        (output / LOG_FILE).write_text("".join(transcript), encoding="utf-8")
-        return result
-
-    started = time.monotonic()
-    result = run_tests([*cargo, "--no-report", *RUN_OPTIONS], True)
-    failed = failed_targets(result.stdout)
-    if result.returncode != 0 and not failed:
-        raise MeasurementError(
-            f"the tests did not run: cargo llvm-cov failed with status "
-            f"{result.returncode}"
-        )
-    retries = [retry(cargo, target, run_tests) for target in failed]
-    seconds = round(time.monotonic() - started, 1)
-    strays = sorted(stray_profiles(crate) - earlier_strays)
-    repaired = make_readable(profiles)
-    if repaired:
-        print(
-            f"Let the owner read and write {repaired:,} profiles",
-            file=sys.stderr,
-            flush=True,
-        )
     report = [*cargo, "report", *REPORT_OPTIONS]
     without_tests = ["--ignore-filename-regex", TEST_CODE]
     production = ["--ignore-filename-regex", f"{TEST_CODE}|{TEST_DOUBLES}"]
@@ -1003,12 +1031,12 @@ def measure(
         "format": MEASUREMENT_FORMAT,
         "host": platform.system(),
         "commit": commit.stdout.strip() if commit.returncode == 0 else "unknown",
-        "rustc": _version(run, ["rustc", "--version"]),
-        "cargo_llvm_cov": _version(run, [*cargo, "--version"]),
-        "seconds": seconds,
-        "status": result.returncode,
-        "retries": [retried.to_json() for retried in retries],
-        "stray_profiles": strays,
+        "rustc": version(run, ["rustc", "--version"]),
+        "cargo_llvm_cov": version(run, [*cargo, "--version"]),
+        "seconds": tests.seconds,
+        "status": tests.status,
+        "retries": [retried.to_json() for retried in tests.retries],
+        "stray_profiles": list(tests.strays),
     }
     (output / MEASUREMENT_FILE).write_text(
         json.dumps(measurement, indent=2) + "\n", encoding="utf-8"
