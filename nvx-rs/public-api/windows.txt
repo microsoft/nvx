@@ -1030,8 +1030,10 @@ struct nvx::host::process::BootId
 method nvx::host::process::BootId::as_bytes
 method nvx::host::process::BootId::current
 method nvx::host::process::BootId::from_bytes
+type nvx::host::process::ExitHandle
 struct nvx::host::process::Process
 method nvx::host::process::Process::bytes_read
+method nvx::host::process::Process::exit_handle
 method nvx::host::process::Process::has_exited
 method nvx::host::process::Process::kill
 method nvx::host::process::Process::open
