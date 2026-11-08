@@ -979,6 +979,20 @@ fn a_clone_with_a_boot_console_listens_at_the_endpoint_that_its_lease_fixes() {
         crate::host::session::connect(&console, reference.pid, reference.start_time, deadline)
             .unwrap();
     }
+    // A process that took the VMM's ID once the VMM exited, as one of another start time stands
+    // for, is not the VMM: a reader refuses the endpoint that it serves, since the boot console
+    // authenticates no one.
+    let deadline = Instant::now() + TIMEOUT;
+    let stale =
+        crate::host::session::connect(&console, reference.pid, reference.start_time + 1, deadline);
+    assert!(
+        matches!(
+            stale,
+            Err(crate::host::session::SessionError::ProcessExited)
+        ),
+        "{:?}",
+        stale.map(|_| ())
+    );
     assert!(format!("{restoring:?}").contains(&console));
     // Abandoning the launch ends its VMM, which leaves its sockets, and the end of the launch
     // removes them.
