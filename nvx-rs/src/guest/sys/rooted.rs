@@ -238,6 +238,93 @@ pub(crate) fn open_beneath(
     nix::fcntl::openat2(directory.borrowed(), path, how).map(FileDescriptor::from_owned)
 }
 
+#[cfg(target_arch = "x86_64")]
+impl FileDescriptor {
+    /// Opens a directory inside this root, following ordinary ancestor links but not a final
+    /// link or a magic link. Absolute links and `..` remain inside this root.
+    pub(crate) fn open_directory_in_root(&self, path: &CStr) -> Result<Self, Errno> {
+        let mut bytes = path.to_bytes();
+        while bytes.len() > 1 && bytes.ends_with(b"/") {
+            bytes = &bytes[..bytes.len() - 1];
+        }
+        let path = super::c_string(bytes)?;
+        let how = OpenHow::new()
+            .flags(
+                OpenFlags::O_PATH
+                    | OpenFlags::O_DIRECTORY
+                    | OpenFlags::O_NOFOLLOW
+                    | OpenFlags::O_CLOEXEC,
+            )
+            .resolve(ResolveFlag::RESOLVE_IN_ROOT | ResolveFlag::RESOLVE_NO_MAGICLINKS);
+        nix::fcntl::openat2(self.borrowed(), path.as_c_str(), how).map(Self::from_owned)
+    }
+
+    /// Replaces one regular file of this directory atomically, retaining its owner and mode.
+    /// No path component or temporary file is resolved against the process's working directory.
+    pub(crate) fn replace_file(&self, name: &CStr, bytes: &[u8]) -> Result<(), Errno> {
+        use nix::sys::stat::SFlag;
+        use nix::unistd::{Gid, Uid};
+
+        if name.to_bytes().contains(&b'/') || matches!(name.to_bytes(), b"" | b"." | b"..") {
+            return Err(Errno::EINVAL);
+        }
+        let original = open_beneath(
+            self,
+            name,
+            OpenFlags::O_RDONLY | OpenFlags::O_NONBLOCK | OpenFlags::O_NOCTTY,
+            Mode::empty(),
+            false,
+        )?;
+        let status = nix::sys::stat::fstat(original.borrowed())?;
+        if SFlag::from_bits_truncate(status.st_mode) != SFlag::S_IFREG {
+            return Err(Errno::EINVAL);
+        }
+        let random = super::open(
+            c"/dev/urandom",
+            OpenFlags::O_RDONLY | OpenFlags::O_NOFOLLOW | OpenFlags::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut nonce = [0; 8];
+        random.read_exact(&mut nonce)?;
+        let temporary_name =
+            super::c_string(format!(".nvx-{:016x}", u64::from_ne_bytes(nonce)).as_bytes())?;
+        let temporary = open_beneath(
+            self,
+            &temporary_name,
+            OpenFlags::O_WRONLY | OpenFlags::O_CREAT | OpenFlags::O_EXCL,
+            Mode::from_bits_truncate(0o600),
+            false,
+        )?;
+        let renamed = (|| {
+            temporary.write_all(bytes)?;
+            nix::unistd::fchown(
+                temporary.borrowed(),
+                Some(Uid::from_raw(status.st_uid)),
+                Some(Gid::from_raw(status.st_gid)),
+            )?;
+            temporary.set_mode(Mode::from_bits_truncate(status.st_mode))?;
+            temporary.sync()?;
+            temporary.close()?;
+            nix::fcntl::renameat(
+                self.borrowed(),
+                temporary_name.as_c_str(),
+                self.borrowed(),
+                name,
+            )
+        })();
+        if renamed.is_err() {
+            // The original error wins; unlinking only our exclusive sibling is best effort.
+            let _ = nix::unistd::unlinkat(
+                self.borrowed(),
+                temporary_name.as_c_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            );
+        }
+        renamed?;
+        self.sync()
+    }
+}
+
 /// Returns the kind of the file that `descriptor` opened, its owner and mode, its mount's unique
 /// ID, and whether it is the mount's root, from `statx`.
 ///

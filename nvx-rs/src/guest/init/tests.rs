@@ -21,6 +21,25 @@ use crate::guest::sys::tests::{
 };
 use crate::guest::sys::{ForkResult, wait};
 
+/// Drives the unchanged helper/signal scripts through production preparation, collection and
+/// shutdown; layered boot itself is exercised by the boot tests.
+fn init(system: &mut impl System, arguments: &[CString]) {
+    let result = serve(system, arguments);
+    finish(system, result);
+}
+
+fn serve(system: &mut impl System, arguments: &[CString]) -> Result<(), String> {
+    let helpers = prepare(system, arguments)?;
+    let mut terminating = false;
+    loop {
+        collect(system, helpers, |_, _| {})?;
+        if terminating {
+            return Ok(());
+        }
+        terminating = system.wait_signal() == Some(Signal::SIGTERM);
+    }
+}
+
 /// One operation that PID 1 asked its system for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Call {

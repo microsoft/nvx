@@ -146,6 +146,94 @@ fn status(descriptor: &FileDescriptor) -> Option<FileStatus> {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
+fn atomic_replacements_keep_the_open_original_and_its_owner_and_mode() {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+
+    with_thread_umask(0o077, || {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("database");
+        std::fs::write(&path, b"old database\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let mut original = std::fs::File::open(&path).unwrap();
+        let directory = open(
+            &path_c_string(root.path()).unwrap(),
+            OpenFlags::O_RDONLY | OpenFlags::O_DIRECTORY | OpenFlags::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        directory
+            .replace_file(c"database", b"new database\n")
+            .unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new database\n");
+        let mut kept = Vec::new();
+        original.read_to_end(&mut kept).unwrap();
+        assert_eq!(kept, b"old database\n");
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        std::os::unix::fs::symlink("database", root.path().join("link")).unwrap();
+        assert_eq!(
+            directory.replace_file(c"link", b"refused"),
+            Err(Errno::ELOOP)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"new database\n");
+    });
+    let root = path_descriptor(std::path::Path::new("/"));
+    assert_eq!(
+        root.open_directory_in_root(c"/proc/self/root/tmp")
+            .map(drop),
+        Err(Errno::ELOOP)
+    );
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn a_partial_replacement_write_keeps_the_old_file_and_removes_only_its_temporary() {
+    if crate::guest::sys::tests::isolate_process_test(
+        "NVX_ATOMIC_FILE_LIMIT_TEST",
+        "guest::sys::rooted::tests::a_partial_replacement_write_keeps_the_old_file_and_removes_only_its_temporary",
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("database");
+    std::fs::write(&path, b"old database\n").unwrap();
+    let directory = open(
+        &path_c_string(root.path()).unwrap(),
+        OpenFlags::O_RDONLY | OpenFlags::O_DIRECTORY | OpenFlags::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .unwrap();
+    let mut blocked = nix::sys::signal::SigSet::empty();
+    blocked.add(nix::sys::signal::Signal::SIGXFSZ);
+    blocked.thread_block().unwrap();
+    let mut previous = nix::libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `previous` is a writable rlimit that getrlimit fills.
+    Errno::result(unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_FSIZE, &mut previous) }).unwrap();
+    let restricted = nix::libc::rlimit {
+        rlim_cur: 17,
+        rlim_max: previous.rlim_max,
+    };
+    // SAFETY: the isolated test process owns this limit and both rlimit values outlive the calls.
+    Errno::result(unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_FSIZE, &restricted) }).unwrap();
+    let replaced = directory.replace_file(c"database", &[b'x'; 100]);
+    // SAFETY: the original rlimit remains valid; restore it before the test harness writes logs.
+    Errno::result(unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_FSIZE, &previous) }).unwrap();
+    assert_eq!(replaced, Err(Errno::EFBIG));
+    assert_eq!(std::fs::read(&path).unwrap(), b"old database\n");
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[test]
 fn paths_resolve_only_beneath_their_directory_and_through_no_link() {
     let temporary = tempfile::tempdir().unwrap();
     let base = temporary.path();
