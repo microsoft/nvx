@@ -854,8 +854,9 @@ copies or changes, so that clones of one generation restore it at once,
 processor target, for a template whose processors were not all online at boot,
 and `--restore-ready-path`, under the
 template's backend, CPU profile, and processors, with a boot console that
-discards its output, as cold boots have, and the control console, but no kernel,
-initramfs, command line, or guest address, which the snapshot fixes.
+discards its output, as cold boots have, unless the plan asks for one that the
+caller reads, and the control console, but no kernel, initramfs, command line,
+or guest address, which the snapshot fixes.
 
 On Linux, where OpenVMM requires a restore's control socket in the snapshot's
 parent, the clone's VMM listens in the generation's payload, at `<launch>.sock`,
@@ -865,9 +866,27 @@ at a named pipe, as every launch does. The VMM inherits the claim of a scratch
 image, on Windows through the image's guard, once the launch has closed the
 claim's handle, which OpenVMM's open of the image would refuse.
 
+`ClonePlan::with_boot_console` asks for a boot console that the caller reads,
+which keeps what the guest writes to its kernel console after the restore, such
+as a panic, an oops, or an out-of-memory kill. A template captures a boot
+console that discards its output, so that its capture waits for no reader, and
+the launch attaches a listener to it with `--virtio-console listen=<endpoint>`,
+at the endpoint that the lease fixes, `Store::clone_console_endpoint`, which
+`Restoring::console_endpoint` returns: on Linux, the socket `<launch>.console`
+beside the control socket in the payload, where OpenVMM requires it too, whose
+path is checked as the control socket's is, and on Windows, the named pipe
+`//./pipe/openvmm-microvm-<launch>.console`. The device is the template's, so
+OpenVMM discards the guest's output while no reader is connected, as the
+template's console does, and the clone never waits for a reader: a reader reads
+what the guest writes once it connected, and one that disconnects leaves the
+clone running. A reader connects with `session::connect`, as to the control
+endpoint, which checks that the clone's VMM serves it, and a caller that takes
+the clone over after a crash finds the endpoint again from the clone's lease,
+and connects to it again.
+
 A payload holds the sockets of its clones only while they lease it: the VMM
-removes its socket as it exits, a stop or a recovery removes the one that an
-abrupt exit leaves, and the release makes the socket's absence durable before
+removes its sockets as it exits, a stop or a recovery removes those that an
+abrupt exit leaves, and the release makes the sockets' absence durable before
 the lease ends, and removes the record and `restore.sock`.
 
 `Restoring::activate` then runs the clone's restore sequence through the

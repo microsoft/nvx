@@ -1649,6 +1649,7 @@ method nvx::host::template::CloneFailure::teardown
 method nvx::host::template::CloneFailure::with_staging_proven
 struct nvx::host::template::ClonePlan
 method nvx::host::template::ClonePlan::activation
+method nvx::host::template::ClonePlan::boot_console
 method nvx::host::template::ClonePlan::capability
 method nvx::host::template::ClonePlan::export
 method nvx::host::template::ClonePlan::generation
@@ -1663,6 +1664,7 @@ method nvx::host::template::ClonePlan::scratch_path
 method nvx::host::template::ClonePlan::snapshot
 method nvx::host::template::ClonePlan::table
 method nvx::host::template::ClonePlan::upper
+method nvx::host::template::ClonePlan::with_boot_console
 struct nvx::host::template::CloneRecords
 field nvx::host::template::CloneRecords::failure
 field nvx::host::template::CloneRecords::journal
@@ -1864,6 +1866,7 @@ method nvx::host::template::Restoring::abandon
 method nvx::host::template::Restoring::activate
 method nvx::host::template::Restoring::activation
 method nvx::host::template::Restoring::capability
+method nvx::host::template::Restoring::console_endpoint
 method nvx::host::template::Restoring::image
 method nvx::host::template::Restoring::ready_endpoint
 method nvx::host::template::Restoring::starting
@@ -1899,6 +1902,7 @@ method nvx::host::template::StorageGeneration::from_bytes
 method nvx::host::template::StorageGeneration::generate
 struct nvx::host::template::Store
 method nvx::host::template::Store::acquire
+method nvx::host::template::Store::clone_console_endpoint
 method nvx::host::template::Store::create
 method nvx::host::template::Store::create_template
 method nvx::host::template::Store::dir

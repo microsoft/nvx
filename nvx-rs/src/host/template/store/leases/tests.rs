@@ -1636,6 +1636,101 @@ fn a_sandbox_s_store_removes_the_socket_of_its_clone_through_no_link() {
     assert_eq!(release(&store, &sandbox).unwrap(), Some(lease));
 }
 
+/// The boot console of a clone's VMM, if its launch attaches one that the caller reads, listens at
+/// an endpoint that the clone's lease fixes, so that a caller that takes the clone over finds it
+/// again: on Linux, the socket `<launch>.console` beside the clone's control socket, in the payload
+/// of the leased generation, and on Windows, a named pipe named after the launch, in the namespace
+/// of the pipes that OpenVMM takes for a microVM's consoles.
+#[test]
+fn a_lease_fixes_the_endpoint_of_its_clone_s_boot_console() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let lease = leased(&store, &published, &provision(directory.path(), "sandbox"));
+    let endpoint = store.clone_console_endpoint(&lease).unwrap();
+    let name = format!("{}.console", lease.launch());
+    if cfg!(windows) {
+        assert_eq!(endpoint, format!("//./pipe/openvmm-microvm-{name}"));
+    } else {
+        let socket = store.clone_socket_path(&lease);
+        assert_eq!(Path::new(&endpoint), socket.with_file_name(&name));
+        assert_eq!(
+            Path::new(&endpoint).parent(),
+            Some(store.payload_dir(published.generation()).as_path())
+        );
+    }
+    assert_eq!(store.clone_console_endpoint(&lease).unwrap(), endpoint);
+    let other = leased(&store, &published, &provision(directory.path(), "other"));
+    assert_ne!(store.clone_console_endpoint(&other).unwrap(), endpoint);
+}
+
+/// A release removes the socket of the boot console of its clone's VMM with the VMM's control
+/// socket, from the payload of the leased generation, as an abrupt exit of the VMM leaves them,
+/// and leaves those of the other clones of the generation. Only on Unix, where the sockets are
+/// files.
+#[cfg(unix)]
+#[test]
+fn a_release_removes_the_console_socket_of_its_clone_with_its_control_socket() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let sandbox = provision(directory.path(), "sandbox");
+    let lease = leased(&store, &published, &sandbox);
+    let other = leased(&store, &published, &provision(directory.path(), "other"));
+    let sockets = [
+        store.clone_socket_path(&lease),
+        store.clone_console_path(&lease),
+    ];
+    let others = [
+        store.clone_socket_path(&other),
+        store.clone_console_path(&other),
+    ];
+    for path in sockets.iter().chain(&others) {
+        fs::write(path, b"").unwrap();
+    }
+    assert_eq!(release(&store, &sandbox).unwrap(), Some(lease));
+    for path in &sockets {
+        assert!(fs::symlink_metadata(path).is_err(), "{}", path.display());
+    }
+    for path in &others {
+        assert!(path.exists(), "{}", path.display());
+    }
+}
+
+/// A sandbox's store that clears the runtime record of its clone's VM removes the socket of the
+/// clone's boot console with the VMM's control socket, as a recovery of the clone's launch does,
+/// and leaves those of the other clones of the generation. Only on Unix, where the sockets are
+/// files.
+#[cfg(unix)]
+#[test]
+fn a_sandbox_s_store_removes_the_console_socket_of_its_clone_with_its_control_socket() {
+    let (directory, store) = new_store();
+    let published = publish(&store, &ManifestSpec::template(), storage(1));
+    let sandbox = provision(directory.path(), "sandbox");
+    let lease = leased(&store, &published, &sandbox);
+    let other = leased(&store, &published, &provision(directory.path(), "other"));
+    let socket = store.clone_socket_path(&lease);
+    let console = store.clone_console_path(&lease);
+    let other_console = store.clone_console_path(&other);
+    for path in [&socket, &console, &other_console] {
+        fs::write(path, b"").unwrap();
+    }
+    let record = json!({
+        "format": FORMAT,
+        "launch": lease.launch().to_string(),
+        "process": { "pid": 42, "startTime": 4242, "boot": "ab".repeat(16) },
+        "endpoint": socket.to_str().unwrap(),
+        "runtime": serde_json::to_value(runtime()).unwrap(),
+    });
+    write_private(&sandbox.join(RUNTIME_NAME), record.to_string().as_bytes()).unwrap();
+    let mut locked = SandboxStore::lock_existing(&sandbox, &files(), None).unwrap();
+    locked.clear_runtime().unwrap();
+    assert!(fs::symlink_metadata(&socket).is_err());
+    assert!(fs::symlink_metadata(&console).is_err());
+    assert!(!sandbox.join(RUNTIME_NAME).exists());
+    assert!(other_console.exists());
+    drop(locked);
+    assert_eq!(release(&store, &sandbox).unwrap(), Some(lease));
+}
+
 #[test]
 fn a_retirement_that_finds_its_generation_unindexed_makes_the_index_durable_first() {
     let (_directory, store) = new_store();

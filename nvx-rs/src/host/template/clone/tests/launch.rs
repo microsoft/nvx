@@ -429,11 +429,13 @@ impl Drop for VmmDir {
 /// restore-ready event, and the snapshot that it restores, among the arguments that its launch
 /// made, which [`ARGUMENTS`] holds; holds the snapshot as OpenVMM does, which on Linux listens at
 /// the control endpoint beside the snapshot, and on Windows opens the snapshot's directory and
-/// files sharing nothing but reading, and serves its control endpoint's named pipe; sends the
+/// files sharing nothing but reading, and serves its control endpoint's named pipe, and listens at
+/// the endpoint of a boot console that the arguments attach likewise; sends the
 /// restore-ready event as OpenVMM does, or as its [plan](VmmDir::plan) says; writes [`STARTED`];
 /// then runs until a file named [`EXIT_MARKER`] appears, or for [`VMM_LIFETIME`] at most, writes
-/// the outcome report that its plan asks for, and removes its control socket as it exits, as
-/// OpenVMM does at a normal exit. It never answers on its control endpoint.
+/// the outcome report that its plan asks for, and removes its control socket, and the socket of
+/// its boot console, as it exits, as OpenVMM does at a normal exit. It never answers on its
+/// control endpoint, and writes nothing to its boot console.
 ///
 /// Where OpenVMM would refuse its arguments, this VMM writes why in [`STARTED`] after its
 /// capability and whether it sent its event. Where OpenVMM would abort a restore whose event it
@@ -570,30 +572,49 @@ struct Held {
     /// The listener at the control endpoint, on Linux, and the path at which it listens.
     #[cfg(unix)]
     listener: (std::os::unix::net::UnixListener, PathBuf),
+    /// The listener at the endpoint of the boot console, if the arguments attach one, on Linux,
+    /// and the path at which it listens.
+    #[cfg(unix)]
+    console: Option<(std::os::unix::net::UnixListener, PathBuf)>,
     /// The snapshot's directory and files, open, on Windows.
     #[cfg(windows)]
     _files: Vec<File>,
     /// The instances of the control endpoint's named pipe, on Windows.
     #[cfg(windows)]
     _control: Vec<std::os::windows::io::OwnedHandle>,
+    /// The instances of the named pipe of the boot console, if the arguments attach one, on
+    /// Windows.
+    #[cfg(windows)]
+    _console: Vec<std::os::windows::io::OwnedHandle>,
 }
 
 impl Held {
-    /// Lets go of the restore, as OpenVMM does at a normal exit, which removes its control socket.
+    /// Lets go of the restore, as OpenVMM does at a normal exit, which removes its control socket,
+    /// and the socket of its boot console.
     fn release(self) {
         #[cfg(unix)]
         {
-            let (listener, path) = self.listener;
-            drop(listener);
-            fs::remove_file(path).unwrap();
+            for (listener, path) in std::iter::once(self.listener).chain(self.console) {
+                drop(listener);
+                fs::remove_file(path).unwrap();
+            }
         }
     }
+}
+
+/// Returns the endpoint of the boot console that `arguments` attach as a listener, as
+/// `--virtio-console listen=<endpoint>` names it, if they attach one.
+fn console_endpoint(arguments: &[String]) -> Option<String> {
+    argument(arguments, "--virtio-console")
+        .and_then(|console| console.strip_prefix("listen=").map(str::to_owned))
 }
 
 /// Holds the snapshot that `arguments` restore as OpenVMM does, or returns why OpenVMM would
 /// refuse them. On Linux, OpenVMM requires the parent of its control endpoint to be a directory
 /// of its user with mode 0700, not a link, whose path with its links resolved is that of the
-/// snapshot's parent, and listens at the endpoint's path with its parent's links resolved.
+/// snapshot's parent, and listens at the endpoint's path with its parent's links resolved. It
+/// requires the socket of a boot console that it listens at to be beside the snapshot too, and
+/// listens there likewise.
 #[cfg(unix)]
 fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -628,8 +649,28 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
     let path = canonical.join(name);
     let listener = std::os::unix::net::UnixListener::bind(&path)
         .map_err(|error| format!("cannot listen at {}: {error}", path.display()))?;
+    let console = match console_endpoint(arguments).map(PathBuf::from) {
+        Some(console) => {
+            let (Some(parent), Some(name)) = (console.parent(), console.file_name()) else {
+                return Err("the boot console names no directory".to_owned());
+            };
+            if fs::canonicalize(parent).map_err(|error| error.to_string())? != canonical {
+                return Err(format!(
+                    "the boot console {} is not beside the snapshot {}",
+                    console.display(),
+                    snapshot.display()
+                ));
+            }
+            let path = canonical.join(name);
+            let listener = std::os::unix::net::UnixListener::bind(&path)
+                .map_err(|error| format!("cannot listen at {}: {error}", path.display()))?;
+            Some((listener, path))
+        }
+        None => None,
+    };
     Ok(Held {
         listener: (listener, path),
+        console,
     })
 }
 
@@ -637,7 +678,7 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
 /// refuse them: on Windows, OpenVMM opens the snapshot's directory and files for reading, sharing
 /// nothing but reading, so that a restore of another clone, which shares reading, reads them too,
 /// while no one changes them. It also serves the named pipe of its control endpoint, as
-/// [`control_pipe::serve`] does.
+/// [`control_pipe::serve`] does, and that of its boot console, if the arguments attach one.
 #[cfg(windows)]
 fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -663,9 +704,15 @@ fn hold_snapshot(arguments: &[String]) -> std::result::Result<Held, String> {
         .ok_or("no control endpoint")?;
     let control = control_pipe::serve(&endpoint)
         .map_err(|error| format!("cannot serve the control endpoint {endpoint}: {error}"))?;
+    let console = match console_endpoint(arguments) {
+        Some(console) => control_pipe::serve(&console)
+            .map_err(|error| format!("cannot serve the boot console {console}: {error}"))?,
+        None => Vec::new(),
+    };
     Ok(Held {
         _files: files,
         _control: control,
+        _console: console,
     })
 }
 
@@ -859,6 +906,89 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
         Recovery::Terminated(reference)
     );
     assert!(!exists(&socket));
+    assert_eq!(
+        fixture.store.release(&mut acquired.locked).unwrap(),
+        Some(acquired.lease.clone())
+    );
+    assert_released(&sandbox);
+    assert_untouched(&fixture, &snapshot, &contents, &sealed);
+}
+
+#[test]
+fn a_clone_with_a_boot_console_listens_at_the_endpoint_that_its_lease_fixes() {
+    let fixture = Fixture::new();
+    let (snapshot, contents) = complete_snapshot(&fixture);
+    let sealed = seals(&snapshot);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let request = tmpfs_request(&image, &binding);
+    let plan = fixture.plan(&mut acquired, &request, NO_CONTENT).unwrap();
+    assert!(!plan.boot_console());
+    let plan = plan.with_boot_console();
+    assert!(plan.boot_console());
+    let key = plan.key().clone();
+    let capability = *plan.capability();
+    let sandbox = acquired.locked.dir().to_owned();
+    let lease = acquired.lease.clone();
+    let mut vmm = VmmDir::new();
+    let dir = vmm.path().to_owned();
+    let made = RefCell::new(None);
+    let command = fake_vmm(&dir, &made);
+    let hooks = Hooks {
+        command: &command,
+        ..Hooks::LAUNCH
+    };
+    let restoring = plan
+        .launch_with(&mut acquired, Path::new(OPENVMM), key.runtime(), hooks)
+        .unwrap();
+    let reference = restoring.starting().process().reference().clone();
+    vmm.reference = Some(reference.clone());
+    // The VMM took its arguments as OpenVMM does, and listens at both of its endpoints.
+    assert_eq!(vmm.started(), format!("{} true", hex(&capability)));
+    // The boot console listens at the endpoint that the lease fixes, which the store finds again
+    // from the lease alone: on Linux, beside the snapshot, after the launch, as OpenVMM requires
+    // of a restore's console socket, and on Windows, at a named pipe after the launch.
+    let console = restoring.console_endpoint().unwrap().to_owned();
+    assert_eq!(
+        console,
+        fixture.store.clone_console_endpoint(&lease).unwrap()
+    );
+    let name = format!("{}.console", lease.launch());
+    if cfg!(target_os = "linux") {
+        assert_eq!(Path::new(&console), snapshot.parent().unwrap().join(&name));
+        assert!(exists(Path::new(&console)));
+    } else {
+        assert_eq!(console, format!("//./pipe/openvmm-microvm-{name}"));
+    }
+    let made = made.take().unwrap();
+    assert_eq!(
+        argument(&made.arguments, "--virtio-console"),
+        Some(format!("listen={console}"))
+    );
+    // The control console listens where it would without the boot console.
+    let endpoint = restoring.starting().endpoint().to_owned();
+    assert_eq!(
+        argument(&made.arguments, "--microvm-control-console"),
+        Some(format!("listen={endpoint}"))
+    );
+    assert_ne!(endpoint, console);
+    // A reader connects to the boot console as to the control endpoint, through the VMM's
+    // identity, and again once it disconnected, as one that takes the clone over does.
+    for _ in 0..2 {
+        let deadline = Instant::now() + TIMEOUT;
+        crate::host::session::connect(&console, reference.pid, reference.start_time, deadline)
+            .unwrap();
+    }
+    assert!(format!("{restoring:?}").contains(&console));
+    // Abandoning the launch ends its VMM, which leaves its sockets, and the end of the launch
+    // removes them.
+    assert_eq!(
+        restoring.abandon().unwrap(),
+        Recovery::Terminated(reference)
+    );
+    if cfg!(target_os = "linux") {
+        assert!(!exists(Path::new(&console)));
+    }
     assert_eq!(
         fixture.store.release(&mut acquired.locked).unwrap(),
         Some(acquired.lease.clone())
@@ -1669,6 +1799,47 @@ fn too_long(path: &Path) -> String {
          socket's address requires",
         path.display()
     )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_clone_whose_console_socket_does_not_fit_starts_nothing() {
+    // A store whose path leaves room for the control socket of a clone's VMM in a payload,
+    // `generations/1/<launch>.sock`, 106 bytes, but not for the socket of its boot console beside
+    // it, `<launch>.console`, three bytes longer.
+    let fixture = Fixture::in_store(
+        |directory| {
+            let socket = "/templates/generations/1/".len() + 32 + ".sock".len();
+            let room = 106 - socket - directory.as_os_str().len() - 1;
+            let parent = directory.join("p".repeat(room));
+            assert_eq!(platform::create_owner_only_dir(&parent).unwrap(), None);
+            parent.join("templates")
+        },
+        |_, _, _| {},
+    );
+    complete_snapshot(&fixture);
+    let (image, binding) = fixture.image("distro.erofs", IMAGE_LEN);
+    let mut acquired = fixture.acquire("sandbox");
+    let socket = fixture.store.clone_socket_path(&acquired.lease);
+    let console = fixture.store.clone_console_path(&acquired.lease);
+    assert_eq!(socket.as_os_str().len(), 106, "{}", socket.display());
+    assert_eq!(console.as_os_str().len(), 109, "{}", console.display());
+    let plan = fixture
+        .plan(&mut acquired, &tmpfs_request(&image, &binding), NO_CONTENT)
+        .unwrap()
+        .with_boot_console();
+    let hooks = Hooks {
+        command: &never_spawned,
+        ..Hooks::LAUNCH
+    };
+    let runtime = runtime_of(&fixture);
+    let launched = plan.launch_with(&mut acquired, Path::new(OPENVMM), &runtime, hooks);
+    let (kind, message) = refused_at(launched, Stage::Launch, Evidence::EndpointBind);
+    assert_eq!(
+        (kind, message),
+        (ErrorKind::Unsupported, too_long(&console))
+    );
+    assert_unlaunched(&fixture, &acquired);
 }
 
 #[cfg(target_os = "linux")]

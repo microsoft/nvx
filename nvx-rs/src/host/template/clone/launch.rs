@@ -23,6 +23,7 @@ use crate::host::platform::{self, ReadyListener};
 use crate::host::sandbox::SandboxPlan;
 use crate::host::sandbox::distro::CheckedDistro;
 use crate::host::store::files::write_private;
+use crate::host::store::lease::clone_console_endpoint;
 use crate::host::store::{LockedStore, Recovery, RuntimeIdentity};
 use crate::host::supervisor::{self, Inherited, Starting, VmmCommand};
 use crate::host::template::key::TemplateKey;
@@ -120,7 +121,13 @@ impl ClonePlan {
     /// the lease reserved, `<launch>.sock` in the payload, after the launch's identity, rather
     /// than at the sandbox's own control socket, as
     /// [`Store::acquire`](crate::host::template::Store::acquire) describes; on Windows, at a named
-    /// pipe, as every launch does. [`Starting::endpoint`] returns it.
+    /// pipe, as every launch does. [`Starting::endpoint`] returns it. The boot console of a plan
+    /// that asks for one that the caller reads, [`ClonePlan::with_boot_console`], listens at the
+    /// endpoint that the lease fixes,
+    /// [`Store::clone_console_endpoint`](crate::host::template::Store::clone_console_endpoint): on
+    /// Linux, the socket `<launch>.console` beside the control socket, where OpenVMM requires it
+    /// too, and on Windows, the named pipe `//./pipe/openvmm-microvm-<launch>.console`.
+    /// [`Restoring::console_endpoint`] returns it.
     ///
     /// The VMM's arguments are those of the clone's devices: the microVM machine, the clone's
     /// image as the read-only `distro` block device, which OpenVMM opens at its path, as [Block
@@ -147,8 +154,12 @@ impl ClonePlan {
     /// online at boot, [`TemplateKey::boot_processors`], `--restore-processors` with the processor
     /// target, which brings online those of the target beyond them, `--restore-memory` with the
     /// memory target,
-    /// `--restore-ready-path` with the endpoint of the restore-ready event, a boot console that
-    /// discards its output, as cold boots have, the control console at the launch's endpoint,
+    /// `--restore-ready-path` with the endpoint of the restore-ready event, the boot console: one
+    /// that discards its output, as cold boots have, `--virtio-console none`, or for a plan that
+    /// asks for one that the caller reads, a listener at its endpoint,
+    /// `--virtio-console listen=<endpoint>`, which OpenVMM attaches to the template's boot
+    /// console, and which discards the guest's output while no reader is connected; the control
+    /// console at the launch's endpoint,
     /// which authenticates with the capability that the VMM reads from its standard input, and the
     /// outcome report, [`SandboxStore::outcome_path`](crate::host::store::SandboxStore::outcome_path).
     /// They name no kernel, initramfs, kernel command line, or RAM, which the snapshot fixes. The
@@ -166,7 +177,7 @@ impl ClonePlan {
     /// of the lease, [`Store::release`](crate::host::template::Store::release), removes, and a
     /// launch that the journal names, which a reattach ends, as
     /// [Crashes](crate::host::supervisor#crashes) describes, removing the control socket that the
-    /// VMM, if it started, left beside the snapshot.
+    /// VMM, if it started, left beside the snapshot, with the socket of its boot console.
     ///
     /// Like every launch of the sandbox's store, the launch names the sandbox's files by their
     /// paths, under its lock: the progress log that it creates, the activation record that it
@@ -203,10 +214,12 @@ impl ClonePlan {
     ///   0700, as OpenVMM requires of the directory of a control socket,
     ///   [`Evidence::MalformedGeneration`], and with
     ///   [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) if the path of the control
-    ///   socket, with or without the payload's links resolved, or of the restore-ready socket, is
-    ///   not shorter than 108 bytes, as a Unix socket's address requires, or is not valid UTF-8,
-    ///   as OpenVMM and the host take it, or if the path of the control socket holds a comma or an
-    ///   equals sign, which OpenVMM's option `listen=<path>` cannot take,
+    ///   socket, with or without the payload's links resolved, of the console socket beside it,
+    ///   for a plan that asks for a boot console that the caller reads, likewise, or of the
+    ///   restore-ready socket, is not shorter than 108 bytes, as a Unix socket's address
+    ///   requires, or is not valid UTF-8, as OpenVMM and the host take it, or if the path of the
+    ///   control socket, or of the console socket, holds a comma or an equals sign, which
+    ///   OpenVMM's option `listen=<path>` cannot take,
     ///   [`Evidence::EndpointBind`]; as
     ///   [`ExportPlan::verify`](crate::host::filesystem::ExportPlan::verify) fails for the clone's
     ///   export, if it has one: with [`ErrorKind::Other`](crate::ErrorKind::Other) for a
@@ -286,7 +299,23 @@ impl ClonePlan {
             capability,
             devices,
             export,
+            console,
         } = self;
+        // The boot console that the caller reads listens at the endpoint that the lease fixes,
+        // beside the clone's control socket on Linux, which the check of the launch checked.
+        let console = if console {
+            let socket = locked.reserved_console().ok_or_else(|| {
+                unrecorded(Fault::host(Error::other(
+                    "the lock of a clone's launch reserves no launch, whose boot console it names",
+                )))
+            })?;
+            Some(
+                clone_console_endpoint(&socket, lease.launch())
+                    .map_err(|error| unrecorded(Fault::new(Evidence::EndpointBind, error)))?,
+            )
+        } else {
+            None
+        };
         let mut devices = device_arguments(&devices)
             .attribute(Evidence::InvalidSettings)
             .map_err(unrecorded)?;
@@ -360,6 +389,7 @@ impl ClonePlan {
             processors,
             memory,
             ready: &ready,
+            console: console.as_deref(),
             report: locked.outcome_path(),
         };
         let dir = locked.dir().to_owned();
@@ -417,6 +447,7 @@ impl ClonePlan {
             launched,
             ready,
             listener,
+            console,
             image,
             activation,
             record,
@@ -506,7 +537,8 @@ impl ClonePlan {
         if cfg!(target_os = "linux")
             && let Some(socket) = locked.reserved_socket()
         {
-            self.check_sockets(socket, &locked.restore_ready_path())?;
+            let console = locked.reserved_console().filter(|_| self.console);
+            self.check_sockets(socket, console.as_deref(), &locked.restore_ready_path())?;
         }
         // The objects of the export must still be those that its plan found, before each restore,
         // as before each cold start: a refusal is of the request's mappings, which no longer name
@@ -524,18 +556,24 @@ impl ClonePlan {
     }
 
     /// Refuses, on Linux, a control socket of the clone's VMM at `socket`, beside the plan's
-    /// snapshot, and a socket of the restore-ready event at `ready`, that OpenVMM or the host
-    /// could not use, as [`launch`](Self::launch) describes, without writing anything.
+    /// snapshot, a socket of its boot console at `console`, if the plan asks for one, beside the
+    /// control socket, and a socket of the restore-ready event at `ready`, that OpenVMM or the
+    /// host could not use, as [`launch`](Self::launch) describes, without writing anything.
     ///
     /// OpenVMM requires the control socket of a restore in the snapshot's parent, a directory of
-    /// the current user with mode 0700, which the payload of a generation is, and listens at the
-    /// socket's path with the parent's links resolved, while the host connects at the path that it
-    /// recorded: each must be shorter than 108 bytes, as a Unix socket's address requires, and
-    /// valid UTF-8, as OpenVMM and the host take them, as must the path of the restore-ready
-    /// socket. OpenVMM takes the control socket's path in its option `listen=<path>`, among
-    /// options that commas separate, and whose values follow an equals sign, so the path must hold
-    /// neither.
-    fn check_sockets(&self, socket: &Path, ready: &Path) -> Result<(), Fault> {
+    /// the current user with mode 0700, which the payload of a generation is, and the socket of a
+    /// restore's boot console there too, and listens at each socket's path with the parent's links
+    /// resolved, while the host connects at the path that it recorded: each must be shorter than
+    /// 108 bytes, as a Unix socket's address requires, and valid UTF-8, as OpenVMM and the host
+    /// take them, as must the path of the restore-ready socket. OpenVMM takes the paths of the
+    /// control and console sockets in its option `listen=<path>`, among options that commas
+    /// separate, and whose values follow an equals sign, so the paths must hold neither.
+    fn check_sockets(
+        &self,
+        socket: &Path,
+        console: Option<&Path>,
+        ready: &Path,
+    ) -> Result<(), Fault> {
         let (Some(payload), Some(name)) = (socket.parent(), socket.file_name()) else {
             return Err(Fault::new(
                 Evidence::HostFailure,
@@ -592,7 +630,13 @@ impl ClonePlan {
             ));
         }
         let resolved = canonical.join(name);
-        for path in [socket, &resolved, ready] {
+        let mut paths = vec![socket.to_owned(), resolved, ready.to_owned()];
+        // The boot console's socket is beside the control socket, in the payload.
+        if let Some(console) = console {
+            paths.push(console.to_owned());
+            paths.extend(console.file_name().map(|name| canonical.join(name)));
+        }
+        for path in &paths {
             if path.as_os_str().len() >= SOCKET_PATH_LIMIT {
                 return Err(Fault::new(
                     Evidence::EndpointBind,
@@ -604,7 +648,7 @@ impl ClonePlan {
                 ));
             }
         }
-        for path in [socket, &resolved, ready] {
+        for path in &paths {
             if path.to_str().is_none() {
                 return Err(Fault::new(
                     Evidence::EndpointBind,
@@ -616,15 +660,19 @@ impl ClonePlan {
                 ));
             }
         }
-        if socket.to_string_lossy().contains([',', '=']) {
-            return Err(Fault::new(
-                Evidence::EndpointBind,
-                Error::unsupported(format!(
-                    "the path of the control socket {} of a clone's VMM must hold no ',' or '=', \
-                     which end the path in OpenVMM's option `listen=<path>`",
-                    socket.display()
-                )),
-            ));
+        for (path, what) in std::iter::once((socket, "control socket"))
+            .chain(console.map(|console| (console, "console socket")))
+        {
+            if path.to_string_lossy().contains([',', '=']) {
+                return Err(Fault::new(
+                    Evidence::EndpointBind,
+                    Error::unsupported(format!(
+                        "the path of the {what} {} of a clone's VMM must hold no ',' or '=', \
+                         which end the path in OpenVMM's option `listen=<path>`",
+                        path.display()
+                    )),
+                ));
+            }
         }
         Ok(())
     }
@@ -663,6 +711,9 @@ struct Restore<'a> {
     memory: u64,
     /// The endpoint of the restore-ready event.
     ready: &'a str,
+    /// The endpoint at which the boot console that the caller reads listens, or `None` for a boot
+    /// console that discards its output.
+    console: Option<&'a str>,
     /// The path of the VMM's outcome report.
     report: PathBuf,
 }
@@ -677,6 +728,9 @@ impl Restore<'_> {
         let processors = self.processors.to_string();
         let memory = format!("{}M", self.memory / MIB);
         let listen = format!("listen={endpoint}");
+        let console = self
+            .console
+            .map_or_else(|| "none".to_owned(), |console| format!("listen={console}"));
         let mut options = vec![
             OsStr::new("--single-process"),
             OsStr::new("--hypervisor"),
@@ -699,7 +753,7 @@ impl Restore<'_> {
             OsStr::new("--restore-ready-path"),
             OsStr::new(self.ready),
             OsStr::new("--virtio-console"),
-            OsStr::new("none"),
+            OsStr::new(&console),
             OsStr::new("--microvm-control-console"),
             OsStr::new(&listen),
             OsStr::new("--microvm-control-auth-stdin"),
@@ -732,6 +786,9 @@ pub struct Restoring<'s> {
     pub(super) ready: String,
     /// The listener of the restore-ready event.
     pub(super) listener: ReadyListener,
+    /// The endpoint at which the clone's boot console listens, if the launch attached one that
+    /// the caller reads.
+    pub(super) console: Option<String>,
     /// The clone's image, open for reading, which the plan checked.
     pub(super) image: CheckedDistro,
     /// The clone's activation record.
@@ -758,6 +815,18 @@ impl<'s> Restoring<'s> {
     /// of a named pipe, `//./pipe/NAME`, on Windows.
     pub fn ready_endpoint(&self) -> &str {
         &self.ready
+    }
+
+    /// Returns the endpoint at which the clone's boot console listens, if the plan asked for one
+    /// that the caller reads, [`ClonePlan::with_boot_console`], as OpenVMM's
+    /// `--virtio-console listen=<endpoint>` takes it, and as
+    /// [`Store::clone_console_endpoint`](crate::host::template::Store::clone_console_endpoint)
+    /// returns it from the clone's lease: the path of a Unix socket beside the snapshot on Linux,
+    /// and the name of a named pipe, `//./pipe/NAME`, on Windows. The VMM listens there before the
+    /// restored guest runs, until it exits, and discards the guest's output while no reader is
+    /// connected: a reader reads what the guest writes once it connected.
+    pub fn console_endpoint(&self) -> Option<&str> {
+        self.console.as_deref()
     }
 
     /// Returns the clone's activation record, as the sandbox holds it.
@@ -791,6 +860,7 @@ impl fmt::Debug for Restoring<'_> {
             .field("starting", &self.starting)
             .field("ready", &self.ready)
             .field("listener", &self.listener)
+            .field("console", &self.console)
             .field("image", &self.image)
             .field("activation", &self.activation)
             .finish_non_exhaustive()

@@ -248,6 +248,8 @@ impl Index {
 ///       snapshot/          its snapshot, as OpenVMM published it
 ///       <launch>.sock      on Linux, the control socket of the VMM of a clone that leases it,
 ///                          named after the clone's launch, until the lease's release
+///       <launch>.console   on Linux, the socket of the boot console of such a VMM, whose launch
+///                          attached one that the caller reads, until the lease's release
 ///   leases/                the records of the leases that the store granted
 ///     <L>.json             the record of the lease L
 ///   tombstones/            the tombstones of the generations that take no new leases
@@ -427,11 +429,12 @@ impl Index {
 ///
 /// On Linux, a payload holds the control socket of the VMM of each clone that leases it,
 /// `<launch>.sock`, named after the launch that the lease reserves, beside the snapshot that the
-/// clone restores, and of no clone whose lease has ended: the release makes the socket's absence
-/// durable before it ends the lease. So a payload holds entries other than its capture's while
-/// its generation has leases, which nothing that reads an indexed payload may refuse, and a
-/// retirement deletes the payload with any socket that a crash, or a removal of a sandbox that
-/// never released its lease, left in it.
+/// clone restores, with the socket of the clone's boot console, `<launch>.console`, if its launch
+/// attached one that the caller reads, and of no clone whose lease has ended: the release makes
+/// the sockets' absence durable before it ends the lease. So a payload holds entries other than
+/// its capture's while its generation has leases, which nothing that reads an indexed payload may
+/// refuse, and a retirement deletes the payload with any socket that a crash, or a removal of a
+/// sandbox that never released its lease, left in it.
 ///
 /// A tombstone, which [`Store::tombstone`] writes, quarantines a generation: it takes no new
 /// lease, and selection skips it, while the leases that it granted keep working.

@@ -264,6 +264,7 @@ impl<'s> Restoring<'s> {
             launched,
             ready: _,
             mut listener,
+            console: _,
             image,
             activation,
             record,

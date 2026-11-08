@@ -72,8 +72,11 @@ impl From<io::Error> for SessionError {
     }
 }
 
-/// Connects to the control endpoint of OpenVMM process `pid`, retrying until `deadline` while
-/// the endpoint is not yet available and the process is still alive.
+/// Connects to an endpoint that OpenVMM process `pid` serves, its control endpoint, or the boot
+/// console of a clone,
+/// [`Store::clone_console_endpoint`](crate::host::template::Store::clone_console_endpoint),
+/// retrying until `deadline` while the endpoint is not yet available and the process is still
+/// alive. An endpoint that another process serves is [`SessionError::Refused`].
 pub fn connect(
     endpoint: &str,
     pid: u32,
