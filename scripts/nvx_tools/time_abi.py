@@ -143,16 +143,18 @@ class CpuGeneration:
 # no built-in profile serves, reads a copy of its own,
 # nvx-rs/src/host/cli/cpu_generations.json.
 # Model 85 also covers Cascade Lake (steppings 5-7) and Cooper Lake (10-11),
-# which have no profile. AMD's family 25 model 1 is Milan's in every stepping,
-# Milan-X's 2 included, family 25 model 17 Genoa's, Genoa-X's included, and
-# family 26 model 2 Turin's. Genoa's latest profile, amd.genoa.v2, leaves out
-# what amd.genoa.v1 presents in CPUID 0x80000021 and the basic leaves above
-# 0xD, which the Microsoft hypervisor of the Azure Genoa VMs fingerprinted so
-# far does not present.
+# which have no profile. Model 173 is Granite Rapids-AP and -SP; Granite
+# Rapids-D, model 174, has no profile. AMD's family 25 model 1 is Milan's in
+# every stepping, Milan-X's 2 included, family 25 model 17 Genoa's, Genoa-X's
+# included, and family 26 model 2 Turin's. Genoa's latest profile,
+# amd.genoa.v2, leaves out what amd.genoa.v1 presents in CPUID 0x80000021 and
+# the basic leaves above 0xD, which the Microsoft hypervisor of the Azure Genoa
+# VMs fingerprinted so far does not present.
 CPU_GENERATIONS: tuple[CpuGeneration, ...] = (
     CpuGeneration("skylake-sp", "GenuineIntel", (CpuModel(6, 85, range(5)),)),
     CpuGeneration("icelake-sp", "GenuineIntel", (CpuModel(6, 106),)),
     CpuGeneration("emeraldrapids", "GenuineIntel", (CpuModel(6, 207),)),
+    CpuGeneration("graniterapids", "GenuineIntel", (CpuModel(6, 173),)),
     CpuGeneration("alderlake", "GenuineIntel", (CpuModel(6, 151), CpuModel(6, 154))),
     CpuGeneration("milan", "AuthenticAMD", (CpuModel(25, 1),)),
     CpuGeneration("genoa", "AuthenticAMD", (CpuModel(25, 17),), revision=2),

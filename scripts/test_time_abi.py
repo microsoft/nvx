@@ -235,6 +235,7 @@ class FieldParsingTests(unittest.TestCase):
         self.assertEqual(name(85, 4), "skylake-sp")
         self.assertEqual(name(106, 6), "icelake-sp")
         self.assertEqual(name(207, 2), "emeraldrapids")
+        self.assertEqual(name(173, 1), "graniterapids")
         # Alder Lake-S and Alder Lake-P and -H share one profile.
         self.assertEqual(name(151, 2), "alderlake")
         self.assertEqual(name(154, 3), "alderlake")
@@ -285,6 +286,7 @@ class FieldParsingTests(unittest.TestCase):
                 "intel.skylake-sp.v1",
                 "intel.icelake-sp.v1",
                 "intel.emeraldrapids.v1",
+                "intel.graniterapids.v1",
                 "intel.alderlake.v1",
                 "amd.milan.v1",
                 "amd.genoa.v2",
@@ -299,7 +301,8 @@ class FieldParsingTests(unittest.TestCase):
         self.assertEqual(
             time_abi.describe_cpu_generations(),
             "skylake-sp 6/85 steppings 0-4, icelake-sp 6/106, emeraldrapids 6/207, "
-            "alderlake 6/151 and 6/154, milan 25/1, genoa 25/17, turin 26/2",
+            "graniterapids 6/173, alderlake 6/151 and 6/154, milan 25/1, genoa 25/17, "
+            "turin 26/2",
         )
 
     def test_the_catalog_copy_matches_openvmm_pinned_profiles(self):

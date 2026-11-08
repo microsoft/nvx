@@ -37,6 +37,7 @@ fn the_catalog_lists_the_built_in_profiles() {
             "intel.skylake-sp.v1",
             "intel.icelake-sp.v1",
             "intel.emeraldrapids.v1",
+            "intel.graniterapids.v1",
             "intel.alderlake.v1",
             "amd.milan.v1",
             "amd.genoa.v1",
@@ -48,8 +49,8 @@ fn the_catalog_lists_the_built_in_profiles() {
     // once.
     assert_eq!(
         describe_generations(&catalog),
-        "skylake-sp 6/85 steppings 0-4, icelake-sp 6/106, emeraldrapids 6/207, alderlake \
-             6/151 and 6/154, milan 25/1, genoa 25/17, turin 26/2"
+        "skylake-sp 6/85 steppings 0-4, icelake-sp 6/106, emeraldrapids 6/207, graniterapids \
+             6/173, alderlake 6/151 and 6/154, milan 25/1, genoa 25/17, turin 26/2"
     );
 }
 
@@ -59,6 +60,7 @@ fn cpus_map_to_the_generations_of_the_built_in_profiles() {
     assert_eq!(intel(85, 4).as_deref(), Some("skylake-sp"));
     assert_eq!(intel(106, 6).as_deref(), Some("icelake-sp"));
     assert_eq!(intel(207, 2).as_deref(), Some("emeraldrapids"));
+    assert_eq!(intel(173, 1).as_deref(), Some("graniterapids"));
     // Alder Lake-S and Alder Lake-P and -H share one profile.
     assert_eq!(intel(151, 2).as_deref(), Some("alderlake"));
     assert_eq!(intel(154, 3).as_deref(), Some("alderlake"));
@@ -290,8 +292,8 @@ fn unserved_intel_and_amd_cpus_get_the_fallback_and_a_profile_request() {
              Intel(R) Core(TM) i7-1185G7), so --cpu-profile auto, the default, falls back on it to \
              a CPU profile derived from this host, which OpenVMM warns about with \
              NVX-CPU-PROFILE-FALLBACK:; the built-in profiles cover skylake-sp 6/85 steppings \
-             0-4, icelake-sp 6/106, emeraldrapids 6/207, alderlake 6/151 and 6/154, milan 25/1, \
-             genoa 25/17, turin 26/2."
+             0-4, icelake-sp 6/106, emeraldrapids 6/207, graniterapids 6/173, alderlake 6/151 \
+             and 6/154, milan 25/1, genoa 25/17, turin 26/2."
     );
     assert!(lines[1].contains("OpenVMM's error above names the cause"));
     assert!(!guidance.contains(PROFILE_HOST_UNKNOWN));
@@ -343,9 +345,9 @@ fn unserved_cpus_of_other_vendors_get_no_profile_request() {
         "nvx: no built-in CPU profile serves this host's CPU, HygonGenuine 24/0/1, so a cold \
              boot with --cpu-profile auto, the default, fails on it with E_PROFILE_HOST_UNKNOWN; \
              the built-in profiles cover skylake-sp 6/85 steppings 0-4, icelake-sp 6/106, \
-             emeraldrapids 6/207, alderlake 6/151 and 6/154, milan 25/1, genoa 25/17, turin \
-             26/2.\nnvx: --cpu-profile host cannot boot on it either: host CPU profiles serve only \
-             Intel and AMD CPUs."
+             emeraldrapids 6/207, graniterapids 6/173, alderlake 6/151 and 6/154, milan 25/1, \
+             genoa 25/17, turin 26/2.\nnvx: --cpu-profile host cannot boot on it either: host CPU \
+             profiles serve only Intel and AMD CPUs."
     );
     assert_eq!(guide(None, &hygon).as_ref(), Some(&guidance));
     assert_eq!(guide(Some(HOST_PROFILE), &hygon).as_ref(), Some(&guidance));
