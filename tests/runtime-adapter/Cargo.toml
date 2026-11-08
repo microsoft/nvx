@@ -15,7 +15,7 @@ publish = false
 # does. Without features, the adapter builds against the protocol-only `nvx`.
 default = []
 # The host program: the host API of `nvx` and the `runtime-adapter-host` binary.
-host = ["nvx/host", "dep:serde_json"]
+host = ["nvx/host", "dep:serde_json", "dep:nix"]
 # The guest agent: the guest API of `nvx` and the `runtime-adapter-guest` binary, which builds as a
 # static `x86_64-unknown-linux-musl` executable.
 guest = ["nvx/guest", "dep:nix"]
@@ -30,8 +30,9 @@ serde_json = { version = "1.0.120", optional = true }
 # worker polls its nonblocking session and executions, its probes read how much space a file
 # system has, its mapping probes mount a procfs in the root, and
 # the helper of its `entries` probe enters a mount namespace of its own and leaks a descriptor to
-# its executions, which open raw sockets: system calls that `nvx` leaves to the caller. The guest
-# side of `nvx` depends on the same release, with these features among its own.
+# its executions, which open raw sockets: system calls that `nvx` leaves to the caller. The host
+# program opens a clone's console log without following a link or waiting for a FIFO's reader. The
+# guest side of `nvx` depends on the same release, with these features among its own.
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31.3", default-features = false, features = [
     "fs",

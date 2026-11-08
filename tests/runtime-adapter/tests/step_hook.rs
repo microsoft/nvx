@@ -1,7 +1,7 @@
 //! The host program's step hook, for tests: the values of `RUNTIME_ADAPTER_STEP_HOOK` that set it,
-//! and those that the host program refuses, a start's, which it takes at `checked` alone, and a
-//! pause, which waits until its file is gone, on Windows until a pending deletion of the file
-//! completes, and says how long it paused. The tests need no hypervisor; the VM tests pause
+//! and those that the host program refuses, a start's, which it takes at `checked` alone, and
+//! `console`'s, which it takes at `found` alone, and a pause, which waits until its file is gone,
+//! on Windows until a pending deletion of the file completes, and says how long it paused. The tests need no hypervisor; the VM tests pause
 //! launches, starts, and stops with the hook, and end them.
 #![cfg(feature = "host")]
 
@@ -264,4 +264,41 @@ fn a_start_takes_a_step_hook_at_checked_alone() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("failure.stage=selection\n"), "{stdout}");
     assert!(!store.exists(), "the start created the sandbox's store");
+}
+
+#[test]
+fn console_takes_a_step_hook_at_found_alone() {
+    let console = |value: &str| {
+        Command::new(env!("CARGO_BIN_EXE_runtime-adapter-host"))
+            .args(["console", "store", "marker"])
+            .env(STEP_HOOK, value)
+            .env_remove(Artifacts::ENV_DIR)
+            .output()
+            .unwrap()
+    };
+
+    // A hook at a step that `console` does not stop at is a usage error, as one that names no
+    // step.
+    for (value, problem) in [
+        (
+            "checked:exit",
+            "names the step checked, but console takes the hook at found alone",
+        ),
+        ("commit:pause:pause", "names the step commit"),
+        ("nowhere:exit", "names the step \"nowhere\""),
+    ] {
+        let output = console(value);
+        assert_eq!(output.status.code(), Some(2), "{value:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(problem) && stderr.contains("usage: runtime-adapter-host"),
+            "{value:?}: {stderr}"
+        );
+    }
+
+    // One at `found` makes the command, which then needs NVX's artifacts.
+    let output = console("found:exit");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(Artifacts::ENV_DIR), "{stderr}");
 }

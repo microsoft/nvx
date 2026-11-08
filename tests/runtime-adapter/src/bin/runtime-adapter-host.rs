@@ -130,8 +130,8 @@
 //! - `runtime-adapter-host start STORE --template TEMPLATES --generation G --distro FORMAT:PATH
 //!   --distro-identity UUID --upper (scratch:PATH | ram) [--processors N] [--memory MIB]
 //!   [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY]
-//!   [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES]`
-//!   starts a clone of the
+//!   [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE]
+//!   [--boot-console (none | listen)] [SHARES]` starts a clone of the
 //!   generation G of the template store TEMPLATES, an `nvx::host::template::Store`, in the sandbox
 //!   store STORE, which it creates if needed; see `runtime_adapter::clone`. The clone's VM has the
 //!   network of the file FILE, if given, which the command reads first, as `launch` reads its
@@ -197,7 +197,12 @@
 //!   down the root, and which then fails as below. Once every mapping applied, the sequence
 //!   starts the clone's sandbox, and the command exchanges a `Ping` and the longest `Echo` with
 //!   the guest agent, commits the launch, prints the bytes that it read, `read-bytes`, and exits,
-//!   leaving the VM running, and the sandbox holding the lease, which a stop releases.
+//!   leaving the VM running, and the sandbox holding the lease, which a stop releases. With
+//!   `--boot-console listen`, NVX's plan asks, with `ClonePlan::with_boot_console`, for a clone
+//!   whose launch attaches a listener to the template's boot console, which discards what the
+//!   guest writes while no reader is connected, at the endpoint that the clone's lease fixes,
+//!   which the command prints once the clone's VMM runs, and which `console` reads; see
+//!   `runtime_adapter::console`.
 //!   A clone that fails, from its plan to its commit, fails with NVX's
 //!   `nvx::host::template::CloneFailure`, which attributes the failure by its evidence, and records
 //!   it in STORE from the clone's launch on: the command prints the failure's record, releases the
@@ -225,6 +230,17 @@
 //!   runs each PROBE in the VM's layered root, and prints the facts that it found. A PROBE is the
 //!   text of a probe: its name, then its arguments, each after one space; see
 //!   `runtime_adapter::probe` and `runtime_adapter::worker::probes`.
+//! - `runtime-adapter-host console STORE MARKER` connects to the boot console of the clone of
+//!   STORE, which its start asked to listen, at the endpoint that its lease fixes,
+//!   `Store::clone_console_endpoint`, through the clone VMM's verified process identity, and reads
+//!   it from then on, while it reattaches to the clone as `reattach` does, and asks the guest to
+//!   write MARKER, a probe's argument, to its kernel's log, with the `kmsg` probe, until it
+//!   delivered MARKER, whatever the reattach and the guest did. Under the sandbox's lock, it
+//!   appends what it read to STORE's console log, and prints it, even when the reattach ended the
+//!   clone, which then ends the command as it ends `reattach`, or failed, or the guest did not
+//!   answer, or the console ended, or its deadline passed, before MARKER, which then fails the
+//!   command; see `runtime_adapter::console`. It fails for a VM that booted cold, and for a clone
+//!   without a boot console that listens.
 //! - `runtime-adapter-host exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
 //!   `reattach` does, then runs each EXECUTION in the VM's layered root, all at once, over that one
 //!   session, through `runtime_adapter::host::Executions`, and prints their outputs and outcomes
@@ -322,6 +338,10 @@
 //! - `sandbox`: `started` once the guest started the sandbox;
 //! - `preflight`: `staged` once `run` staged the images of its clone;
 //! - `PROBE.KEY`: the fact KEY that the probe named PROBE found;
+//! - `console`: the endpoint at which the boot console of a clone listens, which a start whose
+//!   clone has one prints once the clone's VMM runs, and which `console` reads;
+//! - `console.read` and `console.text`: how many bytes `console` read of the console, and what it
+//!   read, escaped as a probe's fact;
 //! - `exec.N.KEY`: what execution N did, with these KEYs:
 //!   - `launch`: `started`, `failed STAGE ERRNO`, with the number of the guest's stage that failed
 //!     and the error number, or `none` once the guest reported neither;
@@ -409,7 +429,9 @@
 //! leaves out of its deadline, or exits it there without unwinding, with status 5; see
 //! `runtime_adapter::hook`. `start` takes one at `checked` alone: once NVX's `ClonePlan` checked
 //! the clone against the leased generation, and holds the files that its checks opened, before the
-//! start records the clone, and before the clone's launch checks its export again. `start` and
+//! start records the clone, and before the clone's launch checks its export again. `console`
+//! takes one at `found` alone: once it found the clone running, and connected to its boot
+//! console, before it asks the guest to write its marker. `start` and
 //! `run` take the host's time, at which the store checks the generation's eligibility, from the
 //! variable `RUNTIME_ADAPTER_HOST_TIME`, if it is set, as a clock fixture, such as another boot's;
 //! see
@@ -433,8 +455,9 @@
 //! does once its execution failed to run, after the teardown, unless the teardown ended with 4, 8,
 //! or 9, as when the clone's VM exited during the execution, which `run` then exits with, after
 //! the diagnostic. Anything else is a usage error, with status 2, as is a value of
-//! `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, or a step hook of a start at another step
-//! than `checked`, a value of `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time, or a value of
+//! `RUNTIME_ADAPTER_STEP_HOOK` that sets no step hook, a step hook of a start at another step
+//! than `checked`, or of `console` at another step than `found`, a value of
+//! `RUNTIME_ADAPTER_HOST_TIME` that is not a host's time, or a value of
 //! `RUNTIME_ADAPTER_REPAIR_DELAY` that sets no delay.
 
 use std::env;
@@ -474,6 +497,7 @@ use runtime_adapter::capture::{
     Request, repair_delay_from_env,
 };
 use runtime_adapter::clone::{CloneRecord, host_time_from_env};
+use runtime_adapter::console;
 use runtime_adapter::exec::{self, AccountMode, HostExecution, Start};
 use runtime_adapter::frame::{MAX_BODY, Message};
 use runtime_adapter::generations::{self, Entry};
@@ -495,6 +519,10 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long reattach, stop, and probe wait to attach a session and for the guest agent's answers.
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long `console` waits for a clone's boot console to take it as its reader, and then, once the
+/// reattach and the guest's answer to the request for the marker, which [`SESSION_TIMEOUT`] bounds
+/// each, returned, for the console to deliver the marker that the guest wrote to its kernel's log.
+const CONSOLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a stop waits for the guest agent's confirmation and for the VM to exit, and how long
 /// a launch whose root failed waits for the VM to exit.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -597,6 +625,7 @@ const USAGE: &str = concat!(
     " [--scratch-journal POLICY]\n",
     "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
     " [--network FILE]\n",
+    "           [--boot-console (none | listen)]\n",
     "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]...\n",
     "            [--reserved TARGET]... [--share-root DIR]...]\n",
     "       runtime-adapter-host run STORE --template TEMPLATES --generation G",
@@ -607,9 +636,11 @@ const USAGE: &str = concat!(
     " [--scratch-journal POLICY]\n",
     "           [--first-partition-bound BYTES] [--machine-id (image | generated)]",
     " [--network FILE]\n",
+    "           [--boot-console (none | listen)]\n",
     "           [--share HOST:TARGET[:ro]... [--deny PATH]... [--allow PATH]...\n",
     "            [--reserved TARGET]... [--share-root DIR]...] EXECUTION\n",
     "       runtime-adapter-host probe STORE PROBE... [--guest-build BUILD]\n",
+    "       runtime-adapter-host console STORE MARKER [--guest-build BUILD]\n",
     "       runtime-adapter-host exec STORE [--guest-build BUILD] EXECUTION [';' EXECUTION]...\n",
     "           EXECUTION: [--identity UID:GID [--groups GID,...] [--capabilities N,...]",
     " [--numeric]]\n",
@@ -732,6 +763,18 @@ enum Command {
         guest_build: String,
         /// The probes, in order.
         probes: Vec<Probe>,
+    },
+    /// Reattach to a clone, read its boot console until it delivers what the guest wrote to its
+    /// kernel's log, and keep what it read in the sandbox's console log.
+    Console {
+        /// The sandbox's store.
+        store: PathBuf,
+        /// The guest agent's build.
+        guest_build: String,
+        /// The `kmsg` probe that writes the marker that the command reads for.
+        marker: Probe,
+        /// The step hook, for tests, if `RUNTIME_ADAPTER_STEP_HOOK` sets one, at `found`.
+        hook: Option<StepHook>,
     },
     /// Reattach to the VM, and run executions in its layered root.
     Exec {
@@ -899,6 +942,9 @@ struct CloneOptions {
     /// The file of the clone's network, if it has one, which the start reads first, as a launch
     /// reads its network.
     network: Option<PathBuf>,
+    /// Whether the clone's launch attaches a boot console that listens at the endpoint that the
+    /// clone's lease fixes, which `console` reads, rather than one that discards its output.
+    boot_console: bool,
 }
 
 impl CloneOptions {
@@ -986,6 +1032,8 @@ struct Options {
     memory_capacity: Option<u64>,
     /// `--scratch-length`.
     scratch_length: Option<u64>,
+    /// `--boot-console`: whether the clone's launch attaches a boot console that listens.
+    boot_console: Option<bool>,
 }
 
 fn main() -> ExitCode {
@@ -1080,6 +1128,12 @@ fn main() -> ExitCode {
             guest_build,
             probes,
         } => probe(&store, &guest_build, &probes),
+        Command::Console {
+            store,
+            guest_build,
+            marker,
+            hook,
+        } => console(&store, &guest_build, &marker, hook.as_ref()),
         Command::Exec {
             store,
             guest_build,
@@ -1093,7 +1147,8 @@ fn main() -> ExitCode {
 }
 
 /// Parses the program's arguments, with the step hook that `RUNTIME_ADAPTER_STEP_HOOK` sets for a
-/// launch, a start, a reattach, or a stop, or says why they are not a command.
+/// launch, a start, a reattach, a stop, or a read of a clone's boot console, or says why they are
+/// not a command.
 fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     let mut arguments = arguments.into_iter();
     let Some(name) = arguments.next() else {
@@ -1102,7 +1157,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     let name = match name.to_str() {
         Some(
             name @ ("stage" | "launch" | "create" | "refresh" | "list" | "inspect" | "remove"
-            | "reattach" | "stop" | "start" | "run" | "probe" | "exec"),
+            | "reattach" | "stop" | "start" | "run" | "probe" | "console" | "exec"),
         ) => name.to_owned(),
         _ => return Err(format!("unknown command {name:?}")),
     };
@@ -1123,8 +1178,18 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
     }
     let mut options = Options::default();
     let mut probes = Vec::new();
+    let mut markers = Vec::new();
     while let Some(argument) = arguments.next() {
         let Some(option) = argument.to_str().filter(|option| option.starts_with("--")) else {
+            if name == "console" {
+                let marker = argument
+                    .to_str()
+                    .ok_or_else(|| format!("the marker {argument:?} is not Unicode"))?;
+                markers.push(
+                    Probe::new("kmsg", [marker]).map_err(|error| error.problem().to_owned())?,
+                );
+                continue;
+            }
             if name != "probe" {
                 return Err(format!("unexpected argument {argument:?} of {name}"));
             }
@@ -1267,6 +1332,18 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
             guest_build,
             probes,
         },
+        "console" => {
+            let mut markers = markers.into_iter();
+            let (Some(marker), None) = (markers.next(), markers.next()) else {
+                return Err("console needs one marker".to_owned());
+            };
+            Command::Console {
+                store,
+                guest_build,
+                marker,
+                hook: console_hook()?,
+            }
+        }
         stop => Command::Reattach {
             store,
             guest_build,
@@ -1374,6 +1451,19 @@ fn parse_option(
             };
             options.machine_id = Some(mode);
         }
+        ("start", "--boot-console") if options.boot_console.is_none() => {
+            let value = text(value)?;
+            let listen = match value.as_str() {
+                "none" => false,
+                "listen" => true,
+                _ => {
+                    return Err(format!(
+                        "--boot-console takes none or listen, not {value:?}"
+                    ));
+                }
+            };
+            options.boot_console = Some(listen);
+        }
         ("launch" | "start", "--workload-identity") if options.workload_identity.is_none() => {
             let value = text(value)?;
             let identity = ids(&value)
@@ -1471,6 +1561,20 @@ fn start_hook() -> Result<Option<StepHook>, String> {
             "{STEP_HOOK} names the step {}, but a start takes the hook at {} alone",
             hook.step,
             Step::Checked
+        )),
+        hook => Ok(hook),
+    }
+}
+
+/// Returns the step hook that `RUNTIME_ADAPTER_STEP_HOOK` sets for `console`, if any, or says why
+/// it sets none: `console` takes it at `found` alone, once it found the clone running, and
+/// connected to the clone's boot console.
+fn console_hook() -> Result<Option<StepHook>, String> {
+    match StepHook::from_env()? {
+        Some(hook) if hook.step != Step::Found => Err(format!(
+            "{STEP_HOOK} names the step {}, but console takes the hook at {} alone",
+            hook.step,
+            Step::Found
         )),
         hook => Ok(hook),
     }
@@ -1711,6 +1815,7 @@ fn clone_options(name: &str, options: Options) -> Result<CloneOptions, String> {
             network: None,
         },
         network: options.network,
+        boot_console: options.boot_console.unwrap_or(false),
     })
 }
 
@@ -2574,6 +2679,7 @@ fn start_clone(
         runtime: &runtime,
         guest_build,
         hook,
+        boot_console: clone.boot_console,
     };
     match clone.run(&mut acquired) {
         Ok((vmm, client)) => Ok(Ok(Running {
@@ -2686,11 +2792,14 @@ struct CloneLaunch<'a> {
     guest_build: &'a str,
     /// The step hook, if any, which acts at `checked` alone.
     hook: Option<&'a StepHook>,
+    /// Whether the clone's launch attaches a boot console that listens, which `console` reads.
+    boot_console: bool,
 }
 
 impl CloneLaunch<'_> {
     /// Plans, records, and launches the clone in the sandbox of `acquired`, which leased the
-    /// generation, activates it, maps its export's table, if it has one, starts its sandbox,
+    /// generation, with a boot console that listens if the start asks for one, whose endpoint it
+    /// prints, activates it, maps its export's table, if it has one, starts its sandbox,
     /// exchanges a `Ping` and the longest `Echo` with its guest agent, and commits the launch,
     /// leaving the clone running. Returns the clone's VM, and the session of the adapter's order
     /// in which its sandbox started. The step hook, if any, acts once the plan checked the clone,
@@ -2712,6 +2821,7 @@ impl CloneLaunch<'_> {
             runtime,
             guest_build,
             hook,
+            boot_console,
         } = self;
         let staged = Staged::read(acquired.locked.dir())
             .map_err(|error| Failed::Command(describe(&error)))?;
@@ -2735,6 +2845,11 @@ impl CloneLaunch<'_> {
             Instant::now() + LOCK_TIMEOUT,
         )
         .map_err(Failed::Clone)?;
+        let clone_plan = if boot_console {
+            clone_plan.with_boot_console()
+        } else {
+            clone_plan
+        };
         // The plan checked the clone against the generation, and holds the files that the checks
         // opened, but nothing records the clone yet, and nothing runs: a test may change what the
         // clone's launch checks again.
@@ -2755,6 +2870,9 @@ impl CloneLaunch<'_> {
             .launch(acquired, &runtime.artifacts.openvmm, &runtime.identity)
             .map_err(Failed::Clone)?;
         println!("pid={}", restoring.starting().process().reference().pid);
+        if let Some(endpoint) = restoring.console_endpoint() {
+            println!("console={}", escape(endpoint));
+        }
         let mut order = clone_order(guest_build);
         // The restore sequence, and the commit, end the launch that they fail.
         let activated = restoring
@@ -3049,7 +3167,20 @@ fn find(
     guest_build: &str,
     templates: Option<&Path>,
 ) -> Result<Result<Found, ExitCode>, String> {
-    let (store, mut locked, leased) = lock_sandbox(path)?;
+    let (store, locked, leased) = lock_sandbox(path)?;
+    find_locked(store, locked, leased, runtime, guest_build, templates)
+}
+
+/// Finds the VM of the sandbox store `store`, whose lock `locked` [`lock_sandbox`] took, and
+/// which holds a lease if `leased` says so, as [`find`] does.
+fn find_locked(
+    store: SandboxStore,
+    mut locked: LockedStore,
+    leased: bool,
+    runtime: &Runtime,
+    guest_build: &str,
+    templates: Option<&Path>,
+) -> Result<Result<Found, ExitCode>, String> {
     if !leased {
         let vmm = match hold(&mut locked, runtime)? {
             Ok(vmm) => vmm,
@@ -3063,20 +3194,10 @@ fn find(
             leased: false,
         }));
     }
-    let reattached = reattach_leased(&mut locked, runtime, guest_build)?;
-    let found = match &reattached {
-        ReattachedClone::Live { .. } => "live",
-        ReattachedClone::Ended { .. } => "ended",
-        ReattachedClone::Failed(_) => "failed",
-        ReattachedClone::Indeterminate(_) => "indeterminate",
-        _ => return Err(UNKNOWN_STATE.to_owned()),
-    };
-    println!("reattached={found}");
+    let reattached = reattach_printed(&mut locked, runtime, guest_build)?;
     let ReattachedClone::Live { vmm, session } = reattached else {
         return conclude(reattached, locked, templates).map(Err);
     };
-    println!("pid={}", vmm.record().process().pid);
-    print_identity(&session);
     Ok(Ok(Found {
         store,
         locked,
@@ -3108,6 +3229,29 @@ fn reattach_leased(
         FORCED_TIMEOUT,
     )
     .map_err(|error| describe(&error))
+}
+
+/// Reattaches to the clone of the sandbox of `locked` with [`reattach_leased`], and prints what it
+/// found, `reattached`, and the process and the identity of a clone that runs.
+fn reattach_printed(
+    locked: &mut LockedStore,
+    runtime: &Runtime,
+    guest_build: &str,
+) -> Result<ReattachedClone<Client>, String> {
+    let reattached = reattach_leased(locked, runtime, guest_build)?;
+    let found = match &reattached {
+        ReattachedClone::Live { .. } => "live",
+        ReattachedClone::Ended { .. } => "ended",
+        ReattachedClone::Failed(_) => "failed",
+        ReattachedClone::Indeterminate(_) => "indeterminate",
+        _ => return Err(UNKNOWN_STATE.to_owned()),
+    };
+    println!("reattached={found}");
+    if let ReattachedClone::Live { vmm, session } = &reattached {
+        println!("pid={}", vmm.record().process().pid);
+        print_identity(session);
+    }
+    Ok(reattached)
 }
 
 /// Ends a command on the clone of the sandbox of `locked` that `reattached`, what
@@ -3348,6 +3492,174 @@ fn probe(store: &Path, guest_build: &str, probes: &[Probe]) -> Result<ExitCode, 
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Reattaches to the clone of the sandbox store `store`, with the guest agent's build
+/// `guest_build`, reads its boot console until it delivers what `marker`, a `kmsg` probe, writes
+/// to the guest kernel's log, and appends what it read to the sandbox's console log. It prints the
+/// console's endpoint, then how many bytes it read, and what it read.
+///
+/// It connects to the console at the endpoint that the clone's lease fixes,
+/// `Store::clone_console_endpoint`, as a reader that the clone's VMM, as its runtime record names
+/// it, serves, and reads the console from then on, while it reattaches to the clone, as [`find`]
+/// does, which ends a clone whose guest does not answer, and then, once it found the clone running,
+/// and ran the step hook `hook`, if any, at [`Step::Found`], while it asks the guest to write the
+/// marker, through the session of the reattach. A console whose output its reader leaves unread
+/// holds the guest's writes to it back, which could keep the guest from answering. The console
+/// delivers what the guest writes once its reader connected, and nothing that it wrote before: the
+/// clone discards what it writes while no reader is connected.
+///
+/// Under the sandbox's lock, it appends and prints what the console delivered, whatever the
+/// reattach and the guest did, before it ends the command as [`find`] does for a reattach that
+/// ended the clone, or found it ended. A reattach that fails, a guest that does not answer, or a
+/// console that ends, or whose deadline passes, before it delivers the marker fails the command,
+/// once the command kept what the console delivered, such as the last words of a clone that
+/// failed. It fails for a VM that booted cold, and for a
+/// clone whose launch attached no boot console that listens, which nothing serves at that
+/// endpoint.
+fn console(
+    store: &Path,
+    guest_build: &str,
+    marker: &Probe,
+    hook: Option<&StepHook>,
+) -> Result<ExitCode, String> {
+    let runtime = runtime(guest_build)?;
+    let (sandbox, mut locked, leased) = lock_sandbox(store)?;
+    if !leased {
+        return Err(
+            "the sandbox's VM booted cold, and has no boot console that the host program reads"
+                .to_owned(),
+        );
+    }
+    let templates = clone_templates(&locked, None)?;
+    let lease = Lease::of(&locked)
+        .map_err(|error| describe(&error))?
+        .ok_or("the sandbox no longer holds the lease of its clone")?;
+    let endpoint = templates
+        .clone_console_endpoint(&lease)
+        .map_err(|error| describe(&error))?;
+    println!("console={}", escape(&endpoint));
+    let [text] = marker.arguments() else {
+        unreachable!("a marker is the one argument of its kmsg probe");
+    };
+    // The reader connects before the reattach, which ends a clone whose guest does not answer. A
+    // clone whose launch the sandbox no longer records as running, or whose VMM has exited, has no
+    // console to read, and its reattach finds how it ended.
+    let vmm = locked.runtime().map_err(|error| describe(&error))?;
+    let reader = match vmm {
+        Some(record) => {
+            let deadline = Instant::now() + CONSOLE_TIMEOUT;
+            match console::connect(&endpoint, record.process(), deadline) {
+                Ok(reader) => Some(reader),
+                Err(error) if error.kind() == io::ErrorKind::NotConnected => None,
+                Err(error) => {
+                    return Err(format!("cannot read the clone's boot console: {error}"));
+                }
+            }
+        }
+        None => None,
+    };
+    let Some(mut reader) = reader else {
+        return match find_locked(sandbox, locked, leased, &runtime, guest_build, None)? {
+            Ok(_) => Err(
+                "the clone runs, but its VMM served no boot console when the command connected"
+                    .to_owned(),
+            ),
+            Err(status) => Ok(status),
+        };
+    };
+    let ask = || reattach_and_ask(&mut locked, &runtime, guest_build, hook, marker);
+    let (asked, read, delivered) =
+        console::read_marker(reader.as_mut(), ask, text.as_bytes(), CONSOLE_TIMEOUT);
+    // The log keeps what the console delivered under the sandbox's lock, before the end of a
+    // clone that the reattach found ended makes the sandbox another clone's.
+    let kept = keep_console(&sandbox.console_path(), &read);
+    let read_problem = delivered
+        .err()
+        .map(|error| format!("cannot read the clone's boot console: {error}"));
+    match asked {
+        Ok(Asked::Live { answered, vmm }) => {
+            let problems: Vec<String> = [answered.err(), read_problem, kept.err()]
+                .into_iter()
+                .flatten()
+                .collect();
+            drop(vmm);
+            if problems.is_empty() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                Err(problems.join("; "))
+            }
+        }
+        Ok(Asked::Gone(reattached)) => {
+            // The clone's end is the command's outcome, and the console's problems are
+            // diagnostics: no marker comes from a clone that does not run.
+            for problem in [read_problem, kept.err()].into_iter().flatten() {
+                eprintln!("runtime-adapter-host: {problem}");
+            }
+            conclude(*reattached, locked, None)
+        }
+        Err(problem) => {
+            let problems: Vec<String> = [Some(problem), read_problem, kept.err()]
+                .into_iter()
+                .flatten()
+                .collect();
+            Err(problems.join("; "))
+        }
+    }
+}
+
+/// What `console` found of a clone once it reattached, as [`reattach_and_ask`] returns it.
+enum Asked {
+    /// The clone runs, and its guest answered the request for the marker, or failed it, as
+    /// `answered` tells. The command holds the clone's VM, `vmm`, until it ends.
+    Live {
+        /// Whether the guest wrote the marker, or the problem.
+        answered: Result<(), String>,
+        /// The clone's VM.
+        vmm: Box<Vmm>,
+    },
+    /// The reattach ended the clone, or found it ended, failed, or in a state that cannot be
+    /// determined, which [`conclude`] ends the command with.
+    Gone(Box<ReattachedClone<Client>>),
+}
+
+/// Reattaches to the clone of the sandbox of `locked`, under the runtime identity of `runtime`,
+/// with the guest agent's build `guest_build`, as [`find`] does, and prints what it found, with
+/// [`reattach_printed`]. Once it found the clone running, it runs the step hook `hook`, if any, at [`Step::Found`], and asks the
+/// guest to write `marker`, a `kmsg` probe, through the session of the reattach.
+///
+/// Fails as the reattach fails, and as the step hook fails.
+fn reattach_and_ask(
+    locked: &mut LockedStore,
+    runtime: &Runtime,
+    guest_build: &str,
+    hook: Option<&StepHook>,
+    marker: &Probe,
+) -> Result<Asked, String> {
+    let reattached = reattach_printed(locked, runtime, guest_build)?;
+    let ReattachedClone::Live { vmm, mut session } = reattached else {
+        return Ok(Asked::Gone(Box::new(reattached)));
+    };
+    step(hook, Step::Found)?;
+    let deadline = Instant::now() + SESSION_TIMEOUT;
+    let answered = match session.probe(marker, deadline) {
+        Ok(ProbeReply::Report(_)) => Ok(()),
+        Ok(ProbeReply::Failed(problem)) => Err(problem),
+        Err(error) => Err(format!(
+            "the guest agent did not answer: {}",
+            describe(&error)
+        )),
+    };
+    Ok(Asked::Live { answered, vmm })
+}
+
+/// Appends `read`, what a clone's boot console delivered, to the sandbox's console log at `log`,
+/// and prints how many bytes it holds, and what it holds. Fails with the problem of the append.
+fn keep_console(log: &Path, read: &[u8]) -> Result<(), String> {
+    let kept = console::open_log(log).and_then(|mut file| io::Write::write_all(&mut file, read));
+    println!("console.read={}", read.len());
+    println!("console.text={}", escape(&String::from_utf8_lossy(read)));
+    kept.map_err(|error| format!("cannot keep the console's log {}: {error}", log.display()))
 }
 
 /// Reattaches to the VM of the sandbox store `store`, with the guest agent's build `guest_build`,

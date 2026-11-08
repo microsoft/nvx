@@ -102,6 +102,15 @@
 //! - Each command after the start reattaches to the clone from a new process: the clone answers
 //!   the Activate of its record again, in a new session of the same broker, with its Ready, without
 //!   activating again, and serves the command.
+//! - A clone's boot console, which its start asks to listen, delivers to each reader, from a new
+//!   process, what the guest writes to its kernel's log once the reader connected, at the endpoint
+//!   that the clone's lease fixes, and discards what the guest writes while no reader is connected,
+//!   rather than wait for one. A reader that crashes once it connected leaves the clone running, and
+//!   the console to the next reader, and the sandbox's console log keeps what each reader read. The
+//!   stop removes the console's socket with the control socket, and a clone whose start asked for
+//!   no boot console restores as before: nothing listens at its endpoint. A reader whose reattach
+//!   ends the clone, as one of another runtime's does, keeps what the console delivered, and ends
+//!   as the reattach does.
 //! - A host program of another runtime ends the clone through its verified identity, without a
 //!   word to its guest, and releases its lease: the template still serves its other clones.
 //! - A clone whose VM ends without a word of its guest once a stop found it running fails, as NVX
@@ -249,7 +258,7 @@ use runtime_adapter::clone::{
 };
 use runtime_adapter::exec::{HostMessage, Start};
 use runtime_adapter::frame::Message;
-use runtime_adapter::hook::{Action, STEP_HOOK, Step, StepHook};
+use runtime_adapter::hook::{Action, HOOK_EXIT, STEP_HOOK, Step, StepHook};
 use runtime_adapter::host::{Client, CloneOrder, OrderError};
 use runtime_adapter::layered::PROXY_VARIABLES;
 use runtime_adapter::root::DEFAULT_RUNTIME;
@@ -3903,6 +3912,165 @@ fn each_command_reattaches_to_the_clone_from_a_new_process() {
     cloned.stop();
     let store = SandboxStore::open(&cloned.sandbox.store).unwrap();
     assert!(CloneRecords::read(&store).unwrap().is_none());
+}
+
+/// Reads the boot console of the clone `cloned`, from a new process, until it delivers `marker`,
+/// which the guest writes to its kernel's log, and returns what `console` printed, once it
+/// checked that the read reached the clone, which runs, at the endpoint `endpoint`, and that what
+/// it read holds the marker.
+fn read_console(cloned: &mut Cloned, endpoint: &str, marker: &str) -> Printed {
+    let read = cloned.sandbox.run("console", &[OsStr::new(marker)], 0);
+    let found = ["reattached", "pid", "console"].map(|key| &read[key]);
+    assert_eq!(
+        found,
+        ["live", cloned.started["pid"].as_str(), endpoint],
+        "{read:?}"
+    );
+    assert!(read["console.text"].contains(marker), "{read:?}");
+    let bytes = read["console.read"].parse::<usize>().unwrap();
+    assert!(bytes > marker.len(), "{read:?}");
+    read
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_clone_s_boot_console_delivers_what_its_guest_writes_once_its_reader_connected() {
+    let template = Template::create("cl-con");
+    let start = StartOf {
+        options: &["--boot-console", "listen"],
+        ..StartOf::default()
+    };
+    let mut cloned = template.start("cl-k", start, 0);
+    cloned.assert_started();
+    // The clone's console listens at the endpoint that its lease fixes: on Linux, a socket beside
+    // the generation's snapshot, as its control socket is.
+    let endpoint = cloned.started["console"].clone();
+    let lease = template
+        .leases()
+        .pop()
+        .expect("the clone leases the generation");
+    let socket = template
+        .payload()
+        .join(format!("{}.console", lease.launch()));
+    if cfg!(windows) {
+        let pipe = format!("//./pipe/openvmm-microvm-{}.console", lease.launch());
+        assert_eq!(endpoint, pipe);
+    } else {
+        assert_eq!(endpoint, socket.display().to_string());
+        assert!(socket.exists(), "{}", socket.display());
+    }
+
+    // A reader, from a new process, gets what the guest writes to its kernel's log once it
+    // connected, which the kernel prints on the console.
+    read_console(&mut cloned, &endpoint, "first-996");
+    // While no reader is connected, the clone discards what its guest writes there, rather than
+    // wait for a reader, and runs on.
+    let dropped = cloned.probe(&["kmsg dropped-996"]);
+    let record = "runtime-adapter: dropped-996\n";
+    assert_eq!(
+        dropped["kmsg.written"],
+        record.len().to_string(),
+        "{dropped:?}"
+    );
+    let second = read_console(&mut cloned, &endpoint, "second-996");
+    assert!(
+        !second["console.text"].contains("dropped-996"),
+        "{second:?}"
+    );
+
+    // A reader that crashes once it connected, as the hook ends it at `found`, without a word,
+    // leaves the clone running, and its console to the next reader.
+    let hook = OsString::from(
+        StepHook {
+            step: Step::Found,
+            action: Action::Exit,
+        }
+        .to_string(),
+    );
+    let crashing = cloned.sandbox.start(
+        "console",
+        &[OsStr::new("lost-996")],
+        &[(STEP_HOOK, hook.as_os_str())],
+    );
+    let crashed = cloned.sandbox.finish(crashing, i32::from(HOOK_EXIT));
+    assert_eq!(crashed["console"], endpoint, "{crashed:?}");
+    assert!(!crashed.contains_key("console.read"), "{crashed:?}");
+    // A marker that starts as a record's priority would, `<N>`, reaches the console as it is.
+    let third = read_console(&mut cloned, &endpoint, "<2>third-996");
+    assert!(!third["console.text"].contains("lost-996"), "{third:?}");
+
+    // The sandbox's console log keeps what each reader read, in order.
+    let store = SandboxStore::open(&cloned.sandbox.store).unwrap();
+    let log = String::from_utf8(fs::read(store.console_path()).unwrap()).unwrap();
+    let positions = ["first-996", "second-996", "<2>third-996"].map(|marker| {
+        log.find(marker)
+            .unwrap_or_else(|| panic!("the console log lacks {marker}: {log:?}"))
+    });
+    assert!(positions.is_sorted(), "{log:?}");
+    assert!(!log.contains("dropped-996"), "{log:?}");
+
+    // The clone still answers, and stops; the release of its lease removes its console's socket
+    // with its control socket.
+    let facts = cloned.probe(&["memory"]);
+    assert_memory(&facts, TEMPLATE_MEMORY);
+    cloned.stop();
+    assert!(!socket.exists(), "{}", socket.display());
+    assert_payload(&template, false);
+
+    // A clone whose start asked for no boot console restores with the template's, which listens
+    // nowhere: a read of it finds nothing at the endpoint that its lease fixes.
+    let mut silent = template.start("cl-q", StartOf::default(), 0);
+    silent.assert_started();
+    assert!(
+        !silent.started.contains_key("console"),
+        "{:?}",
+        silent.started
+    );
+    let refused = silent
+        .sandbox
+        .run("console", &[OsStr::new("none-996")], FAILED);
+    assert!(refused.contains_key("console"), "{refused:?}");
+    assert!(!refused.contains_key("console.read"), "{refused:?}");
+    let stderr = silent.sandbox.stderr();
+    assert!(
+        stderr.contains("nothing serves the boot console"),
+        "{stderr}"
+    );
+    let facts = silent.probe(&["memory"]);
+    assert_memory(&facts, TEMPLATE_MEMORY);
+    silent.stop();
+    assert_payload(&template, false);
+
+    // A reattach that ends the clone, as that of a host program of another runtime does, without
+    // a word to its guest, ends the command as it ends `reattach`, once the command read what the
+    // console delivered until it ended, which the console log keeps.
+    let start = StartOf {
+        options: &["--boot-console", "listen"],
+        ..StartOf::default()
+    };
+    let mut ended = template.start("cl-r", start, 0);
+    ended.assert_started();
+    let options = [
+        OsStr::new("ended-996"),
+        OsStr::new("--guest-build"),
+        OsStr::new(ANOTHER_BUILD),
+    ];
+    let printed = ended.sandbox.run("console", &options, CLONE_FAILED);
+    let found = ["reattached", "failure.code", "released"].map(|key| &printed[key]);
+    assert_eq!(
+        found,
+        [
+            "failed",
+            "runtime-mismatch",
+            ended.started["lease"].as_str()
+        ],
+        "{printed:?}"
+    );
+    assert!(printed.contains_key("console.read"), "{printed:?}");
+    let store = SandboxStore::open(&ended.sandbox.store).unwrap();
+    assert!(store.console_path().is_file());
+    assert!(template.leases().is_empty());
+    assert_payload(&template, false);
 }
 
 #[test]
