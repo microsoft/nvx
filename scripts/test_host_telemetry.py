@@ -2062,6 +2062,20 @@ class AzureMetadataRequestTests(unittest.TestCase):
         blocked = threading.Event()
         released = threading.Event()
         real_socket = socket.socket
+        timeout = 0.2
+        requester = threading.current_thread()
+        deadline_started = False
+
+        def deadline_clock() -> float:
+            nonlocal deadline_started
+            if threading.current_thread() is not requester:
+                return 0.0
+            if not deadline_started:
+                deadline_started = True
+                return 0.0
+            # Reach the deadline only after the pending connect has actually begun.
+            self.assertTrue(blocked.wait(5), "the pending connect never started")
+            return timeout
 
         class BlockingSocket(real_socket):
             def connect(self, address: object) -> None:
@@ -2076,13 +2090,14 @@ class AzureMetadataRequestTests(unittest.TestCase):
                     super().shutdown(how)
 
         with (
+            patch.object(host_telemetry.time, "monotonic", side_effect=deadline_clock),
             patch.object(socket, "socket", BlockingSocket),
             patch.object(
                 host_telemetry, "AZURE_IMDS_URL", "http://127.0.0.1:9/compute"
             ),
         ):
             with self.assertRaises(TimeoutError):
-                host_telemetry.read_azure_compute_metadata(timeout=0.2)
+                host_telemetry.read_azure_compute_metadata(timeout=timeout)
 
         self.assertTrue(blocked.is_set())
         self.assertTrue(released.is_set(), "the pending connect was never shut down")
