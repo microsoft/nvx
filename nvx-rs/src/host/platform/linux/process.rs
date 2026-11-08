@@ -115,6 +115,11 @@ impl ProcessHandle {
         self.0.is_some()
     }
 
+    /// Duplicates the pidfd, or reports a polling-only host without attempting a duplicate.
+    pub(crate) fn exit_handle(&self) -> io::Result<Option<std::os::fd::OwnedFd>> {
+        self.0.as_ref().map(PidFd::try_clone_handle).transpose()
+    }
+
     /// Waits until the process exits or `deadline` passes, and returns whether it exited, or
     /// `None` without a pidfd, where the caller polls the process's identity instead.
     ///
