@@ -55,6 +55,10 @@ pub(crate) struct FakeOps {
     pub(crate) kernel_log: Mutex<Vec<u8>>,
     /// Console output, in order.
     pub(crate) console: Mutex<Vec<u8>>,
+    /// A test-owned console path that exercises the production output instead.
+    console_device: Option<CString>,
+    /// Caller deadlines passed to kernel-log and console output, respectively.
+    diagnostic_deadlines: Mutex<Vec<(bool, Option<Instant>)>>,
     /// What the frequency MSR reads: the declared TSC rate, or an error.
     pub(crate) tsc_hz: Result<u64, Errno>,
     /// The next TSC read, which each read advances by [`FakeOps::TSC_STEP`].
@@ -85,6 +89,8 @@ impl FakeOps {
             power: AtomicUsize::new(0),
             kernel_log: Mutex::new(Vec::new()),
             console: Mutex::new(Vec::new()),
+            console_device: None,
+            diagnostic_deadlines: Mutex::new(Vec::new()),
             tsc_hz: Ok(Self::TSC_HZ),
             tsc: AtomicU64::new(Self::TSC_START),
             realtime_ns: Self::REALTIME_NS,
@@ -208,11 +214,23 @@ impl PrivilegedOps for FakeOps {
             .store(usize::from(status.code()), Ordering::Relaxed);
     }
 
-    fn write_kernel_log(&self, record: &[u8]) {
+    fn write_kernel_log(&self, record: &[u8], deadline: Option<Instant>) {
+        self.diagnostic_deadlines
+            .lock()
+            .unwrap()
+            .push((true, deadline));
         self.kernel_log.lock().unwrap().extend_from_slice(record);
     }
 
-    fn write_console(&self, separator: &[u8], line: &[u8]) {
+    fn write_console(&self, separator: &[u8], line: &[u8], deadline: Option<Instant>) {
+        self.diagnostic_deadlines
+            .lock()
+            .unwrap()
+            .push((false, deadline));
+        if let Some(path) = &self.console_device {
+            write_console_at(path, separator, line, deadline);
+            return;
+        }
         let mut console = self.console.lock().unwrap();
         console.extend_from_slice(separator);
         console.extend_from_slice(line);
@@ -681,6 +699,98 @@ fn a_strict_runtime_keeps_its_first_violation_and_never_powers_off() {
             status::TIME_REPAIR
         ]
     );
+}
+
+#[test]
+fn a_full_console_pipe_does_not_delay_or_change_a_strict_capture_failure() {
+    use std::os::fd::AsRawFd;
+
+    let (reader, writer) = sys::create_pipe().unwrap();
+    let path = CString::new(format!("/proc/self/fd/{}", writer.borrowed().as_raw_fd())).unwrap();
+    let flags = OpenFlags::O_WRONLY | OpenFlags::O_CLOEXEC | OpenFlags::O_NONBLOCK;
+    let filling = sys::open(&path, flags, Mode::empty()).unwrap();
+    let bytes = [0_u8; 4096];
+    loop {
+        match filling.write(&bytes) {
+            Ok(count) => assert_ne!(count, 0),
+            Err(Errno::EINTR) => {}
+            Err(Errno::EAGAIN) => break,
+            Err(error) => panic!("fill pipe: {error}"),
+        }
+    }
+    let status_flags = || {
+        nix::fcntl::fcntl(writer.borrowed(), nix::fcntl::FcntlArg::F_GETFL)
+            .map(OpenFlags::from_bits_retain)
+            .unwrap()
+    };
+    let original = status_flags();
+    assert!(!original.contains(OpenFlags::O_NONBLOCK));
+    let (returned, waiting) = mpsc::channel();
+    let (ready, started) = mpsc::channel();
+    let observer = thread::spawn(move || {
+        ready.send(()).unwrap();
+        let returned = waiting.recv_timeout(Duration::from_secs(2)).is_ok();
+        if !returned {
+            reader.read(&mut [0; 4096]).unwrap();
+        }
+        returned
+    });
+    started.recv().unwrap();
+    let mut ops = FakeOps::new([]);
+    ops.console_device = Some(path);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    runtime.deadline = Some(deadline);
+    runtime.conformance_failure(
+        ViolationCode::Conformance(CheckId::C12),
+        Phase::Capture,
+        b"blocked diagnostics",
+    );
+    returned.send(()).unwrap();
+    assert!(
+        observer.join().unwrap(),
+        "diagnostic output blocked until the pipe was drained"
+    );
+    assert_eq!(status_flags(), original);
+    assert_eq!(
+        *ops.diagnostic_deadlines.lock().unwrap(),
+        [(true, Some(deadline)), (false, Some(deadline))]
+    );
+    let violation = runtime.take_violation().unwrap();
+    assert_eq!(
+        (violation.status(), violation.code(), violation.detail()),
+        (193, "G_CONFORMANCE_C12", "blocked diagnostics")
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_busy_report_lock_keeps_the_strict_failure_without_waiting_past_its_deadline() {
+    let ops = FakeOps::new([]);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    runtime.deadline = Some(Instant::now() + Duration::from_millis(20));
+    let held = runtime.report_lock.lock().unwrap();
+    let (finished, received) = mpsc::channel();
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            runtime.conformance_failure(
+                ViolationCode::Conformance(CheckId::C12),
+                Phase::Capture,
+                b"busy diagnostics",
+            );
+            finished.send(()).unwrap();
+        });
+        let returned = received.recv_timeout(Duration::from_secs(1)).is_ok();
+        drop(held);
+        worker.join().unwrap();
+        assert!(returned, "the reporting lock outlived the caller deadline");
+    });
+    let violation = runtime.take_violation().unwrap();
+    assert_eq!(
+        (violation.status(), violation.code(), violation.detail()),
+        (193, "G_CONFORMANCE_C12", "busy diagnostics")
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
 }
 
 #[test]
