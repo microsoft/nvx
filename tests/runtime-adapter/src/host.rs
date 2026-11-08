@@ -1,8 +1,8 @@
 //! The adapter's host program: a client of the guest agent that attaches to the host's end of the
 //! control session between the host and the guest, and exchanges the adapter's own
-//! [framing](crate::frame) with the guest agent, through `nvx::host::nvxs` alone, over any platform
-//! transport, and the driver of the [executions](crate::exec) that the host program runs over it,
-//! [`Executions`].
+//! [framing](crate::frame) with the guest agent, through `nvx::host::transport` alone, over any
+//! platform transport, and the driver of the [executions](crate::exec) that the host program runs
+//! over it, [`Executions`].
 //!
 //! # The host's order
 //!
