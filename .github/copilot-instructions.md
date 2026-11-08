@@ -126,13 +126,13 @@
   the `--processors` counts the change needs.
   MSHV and WHP are never available there. The setup summary names the runner's
   CPU. Built-in CPU profiles serve the runner CPUs met so far, the AMD EPYC
-  7763, 9V74, and 9V45 and the Intel Xeon 8573C, among the generations that
-  `doc/usage.md` lists. On a CPU that no built-in profile serves, such as the
-  Xeon 6973P-C (Granite Rapids), `--cpu-profile auto` falls back to a host CPU
-  profile and OpenVMM warns with `NVX-CPU-PROFILE-FALLBACK:` at every cold
-  boot, so the microVM scenarios run there on that profile. `doctor` H2 and H3
-  still fail there, and `benchmark` refuses that CPU, so leave qualification
-  and benchmarks to CI.
+  7763, 9V74, and 9V45 and the Intel Xeon 8573C and 6973P-C, among the
+  generations that `doc/usage.md` lists. On a CPU that no built-in profile
+  serves, `--cpu-profile auto` falls back to a host CPU profile and OpenVMM
+  warns with `NVX-CPU-PROFILE-FALLBACK:` at every cold boot, so the microVM
+  scenarios run there on that profile. `doctor` H2 and H3 still fail there,
+  and `benchmark` refuses that CPU, so leave qualification and benchmarks to
+  CI.
 
 ## Pull Requests And CI
 

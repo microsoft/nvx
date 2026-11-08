@@ -17,7 +17,7 @@ body:
       description: >-
         The CPU's name, its brand string, as OpenVMM's warning, `model name` in
         `/proc/cpuinfo`, or Windows' System Information gives it.
-      placeholder: Intel(R) Xeon(R) 6973P-C
+      placeholder: 11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz
     validations:
       required: true
   - type: input
@@ -27,7 +27,7 @@ body:
       description: >-
         The CPU's vendor string and its display family, model, and stepping, as
         OpenVMM's warning gives them.
-      placeholder: GenuineIntel 6/173/1
+      placeholder: GenuineIntel 6/140/1
     validations:
       required: true
   - type: dropdown

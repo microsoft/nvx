@@ -1636,7 +1636,9 @@ class CliTests(unittest.TestCase):
     def test_benchmark_refuses_a_cpu_that_no_built_in_profile_serves(self):
         # The command guards the benchmark coordinator, which it runs after.
         self.assertIs(nvx.run_benchmark, benchmark.run)
-        granite_rapids = HostCpu("GenuineIntel", 6, 173, 1, "Intel(R) Xeon(R) 6973P-C")
+        sapphire_rapids = HostCpu(
+            "GenuineIntel", 6, 143, 8, "Intel(R) Xeon(R) Platinum 8480C"
+        )
         icelake = HostCpu("GenuineIntel", 6, 106, 6)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -1694,20 +1696,20 @@ class CliTests(unittest.TestCase):
 
         # The refusal comes before the coordinator builds or measures anything.
         status, output, launched = run_command(
-            granite_rapids, "--suite", "e2e", "--backend", "kvm"
+            sapphire_rapids, "--suite", "e2e", "--backend", "kvm"
         )
         self.assertEqual((status, launched), (1, []))
         self.assertTrue(
             output.startswith(
                 "error: benchmark refuses this host: no built-in CPU profile serves "
-                "its CPU, GenuineIntel 6/173/1 (Intel(R) Xeon(R) 6973P-C)"
+                "its CPU, GenuineIntel 6/143/8 (Intel(R) Xeon(R) Platinum 8480C)"
             ),
             output,
         )
         self.assertIn("openvmm --hypervisor kvm --cpu-fingerprint", output)
-        self.assertIn(cpu_profile_request_url(granite_rapids), output)
+        self.assertIn(cpu_profile_request_url(sapphire_rapids), output)
         # On Windows, both backends name WHP's fingerprint.
-        status, output, launched = run_command(granite_rapids, "--backend", "both")
+        status, output, launched = run_command(sapphire_rapids, "--backend", "both")
         self.assertEqual((status, launched), (1, []))
         self.assertIn("openvmm --hypervisor whp --cpu-fingerprint", output)
         # A CPU that cannot be identified is refused too.
@@ -1717,7 +1719,7 @@ class CliTests(unittest.TestCase):
         # The phase 2 suite boots no microVM, so it runs on any CPU, and a CPU
         # that a built-in profile serves runs every suite.
         for host, arguments in (
-            (granite_rapids, ("--suite", "phase2")),
+            (sapphire_rapids, ("--suite", "phase2")),
             (None, ("--suite", "phase2")),
             (icelake, ("--suite", "e2e")),
             (icelake, ()),
@@ -1729,12 +1731,12 @@ class CliTests(unittest.TestCase):
         # The profiles that decide are those of the OpenVMM checkout that
         # benchmark builds: one that adds a profile for a CPU benchmarks it, and
         # one that lacks a CPU's profile refuses it.
-        graniterapids = CpuGeneration(
-            "graniterapids", "GenuineIntel", (CpuModel(6, 173),)
+        sapphirerapids = CpuGeneration(
+            "sapphirerapids", "GenuineIntel", (CpuModel(6, 143),)
         )
-        candidate = checkout("candidate", *CPU_GENERATIONS, graniterapids)
+        candidate = checkout("candidate", *CPU_GENERATIONS, sapphirerapids)
         status, output, launched = run_command(
-            granite_rapids, "--suite", "e2e", openvmm_dir=candidate
+            sapphire_rapids, "--suite", "e2e", openvmm_dir=candidate
         )
         self.assertEqual((status, output), (0, ""))
         self.assertEqual([args.openvmm_dir for args in launched], [Path(candidate)])
@@ -1785,7 +1787,7 @@ class CliTests(unittest.TestCase):
         # without its --openvmm-dir, runs the binaries that the coordinator
         # staged after the check, so it skips the check, whatever its checkout.
         status, output, launched = run_command(
-            granite_rapids, "--_kvm-worker", openvmm_dir=missing
+            sapphire_rapids, "--_kvm-worker", openvmm_dir=missing
         )
         self.assertEqual((status, output, len(launched)), (0, "", 1))
 

@@ -24,6 +24,14 @@
     }
   },
   {
+    "id": "intel.graniterapids.v1",
+    "vendor": "GenuineIntel",
+    "generation": {
+      "name": "graniterapids",
+      "cpus": [{ "family": 6, "model": 173, "steppings": [0, 15] }]
+    }
+  },
+  {
     "id": "intel.alderlake.v1",
     "vendor": "GenuineIntel",
     "generation": {
