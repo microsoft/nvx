@@ -236,32 +236,32 @@ fn hosts_without_cpuid_identify_no_cpu() {
 
 #[test]
 fn request_links_prefill_the_cpu() {
-    let granite_rapids = cpu("GenuineIntel", 6, 173, 1, "Intel(R) Xeon(R) 6973P-C");
-    assert_eq!(granite_rapids.signature(), "GenuineIntel 6/173/1");
+    let sapphire_rapids = cpu("GenuineIntel", 6, 143, 8, "Intel(R) Xeon(R) Platinum 8480C");
+    assert_eq!(sapphire_rapids.signature(), "GenuineIntel 6/143/8");
     assert_eq!(
-        granite_rapids.describe(),
-        "GenuineIntel 6/173/1 (Intel(R) Xeon(R) 6973P-C)"
+        sapphire_rapids.describe(),
+        "GenuineIntel 6/143/8 (Intel(R) Xeon(R) Platinum 8480C)"
     );
     // The link that OpenVMM's fallback warning gives the same CPU.
     assert_eq!(
-        granite_rapids.request_url(),
+        sapphire_rapids.request_url(),
         "https://github.com/microsoft/nvx/issues/new?template=cpu-profile.yml\
-             &title=CPU%20profile%3A%20GenuineIntel%206%2F173%2F1%20%28Intel%28R%29\
-             %20Xeon%28R%29%206973P-C%29&signature=GenuineIntel%206%2F173%2F1\
-             &cpu=Intel%28R%29%20Xeon%28R%29%206973P-C"
+             &title=CPU%20profile%3A%20GenuineIntel%206%2F143%2F8%20%28Intel%28R%29\
+             %20Xeon%28R%29%20Platinum%208480C%29&signature=GenuineIntel%206%2F143%2F8\
+             &cpu=Intel%28R%29%20Xeon%28R%29%20Platinum%208480C"
     );
     // A CPU without a brand string prefills only its signature.
-    let brandless = cpu("GenuineIntel", 6, 173, 1, "");
-    assert_eq!(brandless.describe(), "GenuineIntel 6/173/1");
+    let brandless = cpu("GenuineIntel", 6, 143, 8, "");
+    assert_eq!(brandless.describe(), "GenuineIntel 6/143/8");
     assert_eq!(
         brandless.request_url(),
         format!(
-            "{REQUEST_URL}&title=CPU%20profile%3A%20GenuineIntel%206%2F173%2F1\
-                 &signature=GenuineIntel%206%2F173%2F1"
+            "{REQUEST_URL}&title=CPU%20profile%3A%20GenuineIntel%206%2F143%2F8\
+                 &signature=GenuineIntel%206%2F143%2F8"
         )
     );
     assert!(
-        cpu("GenuineIntel", 6, 173, 1, "&=?#%+ é")
+        cpu("GenuineIntel", 6, 143, 8, "&=?#%+ é")
             .request_url()
             .ends_with("&cpu=%26%3D%3F%23%25%2B%20%C3%A9")
     );
