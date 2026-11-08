@@ -31,7 +31,7 @@ use crate::host::spawn::{self, VmmCommand};
 use crate::host::transport::{self, HostConnection};
 use crate::host::{platform::inherit::Inherited, process::Process, process::ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
-use crate::{Error, ErrorKind, Result};
+use crate::{Error, Result};
 
 /// OpenVMM's log of a launch.
 const LOG: &str = "openvmm.log";
@@ -230,12 +230,13 @@ impl fmt::Debug for SavedVm {
 /// Checks the saved runtime and process, returning the verified held process.
 ///
 /// Opens no endpoint and reads no runtime artifact. A different runtime is
-/// [`ErrorKind::RuntimeMismatch`], an exited recorded process is [`ErrorKind::Exited`], and an
-/// indeterminate process check is [`ErrorKind::Io`], retaining its original I/O source.
+/// [`ErrorKind::RuntimeMismatch`](crate::ErrorKind::RuntimeMismatch), an exited recorded process is
+/// [`ErrorKind::Exited`](crate::ErrorKind::Exited), and an indeterminate process check is
+/// [`ErrorKind::Io`](crate::ErrorKind::Io), retaining its original I/O source.
 pub fn verify(saved: &SavedVm, runtime: &RuntimeIdentity) -> Result<Process> {
     if saved.runtime != *runtime {
         return Err(Error::new(
-            ErrorKind::RuntimeMismatch,
+            crate::ErrorKind::RuntimeMismatch,
             "the saved VM runtime does not match the current runtime",
         ));
     }
