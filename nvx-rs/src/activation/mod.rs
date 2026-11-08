@@ -17,6 +17,11 @@
 //! - [`ReadyActivation`]: what Ready reports about the activation: that it applied, which every
 //!   layered root reports, and the transaction ID, which only a clone reports.
 //!
+//! The [guest-agent guidelines] describe the init's ownership and restore order: applying this
+//! record, its own DNS and listener policy, runtime filesystems and helpers precedes Ready.
+//!
+//! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
+//!
 //! [`ActivationRecord::new`] admits a configuration only once [`Configuration::check`] finds that
 //! it keeps every [limit](#limits), so that every record holds settings that a guest can apply.
 //! [`ActivationRecord::encode`] writes a record's canonical [encoding](#encoding), and

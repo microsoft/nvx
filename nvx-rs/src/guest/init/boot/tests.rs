@@ -14,58 +14,33 @@ const EXPORT: &str =
 /// mount over and switch the test host's root.
 #[test]
 fn the_reference_space_steps_compile() {
-    // A cold boot: the root, an image under its upper, and the host export; the runtime's file
-    // systems; the view; then the VM's one switch. The mapper keeps the root's descriptors for
-    // the host's mapping table, which comes after Ready.
-    let cold = |assembly: &Assembly,
-                export: Option<&HostExport>,
-                configuration: &View,
-                dns: Option<IpAddr>|
-     -> Result<(Root, Mapper, Option<SourceRoot>)> {
-        let mut root = root::assemble(assembly).map_err(system_error)?;
-        let source = export
-            .map(|export| root.mount_export(&export.tag, export.mode.into()))
-            .transpose()
-            .map_err(system_error)?;
-        root.mount_runtime(Some(Path::new("/run/nvx/time")))
-            .map_err(system_error)?;
-        let mut target = TargetRoot::open(root.path()).map_err(system_error)?;
-        target
-            .add_mount(&root.path().join("run"))
-            .map_err(system_error)?;
-        let mapper = Mapper::new(target, Reserved::container_root());
+    use crate::guest::{mappings, root, view};
+
+    // Compile the real private workflow without mounting or switching the developer host's root.
+    let _space = |assembly: &root::Assembly,
+                  configuration: &crate::activation::View,
+                  dns: Option<std::net::IpAddr>,
+                  export: &crate::protocol::export::HostExport,
+                  time_status: Option<&std::path::Path>|
+     -> Result<
+        (root::Root, mappings::Mapper, mappings::SourceRoot),
+        Box<dyn std::error::Error>,
+    > {
+        let mut root = root::assemble(assembly)?;
+        root.mount_runtime(time_status)?;
         view::apply(&mut root, configuration, dns)?;
-        root.switch().map_err(system_error)?;
+        let source = root.mount_export(&export.tag, export.mode.into())?;
+        let mut target = mappings::TargetRoot::open(root.path())?;
+        target.add_mount(&root.path().join("run"))?;
+        let mapper = mappings::Mapper::new(target, mappings::Reserved::container_root());
         Ok((root, mapper, source))
     };
-    // The host's mapping table, part by part, beneath the switched root.
-    let map = |table: &mut MappingTable, mapper: &mut Mapper, source: &SourceRoot, part: &[u8]| {
-        table.apply(part, |mappings| {
-            mapper
-                .apply(source, mappings)
-                .map_err(|error| (error.entry(), error))
-        })
+    let _switch = |root: &mut root::Root| root.switch();
+    let _restored = |record: &crate::activation::ActivationRecord,
+                     template: &crate::guest::activation::RootTemplate,
+                     deadline: Option<std::time::Instant>| {
+        crate::guest::activation::apply(record, template, deadline)
     };
-    // A restore: the record's root, export and view; the runtime's file systems; the announcer
-    // of the restore's listeners, which the init starts and owns; then the VM's one switch.
-    let restored = |record: &activation::ActivationRecord,
-                    template: &RootTemplate,
-                    deadline: Option<Instant>,
-                    announce: &mut dyn FnMut(Option<std::net::Ipv4Addr>) -> Result<()>|
-     -> Result<Applied> {
-        let mut applied =
-            guest_activation::apply(record, template, deadline).map_err(activation_error)?;
-        applied
-            .root_mut()
-            .mount_runtime(Some(Path::new("/run/nvx/time")))
-            .map_err(activation_error)?;
-        if applied.publication() == activation::Publication::Published {
-            announce(applied.gateway())?;
-        }
-        applied.root_mut().switch().map_err(activation_error)?;
-        Ok(applied)
-    };
-    let _ = (cold, map, restored);
 }
 
 #[test]
