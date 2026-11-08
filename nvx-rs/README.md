@@ -508,11 +508,8 @@ proof from kill success. An unconfirmed exit is `StillRunning`, and the caller
 keeps the process. The callback receives the bounded grace deadline and must
 respect it; its boolean result is never exit proof.
 
-`Process::wait(deadline)` returns `Some(Exited)` only after verified exit, or
-`None` when the deadline passes without confirmation. `Exited` cannot be made
-by a caller. `report::read` returns `Ok(None)` for a missing report, and an
-`Io` error for an unreadable or malformed report. `Stopped::report` retains
-that read's result separately, so report failure never hides confirmed exit.
+`Stopped::report` retains the outcome-report read's result separately, so report
+failure never hides confirmed exit.
 
 `vm::create(&runtime, &config, None, &dir)` creates an inspectable cold
 `Prepared` launch without starting a process or binding a listener. It requires
@@ -990,6 +987,10 @@ On Windows, the duplicate retains the original handle's access rights.
 Duplication failures have kind `Io` and retain their original I/O source.
 No watcher thread, future or callback is created by the library.
 
+`Process::wait(deadline)` returns `Some(Exited)` only after verified exit, or
+`None` when the deadline passes without confirmation. `Exited` cannot be made
+by a caller.
+
 `Process::bytes_read` reports how many bytes the process has read through the
 operating system's read calls, whether the host's cache served them or not:
 `rchar` of `/proc/<pid>/io` on Linux, which it reads only while the process
@@ -1435,6 +1436,11 @@ tampering; see [Distro bindings](#distro-bindings).
 The authenticated control session, which carries NVX's control protocol, `NVXC`,
 one frame per DATA record of a `HostConnection`; Linux and Windows primitives;
 and OpenVMM's outcome report.
+
+`report::read` returns `Ok(None)` for a missing report, and an `Io` error for an
+unreadable or malformed report, retaining the underlying error. It keeps today's
+summary of the outcome category, status code and teardown steps, not free-form
+fields.
 
 A `Transport` to an OpenVMM control endpoint reads and writes with deadlines,
 and tells, through `Transport::unread`, what the endpoint has not read yet of
@@ -3069,6 +3075,7 @@ optional cause.
 | `Unavailable` | A missing or unusable artifact, hypervisor, or release, a guest image without a required control feature, or an unsupported host |
 | `Unsupported` | A request that NVX refuses: a value that it does not accept, such as a malformed or out-of-range one, options that it cannot combine, or a request that it cannot represent or enforce, such as a policy beyond a limit of OpenVMM or the guest agent |
 | `Exited` | The VM's OpenVMM process exited |
+| `StillRunning` | A stop could not confirm the VM process's exit, so the caller keeps its verified process |
 | `Io` | A host I/O failure, or state that NVX recorded on the host and cannot read |
 | `NotFound` | State that an operation names and that does not exist on the host, such as the store of a sandbox that was never created or that a removal deleted |
 | `Protocol` | A control session that failed, or a request that the guest agent refused |
