@@ -576,12 +576,16 @@ the kernel command line, layered-root block devices by path, network and export
 arguments, console attachment, the CPU profile, and every `LaunchOptions` value.
 A configured NIC remains attached even under deny-all policy. A listener needs
 its supplied console name; a disconnected attachment retains the device and
-discards its output. The renderer emits neither `--microvm-lifecycle` nor
+discards its output. Listener names are nonempty and contain no NUL, comma, or
+equals sign, which OpenVMM's serial options cannot hold literally.
+The renderer emits neither `--microvm-lifecycle` nor
 `--microvm-workload-identity`. The whole-config entry point is temporarily
 public: SL2.8 makes it internal when `host::vm::create` calls it.
 
 Both argument entry points refuse a `Boot` with a capture as `Unsupported`
 rather than silently omit its devices and resource capacities.
+They also refuse non-Unicode export child roots instead of lossily rendering
+a different host path.
 `VmConfig::check` and `kernel_command_line` retain their existing behavior for
 valid capture configurations.
 

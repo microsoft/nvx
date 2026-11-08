@@ -443,7 +443,8 @@ impl VmConfig {
     /// given. A [`ConsoleAttachment::Listener`] needs a nonempty `console_endpoint`; a
     /// [`ConsoleAttachment::Disconnected`] needs none and retains the console device with a
     /// discarded attachment. The control endpoint always listens and authenticates from stdin.
-    /// Listener names must be distinct, with ASCII-case-insensitive comparison for WHP.
+    /// Listener names must be distinct, with ASCII-case-insensitive comparison for WHP, and
+    /// contain neither commas nor equals signs, which delimit OpenVMM's serial options.
     /// The caller runs `runtime.openvmm` with these arguments.
     ///
     /// This whole-config entry point is temporarily public. SL2.8 makes it internal when
@@ -453,7 +454,8 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration, no [`Boot`], a capture-bearing boot, empty or NUL-containing required names
-    /// or runtime paths, duplicate listener names, block paths that are not Unicode, hold
+    /// or runtime paths, serial-option delimiters in listener names, duplicate listener names,
+    /// non-Unicode export child roots, block paths that are not Unicode, hold
     /// disk-option delimiters or
     /// unbalanced brackets, or select a non-raw OpenVMM backend, an invalid authentication timeout,
     /// kernel text with double quotes or the standalone `--` delimiter, or a complete command line
@@ -557,8 +559,8 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration or no [`Boot`], a capture-bearing boot, an unlowerable network policy, a
-    /// NUL-containing argument, a non-Unicode block path, one that OpenVMM's disk syntax cannot
-    /// hold literally, or one whose
+    /// NUL-containing argument, a non-Unicode export child root or block path, one that OpenVMM's
+    /// disk syntax cannot hold literally, or one whose
     /// extension selects a non-raw backend, kernel text with double quotes or the standalone `--`
     /// delimiter, or insufficient room for the reserve.
     pub fn check_command_line(&self) -> Result<()> {
@@ -654,6 +656,15 @@ impl VmConfig {
             arguments.extend(nic.into_iter().map(OsString::from));
         }
         if let Some(export) = &self.filesystem {
+            if export
+                .children
+                .iter()
+                .any(|child| child.root.to_str().is_none())
+            {
+                return Err(Error::unsupported(
+                    "filesystem export child roots must be Unicode for OpenVMM's string arguments",
+                ));
+            }
             arguments.extend(export.openvmm_arguments().into_iter().map(OsString::from));
         }
         Ok(arguments)
@@ -1018,11 +1029,11 @@ pub(crate) fn console_arguments(console: &str, endpoint: &str, report: &Path) ->
     .into()
 }
 
-/// Refuses empty or NUL-containing caller-selected endpoint names.
+/// Refuses caller-selected endpoint names that OpenVMM's serial options cannot hold literally.
 fn check_endpoint(endpoint: &str, name: &str) -> Result<()> {
-    if endpoint.is_empty() || endpoint.contains('\0') {
+    if endpoint.is_empty() || endpoint.contains(['\0', ',', '=']) {
         return Err(Error::unsupported(format!(
-            "{name} must name a nonempty endpoint without a NUL",
+            "{name} must name a nonempty endpoint without a NUL, comma, or equals sign",
         )));
     }
     Ok(())
