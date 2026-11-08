@@ -18,6 +18,25 @@
 //! instant. A repair failure is always [`Disposition::MustEnd`], with [`RepairError::status`].
 //! Fresh restore network settings are explicitly refused.
 //!
+//! The [guest-agent guidelines] specify the caller's workspace, silence, failure and restore
+//! obligations. These public excerpts compile without implementing or running those operations:
+//!
+//! ```no_run
+//! use std::time::{Duration, Instant};
+//! use nvx::guest::activation::Activation;
+//! use nvx::guest::snapshot::{self, CaptureFailure, Captured, Devices, Disks, Repaired};
+//!
+//! fn fresh_capture(devices: &Devices, deadline: Instant) -> Result<Captured, CaptureFailure> {
+//!     snapshot::capture(devices, Disks::Fresh, deadline)
+//! }
+//!
+//! fn begin_activation(repaired: &Repaired, timeout: Duration, now: Instant) -> Activation {
+//!     Activation::new(repaired, timeout, now)
+//! }
+//! ```
+//!
+//! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
+//!
 //! Each line of `/proc/self/mountinfo` describes one mount with fields separated by spaces: its
 //! ID, its parent's ID, the device number of its file system, `MAJ:MIN`, the root of the mount
 //! in its file system, the mount point, the mount's options, optional fields, a `-` that ends
