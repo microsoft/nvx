@@ -17,6 +17,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::host::config::{ConsoleAttachment, VmConfig};
+use crate::host::filesystem;
 use crate::host::paths::{absolute, normalized};
 use crate::host::platform;
 #[cfg(not(windows))]
@@ -278,6 +279,17 @@ pub fn create(
             if endpoint.len() >= 108 || endpoint.contains([',', '=']) {
                 return Err(Error::unsupported(format!(
                     "the VM socket {endpoint} must be shorter than 108 bytes and hold no ',' or '='",
+                )));
+            }
+        }
+        let canonical = filesystem::canonicalize(dir.path())
+            .map_err(|error| io_error("resolve", dir.path(), error))?;
+        for name in std::iter::once(CONTROL).chain(outputs.console.as_ref().map(|_| CONSOLE)) {
+            let endpoint = canonical.join(name);
+            if endpoint.to_str().is_none() || endpoint.as_os_str().len() >= 108 {
+                return Err(Error::unsupported(format!(
+                    "the canonical VM socket {} must be valid Unicode and shorter than 108 bytes",
+                    endpoint.display(),
                 )));
             }
         }
