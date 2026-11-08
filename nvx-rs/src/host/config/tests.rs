@@ -1120,6 +1120,28 @@ fn values<'a>(arguments: &'a [OsString], option: &str) -> Vec<&'a OsStr> {
 }
 
 #[test]
+fn cold_boot_arguments_refuse_capture_configurations() {
+    let config = captured();
+    config.check().unwrap();
+    config.kernel_command_line().unwrap();
+    for result in [
+        config.check_command_line(),
+        config
+            .openvmm_arguments(
+                &runtime(),
+                "/missing/control",
+                Path::new("/missing/report"),
+                Some("/missing/console"),
+            )
+            .map(|_| ()),
+    ] {
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(error.to_string().contains("capture"));
+    }
+}
+
+#[test]
 fn cold_boot_command_lines_refuse_native_control_console_syntax() {
     let runtime = runtime();
     for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {

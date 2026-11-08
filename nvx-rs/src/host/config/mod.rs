@@ -435,7 +435,8 @@ impl VmConfig {
         Ok(tokens.join(" "))
     }
 
-    /// Renders a cold boot's complete OpenVMM arguments from this configuration and `runtime`.
+    /// Renders a non-capture cold boot's complete OpenVMM arguments from this configuration and
+    /// `runtime`.
     ///
     /// `endpoint`, `report` and `console_endpoint` are already chosen output names, not launch
     /// settings: this method creates no directory, file, listener, or process, and uses paths as
@@ -451,8 +452,9 @@ impl VmConfig {
     /// `runtime.windows_breakaway` is process-launch behavior, not an OpenVMM argument.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
-    /// configuration, no [`Boot`], empty or NUL-containing required names or runtime paths,
-    /// duplicate listener names, block paths that are not Unicode, hold disk-option delimiters or
+    /// configuration, no [`Boot`], a capture-bearing boot, empty or NUL-containing required names
+    /// or runtime paths, duplicate listener names, block paths that are not Unicode, hold
+    /// disk-option delimiters or
     /// unbalanced brackets, or select a non-raw OpenVMM backend, an invalid authentication timeout,
     /// kernel text with double quotes or the standalone `--` delimiter, or a complete command line
     /// beyond the Windows limit.
@@ -543,8 +545,8 @@ impl VmConfig {
         Ok(arguments)
     }
 
-    /// Checks the configuration's part of a cold boot's OpenVMM command line on every host,
-    /// without reading or changing the host, with 2048 UTF-16 code units reserved for the
+    /// Checks the configuration's part of a non-capture cold boot's OpenVMM command line on every
+    /// host, without reading or changing the host, with 2048 UTF-16 code units reserved for the
     /// runtime's files, launch options, and the VM's output paths.
     ///
     /// Like legacy adapter planning, the reserve foresees runtime-file and output names of up to
@@ -554,8 +556,9 @@ impl VmConfig {
     /// A listener's backend prefix is counted here; its endpoint name stays in the reserve.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
-    /// configuration or no [`Boot`], an unlowerable network policy, a NUL-containing argument,
-    /// a non-Unicode block path, one that OpenVMM's disk syntax cannot hold literally, or one whose
+    /// configuration or no [`Boot`], a capture-bearing boot, an unlowerable network policy, a
+    /// NUL-containing argument, a non-Unicode block path, one that OpenVMM's disk syntax cannot
+    /// hold literally, or one whose
     /// extension selects a non-raw backend, kernel text with double quotes or the standalone `--`
     /// delimiter, or insufficient room for the reserve.
     pub fn check_command_line(&self) -> Result<()> {
@@ -577,9 +580,18 @@ impl VmConfig {
         fit_arguments(&arguments, OPENVMM_COMMAND_LINE_RESERVE)
     }
 
-    /// Renders kernel text without the double quotes or delimiter OpenVMM's control console refuses.
+    /// Renders a non-capture boot's kernel text that OpenVMM's control console accepts.
     fn control_kernel_command_line(&self) -> Result<String> {
         let command_line = self.kernel_command_line()?;
+        if self
+            .boot
+            .as_ref()
+            .is_some_and(|boot| boot.capture.is_some())
+        {
+            return Err(Error::unsupported(
+                "cold-boot argument rendering does not support capture configurations",
+            ));
+        }
         if command_line.contains('"')
             || command_line
                 .split_ascii_whitespace()
