@@ -7391,6 +7391,56 @@ class MicrovmTests(unittest.TestCase):
                 server.join(10.0)
             self.assertEqual(errors, [])
 
+    def test_tcp_boot_consoles_must_be_refused_before_boot(self):
+        # A guest reaches host loopback through its gateway, so OpenVMM must
+        # refuse a boot console on TCP, as a listener or a client, with a
+        # network and without one (#551).
+        commands: list[list[str]] = []
+
+        def check(result: openvmm_process.OpenvmmProcessResult) -> None:
+            def start(command: list[str], log_path: Path) -> MagicMock:
+                commands.append(command)
+                process = MagicMock()
+                process.__enter__.return_value.wait.return_value = result
+                return process
+
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(microvm_tests, "OpenvmmProcess", side_effect=start),
+            ):
+                microvm_tests.check_tcp_boot_console_refused(
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    "kvm",
+                    memory_mib=256,
+                    timeout=5,
+                    output_dir=Path(temporary),
+                )
+
+        check(
+            openvmm_process.OpenvmmProcessResult(
+                1, b"error: " + microvm_tests.CONSOLE_TCP_REFUSED + b"\n"
+            )
+        )
+        consoles = [
+            command[command.index("--virtio-console") + 1] for command in commands
+        ]
+        self.assertEqual(len(consoles), 3)
+        self.assertRegex(consoles[0], r"\Alisten=tcp:127\.0\.0\.1:[0-9]+\Z")
+        self.assertEqual(consoles[1], consoles[0])
+        self.assertEqual(consoles[2], consoles[0].replace("listen=", "connect=", 1))
+        self.assertEqual([command.count("--net") for command in commands], [0, 1, 1])
+        # Neither a launch nor a failure for another reason passes.
+        for accepted in (
+            openvmm_process.OpenvmmProcessResult(0, b""),
+            openvmm_process.OpenvmmProcessResult(1, b"failed to connect\n"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "did not refuse the boot console"
+            ):
+                check(accepted)
+
     def test_every_openvmm_process_success_path_waits(self):
         # close() never raises, so a late violation or a 193-195 power-off is
         # only caught by wait(), which scans the output to EOF and checks the

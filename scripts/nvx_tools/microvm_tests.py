@@ -8590,6 +8590,67 @@ def run_snapshot_rollback(
             raise RuntimeError("snapshot restore did not continue exactly once")
 
 
+# The stable fragment of OpenVMM's refusal of a boot console on TCP.
+CONSOLE_TCP_REFUSED = b"microVM consoles do not accept TCP endpoints"
+# How long OpenVMM may take to refuse a boot console, which it does before it
+# opens any host resource.
+CONSOLE_TCP_REFUSAL_TIMEOUT_SECONDS = 30.0
+
+
+def check_tcp_boot_console_refused(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Check that OpenVMM refuses a boot console on TCP before it boots a guest.
+
+    Unless host loopback is denied, a guest's gateway maps the guest's TCP
+    flows onto host loopback, so the guest could connect to a loopback TCP
+    listener, its own console's or another VM's, and drive the shell on it,
+    or to the listener that a client console connects to (microsoft/nvx#551).
+    OpenVMM refuses both, with a network and without one.
+    """
+    _, port = _available_tcp_address()
+    for name, network, endpoint in (
+        ("listen", None, f"listen=tcp:127.0.0.1:{port}"),
+        (
+            "networked-listen",
+            DIRECTIONAL_NETWORK_CIDR,
+            f"listen=tcp:127.0.0.1:{port}",
+        ),
+        (
+            "networked-connect",
+            DIRECTIONAL_NETWORK_CIDR,
+            f"connect=tcp:127.0.0.1:{port}",
+        ),
+    ):
+        command = [
+            *workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                network=network,
+                boot_console=False,
+            ),
+            "--virtio-console",
+            endpoint,
+        ]
+        with OpenvmmProcess(
+            command, output_dir / f"console-tcp-{name}-refused.log"
+        ) as process:
+            result = process.wait(min(timeout, CONSOLE_TCP_REFUSAL_TIMEOUT_SECONDS))
+        if result.returncode == 0 or CONSOLE_TCP_REFUSED not in result.output:
+            raise RuntimeError(f"OpenVMM did not refuse the boot console {endpoint}")
+
+
 def run_console_snapshot(
     executable: Path,
     kernel: Path,
@@ -8600,6 +8661,15 @@ def run_console_snapshot(
     timeout: float,
     output_dir: Path,
 ) -> None:
+    check_tcp_boot_console_refused(
+        executable,
+        kernel,
+        initrd,
+        backend,
+        memory_mib=memory_mib,
+        timeout=timeout,
+        output_dir=output_dir,
+    )
     script, tx_count, queued_rx = _console_snapshot_script(backend)
     with tempfile.TemporaryDirectory(prefix="nvx-console-snapshot-") as temporary:
         snapshot_path = Path(temporary) / "snapshot"
