@@ -75,7 +75,7 @@ pub use self::plan::{
 pub use self::prepared::PreparedLaunch;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::artifacts::require_existing;
-pub(crate) use crate::host::config::reject_disk_path;
+pub(crate) use crate::host::config::{reject_container_path, reject_disk_path};
 use crate::host::filesystem::ExportPlan;
 use crate::net::is_valid_hostname;
 use crate::protocol::cmdline;
@@ -161,30 +161,6 @@ pub(crate) fn has_kernel_separator(value: &str) -> bool {
 /// [`Path::components`] reads them.
 pub fn require_file(path: &Path, description: &str) -> Result<()> {
     require_existing(path, description, ErrorCode::Unavailable)
-}
-
-/// The extensions of the files that OpenVMM does not attach as the raw image of a sandbox block
-/// device: it opens a `.vhd`, `.vhdx`, or `.vmgs` file in its container format, refuses to write
-/// an `.iso` file, and refuses all four for the block devices of a snapshot.
-const CONTAINER_EXTENSIONS: [&str; 4] = ["vhd", "vhdx", "vmgs", "iso"];
-
-/// Refuses the image at `path`, which the message shows as `shown`, if OpenVMM would not attach it
-/// as a raw image: if the name of `path` has an extension of [`CONTAINER_EXTENSIONS`]. The
-/// extension is the text after the name's last dot, unless that dot starts the name, and compares
-/// case-sensitively, as OpenVMM reads and compares it.
-pub(crate) fn reject_container_path(path: &Path, shown: &str) -> Result<()> {
-    let name = path.file_name().map(|name| name.to_string_lossy());
-    let extension = match name.as_deref().unwrap_or_default().rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => extension,
-        _ => "",
-    };
-    if CONTAINER_EXTENSIONS.contains(&extension) {
-        return Err(refused(format!(
-            "disk paths ending in .{extension} are unsupported, since OpenVMM would not attach \
-             them as raw images: {shown}"
-        )));
-    }
-    Ok(())
 }
 
 /// The logical block size that OpenVMM presents for a sandbox block device, in bytes, of which the

@@ -452,9 +452,10 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration, no [`Boot`], empty or NUL-containing required names or runtime paths,
-    /// duplicate listener names, block paths that are not Unicode or hold disk-option delimiters
-    /// or unbalanced brackets, an invalid authentication timeout, kernel text with double quotes
-    /// or the standalone `--` delimiter, or a complete command line beyond the Windows limit.
+    /// duplicate listener names, block paths that are not Unicode, hold disk-option delimiters or
+    /// unbalanced brackets, or select a non-raw OpenVMM backend, an invalid authentication timeout,
+    /// kernel text with double quotes or the standalone `--` delimiter, or a complete command line
+    /// beyond the Windows limit.
     /// The complete limit check runs on every host, without a reserve.
     pub fn openvmm_arguments(
         &self,
@@ -554,9 +555,9 @@ impl VmConfig {
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
     /// configuration or no [`Boot`], an unlowerable network policy, a NUL-containing argument,
-    /// a non-Unicode block path or one that OpenVMM's disk syntax cannot hold literally, kernel
-    /// text with double quotes or the standalone `--` delimiter, or insufficient room for the
-    /// reserve.
+    /// a non-Unicode block path, one that OpenVMM's disk syntax cannot hold literally, or one whose
+    /// extension selects a non-raw backend, kernel text with double quotes or the standalone `--`
+    /// delimiter, or insufficient room for the reserve.
     pub fn check_command_line(&self) -> Result<()> {
         let command_line = self.control_kernel_command_line()?;
         let mut arguments = self.device_arguments()?;
@@ -605,13 +606,18 @@ impl VmConfig {
                 UpperConfig::Scratch { path, .. } => Some(path),
                 UpperConfig::Ram { .. } => None,
             };
-            for path in [Some(&root.image), scratch].into_iter().flatten() {
+            for (path, writable) in [(Some(&root.image), false), (scratch, true)]
+                .into_iter()
+                .filter_map(|(path, writable)| path.map(|path| (path, writable)))
+            {
                 if path.to_str().is_none() {
                     return Err(Error::unsupported(
                         "block paths must be Unicode for OpenVMM's string arguments",
                     ));
                 }
-                reject_disk_path(path, &path.display().to_string())?;
+                let shown = path.display().to_string();
+                reject_disk_path(path, &shown)?;
+                reject_container_backend(path, &shown, writable)?;
             }
             let mut image = OsString::from("distro:file:");
             image.push(&root.image);
@@ -924,6 +930,30 @@ pub(crate) fn reject_disk_path(path: &Path, shown: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Extensions for which OpenVMM selects a container backend instead of a raw file.
+const CONTAINER_EXTENSIONS: [&str; 4] = ["vhd", "vhdx", "vmgs", "vmdk"];
+
+/// Refuses a block path when OpenVMM would not attach it as the requested raw image.
+fn reject_container_backend(path: &Path, shown: &str, writable: bool) -> Result<()> {
+    let name = path.file_name().map(|name| name.to_string_lossy());
+    let extension = match name.as_deref().unwrap_or_default().rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => extension,
+        _ => "",
+    };
+    if CONTAINER_EXTENSIONS.contains(&extension) || (writable && extension == "iso") {
+        return Err(Error::unsupported(format!(
+            "disk paths ending in .{extension} are unsupported, since OpenVMM would not attach \
+             them as raw images: {shown}"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a legacy sandbox path that OpenVMM would not attach as a raw block image.
+pub(crate) fn reject_container_path(path: &Path, shown: &str) -> Result<()> {
+    reject_container_backend(path, shown, true)
 }
 
 /// Common cold-boot inputs, shared with the legacy VmmLaunch without narrowing its public types.
