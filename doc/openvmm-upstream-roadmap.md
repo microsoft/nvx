@@ -8,19 +8,20 @@
 - Mapped fork tip: `18f4039db9511a3db59a847e95fb1f1f06f2f235`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131, the PR20 fixup at position 148, and
   the PR12 fixup at position 221.
-- NVX's pinned OpenVMM revision: `0e46a01edadcf01af3ccc633f817026ecfe60e9a`, position 221.
-  Position 221, which microsoft/openvmm#4983 proposes for `feature/microvm/dev`, is one commit on
-  position 220, `3cf58a523`, the head of `feature/microvm/dev`, which microsoft/openvmm#4981 landed
-  on position 219, `bced18bec`, the head of the `feature/microvm/release/v5.1` branch of
-  microsoft/openvmm. The v5.1 rebase moved the 219 commits of `feature/microvm/dev` at the NVX pin
-  before that rebase, `db42fde04`, onto `ba105dd7f` without dropping any: the 212 of
-  `feature/microvm/release/v5.0` and the seven that microsoft/openvmm#4953, microsoft/openvmm#4954,
-  microsoft/openvmm#4955, microsoft/openvmm#4970, microsoft/openvmm#4968, and microsoft/openvmm#4969
-  landed after it. Every commit keeps its position, and only position 183, which conflicted with
-  upstream, changed its patch; see [Conflicts of the v5.1 rebase](#conflicts-of-the-v51-rebase).
-  The pin is 90 commits past the mapped tip on the same first-parent chain. Positions 132-220,
-  except the PR20 fixup at position 148, are not yet assigned to PRs, and position 221 is a PR12
-  fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+- NVX's pinned OpenVMM revision: `5799877f0547f31de08dce2c04f8ac27558c5899`, position 222.
+  Position 222, which microsoft/openvmm#4984 proposes for `feature/microvm/dev`, is one commit on
+  position 221, `0e46a01ed`, the head of `feature/microvm/dev`, which microsoft/openvmm#4983 landed
+  on position 220, `3cf58a523`, which microsoft/openvmm#4981 landed on position 219, `bced18bec`,
+  the head of the `feature/microvm/release/v5.1` branch of microsoft/openvmm. The v5.1 rebase moved
+  the 219 commits of `feature/microvm/dev` at the NVX pin before that rebase, `db42fde04`, onto
+  `ba105dd7f` without dropping any: the 212 of `feature/microvm/release/v5.0` and the seven that
+  microsoft/openvmm#4953, microsoft/openvmm#4954, microsoft/openvmm#4955, microsoft/openvmm#4970,
+  microsoft/openvmm#4968, and microsoft/openvmm#4969 landed after it. Every commit keeps its
+  position, and only position 183, which conflicted with upstream, changed its patch; see
+  [Conflicts of the v5.1 rebase](#conflicts-of-the-v51-rebase). The pin is 91 commits past the
+  mapped tip on the same first-parent chain. Positions 132-220 and 222, except the PR20 fixup at
+  position 148, are not yet assigned to PRs, and position 221 is a PR12 fixup; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -883,8 +884,8 @@ ba105dd7f
   -> port forward bind code [212] -> virtio queue starts after restore [213-215]
   -> storage generation block identity [216-217]
   -> device start confirmation [218-219] -> long Windows report paths [220]
-  -> PR12 fixup [221]
-  -> 0e46a01ed (NVX pin)
+  -> PR12 fixup [221] -> wide guest TSC offsets [222]
+  -> 5799877f0 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -903,13 +904,13 @@ into position 036, which adds the sentence that it replaces.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 90 later commits, position
+The NVX pin extends the chain past position 131 without merges. Of the 91 later commits, position
 148 is a PR20 fixup and position 221 a PR12 fixup, and the others are not yet classified or
 assigned to PRs. Each of positions 132-187 combines the v2.4 commits that the table lists, as v3.0
 positions 145-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 188-192 followed the v3.0 reorganization, positions 193-206 are the ABI restart
 of the v4.0 reorganization, positions 207-212 followed it, positions 213-219 followed the v5.0
-reorganization, and positions 220 and 221 followed the v5.1 rebase, so they combine none. Each
+reorganization, and positions 220-222 followed the v5.1 rebase, so they combine none. Each
 commit through position 219 has the position that it had in v5.0, since the v5.1 rebase dropped
 none. A v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are
 those of `feature/microvm/release/v4.0`.
@@ -1006,6 +1007,7 @@ those of `feature/microvm/release/v4.0`.
 | 219 | `bced18bec` | - | - | - | vmcore: confirm device starts before the VM runs (microsoft/openvmm#4969) |
 | 220 | `3cf58a523` | - | - | - | microVM: publish the outcome report below long Windows paths (microsoft/openvmm#4981) |
 | 221 | `0e46a01ed` | - | - | - | openvmm_helpers: leave the change time out of snapshot file generations (microsoft/openvmm#4983); fold into 035 and 036 |
+| 222 | `5799877f0` | - | - | - | virt: read on while the guest TSC's offset is wide (microsoft/openvmm#4984) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1176,6 +1178,13 @@ Position 221 builds on the chain too. Replaying it on upstream main conflicts in
 files: the snapshot file system module, which PR11's position 032 adds and upstream main lacks, and
 the snapshot restore module and the snapshot format guide, which the chain changes. So it follows
 PR12 upstream, folded into positions 035 and 036.
+
+Position 222 changes only the time ABI's measurement of the guest TSC offset, which reads on while
+the offset's uncertainty, half its tightest bracket, is over 50 µs: `virt`'s TSC module, which
+position 161 adds, the backend trait of position 132, and the MSHV and WHP backends of positions
+134 and 140, files that no other commits than positions 132-161 and 194 change. It changes nothing
+that a mapped PR adds. Replaying it on upstream main conflicts in all four of its files, which
+upstream main lacks, so it follows the time ABI series upstream.
 
 ## PR summary
 
