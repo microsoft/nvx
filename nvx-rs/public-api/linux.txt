@@ -1803,6 +1803,7 @@ field nvx::host::config::VmConfig::boot
 method nvx::host::config::VmConfig::check
 field nvx::host::config::VmConfig::console
 field nvx::host::config::VmConfig::filesystem
+method nvx::host::config::VmConfig::kernel_command_line
 field nvx::host::config::VmConfig::memory_mib
 field nvx::host::config::VmConfig::network
 field nvx::host::config::VmConfig::processors
@@ -3774,6 +3775,11 @@ const nvx::protocol::status::TIME_REPAIR
 const nvx::protocol::status::TIME_STATUSES
 const nvx::protocol::status::TIME_VIOLATION
 fn nvx::protocol::status::describe
+mod nvx::protocol::view
+const nvx::protocol::view::HOSTNAME_TOKEN
+const nvx::protocol::view::MACHINE_ID_TOKEN
+fn nvx::protocol::view::parse
+fn nvx::protocol::view::tokens
 fn nvx::resolve_guest_path
 mod nvx::testing (hidden)
 mod nvx::testing::fake_openvmm (hidden)
