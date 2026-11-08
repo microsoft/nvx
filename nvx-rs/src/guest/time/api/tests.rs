@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::guest::sys::{ClockAdjustment, FrequencyHold};
+use crate::guest::time::NSEC_PER_MSEC;
 use crate::guest::time::decoders::{HostClock, PACKET_DNS_SIZE};
 use crate::guest::time::state::HostClockStatus;
 use crate::guest::time::system::PORTB_TIME_WINDOW;
@@ -337,6 +338,126 @@ fn a_preparation_that_may_leave_port_permission_fails_with_its_suppression() {
             .unwrap_err()
             .holds_suppression()
     );
+}
+
+#[test]
+fn strict_preparation_keeps_its_first_diagnostic_revocation_after_a_successful_release() {
+    let ops = FakeOps::new([]);
+    ops.revoke_errors.lock().unwrap().extend([
+        Some(Errno::ENOMEM),
+        None,
+        Some(Errno::EIO),
+        None,
+        None,
+        None,
+    ]);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    runtime.deadline = Some(Instant::now() + std::time::Duration::from_secs(1));
+    for (check, detail) in [
+        (CheckId::C12, b"first".as_slice()),
+        (CheckId::C13, b"second".as_slice()),
+        (CheckId::C14, b"third".as_slice()),
+    ] {
+        runtime.conformance_failure(
+            ViolationCode::Conformance(check),
+            super::super::Phase::Capture,
+            detail,
+        );
+    }
+    assert_eq!(ops.transactions(), 3);
+    assert_eq!(sys::check_released(), Ok(()));
+    let violation = runtime.take_violation().unwrap();
+    assert_eq!(
+        (violation.status(), violation.code(), violation.detail()),
+        (193, "G_CONFORMANCE_C12", "first")
+    );
+    let error =
+        released_preparation(Ok(()), runtime.check_released(), Some(violation)).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            PreCaptureError::PortRelease {
+                error: TimeError::PortRelease(source),
+                suppressed: true,
+            } if has_errno(source, Errno::ENOMEM)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn strict_preparation_keeps_a_partial_grants_failed_rollback_after_a_successful_release() {
+    let ops = FakeOps::new([]);
+    ops.grant_errors
+        .lock()
+        .unwrap()
+        .extend([None, Some(Errno::EPERM)]);
+    ops.revoke_errors
+        .lock()
+        .unwrap()
+        .extend([Some(Errno::ENOMEM), None]);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    runtime.deadline = Some(Instant::now() + std::time::Duration::from_secs(1));
+    runtime.conformance_failure(
+        ViolationCode::Conformance(CheckId::C12),
+        super::super::Phase::Capture,
+        b"partial grant",
+    );
+    assert_eq!(sys::check_released(), Err(PortError::Revoke(Errno::ENOMEM)));
+    runtime.conformance_failure(
+        ViolationCode::Conformance(CheckId::C13),
+        super::super::Phase::Capture,
+        b"later release",
+    );
+    assert_eq!(sys::check_released(), Ok(()));
+    let error = released_preparation(Ok(()), runtime.check_released(), runtime.take_violation())
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            PreCaptureError::PortRelease {
+                error: TimeError::PortRelease(source),
+                suppressed: true,
+            } if has_errno(source, Errno::ENOMEM)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn strict_preparation_keeps_a_samples_failed_revocation_after_successful_diagnostics() {
+    let ops = FakeOps::new([u32::from(PORTB_TIME_WINDOW)]);
+    ops.revoke_errors
+        .lock()
+        .unwrap()
+        .extend([Some(Errno::ENOMEM), None]);
+    let mut runtime = Runtime::new(&ops, false).strict();
+    runtime.deadline = Some(Instant::now() + std::time::Duration::from_secs(1));
+    assert_eq!(
+        system::best_sample(&runtime, 0, NSEC_PER_MSEC, 0).unwrap_err(),
+        system::SampleError::Ports(PortError::Revoke(Errno::ENOMEM))
+    );
+    runtime.conformance_failure(
+        ViolationCode::Conformance(CheckId::C12),
+        super::super::Phase::Capture,
+        b"sample release",
+    );
+    assert_eq!(sys::check_released(), Ok(()));
+    let error = released_preparation(Ok(()), runtime.check_released(), runtime.take_violation())
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            PreCaptureError::PortRelease {
+                error: TimeError::PortRelease(source),
+                suppressed: true,
+            } if has_errno(source, Errno::ENOMEM)
+        ),
+        "{error:?}"
+    );
+    assert_eq!(ops.power.load(Ordering::Relaxed), 0);
 }
 
 #[test]

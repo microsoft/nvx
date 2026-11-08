@@ -273,7 +273,7 @@ impl TimeAbi {
         let suppressed = result
             .as_ref()
             .map_or_else(PreCaptureError::holds_suppression, |()| true);
-        released_preparation(result, sys::check_released(), runtime.take_violation())
+        released_preparation(result, runtime.check_released(), runtime.take_violation())
             .map_err(|error| (error, suppressed))
     }
 
