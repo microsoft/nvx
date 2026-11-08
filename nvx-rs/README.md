@@ -501,10 +501,11 @@ OpenVMM creates the remaining outputs when it runs. A failed preparation
 closes and removes only its new log, preserving all pre-existing entries and
 caller-owned inputs, and reports a cleanup failure with the original error.
 
-On Linux, the generated control and boot-console socket names must be shorter
-than 108 bytes and hold no comma or equals sign, which OpenVMM's listener
-options cannot represent literally. Creation refuses these names before
-creating any output, including the log.
+On Linux, the generated control and boot-console socket names must be valid
+Unicode and shorter than 108 bytes both as supplied and with the directory's
+ancestor links resolved. Supplied names must hold no comma or equals sign,
+which OpenVMM's listener options cannot represent literally. Creation refuses
+these names before creating any output, including the log.
 
 `Prepared::capability()` and `outputs()` return what the caller may journal
 before a spawn. `log()` returns the same opened log, without reopening its
