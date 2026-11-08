@@ -573,6 +573,11 @@ discards its output. The renderer emits neither `--microvm-lifecycle` nor
 `--microvm-workload-identity`. The whole-config entry point is temporarily
 public: SL2.8 makes it internal when `host::vm::create` calls it.
 
+Both argument entry points refuse a `Boot` with a capture as `Unsupported`
+rather than silently omit its devices and resource capacities.
+`VmConfig::check` and `kernel_command_line` retain their existing behavior for
+valid capture configurations.
+
 `VmConfig::check_command_line()` checks the configuration's known arguments on
 every host, before any host change, with 2048 UTF-16 code units reserved for the
 runtime's files, launch options, and VM output names. The reserve foresees file
