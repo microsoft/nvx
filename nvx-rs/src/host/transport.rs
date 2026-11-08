@@ -132,6 +132,7 @@ pub fn connect_verified(
     }
 }
 
+/// Refuses an exited held VM, without relying on its numeric PID.
 fn check_running(process: &Process) -> Result<()> {
     if process
         .has_exited()
@@ -142,11 +143,13 @@ fn check_running(process: &Process) -> Result<()> {
     Ok(())
 }
 
+/// Describes the verified absence of the recorded VM process.
 fn exited() -> Error {
     let message = "the recorded VM process exited";
     Error::exited(message).with_source(io::Error::new(io::ErrorKind::NotFound, message))
 }
 
+/// Classifies transport failures separately from broken-session conditions.
 fn io_kind(error: &io::Error) -> ErrorKind {
     match error.kind() {
         io::ErrorKind::TimedOut => ErrorKind::TimedOut,
