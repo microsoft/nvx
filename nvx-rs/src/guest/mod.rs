@@ -17,6 +17,11 @@
 //! acknowledgement, and then takes its own configuration from the host, in one Activate on a
 //! restricted control session.
 //!
+//! The [guest-agent guidelines] give the init-owned space, execution, capture and restore
+//! contract, with nvx-init as the worked example. The library enforces none of those obligations.
+//!
+//! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
+//!
 //! The guest's space, the root that an init assembles and what it mounts in it, is each init's
 //! own. NVX's own space is internal reference code, which NVX's guest programs use: it is hidden
 //! from this documentation and unstable, and it becomes crate-private once nothing outside NVX
@@ -29,6 +34,22 @@
 //! applies its VM-wide view without starting a process. The contracts that every space reads
 //! stay public: the mapping values and [`MappingTable`](mappings::MappingTable), and the tokens
 //! and records of [`protocol`](crate::protocol) and [`activation`](crate::activation).
+//!
+//! The guidelines' public mapping excerpt forwards mount failures and keeps admission closed
+//! until the table is complete; the mount callback belongs to the init:
+//!
+//! ```no_run
+//! use nvx::guest::mappings::{Mapping, MappingTable, TableError};
+//!
+//! fn apply_part<E>(
+//!     table: &mut MappingTable,
+//!     part: &[u8],
+//!     mount: impl FnOnce(&[Mapping]) -> Result<(), (usize, E)>,
+//! ) -> Result<bool, TableError<E>> {
+//!     table.apply(part, mount)?;
+//!     Ok(table.is_complete())
+//! }
+//! ```
 //!
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
