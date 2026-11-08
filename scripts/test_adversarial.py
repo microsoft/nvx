@@ -980,25 +980,65 @@ class AdversarialOracleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             child_pid_path = root / "child.pid"
-            result = run_bounded_process(
-                [
-                    sys.executable,
-                    "-c",
-                    (
-                        "import pathlib,subprocess,sys,time; "
-                        "child=subprocess.Popen([sys.executable,'-c',"
-                        "'import time; time.sleep(60)']); "
-                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
-                        "time.sleep(60)"
-                    ),
-                    str(child_pid_path),
-                ],
-                cwd=Path.cwd(),
-                output_dir=root / "process",
-                timeout=1.0,
-                environment=os.environ,
-                contained_by_parent=True,
-            )
+            attach = ProcessTreeContainment.attach
+
+            def attach_ready(
+                containment: ProcessTreeContainment,
+                process: subprocess.Popen[bytes],
+            ) -> None:
+                attach(containment, process)
+                ready = False
+                try:
+                    deadline = time.monotonic() + 5.0
+                    while not child_pid_path.exists():
+                        self.assertIsNone(
+                            process.poll(), "fixture parent exited before readiness"
+                        )
+                        self.assertLess(
+                            time.monotonic(),
+                            deadline,
+                            "fixture child did not become ready",
+                        )
+                        time.sleep(0.01)
+                    self.assertIsNone(
+                        process.poll(), "fixture parent exited before readiness"
+                    )
+                    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+                    self.assertGreater(child_pid, 0)
+                    self.assertTrue(_process_running(child_pid))
+                    ready = True
+                finally:
+                    if not ready:
+                        try:
+                            containment.close(process)
+                        finally:
+                            for stream in (process.stdout, process.stderr):
+                                if stream is not None:
+                                    stream.close()
+
+            with patch.object(ProcessTreeContainment, "attach", attach_ready):
+                result = run_bounded_process(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import subprocess,sys,time; "
+                            "child=subprocess.Popen([sys.executable,'-c',"
+                            "'import os,pathlib,sys,time; "
+                            "path=pathlib.Path(sys.argv[1]); "
+                            'path.with_suffix(".tmp").write_text(str(os.getpid())); '
+                            'path.with_suffix(".tmp").replace(path); '
+                            "time.sleep(60)',sys.argv[1]]); "
+                            "time.sleep(60)"
+                        ),
+                        str(child_pid_path),
+                    ],
+                    cwd=Path.cwd(),
+                    output_dir=root / "process",
+                    timeout=1.0,
+                    environment=os.environ,
+                    contained_by_parent=True,
+                )
             child_pid = int(child_pid_path.read_text(encoding="utf-8"))
             deadline = time.monotonic() + 2.0
             while _process_running(child_pid) and time.monotonic() < deadline:
