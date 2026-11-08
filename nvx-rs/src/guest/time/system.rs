@@ -283,7 +283,7 @@ pub(crate) struct Runtime<'a> {
     strict: bool,
     /// The first violation that the call reported in strict mode, which fails the call.
     violation: Mutex<Option<Violation>>,
-    /// The first diagnostic revocation errno, or `u32::MAX` when none occurred.
+    /// The first port-revocation errno, or `u32::MAX` when none occurred.
     release_failure: AtomicU32,
     /// Current VM generation.
     generation: AtomicU32,
@@ -388,12 +388,15 @@ impl<'a> Runtime<'a> {
     /// Takes the calling thread's permission for the time ABI's ports, for one transaction,
     /// which [`PortAccess::release`] ends.
     pub(crate) fn open_ports(&self) -> Result<PortAccess<'a>, PortError> {
+        if let Err(error) = sys::check_released() {
+            self.retain_release_failure(error);
+        }
         self.ops
             .open_ports()
             .inspect_err(|&error| self.retain_release_failure(error))
     }
 
-    /// Reports the first diagnostic revocation failure, otherwise the thread's current
+    /// Reports the first port-revocation failure, otherwise the thread's current
     /// permission state. A later successful release cannot erase the call's original failure.
     pub(crate) fn check_released(&self) -> Result<(), PortError> {
         match self.release_failure.load(Ordering::Relaxed) {
@@ -980,10 +983,7 @@ pub(crate) fn best_sample(
     let rates = clock_rates(runtime)?;
     let ports = runtime.open_ports().map_err(SampleError::Ports)?;
     let selected = select_sample(&ports, runtime.ops, attempts, bound_ns, generation, rates);
-    ports
-        .release()
-        .inspect_err(|&error| runtime.retain_release_failure(error))
-        .map_err(SampleError::Ports)?;
+    ports.release().map_err(SampleError::Ports)?;
     selected
 }
 
