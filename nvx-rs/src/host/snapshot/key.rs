@@ -21,9 +21,9 @@ use crate::error::{Error, Result};
 use crate::host::config::{DiskCapture, check_setting};
 use crate::host::platform::parse_hex32;
 use crate::host::process::BootId;
+use crate::host::runtime::{ArtifactIdentity, MAX_IDENTITY_LEN, RuntimeIdentity};
 use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::mount::MOUNT_TAG;
-use crate::host::store::{ArtifactIdentity, MAX_IDENTITY_LEN, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
 
 pub use crate::host::config::Invariants;

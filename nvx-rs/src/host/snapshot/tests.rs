@@ -20,9 +20,8 @@ use crate::host::config::{
 };
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::BootId;
-use crate::host::runtime::{LaunchOptions, Runtime};
+use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::sandbox::SandboxNetwork;
-use crate::host::store::{ArtifactIdentity, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
 use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootImage;

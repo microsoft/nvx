@@ -14,7 +14,7 @@ use super::{
     REPO_BUILD_DIR, REPO_OPENVMM_DIR, absolute, is_release_dir, openvmm_executable,
 };
 use crate::error::{Error, Result};
-use crate::host::store::{ArtifactIdentity, RuntimeIdentity};
+use crate::host::runtime::{ArtifactIdentity, RuntimeIdentity};
 
 /// The layout of a directory of NVX artifacts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]

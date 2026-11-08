@@ -70,11 +70,11 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::host::filesystem::ExportPlan;
 use crate::host::launch::{VmmLaunch, fit_process_command_line};
+use crate::host::platform::inherit::Inherited;
 use crate::host::process::Process;
 #[cfg(windows)]
 #[cfg(windows)]
 use crate::host::seal;
-use crate::host::supervisor::Inherited;
 #[cfg(target_os = "linux")]
 use crate::host::sys;
 

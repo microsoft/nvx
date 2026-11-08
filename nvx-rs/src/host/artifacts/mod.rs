@@ -40,7 +40,7 @@ use serde_json::Value;
 use crate::contract;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::platform;
-use crate::host::store::RuntimeIdentity;
+use crate::host::runtime::RuntimeIdentity;
 
 pub use self::dir::{ArtifactDir, ArtifactPaths, GuestPaths, Layout};
 pub use self::guest::Guest;
