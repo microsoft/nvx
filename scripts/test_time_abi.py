@@ -290,7 +290,7 @@ class FieldParsingTests(unittest.TestCase):
                 "intel.alderlake.v1",
                 "amd.milan.v1",
                 "amd.genoa.v2",
-                "amd.turin.v1",
+                "amd.turin.v2",
             ],
         )
         # A generation is the CPUs that it covers, whatever its profile's
