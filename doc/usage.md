@@ -1404,6 +1404,7 @@ latest revision of the built-in profile of the host's CPU generation:
 | `intel.skylake-sp.v1` | `skylake-sp` | Intel Xeon Scalable, first generation (6/85, steppings 0 to 4) |
 | `intel.icelake-sp.v1` | `icelake-sp` | Intel Xeon Scalable, third generation (6/106) |
 | `intel.emeraldrapids.v1` | `emeraldrapids` | Intel Xeon Scalable, fifth generation (6/207) |
+| `intel.graniterapids.v1` | `graniterapids` | Intel Xeon 6 with P-cores (6/173) |
 | `intel.alderlake.v1` | `alderlake` | Intel Core, twelfth generation (6/151 and 6/154) |
 | `amd.milan.v1` | `milan` | AMD EPYC, third generation (25/1, Milan-X included) |
 | `amd.genoa.v2` | `genoa` | AMD EPYC, fourth generation (25/17, Genoa-X included) |
@@ -1413,23 +1414,30 @@ OpenVMM keeps every earlier revision pinned, so that its snapshots still
 restore, and `--cpu-profile` still selects it by its ID: `amd.genoa.v1` on
 Genoa.
 
-Any other CPU, including Cascade Lake, Sapphire Rapids, Granite Rapids, Tiger
-Lake, Raptor Lake, and AMD's Ryzen CPUs, has no built-in profile: on an Intel
-or AMD CPU, `--cpu-profile auto` falls back to a host profile, described
-below, and on another vendor's CPU, it fails with `E_PROFILE_HOST_UNKNOWN`.
-A host of a listed generation can still fail with `E_PROFILE_UNSUPPORTED` if
-its SKU or hypervisor lacks a feature of the profile, and on an Intel or AMD
-CPU OpenVMM's error then names `--cpu-profile host`. `intel.alderlake.v1`
-derives from one Core i9-12900H on WHP, `amd.milan.v1` from one EPYC 7763
-Azure VM on WHP, `amd.genoa.v1` and `amd.turin.v1` from KVM on one
-GitHub-hosted Actions runner each, an Azure VM with an EPYC 9V74 or 9V45, and
-`amd.genoa.v2` from that EPYC 9V74 runner's KVM and the nested MSHV of an
-Azure VM with the same CPU. GitHub's runners with an EPYC 7763, 9V74, or 9V45
-pass their profiles' full `test-microvm` suite on KVM, the EPYC 9V74 runner
-on `amd.genoa.v1`, of which `amd.genoa.v2` presents a subset. Alder Lake
-hosts on KVM and MSHV, Milan, Genoa, and Turin hosts on MSHV, Genoa and Turin
-hosts on WHP, bare-metal AMD hosts, and SKUs without the profiles' features
-are unverified. The AMD profiles leave
+Any other CPU, including Cascade Lake, Sapphire Rapids, Tiger Lake, Raptor
+Lake, and AMD's Ryzen CPUs, has no built-in profile: on an Intel or AMD CPU,
+`--cpu-profile auto` falls back to a host profile, described below, and on
+another vendor's CPU, it fails with `E_PROFILE_HOST_UNKNOWN`. A host of a
+listed generation can still fail with `E_PROFILE_UNSUPPORTED` if its SKU or
+hypervisor lacks a feature of the profile, and on an Intel or AMD CPU
+OpenVMM's error then names `--cpu-profile host`. `intel.alderlake.v1` derives
+from one Core i9-12900H on WHP, `intel.graniterapids.v1` from one Xeon 6973P-C
+Azure VM on WHP and the KVM of two GitHub-hosted Actions runners with that
+CPU, `amd.milan.v1` from one EPYC 7763 Azure VM on WHP, `amd.genoa.v1` and
+`amd.turin.v1` from KVM on one GitHub-hosted Actions runner each, an Azure VM
+with an EPYC 9V74 or 9V45, and `amd.genoa.v2` from that EPYC 9V74 runner's KVM
+and the nested MSHV of an Azure VM with the same CPU. GitHub's runners with an
+EPYC 7763, 9V74, or 9V45, or a Xeon 6973P-C, pass their profiles' full
+`test-microvm` suite on KVM, the EPYC 9V74 runner on `amd.genoa.v1`, of which
+`amd.genoa.v2` presents a subset. Alder Lake hosts on KVM and MSHV, Granite
+Rapids hosts on MSHV and WHP, Milan, Genoa, and Turin hosts on MSHV, Genoa and
+Turin hosts on WHP, bare-metal AMD hosts, and SKUs without the profiles'
+features are unverified. No profile presents AMX, whose tile states OpenVMM
+does not enable, or AVX10, whose leaf `0x24` no profile keeps; on Granite
+Rapids, the AVX-512 features enumerate every instruction of AVX10.1. The
+maximum basic leaf of `intel.graniterapids.v1` is `0x24`, which KVM enumerates
+from Linux 6.12, so a Granite Rapids host whose KVM is older does not support
+it. The AMD profiles leave
 out what KVM cannot present, `BTC_NO` and PSFD without a `SPEC_CTRL` control,
 and the enumerations of Intel's speculation controls that KVM adds on AMD
 hosts. They present none of AMD's speculation controls, `IBRS`, `STIBP`, and
