@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::artifacts::Artifacts;
-use super::config::COMMAND_LINE_BUDGET;
+pub use super::config::COMMAND_LINE_BUDGET;
 use super::filesystem::ExportPlan;
 use super::network::{self, NetworkPolicy};
 use crate::error::{Error, Result};

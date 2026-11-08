@@ -860,6 +860,7 @@ fn nvx::host::instance::remove_interrupted_writes
 fn nvx::host::instance::write_json
 fn nvx::host::instance::write_private
 mod nvx::host::launch
+const nvx::host::launch::COMMAND_LINE_BUDGET
 const nvx::host::launch::DEFAULT_GUEST_NETWORK
 const nvx::host::launch::DEFAULT_HOSTNAME
 const nvx::host::launch::DEFAULT_MEMORY_MIB
