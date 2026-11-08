@@ -1408,11 +1408,11 @@ latest revision of the built-in profile of the host's CPU generation:
 | `intel.alderlake.v1` | `alderlake` | Intel Core, twelfth generation (6/151 and 6/154) |
 | `amd.milan.v1` | `milan` | AMD EPYC, third generation (25/1, Milan-X included) |
 | `amd.genoa.v2` | `genoa` | AMD EPYC, fourth generation (25/17, Genoa-X included) |
-| `amd.turin.v1` | `turin` | AMD EPYC, fifth generation (26/2) |
+| `amd.turin.v2` | `turin` | AMD EPYC, fifth generation (26/2) |
 
 OpenVMM keeps every earlier revision pinned, so that its snapshots still
 restore, and `--cpu-profile` still selects it by its ID: `amd.genoa.v1` on
-Genoa.
+Genoa and `amd.turin.v1` on Turin.
 
 Any other CPU, including Cascade Lake, Sapphire Rapids, Tiger Lake, Raptor
 Lake, and AMD's Ryzen CPUs, has no built-in profile: on an Intel or AMD CPU,
@@ -1425,13 +1425,15 @@ from one Core i9-12900H on WHP, `intel.graniterapids.v1` from one Xeon 6973P-C
 Azure VM on WHP and the KVM of two GitHub-hosted Actions runners with that
 CPU, `amd.milan.v1` from one EPYC 7763 Azure VM on WHP, `amd.genoa.v1` and
 `amd.turin.v1` from KVM on one GitHub-hosted Actions runner each, an Azure VM
-with an EPYC 9V74 or 9V45, and `amd.genoa.v2` from that EPYC 9V74 runner's KVM
-and the nested MSHV of an Azure VM with the same CPU. GitHub's runners with an
-EPYC 7763, 9V74, or 9V45, or a Xeon 6973P-C, pass their profiles' full
-`test-microvm` suite on KVM, the EPYC 9V74 runner on `amd.genoa.v1`, of which
-`amd.genoa.v2` presents a subset. Alder Lake hosts on KVM and MSHV, Granite
-Rapids hosts on MSHV and WHP, Milan, Genoa, and Turin hosts on MSHV, Genoa and
-Turin hosts on WHP, bare-metal AMD hosts, and SKUs without the profiles'
+with an EPYC 9V74 or 9V45, `amd.genoa.v2` from that EPYC 9V74 runner's KVM and
+the nested MSHV of an Azure VM with the same CPU, and `amd.turin.v2` from the
+KVM, under Linux 6.8 and 7.0, and the WHP, under Windows Server 2022 and 2025,
+of GitHub's runners with an EPYC 9V45. GitHub's runners with an EPYC 7763,
+9V74, or 9V45, or a Xeon 6973P-C, pass their profiles' full `test-microvm`
+suite on KVM, and those with an EPYC 7763, 9V74, or 9V45 pass it on the WHP of
+Windows Server 2025 too. Alder Lake hosts on KVM and MSHV, Granite Rapids
+hosts on MSHV and WHP, Milan, Genoa, and Turin hosts on MSHV, bare-metal AMD
+hosts, and SKUs without the profiles'
 features are unverified. No profile presents AMX, whose tile states OpenVMM
 does not enable, or AVX10, whose leaf `0x24` no profile keeps; on Granite
 Rapids, the AVX-512 features enumerate every instruction of AVX10.1. The
@@ -1444,12 +1446,18 @@ hosts. They present none of AMD's speculation controls, `IBRS`, `STIBP`, and
 `SSBD`, because the Azure VMs' hypervisors withhold them; `amd.milan.v1`'s
 Linux guests therefore use retpolines and report SSB, SRSO, and TSA as
 vulnerable on every host. `amd.genoa.v1` pins what Azure presents to KVM on
-Genoa: the basic leaves up to `0x1c`, and `LFENCE` serialization,
+Genoa, and `amd.turin.v1` what it presented to KVM on Turin when it was
+derived: the basic leaves up to `0x1c`, and `LFENCE` serialization,
 NoSmmCtlMsr, and the TSA immunities in `0x80000021`. The Microsoft hypervisor
-of the Azure Genoa VMs fingerprinted so far, under MSHV and WHP, presents none
-of them, and a bare-metal Genoa host's KVM does not report the TSA
-immunities. `amd.genoa.v2` leaves them out, so its Linux guests report TSA as
-vulnerable, as `amd.milan.v1`'s do.
+of the Azure Genoa VMs fingerprinted so far, under MSHV and WHP, and of the
+Turin ones, under WHP, presents none of them. The KVM of GitHub's Turin
+runners no longer reports the TSA immunities, and a bare-metal Genoa host's
+KVM does not report them either. `amd.genoa.v2` and `amd.turin.v2` leave them
+out, so their Linux guests report TSA as vulnerable, as `amd.milan.v1`'s do.
+`amd.turin.v2` also leaves out the StibpAlwaysOn and IBPB_RET enumerations of
+`0x80000008`, which qualify controls that no AMD profile presents: the WHP of
+Windows Server 2022 presents neither, and KVM presents IBPB_RET only from
+Linux 6.13.
 
 On an Intel or AMD development host that no built-in profile serves,
 `--cpu-profile auto` falls back to a host profile, `intel.host.v1` or
