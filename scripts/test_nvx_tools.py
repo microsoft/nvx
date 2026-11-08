@@ -3102,7 +3102,7 @@ class CiTests(unittest.TestCase):
                         ci._exact_openvmm_test(required_test),
                         test_filter,
                     )
-        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 29)
+        self.assertEqual(len(ci.OPENVMM_WHP_TESTS), 30)
         self.assertEqual(
             len(set(ci.OPENVMM_WHP_TESTS)),
             len(ci.OPENVMM_WHP_TESTS),

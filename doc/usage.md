@@ -1076,10 +1076,11 @@ python3 scripts/nvx.py test-openvmm
 ```
 
 Builds and runs the OpenVMM checkout's VMM tests that the backend's filter
-selects, with OpenVMM's `vmm-tests-run`. The Linux-direct microVM TTRPC test
-boots NVX's `build/vmlinux` and `build/initramfs.cpio.gz` at one, two, four,
-and eight processors, so build the guest first; the remaining test artifacts
-are produced by OpenVMM itself. On Windows, it appends `/Brepro` to `_LINK_`,
+selects, with OpenVMM's `vmm-tests-run`. The microVM TTRPC tests boot NVX's
+`build/vmlinux` and `build/initramfs.cpio.gz`, the Linux-direct lifecycle and
+snapshot test at one, two, four, and eight processors, and the device snapshot
+test at one, so build the guest first; the remaining test artifacts are
+produced by OpenVMM itself. On Windows, it appends `/Brepro` to `_LINK_`,
 as `test-openvmm-unit` does. No WHP test needs Hyper-V, so `vmm-tests-run`,
 which derives what a run needs from the tests that it selects, needs no
 Hyper-V administration on a WHP host.

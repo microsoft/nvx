@@ -545,6 +545,7 @@ def _exact_openvmm_test(test: str) -> str:
 
 
 OPENVMM_REQUIRED_MICROVM_TESTS = (
+    "ttrpc::test_ttrpc_microvm_device_snapshots",
     "ttrpc::test_ttrpc_microvm_linux_direct_lifecycle_and_snapshot",
     "x86_64::microvm::openvmm_linux_x64_phase_1_lifecycle",
 )
