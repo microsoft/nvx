@@ -75,6 +75,38 @@ impl FileDescriptor {
         Ok(())
     }
 
+    /// Writes through a nonblocking pipe or character device by the caller deadline, without
+    /// waiting for flow control. Regular files ignore nonblocking mode. Legacy writes are unchanged.
+    pub(crate) fn write_all_until(
+        &self,
+        mut bytes: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<(), Errno> {
+        let Some(deadline) = deadline else {
+            return self.write_all(bytes);
+        };
+        FileLock::check_deadline(Some(deadline))?;
+        let flags = fcntl(&self.0, FcntlArg::F_GETFL).map(OpenFlags::from_bits_retain)?;
+        if !flags.contains(OpenFlags::O_NONBLOCK) {
+            return Err(Errno::EINVAL);
+        }
+        let kind =
+            SFlag::from_bits_truncate(nix::sys::stat::fstat(&self.0)?.st_mode) & SFlag::S_IFMT;
+        if !matches!(kind, SFlag::S_IFIFO | SFlag::S_IFCHR) {
+            return Err(Errno::EOPNOTSUPP);
+        }
+        while !bytes.is_empty() {
+            FileLock::check_deadline(Some(deadline))?;
+            match super::signal::write_without_sigpipe(self, bytes) {
+                Ok(0) => return Err(Errno::EIO),
+                Ok(count) => bytes = &bytes[count..],
+                Err(Errno::EINTR) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        FileLock::check_deadline(Some(deadline))
+    }
+
     /// Reads at `offset` once, preserving the C cast from `u64` to `off_t`.
     pub(crate) fn pread(&self, bytes: &mut [u8], offset: u64) -> Result<usize, Errno> {
         nix::sys::uio::pread(&self.0, bytes, offset as _)

@@ -43,6 +43,43 @@ impl FileDescriptor {
     }
 }
 
+#[test]
+fn deadline_writes_refuse_blocking_descriptors_and_keep_legacy_writes() {
+    let (reader, writer) = create_pipe().unwrap();
+    assert_eq!(
+        writer.write_all_until(b"bounded", Some(Instant::now() + Duration::from_secs(1))),
+        Err(Errno::EINVAL)
+    );
+    writer.write_all_until(b"legacy", None).unwrap();
+    let mut bytes = [0; 6];
+    reader.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"legacy");
+    let file = FileDescriptor::from_owned(tempfile::tempfile().unwrap().into());
+    file.set_nonblocking().unwrap();
+    assert_eq!(
+        file.write_all_until(b"bounded", Some(Instant::now() + Duration::from_secs(1))),
+        Err(Errno::EOPNOTSUPP)
+    );
+}
+
+#[test]
+fn an_expired_write_deadline_leaves_the_pipe_unchanged() {
+    let (reader, writer) = create_pipe().unwrap();
+    writer.set_nonblocking().unwrap();
+    reader.set_nonblocking().unwrap();
+    assert_eq!(
+        writer.write_all_until(b"late", Some(Instant::now())),
+        Err(Errno::ETIMEDOUT)
+    );
+    assert_eq!(reader.read(&mut [0; 4]), Err(Errno::EAGAIN));
+    writer
+        .write_all_until(b"on time", Some(Instant::now() + Duration::from_secs(1)))
+        .unwrap();
+    let mut bytes = [0; 7];
+    reader.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes, b"on time");
+}
+
 /// Sets the soft limit of the process's open descriptors to `limit`, and returns the limit that
 /// it replaced, for a test that runs out of descriptors in a process of its own.
 ///

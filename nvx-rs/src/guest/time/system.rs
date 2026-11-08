@@ -4,8 +4,9 @@
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Display};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::Phase;
 use super::api::Violation;
@@ -155,10 +156,10 @@ pub(crate) trait PrivilegedOps: Sync {
     /// Stops the VM with `status`, which in production does not return.
     fn power_off(&self, status: PowerOffStatus);
     /// Appends `record` to the kernel log, when the process may write it.
-    fn write_kernel_log(&self, record: &[u8]);
+    fn write_kernel_log(&self, record: &[u8], deadline: Option<Instant>);
     /// Writes `separator` and then `line` to the console, or to standard error when the console
     /// does not open.
-    fn write_console(&self, separator: &[u8], line: &[u8]);
+    fn write_console(&self, separator: &[u8], line: &[u8], deadline: Option<Instant>);
 }
 
 /// An MSR device, or the token of a test's fake.
@@ -218,25 +219,50 @@ impl PrivilegedOps for RealOps {
         sys::power_off(status.code())
     }
 
-    fn write_kernel_log(&self, record: &[u8]) {
-        let flags = OpenFlags::O_WRONLY | OpenFlags::O_CLOEXEC;
-        if let Ok(log) = sys::open(kernel::KERNEL_LOG_DEVICE, flags, Mode::empty()) {
-            let _ = log.write_all(record);
+    fn write_kernel_log(&self, record: &[u8], deadline: Option<Instant>) {
+        let flags = OpenFlags::O_WRONLY
+            | OpenFlags::O_CLOEXEC
+            | deadline.map_or(OpenFlags::empty(), |_| OpenFlags::O_NONBLOCK);
+        if FileLock::check_deadline(deadline).is_ok()
+            && let Ok(log) = sys::open(kernel::KERNEL_LOG_DEVICE, flags, Mode::empty())
+        {
+            let _ = log.write_all_until(record, deadline);
         }
     }
 
-    fn write_console(&self, separator: &[u8], line: &[u8]) {
-        let flags = OpenFlags::O_WRONLY | OpenFlags::O_NOCTTY | OpenFlags::O_CLOEXEC;
-        match sys::open(kernel::CONSOLE_DEVICE, flags, Mode::empty()) {
-            Ok(console) => {
-                let _ = console.write_all(separator);
-                let _ = console.write_all(line);
-            }
-            Err(_) => {
+    fn write_console(&self, separator: &[u8], line: &[u8], deadline: Option<Instant>) {
+        write_console_at(kernel::CONSOLE_DEVICE, separator, line, deadline);
+    }
+}
+
+/// Best-effort duplicate diagnostics cannot delay the structured failure returned to the caller.
+fn write_console_at(path: &CStr, separator: &[u8], line: &[u8], deadline: Option<Instant>) {
+    if FileLock::check_deadline(deadline).is_err() {
+        return;
+    }
+    let flags = OpenFlags::O_WRONLY
+        | OpenFlags::O_NOCTTY
+        | OpenFlags::O_CLOEXEC
+        | deadline.map_or(OpenFlags::empty(), |_| OpenFlags::O_NONBLOCK);
+    match sys::open(path, flags, Mode::empty()) {
+        Ok(console) => {
+            let _ = console.write_all_until(separator, deadline);
+            let _ = console.write_all_until(line, deadline);
+        }
+        Err(_) => match deadline {
+            None => {
                 sys::write_standard_error(separator);
                 sys::write_standard_error(line);
             }
-        }
+            Some(_) => {
+                // Reopen rather than duplicate: changing a shared stderr description's flags
+                // would also change other writers.
+                if let Ok(stderr) = sys::open(c"/proc/self/fd/2", flags, Mode::empty()) {
+                    let _ = stderr.write_all_until(separator, deadline);
+                    let _ = stderr.write_all_until(line, deadline);
+                }
+            }
+        },
     }
 }
 
@@ -369,8 +395,31 @@ impl<'a> Runtime<'a> {
     /// starts nothing, as [`fork_process`] checks.
     pub(crate) fn log_release_failure(&self, error: PortError) {
         let record = format!("nvx-time: {error}\n");
-        self.ops
-            .write_kernel_log(&[DIAGNOSTIC_PRIORITY, record.as_bytes()].concat());
+        self.ops.write_kernel_log(
+            &[DIAGNOSTIC_PRIORITY, record.as_bytes()].concat(),
+            self.deadline,
+        );
+    }
+
+    fn lock_reports(&self) -> Result<Option<MutexGuard<'_, ()>>, Errno> {
+        let Some(deadline) = self.deadline else {
+            return Ok(self.report_lock.lock().ok());
+        };
+        loop {
+            FileLock::check_deadline(Some(deadline))?;
+            match self.report_lock.try_lock() {
+                Ok(guard) => {
+                    FileLock::check_deadline(Some(deadline))?;
+                    return Ok(Some(guard));
+                }
+                Err(TryLockError::Poisoned(_)) => return Ok(None),
+                Err(TryLockError::WouldBlock) => thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(1)),
+                ),
+            }
+        }
     }
 
     /// Emits one serialized violation record to every ABI destination.
@@ -381,8 +430,9 @@ impl<'a> Runtime<'a> {
         phase: Phase,
         detail: &[u8],
     ) {
-        let _guard = self.report_lock.lock().ok();
-        self.emit_event_unlocked(code, source, phase, detail);
+        if let Ok(_guard) = self.lock_reports() {
+            self.emit_event_unlocked(code, source, phase, detail);
+        }
     }
 
     /// Emits an event while the caller already owns `report_lock`.
@@ -402,13 +452,20 @@ impl<'a> Runtime<'a> {
             clock_ns(sys::Clock::Boottime),
             detail,
         );
-        self.ops
-            .write_kernel_log(&[KERNEL_LOG_PRIORITY, line.as_bytes()].concat());
-        if let Ok(ports) = self.open_ports() {
+        self.ops.write_kernel_log(
+            &[KERNEL_LOG_PRIORITY, line.as_bytes()].concat(),
+            self.deadline,
+        );
+        if FileLock::check_deadline(self.deadline).is_ok()
+            && let Ok(ports) = self.open_ports()
+        {
             if self.async_output.load(Ordering::Relaxed) {
                 ports.write_u8(Port::PortbData, b'\n');
             }
             for byte in line.bytes() {
+                if FileLock::check_deadline(self.deadline).is_err() {
+                    break;
+                }
                 ports.write_u8(Port::PortbData, byte);
             }
             // The event goes on after a failure, which keeps the thread from starting anything,
@@ -422,15 +479,20 @@ impl<'a> Runtime<'a> {
         } else {
             b""
         };
-        self.ops.write_console(separator, line.as_bytes());
+        self.ops
+            .write_console(separator, line.as_bytes(), self.deadline);
         let _ = count_violation(self.deadline);
     }
 
     /// Reports a conformance failure, and powers off unless report-only or strict.
     pub(crate) fn conformance_failure(&self, code: ViolationCode, phase: Phase, detail: &[u8]) {
-        let _guard = self.report_lock.lock().ok();
-        self.emit_event_unlocked(code, EventSource::Conformance, phase, detail);
-        self.stop(PowerOffStatus::Conformance, code, detail);
+        match self.lock_reports() {
+            Ok(_guard) => {
+                self.emit_event_unlocked(code, EventSource::Conformance, phase, detail);
+                self.stop(PowerOffStatus::Conformance, code, detail);
+            }
+            Err(_) => self.stop(PowerOffStatus::Conformance, code, detail),
+        }
     }
 
     /// Emits a fatal event and requests its typed power-off status, unless report-only or
