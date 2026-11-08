@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{MAX_METADATA_LEN, PROVENANCE_FORMAT};
 use crate::error::{Error, Result};
-use crate::host::store::ArtifactIdentity;
+use crate::host::runtime::ArtifactIdentity;
 
 /// Returns the identity of an artifact whose SHA-256 digest is `digest`, if it holds 64 lowercase
 /// hexadecimal digits, as `nvx.py` writes digests and requires them.
