@@ -355,8 +355,8 @@ fn strict_preparation_keeps_its_first_diagnostic_revocation_after_a_successful_r
     runtime.deadline = Some(Instant::now() + std::time::Duration::from_secs(1));
     for (check, detail) in [
         (CheckId::C12, b"first".as_slice()),
-        (CheckId::C13, b"second".as_slice()),
-        (CheckId::C14, b"third".as_slice()),
+        (CheckId::C11, b"second".as_slice()),
+        (CheckId::C10, b"third".as_slice()),
     ] {
         runtime.conformance_failure(
             ViolationCode::Conformance(check),
@@ -406,7 +406,7 @@ fn strict_preparation_keeps_a_partial_grants_failed_rollback_after_a_successful_
     );
     assert_eq!(sys::check_released(), Err(PortError::Revoke(Errno::ENOMEM)));
     runtime.conformance_failure(
-        ViolationCode::Conformance(CheckId::C13),
+        ViolationCode::Conformance(CheckId::C11),
         super::super::Phase::Capture,
         b"later release",
     );
