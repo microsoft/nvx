@@ -8,16 +8,17 @@
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131.
-- NVX's pinned OpenVMM revision: `cf6c03977c1d82ddb3bd49194f073b388f01b958`, position 220, the
-  head of the `feature/microvm/release/v6.0` branch of microsoft/openvmm. The v6.0 reorganization
-  regrouped the 223 commits of `feature/microvm/dev` at the NVX pin before it, `3f2ab4c2f`, the
-  head of `feature/microvm/release/v5.1`, into 220 commits on the same fork base: it folded the
-  PR20 fixup at v5.1 position 148 into position 097 and the PR12 fixup at v5.1 position 221 into
-  positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits of
-  microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
-  positions 149-220 are positions 148-219, and the pin's tree is the tree of `3f2ab4c2f`; see
-  [The v6.0 reorganization](#the-v60-reorganization). The pin is 89 commits past the mapped tip on
-  the same first-parent chain. Positions 132-220 are not yet assigned to PRs; see
+- NVX's pinned OpenVMM revision: `90f9e61807744548cb2d0d1424d01959cae06950`, position 223, the
+  head of microsoft/openvmm#4986, whose three commits, positions 221-223, follow position 220,
+  `cf6c03977`, the head of `feature/microvm/dev` and of its `feature/microvm/release/v6.0` branch.
+  The v6.0 reorganization regrouped the 223 commits of `feature/microvm/dev` at the NVX pin before
+  that, `3f2ab4c2f`, the head of `feature/microvm/release/v5.1`, into 220 commits on the same fork
+  base: it folded the PR20 fixup at v5.1 position 148 into position 097 and the PR12 fixup at v5.1
+  position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
+  of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
+  positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 92 commits past
+  the mapped tip on the same first-parent chain. Positions 132-223 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -957,7 +958,8 @@ ba105dd7f
   -> storage generation block identity [215-216]
   -> device start confirmation [217-218] -> long Windows report paths [219]
   -> guest TSC offset within its bound [220]
-  -> cf6c03977 (NVX pin)
+  -> Granite Rapids CPU profile [221-223]
+  -> 90f9e6180 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -973,14 +975,15 @@ reorganization folded the PR20 and PR12 fixups into the commits that they fix; s
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. None of the 89 later commits is a
+The NVX pin extends the chain past position 131 without merges. None of the 92 later commits is a
 fixup of a mapped PR, and none is yet classified or assigned to PRs. Each of positions 132-186
 combines the v2.4 commits that the table lists, as v3.0 positions 145-160 and 162-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 187-191
 followed the v3.0 reorganization, positions 192-205 are the ABI restart of the v4.0
 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, and positions 219 and 220 followed the v5.1 rebase, so they combine none, apart
-from position 220, which combines v5.1 positions 222 and 223. Each commit has the position that it
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-223 followed the
+v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
+222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
 [The v6.0 reorganization](#the-v60-reorganization). A v4.0 position counts in `feature/microvm/dev`
 at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4.0`.
@@ -1076,6 +1079,9 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 218 | `49afa32c0` | 219 | - | - | - | vmcore: confirm device starts before the VM runs (microsoft/openvmm#4969) |
 | 219 | `82cc6db18` | 220 | - | - | - | microVM: publish the outcome report below long Windows paths (microsoft/openvmm#4981) |
 | 220 | `cf6c03977` | 222, 223 | - | - | - | virt: read the guest TSC offset until it is within its bound (microsoft/openvmm#4984) |
+| 221 | `af3298f5d` | - | - | - | - | cpu_profile: clear AMX's features without its XSAVE state (microsoft/openvmm#4986) |
+| 222 | `86e1617fc` | - | - | - | - | cpu_profile: clear AVX10, whose leaf 0x24 keeps no data (microsoft/openvmm#4986) |
+| 223 | `90f9e6180` | - | - | - | - | cpu_profile: pin intel.graniterapids.v1 for Granite Rapids (microsoft/openvmm#4986) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1247,6 +1253,19 @@ and 193 change, and the paragraph on time samples that position 160 adds to the 
 page, in the section that position 147 adds. It changes nothing that a mapped PR adds. Replaying it
 on upstream main conflicts in all five of its files: upstream main lacks the four of the time ABI
 and that section of the snapshots page, so it follows the time ABI series upstream.
+
+Positions 221-223 change only the CPU profiles. Positions 221 and 222 clear AMX's features without
+AMX's XSAVE states, and AVX10, in the derivation policy of position 138, which positions 150 and
+153 extended. Position 223 pins `intel.graniterapids.v1` as positions 149, 150, and 153 pinned
+theirs, in the generations, static data, fixtures, and tests of the `cpu_profile` crate, which
+position 138 adds and positions 146, 149, 150, 153, and 154 change. It also extends the test of
+the topology leaves of the effective CPUID that position 146 adds, moves the tests of the fallback
+of positions 152 and 162 in `openvmm_core` and petri to another unserved CPU, adds the profile to
+the WHP partition tests that position 153 last extended, and lists it on the Guide's snapshots
+page, in the section that position 147 adds and position 220 last changed. They change nothing that
+a mapped PR adds. Replaying them on upstream main conflicts in all nine of their files that
+existed before them: upstream main lacks the `cpu_profile` crate, the time ABI, and that section of
+the snapshots page, so they follow the time ABI series upstream.
 
 ## PR summary
 
