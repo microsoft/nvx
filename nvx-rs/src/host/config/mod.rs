@@ -617,7 +617,7 @@ impl VmConfig {
                 }
                 let shown = path.display().to_string();
                 reject_disk_path(path, &shown)?;
-                reject_container_backend(path, &shown, writable)?;
+                reject_container_backend(path, &shown, writable, true)?;
             }
             let mut image = OsString::from("distro:file:");
             image.push(&root.image);
@@ -932,17 +932,25 @@ pub(crate) fn reject_disk_path(path: &Path, shown: &str) -> Result<()> {
     Ok(())
 }
 
-/// Extensions for which OpenVMM selects a container backend instead of a raw file.
-const CONTAINER_EXTENSIONS: [&str; 4] = ["vhd", "vhdx", "vmgs", "vmdk"];
+/// Extensions for which every affected OpenVMM flow selects a container backend.
+const CONTAINER_EXTENSIONS: [&str; 3] = ["vhd", "vhdx", "vmgs"];
 
 /// Refuses a block path when OpenVMM would not attach it as the requested raw image.
-fn reject_container_backend(path: &Path, shown: &str, writable: bool) -> Result<()> {
+fn reject_container_backend(
+    path: &Path,
+    shown: &str,
+    writable: bool,
+    reject_vmdk: bool,
+) -> Result<()> {
     let name = path.file_name().map(|name| name.to_string_lossy());
     let extension = match name.as_deref().unwrap_or_default().rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => extension,
         _ => "",
     };
-    if CONTAINER_EXTENSIONS.contains(&extension) || (writable && extension == "iso") {
+    if CONTAINER_EXTENSIONS.contains(&extension)
+        || (reject_vmdk && extension == "vmdk")
+        || (writable && extension == "iso")
+    {
         return Err(Error::unsupported(format!(
             "disk paths ending in .{extension} are unsupported, since OpenVMM would not attach \
              them as raw images: {shown}"
@@ -951,9 +959,9 @@ fn reject_container_backend(path: &Path, shown: &str, writable: bool) -> Result<
     Ok(())
 }
 
-/// Refuses a legacy sandbox path that OpenVMM would not attach as a raw block image.
+/// Preserves the legacy sandbox refusal set used by snapshot and clone flows.
 pub(crate) fn reject_container_path(path: &Path, shown: &str) -> Result<()> {
-    reject_container_backend(path, shown, true)
+    reject_container_backend(path, shown, true, false)
 }
 
 /// Common cold-boot inputs, shared with the legacy VmmLaunch without narrowing its public types.
