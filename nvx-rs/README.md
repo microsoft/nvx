@@ -1835,10 +1835,10 @@ otherwise empty network policy is explicitly refused.
 
 The caller owns its transport. After answering the capture request, send
 nothing until `capture` returns. After `Continued` or a `Resumed` failure,
-report on the same session. After `Restored`, take the session's reset and
-attach again before receiving the activation record. The activation module
-retains its legacy Device-shaped capture and repair interfaces for the test
-adapter until its migration.
+report on the same session. After `Restored`, take the session's RESET, then
+call `GuestConnection::acknowledge(window)` on that session before receiving
+the activation record. The activation module retains its legacy Device-shaped
+capture and repair interfaces for the test adapter until its migration.
 
 ### `nvx::guest::activation`
 
