@@ -324,6 +324,42 @@ def _fresh_openvmm_command(*_args: object, **_kwargs: object) -> list[str]:
     return ["openvmm"]
 
 
+def _serve_boot_console(
+    endpoint: str,
+    serve: Callable[[Callable[[bytes], None], Callable[[], bytes]], None],
+    errors: list[BaseException],
+    *,
+    delay: float = 0.0,
+) -> threading.Thread:
+    """Start a thread that listens at a boot console's endpoint after
+    ``delay``, as OpenVMM does, on a named pipe on Windows and a Unix socket
+    elsewhere, and calls ``serve`` with the send and the receive of its one
+    client. It records what it raises in ``errors``."""
+
+    def run() -> None:
+        try:
+            time.sleep(delay)
+            if sys.platform == "win32":
+                from multiprocessing.connection import Listener
+
+                with Listener(endpoint.replace("/", "\\"), family="AF_PIPE") as pipe:
+                    with pipe.accept() as peer:
+                        serve(peer.send_bytes, peer.recv_bytes)
+            else:
+                with socket.socket(socket.AF_UNIX) as listener:
+                    listener.bind(endpoint)
+                    listener.listen(1)
+                    peer, _ = listener.accept()
+                    with peer:
+                        serve(peer.sendall, lambda: peer.recv(4096))
+        except BaseException as error:
+            errors.append(error)
+
+    server = threading.Thread(target=run, daemon=True)
+    server.start()
+    return server
+
+
 class HostLoopbackHttpFixtureTests(unittest.TestCase):
     def _exchange(self, pieces: list[bytes]) -> tuple[bytes, list[Exception]]:
         """Send the request in pieces with a gap, and return the reply and fixture errors."""
@@ -4331,15 +4367,20 @@ class MicrovmTests(unittest.TestCase):
         for option in ("--kernel", "--initrd", "--microvm-report"):
             self.assertTrue(Path(openvmm[openvmm.index(option) + 1]).is_absolute())
         self.assertTrue(Path(openvmm[0]).is_absolute())
-        # The microVM console listens on TCP, at the address that the test
-        # copies it from.
+        # The microVM console listens on a Unix socket beside the control
+        # endpoint, or a named pipe of its own, never on TCP, which guests
+        # could reach through host loopback (#551), at the endpoint that the
+        # test copies it from.
+        console = environment["NVX_MANAGED_LIFECYCLE_CONSOLE"]
         self.assertEqual(
-            openvmm[openvmm.index("--virtio-console") + 1],
-            f"listen=tcp:{environment['NVX_MANAGED_LIFECYCLE_CONSOLE']}",
+            openvmm[openvmm.index("--virtio-console") + 1], f"listen={console}"
         )
-        self.assertRegex(
-            environment["NVX_MANAGED_LIFECYCLE_CONSOLE"], r"\A127\.0\.0\.1:[0-9]+\Z"
-        )
+        if os.name == "nt":
+            self.assertRegex(console, r"\A//\./pipe/openvmm-microvm-[0-9a-f]{32}\Z")
+        else:
+            report = Path(openvmm[openvmm.index("--microvm-report") + 1])
+            self.assertEqual(Path(console), report.parent / "console.sock")
+        self.assertNotEqual(console, environment["NVX_MANAGED_LIFECYCLE_ENDPOINT"])
         self.assertEqual(
             openvmm[openvmm.index("--microvm-control-console") + 1],
             f"listen={environment['NVX_MANAGED_LIFECYCLE_ENDPOINT']}",
@@ -6777,7 +6818,7 @@ class MicrovmTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             connection, peer = socket.socketpair()
-            console = openvmm_process.TcpConsole(connection)
+            console = openvmm_process.BootConsole(connection)
             peer.sendall(b"failure diagnostic\n")
             peer.close()
 
@@ -7090,9 +7131,9 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(log_path.read_bytes(), b"FIRST\nSECOND\n")
 
-    def test_tcp_console_line_marker_ignores_echoed_command(self):
+    def test_boot_console_line_marker_ignores_echoed_command(self):
         connection, peer = socket.socketpair()
-        console = openvmm_process.TcpConsole(connection)
+        console = openvmm_process.BootConsole(connection)
         marker = b"NVX-CONSOLE-RX-READY"
         output = b"> echo " + marker + b"\r\n" + marker + b"\r\n"
         peer.sendall(output)
@@ -7103,20 +7144,252 @@ class MicrovmTests(unittest.TestCase):
         console.close()
         peer.close()
 
-    def test_tcp_console_connect_closes_failed_connection(self):
+    def test_console_endpoints_are_unix_sockets_or_named_pipes(self):
+        # A boot console never listens on TCP, which guests could reach
+        # through the host-loopback mapping of their gateways (#551). A
+        # listener's socket is beside the snapshot that records it, and a
+        # Windows pipe is in the namespace that OpenVMM requires of a microVM
+        # console.
+        directory = Path("snapshot-parent")
+        first = microvm_tests._console_endpoint(directory)
+        second = microvm_tests._console_endpoint(directory)
+        if os.name == "nt":
+            pattern = r"\A//\./pipe/openvmm-microvm-[0-9a-f]{32}\Z"
+            self.assertRegex(first, pattern)
+            self.assertRegex(second, pattern)
+            self.assertNotEqual(first, second)
+        else:
+            self.assertEqual(Path(first).parent, directory)
+            self.assertEqual(first, second)
+
+    def test_boot_console_connects_once_the_endpoint_listens(self):
+        # The console waits for OpenVMM to listen, reads what the guest
+        # prints, sends what the scenario types, and ends with the endpoint.
+        with tempfile.TemporaryDirectory() as temporary:
+            endpoint = microvm_tests._console_endpoint(Path(temporary))
+            received: list[bytes] = []
+            errors: list[BaseException] = []
+
+            def serve(
+                send: Callable[[bytes], None], receive: Callable[[], bytes]
+            ) -> None:
+                send(b"/ # ")
+                received.append(receive())
+
+            server = _serve_boot_console(endpoint, serve, errors, delay=0.3)
+            try:
+                console = openvmm_process.BootConsole.connect(endpoint, 10.0)
+                console.wait_for(b"/ # ", 10.0)
+                console.send_bytes(b"echo ready\n")
+                server.join(10.0)
+                self.assertEqual(console.finish(), b"/ # ")
+            finally:
+                server.join(10.0)
+            self.assertEqual(errors, [])
+            self.assertEqual(received, [b"echo ready\n"])
+
+    def test_boot_console_connect_times_out_without_a_listener(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            endpoint = microvm_tests._console_endpoint(Path(temporary))
+            with self.assertRaisesRegex(TimeoutError, "boot console at"):
+                openvmm_process.BootConsole.connect(endpoint, 0.2)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows boot consoles are named pipes")
+    def test_boot_console_connect_closes_a_socket_that_failed_to_connect(self):
         failed = MagicMock()
-        failed.setsockopt.side_effect = OSError("configuration failed")
+        failed.connect.side_effect = ConnectionRefusedError("not listening yet")
         connected = MagicMock()
+        connected.recv.return_value = b""
         with patch.object(
-            openvmm_process.socket,
-            "create_connection",
-            side_effect=(failed, connected),
+            openvmm_process.socket, "socket", side_effect=(failed, connected)
         ):
-            console = openvmm_process.TcpConsole.connect(("127.0.0.1", 1), 1.0)
+            console = openvmm_process.BootConsole.connect("console.sock", 1.0)
 
         failed.close.assert_called_once_with()
         console.close()
         connected.close.assert_called_once_with()
+
+    def test_boot_console_connect_gives_up_on_a_listener_whose_backlog_is_full(self):
+        # A blocking connection to a Unix listener whose backlog is full waits
+        # until the listener accepts, so only attempts that do not block keep
+        # the wait within its timeout.
+        if sys.platform == "win32":
+            self.skipTest("Windows boot consoles are named pipes")
+        with tempfile.TemporaryDirectory() as temporary:
+            endpoint = microvm_tests._console_endpoint(Path(temporary))
+            errors: list[BaseException] = []
+
+            def attempt() -> None:
+                try:
+                    openvmm_process.BootConsole.connect(endpoint, 0.2)
+                except BaseException as error:
+                    errors.append(error)
+
+            with (
+                socket.socket(socket.AF_UNIX) as listener,
+                socket.socket(socket.AF_UNIX) as queued,
+            ):
+                listener.bind(endpoint)
+                listener.listen(0)
+                queued.connect(endpoint)
+                connecting = threading.Thread(target=attempt, daemon=True)
+                connecting.start()
+                connecting.join(10.0)
+                self.assertFalse(connecting.is_alive(), "the connection blocked")
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], TimeoutError)
+
+    def test_boot_console_write_gives_up_when_the_guest_takes_no_input(self):
+        # A guest that stops taking input fails a write within its timeout,
+        # on a socket and on a pipe alike, instead of holding the scenario.
+        with tempfile.TemporaryDirectory() as temporary:
+            endpoint = microvm_tests._console_endpoint(Path(temporary))
+            errors: list[BaseException] = []
+            outcome: list[BaseException] = []
+            release = threading.Event()
+
+            def serve(_send: Callable[[bytes], None], _: Callable[[], bytes]) -> None:
+                release.wait(30.0)
+
+            server = _serve_boot_console(endpoint, serve, errors)
+            try:
+                with patch.object(
+                    openvmm_process, "_CONSOLE_WRITE_TIMEOUT_SECONDS", 0.2
+                ):
+                    console = openvmm_process.BootConsole.connect(endpoint, 10.0)
+
+                    def write() -> None:
+                        try:
+                            console.send_bytes(bytes(8 * 1024 * 1024))
+                        except BaseException as error:
+                            outcome.append(error)
+
+                    writing = threading.Thread(target=write, daemon=True)
+                    writing.start()
+                    writing.join(10.0)
+                    blocked = writing.is_alive()
+                console.close()
+            finally:
+                release.set()
+                server.join(10.0)
+            self.assertFalse(blocked, "the write blocked")
+            self.assertEqual(len(outcome), 1)
+            self.assertIsInstance(outcome[0], TimeoutError)
+            self.assertRegex(str(outcome[0]), "took no input")
+            self.assertEqual(errors, [])
+
+    def test_boot_console_pipe_lets_its_server_only_identify_the_harness(self):
+        # A process that took a console pipe's name could otherwise act as
+        # the harness's account: the harness lets a pipe's server identify it
+        # and no more.
+        if sys.platform != "win32":
+            self.skipTest("named pipes exist only on Windows")
+        import _winapi
+        import ctypes
+        from ctypes import wintypes
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.ImpersonateNamedPipeClient.argtypes = [wintypes.HANDLE]
+        advapi32.ImpersonateNamedPipeClient.restype = wintypes.BOOL
+        advapi32.OpenThreadToken.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.BOOL,
+            ctypes.POINTER(wintypes.HANDLE),
+        ]
+        advapi32.OpenThreadToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.RevertToSelf.restype = wintypes.BOOL
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentThread.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        token_query = 0x0008
+        token_impersonation_level = 9
+        security_identification = 1
+        level = ctypes.c_int(-1)
+        with tempfile.TemporaryDirectory() as temporary:
+            endpoint = microvm_tests._console_endpoint(Path(temporary))
+            # A byte pipe, as OpenVMM's are: PIPE_TYPE_BYTE and
+            # PIPE_READMODE_BYTE are zero.
+            server = _winapi.CreateNamedPipe(
+                endpoint.replace("/", "\\"),
+                _winapi.PIPE_ACCESS_DUPLEX,
+                _winapi.PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                _winapi.NULL,
+            )
+            try:
+                connection = openvmm_process.NamedPipeConnection(endpoint)
+                try:
+                    # A server impersonates its client only once it has read.
+                    connection.sendall(b"x")
+                    _winapi.ReadFile(server, 1)
+                    if not advapi32.ImpersonateNamedPipeClient(server):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        token = wintypes.HANDLE()
+                        if not advapi32.OpenThreadToken(
+                            kernel32.GetCurrentThread(),
+                            token_query,
+                            True,
+                            ctypes.byref(token),
+                        ):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        try:
+                            returned = wintypes.DWORD()
+                            if not advapi32.GetTokenInformation(
+                                token,
+                                token_impersonation_level,
+                                ctypes.byref(level),
+                                ctypes.sizeof(level),
+                                ctypes.byref(returned),
+                            ):
+                                raise ctypes.WinError(ctypes.get_last_error())
+                        finally:
+                            kernel32.CloseHandle(token)
+                    finally:
+                        advapi32.RevertToSelf()
+                finally:
+                    connection.close()
+            finally:
+                _winapi.CloseHandle(server)
+        self.assertEqual(level.value, security_identification)
+
+    def test_boot_console_reads_what_the_guest_prints_while_the_scenario_waits(
+        self,
+    ):
+        # A socket or a pipe holds much less unread output than TCP did, and a
+        # guest stops at its next write until it is read, so the console reads
+        # while the scenario waits for OpenVMM rather than for a marker.
+        with tempfile.TemporaryDirectory() as temporary:
+            endpoint = microvm_tests._console_endpoint(Path(temporary))
+            output = bytes(range(256)) * (32 * 1024)
+            errors: list[BaseException] = []
+            written = threading.Event()
+
+            def serve(send: Callable[[bytes], None], _: Callable[[], bytes]) -> None:
+                send(output)
+                written.set()
+
+            server = _serve_boot_console(endpoint, serve, errors)
+            try:
+                console = openvmm_process.BootConsole.connect(endpoint, 10.0)
+                self.assertTrue(written.wait(10.0))
+                server.join(10.0)
+                self.assertEqual(console.finish(), output)
+            finally:
+                server.join(10.0)
+            self.assertEqual(errors, [])
 
     def test_every_openvmm_process_success_path_waits(self):
         # close() never raises, so a late violation or a 193-195 power-off is
@@ -7164,13 +7437,13 @@ class MicrovmTests(unittest.TestCase):
                     )
         self.assertGreater(blocks, 30)
 
-    def test_every_tcp_console_is_monitored_and_cold_boot_shells_are_queried(self):
+    def test_every_boot_console_is_monitored_and_cold_boot_shells_are_queried(self):
         tree = ast.parse(Path(microvm_tests.__file__).read_text(encoding="utf-8"))
         connects = [
             {keyword.arg: ast.unparse(keyword.value) for keyword in node.keywords}
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
-            and ast.unparse(node.func) == "TcpConsole.connect"
+            and ast.unparse(node.func) == "BootConsole.connect"
         ]
         # The console-snapshot capture and restore, and the snapshot-tier
         # capture, restore, and gate-timeout restore.
@@ -7811,7 +8084,7 @@ class MicrovmTests(unittest.TestCase):
             def wait_for_line(self, marker: bytes, timeout: float) -> None:
                 events.append(("wait", marker, timeout))
 
-        console = cast(openvmm_process.TcpConsole, RecordingConsole())
+        console = cast(openvmm_process.BootConsole, RecordingConsole())
         queued_rx = bytes((0, 1, 2, 127, 255))
         microvm_tests._queue_console_rx_and_request_snapshot(
             console,

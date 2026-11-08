@@ -1767,20 +1767,20 @@ class RunnerWiringTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "restore marker"):
                         process.wait_for_time_abi("restore", 1)
 
-    def test_tcp_console_monitor_reports_violations(self):
+    def test_boot_console_monitor_reports_violations(self):
         connection, peer = socket.socketpair()
-        console = openvmm_process.TcpConsole(connection, TimeAbiMonitor(KVM_BOOT))
+        console = openvmm_process.BootConsole(connection, TimeAbiMonitor(KVM_BOOT))
         peer.sendall(VIOLATION)
         with self.assertRaisesRegex(TimeAbiFailure, "G_RCU_STALL"):
             console.wait_for(b"NEVER", 1.0)
         console.close()
         peer.close()
 
-    def test_tcp_console_finish_scans_the_tail(self):
+    def test_boot_console_finish_scans_the_tail(self):
         # A violation after the last awaited marker still fails the scenario,
         # including an unterminated final line.
         connection, peer = socket.socketpair()
-        console = openvmm_process.TcpConsole(connection, TimeAbiMonitor(KVM_BOOT))
+        console = openvmm_process.BootConsole(connection, TimeAbiMonitor(KVM_BOOT))
         peer.sendall(b"READY\n")
         console.wait_for(b"READY", 1.0)
         peer.sendall(VIOLATION.rstrip(b"\n"))
@@ -1793,16 +1793,16 @@ class RunnerWiringTests(unittest.TestCase):
 
         # Error paths keep the tail in the log without raising over the error.
         connection, peer = socket.socketpair()
-        console = openvmm_process.TcpConsole(connection, TimeAbiMonitor(KVM_BOOT))
+        console = openvmm_process.BootConsole(connection, TimeAbiMonitor(KVM_BOOT))
         peer.sendall(VIOLATION)
         peer.close()
         self.assertEqual(console.finish(check=False), VIOLATION)
 
-    def test_tcp_console_queries_a_cold_boot_before_the_first_input(self):
+    def test_boot_console_queries_a_cold_boot_before_the_first_input(self):
         connection, peer = socket.socketpair()
         peer.settimeout(1.0)
         monitor = TimeAbiMonitor(KVM_BOOT)
-        console = openvmm_process.TcpConsole(connection, monitor, time_abi_status=True)
+        console = openvmm_process.BootConsole(connection, monitor, time_abi_status=True)
         peer.sendall(b"NVX-GUEST-BOOT-OK: alpine\n")
         console.wait_for(b"NVX-GUEST-BOOT-OK", 1.0)
         peer.sendall((BOOT_LINE + RUNTIME_LINE + STATUS_OK).encode())
@@ -1820,7 +1820,7 @@ class RunnerWiringTests(unittest.TestCase):
 
         # A query without a passing boot line fails before the input is sent.
         connection, peer = socket.socketpair()
-        console = openvmm_process.TcpConsole(
+        console = openvmm_process.BootConsole(
             connection, TimeAbiMonitor(KVM_BOOT), time_abi_status=True
         )
         peer.sendall(b"NVX-GUEST-BOOT-OK: alpine\n")
@@ -1831,10 +1831,10 @@ class RunnerWiringTests(unittest.TestCase):
         console.close()
         peer.close()
 
-    def test_tcp_console_waits_for_a_status_query_to_exit(self):
+    def test_boot_console_waits_for_a_status_query_to_exit(self):
         connection, peer = socket.socketpair()
         monitor = TimeAbiMonitor(MSHV_RESTORE)
-        console = openvmm_process.TcpConsole(connection, monitor)
+        console = openvmm_process.BootConsole(connection, monitor)
         restore = RESTORE_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
         peer.sendall((restore + RUNTIME_LINE + STATUS_OK).encode())
         console.wait_for_time_abi_status(1.0)
@@ -1852,25 +1852,30 @@ class RunnerWiringTests(unittest.TestCase):
         unmonitored = socket.socket()
         self.addCleanup(unmonitored.close)
         with self.assertRaisesRegex(ValueError, "no time ABI monitor"):
-            openvmm_process.TcpConsole(unmonitored).wait_for_time_abi_status(1.0)
+            openvmm_process.BootConsole(unmonitored).wait_for_time_abi_status(1.0)
 
-    def test_tcp_console_status_query_consumed_with_restore_milestone(self):
+    def test_boot_console_status_query_consumed_with_restore_milestone(self):
         class ScriptedConnection:
-            """Returns each scripted chunk from one recv, so the reads do not depend on TCP segmenting."""
+            """Returns each scripted chunk from one recv, so the reads do not depend on how the stream splits them, then waits until it is shut down."""
 
             def __init__(self, *chunks: bytes) -> None:
                 self._chunks = list(chunks)
+                self._shut_down = threading.Event()
 
-            def settimeout(self, _timeout: float) -> None:
+            def recv(self, _size: int, /) -> bytes:
+                if self._chunks:
+                    return self._chunks.pop(0)
+                self._shut_down.wait()
+                return b""
+
+            def sendall(self, _data: bytes, /) -> None:
                 pass
 
-            def recv(self, _size: int) -> bytes:
-                if not self._chunks:
-                    raise TimeoutError("scripted console is quiet")
-                return self._chunks.pop(0)
+            def shutdown(self, _how: int, /) -> None:
+                self._shut_down.set()
 
             def close(self) -> None:
-                pass
+                self._shut_down.set()
 
         monitor = TimeAbiMonitor(MSHV_RESTORE)
         restore = RESTORE_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
@@ -1880,7 +1885,7 @@ class RunnerWiringTests(unittest.TestCase):
                 "NVX-SNAPSHOT-TIER-RELEASED\n" + restore + RUNTIME_LINE + STATUS_OK
             ).encode()
         )
-        console = openvmm_process.TcpConsole(cast(socket.socket, connection), monitor)
+        console = openvmm_process.BootConsole(connection, monitor)
         baseline = console.status_queries
         console.wait_for(b"NVX-SNAPSHOT-TIER-RELEASED", 1.0)
         self.assertEqual(monitor.status_queries, 1)
@@ -1893,7 +1898,7 @@ class RunnerWiringTests(unittest.TestCase):
             console.wait_for_time_abi_status(0.2)
         console.close()
 
-    def test_tcp_console_queries_only_cold_boots_that_ask(self):
+    def test_boot_console_queries_only_cold_boots_that_ask(self):
         for command, enabled in (
             (MSHV_RESTORE, True),
             (KVM_BOOT, False),
@@ -1902,7 +1907,7 @@ class RunnerWiringTests(unittest.TestCase):
                 connection, peer = socket.socketpair()
                 peer.settimeout(1.0)
                 monitor = TimeAbiMonitor(command)
-                console = openvmm_process.TcpConsole(
+                console = openvmm_process.BootConsole(
                     connection, monitor, time_abi_status=enabled
                 )
                 peer.sendall(b"NVX-GUEST-BOOT-OK: alpine\n")

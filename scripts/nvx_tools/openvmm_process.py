@@ -5,13 +5,16 @@ from __future__ import annotations
 import os
 import queue
 import socket
+import struct
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from types import TracebackType
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 
 from .benchmark import (
     InteractiveProcess,
@@ -31,6 +34,18 @@ from .time_abi import (
 )
 
 _GUEST_BOOT_MARKERS = tuple(marker.encode() for marker in GUEST_BOOT_MARKERS)
+# How long a read of a named pipe waits before it looks for a shutdown.
+_PIPE_READ_WAIT_SECONDS = 0.1
+# How long the console's reader may take to stop once its stream is shut down.
+_CONSOLE_READER_STOP_SECONDS = 5.0
+# How long a connection to a boot console that does not listen yet waits
+# before it tries again.
+_CONSOLE_CONNECT_RETRY_SECONDS = 0.001
+# How long a write to a boot console waits for the guest to take its input.
+_CONSOLE_WRITE_TIMEOUT_SECONDS = 60.0
+# CreateFile's SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION: a pipe's
+# server may identify the harness's account but not impersonate it.
+_PIPE_IDENTIFICATION_ONLY = 0x00100000 | 0x00010000
 
 
 def _line_marker_end(
@@ -399,10 +414,162 @@ class OpenvmmProcess:
                 raise combined
 
 
-class TcpConsole:
+class ConsoleConnection(Protocol):
+    """The stream of a boot console: the part of a socket's interface that
+    BootConsole uses. A read blocks until data arrives, and returns nothing
+    once the stream ends or ``shutdown`` stops it."""
+
+    def recv(self, bufsize: int, /) -> bytes: ...
+
+    def sendall(self, data: bytes, /) -> None: ...
+
+    def shutdown(self, how: int, /) -> None: ...
+
+    def close(self) -> None: ...
+
+
+def _write_timeout() -> TimeoutError:
+    """The failure of a write that the guest did not take in time."""
+    return TimeoutError(
+        "the guest took no input on the boot console within "
+        f"{_CONSOLE_WRITE_TIMEOUT_SECONDS:g}s"
+    )
+
+
+class NamedPipeConnection:
+    """A client of a Windows named pipe, as a ConsoleConnection.
+
+    The handle is overlapped, so that a read that waits for data never holds
+    a write back, as Windows holds every operation on a synchronous handle
+    behind the one in progress.
+    """
+
+    def __init__(self, endpoint: str) -> None:
+        self._stopped = threading.Event()
+        if sys.platform != "win32":
+            raise OSError("named pipes are available only on Windows")
+        import _winapi
+
+        # Fails with an OSError until OpenVMM creates the pipe, and while
+        # another client holds its instance. A process that took the pipe's
+        # name may learn who connected, but cannot act as them.
+        self._handle = _winapi.CreateFile(
+            endpoint.replace("/", "\\"),
+            _winapi.GENERIC_READ | _winapi.GENERIC_WRITE,
+            0,
+            _winapi.NULL,
+            _winapi.OPEN_EXISTING,
+            _winapi.FILE_FLAG_OVERLAPPED | _PIPE_IDENTIFICATION_ONLY,
+            _winapi.NULL,
+        )
+
+    def recv(self, bufsize: int, /) -> bytes:
+        if sys.platform != "win32":
+            raise OSError("named pipes are available only on Windows")
+        import _winapi
+
+        while not self._stopped.is_set():
+            try:
+                overlapped, _ = _winapi.ReadFile(self._handle, bufsize, overlapped=True)
+                # A read that waits too long is canceled, so that shutdown
+                # stops the reader; it keeps whatever arrived before.
+                if (
+                    _winapi.WaitForSingleObject(
+                        overlapped.event, int(_PIPE_READ_WAIT_SECONDS * 1000)
+                    )
+                    != _winapi.WAIT_OBJECT_0
+                ):
+                    overlapped.cancel()
+                overlapped.GetOverlappedResult(True)
+            except BrokenPipeError:
+                return b""
+            data = overlapped.getbuffer()
+            if data:
+                return data
+        return b""
+
+    def sendall(self, data: bytes, /) -> None:
+        if sys.platform != "win32":
+            raise OSError("named pipes are available only on Windows")
+        import _winapi
+
+        view = memoryview(data)
+        while view:
+            overlapped, _ = _winapi.WriteFile(self._handle, view, overlapped=True)
+            # A write that the guest does not take in time is canceled.
+            timed_out = (
+                _winapi.WaitForSingleObject(
+                    overlapped.event, int(_CONSOLE_WRITE_TIMEOUT_SECONDS * 1000)
+                )
+                != _winapi.WAIT_OBJECT_0
+            )
+            if timed_out:
+                overlapped.cancel()
+            written, _ = overlapped.GetOverlappedResult(True)
+            if timed_out and written < len(view):
+                raise _write_timeout()
+            if not written:
+                raise BrokenPipeError("the named pipe took no data")
+            view = view[written:]
+
+    def shutdown(self, how: int, /) -> None:
+        self._stopped.set()
+
+    def close(self) -> None:
+        if sys.platform != "win32":
+            raise OSError("named pipes are available only on Windows")
+        import _winapi
+
+        self._stopped.set()
+        _winapi.CloseHandle(self._handle)
+
+
+def _connect_console(endpoint: str) -> ConsoleConnection:
+    """Connect to the boot console that listens at ``endpoint``: a named pipe
+    on Windows, and a Unix socket elsewhere. Fails with an OSError while the
+    endpoint does not take the connection, at once, so that the caller's
+    deadline bounds the wait."""
+    if sys.platform == "win32":
+        return NamedPipeConnection(endpoint)
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        # A blocking connection to a listener whose backlog is full would
+        # wait until the listener accepts; this one fails instead.
+        connection.setblocking(False)
+        connection.connect(endpoint)
+        connection.setblocking(True)
+        # A write that the guest does not take in time fails with
+        # BlockingIOError, while reads still wait for the guest.
+        seconds, fraction = divmod(_CONSOLE_WRITE_TIMEOUT_SECONDS, 1)
+        connection.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_SNDTIMEO,
+            struct.pack("ll", int(seconds), int(fraction * 1_000_000)),
+        )
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+class BootConsole:
+    """A client of a microVM's boot console, the virtio console ``hvc1``, which
+    OpenVMM serves on a Unix socket or a Windows named pipe.
+
+    Boot consoles never listen on TCP: a guest's gateway maps the guest's TCP
+    flows onto host loopback, so any guest could reach a loopback listener
+    (microsoft/nvx#551).
+
+    A thread reads the console as the guest prints, whatever the scenario
+    waits for. A socket or a pipe holds much less unread output than TCP
+    did, and a guest whose output nobody reads stops at its next write. A
+    write of the harness waits for the guest to take its input only so long,
+    so a guest that stops reading fails the scenario instead of holding it.
+    """
+
     def __init__(
         self,
-        connection: socket.socket,
+        connection: ConsoleConnection,
         monitor: TimeAbiMonitor | None = None,
         *,
         time_abi_status: bool = False,
@@ -416,18 +583,26 @@ class TcpConsole:
         )
         self._status_sent = False
         self._closed = False
+        self._stopped = False
         self._failure: TimeAbiFailure | None = None
+        # Each chunk that the console printed, then None once it ended.
+        self._chunks: queue.Queue[bytes | None] = queue.Queue()
+        self._reader = threading.Thread(
+            target=self._read, name="nvx-boot-console", daemon=True
+        )
+        self._reader.start()
 
     @classmethod
     def connect(
         cls,
-        address: tuple[str, int],
+        endpoint: str,
         timeout: float,
         *,
         monitor: TimeAbiMonitor | None = None,
         time_abi_status: bool = False,
-    ) -> TcpConsole:
-        """Connect to a virtio console.
+    ) -> BootConsole:
+        """Connect to the boot console that listens at ``endpoint``, waiting
+        until OpenVMM listens there.
 
         ``monitor`` scans the console's output for the time ABI, as
         OpenvmmProcess scans OpenVMM's. With ``time_abi_status``, a
@@ -438,18 +613,48 @@ class TcpConsole:
         deadline = time.monotonic() + timeout
         while True:
             try:
-                connection = socket.create_connection(address, timeout=0.25)
-                try:
-                    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                except BaseException:
-                    connection.close()
-                    raise
+                connection = _connect_console(endpoint)
                 return cls(connection, monitor, time_abi_status=time_abi_status)
             except OSError as error:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
-                        f"failed to connect to virtio console at {address}"
+                        f"failed to connect to the boot console at {endpoint}"
                     ) from error
+                # A restored guest may exit soon after OpenVMM listens, and
+                # OpenVMM then drops what the guest printed, so the retries
+                # follow one another closely.
+                time.sleep(_CONSOLE_CONNECT_RETRY_SECONDS)
+
+    def _read(self) -> None:
+        """Queue what the console prints until it ends or is shut down."""
+        try:
+            while chunk := self._connection.recv(65536):
+                self._chunks.put(chunk)
+        except OSError:
+            # The console was reset, or closed under the read.
+            pass
+        finally:
+            self._chunks.put(None)
+
+    def _next(self, timeout: float) -> bytes | None:
+        """Return the next chunk that the console printed within ``timeout``,
+        or None once it ended, which later calls return too. Raises
+        queue.Empty when nothing arrives in time."""
+        chunk = self._chunks.get(timeout=timeout)
+        if chunk is None:
+            self._chunks.put(None)
+        return chunk
+
+    def _stop(self) -> None:
+        """Stop the reader and close the stream, once."""
+        if self._stopped:
+            return
+        self._stopped = True
+        # A shutdown wakes a Linux socket's read, and a close a Windows one's.
+        with suppress(OSError):
+            self._connection.shutdown(socket.SHUT_RDWR)
+        self._connection.close()
+        self._reader.join(_CONSOLE_READER_STOP_SECONDS)
 
     def _consume(self, chunk: bytes) -> None:
         self._output.extend(chunk)
@@ -458,7 +663,14 @@ class TcpConsole:
 
     def send_bytes(self, data: bytes) -> None:
         self._query_status_first()
-        self._connection.sendall(data)
+        self._send(data)
+
+    def _send(self, data: bytes) -> None:
+        try:
+            self._connection.sendall(data)
+        except BlockingIOError as error:
+            # A Unix socket's send timeout expired.
+            raise _write_timeout() from error
 
     def _query_status_first(self) -> None:
         if (
@@ -470,22 +682,21 @@ class TcpConsole:
             return
         assert self._monitor is not None
         self._status_sent = True
-        self._connection.sendall(status_script().encode())
+        self._send(status_script().encode())
         deadline = time.monotonic() + STATUS_TIMEOUT_SECONDS
         while self._monitor.status_queries == 0:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
                     "nvx-time status did not exit within "
-                    f"{STATUS_TIMEOUT_SECONDS:g}s on the TCP console"
+                    f"{STATUS_TIMEOUT_SECONDS:g}s on the boot console"
                 )
-            self._connection.settimeout(min(remaining, 0.25))
             try:
-                chunk = self._connection.recv(4096)
-            except TimeoutError:
+                chunk = self._next(min(remaining, 0.25))
+            except queue.Empty:
                 continue
-            if not chunk:
-                raise RuntimeError("TCP console closed before nvx-time status exited")
+            if chunk is None:
+                raise RuntimeError("boot console closed before nvx-time status exited")
             self._consume(chunk)
 
     @property
@@ -497,7 +708,7 @@ class TcpConsole:
 
     def wait_for(self, marker: bytes, timeout: float) -> None:
         if not marker:
-            raise ValueError("TCP console marker cannot be empty")
+            raise ValueError("boot console marker cannot be empty")
         deadline = time.monotonic() + timeout
         while True:
             index = self._output.find(marker, self._search_offset)
@@ -506,19 +717,18 @@ class TcpConsole:
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"TCP console marker {marker!r} was not observed")
-            self._connection.settimeout(min(remaining, 0.25))
+                raise TimeoutError(f"boot console marker {marker!r} was not observed")
             try:
-                chunk = self._connection.recv(4096)
-            except TimeoutError:
+                chunk = self._next(min(remaining, 0.25))
+            except queue.Empty:
                 continue
-            if not chunk:
-                raise RuntimeError(f"TCP console closed before marker {marker!r}")
+            if chunk is None:
+                raise RuntimeError(f"boot console closed before marker {marker!r}")
             self._consume(chunk)
 
     def wait_for_line(self, marker: bytes, timeout: float) -> None:
         if not marker or b"\n" in marker or b"\r" in marker:
-            raise ValueError("TCP console line marker must be one non-empty line")
+            raise ValueError("boot console line marker must be one non-empty line")
         deadline = time.monotonic() + timeout
         while True:
             marker_end = _line_marker_end(self._output, marker, self._search_offset)
@@ -528,15 +738,14 @@ class TcpConsole:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
-                    f"TCP console line marker {marker!r} was not observed"
+                    f"boot console line marker {marker!r} was not observed"
                 )
-            self._connection.settimeout(min(remaining, 0.25))
             try:
-                chunk = self._connection.recv(4096)
-            except TimeoutError:
+                chunk = self._next(min(remaining, 0.25))
+            except queue.Empty:
                 continue
-            if not chunk:
-                raise RuntimeError(f"TCP console closed before line marker {marker!r}")
+            if chunk is None:
+                raise RuntimeError(f"boot console closed before line marker {marker!r}")
             self._consume(chunk)
 
     @property
@@ -557,23 +766,29 @@ class TcpConsole:
         arrives, so a failed or pending check raises here.
         """
         if self._monitor is None:
-            raise ValueError("TCP console has no time ABI monitor")
+            raise ValueError("boot console has no time ABI monitor")
         baseline = self._monitor.status_queries if since is None else since
         deadline = time.monotonic() + timeout
         while self._monitor.status_queries == baseline:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
-                    f"nvx-time status did not exit within {timeout:g}s on the TCP console"
+                    f"nvx-time status did not exit within {timeout:g}s on the boot console"
                 )
-            self._connection.settimeout(min(remaining, 0.25))
             try:
-                chunk = self._connection.recv(4096)
-            except TimeoutError:
+                chunk = self._next(min(remaining, 0.25))
+            except queue.Empty:
                 continue
-            if not chunk:
-                raise RuntimeError("TCP console closed before nvx-time status exited")
+            if chunk is None:
+                raise RuntimeError("boot console closed before nvx-time status exited")
             self._consume(chunk)
+
+    def _consume_to_the_end(self, chunk: bytes) -> None:
+        try:
+            self._consume(chunk)
+        except TimeAbiFailure as error:
+            # Keep draining, so the log holds everything.
+            self._failure = self._failure or error
 
     def finish(self, *, check: bool = True) -> bytes:
         """Drain the console until it goes quiet, close it, and return its output.
@@ -585,18 +800,25 @@ class TcpConsole:
         """
         if not self._closed:
             self._closed = True
-            self._connection.settimeout(0.1)
             try:
-                while chunk := self._connection.recv(4096):
+                while True:
                     try:
-                        self._consume(chunk)
-                    except TimeAbiFailure as error:
-                        # Keep draining, so the log holds everything.
-                        self._failure = self._failure or error
-            except (TimeoutError, ConnectionError, OSError):
-                pass
+                        chunk = self._next(0.1)
+                    except queue.Empty:
+                        break
+                    if chunk is None:
+                        break
+                    self._consume_to_the_end(chunk)
             finally:
-                self._connection.close()
+                self._stop()
+            # What the reader queued before it stopped.
+            while True:
+                try:
+                    chunk = self._chunks.get_nowait()
+                except queue.Empty:
+                    break
+                if chunk is not None:
+                    self._consume_to_the_end(chunk)
             if self._monitor is not None:
                 try:
                     self._monitor.finish()
@@ -608,4 +830,4 @@ class TcpConsole:
 
     def close(self) -> None:
         self._closed = True
-        self._connection.close()
+        self._stop()
