@@ -39,8 +39,12 @@ impl Suppression<'_> {
 pub(crate) struct FakeOps {
     /// The error with which the kernel refuses to grant the port permission, if any.
     pub(crate) grant_error: Option<Errno>,
+    /// Per-range grant results used before falling back to `grant_error`.
+    pub(crate) grant_errors: Mutex<VecDeque<Option<Errno>>>,
     /// The error with which the kernel refuses to revoke the port permission, if any.
     pub(crate) revoke_error: Option<Errno>,
+    /// Per-range revocation results used before falling back to `revoke_error`.
+    pub(crate) revoke_errors: Mutex<VecDeque<Option<Errno>>>,
     /// Changes of the port permission, as `(first, count, enable)`, in order.
     pub(crate) permissions: Mutex<Vec<(u16, u16, bool)>>,
     /// Values that successive port reads return.
@@ -81,7 +85,9 @@ impl FakeOps {
     pub(crate) fn new(input: impl IntoIterator<Item = u32>) -> Self {
         Self {
             grant_error: None,
+            grant_errors: Mutex::new(VecDeque::new()),
             revoke_error: None,
+            revoke_errors: Mutex::new(VecDeque::new()),
             permissions: Mutex::new(Vec::new()),
             input: Mutex::new(input.into_iter().collect()),
             output: Mutex::new(Vec::new()),
@@ -156,9 +162,17 @@ impl PortBackend for FakeOps {
             .unwrap()
             .push((first, count, enable));
         let error = if enable {
-            self.grant_error
+            self.grant_errors
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(self.grant_error)
         } else {
-            self.revoke_error
+            self.revoke_errors
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(self.revoke_error)
         };
         error.map_or(Ok(()), Err)
     }
