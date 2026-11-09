@@ -1,6 +1,7 @@
 //! Compares what `nvx-rs` copies from OpenVMM with the OpenVMM submodule: the control-session
-//! protocol vectors and the excerpts of OpenVMM's sources in `tests/vectors/openvmm/`, and the
-//! versions of OpenVMM's contracts in `nvx::contract`.
+//! protocol vectors and the excerpts of OpenVMM's sources in `tests/vectors/openvmm/`, the
+//! versions of OpenVMM's contracts in `nvx::contract`, and the bound of an activation record,
+//! which a restore packet carries.
 //!
 //! The protocol's tests read the copies, and the unit tests of `nvx::host::template` compile or
 //! read the excerpts, because the `nvx-rs` job cannot check out the submodule, whose deploy key
@@ -10,7 +11,7 @@
 use std::fs;
 use std::path::Path;
 
-use nvx::contract;
+use nvx::{activation, contract};
 
 /// The files of OpenVMM's `vm/devices/virtio/virtio_console/test_data/` that
 /// `tests/vectors/openvmm/` copies.
@@ -57,6 +58,14 @@ const VERSIONS: [(&str, &str, u64); 4] = [
         contract::RESTORE_PACKET_VERSION,
     ),
 ];
+
+/// The bound of an activation record, [`activation::MAX_RECORD_BYTES`], which OpenVMM's restore
+/// packet shares: the file of the OpenVMM submodule that defines OpenVMM's, and the start of the
+/// line that defines it, up to its value.
+const ACTIVATION_BOUND: (&str, &str) = (
+    "vm/devices/chipset_resources/src/microvm_time.rs",
+    "pub const MAX_RESTORE_ACTIVATION_LEN: usize = ",
+);
 
 #[test]
 #[ignore = "needs the OpenVMM submodule, which the NVX CLI jobs check out"]
@@ -138,4 +147,29 @@ fn the_contract_versions_are_the_submodules() {
              that reads what it versions"
         );
     }
+}
+
+#[test]
+#[ignore = "needs the OpenVMM submodule, which the NVX CLI jobs check out"]
+fn the_activation_bound_is_the_submodules() {
+    let (file, definition) = ACTIVATION_BOUND;
+    let openvmm = Path::new(env!("CARGO_MANIFEST_DIR")).join("../openvmm");
+    let source = fs::read_to_string(openvmm.join(file)).unwrap_or_else(|error| {
+        panic!(
+            "cannot read {file} of the OpenVMM submodule, which `scripts/nvx.py init` checks out: \
+             {error}"
+        )
+    });
+    let values: Vec<&str> = source
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(definition)?.strip_suffix(';'))
+        .collect();
+    assert_eq!(
+        values,
+        [activation::MAX_RECORD_BYTES.to_string()],
+        "{file} of the OpenVMM submodule does not define `{definition}{};` once: change \
+         nvx::activation::MAX_RECORD_BYTES with OpenVMM's bound of a restore packet's activation \
+         record, and the guest's decoder of the restore packet",
+        activation::MAX_RECORD_BYTES
+    );
 }

@@ -22,6 +22,7 @@ impl Restore {
             generation_id,
             memory_ranges: Vec::new(),
             network: None,
+            activation: None,
             finished: false,
             seed: None,
         }
@@ -36,6 +37,13 @@ impl Restore {
     /// Returns the restore with the host's input gated until the guest acknowledges it.
     pub(crate) fn gated(mut self) -> Self {
         self.flags |= decoders::PACKET_ACK_REQUIRED;
+        self
+    }
+
+    /// Returns the restore whose packet ends with the activation record `record`.
+    pub(crate) fn with_activation_record(mut self, record: &[u8]) -> Self {
+        self.flags |= decoders::PACKET_ACTIVATION;
+        self.activation = Some(record.to_vec());
         self
     }
 
@@ -388,6 +396,7 @@ fn requests_and_restores_carry_the_abi_values() {
         generation_id: GenerationId::from_bytes([7; GenerationId::LENGTH]),
         memory_ranges: vec![range],
         network: None,
+        activation: None,
         finished: false,
         seed: None,
     };
@@ -420,6 +429,10 @@ fn requests_and_restores_carry_the_abi_values() {
     assert!(!plain.acknowledgement_required() && !plain.memory_target());
     assert!(plain.finished());
     assert_eq!(plain.processor_target(), None);
+    assert_eq!(plain.activation_record(), None);
+    let activated = plain.with_activation_record(&[0xa1, 0xa2, 0xa3]);
+    assert_eq!(activated.activation_record(), Some(&[0xa1, 0xa2, 0xa3][..]));
+    assert_eq!(activated.flags(), decoders::PACKET_ACTIVATION);
 }
 
 #[test]
@@ -479,6 +492,7 @@ fn a_restore_hands_over_its_seed_once_and_formats_none_of_it() {
         generation_id: seed.generation_id(),
         memory_ranges: Vec::new(),
         network: None,
+        activation: None,
         finished: false,
         seed: Some(seed),
     };
@@ -522,10 +536,27 @@ fn the_file_mode_writes_the_entropy_and_the_in_memory_mode_returns_it() {
 /// reads, and then port B's status, with the time window, and a time sample of the
 /// generation, within the bound.
 fn restore_input(generation: u32, entropy: &[u8; Seed::LENGTH]) -> Vec<u32> {
-    let mut packet = [0_u8; PACKET_HEADER_SIZE + Seed::LENGTH + PACKET_DNS_SIZE];
+    restore_input_with(generation, entropy, None)
+}
+
+/// Returns the port input of [`restore_input`], whose packet ends with the activation record
+/// `record`, if any.
+fn restore_input_with(
+    generation: u32,
+    entropy: &[u8; Seed::LENGTH],
+    record: Option<&[u8]>,
+) -> Vec<u32> {
+    let mut packet = vec![0_u8; PACKET_HEADER_SIZE + Seed::LENGTH + PACKET_DNS_SIZE];
     packet[..4].copy_from_slice(b"OVR\x01");
     packet[8..12].copy_from_slice(&generation.to_le_bytes());
     packet[PACKET_HEADER_SIZE..][..Seed::LENGTH].copy_from_slice(entropy);
+    if let Some(record) = record {
+        packet[4] |= decoders::PACKET_ACTIVATION;
+        packet.extend_from_slice(&u32::try_from(record.len()).unwrap().to_le_bytes());
+        packet.extend_from_slice(record);
+        // The device's last read of the packet returns bytes past it, which the guest ignores.
+        packet.resize(packet.len().next_multiple_of(size_of::<u32>()), 0xee);
+    }
     let words = packet
         .chunks(size_of::<u32>())
         .map(|word| u32::from_ne_bytes(word.try_into().unwrap()));
@@ -541,6 +572,28 @@ fn restore_input(generation: u32, entropy: &[u8; Seed::LENGTH]) -> Vec<u32> {
         .chain(std::iter::once(u32::from(PORTB_TIME_WINDOW)))
         .chain(sample)
         .collect()
+}
+
+#[test]
+fn a_packet_read_takes_its_activation_record_before_the_time_sample() {
+    let entropy: [u8; Seed::LENGTH] = std::array::from_fn(|index| index as u8 + 2);
+    // Records whose last read is whole, and partial.
+    for record in [&[0xa1, 0xa2, 0xa3, 0xa4][..], &[0xb1; 7][..]] {
+        // Without port B's status, which the capture reads before the packet.
+        let input = restore_input_with(1, &entropy, Some(record))[1..].to_vec();
+        let ops = FakeOps::new(input);
+        let runtime = Runtime::new(&ops, true);
+        let ports = runtime.open_ports().unwrap();
+        let read = read_packet(&runtime, &ports, 0);
+        ports.release().unwrap();
+        // The time sample after the record decodes only if the packet's reads took the record
+        // whole, and nothing past it.
+        let PacketRead::Packet(Ok((packet, Ok(_)))) = read else {
+            panic!("the packet with a record of {} bytes failed", record.len());
+        };
+        assert_eq!(packet.activation.as_deref(), Some(record));
+        assert!(ops.input.lock().unwrap().is_empty());
+    }
 }
 
 /// Returns whether a file below `directory` holds `secret`, as bytes or in hexadecimal.

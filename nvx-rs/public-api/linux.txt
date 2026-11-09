@@ -1600,6 +1600,7 @@ method nvx::guest::time::MemoryRange::length
 method nvx::guest::time::MemoryRange::start
 struct nvx::guest::time::Restore
 method nvx::guest::time::Restore::acknowledgement_required
+method nvx::guest::time::Restore::activation_record
 method nvx::guest::time::Restore::finished
 method nvx::guest::time::Restore::generation_id
 method nvx::guest::time::Restore::memory_ranges

@@ -1989,6 +1989,64 @@ fn time_test_mode_decodes_the_network_settings() {
     }
 }
 
+/// Returns `packet`, a packet of [`time_packet`] without an activation record, as one that ends
+/// with `record`: with the activation flag, and, after its DNS server, the record's length
+/// `length`, a little-endian `u32`, and the record.
+#[cfg(target_arch = "x86_64")]
+fn time_activation_packet(mut packet: Vec<u8>, length: u32, record: &[u8]) -> Vec<u8> {
+    packet[4] |= 0x20;
+    packet.extend_from_slice(&length.to_le_bytes());
+    packet.extend_from_slice(record);
+    packet
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn time_test_mode_decodes_the_activation_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let previous = "ffffffffffffffffffffffffffffffff";
+    let base = time_packet(0x04, 0, &[], 1, 0, 0);
+    for (index, record) in [vec![0xa1, 0xa2, 0xa3], vec![0x5a; 1024]]
+        .into_iter()
+        .enumerate()
+    {
+        let packet = time_activation_packet(base.clone(), record.len() as u32, &record);
+        let output = run_time_packet(
+            directory.path(),
+            &format!("activation-{index}"),
+            &packet,
+            "0",
+            previous,
+        );
+        let text = String::from_utf8_lossy(&output.1);
+        assert_eq!(output.0, Some(0), "case {index}: {text:?}");
+        let hex: String = record.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert!(
+            text.starts_with("ok flags=36 ") && text.ends_with(&format!(" activation={hex}\n")),
+            "case {index}: {text:?}"
+        );
+    }
+    for (index, length) in [0, 1025, u32::MAX].into_iter().enumerate() {
+        let packet = time_activation_packet(base.clone(), length, &[0x5a; 1025]);
+        let output = run_time_packet(
+            directory.path(),
+            &format!("activation-rejected-{index}"),
+            &packet,
+            "0",
+            previous,
+        );
+        assert_eq!(output.0, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.1),
+            format!(
+                "error G_REPAIR_PACKET restore packet activation record length {length} is not \
+                 1 to 1024\n"
+            ),
+            "case {index}"
+        );
+    }
+}
+
 #[test]
 #[cfg(target_arch = "x86_64")]
 fn time_test_mode_covers_checks_events_records_and_workers() {
