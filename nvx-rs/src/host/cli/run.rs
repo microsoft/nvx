@@ -1190,12 +1190,12 @@ fn foreground(
     if managed && output.console.is_some() {
         let endpoint = launched.outputs.endpoint.clone();
         let capability = *launched.capability.as_bytes();
-        let child = launched.child_mut().map_err(Exit::from_os_error)?;
+        let process = &launched.process;
         match attach_with_output(
             |cancellation| {
                 Session::connect_launched_cancellable(
                     &endpoint,
-                    child,
+                    process,
                     &capability,
                     60.0,
                     cancellation,
