@@ -160,12 +160,15 @@ fn apply_part<E>(
 ## Own the executions
 
 `nvx-init` runs executions as children in the single VM-wide space, each in its
-own process group. Before exec, the child resets `oom_score_adj` and nice to
-their normal values, then sets its credentials: the selected user and primary
-group IDs and account mode, no supplementary groups, empty capability sets and
-`no_new_privs`. It then changes to the requested working directory and execs.
-A failed identity or working-directory step fails the execution; it must not
-run with another identity or in another directory.
+own process group. Before fork, the init validates the request's account mode;
+when that mode requires an existing account, it checks the root's user and
+group databases. The child resets `oom_score_adj` and nice to their normal
+values, then sets its credentials: the selected user and primary group IDs,
+no supplementary groups, empty capability sets and `no_new_privs`. It then
+changes to the requested working directory and execs. Account mode is a
+parent-side check, not credential state that the child sets. A failed identity
+or working-directory step fails the execution; it must not run with another
+identity or in another directory.
 
 End, cancellation, timeout and session reset kill the execution's process
 group. The init collects child statuses and cleans up descendants and output
