@@ -38,10 +38,14 @@ Retained compatibility paths also start helpers. An init may use
 `nvx-ingress inherit`; the caller owns that announcer, while `nvx-init` starts
 and owns its own announcer. In report-only mode without a running time daemon,
 [`TimeAbi::restore_finish`](../nvx-rs/src/guest/time/api.rs) forks a child for
-deferred checks and detector release and waits for that child, which coordinates
-an RCU-check grandchild. An enforcing or strict finish instead reports the
-missing daemon as a time-ABI violation. These are actual retained helper
-call paths, not new workload orchestration or workspace enforcement.
+the RCU deadline wait. The deferred restore checks and detector release run in
+the calling process, which must have no other thread. The waiter child forks
+a grandchild that forces an RCU grace period and waits for it until the RCU
+stall timeout. The call reaps only the waiter; a grandchild that outlives the
+timeout passes to init or the nearest subreaper. An enforcing or strict finish
+instead reports the missing daemon as a time-ABI violation. These are actual
+retained helper call paths, not new workload orchestration or workspace
+enforcement.
 
 ## Construct the space
 
