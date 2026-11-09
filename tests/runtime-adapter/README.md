@@ -740,6 +740,10 @@ byte:
 - `earlycon=xe9`, `console=hvc0`, `console=hvc1`, `reboot=t`, `panic=-1`,
   `nvx_sandbox=1`, `nvx_config=0xd0010000,65536`,
   `nvx_snapshot_tier=platform`, and `nvx_control_tty=hvc2`;
+- the kernel tuning parameters `mitigations=off`, `mitigations=auto`,
+  `mitigations=auto,nosmt`, `no_timer_check`, `quiet`, and `loglevel=0` to
+  `loglevel=7`, with which a template boots as its adapter's cold sandboxes
+  do, and which OpenVMM also refuses to repeat;
 - `nr_cpus=`, `maxcpus=`, `virtio_mmio.device=`, `virtnet_ip=`,
   `virtnet_mask=`, `virtnet_gw=`, `virtnet_dns=`, `virtnet_ip6=`, and
   `virtnet_gw6=`, with any value that the host chooses.
@@ -1463,8 +1467,10 @@ command's options choose of the template, and `Request::capture` returns NVX's
   fewest that the template's clones take, the RAM and its capacity, the
   geometries of the placeholder and of the dormant scratch, as OpenVMM presents
   a sandbox block device, which `capture::geometry` gives, the network, as
-  the capture attaches its NIC, which no network's policy changes, and, for a
-  template whose clones delay their repair, for tests, the delay, in
+  the capture attaches its NIC, which no network's policy changes, the kernel
+  tuning parameters that the command's `--kernel-tuning` options name, in their
+  order, with which the template's kernel boots, such as `mitigations=off`, and,
+  for a template whose clones delay their repair, for tests, the delay, in
   milliseconds, as its one invariant setting,
   `runtime-adapter.repair-delay-ms`, so that the class is one of its own;
 - NVX's artifacts, with the initramfs that puts the guest agent in place of
@@ -1488,11 +1494,19 @@ so NVX refuses a store whose path is too long for it.
 
 The capture boots the template's VM with the kernel command line
 `nvx_sandbox=1`, and for a template whose processors are not all online at
-boot, `maxcpus=` with those that are, to which OpenVMM adds the platform tier's
+boot, `maxcpus=` with those that are, then the template's kernel tuning
+parameters, to which OpenVMM adds the platform tier's
 tokens, `nvx_snapshot_tier=platform` among them, so the worker of the guest
 agent captures the VM in [template mode](#template-mode) before it assembles
 any root, and the capture ends the VM. OpenVMM records the processors online at
-boot, from which each restore brings a clone's processor target online. The
+boot, from which each restore brings a clone's processor target online. NVX's
+class refuses a kernel tuning parameter that is not one of
+`nvx::host::template::KERNEL_TUNING_PARAMETERS`, `mitigations=off`,
+`mitigations=auto`, `mitigations=auto,nosmt`, `no_timer_check`, `quiet`, and
+`loglevel=0` to `loglevel=7`, and a parameter that two `--kernel-tuning`
+options name, before the command creates the store. Every clone of the
+template restores the template's command line, and with it the kernel
+configuration that the parameters set as the template's kernel booted. The
 store checks what the VM left, and publishes
 the snapshot as its next generation, with the record of its capture and its
 compatibility key, whose kernel command line holds the platform tier's tokens
@@ -1934,7 +1948,7 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   mapping, the launch sends no more of the table, nor `Start`, stops the guest,
   which tears down the root, waits for the VM to end, abandons the launch, and
   checks that the VM ended with a success and a complete teardown.
-- `create STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--boot-processors B] [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]`
+- `create STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--boot-processors B] [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE] [--kernel-tuning PARAMETER]...`
   serves a [template](#templates) of the guest agent PATH from the template
   store STORE, which it creates if needed: a generation of the template's
   class that the store holds, and that is eligible at the host's time, or else
@@ -1947,12 +1961,14 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   RAM, 256 by default, a RAM capacity of MIB mebibytes, its
   RAM by default, and a dormant scratch of BYTES bytes, 64 MiB by default. It
   has one NIC under the policy of the [network](#networks) FILE, unless the
-  policy lets nothing through, and none without a network. The command reads
-  the network before anything else, as a launch does, and checks the class
-  before it creates the store, then prints the generation once the store has
-  committed it, and [evicts](#eviction) the generations of the class that it
-  supersedes.
-- `refresh STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--boot-processors B] [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]`
+  policy lets nothing through, and none without a network. Its kernel boots
+  with the kernel tuning parameter PARAMETER of each `--kernel-tuning`, in
+  their order, such as `mitigations=off`, and so does each of its clones. The
+  command reads the network before anything else, as a launch does, and checks
+  the class before it creates the store, then prints the generation once the
+  store has committed it, and [evicts](#eviction) the generations of the class
+  that it supersedes.
+- `refresh STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--boot-processors B] [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE] [--kernel-tuning PARAMETER]...`
   takes the options of `create`, and captures a new generation of the
   template's class in STORE, whether or not the store holds an eligible one,
   then prints it once the store has committed it, and evicts the generations of
@@ -2221,7 +2237,8 @@ is not UTF-8 text, and admits by its prefix one that the kernel splits in two at
 a vertical tab or at 0xa0, and template mode: a command
 line in which the kernel finds no platform tier boots cold, whatever else it
 holds, and one with it boots a template's VM if it holds the tier's tokens
-alone, between any of the kernel's whitespace, and is refused otherwise, for a
+alone, between any of the kernel's whitespace, the kernel tuning parameters
+among them, and is refused otherwise, for a
 parameter outside the allowlist at its start, in its middle, or at its end, or
 within a platform token's value, after a vertical tab or the byte 0xa0, which
 the kernel takes for whitespace and a split at ASCII whitespace does not, for a
@@ -2962,6 +2979,7 @@ artifacts, and creates a template of it in a template store of its own:
 | `a_network_that_lets_nothing_through_has_no_nic` | A network that denies egress, ingress, and host-loopback access, without a proxy | A captured template without a NIC |
 | `the_networks_of_every_policy_at_one_guest_s_address_share_one_template` | Host-loopback access both ways, with a forward of port 18080 of host loopback to the guest's port 8080; then, at the same guest's address, each network that lets something through: egress allowed, with outbound host-loopback access or without, one TCP rule to the gateway at port 8080, with outbound host-loopback access, a proxy at port 3128 of host loopback, ingress allowed, host-loopback access both ways, and that forward | A captured template with a NIC, under the complete deny-all policy, whose key's command line names the NIC's addresses, but neither a DNS server nor a publication of the guest's listeners; then each creation `existing`, with the same generation, key, and class, without a capture |
 | `a_class_that_no_capture_takes_is_refused_before_the_store` | 3 processors, then 2 processors with 4 online at boot | NVX's refusal of each class, with status 1, before the store exists |
+| `kernel_tuning_that_no_capture_takes_is_refused_before_the_store` | The kernel tuning parameter `nokaslr`, then `mitigations=on`, then `mitigations=off` with `mitigations=auto` | NVX's refusal of each class, with status 1, which names the parameter, before the store exists |
 | `a_refresh_captures_and_retires_the_generations_that_it_supersedes` | A creation, then two refreshes, the second while a clone leases the second generation, then a creation once the clone released it | `list` and `inspect` of the first generation; each refresh captures a new generation, although the store holds an eligible one, and its eviction retires the first generation, and leaves the leased second one, tombstoned, with its payload; the creation serves the third without a capture, and its eviction deletes the second |
 | `a_removal_reports_busy_while_leases_keep_the_generation` | A creation, two clones' leases of its generation, a removal, a second creation, then a removal after each release | `list` and `inspect` with the leases; the removal tombstones the generation, which keeps its payload and takes no new lease, and reports busy, with status 7 and its leases; the second creation captures a new generation, and leaves the first to its leases; a removal reports busy while a lease remains, and deletes the generation once none does; a second removal finds it retired, one of a generation that the store never published fails, and a generation that no lease keeps goes at once |
 | `a_refresh_refuses_a_class_that_no_capture_takes_before_the_store` | A refresh of 3 processors | NVX's refusal of the class, with status 1, before the store exists |
@@ -3018,6 +3036,7 @@ directory that the starts authorize:
 | `one_generation_serves_clones_of_each_upper_and_memory_target` | Two at once, over a scratch image at 256 MiB, and in RAM at 512 MiB with untrusted lowers, then one over a scratch image at 1 GiB | Each started, by the host's monotonic clock, with its own lease, which the store lists with the clone's sandbox, its memory target online, its upper, overlay mode, and image's contents, and the events of its activation in order; a stop releases each lease; the generation's snapshot unchanged, and its payload with nothing but the capture's files once the clones stopped |
 | `one_generation_serves_clones_of_each_processor_count_from_its_boot_online_count_to_its_capacity` | Of a template of 4 processors, 1 of them online at boot: in turn, one without a processor target, one of 2, and one of 4; then targets of 3 and 8 | Each started, with the CPUs of its target online, CPU 0 alone by default, of the 4 possible ones, and the CPUs beyond the first that the time ABI's record of the restore names as those that the restore brought online, none by default, and the events of its activation in order; then for each of the others, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid targets, which quarantines nothing; the lease released, and the generation's snapshot unchanged |
 | `a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with` | Of a template of 4 processors, 2 of them online at boot: a target of 1, then in turn one without a processor target, and one of 4 | Status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of invalid targets; then each started, with CPUs 0 and 1 online by default, which the restore brought none of online, and all 4 online for the target of 4, of which the restore brought CPUs 2 and 3 online |
+| `a_template_s_clones_run_with_its_kernel_tuning_parameters` | Of a template whose kernel boots with the kernel tuning parameter `mitigations=off`: one | The template's key, whose kernel command line holds `mitigations=off` once; then the clone started, whose `/proc/cmdline`, which an execution reads, holds it once, and is the key's command line, token for token; a stop releases the lease |
 | `one_generation_serves_clones_of_either_format_over_either_upper` | Of a template whose placeholder is a GPT disk of two layers, longer than the EROFS image, four at once, each image shorter than the placeholder: the EROFS image over a scratch image and in RAM, a GPT disk of one layer, of the EROFS image's length, in RAM, and one of three layers, as short as its layout allows, over a scratch image, with a bound that its first partition meets exactly; then the disk of one layer, with a bound one byte smaller than its first partition | Each started, with its upper and the overlay's options; the EROFS image's root, without a first partition; each GPT disk's layers, ext4 file systems mounted read-only once each, from the partitions that its own table names, stacked in order, and the bytes of its own first partition; the image's read-only disk at the placeholder's length, and the scratch device at the template's scratch length, each of which the guest reads to its end; for a clone in RAM, no file of its sandbox as long as the template's scratch, and on Linux `--restore-absent-scratch` and no `scratch` block device among its VMM's arguments, which name one over a scratch image; then status 8, and the record of a failure of the request, at the activation, once the VM exited, by the evidence of an unusable root, with the guest's status 54; nothing quarantined, and the lease released, with the records |
 | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | An EROFS image and a GPT disk 4 KiB longer, and an EROFS image 100 bytes longer, than the placeholder, a scratch image of twice the template's scratch, memory targets of 2 GiB and of 320 MiB, unstaged images, and a generation that the store does not hold, then the generation once its key is gone | For those that NVX's plan refuses, status 8, with NVX's reason, and the record of a failure of the request, at the plan, without a VM, by the evidence of a length that the request supplied, of the image's geometry, which OpenVMM cannot attach, or of invalid targets, which quarantines nothing; for unstaged images, status 1, without a record; for the generation, status 10, with the record of a selection that names no template, which the store never published, without a lease; any lease released, and no VMM's log or record in the sandbox; for the generation without its key, status 8, and the record of a failure of the template, at the plan, by the evidence of a malformed generation, which quarantines the generation, so that the store refuses a later start's selection, with status 10, as `ineligible`, by the evidence of its tombstone, without a lease |
 | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A scratch image of zeros, a journal that the record forbids, and, through NVX's restore sequence, a ping, a start, or the start of an execution before the `Activate` | Status 8, no `Ready`, and the record of a failure, at the activation, once the VM exited: of the request, by the evidence of an unusable root, with the guest's status 54, or, before the `Activate`, of an unknown cause, by the protocol's, with 51, which the sandbox records until the release; nothing quarantined, and the lease released, with the records |
@@ -3124,6 +3143,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | Target | Scenario | Proves |
 | --- | --- | --- |
 | `template_capture` | `a_capture_takes_its_class_and_inputs_from_the_request` | A capture's request: the plan of the placeholder over RAM, with the request's network, the placeholder's binding, the policy revision, the artifacts, and the class, which the network names, and the delay of a template's clones' repair, as its invariant setting |
+| `template_capture` | `a_capture_takes_its_kernel_tuning_from_the_request` | A capture's class takes the request's kernel tuning parameters, in their order, which, order included, name a class of its own, and nothing else of the capture changes; NVX's class refuses a parameter that is not NVX's, and one given twice |
 | `template_capture` | `the_host_program_refuses_a_repair_delay_that_it_cannot_read` | `create` and `refresh` refuse a value of `RUNTIME_ADAPTER_REPAIR_DELAY` that sets no delay with status 2 before they create anything |
 | `template_capture` | `the_host_program_refuses_a_template_before_it_creates_anything` | `create` refuses a network that the plan refuses, or that it cannot read, with status 1 before it needs NVX's artifacts or creates the store |
 | `template_operations` | `a_refresh_refuses_a_template_before_it_creates_anything` | `refresh` refuses a network that the plan refuses with status 1 before it needs NVX's artifacts or creates the store, as `create` does |
@@ -3244,6 +3264,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_template` | `a_removal_reports_busy_while_leases_keep_the_generation` | `remove` tombstones a leased generation, keeps its payload, and reports busy, with status 7 and its leases, until no lease remains, then deletes it |
 | `vm_template` | `a_template_whose_processors_are_all_online_at_boot_limits_none` | `create` captures a template whose processors are all online at boot without `maxcpus=`, and whose key records none online at boot |
 | `vm_template` | `a_template_without_a_network_has_no_nic` | `create` captures a template without a NIC, whose key holds what it asked for, its processor online at boot among it, and serves it again without a capture |
+| `vm_template` | `kernel_tuning_that_no_capture_takes_is_refused_before_the_store` | `create` of kernel tuning parameters that no capture takes, one that is not NVX's, another value of one, or one given twice, fails with status 1, naming the parameter, before the store exists |
 | `vm_template` | `the_networks_of_every_policy_at_one_guest_s_address_share_one_template` | `create` of a network of any policy captures one template, whose NIC the capture attaches under the complete deny-all policy, and the creations of the networks of every other policy at the same guest's address serve it without a capture |
 | `vm_clone` | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | A clone of a network with egress allowed binds a resolver file that names the gateway's DNS server read-only at `/etc/resolv.conf`, and a TCP connection to the server's DNS port opens, which the gateway's DNS proxy accepts; one whose resolver cannot be bound ends with status 57 |
 | `vm_clone` | `a_clone_maps_an_aggregate_of_directories_and_files_beneath_its_root_before_its_sandbox_starts` | A clone maps an aggregate of host directories and files beneath its root before its sandbox starts, each with its access, a hidden file, and a hidden directory that shows a file again, and writes reach the host's directories and file through the writable ones alone |
@@ -3270,6 +3291,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `a_selection_that_names_no_template_leases_nothing` | A start of a template store that does not exist, or of a generation that `remove` retired, ends with status 10 and the refusal's record, without a lease or a VM |
 | `vm_clone` | `a_start_refuses_an_export_whose_mapped_objects_changed_before_any_vmm_starts` | An export whose mapped file, or pinned directory, another object replaced once NVX's plan checked the clone is refused with status 8 at the clone's launch, before any VMM starts |
 | `vm_clone` | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | Images, scratch images, and memory targets that the template cannot serve are refused with status 8 before any VMM starts, unstaged images with status 1, and a generation that the store does not hold with status 10 |
+| `vm_clone` | `a_template_s_clones_run_with_its_kernel_tuning_parameters` | A template whose kernel boots with `mitigations=off` holds it in its key's command line, and its clone runs with it: the clone's `/proc/cmdline` is the template's command line |
 | `vm_clone` | `a_template_without_a_nic_serves_clones_without_a_network` | A template without a NIC serves clones without a network, or with one that lets nothing through, and refuses those of a network with a NIC with status 8 |
 | `vm_clone` | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | A tombstone refuses new clones of its generation with status 10, while the running clone serves on, and releases its lease once it stops |
 | `vm_clone` | `clones_at_once_keep_their_own_uppers_and_machine_ids` | Clones at once keep their own uppers, and their own machine IDs, generated, distinct, and bound read-only, or the image's own |

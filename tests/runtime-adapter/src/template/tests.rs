@@ -42,9 +42,27 @@ const WHOLE: [&str; 9] = [
     "nvx_control_tty=hvc2",
 ];
 
+/// The kernel tuning parameters that the platform tier's allowlist holds whole too, which a
+/// template boots with as its adapter's cold sandboxes do.
+const TUNING: [&str; 13] = [
+    "mitigations=off",
+    "mitigations=auto",
+    "mitigations=auto,nosmt",
+    "no_timer_check",
+    "quiet",
+    "loglevel=0",
+    "loglevel=1",
+    "loglevel=2",
+    "loglevel=3",
+    "loglevel=4",
+    "loglevel=5",
+    "loglevel=6",
+    "loglevel=7",
+];
+
 #[test]
 fn the_platform_tier_s_allowlist_is_openvmm_s() {
-    for token in WHOLE {
+    for token in WHOLE.into_iter().chain(TUNING) {
         assert!(is_platform_token(token.as_bytes()), "{token}");
     }
     for token in [
@@ -105,6 +123,16 @@ fn the_platform_tier_s_allowlist_is_openvmm_s() {
         "driver_async_probe=virtio_mmio",
         "init=/bin/sh",
         "rdinit=/bin/sh",
+        // Other values of the kernel tuning parameters, and other spellings of them.
+        "mitigations=on",
+        "mitigations=",
+        "mitigations",
+        "loglevel=8",
+        "loglevel=07",
+        "loglevel",
+        "quiet=1",
+        "no_timer_check=1",
+        "no-timer-check",
         "nokaslr",
         "--",
         "--=1",
@@ -209,6 +237,26 @@ fn a_template_s_command_line_holds_the_platform_tier_s_tokens_alone() {
 }
 
 #[test]
+fn a_template_s_command_line_may_hold_kernel_tuning_parameters() {
+    // NVX gives a template the kernel tuning parameters of its class after its own tokens.
+    let tuned = TEMPLATE.replacen(
+        "nvx_sandbox=1",
+        "nvx_sandbox=1 mitigations=off no_timer_check quiet loglevel=0",
+        1,
+    );
+    assert_eq!(boot(tuned.as_bytes()), Ok(Boot::Template { gateway: None }));
+    for parameter in TUNING {
+        for command_line in with(parameter) {
+            assert_eq!(
+                boot(command_line.as_bytes()),
+                Ok(Boot::Template { gateway: None }),
+                "{command_line:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn template_mode_refuses_a_gateway_that_openvmm_would_not_render() {
     for (gateway, problem) in [
         (
@@ -243,6 +291,8 @@ fn template_mode_refuses_a_gateway_that_openvmm_would_not_render() {
 fn template_mode_refuses_a_token_outside_the_allowlist() {
     for token in [
         "nokaslr",
+        "mitigations=on",
+        "loglevel=8",
         "init=/bin/sh",
         "console=ttyS0",
         "nvx_config=0xd0010000,65537",
