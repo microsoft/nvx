@@ -72,8 +72,17 @@ impl From<io::Error> for SessionError {
     }
 }
 
-/// Connects to the control endpoint of OpenVMM process `pid`, retrying until `deadline` while
-/// the endpoint is not yet available and the process is still alive.
+/// Connects to an endpoint that OpenVMM process `pid` serves, its control endpoint, or the boot
+/// console of a clone,
+/// [`Store::clone_console_endpoint`](crate::host::template::Store::clone_console_endpoint),
+/// retrying until `deadline` while the endpoint is not yet available and the process is still
+/// alive. An endpoint that another process serves is [`SessionError::Refused`]. Once connected, it
+/// checks that the process with the ID `pid` still started at `start_time`, as the caller recorded
+/// it: one that took the ID of the recorded process once that process exited is another, whose
+/// endpoint the caller must not take for its own, since a clone's boot console authenticates
+/// no one, so the connection then fails with [`SessionError::ProcessExited`], as one to a process
+/// that exited does, and with [`SessionError::Io`] if the start time cannot be read, rather than
+/// return an endpoint that it could not verify.
 pub fn connect(
     endpoint: &str,
     pid: u32,
@@ -83,7 +92,9 @@ pub fn connect(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match platform::connect_endpoint(endpoint, pid, remaining.min(Duration::from_millis(250))) {
-            Ok(transport) => return Ok(transport),
+            Ok(transport) => {
+                return verified(transport, platform::process_start_time(pid), start_time);
+            }
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
                 return Err(SessionError::Refused(error));
             }
@@ -102,6 +113,23 @@ pub fn connect(
             return Err(SessionError::TimedOut);
         }
         thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Returns `transport`, a connection to an endpoint that the process with a recorded ID serves,
+/// if `current`, the start time of the process that has that ID now, is the recorded
+/// `start_time`, as [`connect`] checks it. Fails with [`SessionError::ProcessExited`] if another
+/// process has the ID, or none does, and with [`SessionError::Io`] if the start time cannot be
+/// read, which verifies nothing.
+fn verified(
+    transport: Box<dyn Transport>,
+    current: io::Result<Option<u64>>,
+    start_time: u64,
+) -> Result<Box<dyn Transport>, SessionError> {
+    match current {
+        Ok(Some(current)) if current == start_time => Ok(transport),
+        Ok(_) => Err(SessionError::ProcessExited),
+        Err(error) => Err(SessionError::Io(error)),
     }
 }
 

@@ -17,7 +17,8 @@
 //! Without the variable, the hook does nothing. `runtime-adapter-host launch`, `reattach`, and
 //! `stop` read it, and refuse a value that names no step or action, as they refuse a command line
 //! that is not a command. `runtime-adapter-host start` reads it too, and refuses one that names
-//! another step than `checked`.
+//! another step than `checked`, as `runtime-adapter-host console` refuses one that names another
+//! step than `found`.
 
 use std::env;
 use std::ffi::OsStr;
@@ -61,7 +62,8 @@ pub enum Step {
     /// `found`: `reattach` or `stop` has found the sandbox's VM running, and holds it, under the
     /// sandbox's lock, with the session in which a clone answered the Activate of its record
     /// again, if the VM is a clone's, but has sent the guest agent nothing more, and stopped
-    /// nothing.
+    /// nothing. `console` reaches it once it also connected to the clone's boot console, before it
+    /// asks the guest to write its marker.
     Found,
 }
 

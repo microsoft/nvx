@@ -329,6 +329,10 @@ pub struct ClonePlan {
     /// The clone's export, which its restore binds to the template's dormant filesystem slot, if
     /// it has one.
     export: Option<CloneExport>,
+    /// Whether the clone's launch attaches a boot console from which the caller reads, as
+    /// [`with_boot_console`](Self::with_boot_console) asks, rather than one that discards its
+    /// output.
+    console: bool,
 }
 
 /// How a plan reaches the clone's files: as the checks of their bindings reach them, or, in tests,
@@ -596,6 +600,7 @@ impl ClonePlan {
             capability,
             devices,
             export,
+            console: false,
         })
     }
 
@@ -705,6 +710,33 @@ impl ClonePlan {
     pub fn capability(&self) -> &[u8; CAPABILITY_LEN] {
         &self.capability
     }
+
+    /// Asks the clone's launch for a boot console from which the caller reads what the clone's
+    /// guest writes to its kernel console, `hvc1`, after the restore, such as a panic, an oops, or
+    /// an out-of-memory kill, as an adapter may read the boot console of a cold launch.
+    ///
+    /// A template captures a boot console that discards its output, so that its capture waits for
+    /// no reader, and a clone's restore keeps that console unless its plan asks for one: the
+    /// launch then attaches a listener to the template's boot console at the endpoint that the
+    /// lease fixes, [`Store::clone_console_endpoint`], beside the snapshot as the clone's control
+    /// socket is on Linux, and a named pipe on Windows, which [`Restoring::console_endpoint`]
+    /// returns. The device is the template's, so OpenVMM discards the guest's output while no
+    /// reader is connected, as the template's console does, and the clone never waits for a
+    /// reader: a reader reads what the guest writes once it connected, and one that disconnects
+    /// leaves the clone running. A reader connects with
+    /// [`session::connect`](crate::host::session::connect), as to the clone's control endpoint,
+    /// which checks that the clone's VMM serves it, and connects again, as after a crash of the
+    /// caller, for as long as the clone runs, one at a time.
+    pub fn with_boot_console(mut self) -> Self {
+        self.console = true;
+        self
+    }
+
+    /// Returns whether the clone's launch attaches a boot console from which the caller reads, as
+    /// [`with_boot_console`](Self::with_boot_console) asks.
+    pub fn boot_console(&self) -> bool {
+        self.console
+    }
 }
 
 impl fmt::Debug for ClonePlan {
@@ -721,6 +753,7 @@ impl fmt::Debug for ClonePlan {
             .field("memory", &self.memory)
             .field("activation", &self.activation)
             .field("export", &self.export())
+            .field("console", &self.console)
             .finish_non_exhaustive()
     }
 }

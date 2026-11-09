@@ -2,7 +2,8 @@
 //! not a host's time, as usage errors, a network that the plan refuses and shares that it cannot
 //! export, and a selection that names no template, of a template store that does not exist, or of
 //! a generation that the store does not hold, with the refusal's record and its own status, before
-//! it needs NVX's artifacts or creates the sandbox's store. Its `run` refuses options that do not
+//! it needs NVX's artifacts or creates the sandbox's store. Its `console` refuses arguments that do
+//! not make a read of a clone's boot console as usage errors. Its `run` refuses options that do not
 //! make a run, an execution's included, as usage errors, an image that the plan refuses before it
 //! stages anything, and a selection that names no template once its preflight staged the clone's
 //! images, as a start refuses it. A clone's record names its template store and its generation,
@@ -288,6 +289,111 @@ fn the_host_program_refuses_options_that_do_not_make_a_start() {
             stderr.contains(&format!("{HOST_TIME_VARIABLE} takes host=HOST,boot=BOOT")),
             "{time:?}: {stderr}"
         );
+    }
+}
+
+#[test]
+fn the_host_program_refuses_options_that_do_not_make_a_boot_console_or_its_read() {
+    let start = [
+        "start",
+        "store",
+        "--template",
+        "templates",
+        "--generation",
+        "1",
+        "--distro",
+        "erofs:image",
+        "--distro-identity",
+        IDENTITY,
+        "--upper",
+        "ram",
+    ];
+    let with = |options: &[&'static str]| [&start[..], options].concat();
+    let run = |options: &[&'static str]| {
+        [&["run"][..], &start[1..], options, &["--", "/bin/true"][..]].concat()
+    };
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (
+            with(&["--boot-console", "read"]),
+            "--boot-console takes none or listen, not \"read\"",
+        ),
+        (
+            with(&["--boot-console", "none", "--boot-console", "listen"]),
+            "unexpected option \"--boot-console\" of start",
+        ),
+        (
+            run(&["--boot-console", "listen=console.sock"]),
+            "--boot-console takes none or listen, not \"listen=console.sock\"",
+        ),
+        (
+            vec!["launch", "store", "--boot-console", "listen"],
+            "unexpected option \"--boot-console\" of launch",
+        ),
+        (
+            vec!["reattach", "store", "--boot-console", "listen"],
+            "unexpected option \"--boot-console\" of reattach",
+        ),
+        // `console` reads the boot console of a clone until it delivered one marker, which the
+        // guest writes as the argument of a probe.
+        (vec!["console"], "console needs a sandbox store"),
+        (vec!["console", "store"], "console needs one marker"),
+        (
+            vec!["console", "store", "first", "second"],
+            "console needs one marker",
+        ),
+        (
+            vec!["console", "store", "a marker"],
+            "the kmsg probe's argument \"a marker\" is empty, or holds whitespace or a control \
+             character",
+        ),
+        (
+            vec!["console", "store", "marker", "--template", "templates"],
+            "unexpected option \"--template\" of console",
+        ),
+        (
+            vec!["console", "store", "marker", "--boot-console", "listen"],
+            "unexpected option \"--boot-console\" of console",
+        ),
+    ];
+    for (arguments, problem) in cases {
+        let output = host(&arguments, None);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(problem) && stderr.contains("usage: runtime-adapter-host"),
+            "{arguments:?}: {stderr}"
+        );
+    }
+
+    // A start that asks for a boot console that listens, or for none, is a start, whose selection
+    // the template store, which does not exist, refuses before it needs NVX's artifacts.
+    for value in ["listen", "none"] {
+        let directory = directory(&format!("boot-console-{value}"));
+        let store = directory.join("store");
+        let templates = directory.join("templates");
+        let image = image(directory.join("distro.erofs"), 4096);
+        let arguments = [
+            "start",
+            store.to_str().unwrap(),
+            "--template",
+            templates.to_str().unwrap(),
+            "--generation",
+            "1",
+            "--distro",
+            &format!("erofs:{}", image.display()),
+            "--distro-identity",
+            IDENTITY,
+            "--upper",
+            "ram",
+            "--boot-console",
+            value,
+        ];
+        let output = host(&arguments, None);
+        assert_eq!(output.status.code(), Some(10), "{value}: {output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("failure.evidence=no-store\n"), "{stdout}");
+        assert!(!stdout.contains("console="), "{stdout}");
+        assert!(!store.exists(), "the start created the sandbox's store");
     }
 }
 

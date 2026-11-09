@@ -216,7 +216,8 @@ and a value escapes `\`, newlines, and carriage returns as `\\`, `\n`, and
 
 The worker runs the probes of `worker::probes` while it runs no
 [execution](#the-workers-executions). FILE and DIRECTORY are relative paths in
-the root, of normal components, and the other probes take no arguments:
+the root, of normal components, TEXT is any argument, and the other probes take
+no arguments:
 
 | Probe | Facts |
 | --- | --- |
@@ -235,6 +236,7 @@ the root, of normal components, and the other probes take no arguments:
 | `cgroups` | The file system at the cgroups' parent, `parent.type`, and its `parent.subtree-control`; whether each cgroup exists, `agent.exists` and `workload.exists`; `agent.memory.low`, `workload.memory.max`, and `workload.pids.max`; the number of processes in each, `agent.processes` and `workload.processes`; and `user-namespaces`, the guest's limit of user namespaces, or `unavailable` without them |
 | `processes` | For PID 1, `pid1`, the worker, `worker`, and PID 1's unrelated child, `sibling`: `NAME.pid`, and while the process exists, `NAME.state`, `NAME.ppid`, `NAME.root`, `NAME.cgroup`, `NAME.command`, and `NAME.namespaces`: `same` if it shares PID 1's, or the ones that differ |
 | `hold` | It opens the root, and keeps it open until the worker ends, so that the teardown finds the root busy: `held`, the path that it holds |
+| `kmsg TEXT` | It writes `runtime-adapter: TEXT`, as one line, to the kernel's log, `/dev/kmsg`, which the kernel prints on its console, the [boot console](#boot-consoles) of a VM that has one: `written`, the bytes that it wrote. The log takes a record that starts with `<N>` for one of priority N, and drops that prefix, so TEXT comes after fixed text, and stays as it is |
 
 A value that a probe cannot read is `absent` if its file does not exist, and
 otherwise `unreadable: PROBLEM`. A new check of a root is a new probe in this
@@ -1388,7 +1390,8 @@ guest's listeners, through publication or a forward.
 For tests, `launch`, `reattach`, and `stop` take a step hook, `hook::StepHook`,
 from the variable `RUNTIME_ADAPTER_STEP_HOOK`, which pauses the command at a
 named step, so that a test can act between two steps, or exits the command
-there without unwinding, as a crash would end it:
+there without unwinding, as a crash would end it; `start` and `console` take
+it at one step each, as below:
 
 - `STEP:pause:PATH` creates the file PATH, which holds the step's name, and
   waits until the file is gone, then goes on: a launch leaves the time that it
@@ -1406,7 +1409,7 @@ The steps of a launch, in order, then that of a command that reattaches, are:
 | `spawned` | The VMM runs, and the launch's journal records it, but the launch has not connected to the VM. |
 | `ready` | The guest agent, of the build that the host ships, has assembled the layered root, and the launch has released the checked files, but has sent neither the mapping table nor `Start`. |
 | `commit` | The guest has started the sandbox, if the VM has a layered root, the guest agent has answered, and the launch is about to commit: its journal still records the VMM, which no runtime record names yet. |
-| `found` | `reattach` or `stop` has found the VM running, and holds it, under the sandbox's lock, with the session in which a clone answered the `Activate` of its record again, if the VM is a clone's, but has sent the guest agent nothing more, and stopped nothing. |
+| `found` | `reattach` or `stop` has found the VM running, and holds it, under the sandbox's lock, with the session in which a clone answered the `Activate` of its record again, if the VM is a clone's, but has sent the guest agent nothing more, and stopped nothing. `console` reaches it once it also connected to the clone's boot console. |
 
 A value that names no step or action is a usage error. Without the variable,
 the hook does nothing.
@@ -1418,6 +1421,12 @@ scratch image, if it has one, its processor and memory targets, its network,
 and the export of its shares, if any. The start has recorded nothing of the
 clone yet, and spawned nothing, and the clone's launch checks the export again,
 so a test may change a shared object there. A start refuses a hook at another
+step as a usage error.
+
+`console` takes the hook at `found` alone, which it reaches once it found the
+clone running, as `reattach` does, and connected to the clone's
+[boot console](#boot-consoles), before it asks the guest to write its marker:
+a crash there leaves the clone without a reader. It refuses a hook at another
 step as a usage error.
 
 ### Templates
@@ -1803,6 +1812,54 @@ clone as a reattach that finds it so does, with the record of its failure, so
 the run exits with 8, or 9 while the teardown is unresolved. It exits with 4
 once the guest reported that a stage of the root failed, and with 1 otherwise.
 
+#### Boot consoles
+
+A template captures a boot console that discards what its guest writes, so its
+capture waits for no reader. `start --boot-console listen`, and `run` with it,
+asks NVX's `ClonePlan::with_boot_console` for a clone whose launch attaches a
+listener to that console, at the endpoint that the clone's lease fixes,
+`Store::clone_console_endpoint`: on Linux, the Unix socket `LAUNCH.console`
+beside the generation's snapshot, as the clone's control socket is, and on
+Windows, the named pipe `//./pipe/openvmm-microvm-LAUNCH.console`, where LAUNCH
+is the ID of the launch that the lease reserves. The start prints the endpoint,
+`console=ENDPOINT`, once the clone's VMM runs. OpenVMM discards what the guest
+writes there while no reader is connected, as it does without a listener, so
+the clone never waits for a reader, and runs on once its reader disconnected,
+or crashed: a reader gets what the guest writes once it connected, and nothing
+from before. The boot console is the clone kernel's console, `hvc1`, on which
+the kernel prints its log, such as a panic, an oops, or an out-of-memory kill.
+A clone whose start asked for none restores with the template's boot console,
+which listens nowhere, as `--boot-console none` asks.
+
+`runtime-adapter-host console STORE MARKER` reads the boot console of the clone
+of STORE: it connects to the console at the endpoint that the clone's lease
+fixes, through the identity of the clone's VMM, as its runtime record names it,
+as to the clone's control endpoint, so that it refuses an endpoint that another
+process serves, even one that a host restart gave the ID and the start time of a
+VMM of the earlier boot, and reads the console from then on, so that the console
+never holds the guest's writes back for want of a reader. Meanwhile, it
+reattaches as `reattach` does, which ends a clone whose guest does not answer,
+and asks the guest's worker to write MARKER, a probe's argument, to the kernel's
+log, with the [`kmsg` probe](#probes), each within the 30 seconds that a
+reattach and a probe wait for the guest at most. It reads on until what it read
+holds MARKER, for at most 10 seconds once the reattach and the probe returned,
+and at least until they returned. MARKER is text that the guest writes only when
+asked, such as text unique to the command: the first that the console delivers
+is the one that the command asked for. Under the sandbox's lock, it appends what
+it read to the sandbox's console log, `console.log`, a regular file of the
+store, never a link, private to its user, whatever the umask, which each launch
+in the sandbox starts anew, and prints the console's endpoint,
+`console=ENDPOINT`, how many bytes it read, `console.read=BYTES`, and what it
+read, `console.text=TEXT`, escaped as a probe's fact. It reads the console
+whatever the reattach and the probe did, since a guest whose kernel panicked
+once the command connected answers nothing, but its console holds why: a
+reattach that ends the clone ends the command as it ends `reattach`, and a
+reattach that fails, a guest that does not answer, or a console that ends, or
+whose 10 seconds pass, before it delivers MARKER fails the command, once the
+command appended and printed what the console delivered, such as the last words
+of a clone that failed. It fails for a VM that booted cold, and for a clone
+whose start asked for no boot console, at whose endpoint nothing listens.
+
 ### Commands
 
 Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
@@ -1924,7 +1981,7 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   its record again, and releases the lease of a clone that ended, through the
   template store TEMPLATES, if given, in place of the one that the clone's
   record names.
-- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--processors N] [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES]`
+- `start STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--processors N] [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [--boot-console (none | listen)] [SHARES]`
   starts a [clone](#clones) of the generation G of the template store
   TEMPLATES in the sandbox store STORE, which it creates if needed, and whose
   `stage` staged its images, which no one else may change: the image PATH, an
@@ -1944,6 +2001,9 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   [network](#networks) that FILE holds, if given, which the start reads before
   anything else, as a launch does, and which must be the template's: NVX's plan
   refuses any other before any VMM starts, as [Clones](#clones) describes.
+  With `--boot-console listen`, the clone's launch attaches a boot console that
+  listens at the endpoint that its lease fixes, which the start prints, as
+  [Boot consoles](#boot-consoles) describes.
   SHARES, as `launch` takes
   them, share host paths with the clone's root: the start refuses those that it
   cannot export before anything but its network, and NVX's plan those that the
@@ -1976,6 +2036,10 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   each PROBE in the VM's layered root, in order, and prints the facts that it
   found. A PROBE is the text of a [probe](#probes): its name, then its
   arguments, each after one space. A probe that fails fails the command.
+- `console STORE MARKER` connects to the boot console of the clone of STORE,
+  then reads it while it reattaches as `reattach` does, and asks the guest to
+  write MARKER to its kernel's log, until the console delivered MARKER, as
+  [Boot consoles](#boot-consoles) describes.
 - `exec STORE EXECUTION [; EXECUTION]...` reattaches and attaches as
   `reattach` does, then runs each EXECUTION in the VM's layered root, all at
   once, over that one session, through `host::Executions`, and prints their
@@ -2003,7 +2067,7 @@ Each command of `runtime-adapter-host` but `stage`, `list`, `inspect`, and
   number. The guest refuses a key that it heard of before, and the epochs of a
   broker instance only advance, while a broker restored from a snapshot has a
   new instance ID, so no command repeats the key of another's execution.
-- `run STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--processors N] [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [SHARES] EXECUTION`
+- `run STORE --template TEMPLATES --generation G --distro FORMAT:PATH --distro-identity UUID --upper (scratch:PATH | ram) [--processors N] [--memory MIB] [--workload-identity UID:GID] [--overlay-mode MODE] [--scratch-journal POLICY] [--first-partition-bound BYTES] [--machine-id (image | generated)] [--network FILE] [--boot-console (none | listen)] [SHARES] EXECUTION`
   runs one EXECUTION, one of `exec`'s, in a [clone](#clones) of the generation
   G of the template store TEMPLATES, in the sandbox store STORE, which it
   creates if needed, then tears the clone down, as
@@ -2966,6 +3030,7 @@ directory that the starts authorize:
 | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | Over a scratch image, and in RAM | Less than an eighth of each disk read once the clone is ready, by the guest's statistics, and each disk's whole length once the guest read it to its end; on the host, the staging's count of the bytes that it read at least the image's length, which it hashed, the start's less than an eighth of it, and the VMM's less than an eighth of the disks whose files back the clone's, those of the image and of a scratch image, once the clone is ready; then, once the guest read each disk to its end, the VMM's count raised by at least what the guest asked of those files on Windows, and by less than an eighth of it on Linux, whose `rchar` misses OpenVMM's reads through io_uring |
 | `a_clone_s_time_settles_after_it_is_ready` | In RAM | The time daemon's restore check `ok`, after the restore's generation, without a violation, after a downtime that the host's monotonic clock measured, and a clone that still serves |
 | `each_command_reattaches_to_the_clone_from_a_new_process` | Over a scratch image, then `reattach`, `probe`, `exec`, and `reattach` again, each from a new process | The launch's records, committed, with the clone's VM and no failure; each command `live`, with the clone's VMM, in a new session of the same broker, in a later epoch; the events of the activation as they were; an execution as nobody; and a stop that releases the lease, with the records |
+| `a_clone_s_boot_console_delivers_what_its_guest_writes_once_its_reader_connected` | In RAM, with `--boot-console listen`, then `console` from new processes, a `kmsg` probe while no reader is connected, a `console` that the step hook ends at `found`, another clone without a boot console, and a third with one, whose `console` names another guest agent's build | The console's endpoint, which the clone's lease fixes, beside the snapshot on Linux; each reader's marker, which the guest wrote once the reader connected, and none of what the guest wrote while no reader was, nor of a reader that crashed; the console log, which keeps each read in order; a clone that still answers, and whose stop removes the console's socket with the control socket; without a boot console, a `console` that finds nothing at the endpoint, with status 1, of a clone that still serves; and a `console` of another runtime's build, whose reattach ends its clone, with status 8 and the record of the failure, once it kept what the console delivered |
 | `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | In RAM, then a `reattach` with another guest agent's build | Status 8, `reattached=failed`, without a session, and the record of a failure of the host, at the reattach, by the evidence of the runtime's mismatch, once NVX terminated the VMM, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
 | `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | In RAM, then a `stop` that the step hook pauses at `found`, while the test terminates the clone's VMM | Status 8, `reattached=live` and `stopped=exited`, and the record of a failure of an unknown cause, at the run, by the evidence of the clone's lost status, without a status of the guest's, once the VM exited, which quarantines nothing; the lease released, with the records; then another clone that starts and stops |
 | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | Over a scratch image, then a tombstone of its generation, through NVX's store | A start whose selection the store refuses, with status 10 and the record of an `ineligible` generation, by the evidence of its tombstone, without a lease; the running clone, which reattaches, probes, runs an execution, and stops, which releases its lease; and the generation's snapshot unchanged |
@@ -3074,6 +3139,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `clone_start` | `a_start_refuses_a_generation_that_the_template_store_does_not_hold_before_anything_else` | A start whose template store does not exist, or does not hold the generation, ends with status 10 and the refusal's record, and one whose image the plan refuses with status 1, before it needs NVX's artifacts or creates the sandbox's store |
 | `clone_start` | `a_start_refuses_a_network_that_the_plan_refuses_before_anything_else` | A start refuses a network that it cannot read, or that the plan refuses, with status 1 before its image, its shares, and the template store |
 | `clone_start` | `a_start_refuses_shares_that_it_cannot_export_before_anything_else` | A start refuses shares that it cannot export with status 1 before it reads the template store or creates the sandbox's store |
+| `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_boot_console_or_its_read` | The values of `--boot-console` that a start or a run refuses, the commands that do not take it, and the command lines of `console` that the host program refuses, each with status 2; a start that asks for a boot console that listens, or for none, whose selection the template store refuses without a lease |
 | `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_run` | The command lines of `run` that the host program refuses, its execution's included, each with status 2, and a clock fixture that is not a host's time |
 | `clone_start` | `the_host_program_refuses_options_that_do_not_make_a_start` | The command lines of `start` that the host program refuses, each with status 2, and a clock fixture that is not a host's time |
 | `host_session` | `a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_the_guest` | A clone's order sends no more of its table, nor `Start`, once the guest fails a mapping, and asks the guest to stop |
@@ -3185,6 +3251,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | A clone's restore reads less than an eighth of each disk, before the guest reads each to its end, by the guest's statistics, and as the host counts the reads of the start, which hashes and copies nothing, and of the VMM, whose count on Windows rises by what the guest asked of the disks' files, and on Linux, where it misses io_uring's reads, does not |
 | `vm_clone` | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | A scratch image whose upper an earlier clone used ends the clone before it is ready, with status 54 |
 | `vm_clone` | `a_clone_runs_the_executions_that_name_their_identity_once_it_is_ready` | A clone runs the executions that name their identity once it is ready, whatever workload identity its record names, and refuses one that names none with `EINVAL` |
+| `vm_clone` | `a_clone_s_boot_console_delivers_what_its_guest_writes_once_its_reader_connected` | A clone's boot console delivers to each reader, from a new process, what the guest writes to its kernel's log once the reader connected, and discards what it writes while none is, without waiting; a reader that crashes leaves the clone running, and the console to the next; a clone without one restores as before; and a reader whose reattach ends the clone keeps what the console delivered |
 | `vm_clone` | `a_clone_s_executions_find_the_proxy_of_its_policy` | The executions of a clone of a proxy-only network find its proxy's URL in their environment, and the clone keeps the image's own `/etc/resolv.conf` |
 | `vm_clone` | `a_clone_s_time_settles_after_it_is_ready` | A clone's time settles once it is ready, without a violation, after the downtime that the host's monotonic clock measured |
 | `vm_clone` | `a_clone_whose_activation_fails_ends_before_it_is_ready` | A clone whose activation fails ends before it is ready, with the status of the failure's class and the failure's record, quarantines nothing, and releases its lease |
