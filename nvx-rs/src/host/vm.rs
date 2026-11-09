@@ -16,7 +16,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::host::config::{ConsoleAttachment, VmConfig};
+use crate::host::config::{ConsoleAttachment, RootConfig, UpperConfig, VmConfig};
 use crate::host::filesystem;
 use crate::host::paths::{absolute, normalized};
 use crate::host::platform;
@@ -252,7 +252,8 @@ impl Prepared {
 ///
 /// A cold launch needs [`VmConfig::boot`]. Restoring `from` a [`Snapshot`] is not supported yet.
 /// The caller keeps the directory and runtime inputs stable during creation and a later spawn.
-/// Runtime and configuration paths are used as supplied; output paths come from `dir`.
+/// Caller-relative runtime and block-image paths become absolute during creation, without
+/// resolving links or `..` components; output paths come from `dir`.
 ///
 /// The log is created anew, privately, and kept open in [`Prepared`]. Other outputs are reserved
 /// names that OpenVMM creates when it runs: existing entries at those names are refused, not
@@ -302,6 +303,28 @@ pub fn create(
             }
         }
     }
+    let resolve = |path: &Path| -> Result<PathBuf> {
+        // Keep invalid spellings for the renderer's existing required-path checks.
+        if path.as_os_str().is_empty() || path.as_os_str().to_string_lossy().contains('\0') {
+            return Ok(path.to_owned());
+        }
+        absolute(path).map_err(|error| {
+            Error::io(format!("cannot resolve VM input {}", path.display())).with_source(error)
+        })
+    };
+    let runtime = Runtime {
+        openvmm: resolve(&runtime.openvmm)?,
+        kernel: resolve(&runtime.kernel)?,
+        initramfs: resolve(&runtime.initramfs)?,
+        ..runtime.clone()
+    };
+    let mut config = config.clone();
+    if let RootConfig::Layered(root) = &mut config.root {
+        root.image = resolve(&root.image)?;
+        if let UpperConfig::Scratch { path, .. } = &mut root.upper {
+            *path = resolve(path)?;
+        }
+    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -336,7 +359,7 @@ pub fn create(
         }
         let capability = Capability(crate::host::instance::generate_capability()?);
         let arguments = config.openvmm_arguments(
-            runtime,
+            &runtime,
             &outputs.endpoint,
             &outputs.outcome,
             outputs.console.as_deref(),
