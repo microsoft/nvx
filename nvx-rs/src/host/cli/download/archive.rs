@@ -19,7 +19,6 @@ use super::system_program;
 use crate::ErrorCode;
 use crate::host::artifacts::CHECKSUMS_NAME;
 use crate::host::cli::{Exit, Result, check_interrupt, io_error};
-use crate::host::supervisor::spawn_command;
 
 /// The directory beside the package into which `tar` extracts it.
 const EXTRACTION_DIR: &str = "package";
@@ -83,7 +82,8 @@ fn tar(directory: &Path, arguments: &[&str]) -> Result<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = spawn_command(&mut command)
+    let output = command
+        .spawn()
         .and_then(Child::wait_with_output)
         .map_err(|error| {
             Exit::error(
