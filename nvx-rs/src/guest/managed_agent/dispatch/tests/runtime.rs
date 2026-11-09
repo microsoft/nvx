@@ -512,3 +512,273 @@ fn privileged_layered_runtime_keeps_helper_policy_and_first_error_during_failed_
         },
     );
 }
+
+struct KillParentOnPanic<'a>(&'a FileDescriptor);
+
+impl Drop for KillParentOnPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            assert!(matches!(
+                sys::kill_through_pidfd(self.0.borrowed(), false),
+                Ok(()) | Err(Errno::ESRCH)
+            ));
+        }
+    }
+}
+
+fn narrow_output(probe: &UnixStream) {
+    use nix::sys::socket::{getsockopt, setsockopt, sockopt::SndBuf};
+
+    setsockopt(probe, SndBuf, &1024).unwrap();
+    assert!(getsockopt(probe, SndBuf).unwrap() < 6000);
+}
+
+fn output_is_blocked(probe: &UnixStream) {
+    use std::os::fd::AsFd;
+
+    use nix::poll::{PollFd, PollFlags};
+
+    until(|| {
+        let mut descriptors = [PollFd::new(probe.as_fd(), PollFlags::POLLOUT)];
+        nix::poll::poll(&mut descriptors, 0u16).unwrap();
+        !descriptors[0]
+            .revents()
+            .unwrap()
+            .contains(PollFlags::POLLOUT)
+    });
+}
+
+fn reset_peer(host: &mut UnixStream) {
+    assert_eq!(read_outer(host).0.record_type, OUTER_GUEST_ATTACH);
+    host.write_all(&encode_outer(OUTER_RESET, &INSTANCE, 1, 0, &[]).unwrap())
+        .unwrap();
+    assert_eq!(read_outer(host).0.record_type, OUTER_ACK);
+}
+
+fn only_stdout_prefix(mut traffic: &[u8]) {
+    assert!(!traffic.is_empty());
+    while traffic.len() >= OUTER_HEADER_LEN {
+        let header = decode_outer_header(&traffic[..OUTER_HEADER_LEN]).unwrap();
+        assert_eq!(header.record_type, OUTER_DATA);
+        let length = OUTER_HEADER_LEN + header.length;
+        if traffic.len() < length {
+            return;
+        }
+        let frame = decode_app(&traffic[OUTER_HEADER_LEN..length]).unwrap();
+        assert_eq!((frame.kind, frame.request_id), (APP_STDOUT, 9));
+        traffic = &traffic[length..];
+    }
+}
+
+fn backpressured_termination(helper_ends: bool) {
+    let helper = helper();
+    let parent = sys::open_pidfd(sys::current_process()).unwrap();
+    let (descriptor, _peer, proof) = peer(|mut host, probe| {
+        let _guard = KillParentOnPanic(&parent);
+        narrow_output(&probe);
+        reset_peer(&mut host);
+        output_is_blocked(&probe);
+        drop(probe);
+        if helper_ends {
+            sys::kill_through_pidfd(helper.descriptor.borrowed(), false).unwrap();
+            assert!(sys::readable_or_hung_up(&[helper.descriptor.borrowed()], 5000).unwrap()[0]);
+        }
+        sys::signal_through_pidfd(parent.borrowed(), Signal::SIGTERM as i32, false).unwrap();
+        let mut traffic = Vec::new();
+        host.read_to_end(&mut traffic).unwrap();
+        only_stdout_prefix(&traffic);
+    });
+    let mut runtime =
+        Runtime::new(&[CString::new(helper.process.raw().to_string()).unwrap()]).unwrap();
+    let mut session = Session::with_runtime(descriptor, &mut runtime).unwrap();
+    session.send_attach().unwrap();
+    assert!(matches!(session.next_event(), Ok(Event::Reset)));
+    session.acknowledge().unwrap();
+    assert_eq!(
+        session.send_app(APP_STDOUT, 9, 0, &[0; 32768]),
+        Err(if helper_ends {
+            Errno::ECHILD
+        } else {
+            Errno::ECANCELED
+        })
+    );
+    if helper_ends {
+        let failure = session.runtime_failure().unwrap();
+        assert!(failure.contains("the time daemon"), "{failure}");
+        assert!(failure.contains("signal 9"), "{failure}");
+    } else {
+        assert!(session.stopping());
+        assert!(session.runtime_failure().is_none());
+    }
+    drop(session);
+    drop(runtime);
+    completed(proof);
+}
+
+#[test]
+#[ignore = "requires root with CAP_SYS_NICE and CAP_SYS_RESOURCE"]
+fn privileged_layered_runtime_stops_with_backpressured_control_output() {
+    isolated(
+        "NVX_LAYERED_RUNTIME_OUTPUT_STOP_CHILD",
+        "guest::managed_agent::dispatch::tests::runtime::privileged_layered_runtime_stops_with_backpressured_control_output",
+        || backpressured_termination(false),
+    );
+}
+
+#[test]
+#[ignore = "requires root with CAP_SYS_NICE and CAP_SYS_RESOURCE"]
+fn privileged_layered_runtime_helper_failure_wins_with_backpressured_control_output() {
+    isolated(
+        "NVX_LAYERED_RUNTIME_OUTPUT_HELPER_CHILD",
+        "guest::managed_agent::dispatch::tests::runtime::privileged_layered_runtime_helper_failure_wins_with_backpressured_control_output",
+        || backpressured_termination(true),
+    );
+}
+
+#[test]
+#[ignore = "requires root with CAP_SYS_NICE and CAP_SYS_RESOURCE"]
+fn privileged_layered_runtime_stops_before_attach_on_pending_sigterm() {
+    isolated(
+        "NVX_LAYERED_RUNTIME_ATTACH_STOP_CHILD",
+        "guest::managed_agent::dispatch::tests::runtime::privileged_layered_runtime_stops_before_attach_on_pending_sigterm",
+        || {
+            let helper = helper();
+            let mut runtime =
+                Runtime::new(&[CString::new(helper.process.raw().to_string()).unwrap()]).unwrap();
+            let (mut host, guest) = UnixStream::pair().unwrap();
+            let mut session =
+                Session::with_runtime(FileDescriptor::from_owned(guest.into()), &mut runtime)
+                    .unwrap();
+            let process = sys::open_pidfd(sys::current_process()).unwrap();
+            sys::signal_through_pidfd(process.borrowed(), Signal::SIGTERM as i32, false).unwrap();
+            let mut system = TestSystem::new(Paths::default());
+            let config =
+                AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())
+                    .unwrap();
+            let mut mappings = HostMappings::announced_for(&config, 0);
+            assert!(matches!(
+                run(&mut system, &mut session, &config, &mut mappings),
+                Ok(Outcome::Stopped)
+            ));
+            assert!(system.diagnostics.is_empty(), "{:?}", system.diagnostics);
+            drop(session);
+            drop(runtime);
+            let mut traffic = Vec::new();
+            host.read_to_end(&mut traffic).unwrap();
+            assert!(
+                traffic.is_empty(),
+                "pending termination must not send ATTACH"
+            );
+        },
+    );
+}
+
+#[test]
+#[ignore = "requires root with CAP_SYS_NICE and CAP_SYS_RESOURCE"]
+fn privileged_layered_runtime_delivers_a_write_collected_status_before_driver_events() {
+    isolated(
+        "NVX_LAYERED_RUNTIME_OUTPUT_STATUS_CHILD",
+        "guest::managed_agent::dispatch::tests::runtime::privileged_layered_runtime_delivers_a_write_collected_status_before_driver_events",
+        || {
+            let temporary = tempfile::tempdir().unwrap();
+            let pid_path = temporary.path().join("leader");
+            let gate = sys::path_c_string(&temporary.path().join("gate")).unwrap();
+            crate::guest::sys::tests::create_fifo(&gate, sys::Mode::from_bits_retain(0o600))
+                .unwrap();
+            let payload = workload_payload(
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "printf '%s' \"$$\" > \"$1\"; head -c 6000 /dev/zero; read -r go < \"$2\"; exit 7",
+                    "sh",
+                    pid_path.to_str().unwrap(),
+                    gate.to_str().unwrap(),
+                ],
+                Some("/"),
+            )
+            .unwrap();
+            let helper = helper();
+            let parent = sys::open_pidfd(sys::current_process()).unwrap();
+            let (descriptor, _peer, proof) = peer(|mut host, probe| {
+                let _guard = KillParentOnPanic(&parent);
+                narrow_output(&probe);
+                reset_peer(&mut host);
+                host.write_all(
+                    &encode_outer(
+                        OUTER_DATA,
+                        &INSTANCE,
+                        1,
+                        1,
+                        &encode_app(APP_EXEC, 9, 0, &payload),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
+                output_is_blocked(&probe);
+                drop(probe);
+                let id: i64 = std::fs::read_to_string(&pid_path).unwrap().parse().unwrap();
+                let leader = sys::open_pidfd(ProcessId::from_positive(id).unwrap()).unwrap();
+                let mut release = None;
+                until(|| {
+                    match sys::open(
+                        &gate,
+                        sys::OpenFlags::O_WRONLY | sys::OpenFlags::O_NONBLOCK,
+                        sys::Mode::empty(),
+                    ) {
+                        Ok(writer) => {
+                            release = Some(writer);
+                            true
+                        }
+                        Err(Errno::ENXIO) => false,
+                        Err(error) => panic!("cannot release the owned leader: {error}"),
+                    }
+                });
+                release.unwrap().write_all(b"go\n").unwrap();
+                assert!(sys::readable_or_hung_up(&[leader.borrowed()], 5000).unwrap()[0]);
+                until(|| !Path::new(&format!("/proc/{id}")).exists());
+                let mut output = Vec::new();
+                loop {
+                    let frame = receive(&mut host);
+                    if frame.kind == APP_EXIT {
+                        assert_eq!(frame, response(APP_EXIT, 9, 7, b"exit"));
+                        break;
+                    }
+                    assert_eq!((frame.kind, frame.request_id), (APP_STDOUT, 9));
+                    output.extend(frame.payload);
+                }
+                assert_eq!(output, vec![0; 6000]);
+                host.write_all(
+                    &encode_outer(
+                        OUTER_DATA,
+                        &INSTANCE,
+                        1,
+                        2,
+                        &encode_app(APP_STOP, 99, 0, &[]),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
+                assert_eq!(receive(&mut host), response(APP_STOPPED, 99, 0, &[]));
+            });
+            let mut runtime =
+                Runtime::new(&[CString::new(helper.process.raw().to_string()).unwrap()]).unwrap();
+            let mut session = Session::with_runtime(descriptor, &mut runtime).unwrap();
+            let mut system = TestSystem::new(Paths::default());
+            system.direct_starter = Some(super::super::super::seam::tests::start_as_privileged);
+            let config =
+                AgentConfig::layered(b"nvx_identity=1000:1000", c"workload".into(), c"/".into())
+                    .unwrap();
+            let mut mappings = HostMappings::announced_for(&config, 0);
+            assert!(matches!(
+                run(&mut system, &mut session, &config, &mut mappings),
+                Ok(Outcome::Stopped)
+            ));
+            assert!(system.diagnostics.is_empty(), "{:?}", system.diagnostics);
+            drop(session);
+            drop(runtime);
+            completed(proof);
+        },
+    );
+}

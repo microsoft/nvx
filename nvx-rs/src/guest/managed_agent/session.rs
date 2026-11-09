@@ -28,6 +28,18 @@ struct Control<'r> {
 }
 
 impl Control<'_> {
+    fn service_leader(&self) -> Result<(), Errno> {
+        if self.service(|id, status| {
+            // Keep the first leader status across partial I/O, not unrelated orphans.
+            if id == self.leader.get() && self.status.get().is_none() {
+                self.status.set(Some((id, status)));
+            }
+        })? {
+            return Err(Errno::ECANCELED);
+        }
+        Ok(())
+    }
+
     fn service(&self, observed: impl FnMut(u32, ExitStatus)) -> Result<bool, Errno> {
         if self.outcome.borrow().is_err() {
             return Err(Errno::ECHILD);
@@ -54,14 +66,7 @@ impl Read for Control<'_> {
             return Read::read(&mut self.descriptor, bytes);
         };
         loop {
-            if self.service(|id, status| {
-                // Keep the first leader status across partial reads, not unrelated orphans.
-                if id == self.leader.get() && self.status.get().is_none() {
-                    self.status.set(Some((id, status)));
-                }
-            })? {
-                return Err(Errno::ECANCELED.into());
-            }
+            self.service_leader()?;
             let signals = sys::poll(
                 [Pollable::File(&self.descriptor), runtime.borrow().wake()],
                 None,
@@ -71,7 +76,10 @@ impl Read for Control<'_> {
             }
             if !signals.readable {
                 // A control-only wake includes HUP, which PollEvents does not expose.
-                return Read::read(&mut self.descriptor, bytes);
+                match self.descriptor.read(bytes) {
+                    Err(Errno::EAGAIN) => {}
+                    result => return result.map_err(io::Error::from),
+                }
             }
         }
     }
@@ -79,7 +87,34 @@ impl Read for Control<'_> {
 
 impl Write for Control<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        Write::write(&mut self.descriptor, bytes)
+        let Some(runtime) = &self.runtime else {
+            return Write::write(&mut self.descriptor, bytes);
+        };
+        if bytes.is_empty() {
+            return Write::write(&mut self.descriptor, bytes);
+        }
+        loop {
+            self.service_leader()?;
+            match self.descriptor.write(bytes) {
+                Err(Errno::EAGAIN) => loop {
+                    let events = sys::poll(
+                        [
+                            Pollable::Writable(&self.descriptor),
+                            runtime.borrow().wake(),
+                        ],
+                        None,
+                    )?;
+                    if events[1].error {
+                        return Err(Errno::EIO.into());
+                    }
+                    self.service_leader()?;
+                    if events[0].writable || !events[1].readable {
+                        break;
+                    }
+                },
+                result => return result.map_err(io::Error::from),
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -188,16 +223,20 @@ impl<'r> Session<'r> {
                     .runtime_failure()
                     .expect("the collector retained its failure")
             })?;
+        session
+            .descriptor()
+            .set_nonblocking()
+            .map_err(|error| format!("cannot configure layered control: {}", error.desc()))?;
         Ok(session)
     }
 
-    /// Registers the newly launched leader before any control read can collect it.
+    /// Registers the newly launched leader before any control I/O can collect it.
     pub(crate) fn watch(&self, id: u32) {
         self.connection.get_ref().leader.set(id);
         self.connection.get_ref().status.set(None);
     }
 
-    /// Takes a status collected while a partial control record was being read.
+    /// Takes a status collected while a control record was being read or written.
     pub(crate) fn take_status(&self) -> Option<(u32, ExitStatus)> {
         self.connection.get_ref().status.take()
     }

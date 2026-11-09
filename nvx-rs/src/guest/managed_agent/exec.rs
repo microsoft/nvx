@@ -120,9 +120,6 @@ pub(crate) fn run(
         } else {
             &mut buffer[..]
         };
-        if let Some((id, status)) = session.take_status() {
-            workload.observe(id, status);
-        }
         state.forward(system, session, request_id, &mut workload, output)?;
         workload.collect(session)?;
         if state.running(&workload)
@@ -519,6 +516,9 @@ impl RunState {
         buffer: &mut [u8],
     ) -> Result<(), Errno> {
         loop {
+            if let Some((id, status)) = session.take_status() {
+                workload.observe(id, status);
+            }
             let event = match workload.next_event(buffer) {
                 Ok(Some(event)) => event,
                 Ok(None) => return Ok(()),

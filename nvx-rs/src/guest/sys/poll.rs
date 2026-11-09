@@ -37,11 +37,13 @@ pub(crate) fn hung_up(descriptor: BorrowedFd<'_>) -> Result<bool, Errno> {
         .is_some_and(|events| events.contains(PollFlags::POLLHUP)))
 }
 
-/// A descriptor owner that [`poll`] waits on for input.
+/// A descriptor owner and the readiness that [`poll`] waits for.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pollable<'a> {
     /// A file, device, pipe, or socket.
     File(&'a FileDescriptor),
+    /// A file, device, pipe, or socket with space to write.
+    Writable(&'a FileDescriptor),
     /// A timer, which polls readable once it expires.
     Timer(&'a Timer),
     /// A signal descriptor, which polls readable while one of its signals is pending.
@@ -54,7 +56,7 @@ impl Pollable<'_> {
     /// Borrows the owner's descriptor.
     fn borrowed(&self) -> BorrowedFd<'_> {
         match self {
-            Self::File(descriptor) => descriptor.borrowed(),
+            Self::File(descriptor) | Self::Writable(descriptor) => descriptor.borrowed(),
             Self::Timer(timer) => timer.borrowed(),
             Self::Signals(signals) => signals.borrowed(),
             Self::ChildSignal(wait) => wait.borrowed(),
@@ -67,12 +69,14 @@ impl Pollable<'_> {
 pub(crate) struct PollEvents {
     /// The descriptor has input to read.
     pub(crate) readable: bool,
-    /// The descriptor has an error condition, which a read returns.
+    /// The descriptor has space to write.
+    pub(crate) writable: bool,
+    /// The descriptor has an error condition, which its next I/O returns.
     pub(crate) error: bool,
 }
 
-/// Waits at most `timeout`, or without a limit for `None`, until one of `descriptors` has input
-/// or an error, with one `poll` call and without allocating, and returns each descriptor's
+/// Waits at most `timeout`, or without a limit for `None`, until one of `descriptors` has its
+/// requested readiness or an error, with one `poll` call and without allocating, and returns their
 /// events in the caller's order. An interrupted call is `EINTR`, not a retry.
 ///
 /// A timeout of more than `i32::MAX` milliseconds waits for `i32::MAX` milliseconds, about 24
@@ -84,14 +88,19 @@ pub(crate) fn poll<const N: usize>(
     let timeout = timeout.map_or(PollTimeout::NONE, |timeout| {
         PollTimeout::try_from(timeout.as_millis()).unwrap_or(PollTimeout::MAX)
     });
-    let mut raw = descriptors
-        .each_ref()
-        .map(|descriptor| PollFd::new(descriptor.borrowed(), PollFlags::POLLIN));
+    let mut raw = descriptors.each_ref().map(|descriptor| {
+        let interest = match descriptor {
+            Pollable::Writable(_) => PollFlags::POLLOUT,
+            _ => PollFlags::POLLIN,
+        };
+        PollFd::new(descriptor.borrowed(), interest)
+    });
     nix::poll::poll(&mut raw, timeout)?;
     Ok(raw.map(|descriptor| {
         let returned = descriptor.revents().unwrap_or(PollFlags::empty());
         PollEvents {
             readable: returned.contains(PollFlags::POLLIN),
+            writable: returned.contains(PollFlags::POLLOUT),
             error: returned.contains(PollFlags::POLLERR),
         }
     }))
