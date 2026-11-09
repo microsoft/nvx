@@ -84,13 +84,23 @@ pub(crate) fn run(
     if session.stopping() {
         return Ok(Outcome::Stopped);
     }
-    session.send_attach()?;
+    if let Err(error) = session.send_attach() {
+        return if session.stopping() {
+            Ok(Outcome::Stopped)
+        } else {
+            Err(error)
+        };
+    }
     loop {
         let payload = match session.next_event() {
             Ok(Event::Reset) => {
-                session.acknowledge().inspect_err(|error| {
-                    diagnostics::error(system, "reset-ack", *error as i32);
-                })?;
+                if let Err(error) = session.acknowledge() {
+                    if session.stopping() {
+                        return Ok(Outcome::Stopped);
+                    }
+                    diagnostics::error(system, "reset-ack", error as i32);
+                    return Err(error);
+                }
                 continue;
             }
             Ok(Event::Data(payload)) => payload,
