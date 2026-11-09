@@ -1144,7 +1144,13 @@ fallback's warning, captures the guest, and restores it on the snapshot's host
 profile. The `run-console-restore` scenario captures a cold boot whose boot
 console is on OpenVMM's standard streams, restores the snapshot through
 [`nvx-rs run`](#run), which must attach that console to the terminal again, and
-types a script into the restored guest's shell. The `time-host-correction`
+types a script into the restored guest's shell. The `console-snapshot`
+scenario first checks that OpenVMM refuses a boot console on TCP, as a
+listener or a client, with a network and without one, since a guest reaches
+host loopback through its gateway (see
+[Host-loopback access](run.md#host-loopback-access)); it then captures a guest
+whose boot console listens on a Unix socket beside the snapshot, or on Windows
+on a named pipe, and restores it twice. The `time-host-correction`
 scenario reads the host's own clock
 correction from a time sample of an unhooked cold boot, then cold boots with
 OpenVMM's `host-rate-offset-ppm` test hook. The harness composes the host and

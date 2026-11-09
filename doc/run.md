@@ -363,6 +363,14 @@ loopback in both directions without a port list, and
 preserves the existing guest-to-host mapping without publishing guest ports.
 Guest-originated traffic remains subject to egress policy.
 
+With the mapping, explicit or kept, a guest reaches every host-loopback TCP
+listener that its egress policy permits, another VM's included. A microVM's
+boot console authenticates no client, so OpenVMM refuses a TCP endpoint for
+it, `listen=tcp:` or `connect=tcp:`, and a snapshot whose boot console has
+one: give `--virtio-console` a Unix socket or, on Windows, a named pipe in the
+`//./pipe/openvmm-microvm-NAME` namespace, as in `listen=PATH`; see
+[Boot Console](design/3.3-consoles.md#331-boot-console).
+
 Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
 `--cpu-profile`, `--mount`, `--net`, `--network-profile`, `--cmdline`,
 `--restore-snapshot`, `--restore-processors`, and `--restore-ready-path`. The

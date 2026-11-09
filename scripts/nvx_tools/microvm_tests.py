@@ -70,7 +70,7 @@ from .microvm_durations import REPORT_NAME, DurationReport
 from .microvm_shards import configure_parser as configure_shards_parser
 from .microvm_shards import load_partition, shard_scenarios
 from .nvx_rs import EgressRules, compile_egress_policy
-from .openvmm_process import OpenvmmProcess, TcpConsole
+from .openvmm_process import BootConsole, OpenvmmProcess
 from .sandbox_lifecycle_tests import run_sandbox_lifecycle
 from .sandbox_proxy_tests import run_sandbox_proxy_only
 from .sandbox_ram_upper_tests import run_sandbox_ram_upper
@@ -1068,8 +1068,21 @@ def _available_tcp_address() -> tuple[str, int]:
         return str(host), int(port)
 
 
+def _console_endpoint(directory: Path) -> str:
+    """Return a fresh endpoint at which a boot console listens: a Unix socket
+    in ``directory``, which must be beside a snapshot that records it, or a
+    named pipe on Windows.
+
+    A boot console never listens on TCP, which guests could reach through the
+    host-loopback mapping of their gateways (microsoft/nvx#551).
+    """
+    if os.name == "nt":
+        return f"//./pipe/openvmm-microvm-{uuid.uuid4().hex}"
+    return str(directory / "console.sock")
+
+
 def _persist_console_log(
-    console: TcpConsole | None,
+    console: BootConsole | None,
     output: bytes,
     log_path: Path,
 ) -> bytes:
@@ -1082,7 +1095,7 @@ def _persist_console_log(
 
 
 def _queue_console_rx_and_request_snapshot(
-    console: TcpConsole,
+    console: BootConsole,
     data: bytes,
     timeout: float,
 ) -> None:
@@ -1396,8 +1409,9 @@ def run_managed_lifecycle(
             f"//./pipe/openvmm-microvm-{uuid.uuid4().hex}",
         )[os.name == "nt"]
         report_path = root / "managed-outcome.json"
-        # The test copies the guest console, which listens on TCP, to this log.
-        console_address = _available_tcp_address()
+        # The test copies the guest console, which listens beside the control
+        # endpoint, to this log.
+        console_endpoint = _console_endpoint(root)
         guest_log_path = output_dir / "managed-lifecycle-guest.log"
         guest_log_path.unlink(missing_ok=True)
         command = workload_boot_command(
@@ -1416,7 +1430,7 @@ def run_managed_lifecycle(
                 "--microvm-lifecycle",
                 "managed",
                 "--virtio-console",
-                f"listen=tcp:{console_address[0]}:{console_address[1]}",
+                f"listen={console_endpoint}",
                 "--microvm-control-console",
                 f"listen={endpoint_value}",
                 "--microvm-control-auth-stdin",
@@ -1438,9 +1452,7 @@ def run_managed_lifecycle(
                 "OPENVMM_LOG": "off",
                 "NVX_MANAGED_LIFECYCLE_COMMAND": json.dumps(command),
                 "NVX_MANAGED_LIFECYCLE_ENDPOINT": endpoint_value,
-                "NVX_MANAGED_LIFECYCLE_CONSOLE": (
-                    f"{console_address[0]}:{console_address[1]}"
-                ),
+                "NVX_MANAGED_LIFECYCLE_CONSOLE": console_endpoint,
                 "NVX_MANAGED_LIFECYCLE_TIMEOUT": str(timeout),
                 "NVX_MANAGED_LIFECYCLE_OUTPUT_DIR": os.fspath(output_dir),
             }
@@ -8578,6 +8590,67 @@ def run_snapshot_rollback(
             raise RuntimeError("snapshot restore did not continue exactly once")
 
 
+# The stable fragment of OpenVMM's refusal of a boot console on TCP.
+CONSOLE_TCP_REFUSED = b"microVM consoles do not accept TCP endpoints"
+# How long OpenVMM may take to refuse a boot console, which it does before it
+# opens any host resource.
+CONSOLE_TCP_REFUSAL_TIMEOUT_SECONDS = 30.0
+
+
+def check_tcp_boot_console_refused(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    memory_mib: int,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Check that OpenVMM refuses a boot console on TCP before it boots a guest.
+
+    Unless host loopback is denied, a guest's gateway maps the guest's TCP
+    flows onto host loopback, so the guest could connect to a loopback TCP
+    listener, its own console's or another VM's, and drive the shell on it,
+    or to the listener that a client console connects to (microsoft/nvx#551).
+    OpenVMM refuses both, with a network and without one.
+    """
+    _, port = _available_tcp_address()
+    for name, network, endpoint in (
+        ("listen", None, f"listen=tcp:127.0.0.1:{port}"),
+        (
+            "networked-listen",
+            DIRECTIONAL_NETWORK_CIDR,
+            f"listen=tcp:127.0.0.1:{port}",
+        ),
+        (
+            "networked-connect",
+            DIRECTIONAL_NETWORK_CIDR,
+            f"connect=tcp:127.0.0.1:{port}",
+        ),
+    ):
+        command = [
+            *workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0",
+                network=network,
+                boot_console=False,
+            ),
+            "--virtio-console",
+            endpoint,
+        ]
+        with OpenvmmProcess(
+            command, output_dir / f"console-tcp-{name}-refused.log"
+        ) as process:
+            result = process.wait(min(timeout, CONSOLE_TCP_REFUSAL_TIMEOUT_SECONDS))
+        if result.returncode == 0 or CONSOLE_TCP_REFUSED not in result.output:
+            raise RuntimeError(f"OpenVMM did not refuse the boot console {endpoint}")
+
+
 def run_console_snapshot(
     executable: Path,
     kernel: Path,
@@ -8588,10 +8661,20 @@ def run_console_snapshot(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    address = _available_tcp_address()
+    check_tcp_boot_console_refused(
+        executable,
+        kernel,
+        initrd,
+        backend,
+        memory_mib=memory_mib,
+        timeout=timeout,
+        output_dir=output_dir,
+    )
     script, tx_count, queued_rx = _console_snapshot_script(backend)
     with tempfile.TemporaryDirectory(prefix="nvx-console-snapshot-") as temporary:
         snapshot_path = Path(temporary) / "snapshot"
+        # A listener's socket is beside the snapshot that records it.
+        endpoint = _console_endpoint(Path(temporary))
         capture_command = [
             *workload_boot_command(
                 executable,
@@ -8605,7 +8688,7 @@ def run_console_snapshot(
             "--snapshot-destination",
             str(snapshot_path),
             "--virtio-console",
-            f"listen=tcp:{address[0]}:{address[1]}",
+            f"listen={endpoint}",
         ]
         capture_console_log = output_dir / "console-snapshot-capture-console.log"
         source_console = b""
@@ -8617,8 +8700,8 @@ def run_console_snapshot(
             try:
                 # The guest's shell is on this virtio console, so it answers
                 # the cold boot's status query there.
-                console = TcpConsole.connect(
-                    address,
+                console = BootConsole.connect(
+                    endpoint,
                     timeout,
                     monitor=TimeAbiMonitor(capture_command),
                     time_abi_status=True,
@@ -8671,8 +8754,8 @@ def run_console_snapshot(
                 output_dir / f"console-snapshot-restore-{restore_index}-process.log",
             ) as process:
                 try:
-                    console = TcpConsole.connect(
-                        address, timeout, monitor=TimeAbiMonitor(restore_command)
+                    console = BootConsole.connect(
+                        endpoint, timeout, monitor=TimeAbiMonitor(restore_command)
                     )
                     if backend != "mshv":
                         console.wait_for_line(CONSOLE_RX_RESTORED_MARKER, timeout)
@@ -10556,7 +10639,8 @@ def _run_snapshot_tier(
         _write_pattern(replacement_layer, 1024 * 1024, 0xC3)
         _write_pattern(source_scratch, 1024 * 1024, 0xA5)
         _write_pattern(restore_scratch, 1024 * 1024, 0x5A)
-        address = _available_tcp_address()
+        # A listener's socket is beside the snapshot that records it.
+        endpoint = _console_endpoint(root)
 
         capture_command = workload_boot_command(
             executable,
@@ -10573,7 +10657,7 @@ def _run_snapshot_tier(
                 "--allow-host",
                 "10.0.0.1",
                 "--virtio-console",
-                f"listen=tcp:{address[0]}:{address[1]}",
+                f"listen={endpoint}",
                 "--snapshot-destination",
                 str(snapshot),
                 "--snapshot-tier",
@@ -10588,7 +10672,7 @@ def _run_snapshot_tier(
 
         source_console_path = output_dir / f"snapshot-tier-{tier}-capture-console.log"
         source_console = b""
-        console: TcpConsole | None = None
+        console: BootConsole | None = None
         with OpenvmmProcess(
             capture_command,
             output_dir / f"snapshot-tier-{tier}-capture-process.log",
@@ -10596,8 +10680,8 @@ def _run_snapshot_tier(
             try:
                 # The guest's shell is on this virtio console, so it answers
                 # the cold boot's status query there.
-                console = TcpConsole.connect(
-                    address,
+                console = BootConsole.connect(
+                    endpoint,
                     timeout,
                     monitor=TimeAbiMonitor(capture_command),
                     time_abi_status=True,
@@ -10699,8 +10783,8 @@ def _run_snapshot_tier(
             output_dir / f"snapshot-tier-{tier}-restore-process.log",
         ) as process:
             try:
-                console = TcpConsole.connect(
-                    address, timeout, monitor=TimeAbiMonitor(restore_command)
+                console = BootConsole.connect(
+                    endpoint, timeout, monitor=TimeAbiMonitor(restore_command)
                 )
                 # A status query that one of the milestone reads below consumes
                 # must still count for the wait after them.
@@ -10759,7 +10843,7 @@ def _run_snapshot_tier(
                 "--restore-gate-timeout-ms",
                 "500",
             ]
-            timeout_console: TcpConsole | None = None
+            timeout_console: BootConsole | None = None
             timeout_console_path = (
                 output_dir / f"snapshot-tier-{tier}-timeout-console.log"
             )
@@ -10769,8 +10853,8 @@ def _run_snapshot_tier(
                 output_dir / f"snapshot-tier-{tier}-timeout-process.log",
             ) as process:
                 try:
-                    timeout_console = TcpConsole.connect(
-                        address, timeout, monitor=TimeAbiMonitor(timeout_command)
+                    timeout_console = BootConsole.connect(
+                        endpoint, timeout, monitor=TimeAbiMonitor(timeout_command)
                     )
                     timeout_console.send_bytes(b"Z")
                     timed_out = process.wait(timeout)

@@ -8,18 +8,19 @@
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131.
-- NVX's pinned OpenVMM revision: `adb7c8bc8a555d0ceec97fcc219c310e96331aba`, position 224, the
-  head of microsoft/openvmm#4987, whose commit follows position 223, `90f9e6180`, the head of
-  `feature/microvm/dev`. Positions 221-223, the three commits of microsoft/openvmm#4986, follow
-  position 220, `cf6c03977`, the head of `feature/microvm/release/v6.0`.
+- NVX's pinned OpenVMM revision: `99aac19b3399eedf67583e95169d92a0090872a7`, position 225, the
+  head of microsoft/openvmm#4988, whose commit follows position 224, `adb7c8bc8`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#4987 merged after position 223, `90f9e6180`.
+  Positions 221-223, the three commits of microsoft/openvmm#4986, follow position 220,
+  `cf6c03977`, the head of `feature/microvm/release/v6.0`.
   The v6.0 reorganization regrouped the 223 commits of `feature/microvm/dev` at the NVX pin before
   that, `3f2ab4c2f`, the head of `feature/microvm/release/v5.1`, into 220 commits on the same fork
   base: it folded the PR20 fixup at v5.1 position 148 into position 097 and the PR12 fixup at v5.1
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 93 commits past
-  the mapped tip on the same first-parent chain. Positions 132-224 are not yet assigned to PRs; see
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 94 commits past
+  the mapped tip on the same first-parent chain. Positions 132-225 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -961,7 +962,8 @@ ba105dd7f
   -> guest TSC offset within its bound [220]
   -> Granite Rapids CPU profile [221-223]
   -> second Turin CPU profile [224]
-  -> adb7c8bc8 (NVX pin)
+  -> microVM consoles without TCP [225]
+  -> 99aac19b3 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -977,13 +979,13 @@ reorganization folded the PR20 and PR12 fixups into the commits that they fix; s
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. None of the 93 later commits is a
+The NVX pin extends the chain past position 131 without merges. None of the 94 later commits is a
 fixup of a mapped PR, and none is yet classified or assigned to PRs. Each of positions 132-186
 combines the v2.4 commits that the table lists, as v3.0 positions 145-160 and 162-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 187-191
 followed the v3.0 reorganization, positions 192-205 are the ABI restart of the v4.0
 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-224 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-225 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1085,6 +1087,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 222 | `86e1617fc` | - | - | - | - | cpu_profile: clear AVX10, whose leaf 0x24 keeps no data (microsoft/openvmm#4986) |
 | 223 | `90f9e6180` | - | - | - | - | cpu_profile: pin intel.graniterapids.v1 for Granite Rapids (microsoft/openvmm#4986) |
 | 224 | `adb7c8bc8` | - | - | - | - | cpu_profile: pin amd.turin.v2 for Turin hosts without the TSA immunities (microsoft/openvmm#4987) |
+| 225 | `99aac19b3` | - | - | - | - | openvmm_entry: refuse TCP endpoints for microVM consoles (microsoft/openvmm#4988) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1141,8 +1144,14 @@ adds its confirmation next to the input quiesce of PR09's position 018 in the fi
 018 changes, and rewrites position 214's documentation. Position 219 changes the outcome report
 publication of PR24's position 122, which on Windows now publishes the report through the
 extended-length form of its path, and moves the extended-length encoding that position 209 gives
-`pal`'s secure creation into `pal`'s file system module, which both now use. Assigning the later
-commits therefore means revisiting those PRs, not only appending new ones.
+`pal`'s secure creation into `pal`'s file system module, which both now use. Position 225 removes
+the TCP endpoints of microVM consoles, which the CLI guide described: the TCP listener that PR16's
+position 067 gives the microVM's virtio console; the TCP client, the checks of loopback addresses
+and stable ports, and the `tcp` identities of the boot console's attachment, its restore, and the
+snapshot contract of PR17's position 074, which PR18's position 082 adds; the `Tcp` backend kind
+of the console attachments of PR13's position 042; and the TCP backends that the management RPC's
+restore of PR25's position 124 rebuilds. Assigning the later commits therefore means revisiting
+those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
 have alike and no other commit of the chain changes, so it can go upstream on its own. Position
@@ -1278,6 +1287,16 @@ position 223 last extended, and lists it on the Guide's snapshots page, in the s
 position 147 adds and position 223 last changed. It changes nothing that a mapped PR adds.
 Replaying it on upstream main conflicts in all seven of its files that existed before it, for the
 same reasons, so it follows the time ABI series upstream.
+
+Position 225 changes only the endpoints of the microVM consoles: their attachments, which PR13's
+position 042 adds and no other commit changes; the microVM CLI's options, configuration, and
+module, which PR15's position 064 adds, and its console module, which PR18's position 082 adds and
+PR23's positions 117 and 118 and PR25's position 124 change; the management RPC's microVM module,
+which position 124 adds; the snapshot contract, which PR17's position 074 adds; and the CLI guide's
+`--virtio-console`, serial backend, and `--host-loopback` entries. Many later commits also change
+the CLI's files, the management RPC's module, and the snapshot contract. Replaying it on upstream
+main conflicts in all eight of its files, seven of which upstream main lacks, those that positions
+042, 064, 074, 082, and 124 add, so it follows PR13, PR15, PR17, PR18, and PR25 upstream.
 
 ## PR summary
 
