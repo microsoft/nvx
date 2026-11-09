@@ -636,6 +636,46 @@ fn captures_may_limit_the_processors_online_at_boot() {
     }
 }
 
+#[test]
+fn captures_may_boot_with_the_kernel_tuning_parameters_that_openvmm_admits() {
+    // The capture of `CAPTURE` has 2 processors.
+    for command_line in [
+        "nvx_sandbox=1 mitigations=off",
+        "nvx_sandbox=1 maxcpus=1 mitigations=auto,nosmt no_timer_check quiet loglevel=0",
+        "nvx_sandbox=1 loglevel=7 quiet mitigations=auto",
+    ] {
+        let (_temporary, options) = parse_capture(&capture_with("--cmdline", command_line));
+        assert_eq!(options.err(), None, "{command_line}");
+    }
+    // Other values and parameters, a parameter more than once, and a limit that OpenVMM would not
+    // record.
+    for command_line in [
+        "nvx_sandbox=1 mitigations=on",
+        "nvx_sandbox=1 loglevel=8",
+        "nvx_sandbox=1 no-timer-check",
+        "nvx_sandbox=1 nokaslr",
+        "nvx_sandbox=1 quiet quiet",
+        "nvx_sandbox=1 mitigations=off mitigations=auto",
+        "nvx_sandbox=1 maxcpus=01 quiet",
+    ] {
+        let (_temporary, options) = parse_capture(&capture_with("--cmdline", command_line));
+        assert_eq!(
+            options.err(),
+            Some(CAPTURE_COMMAND_LINE.to_owned()),
+            "{command_line}"
+        );
+    }
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn the_kernel_tuning_parameters_are_those_of_nvx_s_capture_classes() {
+    assert_eq!(
+        KERNEL_TUNING_PARAMETERS,
+        crate::host::template::KERNEL_TUNING_PARAMETERS
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn captures_listen_in_the_directory_of_their_snapshot_destination() {

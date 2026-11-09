@@ -12,7 +12,8 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 | [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
 | [`activation-v1.txt`](activation-v1.txt) | Version 1 of the activation record of a layered root, and what Ready reports about an activation |
-| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encodings of a template's compatibility key and of a capture class, with their identities |
+| [`template-key-v1.txt`](template-key-v1.txt) | Version 1 of the canonical encoding of a template's compatibility key, with its identity |
+| [`capture-class-v2.txt`](capture-class-v2.txt) | Version 2 of the canonical encoding of a capture class, with its identity |
 | [`openvmm/`](openvmm) | OpenVMM's vectors and cases of the `NVXS` session, and the excerpts of its sources that define the kernel command-line tokens of its platform tier, unchanged |
 
 [4.4 Host-Guest Control Interface](../../../doc/design/4.4-host-guest-control-interface.md)
@@ -23,9 +24,10 @@ describe the protocols, and the documentation of `nvx::activation`, in
 
 ## Line format
 
-`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v1.txt`, and `template-key-v1.txt`
-share one line format. A line that starts with `#` is a comment, and an empty
-line is ignored. Every other line is one vector, whose fields `|` separates:
+`nvxc-v1.txt`, `nvxl-v1.txt`, `activation-v1.txt`, `template-key-v1.txt`, and
+`capture-class-v2.txt` share one line format. A line that starts with `#` is a
+comment, and an empty line is ignored. Every other line is one vector, whose
+fields `|` separates:
 
 ```text
 KIND|NAME|BYTES|VALUE|...
@@ -50,10 +52,12 @@ must encode the values to exactly its bytes. A kind whose name starts with
 `INVALID_` has no values: every decoder must refuse the bytes of its vectors.
 
 A key or a class holds too many values for one line, so the value of each
-vector of `template-key-v1.txt` is its identity, and the file's header names
-the captures whose keys and classes the vectors encode. The tests of
-`nvx::host::template` derive each key from its capture, and check that it is
-the key that the vector's bytes decode to.
+vector of `template-key-v1.txt` and of `capture-class-v2.txt` is its identity,
+and each file's header names the captures whose keys or classes the vectors
+encode. The tests of `nvx::host::template` derive each key from its capture,
+and check that it is the key that the vector's bytes decode to, and encode
+each class to the vector's bytes. Nothing decodes a class, which only its
+identity names.
 
 ## Rules
 
@@ -67,12 +71,17 @@ the key that the vector's bytes decode to.
   hosts, whose exports are aggregates, send none, and a host whose export is
   one directory sends one only to a guest that deploys with it, so the C agent
   of earlier releases, which refuses it, never receives one. And
-  `CLASS|NETWORK` of
-  `template-key-v1.txt` came to encode its network in place as the template
-  captures it, under the complete deny-all policy: the encodings of a key and
-  of a class have not been released, so a template store that an earlier build
-  created is not supported, and is deleted and created again, since nothing
-  migrates it.
+  `CLASS|NETWORK` of version 1 of a class's encoding came to encode its
+  network in place as the template captures it, under the complete deny-all
+  policy: the encodings of a key and of a class have not been released, so a
+  template store that an earlier build created is not supported, and is
+  deleted and created again, since nothing migrates it.
+- Version 2 of a class's encoding, which adds the kernel tuning parameters of
+  [microsoft/nvx#995](https://github.com/microsoft/nvx/issues/995), replaced
+  version 1, whose vectors `template-key-v1.txt` held until then. Its vectors
+  in `capture-class-v2.txt` encode the classes of version 1's, and one with
+  kernel tuning parameters. No decoder refuses version 1, since nothing decodes
+  a class.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 
@@ -96,7 +105,8 @@ constant of the kernel tuning parameters that it admits among them, and
 `microvm_control_tty_command_line.rs`, the constant of
 `openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
 the function reads. The tests of `nvx::host::template` compile them, and check
-each token of a template's kernel command line with OpenVMM's own function. The
+each token of a template's kernel command line with OpenVMM's own function, and
+the kernel tuning parameters of a template with OpenVMM's own constant. The
 runtime adapter in `tests/runtime-adapter/` compiles them too, as the allowlist
 with which the guest agent of a template's VM checks its kernel command line,
 and its tests pin the set of tokens that they admit.

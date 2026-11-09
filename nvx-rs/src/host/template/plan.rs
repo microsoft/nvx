@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::key::kernel_tuning_problem;
 use super::manifest::PROCESSOR_COUNTS;
 use super::store::{SNAPSHOT_NAME, StorageGeneration};
 use crate::error::{Error, Result};
@@ -12,6 +13,8 @@ use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::distro::DistroBinding;
 use crate::host::sandbox::plan::bound_image;
 use crate::host::sandbox::{SandboxPlan, SandboxUpper, reject_container_path, reject_disk_path};
+#[cfg(doc)]
+use crate::host::template::{CaptureClass, KERNEL_TUNING_PARAMETERS};
 
 /// Bytes in a mebibyte, the unit in which the plan writes OpenVMM's `--memory` and
 /// `--memory-capacity`.
@@ -101,14 +104,17 @@ pub struct TemplateResources {
 /// template that boots with fewer processors online than its capacity, `maxcpus=` with the
 /// processors online at boot, which limits those that the guest brings online at boot, and which
 /// OpenVMM records as the template's, so that each restore may bring a prefix of the others
-/// online. OpenVMM writes the other tokens itself, each on the allowlist: the early console,
-/// console, reboot, and panic settings, `nr_cpus=` with the processor capacity,
-/// `nvx_snapshot_tier=platform`, the virtio devices and the control tty that the guest discovers,
-/// and the NIC's addresses. The arguments name no workload identity, lifecycle, share, or
-/// published listener, for which OpenVMM would write other tokens, and under the NIC's deny-all
-/// policy, OpenVMM names no DNS server either. The command line therefore holds no image
-/// identity, hostname, share, proxy, DNS server, entrypoint, or other tenant data, and every
-/// clone of the template has the same.
+/// online. The kernel tuning parameters of the template's class follow them, in their order,
+/// which [`with_kernel_tuning`](Self::with_kernel_tuning) sets: those of an adapter's cold boots
+/// that the allowlist holds too, [`KERNEL_TUNING_PARAMETERS`], such as `mitigations=off`, which
+/// the kernel applies once, as it boots, so that a clone has no other way to get them. OpenVMM
+/// writes the other tokens itself, each on the allowlist: the early console, console, reboot, and
+/// panic settings, `nr_cpus=` with the processor capacity, `nvx_snapshot_tier=platform`, the
+/// virtio devices and the control tty that the guest discovers, and the NIC's addresses. The
+/// arguments name no workload identity, lifecycle, share, or published listener, for which
+/// OpenVMM would write other tokens, and under the NIC's deny-all policy, OpenVMM names no DNS
+/// server either. The command line therefore holds no image identity, hostname, share, proxy, DNS
+/// server, entrypoint, or other tenant data, and every clone of the template has the same.
 ///
 /// # The capture
 ///
@@ -150,7 +156,8 @@ pub struct TemplateResources {
 ///     memory_capacity: 16 * MEMORY_BLOCK_SIZE,
 /// };
 /// let template =
-///     TemplatePlan::new(adapter, binding, 64 << 20, resources, transaction, generation)?;
+///     TemplatePlan::new(adapter, binding, 64 << 20, resources, transaction, generation)?
+///         .with_kernel_tuning(&["mitigations=off".to_owned()])?;
 /// let mut arguments = template.openvmm_arguments()?;
 /// arguments.extend(["--cmdline".to_owned(), template.kernel_command_line().to_owned()]);
 /// // ... the caller's own arguments: the hypervisor, the kernel and the initramfs, the CPU
@@ -273,16 +280,7 @@ impl TemplatePlan {
         reject_disk_path(&scratch, &scratch.display().to_string())?;
         let destination = transaction.join(SNAPSHOT_NAME);
         let plan = SandboxPlan::adapter(distro.clone(), SandboxUpper::scratch_at(scratch));
-        // A template whose processors are all online at boot needs no limit, and records none,
-        // as OpenVMM records none without the parameter.
-        let command_line = if resources.boot_processors < resources.processors {
-            format!(
-                "{COMMAND_LINE} {BOOT_PROCESSORS}={}",
-                resources.boot_processors
-            )
-        } else {
-            COMMAND_LINE.to_owned()
-        };
+        let command_line = own_command_line(&resources);
         Ok(Self {
             plan,
             nic,
@@ -294,6 +292,28 @@ impl TemplatePlan {
             destination,
             generation,
         })
+    }
+
+    /// Returns the plan with the kernel tuning parameters `parameters`, which replace any earlier
+    /// ones: those with which the template's kernel boots, in their order, after the plan's own
+    /// tokens, as [`CaptureClass::kernel_tuning`] holds them, and as
+    /// [The kernel command line](Self#the-kernel-command-line) describes. A plan that
+    /// [`new`](Self::new) returns has none.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) as
+    /// [`CaptureClass::check`] refuses the parameters: for one that is not among
+    /// [`KERNEL_TUNING_PARAMETERS`], and for a parameter that appears more than once.
+    pub fn with_kernel_tuning(mut self, parameters: &[String]) -> Result<Self> {
+        if let Some(problem) = kernel_tuning_problem(parameters) {
+            return Err(Error::unsupported(problem));
+        }
+        let mut command_line = own_command_line(&self.resources);
+        for parameter in parameters {
+            command_line.push(' ');
+            command_line.push_str(parameter);
+        }
+        self.command_line = command_line;
+        Ok(self)
     }
 
     /// Returns the capture's devices but its NIC: an adapter's plan of the placeholder over the
@@ -356,8 +376,9 @@ impl TemplatePlan {
 
     /// Returns the kernel command line of the capture's VM, which the caller passes as OpenVMM's
     /// `--cmdline`, alone: `nvx_sandbox=1`, then, for a template that boots with fewer processors
-    /// online than its capacity, `maxcpus=` with the processors online at boot, as
-    /// [The kernel command line](Self#the-kernel-command-line) describes.
+    /// online than its capacity, `maxcpus=` with the processors online at boot, then the kernel
+    /// tuning parameters, if [`with_kernel_tuning`](Self::with_kernel_tuning) set any, in their
+    /// order, as [The kernel command line](Self#the-kernel-command-line) describes.
     ///
     /// It takes the place of the command line of [`plan`](Self::plan), which
     /// [`SandboxPlan::kernel_command_line`] and a [`PreparedLaunch`] render: that one names the
@@ -424,6 +445,21 @@ impl TemplatePlan {
 /// of [`LOGICAL_BLOCK_SIZE`].
 fn is_block_length(length: u64) -> bool {
     length != 0 && length.is_multiple_of(LOGICAL_BLOCK_SIZE)
+}
+
+/// Returns the template's own kernel command line for `resources`: `nvx_sandbox=1`, then
+/// `maxcpus=` with the processors online at boot when they are fewer than the processors.
+fn own_command_line(resources: &TemplateResources) -> String {
+    // A template whose processors are all online at boot needs no limit, and records none, as
+    // OpenVMM records none without the parameter.
+    if resources.boot_processors < resources.processors {
+        format!(
+            "{COMMAND_LINE} {BOOT_PROCESSORS}={}",
+            resources.boot_processors
+        )
+    } else {
+        COMMAND_LINE.to_owned()
+    }
 }
 
 /// Refuses `resources` that no template's VM has: processors other than 1, 2, 4, or 8, processors

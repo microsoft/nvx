@@ -92,8 +92,9 @@ const CAPTURES_WHAT: &str = "the captures of the template store";
 /// [`Store::create_template`] and [`Store::refresh_template`] capture.
 ///
 /// The adapter's plan is lowered as [`TemplatePlan::new`] lowers it, with the processors, those
-/// online at boot among them, and RAM of the class, and a scratch of the class's scratch length;
-/// its upper is no part of the template. The class and the plan must describe one VM: a
+/// online at boot among them, and RAM of the class, and a scratch of the class's scratch length,
+/// and with the class's kernel tuning parameters, as [`TemplatePlan::with_kernel_tuning`] sets
+/// them; its upper is no part of the template. The class and the plan must describe one VM: a
 /// placeholder whose binding records the class's `distro` length, and a network of the plan whose
 /// NIC, as [`SandboxNetwork::template_arguments`] lowers it for a template, is the class's: none,
 /// or one at the same guest's address, under the complete deny-all policy, whatever the policies
@@ -104,7 +105,7 @@ const CAPTURES_WHAT: &str = "the captures of the template store";
 pub struct Capture {
     /// The class of the capture, which names its slot, and from which the capture takes its
     /// backend, its CPU profile, its processors and those online at boot, its RAM, its scratch
-    /// length, and the runtime identity of its launch.
+    /// length, its kernel tuning parameters, and the runtime identity of its launch.
     pub class: CaptureClass,
     /// The adapter's plan, which [`SandboxPlan::adapter`] makes, of the placeholder `distro` and
     /// the template's network.
@@ -516,7 +517,8 @@ impl Store {
             inputs.resources,
             &transaction,
             StorageGeneration::generate()?,
-        )?;
+        )?
+        .with_kernel_tuning(&capture.class.kernel_tuning)?;
         let envelope =
             match self.check_capture(capture, &inputs, &template, &locked, deadline, hooks) {
                 Ok(envelope) => envelope,

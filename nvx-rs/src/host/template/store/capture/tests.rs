@@ -515,6 +515,70 @@ fn captures_limit_the_processors_that_their_class_keeps_offline_at_boot() {
 }
 
 #[test]
+fn captures_boot_with_the_kernel_tuning_parameters_of_their_class() {
+    let mut bench = Bench::new();
+    bench.capture.class.kernel_tuning = vec!["mitigations=off".to_owned(), "quiet".to_owned()];
+    // OpenVMM records the command line with which the kernel booted.
+    let mut spec = ManifestSpec::template();
+    let contract = spec.contract();
+    contract.command_line =
+        contract
+            .command_line
+            .replacen("nvx_sandbox=1", "nvx_sandbox=1 mitigations=off quiet", 1);
+    let emulation = Emulation {
+        manifest: Some(spec),
+        ..Emulation::capture()
+    };
+    let arguments = RefCell::new(Vec::new());
+    let run = |locked: &mut LockedStore, vm: &Vm<'_>| {
+        let command = vm.command("control", Path::new("outcome.json"), locked.dir())?;
+        arguments.replace(command.arguments);
+        emulation.run(locked, vm)
+    };
+    let created = bench.serve_with(Some(&|| Ok(after(1))), &run, &uninterrupted, false);
+    let Created::Captured(generation) = created.unwrap() else {
+        panic!("the first creation of a class captures it");
+    };
+    let arguments: Vec<String> = arguments
+        .take()
+        .into_iter()
+        .map(|argument| argument.into_string().unwrap())
+        .collect();
+    let at = arguments
+        .iter()
+        .position(|given| given == "--cmdline")
+        .unwrap();
+    assert_eq!(arguments[at + 1], "nvx_sandbox=1 mitigations=off quiet");
+    let key = bench.store.read_key(&generation).unwrap();
+    assert!(
+        key.command_line()
+            .contains(" nvx_sandbox=1 mitigations=off quiet "),
+        "{}",
+        key.command_line()
+    );
+
+    // A capture whose kernel booted without them made no template of its class, and publishes
+    // nothing.
+    let refused = bench.refresh(&Emulation::capture());
+    let error = refused.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+    assert!(
+        error.message().contains(
+            "its kernel tuning parameters are none, but the class requests mitigations=off quiet"
+        ),
+        "{error}"
+    );
+    assert_eq!(bench.indexed(), [1]);
+
+    // A parameter that no capture takes is refused before any VM boots.
+    let runs = bench.runs.get();
+    bench.capture.class.kernel_tuning = vec!["mitigations=on".to_owned()];
+    let error = bench.refresh(&Emulation::capture()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert_eq!(bench.runs.get(), runs);
+}
+
+#[test]
 fn refreshes_leave_older_generations_and_their_leases_untouched() {
     let bench = Bench::new();
     let first = bench.refresh(&Emulation::capture()).unwrap();

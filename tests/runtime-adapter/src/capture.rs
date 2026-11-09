@@ -173,6 +173,7 @@ impl Request {
             scratch: geometry(scratch, self.scratch_length)?,
             network: self.network.clone(),
             invariants,
+            kernel_tuning: Vec::new(),
         };
         Ok(Capture {
             class,

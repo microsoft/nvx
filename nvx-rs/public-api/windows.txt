@@ -1617,6 +1617,7 @@ field nvx::host::template::CaptureClass::guest_build
 field nvx::host::template::CaptureClass::hypervisor
 method nvx::host::template::CaptureClass::identity
 field nvx::host::template::CaptureClass::invariants
+field nvx::host::template::CaptureClass::kernel_tuning
 field nvx::host::template::CaptureClass::memory
 field nvx::host::template::CaptureClass::memory_capacity
 field nvx::host::template::CaptureClass::network
@@ -1798,6 +1799,7 @@ method nvx::host::template::Invariants::iter
 method nvx::host::template::Invariants::len
 method nvx::host::template::Invariants::new
 method nvx::host::template::Invariants::with
+const nvx::host::template::KERNEL_TUNING_PARAMETERS
 const nvx::host::template::KEY_NAME
 struct nvx::host::template::KeyIdentity
 method nvx::host::template::KeyIdentity::as_bytes
@@ -1982,6 +1984,7 @@ method nvx::host::template::TemplatePlan::resources
 method nvx::host::template::TemplatePlan::scratch_length
 method nvx::host::template::TemplatePlan::scratch_path
 method nvx::host::template::TemplatePlan::transaction
+method nvx::host::template::TemplatePlan::with_kernel_tuning
 struct nvx::host::template::TemplateResources
 field nvx::host::template::TemplateResources::boot_processors
 field nvx::host::template::TemplateResources::memory
