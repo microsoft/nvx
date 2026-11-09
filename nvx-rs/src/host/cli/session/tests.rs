@@ -827,6 +827,89 @@ fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     assert_ne!(checks, 0);
 }
 
+/// A process that runs for a minute unless it is killed, which dropping it kills and reaps.
+#[cfg(any(target_os = "linux", windows))]
+struct Sleeper(std::process::Child);
+
+#[cfg(any(target_os = "linux", windows))]
+impl Sleeper {
+    /// Spawns the sleeper under a `SpawnLock`, so that on Windows it holds no handle of a VMM that
+    /// another test spawns meanwhile.
+    fn spawn() -> Self {
+        let mut command = if cfg!(windows) {
+            let mut command = std::process::Command::new("ping");
+            command.args(["-n", "60", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60");
+            command
+        };
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null());
+        Self(crate::host::tests::spawn_locked(&mut command).unwrap())
+    }
+
+    /// Returns the verified process of the sleeper.
+    fn process(&self) -> Process {
+        use crate::host::process::{BootId, Opened, ProcessRef};
+
+        let reference = ProcessRef {
+            pid: self.0.id(),
+            start_time: platform::process_start_time(self.0.id()).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        };
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the sleeper runs");
+        };
+        process
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Checks the wait for `endpoint`, which never appears, of a cold run whose OpenVMM is the
+/// verified process that [`Session::connect_launched_cancellable`] receives: the wait goes on
+/// while the process runs, and ends at once, as a closed endpoint, once it exits, rather than at
+/// the timeout.
+#[cfg(any(target_os = "linux", windows))]
+fn check_launched_waits_end_once_their_process_exits(endpoint: &str) {
+    let mut sleeper = Sleeper::spawn();
+    let process = sleeper.process();
+    let started = Instant::now();
+    let failure = thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            Session::connect_launched_cancellable(
+                endpoint,
+                &process,
+                &CAPABILITY,
+                60.0,
+                AttachmentCancellation::default(),
+            )
+            .err()
+        });
+        thread::sleep(Duration::from_millis(500));
+        let ended_early = waiting.is_finished();
+        sleeper.0.kill().unwrap();
+        sleeper.0.wait().unwrap();
+        assert!(!ended_early, "the wait ended while OpenVMM ran");
+        waiting.join().unwrap().unwrap()
+    });
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(matches!(failure, Exit::EndpointClosed), "{failure:?}");
+}
+
 #[cfg(any(target_os = "linux", windows))]
 fn check_forward_failure_during_connect(endpoint: &str) {
     let (attempted, attempt) = mpsc::sync_channel(1);
@@ -1213,6 +1296,14 @@ mod endpoints {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn launched_waits_end_once_their_process_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        check_launched_waits_end_once_their_process_exits(path.to_str().unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn forward_failure_cancels_the_connection_before_its_timeout() {
         let directory = tempfile::tempdir().unwrap();
         check_forward_failure_during_connect(
@@ -1444,6 +1535,13 @@ mod endpoints {
     #[test]
     fn waits_for_an_endpoint_end_once_openvmm_exits() {
         check_waits_for_openvmm_that_exits(r"\\.\pipe\nvx-cli-session-test-exited");
+    }
+
+    #[test]
+    fn launched_waits_end_once_their_process_exits() {
+        check_launched_waits_end_once_their_process_exits(
+            r"\\.\pipe\nvx-cli-session-test-launched-exited",
+        );
     }
 
     #[test]

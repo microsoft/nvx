@@ -863,7 +863,7 @@ pub struct Launched {
     pub capability: Capability,
     /// The preparation's same restore-ready listener, absent for a cold launch.
     pub ready: Option<ReadyListener>,
-    /// Retains only a foreground caller's child for status and control attachment.
+    /// Retains only a foreground caller's child, for its status.
     #[cfg(feature = "cli")]
     child: ForegroundChild,
 }
@@ -892,8 +892,8 @@ impl Launched {
             .map(|status| status as i32))
     }
 
-    /// Gives the CLI connector the same owned child whose exit it observes.
-    pub(crate) fn child_mut(&mut self) -> io::Result<&mut spawn::Launched> {
+    /// Returns the owned child, whose status [`Self::wait_status`] polls.
+    fn child_mut(&mut self) -> io::Result<&mut spawn::Launched> {
         self.child
             .0
             .as_mut()
