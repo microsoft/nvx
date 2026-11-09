@@ -62,8 +62,10 @@ pub use super::platform::TransportHandle;
 /// not yet available, until `deadline`.
 ///
 /// Opens and holds the process with its recorded boot, ID and start time. Linux checks the Unix
-/// socket's peer credentials; Windows checks the named pipe's server process ID. The held
-/// process is checked again after connection, before the transport can send a capability.
+/// socket's peer credentials and original peer pidfd, requiring `SO_PEERPIDFD` (Linux 6.5 or a
+/// backport) without falling back to a numeric PID. Windows checks the named pipe's server
+/// process ID. The held process is checked again after connection, before the transport can
+/// send a capability.
 ///
 /// A passed deadline is [`ErrorKind::TimedOut`], an exited recorded process
 /// [`ErrorKind::Exited`], a refused or broken session [`ErrorKind::Protocol`], and an

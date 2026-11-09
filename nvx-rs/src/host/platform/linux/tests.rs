@@ -53,6 +53,143 @@ fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
 }
 
 #[test]
+fn a_transferred_listener_cannot_authenticate_its_exited_creator() {
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixListener;
+
+    let child = "NVX_TEST_TRANSFERRED_CONTROL_LISTENER";
+    let endpoint = "NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT";
+    let verified = "NVX_STALE_CONTROL_PEER_REJECTED";
+    if let Some(pid) = std::env::var_os(child) {
+        let pid: u32 = pid.to_str().unwrap().parse().unwrap();
+        let endpoint = std::env::var(endpoint).unwrap();
+        let listener = UnixListener::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap());
+        let probe = crate::host::sys::connect_nonblocking(&endpoint).unwrap();
+        assert_eq!(crate::host::sys::peer_pid(&probe).unwrap(), pid);
+        drop(listener.accept().unwrap());
+        drop(probe);
+        // Match the stale creator's PID without changing the host's PID allocator.
+        let error = connect_endpoint(&endpoint, pid, Duration::from_secs(2))
+            .err()
+            .expect("a stale listener's numeric PID must not authenticate it");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("original socket peer exited"));
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+        println!("{verified} pid={pid}");
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control.sock");
+    let mut command = Command::new("python3");
+    command
+        .args([
+            "-c",
+            r#"import array, os, socket, sys
+receiver, sender = socket.socketpair()
+creator = os.fork()
+if creator == 0:
+    receiver.close()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(sys.argv[1])
+    listener.listen()
+    sender.sendmsg([b"L"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                            array.array("i", [listener.fileno()]))])
+    os._exit(0)
+sender.close()
+data, messages, flags, address = receiver.recvmsg(1, socket.CMSG_SPACE(array.array("i").itemsize))
+assert data == b"L" and len(messages) == 1
+assert messages[0][:2] == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
+descriptors = array.array("i")
+descriptors.frombytes(messages[0][2])
+assert len(descriptors) == 1
+assert os.waitpid(creator, 0) == (creator, 0)
+os.dup2(descriptors[0], 0)
+if descriptors[0] != 0:
+    os.close(descriptors[0])
+receiver.close()
+os.environ["NVX_TEST_TRANSFERRED_CONTROL_LISTENER"] = str(creator)
+os.execv(sys.argv[2], [sys.argv[2], "--exact", sys.argv[3], "--nocapture", "--test-threads=1"])
+"#,
+        ])
+        .arg(&path)
+        .arg(std::env::current_exe().unwrap())
+        .arg(
+            "host::platform::linux::tests::a_transferred_listener_cannot_authenticate_its_exited_creator",
+        )
+        .env(endpoint, &path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crate::host::tests::spawn_locked(&mut command)
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains(verified),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_control_connection_fails_closed_without_original_peer_pidfds() {
+    use std::os::unix::net::UnixListener;
+
+    let child = "NVX_TEST_CONTROL_PIDFD_DENIAL";
+    let Some(errno) = std::env::var_os(child) else {
+        for errno in [nix::libc::ENOPROTOOPT, nix::libc::EPERM, nix::libc::EINVAL] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "host::platform::linux::tests::a_control_connection_fails_closed_without_original_peer_pidfds",
+                    "--nocapture",
+                ])
+                .env(child, errno.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::host::sys::tests::refuse_peer_pidfd_on_spawn(&mut command, errno);
+            let output = crate::host::tests::spawn_locked(&mut command)
+                .unwrap()
+                .wait_with_output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains(&format!("NVX_CONTROL_PEER_PIDFD_REFUSED {errno}")),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+    let errno: i32 = errno.to_str().unwrap().parse().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control.sock");
+    let _listener = UnixListener::bind(&path).unwrap();
+    let error = connect_endpoint(
+        path.to_str().unwrap(),
+        std::process::id(),
+        Duration::from_secs(2),
+    )
+    .err()
+    .expect("an unverifiable peer must not authenticate by numeric PID alone");
+    let expected = if errno == nix::libc::EINVAL {
+        std::io::ErrorKind::PermissionDenied
+    } else {
+        std::io::ErrorKind::Unsupported
+    };
+    assert_eq!(error.kind(), expected);
+    println!("NVX_CONTROL_PEER_PIDFD_REFUSED {errno}");
+}
+
+#[test]
 fn a_wait_sleeps_a_remainder_below_a_millisecond_instead_of_polling_a_millisecond() {
     assert_eq!(wait_step(Duration::ZERO), (Duration::ZERO, Duration::ZERO));
     for remainder in [Duration::from_micros(300), Duration::from_micros(999)] {
