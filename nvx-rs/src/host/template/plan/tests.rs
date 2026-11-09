@@ -539,6 +539,14 @@ fn openvmms_platform_allowlist_admits_its_tokens_and_refuses_tenant_data() {
         "virtnet_dns=10.0.0.1",
         "virtnet_ip6=fd00::2/64",
         "virtnet_gw6=fd00::1",
+        // The kernel tuning parameters, which are fixed at boot and the same for every clone.
+        "mitigations=off",
+        "mitigations=auto",
+        "mitigations=auto,nosmt",
+        "no_timer_check",
+        "quiet",
+        "loglevel=0",
+        "loglevel=7",
     ] {
         assert!(openvmm::admits(token), "{token}");
     }
@@ -569,7 +577,14 @@ fn openvmms_platform_allowlist_admits_its_tokens_and_refuses_tenant_data() {
         "nvx_sandbox=0",
         "nvx_snapshot_tier=workload-start",
         "console=ttyS0",
-        "quiet",
+        // Other values of the kernel tuning parameters, and other spellings of them.
+        "mitigations=on",
+        "mitigations=",
+        "loglevel=8",
+        "loglevel=07",
+        "quiet=1",
+        "no-timer-check",
+        "nokaslr",
         "",
     ] {
         assert!(!openvmm::admits(token), "{token}");

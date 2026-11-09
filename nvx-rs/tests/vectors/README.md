@@ -81,7 +81,7 @@ the key that the vector's bytes decode to.
 `openvmm/` holds `control_session_protocol_vectors.txt` and
 `control_session_protocol_cases.txt` of OpenVMM's
 `vm/devices/virtio/virtio_console/test_data/`, unchanged, from OpenVMM commit
-[`e68871cc6f14fceb6d38a899504ae8105f89e310`](https://github.com/microsoft/openvmm/tree/e68871cc6f14fceb6d38a899504ae8105f89e310/vm/devices/virtio/virtio_console/test_data).
+[`b4028c1aa775d8aafba1a170857acc032c7c86a1`](https://github.com/microsoft/openvmm/tree/b4028c1aa775d8aafba1a170857acc032c7c86a1/vm/devices/virtio/virtio_console/test_data).
 They keep OpenVMM's own format, which its `control_session_protocol` tests read:
 one record of each type, as `NAME|BYTES`, and 37 cases of the boundaries and
 refusals of the records' payloads and headers. The tests of
@@ -91,7 +91,8 @@ and that each case is accepted or refused as it says.
 `openvmm/` also holds two excerpts of OpenVMM's sources at that commit, whole
 lines, unchanged: `platform_command_line_token_is_invariant.rs`, the function
 of `openvmm/openvmm_helpers/src/snapshot/microvm.rs` that admits the kernel
-command-line tokens of a capture at OpenVMM's platform tier, and
+command-line tokens of a capture at OpenVMM's platform tier, after the
+constant of the kernel tuning parameters that it admits among them, and
 `microvm_control_tty_command_line.rs`, the constant of
 `openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
 the function reads. The tests of `nvx::host::template` compile them, and check

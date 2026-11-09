@@ -1,3 +1,23 @@
+/// The guest kernel tuning parameters that a platform snapshot's command line
+/// may carry, each parameter at most once. Like the other tokens that the
+/// command line may carry, each is fixed when the guest kernel boots, is the
+/// same for every clone, and carries no tenant data.
+const PLATFORM_TUNING_TOKENS: [&str; 13] = [
+    "mitigations=off",
+    "mitigations=auto",
+    "mitigations=auto,nosmt",
+    "no_timer_check",
+    "quiet",
+    "loglevel=0",
+    "loglevel=1",
+    "loglevel=2",
+    "loglevel=3",
+    "loglevel=4",
+    "loglevel=5",
+    "loglevel=6",
+    "loglevel=7",
+];
+
 fn platform_command_line_token_is_invariant(token: &str) -> bool {
     matches!(
         token,
@@ -12,6 +32,7 @@ fn platform_command_line_token_is_invariant(token: &str) -> bool {
     ) || token.starts_with("nr_cpus=")
         || token.starts_with("maxcpus=")
         || token == openvmm_defs::microvm::MICROVM_CONTROL_TTY_COMMAND_LINE
+        || PLATFORM_TUNING_TOKENS.contains(&token)
         || [
             "virtio_mmio.device=",
             "virtnet_ip=",
