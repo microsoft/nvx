@@ -993,6 +993,64 @@ mod endpoints {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn unsupported_peer_verification_fails_without_retrying() {
+        use std::process::{Command, Stdio};
+
+        let child = "NVX_TEST_CLI_CONTROL_PIDFD_DENIAL";
+        let Some(errno) = std::env::var_os(child) else {
+            for errno in [nix::libc::ENOPROTOOPT, nix::libc::EPERM, nix::libc::EACCES] {
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "host::cli::session::tests::endpoints::unsupported_peer_verification_fails_without_retrying",
+                        "--nocapture",
+                    ])
+                    .env(child, errno.to_string())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                crate::host::sys::tests::refuse_peer_pidfd_on_spawn(&mut command, errno);
+                let output = crate::host::tests::spawn_locked(&mut command)
+                    .unwrap()
+                    .wait_with_output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout)
+                            .contains(&format!("NVX_CLI_CONTROL_PIDFD_REFUSED {errno}")),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let errno: i32 = errno.to_str().unwrap().parse().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+        let mut checks = 0;
+        let failure = Session::connect_unless_exited(
+            path.to_str().unwrap(),
+            std::process::id(),
+            &CAPABILITY,
+            60.0,
+            || {
+                checks += 1;
+                checks == 2
+            },
+        )
+        .err()
+        .expect("unsupported peer verification must fail before authentication");
+        assert_eq!(failure.code(), Some(ErrorCode::Io));
+        assert!(failure.message().unwrap().contains("SO_PEERPIDFD"));
+        assert_eq!(checks, 0, "a permanent verification failure must not retry");
+        println!("NVX_CLI_CONTROL_PIDFD_REFUSED {errno}");
+    }
+
+    #[test]
     fn waits_for_an_endpoint_end_once_openvmm_exits() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("control.sock");
