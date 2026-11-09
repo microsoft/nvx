@@ -12486,6 +12486,48 @@ class MicrovmTests(unittest.TestCase):
                 output_dir=Path(temporary),
             )
 
+    def test_interrupt_map_attaches_the_control_console_to_its_broker(self):
+        # The control console's driver can take back every buffer of its
+        # output before the device reads its used event, which skips the
+        # interrupt of every write (#1400). The guest therefore makes the
+        # console interrupt with input: the broker's answer to the bootstrap
+        # GuestAttach record, whose bytes are OpenVMM's vector.
+        vectors = (
+            BuildConstants.REPO_ROOT
+            / "nvx-rs"
+            / "tests"
+            / "vectors"
+            / "openvmm"
+            / "control_session_protocol_vectors.txt"
+        )
+        (guest_attach,) = (
+            bytes.fromhex(line.split("|")[1])
+            for line in vectors.read_text(encoding="utf-8").splitlines()
+            if line.startswith("GUEST_ATTACH|")
+        )
+        self.assertEqual(microvm_tests.INTERRUPT_MAP_GUEST_ATTACH, guest_attach)
+
+        for devices in (
+            len(microvm_tests.MICROVM_VIRTIO_DEVICES),
+            len(microvm_tests.INTERRUPT_MAP_SNAPSHOT_DEVICES),
+        ):
+            script = microvm_tests._interrupt_map_script(devices, capture="")
+            self.assertNotIn("@", script)
+            # The control console's step writes the record, once, to the
+            # console held open, raw, and silent until its interrupt.
+            steps = re.findall(
+                r"\{ stty raw -echo <&3 && printf '([^']*)' >&3 &&\n"
+                r' +await_irq "\$irq" "\$fired"; \} 3<>/dev/hvc2 \|\| fail 35\n',
+                script,
+            )
+            self.assertEqual(len(steps), 1)
+            self.assertRegex(steps[0], r"^(\\[0-7]{3})+$")
+            written = bytes(
+                int(escape, 8) for escape in re.findall(r"\\([0-7]{3})", steps[0])
+            )
+            self.assertEqual(written, guest_attach)
+            self.assertEqual(script.count("/dev/hvc2"), 1)
+
     def test_smp_snapshot_runs_the_warp_probe_after_each_restore(self):
         def measure(command: list[str], **kwargs: object) -> None:
             processors = int(command[command.index("--processors") + 1])

@@ -275,6 +275,13 @@ INTERRUPT_MAP_ERRORS_PREFIX = "NVX-INTERRUPT-MAP-ERRORS "
 INTERRUPT_MAP_ERROR_COUNTS = ("err", "mis", "spu")
 INTERRUPT_MAP_NETWORK = "10.0.0.2/24"
 INTERRUPT_MAP_SHARE_SEED = "NVX-INTERRUPT-MAP-SHARE"
+# The record with which the interrupt-map scenario's guest attaches to the
+# control console's session broker, so that the broker answers with a Reset
+# record (4.4.3): the bootstrap GuestAttach record, whose 44-byte header holds
+# the magic NVXS, version 1, type 1, and zero flags, instance, epoch,
+# sequence, and payload length, as the GUEST_ATTACH vector of OpenVMM's
+# control-session protocol gives it.
+INTERRUPT_MAP_GUEST_ATTACH = b"NVXS" + bytes((1, 0, 1, 0)) + bytes(36)
 # The devices of the interrupt-map scenario's snapshot, by the bases of their
 # windows: the NIC, the host filesystem with a share, and the boot console.
 INTERRUPT_MAP_SNAPSHOT_DEVICES = (0xD000_0000, 0xD000_1000, 0xD000_2000)
@@ -7122,6 +7129,21 @@ def check_interrupt_map(
         )
 
 
+def _interrupt_map_script(devices: int, *, capture: str) -> str:
+    """Return the interrupt-map scenario's guest script for a guest with
+    ``devices`` virtio devices, which runs ``capture`` between its boot report
+    and its traffic.
+
+    The script writes INTERRUPT_MAP_GUEST_ATTACH to the control console with
+    printf, whose format gives each of its bytes as an octal escape."""
+    return _render_script(
+        "interrupt-map.sh.in",
+        DEVICES=str(devices),
+        CAPTURE=capture,
+        GUEST_ATTACH="".join(f"\\{byte:03o}" for byte in INTERRUPT_MAP_GUEST_ATTACH),
+    )
+
+
 def run_interrupt_map(
     executable: Path,
     kernel: Path,
@@ -7171,11 +7193,7 @@ def run_interrupt_map(
             )
         result = run_guest_script(
             command,
-            _render_script(
-                "interrupt-map.sh.in",
-                DEVICES=str(len(MICROVM_VIRTIO_DEVICES)),
-                CAPTURE="",
-            ),
+            _interrupt_map_script(len(MICROVM_VIRTIO_DEVICES), capture=""),
             INTERRUPT_MAP_COMPLETION_MARKER,
             timeout=timeout,
             log_path=output_dir / "interrupt-map.log",
@@ -7208,10 +7226,9 @@ def run_interrupt_map(
                 process,
                 "/tmp/nvx-interrupt-map",
                 "NVX_INTERRUPT_MAP",
-                _render_script(
-                    "interrupt-map.sh.in",
-                    DEVICES=str(len(INTERRUPT_MAP_SNAPSHOT_DEVICES)),
-                    CAPTURE=f"echo {capture_marker}\nnvx-snapshot\nreport restore",
+                _interrupt_map_script(
+                    len(INTERRUPT_MAP_SNAPSHOT_DEVICES),
+                    capture=f"echo {capture_marker}\nnvx-snapshot\nreport restore",
                 ),
             )
             source = process.wait(timeout)

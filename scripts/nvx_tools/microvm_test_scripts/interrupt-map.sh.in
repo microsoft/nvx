@@ -85,14 +85,15 @@ report() {
 }
 
 # Makes each virtio device interrupt, one device at a time: the NIC with an
-# echo of its gateway, the host filesystem with a read of its share, the
-# consoles with output, and the block devices with a read of the read-only
-# one and a flushed write to the writable one, past the page cache. Each
-# device's traffic must raise the device's own interrupt before the next
-# device's starts, so two devices whose interrupts were crossed cannot each
-# raise the other's: the consoles' drivers poll the used ring for their
-# output, so a console's writes complete even when its interrupt reaches
-# another handler.
+# echo of its gateway, the host filesystem with a read of its share, the boot
+# console with output, the control console with input that the guest asks its
+# session broker for, and the block devices with a read of the read-only one
+# and a flushed write to the writable one, past the page cache. Each device's
+# traffic must raise the device's own interrupt before the next device's
+# starts, so two devices whose interrupts were crossed cannot each raise the
+# other's: the boot console's driver polls the used ring for its output, so
+# the console's writes complete even when its interrupt reaches another
+# handler.
 traffic() {
     for device in /sys/bus/virtio/devices/virtio*; do
         name=${device##*/}
@@ -104,9 +105,10 @@ traffic() {
             d0000000) ping -c 2 -W 2 10.0.0.1 >/dev/null || fail 30 ;;
             d0001000) cat /mnt/share/seed >/dev/null || fail 31 ;;
             d0002000)
-                # When a console's driver takes its buffer back before the
+                # When the console's driver takes its buffer back before the
                 # device reads the used event, the device rightly skips the
-                # interrupt, so write until one interrupts.
+                # interrupt, so write until one interrupts. In #1400's
+                # measurements, the driver won at most 15% of these races.
                 while [ "$(irq_count "$irq")" -le "$fired" ] && [ "$writes" -lt 16 ]; do
                     echo NVX-INTERRUPT-MAP-CONSOLE
                     writes=$((writes + 1))
@@ -124,15 +126,21 @@ traffic() {
                     fail 34
                 ;;
             d0007000)
-                # As for the boot console, a byte at a time, each in a buffer
-                # of its own: fewer bytes than the 44-byte header of the
-                # control-session protocol, which the console parses its
-                # input as.
-                while [ "$(irq_count "$irq")" -le "$fired" ] && [ "$writes" -lt 16 ]; do
-                    printf . >/dev/hvc2 || fail 35
-                    writes=$((writes + 1))
-                    await_irq "$irq" "$fired" 10
-                done
+                # The console's driver polls the used ring for its output and
+                # takes each buffer back as soon as the device returns it, so
+                # a write interrupts only if the device reads the used event
+                # before the driver moves it past the buffer, a race that the
+                # driver can win at every write (#1400). Nothing waits for
+                # the console's input, whose buffers the driver takes back
+                # from its interrupt, so attach to the control-session broker
+                # that the console runs: the device writes the broker's
+                # answer, a Reset record, into one of them. The terminal stays
+                # open, raw, and silent until the interrupt, so that it sends
+                # the record unchanged and echoes no answer to the broker,
+                # which would stop at the echo as at any malformed record and
+                # never complete the write.
+                { stty raw -echo <&3 && printf '@GUEST_ATTACH@' >&3 &&
+                    await_irq "$irq" "$fired"; } 3<>/dev/hvc2 || fail 35
                 ;;
             *) fail 36 ;;
         esac
