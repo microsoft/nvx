@@ -37,10 +37,10 @@ use std::time::Duration;
 use super::deadline::{Deadline, RETRY_INTERVAL, sleep};
 use super::{Exit, Result, check_interrupt};
 use crate::host::platform::{self, Transport};
+use crate::host::process::Process;
 use crate::host::runtime::Runtime;
 use crate::host::sandbox::options::validate_exec_environment;
 use crate::host::session::{ControlSession, SessionError};
-use crate::host::supervisor::Launched;
 use crate::host::transport;
 use crate::host::vm::{self, SavedVm};
 use crate::protocol::{
@@ -335,7 +335,7 @@ impl Session {
         })
     }
 
-    /// Connects to `endpoint`, which `launched`, the OpenVMM process that a cold run launched,
+    /// Connects to `endpoint`, which `process`, the OpenVMM process that a cold run launched,
     /// serves, as [`Self::connect_unless_exited`] does, but stops waiting for the endpoint once
     /// OpenVMM has exited, as `nvx::host::session::connect` does: an OpenVMM that exits before it
     /// serves its endpoint, as one that refuses its configuration does, then ends the wait at
@@ -344,22 +344,18 @@ impl Session {
     /// `cancellation`.
     pub(super) fn connect_launched_cancellable(
         endpoint: &str,
-        launched: &mut Launched,
+        process: &Process,
         capability: &[u8; CAPABILITY_LEN],
         timeout: f64,
         cancellation: AttachmentCancellation,
     ) -> Result<Self> {
-        let pid = launched.id();
+        let pid = process.reference().pid;
         Self::connect_unless_exited(
             endpoint,
             pid,
             capability,
             timeout,
-            || {
-                launched
-                    .wait_timeout(Duration::ZERO)
-                    .is_ok_and(|status| status.is_some())
-            },
+            || process.has_exited().is_ok_and(|exited| exited),
             Some(cancellation),
         )
     }
@@ -686,7 +682,7 @@ impl Session {
             match kind {
                 APP_STDOUT | APP_STDERR => {
                     // The guest agent forwards at most this much output, so more breaks the
-                    // protocol, as `nvx::host::instance` also finds.
+                    // protocol.
                     if stdout.len() + stderr.len() + response.len() > MAX_OUTPUT_BYTES {
                         return Err(violation(&format!(
                             "managed guest exceeded the {MAX_OUTPUT_BYTES}-byte output limit"
