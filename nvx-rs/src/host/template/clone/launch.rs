@@ -100,8 +100,9 @@ impl ClonePlan {
     ///    [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME) in the sandbox's
     ///    directory, in place of one that an earlier launch left, before the VMM starts: the
     ///    record, with the transaction ID of its restore section, is the one that the clone
-    ///    activates with, which the caller, or a caller that takes the sandbox over after a
-    ///    crash, reads there again and resends unchanged.
+    ///    activates with, which OpenVMM reads there with `--restore-activation-record` before any
+    ///    restored vCPU runs, and seals in the clone's restore packet, and which a caller that
+    ///    takes the sandbox over after a crash reads there again, to check the clone's Ready.
     /// 3. Listens at the endpoint of the VMM's restore-ready event, which OpenVMM connects to once
     ///    it has prepared the restore, before the restored VM runs, and which must exist before
     ///    the VMM starts: on Linux, the socket
@@ -153,7 +154,9 @@ impl ClonePlan {
     /// generation's snapshot, [`ClonePlan::snapshot`], for a template that records its processors
     /// online at boot, [`TemplateKey::boot_processors`], `--restore-processors` with the processor
     /// target, which brings online those of the target beyond them, `--restore-memory` with the
-    /// memory target,
+    /// memory target, `--restore-activation-record` with the sandbox's activation record, which
+    /// OpenVMM hands the clone's guest at the end of its restore packet, gating the host's input
+    /// until the guest acknowledged the restore,
     /// `--restore-ready-path` with the endpoint of the restore-ready event, the boot console: one
     /// that discards its output, as cold boots have, `--virtio-console none`, or for a plan that
     /// asks for one that the caller reads, a listener at its endpoint,
@@ -388,6 +391,7 @@ impl ClonePlan {
             snapshot,
             processors,
             memory,
+            activation: &record,
             ready: &ready,
             console: console.as_deref(),
             report: locked.outcome_path(),
@@ -450,7 +454,6 @@ impl ClonePlan {
             console,
             image,
             activation,
-            record,
             capability,
             tracker,
             table,
@@ -709,6 +712,9 @@ struct Restore<'a> {
     processors: u32,
     /// The memory target, in bytes.
     memory: u64,
+    /// The path of the sandbox's activation record, which OpenVMM hands the clone's guest in its
+    /// restore packet.
+    activation: &'a Path,
     /// The endpoint of the restore-ready event.
     ready: &'a str,
     /// The endpoint at which the boot console that the caller reads listens, or `None` for a boot
@@ -750,6 +756,8 @@ impl Restore<'_> {
         options.extend([
             OsStr::new("--restore-memory"),
             OsStr::new(&memory),
+            OsStr::new("--restore-activation-record"),
+            self.activation.as_os_str(),
             OsStr::new("--restore-ready-path"),
             OsStr::new(self.ready),
             OsStr::new("--virtio-console"),
@@ -793,8 +801,6 @@ pub struct Restoring<'s> {
     pub(super) image: CheckedDistro,
     /// The clone's activation record.
     pub(super) activation: ActivationRecord,
-    /// The path of the activation record in the sandbox, which the launch wrote.
-    pub(super) record: PathBuf,
     /// The capability of the launch.
     pub(super) capability: [u8; CAPABILITY_LEN],
     /// How far the clone got, and how its failures are recorded.

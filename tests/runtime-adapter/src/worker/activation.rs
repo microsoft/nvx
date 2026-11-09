@@ -1,7 +1,8 @@
 //! The activation of a clone, which a restore of a template's snapshot started, and which the
 //! worker repaired, on x86_64, whose time ABI a clone needs: the worker takes the clone's own
-//! configuration from the host in one `Activate`, through the clone's
-//! `nvx::guest::clone::Activation`, and then serves the host's order as after a cold boot, as the
+//! configuration from the activation record of its restore packet, through the clone's
+//! `nvx::guest::clone::Activation`, answers the host's `Await` with `Ready` once the clone is
+//! ready, and then serves the host's order as after a cold boot, as the
 //! [worker's documentation](super#clones) describes.
 //!
 //! The activation's failures are final, and end the worker, and with it the VM, with the status of
@@ -17,9 +18,13 @@
 //!   nothing;
 //! - `repair-delay`: how long, in microseconds, the worker waited before the repair, as the
 //!   template's `template::REPAIR_DELAY_FILE` asked, for tests, and `none` without the file;
-//! - `reset`: when the clone took the reset that the restore queued;
-//! - `message`: when the host's first message came, which must be the clone's `Activate`;
-//! - `ready`: when the clone was ready, once the record applied;
+//! - `reset`: when the clone took the reset that the restore queued, at which it started to apply
+//!   the record of its restore packet;
+//! - `message`: when the host's first message came, which must be its `Await`;
+//! - `applied`: when the application of the record completed, which may be before the host's
+//!   first message;
+//! - `ready`: when the clone was ready: once the record applied and the host asked for its
+//!   Ready;
 //! - `started`: when the clone's sandbox started;
 //! - `execution`: when the start of the host's first execution came.
 //!
@@ -32,8 +37,8 @@ use std::time::{Duration, Instant};
 
 use nvx::activation::{self, ActivationRecord, ReadyActivation};
 use nvx::guest::clone::{
-    Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput, ApplyError,
-    RootTemplate,
+    Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
+    ActivationState, ApplyError, RootTemplate,
 };
 use nvx::guest::entry::Publication;
 use nvx::protocol::status;
@@ -44,16 +49,16 @@ use super::executions::{Executions, Sandbox};
 use super::order::Order;
 use super::{RootOperations, Worked, serve_root};
 use crate::GUEST_BUILD;
-use crate::frame::{FrameError, Message};
+use crate::frame::Message;
 use crate::guest::{ServeError, Step};
 use crate::probe::{Facts, Probe};
 use crate::root::Ready;
 
 /// How long a clone's activation may take, from the repair's acknowledgement of the restore until
-/// the clone is ready: long enough for the host to connect once the restore is ready, and for the
+/// the clone is ready: long enough for the reset that the restore queued to come, and for the
 /// application of the record to wait for each block device as long as the template's default
-/// configuration allows. The application's waits end by then at the latest, and a clone that the
-/// host did not activate by then ends.
+/// configuration allows. The application's waits end by then at the latest, and a clone that is
+/// not ready by then ends.
 pub const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The probe that the worker of a clone answers with when the events of the clone's activation and
@@ -67,11 +72,10 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///
 /// - [`ACTIVATION_DEADLINE`](status::ACTIVATION_DEADLINE): the deadline passed before the clone
 ///   was ready;
-/// - [`ACTIVATION_PROTOCOL`](status::ACTIVATION_PROTOCOL): the host broke the restricted session:
-///   it reset the session again, or sent a request before the clone was ready, or an Activate of
-///   another transaction, or one that changes the accepted record;
-/// - [`ACTIVATION_RECORD`](status::ACTIVATION_RECORD): the Activate's record does not decode,
-///   breaks a limit, or is a cold boot's;
+/// - [`ACTIVATION_PROTOCOL`](status::ACTIVATION_PROTOCOL): the host sent a request other than its
+///   `Await` before the clone was ready;
+/// - [`ACTIVATION_RECORD`](status::ACTIVATION_RECORD): the restore packet carried no activation
+///   record, or its record does not decode, breaks a limit, or is a cold boot's;
 /// - [`ACTIVATION_RESOURCES`](status::ACTIVATION_RESOURCES): the record expects other resources
 ///   than the repaired clone has;
 /// - [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT): the root's assembly failed, the scratch's upper
@@ -89,18 +93,18 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///   announcer of the workload's listeners, which the network publishes, cannot start, as
 ///   [`ApplyError::Network`] tells. The worker also ends a clone whose announcer ended with it,
 ///   whether the clone was ready or not, outside the activation;
-/// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
-///   activation that did not run, or started the sandbox before the clone was ready, or again.
+/// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order accepted the record
+///   again, completed an activation that did not run, or started the sandbox before the clone was
+///   ready, or again.
 ///
 /// A cause that this build of the adapter does not know ends it with `ACTIVATION_PROTOCOL`.
 pub fn failure_status(failure: &ActivationFailure) -> u8 {
     match failure.cause() {
         ActivationCause::Expired => status::ACTIVATION_DEADLINE,
-        ActivationCause::Reset
-        | ActivationCause::Request
-        | ActivationCause::Transaction { .. }
-        | ActivationCause::Changed => status::ACTIVATION_PROTOCOL,
-        ActivationCause::Record(_) | ActivationCause::Cold => status::ACTIVATION_RECORD,
+        ActivationCause::Request => status::ACTIVATION_PROTOCOL,
+        ActivationCause::Missing | ActivationCause::Record(_) | ActivationCause::Cold => {
+            status::ACTIVATION_RECORD
+        }
         ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
         ActivationCause::Failed(error) => match error.downcast_ref::<ApplyError>() {
             Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => status::ACTIVATION_ROOT,
@@ -119,7 +123,8 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
 
 /// A clone's activation, as the worker's session drives it, with the inputs of the root's
 /// assembly that the clone's template captured, the application that awaits the activation's
-/// completion, if any, and the worker's order once the clone is ready.
+/// completion, if any, the host's `Await`s that joined it, and the worker's order once the record
+/// applied.
 pub(super) struct CloneState {
     /// The clone's activation, behind the worker's fence of workload admission.
     activation: Activation<Admission>,
@@ -128,14 +133,17 @@ pub(super) struct CloneState {
     /// The application of the accepted record, once it ran, until the worker
     /// [settles](Self::settle) the activation with its result.
     applied: Option<Applied>,
-    /// The worker's order, once the clone is ready.
+    /// The number of the host's `Await`s of the current session that joined the activation, which
+    /// its completion answers.
+    joined: usize,
+    /// The worker's order, once the record applied, which serves the host once the clone is ready.
     order: Option<Order>,
     /// When the events of the clone's activation and order happened.
     timeline: Timeline,
 }
 
-/// The application of the record of the Activate that a clone's activation accepted, which ran,
-/// and which awaits the activation's completion.
+/// The application of the record that a clone's activation accepted, which ran, and which awaits
+/// the activation's completion.
 struct Applied {
     /// Whether the application succeeded, or why it failed.
     result: Result<(), ApplyError>,
@@ -146,16 +154,12 @@ struct Applied {
     /// The publication of the listeners of every execution: that of the record's network, and
     /// unpublished without one.
     publication: Publication,
-    /// The number of retries of the Activate that joined the application, which its completion
-    /// answers too.
-    joined: usize,
 }
 
 impl CloneState {
-    /// Returns the state of the clone whose activation is `activation`, in its transport
-    /// bootstrap, whose template captured `template`, whose worker waited `repair_delay` before
-    /// the repair, if the template set a delay, and whose repair acknowledged the restore at
-    /// `acknowledged`, if it did.
+    /// Returns the state of the clone whose activation is `activation`, pending, whose template
+    /// captured `template`, whose worker waited `repair_delay` before the repair, if the template
+    /// set a delay, and whose repair acknowledged the restore at `acknowledged`, if it did.
     pub(super) fn new(
         activation: Activation<Admission>,
         template: RootTemplate,
@@ -166,6 +170,7 @@ impl CloneState {
             activation,
             template,
             applied: None,
+            joined: 0,
             order: None,
             timeline: Timeline {
                 acknowledged,
@@ -175,15 +180,37 @@ impl CloneState {
         }
     }
 
-    /// Takes the session's reset, which the connection acknowledged already: the one that the
-    /// restore queued, which ends the activation's transport bootstrap, or a later one once the
-    /// clone is ready, as when the host attaches again. Returns how the worker ends once the reset
-    /// failed the activation: another reset before the clone is ready.
-    pub(super) fn reset(&mut self) -> Option<Worked> {
+    /// Takes the session's reset, which `connection` acknowledged already: the one that the
+    /// restore queued, or a later one, as when the host attaches again, which abandons the `Await`s
+    /// of the earlier session. At the first, the worker activates the clone: it writes what the
+    /// stream takes of the acknowledgement first, since OpenVMM's broker attaches the host only
+    /// once the guest acknowledged the reset, so that the host's attachment and the application of
+    /// the record overlap, then accepts the record of the clone's restore packet, and applies it
+    /// through `operations`, as [`apply`](Self::apply) describes. Returns how the worker ends once
+    /// the activation failed: a record that the activation refuses, or a deadline that passed.
+    pub(super) fn reset<S: Read + Write + AsFd>(
+        &mut self,
+        operations: &mut dyn RootOperations,
+        connection: &mut Connection<S>,
+    ) -> Option<Worked> {
         let now = Instant::now();
         self.timeline.reset.get_or_insert(now);
-        let action = self.activation.input(now, ActivationInput::Reset);
-        action.err().map(|failure| unactivated(&failure))
+        if let Err(failure) = self.activation.input(now, ActivationInput::Reset) {
+            return Some(unactivated(&failure));
+        }
+        self.joined = 0;
+        if self.activation.state() != ActivationState::Pending {
+            return None;
+        }
+        // A failure of the stream fails the worker's next flush, once the session took what it
+        // received, so that a clone that ends before it is ready still ends with its own status.
+        let _ = connection.flush();
+        let record = match self.activation.accept(Instant::now()) {
+            Ok(record) => record,
+            Err(failure) => return Some(unactivated(&failure)),
+        };
+        self.apply(operations, &record);
+        None
     }
 
     /// Returns when the activation fails unless the clone is ready, if it is not.
@@ -191,10 +218,10 @@ impl CloneState {
         self.activation.deadline()
     }
 
-    /// Returns whether the clone is ready: whether the activation completed, which gave the worker
-    /// its order.
+    /// Returns whether the clone is ready: whether the record applied, which gave the worker its
+    /// order, and the host asked for Ready.
     pub(super) fn is_ready(&self) -> bool {
-        self.order.is_some()
+        self.activation.established().is_some()
     }
 
     /// Returns how the worker ends once the activation's deadline passed before the clone was
@@ -204,39 +231,17 @@ impl CloneState {
         ticked.err().map(|failure| unactivated(&failure))
     }
 
-    /// Returns how the worker ends once the session's receipt failed with `error`, if the
-    /// activation takes the failure: an `Activate` whose header announced more than
-    /// [`MAX_ACTIVATE_BODY`](crate::frame::MAX_ACTIVATE_BODY) bytes, the most that a record has,
-    /// which the framing refused before it took any byte of its body. The activation takes it as
-    /// an `Activate` whose record has that many bytes, which fails it, with
-    /// [`ACTIVATION_RECORD`](status::ACTIVATION_RECORD) once the session is restricted, whether
-    /// the clone is ready or not. Any other failure ends the session as it ends that of a VM that
-    /// boots cold.
-    pub(super) fn refused(&mut self, error: &ServeError) -> Option<Worked> {
-        let ServeError::Frame(FrameError::Length { kind, length }) = *error else {
-            return None;
-        };
-        if kind != Message::Activate(Vec::new()).kind() {
-            return None;
-        }
-        let input = ActivationInput::TooLong(length);
-        let failure = self.activation.input(Instant::now(), input).err()?;
-        Some(unactivated(&failure))
-    }
-
     /// Handles `message` at `now` through the activation, and, once the clone is ready, in the
     /// worker's order, through `operations`, with `executions`, which queue what they answer on
     /// `connection`, as [`serve_root`] does once the root of a VM that boots cold is ready.
     ///
-    /// Before the clone is ready, the activation takes an `Activate`, whose record it hands back
-    /// once it accepted it, and which the worker applies then, through `operations`, and keeps the
-    /// result of until it [settles](Self::settle) the activation. Until then, the activation takes
-    /// what the session received meanwhile, as while it activates: a retry of the same
-    /// `Activate`, byte for byte, joins the application, and any other message fails the
-    /// activation. The worker answers an `Activate` that the activation completed, and each retry
-    /// that joined its application, with `Ready`, which reports the activation, as it answers a
-    /// retry once the clone is ready, and the [`ACTIVATION_PROBE`] itself. Once the activation
-    /// failed, the worker drops its executions, and ends.
+    /// While the record applies, the activation takes the host's `Await`, which joins it, and
+    /// which its completion answers with `Ready`, once the worker [settles](Self::settle) it. Once
+    /// the record applied, the worker answers an `Await` with `Ready` at once, the first of which
+    /// makes the clone ready, and it answers the [`ACTIVATION_PROBE`] itself once the clone is
+    /// ready, and serves every other message in its order. Before the clone is ready, any other
+    /// message fails the activation. Once the activation failed, the worker drops its executions,
+    /// and ends.
     pub(super) fn handle<S: Read + Write + AsFd>(
         &mut self,
         operations: &mut dyn RootOperations,
@@ -247,7 +252,7 @@ impl CloneState {
     ) -> Result<Step<Worked>, ServeError> {
         self.timeline.message.get_or_insert(now);
         let input = match &message {
-            Message::Activate(record) => ActivationInput::Activate(record),
+            Message::Await => ActivationInput::Await,
             _ => ActivationInput::Request,
         };
         let action = match self.activation.input(now, input) {
@@ -255,17 +260,14 @@ impl CloneState {
             Err(failure) => return Ok(self.end(executions, &failure)),
         };
         Ok(match action {
-            ActivationAction::Apply(record) => {
-                self.apply(operations, &record);
-                Step::Continue(Vec::new())
-            }
             ActivationAction::Join => {
-                if let Some(applied) = &mut self.applied {
-                    applied.joined += 1;
-                }
+                self.joined += 1;
                 Step::Continue(Vec::new())
             }
-            ActivationAction::Ready(activation) => Step::Continue(vec![ready(activation)]),
+            ActivationAction::Ready(activation) => {
+                self.timeline.ready.get_or_insert(now);
+                Step::Continue(vec![ready(activation)])
+            }
             ActivationAction::Serve => {
                 if let Some(answer) = self.timeline.answer(&message) {
                     return Ok(Step::Continue(vec![answer]));
@@ -293,7 +295,7 @@ impl CloneState {
         })
     }
 
-    /// Applies `record`, the record of the Activate that the activation accepted, through
+    /// Applies `record`, the record of the restore packet that the activation accepted, through
     /// `operations`, with the template's inputs, by the activation's deadline, and keeps the
     /// application's result, with the record's hostname, its publication of listeners, and the
     /// number of its mappings, until the worker [settles](Self::settle) the activation with it.
@@ -320,17 +322,17 @@ impl CloneState {
             mappings,
             hostname: configuration.workload.hostname.clone(),
             publication,
-            joined: 0,
         });
     }
 
     /// Completes the activation with the result of the application that ran, if any, once the
     /// worker took what the session received while it ran, which comes before `Ready`, and
-    /// returns the worker's step: `Ready`, which reports the activation, for the `Activate` and
-    /// for each retry that joined its application, once the clone is ready, after which
-    /// `executions` run in the cgroups that the template's bootstrap prepared, each as the identity
-    /// that it names, with the record's hostname and publication of listeners, and the worker's
-    /// order awaits the record's mappings; or the end, once the activation failed.
+    /// returns the worker's step: `Ready`, which reports the activation, for each `Await` of the
+    /// current session that joined it, which made the clone ready, and nothing without one, until
+    /// the host's next `Await`, once the record applied, after which `executions` run in the
+    /// cgroups that the template's bootstrap prepared, each as the identity that it names, with
+    /// the record's hostname and publication of listeners, and the worker's order awaits the
+    /// record's mappings; or the end, once the activation failed.
     pub(super) fn settle(
         &mut self,
         operations: &mut dyn RootOperations,
@@ -340,14 +342,18 @@ impl CloneState {
         let result = applied.result.map_err(Into::into);
         Some(match self.activation.complete(Instant::now(), result) {
             Ok(activation) => {
-                self.timeline.ready = Some(Instant::now());
+                let now = Instant::now();
+                self.timeline.applied = Some(now);
+                if self.activation.established().is_some() {
+                    self.timeline.ready = Some(now);
+                }
                 // A clone has no workload identity of the whole sandbox: each execution names
                 // its own.
                 let sandbox =
                     Sandbox::new(None, applied.publication).with_hostname(applied.hostname);
                 executions.run_in(operations.cgroups(), sandbox);
                 self.order = Some(Order::new(applied.mappings));
-                Step::Continue(vec![ready(activation); 1 + applied.joined])
+                Step::Continue(vec![ready(activation); std::mem::take(&mut self.joined)])
             }
             Err(failure) => self.end(executions, &failure),
         })
@@ -380,6 +386,8 @@ struct Timeline {
     reset: Option<Instant>,
     /// When the host's first message came.
     message: Option<Instant>,
+    /// When the application of the record completed.
+    applied: Option<Instant>,
     /// When the clone was ready.
     ready: Option<Instant>,
     /// When the clone's sandbox started.
@@ -423,6 +431,7 @@ impl Timeline {
         let events = [
             ("reset", self.reset),
             ("message", self.message),
+            ("applied", self.applied),
             ("ready", self.ready),
             ("started", self.started),
             ("execution", self.execution),

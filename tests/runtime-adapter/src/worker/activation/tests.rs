@@ -52,32 +52,32 @@ fn record(transaction: u8, uid: u32) -> ActivationRecord {
     ActivationRecord::new(Some(restore), configuration).unwrap()
 }
 
-/// Returns a clone's activation, in its transport bootstrap, behind a closed fence, with
-/// `resources`, which the deadline ends `timeout` after now.
-fn activation(resources: ExpectedResources, timeout: Duration) -> Activation<Admission> {
+/// Returns a clone's activation, pending, behind a closed fence, with `resources`, whose restore
+/// packet carried `record`, if it carried one, which the deadline ends `timeout` after now.
+fn activation(
+    resources: ExpectedResources,
+    record: Option<&[u8]>,
+    timeout: Duration,
+) -> Activation<Admission> {
     let mut fence = Admission::default();
     fence.close().unwrap();
     let now = Instant::now();
-    Activation::with_resources(resources, Some(now), fence, timeout, now)
+    Activation::with_resources(resources, record, Some(now), fence, timeout, now)
 }
 
-/// Returns an activation that took the session's reset, and is restricted.
-fn restricted() -> Activation<Admission> {
-    let mut activation = activation(RESOURCES, ACTIVATION_TIMEOUT);
+/// Returns a pending activation whose restore packet carried the record of the transaction 1.
+fn pending() -> Activation<Admission> {
+    let bytes = record(1, 1000).encode();
+    activation(RESOURCES, Some(&bytes), ACTIVATION_TIMEOUT)
+}
+
+/// Returns an activation that took the session's reset, and accepted the record of the
+/// transaction 1 from its restore packet.
+fn activating() -> Activation<Admission> {
+    let mut activation = pending();
     let action = activation.input(Instant::now(), ActivationInput::Reset);
     assert_eq!(action.unwrap(), ActivationAction::Acknowledge);
-    activation
-}
-
-/// Returns an activation that accepted the record of the transaction 1.
-fn activating() -> Activation<Admission> {
-    let mut activation = restricted();
-    let bytes = record(1, 1000).encode();
-    let action = activation.input(Instant::now(), ActivationInput::Activate(&bytes));
-    assert!(
-        matches!(action, Ok(ActivationAction::Apply(_))),
-        "{action:?}"
-    );
+    activation.accept(Instant::now()).unwrap();
     activation
 }
 
@@ -93,46 +93,36 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     let mut cases = Vec::new();
 
     // The deadline.
-    let mut expired = activation(RESOURCES, Duration::ZERO);
+    let mut expired = activation(RESOURCES, Some(&bytes), Duration::ZERO);
     cases.push((failed(expired.tick(now())), status::ACTIVATION_DEADLINE));
-    // The host's session: another reset, a request, another transaction, a changed record.
-    let mut reset = restricted();
-    let failure = failed(reset.input(now(), ActivationInput::Reset));
-    cases.push((failure, status::ACTIVATION_PROTOCOL));
-    let mut request = restricted();
+    // The host's session: a request before the clone is ready, before the activation accepted
+    // the record, or while it applies it.
+    let mut request = pending();
     let failure = failed(request.input(now(), ActivationInput::Request));
+    assert!(matches!(failure.cause(), ActivationCause::Request));
     cases.push((failure, status::ACTIVATION_PROTOCOL));
-    let early = activation(RESOURCES, ACTIVATION_TIMEOUT).input(now(), ActivationInput::Request);
-    cases.push((failed(early), status::ACTIVATION_PROTOCOL));
-    let other = record(2, 1000).encode();
-    let failure = failed(activating().input(now(), ActivationInput::Activate(&other)));
-    assert!(matches!(
-        failure.cause(),
-        ActivationCause::Transaction { .. }
-    ));
+    let failure = failed(activating().input(now(), ActivationInput::Request));
     cases.push((failure, status::ACTIVATION_PROTOCOL));
-    let changed = record(1, 1001).encode();
-    let failure = failed(activating().input(now(), ActivationInput::Activate(&changed)));
-    assert!(matches!(failure.cause(), ActivationCause::Changed));
-    cases.push((failure, status::ACTIVATION_PROTOCOL));
-    // The record: one that does not decode, and a cold boot's.
-    let failure = failed(restricted().input(now(), ActivationInput::Activate(b"\x01")));
+    // The record: none in the restore packet, one that does not decode, and a cold boot's.
+    let failure = failed(activation(RESOURCES, None, ACTIVATION_TIMEOUT).accept(now()));
+    assert!(matches!(failure.cause(), ActivationCause::Missing));
+    cases.push((failure, status::ACTIVATION_RECORD));
+    let mut undecodable = activation(RESOURCES, Some(b"\x01"), ACTIVATION_TIMEOUT);
+    let failure = failed(undecodable.accept(now()));
+    assert!(matches!(failure.cause(), ActivationCause::Record(_)));
     cases.push((failure, status::ACTIVATION_RECORD));
     let cold = ActivationRecord::new(None, record(1, 1000).configuration().clone()).unwrap();
     let cold = cold.encode();
-    let failure = failed(restricted().input(now(), ActivationInput::Activate(&cold)));
+    let failure = failed(activation(RESOURCES, Some(&cold), ACTIVATION_TIMEOUT).accept(now()));
     assert!(matches!(failure.cause(), ActivationCause::Cold));
     cases.push((failure, status::ACTIVATION_RECORD));
     // The resources.
-    let mut more = activation(
-        ExpectedResources {
-            cpus: 4,
-            ..RESOURCES
-        },
-        ACTIVATION_TIMEOUT,
-    );
-    more.input(now(), ActivationInput::Reset).unwrap();
-    let failure = failed(more.input(now(), ActivationInput::Activate(&bytes)));
+    let more = ExpectedResources {
+        cpus: 4,
+        ..RESOURCES
+    };
+    let failure = failed(activation(more, Some(&bytes), ACTIVATION_TIMEOUT).accept(now()));
+    assert!(matches!(failure.cause(), ActivationCause::Resources { .. }));
     cases.push((failure, status::ACTIVATION_RESOURCES));
     // The application: of the root, of the workload, of the export, of the network, and any
     // other.
@@ -205,11 +195,15 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     }
     let other = activating().complete(now(), Err("another failure of the application".into()));
     cases.push((failed(other), status::ACTIVATION_ROOT));
-    // The worker's own order.
-    let failure = failed(restricted().complete(now(), Ok(())));
+    // The worker's own order: a second acceptance, a completion without an application, and a
+    // start before the clone is ready.
+    let failure = failed(activating().accept(now()));
     assert!(matches!(failure.cause(), ActivationCause::Completion));
     cases.push((failure, status::ACTIVATION_ORDER));
-    let failure = failed(restricted().start());
+    let failure = failed(pending().complete(now(), Ok(())));
+    assert!(matches!(failure.cause(), ActivationCause::Completion));
+    cases.push((failure, status::ACTIVATION_ORDER));
+    let failure = failed(activating().start());
     assert!(matches!(failure.cause(), ActivationCause::Start));
     cases.push((failure, status::ACTIVATION_ORDER));
 
@@ -261,6 +255,7 @@ fn the_activation_probe_reports_the_clone_s_events_after_the_acknowledgement() {
         repair_delay: None,
         reset: Some(after(10)),
         message: Some(after(250)),
+        applied: Some(after(3_900)),
         ready: Some(after(4_000)),
         started: Some(after(4_100)),
         execution: None,
@@ -271,6 +266,7 @@ fn the_activation_probe_reports_the_clone_s_events_after_the_acknowledgement() {
         ("repair-delay", "none"),
         ("reset", "10"),
         ("message", "250"),
+        ("applied", "3900"),
         ("ready", "4000"),
         ("started", "4100"),
         ("execution", "none"),

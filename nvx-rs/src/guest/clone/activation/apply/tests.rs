@@ -4,9 +4,9 @@
 //! leaves alone, and which generates no machine ID, writes no resolver file, starts
 //! no announcer, and mounts, binds, and unmounts nothing; and, with the clone's activation,
 //! through an adapter of
-//! the tests' own, which takes what the host sends, applies the record of the Activate that the
-//! activation accepted through the fake system, and spawns an execution for each request that
-//! the activation serves.
+//! the tests' own, which applies the record of the restore packet that the activation accepted
+//! through the fake system, takes what the host sends, and spawns an execution for each request
+//! that the activation serves.
 //!
 //! One test runs the live system's generation of a machine ID, its write of a resolver file, and
 //! their binds with the kernel itself, over a tmpfs that stands for the root, which needs the
@@ -52,9 +52,9 @@ const CPUS: u32 = 2;
 const MEMORY: u64 = 8 << 27;
 /// How long the tests' activation may take after the restore's acknowledgement.
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// The transaction of the tests' Activate.
+/// The transaction of the tests' restore.
 const TRANSACTION: TransactionId = TransactionId::from_bytes([0x22; TransactionId::LEN]);
-/// The UUID that the record of the tests' Activate expects of its EROFS image.
+/// The UUID that the record of the tests' restore packet expects of its EROFS image.
 const IMAGE_UUID: Uuid = Uuid::from_bytes([0x5a; 16]);
 /// The GUID that a record of the tests expects of its GPT disk.
 const DISK_GUID: Uuid = Uuid::from_bytes([0xd1; 16]);
@@ -416,10 +416,11 @@ impl AdmissionFence for FakeFence {
     }
 }
 
-/// A clone's adapter in the tests, which takes what the host sends, as its session receives it,
-/// through the clone's activation, behind a fake fence: it applies the record of the Activate that
-/// the activation accepted through a fake system, with the tests' template, reports the result,
-/// and spawns an execution for each request that the activation serves, once the fence is open.
+/// A clone's adapter in the tests, which activates the clone with the record of its restore packet
+/// and takes what the host sends, as its session receives it, through the clone's activation,
+/// behind a fake fence: it applies the record that the activation accepted through a fake system,
+/// with the tests' template, reports the result, and spawns an execution for each request that
+/// the activation serves, once the fence is open.
 struct Adapter {
     /// The clone's activation.
     activation: Activation<FakeFence>,
@@ -436,9 +437,10 @@ struct Adapter {
 }
 
 impl Adapter {
-    /// Returns the adapter of a clone, in its transport bootstrap, which applies records through
-    /// `system`, and whose repair acknowledged its restore at `acknowledged`.
-    fn new(system: FakeSystem, acknowledged: Instant) -> Self {
+    /// Returns the adapter of a clone, pending, whose restore packet carried `record`, if any,
+    /// which it applies through `system`, and whose repair acknowledged its restore at
+    /// `acknowledged`.
+    fn new(system: FakeSystem, record: Option<&[u8]>, acknowledged: Instant) -> Self {
         let fence = FakeFence::default();
         let resources = ExpectedResources {
             cpus: CPUS,
@@ -446,6 +448,7 @@ impl Adapter {
         };
         let activation = Activation::with_resources(
             resources,
+            record,
             Some(acknowledged),
             fence.clone(),
             TIMEOUT,
@@ -460,32 +463,30 @@ impl Adapter {
         }
     }
 
-    /// Returns the adapter of [`new`](Self::new) once the session's reset at `at` restricted its
-    /// activation.
-    fn restricted(system: FakeSystem, at: Instant) -> Self {
-        let mut adapter = Self::new(system, at);
-        adapter.take(at, ActivationInput::Reset).unwrap();
-        assert_eq!(adapter.activation.state(), ActivationState::Restricted);
-        adapter
+    /// Activates the clone at `now`, as an adapter does: accepts the record of its restore
+    /// packet, takes the host's request for Ready, which joins the activation, applies the record,
+    /// and reports the result, whose Ready it keeps, or returns the activation's failure.
+    fn activate(&mut self, now: Instant) -> Result<(), ActivationFailure> {
+        let record = self.activation.accept(now)?;
+        self.take(now, ActivationInput::Await)?;
+        let deadline = self.activation.deadline();
+        let applied = apply_with(&mut self.system, &record, &template(), deadline);
+        let result = match applied {
+            Ok(applied) => {
+                self.applied = Some(applied);
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        };
+        self.ready = Some(self.activation.complete(now, result)?);
+        Ok(())
     }
 
     /// Takes `input`, which the session received at `now`, as an adapter does, or returns the
     /// activation's failure.
-    fn take(&mut self, now: Instant, input: ActivationInput<'_>) -> Result<(), ActivationFailure> {
+    fn take(&mut self, now: Instant, input: ActivationInput) -> Result<(), ActivationFailure> {
         match self.activation.input(now, input)? {
             ActivationAction::Acknowledge | ActivationAction::Continue | ActivationAction::Join => {
-            }
-            ActivationAction::Apply(record) => {
-                let deadline = self.activation.deadline();
-                let applied = apply_with(&mut self.system, &record, &template(), deadline);
-                let result = match applied {
-                    Ok(applied) => {
-                        self.applied = Some(applied);
-                        Ok(())
-                    }
-                    Err(error) => Err(error.into()),
-                };
-                self.ready = Some(self.activation.complete(now, result)?);
             }
             ActivationAction::Ready(ready) => self.ready = Some(ready),
             ActivationAction::Serve => {
@@ -610,7 +611,7 @@ fn clone_record(configuration: Configuration) -> ActivationRecord {
     ActivationRecord::new(Some(restore), configuration).unwrap()
 }
 
-/// Returns the record of the tests' Activate: an EROFS image, whose UUID it expects, over a
+/// Returns the record of the tests' restore packet: an EROFS image, whose UUID it expects, over a
 /// tmpfs, with untrusted lowers, which names the tests' workload identity.
 fn accepted() -> ActivationRecord {
     clone_record(configuration(
@@ -621,9 +622,9 @@ fn accepted() -> ActivationRecord {
     ))
 }
 
-/// Returns the assembly of the root of the tests' Activate: its EROFS image, with the UUID that
-/// the record expects of it, over a tmpfs, with untrusted lowers, with the template's runtime
-/// directory, devices, and timeout.
+/// Returns the assembly of the root of the tests' restore packet's record: its EROFS image, with
+/// the UUID that the record expects of it, over a tmpfs, with untrusted lowers, with the template's
+/// runtime directory, devices, and timeout.
 fn accepted_assembly() -> Assembly {
     let template = template();
     Assembly {
@@ -638,8 +639,8 @@ fn accepted_assembly() -> Assembly {
     }
 }
 
-/// Returns the record of the tests' Activate, as [`accepted`] returns it, but whose workload sees
-/// a machine ID that the guest generates.
+/// Returns the record of the tests' restore packet, as [`accepted`] returns it, but whose workload
+/// sees a machine ID that the guest generates.
 fn with_generated_id() -> ActivationRecord {
     let mut configuration = accepted().configuration().clone();
     configuration.workload.machine_id = MachineIdMode::Generated;
@@ -673,8 +674,8 @@ fn unpublished(dns: Option<IpAddr>, proxy: Option<&str>) -> Network {
     }
 }
 
-/// Returns the record of the tests' Activate, as [`with_generated_id`] returns it, but with an
-/// aggregate export, of three mappings, and a network that names [`DNS`] and [`PROXY`], and
+/// Returns the record of the tests' restore packet, as [`with_generated_id`] returns it, but with
+/// an aggregate export, of three mappings, and a network that names [`DNS`] and [`PROXY`], and
 /// publishes the workload's listeners.
 fn with_everything() -> ActivationRecord {
     let mut configuration = with_generated_id().configuration().clone();
@@ -783,50 +784,38 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     })
     .encode();
 
-    // Before the session's reset, the host can send nothing.
-    let mut adapter = Adapter::new(FakeSystem::new(), base);
+    // Before the clone is ready, the host can send nothing but its request for Ready, and resets.
+    let mut adapter = Adapter::new(FakeSystem::new(), Some(&record), base);
     adapter.take(base, ActivationInput::Flow).unwrap();
-    let failure = adapter
-        .take(base, ActivationInput::Activate(&record))
-        .unwrap_err();
-    adapter.assert_untouched(&failure, |cause| matches!(cause, ActivationCause::Request));
-    let mut adapter = Adapter::new(FakeSystem::new(), base);
+    adapter.take(base, ActivationInput::Reset).unwrap();
+    adapter.take(base, ActivationInput::Await).unwrap();
     let failure = adapter.take(base, ActivationInput::Request).unwrap_err();
     adapter.assert_untouched(&failure, |cause| matches!(cause, ActivationCause::Request));
 
-    // Once the session is restricted, a request or another reset fails, and so does an Activate
-    // whose record does not decode, is a cold boot's, or expects other resources.
-    let refused: [(ActivationInput<'_>, Expected); 5] = [
-        (ActivationInput::Request, |cause| {
-            matches!(cause, ActivationCause::Request)
+    // A restore packet without a record fails the activation, and so does a record that does not
+    // decode, is a cold boot's, or expects other resources.
+    let truncated = &record[..record.len() - 1];
+    let refused: [(Option<&[u8]>, Expected); 4] = [
+        (None, |cause| matches!(cause, ActivationCause::Missing)),
+        (Some(truncated), |cause| {
+            matches!(cause, ActivationCause::Record(_))
         }),
-        (ActivationInput::Reset, |cause| {
-            matches!(cause, ActivationCause::Reset)
-        }),
-        (
-            ActivationInput::Activate(&record[..record.len() - 1]),
-            |cause| matches!(cause, ActivationCause::Record(_)),
-        ),
-        (ActivationInput::Activate(&cold), |cause| {
-            matches!(cause, ActivationCause::Cold)
-        }),
-        (ActivationInput::Activate(&larger), |cause| {
+        (Some(&cold), |cause| matches!(cause, ActivationCause::Cold)),
+        (Some(&larger), |cause| {
             matches!(cause, ActivationCause::Resources { .. })
         }),
     ];
-    for (input, expected) in refused {
-        let mut adapter = Adapter::restricted(FakeSystem::new(), base);
-        adapter.take(base, ActivationInput::Flow).unwrap();
-        let failure = adapter.take(base, input).unwrap_err();
+    for (packet, expected) in refused {
+        let mut adapter = Adapter::new(FakeSystem::new(), packet, base);
+        adapter.take(base, ActivationInput::Reset).unwrap();
+        let failure = adapter.activate(base).unwrap_err();
         adapter.assert_untouched(&failure, expected);
     }
 
     // A GPT disk, which the activation accepted, whose partition table the kernel refuses to
     // reread, fails the application before anything is mounted: the reread is its one call.
-    let mut adapter = Adapter::restricted(FakeSystem::refusing(Errno::EBUSY), base);
-    let failure = adapter
-        .take(base, ActivationInput::Activate(&disk))
-        .unwrap_err();
+    let mut adapter = Adapter::new(FakeSystem::refusing(Errno::EBUSY), Some(&disk), base);
+    let failure = adapter.activate(base).unwrap_err();
     assert!(
         matches!(
             apply_error(&failure),
@@ -844,22 +833,18 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
     assert_eq!(adapter.ready, None);
     assert!(!adapter.fence.is_open());
 
-    // Past the deadline, even a valid Activate does nothing.
-    let mut adapter = Adapter::restricted(FakeSystem::new(), base);
-    let failure = adapter
-        .take(base + TIMEOUT, ActivationInput::Activate(&record))
-        .unwrap_err();
+    // Past the deadline, even a valid record does nothing.
+    let mut adapter = Adapter::new(FakeSystem::new(), Some(&record), base);
+    let failure = adapter.activate(base + TIMEOUT).unwrap_err();
     adapter.assert_untouched(&failure, |cause| matches!(cause, ActivationCause::Expired));
 
-    // Only a valid Activate mounts the root, generates the machine ID, mounts the export, writes
+    // Only a valid record mounts the root, generates the machine ID, mounts the export, writes
     // the resolver file, starts the announcer, and binds the runtime's files, before Ready, and
     // an execution spawns only once Ready opened the fence.
-    let mut adapter = Adapter::restricted(FakeSystem::new(), base);
+    let mut adapter = Adapter::new(FakeSystem::new(), Some(&record), base);
     adapter.take(base, ActivationInput::Flow).unwrap();
     assert!(adapter.system.effects.is_empty());
-    adapter
-        .take(base, ActivationInput::Activate(&record))
-        .unwrap();
+    adapter.activate(base).unwrap();
     assert_eq!(adapter.system.effects, applied_everything());
     assert!(adapter.fence.is_open());
     adapter.take(base, ActivationInput::Request).unwrap();
@@ -867,13 +852,11 @@ fn no_mount_spawn_or_id_generation_happens_before_the_gate() {
 }
 
 #[test]
-fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
+fn a_valid_record_activates_the_root_and_the_workload_once_before_ready() {
     let base = Instant::now();
     let record = accepted().encode();
-    let mut adapter = Adapter::restricted(FakeSystem::new(), base);
-    adapter
-        .take(base, ActivationInput::Activate(&record))
-        .unwrap();
+    let mut adapter = Adapter::new(FakeSystem::new(), Some(&record), base);
+    adapter.activate(base).unwrap();
     // The application assembled the root with the record's settings, before Ready, which reports
     // that the activation applied, with the record's transaction.
     assert_eq!(adapter.activation.state(), ActivationState::Ready);
@@ -889,14 +872,12 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
     );
     assert!(adapter.fence.is_open());
 
-    // A later session, and a retry of the Activate in it, get the established activation
+    // A later session, and the host's request for Ready in it, get the established activation
     // without applying the record again; requests spawn executions.
     adapter.take(base, ActivationInput::Request).unwrap();
     adapter.take(base, ActivationInput::Reset).unwrap();
     adapter.ready = None;
-    adapter
-        .take(base, ActivationInput::Activate(&record))
-        .unwrap();
+    adapter.take(base, ActivationInput::Await).unwrap();
     assert_eq!(adapter.ready, Some(ReadyActivation::of(&accepted())));
     adapter.take(base, ActivationInput::Request).unwrap();
     assert_eq!(
@@ -1034,10 +1015,9 @@ fn a_gpt_disk_s_partition_table_is_reread_before_its_root_is_assembled() {
         activation::OverlayMode::UntrustedLowers,
         Some(WORKLOAD),
     ));
-    let mut adapter = Adapter::restricted(FakeSystem::new(), base);
-    adapter
-        .take(base, ActivationInput::Activate(&record.encode()))
-        .unwrap();
+    let encoded = record.encode();
+    let mut adapter = Adapter::new(FakeSystem::new(), Some(&encoded), base);
+    adapter.activate(base).unwrap();
     let template = template();
     let assembly = Assembly {
         runtime: template.runtime.clone(),
@@ -1088,10 +1068,8 @@ fn the_application_checks_no_account_of_the_record_s_workload_identity() {
         without_passwd,
     ];
     for system in systems {
-        let mut adapter = Adapter::restricted(system, base);
-        adapter
-            .take(base, ActivationInput::Activate(&record))
-            .unwrap();
+        let mut adapter = Adapter::new(system, Some(&record), base);
+        adapter.activate(base).unwrap();
         assert_eq!(adapter.activation.state(), ActivationState::Ready);
         assert_eq!(adapter.ready, Some(ReadyActivation::of(&accepted())));
         assert_eq!(
@@ -1113,10 +1091,8 @@ fn the_application_checks_no_account_of_the_record_s_workload_identity() {
 fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
     let base = Instant::now();
     let record = accepted().encode();
-    let mut adapter = Adapter::restricted(FakeSystem::failing(), base);
-    let failure = adapter
-        .take(base, ActivationInput::Activate(&record))
-        .unwrap_err();
+    let mut adapter = Adapter::new(FakeSystem::failing(), Some(&record), base);
+    let failure = adapter.activate(base).unwrap_err();
     let ApplyError::Assembly(error) = apply_error(&failure) else {
         panic!("{failure}");
     };
@@ -1132,11 +1108,9 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
     assert_eq!(adapter.applied, None);
     assert_eq!(adapter.ready, None);
     assert!(!adapter.fence.is_open());
-    assert!(
-        adapter
-            .take(base, ActivationInput::Activate(&record))
-            .is_err()
-    );
+    // Neither another acceptance nor a request for Ready applies the record again.
+    assert!(adapter.activate(base).is_err());
+    assert!(adapter.take(base, ActivationInput::Await).is_err());
     assert_eq!(adapter.system.effects.len(), 1);
 }
 
@@ -1148,10 +1122,8 @@ fn a_generated_machine_id_is_generated_once_after_the_gate_for_every_execution()
     let base = Instant::now();
     let record = with_generated_id();
     let bytes = record.encode();
-    let mut adapter = Adapter::restricted(FakeSystem::new(), base);
-    adapter
-        .take(base, ActivationInput::Activate(&bytes))
-        .unwrap();
+    let mut adapter = Adapter::new(FakeSystem::new(), Some(&bytes), base);
+    adapter.activate(base).unwrap();
     let expected = [
         Effect::Assemble(accepted_assembly()),
         Effect::Generate(machine_id_path()),
@@ -1165,17 +1137,13 @@ fn a_generated_machine_id_is_generated_once_after_the_gate_for_every_execution()
     assert_eq!(adapter.ready, Some(ReadyActivation::of(&record)));
     assert_eq!(machine_id_path(), Path::new("/run/nvx/workload-machine-id"));
 
-    // Every execution, a retry of the Activate, and a retry in a later session reuse it: nothing
-    // generates or binds it again.
+    // Every execution, the host's request for Ready, and its request in a later session reuse it:
+    // nothing generates or binds it again.
     adapter.take(base, ActivationInput::Request).unwrap();
-    adapter
-        .take(base, ActivationInput::Activate(&bytes))
-        .unwrap();
+    adapter.take(base, ActivationInput::Await).unwrap();
     adapter.take(base, ActivationInput::Reset).unwrap();
     adapter.ready = None;
-    adapter
-        .take(base, ActivationInput::Activate(&bytes))
-        .unwrap();
+    adapter.take(base, ActivationInput::Await).unwrap();
     assert_eq!(adapter.ready, Some(ReadyActivation::of(&record)));
     adapter.take(base, ActivationInput::Request).unwrap();
     assert_eq!(adapter.system.generated(), 1);
@@ -1248,10 +1216,8 @@ fn a_machine_id_or_a_view_that_fails_fails_the_activation_once_the_root_is_torn_
         ),
     ];
     for (system, effects) in cases {
-        let mut adapter = Adapter::restricted(system, base);
-        let failure = adapter
-            .take(base, ActivationInput::Activate(&bytes))
-            .unwrap_err();
+        let mut adapter = Adapter::new(system, Some(&bytes), base);
+        let failure = adapter.activate(base).unwrap_err();
         assert_eq!(failure.state(), ActivationState::Activating);
         match apply_error(&failure) {
             ApplyError::MachineId {
@@ -1273,12 +1239,9 @@ fn a_machine_id_or_a_view_that_fails_fails_the_activation_once_the_root_is_torn_
         assert_eq!(adapter.applied, None);
         assert_eq!(adapter.ready, None);
         assert!(!adapter.fence.is_open());
-        // The failure is final: no retry applies the record again.
-        assert!(
-            adapter
-                .take(base, ActivationInput::Activate(&bytes))
-                .is_err()
-        );
+        // The failure is final: nothing applies the record again.
+        assert!(adapter.activate(base).is_err());
+        assert!(adapter.take(base, ActivationInput::Await).is_err());
         assert_eq!(adapter.system.effects, expected);
     }
 }
@@ -1345,10 +1308,8 @@ fn an_export_is_mounted_through_the_template_s_device_and_handed_to_the_adapter(
         configuration.export = Some(export(kind));
         configuration.mappings = 2;
         let record = clone_record(configuration).encode();
-        let mut adapter = Adapter::restricted(FakeSystem::new(), base);
-        adapter
-            .take(base, ActivationInput::Activate(&record))
-            .unwrap();
+        let mut adapter = Adapter::new(FakeSystem::new(), Some(&record), base);
+        adapter.activate(base).unwrap();
         let expected = [
             Effect::Assemble(accepted_assembly()),
             Effect::MountExport(TAG.to_owned(), Access::ReadWrite),
@@ -1362,10 +1323,8 @@ fn an_export_is_mounted_through_the_template_s_device_and_handed_to_the_adapter(
                 ..activated(&adapter.system, MachineId::Image)
             })
         );
-        // A retry and an execution mount nothing again.
-        adapter
-            .take(base, ActivationInput::Activate(&record))
-            .unwrap();
+        // A request for Ready and an execution mount nothing again.
+        adapter.take(base, ActivationInput::Await).unwrap();
         adapter.take(base, ActivationInput::Request).unwrap();
         assert_eq!(adapter.system.effects[expected.len()..], [Effect::Spawn]);
     }
@@ -1583,10 +1542,8 @@ fn an_export_or_a_network_that_fails_fails_the_activation_once_the_root_is_torn_
         ),
     ];
     for (system, effects, expected) in cases {
-        let mut adapter = Adapter::restricted(system, base);
-        let failure = adapter
-            .take(base, ActivationInput::Activate(&bytes))
-            .unwrap_err();
+        let mut adapter = Adapter::new(system, Some(&bytes), base);
+        let failure = adapter.activate(base).unwrap_err();
         let error = apply_error(&failure);
         assert!(expected(error), "{error}");
         assert_eq!(adapter.system.effects, effects, "{error}");
@@ -1976,13 +1933,9 @@ fn application_errors_name_their_cause() {
     // The adapter hands the error to the activation, whose failure names it.
     let base = Instant::now();
     let generating = FakeSystem::generating(io::ErrorKind::AlreadyExists);
-    let mut adapter = Adapter::restricted(generating, base);
-    let failure = adapter
-        .take(
-            base,
-            ActivationInput::Activate(&with_generated_id().encode()),
-        )
-        .unwrap_err();
+    let record = with_generated_id().encode();
+    let mut adapter = Adapter::new(generating, Some(&record), base);
+    let failure = adapter.activate(base).unwrap_err();
     assert_eq!(
         failure.to_string(),
         format!(

@@ -663,7 +663,8 @@ impl Restore {
     /// Returns the activation record that the restore packet ends with: the bytes, 1 to
     /// [`MAX_RECORD_BYTES`](crate::activation::MAX_RECORD_BYTES) of them, that the host handed a
     /// platform clone with its restore, which the time ABI does not decode, or `None` for a
-    /// restore that handed over none. A clone decodes them with
+    /// restore that handed over none. A clone's repair hands them to the repaired clone, whose
+    /// activation decodes them with
     /// [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode).
     pub fn activation_record(&self) -> Option<&[u8]> {
         self.activation.as_deref()

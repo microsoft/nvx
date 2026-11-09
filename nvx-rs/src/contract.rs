@@ -44,8 +44,9 @@
 //! Each of these four must match the pinned OpenVMM's, which the ignored test
 //! `tests/openvmm_vectors.rs` checks in the jobs that check out the OpenVMM submodule. The key
 //! also holds the version of the activation contract,
-//! [`activation::VERSION`](crate::activation::VERSION), through which each clone receives the
-//! settings of its own launch.
+//! [`activation::CONTRACT_VERSION`](crate::activation::CONTRACT_VERSION): the schema of the
+//! activation record through which each clone receives the settings of its own launch, and how it
+//! receives it, at the end of its restore packet.
 //!
 //! The build script includes this file to check bundled artifacts, so it must not depend on the
 //! rest of the crate.

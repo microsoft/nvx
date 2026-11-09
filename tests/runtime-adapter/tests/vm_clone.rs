@@ -51,8 +51,8 @@
 //! - A clone whose activation fails ends before it is ready, with the status of the failure's
 //!   class, which attributes the failure, and the VMM's exit: a scratch image that holds no ext4
 //!   file system, a journal that the clone's record forbids, and a host that sends anything but the
-//!   clone's Activate first, a ping, a start, or an execution. The sandbox records the failure
-//!   until the release of its lease.
+//!   clone's Await first, a ping, a start, or an execution, which fails the clone whether its
+//!   record applied or not. The sandbox records the failure until the release of its lease.
 //! - A clone refuses a scratch image whose upper is not fresh, as an earlier clone left it, and
 //!   ends before it is ready.
 //! - Clones at once each keep a root of their own, and every execution of a clone sees its
@@ -103,8 +103,8 @@
 //!   holds, gets its answer within a fraction of the delay, as the positive control, and the guest
 //!   reports that it waited the delay before its repair.
 //! - Each command after the start reattaches to the clone from a new process: the clone answers
-//!   the Activate of its record again, in a new session of the same broker, with its Ready, without
-//!   activating again, and serves the command.
+//!   the Await of the new session, of the same broker, with its Ready, without activating again,
+//!   and serves the command.
 //! - A clone's boot console, which its start asks to listen, delivers to each reader, from a new
 //!   process, what the guest writes to its kernel's log once the reader connected, at the endpoint
 //!   that the clone's lease fixes, and discards what the guest writes while no reader is connected,
@@ -2246,17 +2246,22 @@ fn assert_generated(view: &View) {
 
 /// Checks the events of a clone's activation that its `activation` probe found: the repair
 /// acknowledged the restore, and the clone took its reset, the host's first message, its Ready,
-/// and its start, in that order, after the acknowledgement. Returns when each came, in
+/// and its start, in that order, after the acknowledgement, and the application of the record of
+/// its restore packet completed between its reset and its Ready, before the host's first message
+/// or after it. Returns when the reset, the first message, Ready, and the start came, in
 /// microseconds after the acknowledgement.
 fn assert_timeline(facts: &Printed) -> [u64; 4] {
     assert_eq!(facts["activation.acknowledged"], "yes", "{facts:?}");
-    let events = ["reset", "message", "ready", "started"].map(|event| {
-        let value = &facts[&format!("activation.{event}")];
-        value
-            .parse::<u64>()
-            .unwrap_or_else(|_| panic!("the clone's {event} is {value}: {facts:?}"))
-    });
+    let [reset, message, applied, ready, started] =
+        ["reset", "message", "applied", "ready", "started"].map(|event| {
+            let value = &facts[&format!("activation.{event}")];
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("the clone's {event} is {value}: {facts:?}"))
+        });
+    let events = [reset, message, ready, started];
     assert!(events.is_sorted(), "{facts:?}");
+    assert!((reset..=ready).contains(&applied), "{facts:?}");
     events
 }
 
@@ -2326,7 +2331,7 @@ fn other_boot(boot: BootId) -> BootId {
 }
 
 /// The adapter's framing of a clone's control session that sends `early`, which the host must not
-/// send before the clone is ready, in place of the clone's Activate, and, once the clone ended its
+/// send before the clone is ready, in place of the clone's Await, and, once the clone ended its
 /// session, waits for the clone's VMM to exit, so that the restore sequence, which then ends the
 /// launch, ends it once the VM ended on its own.
 struct Early {
@@ -2351,10 +2356,9 @@ impl CloneControl for Early {
         Client::attach(transport, capability, deadline).map_err(io::Error::other)
     }
 
-    fn activate(
+    fn ready(
         &mut self,
         session: &mut Client,
-        _record: &[u8],
         deadline: Instant,
     ) -> io::Result<Option<ReadyActivation>> {
         session
@@ -2387,7 +2391,7 @@ impl CloneControl for Early {
 }
 
 /// Starts a clone of `template` in RAM, in a sandbox of its own, through NVX's public API, whose
-/// host sends `early` before the clone's Activate, and checks that the clone ended before it was
+/// host sends `early` before the clone's Await, and checks that the clone ended before it was
 /// ready, with the status of the host's session, which attributes the failure to no one, as the
 /// sandbox records it, and that the VMM exited, then releases the clone's lease, which removes the
 /// record.
@@ -2650,13 +2654,12 @@ impl CloneControl for Watched {
         attached
     }
 
-    fn activate(
+    fn ready(
         &mut self,
         session: &mut Client,
-        record: &[u8],
         deadline: Instant,
     ) -> Result<Option<ReadyActivation>, OrderError> {
-        self.order.activate(session, record, deadline)
+        self.order.ready(session, deadline)
     }
 
     fn map(
@@ -3212,8 +3215,9 @@ fn a_clone_whose_activation_fails_ends_before_it_is_ready() {
         ended.assert_unactivated(&template, evidence, expected);
     }
 
-    // Until the clone is ready, it takes nothing but its Activate: a ping, a start, and the start
-    // of an execution, before it, each end the clone with the status of the host's session.
+    // Until the clone is ready, which it is not before the host's Await, whether its record
+    // applied or not, it takes nothing but its Await: a ping, a start, and the start of an
+    // execution, before it, each end the clone with the status of the host's session.
     let timers = Timers::new(Duration::from_secs(1), Duration::from_secs(5));
     let execution = Start::new(Key::new(1, 1), limits(), timers, [b"/bin/true".to_vec()]);
     for early in [
@@ -3924,8 +3928,8 @@ fn each_command_reattaches_to_the_clone_from_a_new_process() {
     assert!(records.journal.is_none() && records.failure.is_none());
 
     // Each command, from a new process, reattaches to the clone in a new session of the same
-    // broker, in which the clone answers the Activate of its record again with its Ready, without
-    // activating again, so that the events of its activation stay as they were.
+    // broker, in which the clone answers the host's Await with its Ready, without activating
+    // again, so that the events of its activation stay as they were.
     let first = cloned.sandbox.run("reattach", &[], 0);
     assert_eq!(first["reattached"], "live", "{first:?}");
     assert_eq!(first["pid"], cloned.started["pid"]);

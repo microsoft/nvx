@@ -189,9 +189,21 @@ mod tests;
 
 pub use self::codec::Field;
 
-/// The version of the activation contract that this build speaks: the schema of an
-/// [`ActivationRecord`], which every record names. A record of another version is refused.
+/// The version of the schema of an [`ActivationRecord`] that this build speaks, which every
+/// record names. A record of another version is refused.
 pub const VERSION: u16 = 1;
+
+/// The version of the activation contract that this build speaks, which the compatibility key of
+/// a template holds: the schema of an [`ActivationRecord`], at [`VERSION`], and how a clone of
+/// the template receives it, so that a template whose guest takes its record another way restores
+/// no clone of this build.
+///
+/// Version 1 sent the record in the adapter's Activate, on the clone's control session, once the
+/// host attached. Version 2 hands it to the clone's guest at the end of its restore packet, which
+/// OpenVMM seals before the first restored vCPU runs, from `--restore-activation-record`, and the
+/// host asks for the clone's Ready instead: a guest of version 1, which predates the packet's
+/// activation record, refuses a packet that carries one, or awaits an Activate that never comes.
+pub const CONTRACT_VERSION: u64 = 2;
 
 /// The most bytes of a record's encoding, so that a restore packet could carry the same bytes.
 pub const MAX_RECORD_BYTES: usize = 1024;

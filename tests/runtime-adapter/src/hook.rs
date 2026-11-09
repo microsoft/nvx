@@ -60,8 +60,8 @@ pub enum Step {
     /// which no runtime record names yet.
     Commit,
     /// `found`: `reattach` or `stop` has found the sandbox's VM running, and holds it, under the
-    /// sandbox's lock, with the session in which a clone answered the Activate of its record
-    /// again, if the VM is a clone's, but has sent the guest agent nothing more, and stopped
+    /// sandbox's lock, with the session in which a clone answered the host's `Await` with its
+    /// Ready, if the VM is a clone's, but has sent the guest agent nothing more, and stopped
     /// nothing. `console` reaches it once it also connected to the clone's boot console, before it
     /// asks the guest to write its marker.
     Found,

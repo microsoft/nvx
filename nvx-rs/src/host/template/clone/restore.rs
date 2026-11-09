@@ -7,21 +7,19 @@
 
 use std::fmt;
 use std::io;
-use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::failure::{Attribute, CloneFailure, Evidence, Fault, Progress, Stage, host_evidence};
 use super::launch::Restoring;
 use super::records::Tracker;
-use crate::activation::{ActivationRecord, MAX_RECORD_BYTES, ReadyActivation};
+use crate::activation::{ActivationRecord, ReadyActivation};
 use crate::error::{Error, Result};
 use crate::host::platform::{ReadyListener, Transport};
 use crate::host::process::ProcessRef;
 use crate::host::sandbox::distro::CheckedDistro;
 use crate::host::session::{self, SessionError};
 use crate::host::store::Recovery;
-use crate::host::store::regular::{open_regular, read_at_most};
 use crate::host::supervisor::{Starting, Vmm};
 use crate::protocol::{CAPABILITY_LEN, HostMap};
 
@@ -45,8 +43,8 @@ pub const RESTORE_TO_READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// It is the test adapter's deadline of a session's answers.
 pub const READY_TO_START_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The most sessions in which [`Restoring::activate`] sends a clone's Activate: its first session,
-/// and those that replace a session that the adapter lost.
+/// The most sessions in which [`Restoring::activate`] asks for a clone's Ready: its first
+/// session, and those that replace a session that the adapter lost.
 pub const MAX_ACTIVATION_SESSIONS: usize = 3;
 
 /// How often the wait for the restore-ready event checks whether the VMM still runs.
@@ -66,7 +64,7 @@ const SESSION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 pub struct RestoreDeadlines {
     /// The restore-to-Ready deadline: how long after the clone's launch its Ready may come, which
     /// bounds the wait for the restore-ready event, the connections to the clone's control
-    /// endpoint, the adapter's attachments, and the Activates.
+    /// endpoint, the adapter's attachments, and the waits for Ready.
     pub ready: Duration,
     /// The Ready-to-Start deadline: how long after the check of the clone's Ready its sandbox may
     /// start.
@@ -104,15 +102,20 @@ pub trait CloneControl {
         deadline: Instant,
     ) -> Result<Self::Session, Self::Error>;
 
-    /// Sends `record`, the clone's activation record in its canonical encoding, in the framing's
-    /// Activate, as the first request of `session`, and waits until `deadline` for the clone's
-    /// Ready. Returns the activation that Ready reports, or `None` for a Ready that reports
-    /// none, once the adapter checked its own identities in Ready, such as its build, and
-    /// refused a Ready that does not match them.
-    fn activate(
+    /// Asks for the clone's Ready in the framing's request for it, as the first request of
+    /// `session`, and waits until `deadline` for the clone's Ready, which the clone sends once it
+    /// activated with the record of its restore packet, in whichever session asks. Returns the
+    /// activation that Ready reports, or `None` for a Ready that reports none, once the adapter
+    /// checked its own identities in Ready, such as its build, and refused a Ready that does not
+    /// match them.
+    ///
+    /// The host asks, rather than the clone sending Ready unasked, since OpenVMM's broker refuses
+    /// the guest's records while no host is attached, which the guest cannot tell: the request
+    /// carries nothing, as the host asks a guest agent for its readiness with NVXC's `PING`, since
+    /// the record reached the clone with its restore.
+    fn ready(
         &mut self,
         session: &mut Self::Session,
-        record: &[u8],
         deadline: Instant,
     ) -> Result<Option<ReadyActivation>, Self::Error>;
 
@@ -137,11 +140,11 @@ pub trait CloneControl {
     /// table if it has one: sends the start, and waits until `deadline` for its confirmation.
     fn start(&mut self, session: &mut Self::Session, deadline: Instant) -> Result<(), Self::Error>;
 
-    /// Returns whether `error`, with which [`attach`](Self::attach) or
-    /// [`activate`](Self::activate) failed, lost the session, as a reset of the session, the end
-    /// of its stream, or a failure of its transport do, rather than another failure, such as the
-    /// guest's refusal or the passing of the deadline: a clone that answers no more in a lost
-    /// session may still answer in another.
+    /// Returns whether `error`, with which [`attach`](Self::attach) or [`ready`](Self::ready)
+    /// failed, lost the session, as a reset of the session, the end of its stream, or a failure of
+    /// its transport do, rather than another failure, such as the guest's refusal or the passing
+    /// of the deadline: a clone that answers no more in a lost session may still answer in
+    /// another.
     fn lost(&self, error: &Self::Error) -> bool;
 
     /// Returns whether `error`, with which [`map`](Self::map) failed, is the guest's refusal of
@@ -172,20 +175,20 @@ impl<'s> Restoring<'s> {
     ///    event once the restored VM has started, after which, on Windows, it waits until the
     ///    host has read the event, and then closes its end, which carries nothing else. The wait
     ///    refuses a connection of another process than the VMM, and bytes that differ from the
-    ///    event, reads nothing past the event, and ends once the VMM has exited.
-    /// 2. Reads the clone's activation record again where the launch wrote it,
-    ///    [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME) in the sandbox,
-    ///    which must still be, byte for byte, the record of the launch,
-    ///    [`activation`](Self::activation), in its canonical encoding: the only record that the
-    ///    clone's restore sends.
-    /// 3. Connects to the clone's control endpoint, [`Starting::endpoint`], which the VMM serves,
+    ///    event, reads nothing past the event, and ends once the VMM has exited. By then, the
+    ///    clone holds its activation record, [`activation`](Self::activation), which OpenVMM read
+    ///    from the sandbox's [`CLONE_ACTIVATION_NAME`](crate::host::store::CLONE_ACTIVATION_NAME)
+    ///    at the launch and sealed in the restore packet before the first restored vCPU ran, and
+    ///    activates with it, whatever the host does.
+    /// 2. Connects to the clone's control endpoint, [`Starting::endpoint`], which the VMM serves,
     ///    as [`session::connect`] does, only after the event: the VMM's control console bounds the
     ///    host's authentication from its connection on, which the restore may hold up until its
     ///    event.
-    /// 4. Attaches the adapter's session over the connection with the launch's capability,
-    ///    [`capability`](Self::capability), which the VMM authenticates, and sends the record in
-    ///    the adapter's Activate, as the session's first request.
-    /// 5. Checks the activation that the clone's Ready reports, after the adapter checked its own
+    /// 3. Attaches the adapter's session over the connection with the launch's capability,
+    ///    [`capability`](Self::capability), which the VMM authenticates, and asks for the clone's
+    ///    Ready in the adapter's request for it, as the session's first request,
+    ///    [`CloneControl::ready`].
+    /// 4. Checks the activation that the clone's Ready reports, after the adapter checked its own
     ///    identities in it: the transaction ID of the record's restore section, as
     ///    [`ReadyActivation::of`] returns it.
     ///
@@ -193,7 +196,7 @@ impl<'s> Restoring<'s> {
     /// [`CloneRecords`](super::CloneRecords) describes: the event; its acknowledgment, which the
     /// attachment of a session shows, since OpenVMM reads none of the host's input, its
     /// authentication included, until the guest's repair acknowledged a restore that gates the
-    /// input; the Activate; and the Ready.
+    /// input; the request for Ready; and the Ready.
     ///
     /// Returns the [`Activated`] clone, whose Ready-to-Start deadline, `deadlines.start`, starts
     /// at the check of its Ready, and whose sandbox [`Activated::start`] starts, once the clone
@@ -203,18 +206,15 @@ impl<'s> Restoring<'s> {
     ///
     /// # Retries
     ///
-    /// A clone answers an Activate of its record, byte for byte, with the same Ready, without
-    /// activating again, also in a later session once it is ready, and refuses any other Activate
-    /// for good, as does the reset of its session before it is ready. So once the adapter lost the
-    /// session, as [`CloneControl::lost`] tells, while it attached it or awaited the clone's
-    /// Ready, the sequence waits briefly, reads the record again, connects again, and attaches a
-    /// new session, in which it sends the record again, byte for byte, and checks the Ready again:
-    /// a clone that was ready answers it, and a clone that took the reset of the lost session
-    /// before then has ended, so that the connection fails once its VMM has exited. It does so
-    /// until the restore-to-Ready deadline, which no retry extends, in at most
-    /// [`MAX_ACTIVATION_SESSIONS`] sessions in all, and never after another failure: a refusal, a
-    /// Ready that does not match the record, a record that changed, and the passing of the
-    /// deadline are final.
+    /// A clone activates with the record of its restore packet, which no session changes, and
+    /// answers the request for its Ready in every session, once it is ready, with the same Ready,
+    /// whatever resets of its session came before. So once the adapter lost the session, as
+    /// [`CloneControl::lost`] tells, while it attached it or awaited the clone's Ready, the
+    /// sequence waits briefly, connects again, attaches a new session, in which it asks for Ready
+    /// again, and checks the Ready again: a clone that ended meanwhile fails the connection once
+    /// its VMM has exited. It does so until the restore-to-Ready deadline, which no retry extends,
+    /// in at most [`MAX_ACTIVATION_SESSIONS`] sessions in all, and never after another failure: a
+    /// refusal, a Ready that does not match the record, and the passing of the deadline are final.
     ///
     /// # Failures
     ///
@@ -243,10 +243,9 @@ impl<'s> Restoring<'s> {
     ///   adapter's framing, and a Ready that reports another activation than the record's, or
     ///   none, [`Evidence::Protocol`], and for a session that the adapter lost in the last of the
     ///   sessions, [`Evidence::Reset`];
-    /// - [`ErrorKind::Io`](crate::ErrorKind::Io) if the endpoints fail otherwise, if the sandbox's
-    ///   activation record cannot be read, or is no longer the launch's, and if the progress log
-    ///   cannot be appended to, the host's evidence, as [`ClonePlan::new`](super::ClonePlan::new)
-    ///   describes it;
+    /// - [`ErrorKind::Io`](crate::ErrorKind::Io) if the endpoints fail otherwise, and if the
+    ///   progress log cannot be appended to, the host's evidence, as
+    ///   [`ClonePlan::new`](super::ClonePlan::new) describes it;
     /// - [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a deadline beyond the
     ///   host's clock, [`Evidence::HostFailure`].
     ///
@@ -267,7 +266,6 @@ impl<'s> Restoring<'s> {
             console: _,
             image,
             activation,
-            record,
             capability,
             mut tracker,
             table,
@@ -286,8 +284,6 @@ impl<'s> Restoring<'s> {
         }
         let activation_session = ActivationSession {
             capability: &capability,
-            record: &record,
-            encoded: activation.encode(),
             expected: ReadyActivation::of(&activation),
             deadline,
             timeout: deadlines.ready,
@@ -319,9 +315,10 @@ impl<'s> Restoring<'s> {
 }
 
 /// A clone that its restore sequence activated, as [`Restoring::activate`] returns it: its guest
-/// answered the Activate of its record with a Ready that reports the record's activation, and
-/// awaits its mapping table, if it has an export, and the start of its sandbox, which
-/// [`start`](Self::start) sends, by the Ready-to-Start deadline, [`deadline`](Self::deadline).
+/// answered the request for its Ready with a Ready that reports the activation of the record of
+/// its restore packet, and awaits its mapping table, if it has an export, and the start of its
+/// sandbox, which [`start`](Self::start) sends, by the Ready-to-Start deadline,
+/// [`deadline`](Self::deadline).
 ///
 /// It holds the adapter's session in which the clone answered, and the launch, uncommitted,
 /// through which it borrows the sandbox's locked store exclusively, as [`Starting`] does.
@@ -329,7 +326,7 @@ impl<'s> Restoring<'s> {
 /// of the caller leaves the launch's journal instead, for
 /// [`LockedStore::recover`](crate::host::store::LockedStore::recover).
 pub struct Activated<'s, S> {
-    /// The adapter's session, in which the clone answered its Activate.
+    /// The adapter's session, in which the clone answered with its Ready.
     session: S,
     /// The launch, whose journal records the VMM.
     starting: Starting<'s>,
@@ -352,7 +349,7 @@ impl<'s, S> Activated<'s, S> {
         &self.starting
     }
 
-    /// Returns the adapter's session, in which the clone answered its Activate.
+    /// Returns the adapter's session, in which the clone answered with its Ready.
     pub fn session(&mut self) -> &mut S {
         &mut self.session
     }
@@ -673,16 +670,12 @@ impl<S> fmt::Debug for Started<'_, S> {
     }
 }
 
-/// What every session of a clone's activation takes: the launch's capability, the sandbox's
-/// activation record, and the activation that its Ready must report, by the restore-to-Ready
+/// What every session of a clone's activation takes: the launch's capability, and the activation
+/// that its Ready must report, that of the sandbox's activation record, by the restore-to-Ready
 /// deadline, or by the deadline of a reattach.
 pub(super) struct ActivationSession<'a> {
     /// The capability of the launch.
     pub(super) capability: &'a [u8; CAPABILITY_LEN],
-    /// The path of the activation record in the sandbox.
-    pub(super) record: &'a Path,
-    /// The canonical encoding of the launch's activation record.
-    pub(super) encoded: Vec<u8>,
     /// The activation that the clone's Ready must report.
     pub(super) expected: ReadyActivation,
     /// The deadline by which the clone must be ready.
@@ -702,11 +695,11 @@ enum Attempt {
 }
 
 impl ActivationSession<'_> {
-    /// Activates the clone whose VMM, `reference`, serves its control endpoint at `endpoint`, in
-    /// sessions of `control`, as [`Restoring::activate`] describes: in a new session after a
-    /// session that the adapter lost, in [`MAX_ACTIVATION_SESSIONS`] at most, and returns the
-    /// session in which the clone answered with its Ready. A launch records the clone's progress
-    /// in its `tracker`.
+    /// Asks for the Ready of the clone whose VMM, `reference`, serves its control endpoint at
+    /// `endpoint`, in sessions of `control`, as [`Restoring::activate`] describes: in a new session
+    /// after a session that the adapter lost, in [`MAX_ACTIVATION_SESSIONS`] at most, and returns
+    /// the session in which the clone answered with its Ready. A launch records the clone's
+    /// progress in its `tracker`.
     pub(super) fn activate<C: CloneControl>(
         &self,
         control: &mut C,
@@ -728,7 +721,7 @@ impl ActivationSession<'_> {
         }
     }
 
-    /// Activates the clone in a new session of `control`, as [`activate`](Self::activate)
+    /// Asks for the clone's Ready in a new session of `control`, as [`activate`](Self::activate)
     /// describes, records its progress in `tracker`, if it has one, and returns the session once
     /// the clone is ready.
     fn run<C: CloneControl>(
@@ -738,23 +731,22 @@ impl ActivationSession<'_> {
         reference: &ProcessRef,
         mut tracker: Option<&mut Tracker>,
     ) -> std::result::Result<C::Session, Attempt> {
-        let record = self.read_record().map_err(Attempt::Failed)?;
         let transport = self.connect(endpoint, reference).map_err(Attempt::Failed)?;
         let attached = control.attach(transport, self.capability, self.deadline);
         let mut session =
             attached.map_err(|error| self.failed(control, error, "attach its control session"))?;
         if let Some(tracker) = &mut tracker {
             // OpenVMM authenticated the session, which it does only once the guest acknowledged
-            // a restore that gates the host's input. The Activate follows at once, with which
-            // the progress log records the acknowledgment.
+            // a restore that gates the host's input. The request for Ready follows at once, with
+            // which the progress log records the acknowledgment.
             tracker.advance(Progress::Acknowledged);
             tracker
                 .reach(Progress::Activating)
                 .map_err(Attempt::Failed)?;
         }
         let reported = control
-            .activate(&mut session, &record, self.deadline)
-            .map_err(|error| self.failed(control, error, "activate it"))?;
+            .ready(&mut session, self.deadline)
+            .map_err(|error| self.failed(control, error, "get its Ready"))?;
         self.check(reported).map_err(Attempt::Failed)?;
         if let Some(tracker) = &mut tracker {
             tracker.reach(Progress::Ready).map_err(Attempt::Failed)?;
@@ -792,34 +784,6 @@ impl ActivationSession<'_> {
                 }
             },
         )
-    }
-
-    /// Reads the activation record in the sandbox, which must be, byte for byte, the encoding of
-    /// the launch's record, and returns it.
-    fn read_record(&self) -> std::result::Result<Vec<u8>, Fault> {
-        let path = self.record;
-        let bytes = open_regular(path)
-            .and_then(|file| read_at_most(file, MAX_RECORD_BYTES as u64, "an activation record"))
-            .map_err(|error| {
-                Fault::host(
-                    Error::io(format!(
-                        "cannot read the clone's activation record {}",
-                        path.display()
-                    ))
-                    .with_source(error),
-                )
-            })?;
-        if bytes != self.encoded {
-            return Err(Fault::new(
-                Evidence::HostFailure,
-                Error::io(format!(
-                    "{} no longer holds the activation record that the clone's launch wrote, the \
-                     only record that its restore sends",
-                    path.display()
-                )),
-            ));
-        }
-        Ok(bytes)
     }
 
     /// Checks `reported`, the activation that the clone's Ready reports, against the record's.

@@ -168,7 +168,7 @@ impl Repair {
                     self.state = State::Finish(resources);
                 }
                 State::Finish(resources) => return self.finish(*resources),
-                State::Repaired(repaired) => return Ok(*repaired),
+                State::Repaired(repaired) => return Ok(repaired.clone()),
                 State::Failed(error) => return Err(error.clone()),
             }
         }
@@ -344,8 +344,9 @@ impl Repair {
             cpus: resources.cpus,
             memory: resources.memory,
             acknowledged_at,
+            activation: self.restore.activation_record().map(Box::from),
         };
-        self.state = State::Repaired(repaired);
+        self.state = State::Repaired(repaired.clone());
         Ok(repaired)
     }
 }
@@ -412,9 +413,10 @@ fn first_found(log: &mut BTreeMap<u64, bool>, block: u64) -> bool {
 }
 
 /// A clone that its [`Repair`] repaired: its new VM generation ID, the resources that it has,
-/// which an activation checks against the resources that it expects, and when its repair
-/// acknowledged its restore.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// which an activation checks against the resources that it expects, when its repair
+/// acknowledged its restore, and the activation record that its restore packet carried, from
+/// which its activation takes its configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Repaired {
     /// The new VM generation ID.
     generation_id: GenerationId,
@@ -425,6 +427,8 @@ pub struct Repaired {
     /// An instant no later than the repair's acknowledgement of the restore, taken right before
     /// the finish, if the restore asked for the acknowledgement.
     acknowledged_at: Option<Instant>,
+    /// The bytes of the activation record of the restore packet, if it carried one, undecoded.
+    activation: Option<Box<[u8]>>,
 }
 
 impl Repaired {
@@ -452,6 +456,14 @@ impl Repaired {
     /// deadline that starts at the acknowledgement may count from the instant.
     pub fn acknowledged_at(&self) -> Option<Instant> {
         self.acknowledged_at
+    }
+
+    /// Returns the bytes of the activation record that the host handed the clone in its restore
+    /// packet, as [`Restore::activation_record`] returned them, undecoded, or `None` for a restore
+    /// whose packet carried none: the clone's [`Activation`](super::Activation) decodes and
+    /// validates them.
+    pub fn activation_record(&self) -> Option<&[u8]> {
+        self.activation.as_deref()
     }
 }
 

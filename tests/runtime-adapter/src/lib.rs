@@ -50,8 +50,9 @@
 //! root of its own, in [`template`] mode. The host program's `runtime-adapter-host create`
 //! captures such a VM through NVX's template store, which publishes the snapshot as a generation
 //! of a template, in the `capture` module. In each clone, the worker repairs the restore, then
-//! activates the clone with the host's `Activate`, whose record the guest library applies, answers
-//! `Ready` with the activation, and serves the host's order as after a cold boot. On the host, the
+//! activates the clone with the activation record of its restore packet, which the guest library
+//! applies, answers the host's `Await` with `Ready`, which reports the activation, and serves the
+//! host's order as after a cold boot. On the host, the
 //! `host` module's clone order is the framing through which the restore sequence of
 //! `nvx::host::template` activates a clone and starts its sandbox, and the host program's
 //! `runtime-adapter-host start` starts a clone of a generation in a sandbox of its own, which

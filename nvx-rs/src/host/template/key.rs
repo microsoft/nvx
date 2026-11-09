@@ -36,7 +36,7 @@ const HOST_GENERATION: &str = "host";
 
 /// The versions of the contracts of a template's clones that its runtime identity does not
 /// record: the snapshot format, the saved device state, the time ABI, the restore packet, and the
-/// activation record.
+/// activation contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Contracts {
     /// [`contract::SNAPSHOT_FORMAT_VERSION`].
@@ -47,7 +47,7 @@ struct Contracts {
     time: u64,
     /// [`contract::RESTORE_PACKET_VERSION`].
     restore_packet: u64,
-    /// [`activation::VERSION`], as a `u64`, as the other versions are.
+    /// [`activation::CONTRACT_VERSION`].
     activation: u64,
 }
 
@@ -58,8 +58,7 @@ impl Contracts {
         device_state: contract::DEVICE_STATE_SCHEMA_VERSION,
         time: contract::TIME_ABI_VERSION,
         restore_packet: contract::RESTORE_PACKET_VERSION,
-        // `u64::from` is not `const`, and widening a `u16` is lossless.
-        activation: activation::VERSION as u64,
+        activation: activation::CONTRACT_VERSION,
     };
 
     /// Writes the versions.

@@ -72,12 +72,14 @@
 //!
 //! 1. The session that the template attached before its capture, and whose first epoch it
 //!    acknowledged, resumes on the same tty: the worker attaches none, and acknowledges the reset
-//!    that the restore queued, the only one that the clone reads, which ends the activation's
-//!    transport bootstrap and restricts the session.
-//! 2. The host sends one `Activate`, whose body is the canonical encoding of a clone's
-//!    `nvx::activation::ActivationRecord`. The activation decodes and checks it, and checks the
-//!    resources that it expects against those that the repair found, before anything has a side
-//!    effect.
+//!    that the restore queued, which it writes to the stream at once, since OpenVMM's broker
+//!    attaches the host only once the guest acknowledged that reset, so that the host attaches
+//!    while the worker activates the clone.
+//! 2. The activation takes the clone's `nvx::activation::ActivationRecord` from the clone's
+//!    restore packet, which the repair handed over, and into which OpenVMM sealed the record that
+//!    the host's launch supplied before the first restored vCPU ran. It decodes and checks it, and
+//!    checks the resources that it expects against those that the repair found, before anything
+//!    has a side effect.
 //! 3. The worker applies the record through `RootOperations::apply`, which runs
 //!    `nvx::guest::clone::apply`: it assembles the root from the template's devices, with the
 //!    record's image, upper, and overlay mode, once the kernel reread the partition table of a
@@ -97,12 +99,16 @@
 //!    mount namespace, which each execution's copies. The template bootstrapped the guest for its
 //!    root with its own configuration before its capture, so the clone has its cgroups.
 //! 4. Once it took what the session received while the application ran, which came before `Ready`,
-//!    it completes the activation, which opens the fence, and answers `Ready`, which reports that
-//!    the activation applied, with the record's transaction, after the guest agent's build, to the
-//!    `Activate` and to each retry of it, byte for byte, that came meanwhile, which joins the
-//!    application. Anything else that came meanwhile, a reset included, fails the activation, as
-//!    before the application, so the host waits for `Ready` before it sends the mapping table or
-//!    the start.
+//!    it completes the activation, and answers each `Await` of the host's current session that
+//!    came meanwhile, which joins the application, with `Ready`, which reports that the activation
+//!    applied, with the record's transaction, after the guest agent's build, as it answers each
+//!    `Await` that comes later at once. The clone is ready, which opens the fence, once the record
+//!    applied and the host asked for `Ready`: at the completion if an `Await` joined it, and at
+//!    the host's next `Await` otherwise. The host asks for `Ready`, rather than the worker sending
+//!    it unasked, since OpenVMM's broker refuses the guest's records while no host is attached,
+//!    which the guest cannot tell. A reset abandons the `Await`s of the earlier session, and
+//!    anything else that came before `Ready` fails the activation, so the host waits for `Ready`
+//!    before it sends the mapping table or the start.
 //! 5. It then serves the host's order as after a cold boot: the mapping table that the record
 //!    announces, which it maps from the record's export, the start, the executions, the probes, and
 //!    the stop. A clone has no workload identity of the whole sandbox: each execution names its
@@ -127,14 +133,14 @@
 //! fails finally with `nvx::protocol::status`'s `ACTIVATION_NETWORK`, as an application whose
 //! announcer could not start does.
 //!
-//! Until the clone is ready, its session takes nothing but that `Activate`: another reset, any
-//! other message, a `Stop` and a `Ping` included, an `Activate` that the activation refuses, one
-//! whose header announces more bytes than a record can have, which the framing refuses before it
-//! takes any byte of its body, and the passing of the activation's deadline, which ends
-//! `activation::ACTIVATION_TIMEOUT` after the repair's acknowledgement of the restore, fail the
-//! activation finally, as does an application that failed, which nothing retries. Once the clone
-//! is ready, the worker answers a retry of the same `Activate`, byte for byte, with the same
-//! `Ready`, without applying it again, and fails the activation on another. A failed activation
+//! Until the clone is ready, its session takes nothing but resets and the host's `Await`: any
+//! other message, a `Stop` and a `Ping` included, a restore packet without a record, or with one
+//! that the activation refuses, and the passing of the activation's deadline, which ends
+//! `activation::ACTIVATION_TIMEOUT` after the repair's acknowledgement of the restore, whether
+//! the record applied or not, so that a clone whose host never asks ends, fail the activation
+//! finally, as does an application that failed, which nothing retries. Once the clone is ready,
+//! the worker answers each `Await`, in any session, with the same `Ready`, without applying the
+//! record again. A failed activation
 //! ends the worker, and with it the VM, with the status of `nvx::protocol::status` of the
 //! failure's class, from 50 to 58, as `activation::failure_status` selects it, once the worker
 //! dropped its executions and wrote what it queued, for at most [`UNACTIVATED_DRAIN`], so that a
@@ -142,8 +148,8 @@
 //! whatever the stream does then. A broker that closes the stream before the clone is ready ends
 //! it the same way, with [`SESSION_STATUS`], as [`Worked::Abandoned`] tells, and once the clone is
 //! ready, as the worker of a VM that boots cold ends. The worker of a VM that boots cold, which
-//! has no activation, refuses an `Activate` as it refuses any message that it does not take in
-//! its state.
+//! has no activation, refuses an `Await` as it refuses any message that it does not take in its
+//! state.
 //!
 //! # The mapping table and the start
 //!
@@ -480,7 +486,7 @@ pub trait RootOperations: EntryOperations {
     /// blocking, and returns how it ended, as a problem, or `None` while it runs, or without one.
     fn announcer_ended(&mut self) -> Option<String>;
 
-    /// Applies `record`, the record of the Activate that a clone's activation accepted, to the
+    /// Applies `record`, the activation record that a clone's activation accepted, to the
     /// clone, as `nvx::guest::clone::apply` does, with `template`, the inputs of the root's
     /// assembly that the clone's template captured, by `deadline`, the activation's, if any, until
     /// which it waits for each device at the latest, and keeps the root that it assembled, with the
@@ -580,12 +586,12 @@ pub fn work<S: Read + Write + AsFd>(
 /// activation fails, or the broker closes the stream.
 ///
 /// `activation` is `nvx::guest::clone::Activation::new` of the clone that the worker repaired,
-/// behind the fence that its capture's barrier handed over closed, in its transport bootstrap.
+/// behind the fence that its capture's barrier handed over closed, pending.
 /// `session` is the guest's role of the session that the template's VM attached on the same tty
 /// before its capture, and whose first epoch it acknowledged, which the reset that the restore
 /// queued starts again: the worker attaches no session. `template` holds the inputs of the root's
 /// assembly that the template captured, with which the worker [applies](RootOperations::apply)
-/// the record of the host's `Activate`. `acknowledged` is when the repair acknowledged the
+/// the record of its restore packet. `acknowledged` is when the repair acknowledged the
 /// restore, `nvx::guest::clone::Repaired::acknowledged_at`, if it did, from which the
 /// `activation::ACTIVATION_PROBE` reports the events of the clone, with `repair_delay`, how long
 /// the worker waited before the repair, for tests, if the template set a delay.
@@ -626,13 +632,19 @@ enum Phase {
 }
 
 impl Phase {
-    /// Takes the session's reset, which the connection acknowledged already, and returns how the
-    /// worker ends once the reset ended the session: once it failed a clone's activation.
-    fn reset(&mut self) -> Option<Worked> {
+    /// Takes the session's reset, which `connection` acknowledged already, and returns how the
+    /// worker ends once the reset ended the session: once a clone's activation, which the first
+    /// reset starts, through `operations`, failed.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    fn reset<S: Read + Write + AsFd>(
+        &mut self,
+        operations: &mut dyn RootOperations,
+        connection: &mut Connection<S>,
+    ) -> Option<Worked> {
         match self {
             Self::Configuring | Self::Ready(_) => None,
             #[cfg(target_arch = "x86_64")]
-            Self::Clone(state) => state.reset(),
+            Self::Clone(state) => state.reset(operations, connection),
         }
     }
 
@@ -645,19 +657,6 @@ impl Phase {
             Self::Clone(state) if !state.is_ready() => Worked::Abandoned,
             #[cfg(target_arch = "x86_64")]
             Self::Clone(_) => Worked::Closed,
-        }
-    }
-
-    /// Returns how the worker ends once the session's receipt failed with `error`, if its phase
-    /// takes the failure: a clone's activation takes an `Activate` that the framing refused
-    /// unread, as longer than a record can be, which fails it. Otherwise the error ends the
-    /// session.
-    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
-    fn refused(&mut self, error: &ServeError) -> Option<Worked> {
-        match self {
-            Self::Configuring | Self::Ready(_) => None,
-            #[cfg(target_arch = "x86_64")]
-            Self::Clone(state) => state.refused(error),
         }
     }
 
@@ -736,16 +735,7 @@ fn serve<S: Read + Write + AsFd>(
     loop {
         connection.flush()?;
         while !connection.is_overloaded() {
-            let received = match connection.receive() {
-                Ok(received) => received,
-                Err(error) => match phase.refused(&error) {
-                    Some(worked) => {
-                        executions.clear();
-                        return end(&mut connection, worked);
-                    }
-                    None => return Err(error),
-                },
-            };
+            let received = connection.receive()?;
             let message = match received {
                 // The session took everything that it received: a clone's activation completes
                 // with the application that ran meanwhile, if any.
@@ -767,7 +757,7 @@ fn serve<S: Read + Write + AsFd>(
                 }
                 Some(Received::Reset) => {
                     executions.reset(Instant::now());
-                    if let Some(worked) = phase.reset() {
+                    if let Some(worked) = phase.reset(operations, &mut connection) {
                         executions.clear();
                         return end(&mut connection, worked);
                     }

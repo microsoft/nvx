@@ -13,8 +13,8 @@
 //! nothing mounted from the devices that its clones replace, and through which each clone that a
 //! restore of the snapshot starts repairs its restore: it activates the restore's memory target,
 //! reseeds the kernel's random number generator, and finishes the restore, with its
-//! acknowledgement, and then takes its own configuration from the host, in one Activate on a
-//! restricted control session.
+//! acknowledgement, and then takes its own configuration from the activation record that its
+//! restore packet carried, and reports its readiness on its control session.
 //!
 //! The guest's space, the root that an init assembles and what it mounts in it, is each init's
 //! own. NVX's own space is internal reference code, which NVX's guest programs use: it is hidden
