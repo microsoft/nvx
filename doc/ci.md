@@ -480,8 +480,17 @@ the six, the guest reports, for each, the base of its MMIO window and the
 interrupt that its driver requested, as `/sys/kernel/irq` describes it: its
 controller and input, its trigger, its handlers, and how many times it fired.
 It then drives each device, pinging the gateway, reading the share, writing to
-both consoles, reading the `distro` block and writing the `scratch` block past
-the page cache, and reports again. Each device must interrupt on the IOAPIC
+the boot console, attaching to the control console's session broker, reading
+the `distro` block and writing the `scratch` block past the page cache, and
+reports again. A console's driver waits for each write's completion by polling
+the used ring of the console's output, and takes the buffer back as soon as the
+device returns it, so a write interrupts only when the device reads the
+driver's used event before the driver moves it, a race that the driver can win
+at every write (#1400). The guest therefore writes to the boot console until a
+write interrupts, and has the control console interrupt with input instead,
+which nothing waits for: it sends the broker the bootstrap `GuestAttach`
+record, and the device writes the broker's answer, a `Reset` record, into a
+buffer of the console's input. Each device must interrupt on the IOAPIC
 input of its window, 16 through 23, edge-triggered and with no other handler,
 its interrupt must have fired, and `/proc/interrupts` must count no APIC error
 or spurious PIC interrupt (`ERR`), no level-triggered interrupt that the IOAPIC
