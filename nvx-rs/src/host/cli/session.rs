@@ -6,7 +6,8 @@
 //!
 //! - [`Session::connect`] retries the endpoint every 25 ms until its timeout, then attaches with
 //!   the capability within a fresh timeout. On Windows, it gives up at once on the errors that
-//!   Python does not retry.
+//!   Python does not retry. On Linux, unsupported peer verification fails at once, retaining
+//!   its diagnostic instead of reporting that the endpoint did not appear.
 //! - Each operation bounds its request and its response by one timeout. A transfer that times
 //!   out fails with `managed control request timed out` while it sends and `managed control
 //!   response timed out` while it receives.
@@ -247,10 +248,11 @@ impl Session {
             match platform::connect_endpoint(endpoint, pid, slice) {
                 Ok(transport) => break transport,
                 Err(error) => {
-                    if cfg!(windows)
-                        && error
-                            .raw_os_error()
-                            .is_some_and(|code| raised_at_once(code as u32))
+                    if (cfg!(target_os = "linux") && error.kind() == io::ErrorKind::Unsupported)
+                        || (cfg!(windows)
+                            && error
+                                .raw_os_error()
+                                .is_some_and(|code| raised_at_once(code as u32)))
                     {
                         return Err(Exit::from_os_error(error));
                     }
