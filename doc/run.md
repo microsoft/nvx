@@ -680,8 +680,10 @@ platform snapshot.
 OpenVMM's v4 microVM restarted the versions of its contracts: microVM ABI 1,
 boot layout 1, time ABI 1, restore packet 1, and snapshot manifest 2, whose
 version 1 is upstream OpenVMM's. It reads no snapshot of an earlier OpenVMM,
-whose manifest it refuses by its version with `E_SNAPSHOT_VERSION`, and
-`nvx-rs` refuses a template of an earlier OpenVMM by its snapshot format.
+whose manifest it refuses with `E_SNAPSHOT_VERSION` by its version, or by its
+missing format magic for the earliest manifests of version 2, before it
+decodes the rest, and `nvx-rs` refuses a template of an earlier OpenVMM by its
+snapshot format.
 Capture them again; to restore them as they are, use NVX commit
 `304f8e1686b4fba188ad2d9c8d932498a6ca2980` with the OpenVMM that it pins.
 
