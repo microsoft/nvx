@@ -5071,7 +5071,7 @@ class RecordedPerformanceTests(unittest.TestCase):
         self.record(2, c)
         error = _WindowsRenameDenial(5)
 
-        with patch.object(Path, "rename", side_effect=error) as rename:
+        with patch.object(Path, "rename", autospec=True, side_effect=error) as rename:
             outcome = self.persist()
 
         self.assertTrue(outcome.failed)
@@ -5087,7 +5087,7 @@ class RecordedPerformanceTests(unittest.TestCase):
         error = _WindowsRenameDenial(5)
 
         with (
-            patch.object(Path, "rename", side_effect=error) as rename,
+            patch.object(Path, "rename", autospec=True, side_effect=error) as rename,
             self.assertRaises(PermissionError) as refused,
         ):
             performance_history._fetch(
@@ -5101,6 +5101,41 @@ class RecordedPerformanceTests(unittest.TestCase):
 
         self.assertIs(refused.exception, error)
         rename.assert_called_once()
+        self.assertEqual(self.commits(), ["seed"])
+
+    def test_windows_rename_retry_stops_when_sleep_overruns_the_deadline(self):
+        b = self.commit("b")
+        self.record(1, b)
+        error = _WindowsRenameDenial(5)
+        clock = 0.0
+
+        def oversleep(_: float) -> None:
+            nonlocal clock
+            clock = 2.0
+
+        with (
+            patch.object(Path, "rename", autospec=True, side_effect=error) as rename,
+            patch.object(
+                performance_history.time, "monotonic", side_effect=lambda: clock
+            ),
+            patch.object(
+                performance_history.time, "sleep", side_effect=oversleep
+            ) as sleep,
+            self.assertRaises(PermissionError) as refused,
+        ):
+            performance_history._fetch(
+                self.api,
+                REPOSITORY,
+                performance_history.RecordedRun(1, b, ""),
+                self.api.artifacts[1][0],
+                self.downloads,
+                10.0,
+            )
+
+        self.assertIs(refused.exception, error)
+        rename.assert_called_once()
+        sleep.assert_called_once()
+        self.assertEqual(self.api.downloads, [1001])
         self.assertEqual(self.commits(), ["seed"])
 
     def test_windows_rename_denial_does_not_replace_an_existing_destination(self):
