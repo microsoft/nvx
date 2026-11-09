@@ -6,12 +6,14 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::ErrorKind;
-use crate::activation::{MachineIdMode, View};
+use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::config::{
-    Boot, PROCESS_COMMAND_LINE_LIMIT, RootConfig, process_command_line_units,
+    Boot, LayeredRoot, PROCESS_COMMAND_LINE_LIMIT, RootConfig, UpperConfig,
+    process_command_line_units,
 };
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
+use crate::protocol::root::RootImage;
 
 fn is_fresh_pipe(endpoint: &str, prefix: &str) -> bool {
     endpoint
@@ -432,9 +434,9 @@ fn cold_config() -> VmConfig {
 fn cold_runtime() -> Runtime {
     let identity = ArtifactIdentity::new("test-runtime").unwrap();
     Runtime {
-        openvmm: PathBuf::from("missing-openvmm"),
-        kernel: PathBuf::from("missing-kernel"),
-        initramfs: PathBuf::from("missing-initramfs"),
+        openvmm: absolute(Path::new("missing-openvmm")).unwrap(),
+        kernel: absolute(Path::new("missing-kernel")).unwrap(),
+        initramfs: absolute(Path::new("missing-initramfs")).unwrap(),
         identity: RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
         hypervisor: if cfg!(windows) {
             Hypervisor::Whp
@@ -763,17 +765,23 @@ fn creation_checks_the_complete_actual_command_line_at_the_windows_boundary() {
 }
 
 #[cfg(any(target_os = "linux", windows))]
-fn stand_in(dir: &VmDir) -> Prepared {
+fn stand_in_command() -> (PathBuf, Vec<OsString>) {
     #[cfg(target_os = "linux")]
-    let (program, arguments) = (PathBuf::from("sleep"), vec![OsString::from("60")]);
+    let command = (PathBuf::from("/bin/sleep"), vec![OsString::from("60")]);
     #[cfg(windows)]
-    let (program, arguments) = (
+    let command = (
         PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32\\PING.EXE"),
         ["-n", "60", "127.0.0.1"]
             .into_iter()
             .map(OsString::from)
             .collect(),
     );
+    command
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn stand_in(dir: &VmDir) -> Prepared {
+    let (program, arguments) = stand_in_command();
     let runtime = Runtime {
         openvmm: program,
         ..cold_runtime()
@@ -794,6 +802,87 @@ impl Drop for RunningVm {
             .0
             .process
             .wait(Instant::now() + Duration::from_secs(10));
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn spawn_resolves_relative_runtime_and_block_inputs_outside_the_vm_directory() {
+    let cwd = std::env::current_dir().unwrap();
+    let inputs = tempfile::tempdir_in(&cwd).unwrap();
+    let relative = inputs.path().strip_prefix(&cwd).unwrap();
+    let (program, arguments) = stand_in_command();
+    let executable = format!("stand-in{}", std::env::consts::EXE_SUFFIX);
+    fs::copy(program, inputs.path().join(&executable)).unwrap();
+    for name in ["kernel", "initramfs", "image.erofs", "scratch.raw"] {
+        fs::write(inputs.path().join(name), name.as_bytes()).unwrap();
+    }
+    let root = |image, scratch| {
+        RootConfig::Layered(LayeredRoot {
+            image,
+            format: RootImage::erofs(None),
+            gpt_first_partition_bound: None,
+            upper: UpperConfig::Scratch {
+                path: scratch,
+                journal: Journal::Forbidden,
+            },
+            overlay: OverlayMode::TrustedLowers,
+        })
+    };
+    let runtime = Runtime {
+        openvmm: relative.join(&executable),
+        kernel: relative.join("kernel"),
+        initramfs: relative.join("initramfs"),
+        ..cold_runtime()
+    };
+    let config = VmConfig {
+        root: root(relative.join("image.erofs"), relative.join("scratch.raw")),
+        ..cold_config()
+    };
+    let (_directory, vm) = vm_dir();
+    let mut prepared = create(&runtime, &config, None, &vm).unwrap();
+    let resolved_runtime = Runtime {
+        openvmm: inputs.path().join(&executable),
+        kernel: inputs.path().join("kernel"),
+        initramfs: inputs.path().join("initramfs"),
+        ..runtime
+    };
+    let resolved_config = VmConfig {
+        root: root(
+            inputs.path().join("image.erofs"),
+            inputs.path().join("scratch.raw"),
+        ),
+        ..config
+    };
+    assert_eq!(prepared.program, resolved_runtime.openvmm);
+    assert_eq!(
+        prepared.arguments(),
+        resolved_config
+            .openvmm_arguments(
+                &resolved_runtime,
+                &prepared.outputs().endpoint,
+                &prepared.outputs().outcome,
+                prepared.outputs().console.as_deref(),
+            )
+            .unwrap()
+    );
+    prepared.arguments = arguments;
+    let launched = RunningVm(spawn(prepared).unwrap());
+    assert!(!launched.0.process.has_exited().unwrap());
+}
+
+#[test]
+fn resolving_inputs_preserves_required_path_errors_and_log_rollback() {
+    for kernel in [PathBuf::new(), PathBuf::from("bad\0kernel")] {
+        let (_directory, vm) = vm_dir();
+        let runtime = Runtime {
+            kernel,
+            ..cold_runtime()
+        };
+        let error = create(&runtime, &cold_config(), None, &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert!(error.to_string().contains("Runtime.kernel"), "{error}");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
     }
 }
 
@@ -1090,8 +1179,11 @@ fn an_unrelated_process_started_in_the_library_spawn_window_gets_no_vm_claim() {
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
     );
+    assert!(
+        platform::tests::claim_released_within(&log, identity, Duration::from_secs(10)),
+        "an unrelated process retained the VM's job claim"
+    );
     assert!(other.0.try_wait().unwrap().is_none());
-    assert!(!platform::log_claim_held(&log, identity).unwrap());
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -1113,6 +1205,7 @@ fn current_cold_spawn_boots_a_guest_accepts_shell_input_and_exits_cleanly() {
         openvmm,
         kernel,
         initramfs,
+        hypervisor: Hypervisor::from_env_or_default().unwrap(),
         cpu_profile: Some("auto".to_owned()),
         ..cold_runtime()
     };

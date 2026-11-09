@@ -671,7 +671,7 @@ impl HeldSpawn {
 
 /// Returns whether the claim on the log `log`, the file `identity`, is released within
 /// `timeout`.
-fn claim_released_within(log: &Path, identity: (u64, u64), timeout: Duration) -> bool {
+pub(crate) fn claim_released_within(log: &Path, identity: (u64, u64), timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         if !log_claim_held(log, identity).unwrap() {
