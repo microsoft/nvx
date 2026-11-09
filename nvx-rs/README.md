@@ -3103,6 +3103,11 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   reported the exit.
 - `exec` refuses more than 1 MiB of workload output, which the guest agent
   never forwards.
+- `provision`, and `start` again, refuse a share whose resolved host path
+  equals, contains, or lies inside the sandbox's state directory, image, or
+  scratch image, or the OpenVMM, kernel, or initramfs of the artifact root, as
+  [Live host shares](../doc/run.md#live-host-shares) describes, where `nvx.py`
+  shared them.
 - The state directory holds the store's files: `sandbox.lock` replaces the
   `lifecycle.lock` of `nvx.py`, `runtime.json` has the store's format, and each
   start replaces `openvmm.log`, which `nvx.py` appended to. `exec` holds the
