@@ -505,7 +505,10 @@ these names before creating any output, including the log.
 before a spawn. `log()` returns the same opened log, without reopening its
 path. `inherit(file)` moves an already opened resource into the preparation's
 inheritance allowlist and keeps it open. `arguments()` returns the whole
-configuration's OpenVMM arguments. Creation checks the complete Windows
+configuration's OpenVMM arguments. Creation makes caller-relative runtime
+and block-image paths absolute without resolving links or `..` components,
+so spawning in the VM directory does not change which inputs they name.
+Creation checks the complete Windows
 command line with the actual runtime and VM output paths and no reserve,
 including quoting and the terminating NUL, on every host. Callers keep the
 directory and runtime inputs stable through creation and a later spawn.
@@ -534,7 +537,8 @@ The [VM tests](src/host/vm/tests.rs) cover cleanup after child creation,
 ownership, caller survival, the Linux umask, and Windows job claims. Their
 ignored cold-spawn smoke test runs the current library against explicit
 `NVX_VM_SPAWN_OPENVMM`, `NVX_VM_SPAWN_KERNEL`, and `NVX_VM_SPAWN_INITRAMFS`
-paths, using a fresh `NVX_VM_SPAWN_PROOF_DIR`. It checks a guest boot marker,
+paths, using a fresh `NVX_VM_SPAWN_PROOF_DIR` and `NVX_HYPERVISOR` or the
+platform's default hypervisor. It checks a guest boot marker,
 responsive shell input, and a verified clean exit; it downloads no artifact.
 
 ### `nvx::host::snapshot`
