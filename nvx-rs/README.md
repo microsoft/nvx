@@ -492,8 +492,9 @@ file; a caller that reconnects after a restart keeps it.
 capability bytes, `ProcessRef` and `RuntimeIdentity`. The caller owns saving
 and reloading these values; the library neither serializes nor locates them.
 `vm::verify(&saved, &identity)` compares the exact runtime identity, returning
-`RuntimeMismatch` before opening the process if it differs, then returns the
-verified held `Process` without opening an endpoint or reading runtime files.
+`RuntimeMismatch` naming the differing parts before opening the process if it
+differs, then returns the verified held `Process` without opening an endpoint
+or reading runtime files.
 `vm::reattach(&saved, &runtime, deadline)` verifies, connects through
 `transport::connect_verified`, and attaches with the saved capability. Its
 `Reattached` holds both the process and authenticated connection. Failures
@@ -971,6 +972,7 @@ On Linux and Windows, `Process::exit_handle()` returns
 or process handle, or `Ok(None)` only on a polling-only Linux host. Callers
 register the standard owned descriptor or handle with their own runtime;
 dropping the original `Process` or another duplicate leaves it valid.
+On Windows, the duplicate retains the original handle's access rights.
 Duplication failures have kind `Io` and retain their original I/O source.
 No watcher thread, future or callback is created by the library.
 
