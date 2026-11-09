@@ -8,10 +8,11 @@
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131.
-- NVX's pinned OpenVMM revision: `d6addf8c1182a9549a9d6234917c598fc475c623`, position 228, the
-  head of microsoft/openvmm#4992, whose commit follows position 227, `154548a0e`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#4991 merged after position 226, `881619911`,
-  which microsoft/openvmm#4989 merged after position 225, `99aac19b3`, which
+- NVX's pinned OpenVMM revision: `ed8fc0713b4c6301d3b82ffe88817e70084d84b8`, position 229, the
+  head of microsoft/openvmm#4993, whose commit follows position 228, `d6addf8c1`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#4992 merged after position 227, `154548a0e`,
+  which microsoft/openvmm#4991 merged after position 226, `881619911`, which
+  microsoft/openvmm#4989 merged after position 225, `99aac19b3`, which
   microsoft/openvmm#4988 merged after position 224, `adb7c8bc8`, which
   microsoft/openvmm#4987 merged after position 223, `90f9e6180`. Positions 221-223, the
   three commits of microsoft/openvmm#4986, follow position 220, `cf6c03977`, the head of
@@ -22,8 +23,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 97 commits past
-  the mapped tip on the same first-parent chain. Positions 132-228 are not yet assigned to PRs; see
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 98 commits past
+  the mapped tip on the same first-parent chain. Positions 132-229 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -969,7 +970,8 @@ ba105dd7f
   -> undelivered portb output kept [226]
   -> restore listener of a disconnected boot console [227]
   -> management RPC with the command line's microVM settings [228]
-  -> d6addf8c1 (NVX pin)
+  -> staged manifest removed before a failed capture resumes [229]
+  -> ed8fc0713 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -985,13 +987,13 @@ reorganization folded the PR20 and PR12 fixups into the commits that they fix; s
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. None of the 97 later commits is a
+The NVX pin extends the chain past position 131 without merges. None of the 98 later commits is a
 fixup of a mapped PR, and none is yet classified or assigned to PRs. Each of positions 132-186
 combines the v2.4 commits that the table lists, as v3.0 positions 145-160 and 162-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 187-191
 followed the v3.0 reorganization, positions 192-205 are the ABI restart of the v4.0
 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-228 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-229 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1097,6 +1099,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 226 | `881619911` | - | - | - | - | chipset: keep undelivered microVM portb output (microsoft/openvmm#4989) |
 | 227 | `154548a0e` | - | - | - | - | microvm: let a restore attach a listener to a disconnected boot console (microsoft/openvmm#4991) |
 | 228 | `d6addf8c1` | - | - | - | - | vmservice: carry microVM blocks, network, RAM file, and share policy (microsoft/openvmm#4992) |
+| 229 | `ed8fc0713` | - | - | - | - | openvmm_helpers: don't resume beside a restorable staged snapshot (microsoft/openvmm#4993) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1182,7 +1185,13 @@ positions 163, 165, 169, and 170, and of a boot console with no endpoint; it cha
 configuration builder, which takes portb's endpoint from the RPC, and its storage builder and
 network endpoint, which take the microVM's resources; and it removes the exports and accessors
 that only position 124's module used, the console restore that positions 225 and 227 changed
-among them.
+among them. Position 229 changes the rollback of a failed publication that PR11's position 032
+adds and its position 033 extends with the live RAM alias: the cleanup of the staging directory
+now removes its manifest first, and a cleanup that cannot prove the manifest gone returns position
+033's uncertain outcome, on which the controller of PR17's position 076 terminates the source,
+where position 032 let it resume beside a snapshot that restore could open. It also rewords that
+outcome's message, the controller's log, and the sentences on a failed publication that position
+076 adds to the snapshot and snapshot format guides.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1359,6 +1368,15 @@ PR12's position 036 adds, the TTRPC VMM tests, whose microVM module position 124
 gRPC reference. Replaying it on upstream main conflicts in 16 of its 17 files: upstream main lacks
 the microVM modules, options, fields, and tests that those positions add, so it follows PR12,
 PR15, PR17, PR18, PR19, PR21, PR22, and PR25 upstream.
+
+Position 229 changes only the snapshot publication of `openvmm_helpers`, which PR11's positions
+031-033, PR17's position 076, PR19's position 092, and positions 139, 147, 166, 209, and 215 also
+change, the microVM controller's capture, which position 076 adds, and the sentences on a failed
+publication that position 076 adds to the snapshot and snapshot format guides. In the publication
+file it changes only the cleanup and rollback of the staging directory that positions 032 and 033
+add, and their tests. Replaying it on upstream main conflicts in all four of its files: upstream
+main lacks the controller, the staging of positions 032 and 033, and those sentences, so it follows
+PR11 and PR17 upstream.
 
 ## PR summary
 
