@@ -926,8 +926,10 @@ owned by [`nvx::host::transport`](#nvxhosttransport).
 `connect_verified` opens and holds the recorded process by its boot, ID and
 start time, retries while the endpoint is unavailable until the caller's
 deadline, and checks its server before authentication: Unix peer credentials
-on Linux and the named-pipe server process ID on Windows. An indeterminate
-process check remains an error, never exit proof.
+and the original socket peer's live pidfd on Linux, and the named-pipe server
+process ID on Windows. Linux requires `SO_PEERPIDFD` (Linux 6.5 or a backport)
+and refuses unverifiable peers rather than falling back to a numeric PID.
+An indeterminate process check remains an error, never exit proof.
 
 `HostConnection`: the host's role of the NVXS session over a platform transport,
 on which `nvx::host::session` and other host applications run their protocols.
