@@ -120,9 +120,9 @@ instead of running them (see [OpenVMM CI](ci.md#openvmm-ci)). Run its unit and
 documentation tests locally with
 `scripts/nvx.py test-openvmm-unit` and its VMM tests with
 `scripts/nvx.py test-openvmm --backend BACKEND`. The VMM tests boot
-OpenVMM's own test guests, except the management-RPC (TTRPC) lifecycle, SMP,
-and snapshot test, which boots NVX's kernel and Alpine initramfs when
-[`test-openvmm`](usage.md#test-openvmm) runs it.
+OpenVMM's own test guests, except the management-RPC (TTRPC) microVM tests,
+which boot NVX's kernel and Alpine initramfs when
+[`test-openvmm`](usage.md#test-openvmm) runs them.
 
 NVX owns behavior that depends on its patched Linux kernel, its Alpine,
 Ubuntu, and Azure Linux userspaces, guest binaries and scripts, SMP behavior, or virtio

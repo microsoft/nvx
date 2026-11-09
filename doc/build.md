@@ -72,10 +72,10 @@ The combined `build` command rejects unsupported OS/backend combinations before
 producing guest artifacts. Guest-only and source-only commands do not select an
 OpenVMM build target.
 
-When invoked through NVX, OpenVMM's custom TTRPC lifecycle, SMP, and snapshot
-test uses the ACPI-free, MP-enabled `build/vmlinux` and
-`build/initramfs.cpio.gz` artifacts. The phase-1 lifecycle and TTRPC interface
-tests continue to use OpenVMM's packaged guest artifacts.
+When invoked through NVX, OpenVMM's TTRPC microVM tests use the ACPI-free,
+MP-enabled `build/vmlinux` and `build/initramfs.cpio.gz` artifacts. The
+phase-1 lifecycle and TTRPC interface tests continue to use OpenVMM's packaged
+guest artifacts.
 
 On a Linux host, build the Alpine or Ubuntu initramfs directly:
 
