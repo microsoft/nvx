@@ -17,7 +17,7 @@
 //! template's class then holds no transaction, and records no launch, and a second creation serves
 //! the generation without a capture, as does the creation of a network of any other policy at the
 //! same guest's address, whose class is the same. The host program refuses a class that no capture
-//! takes before it creates the store.
+//! takes before it creates the store, such as one of kernel tuning parameters that are not NVX's.
 //!
 //! Other scenarios run the host program's operations on the generations of a store: `refresh`,
 //! which captures a generation of a class whose store holds an eligible one already, and retires
@@ -616,6 +616,31 @@ fn a_class_that_no_capture_takes_is_refused_before_the_store() {
         let stderr = templates.sandbox.stderr();
         assert!(stderr.contains("needs 1, 2, 4, or 8 of each"), "{stderr}");
         assert!(!templates.sandbox.store.exists());
+    }
+}
+
+#[test]
+#[ignore = "needs NVX's artifacts; see the module documentation"]
+fn kernel_tuning_that_no_capture_takes_is_refused_before_the_store() {
+    // A parameter that is not one of NVX's kernel tuning parameters, and one given twice.
+    for (tuning, refused) in [
+        (&["nokaslr"][..], "\"nokaslr\""),
+        (&["mitigations=on"][..], "\"mitigations=on\""),
+        (&["mitigations=off", "mitigations=auto"][..], "mitigations"),
+    ] {
+        let mut templates = Templates::new("tpl-tune");
+        let mut options = templates.options(&Template::new(Network::None));
+        for parameter in tuning {
+            options.extend([OsString::from("--kernel-tuning"), OsString::from(parameter)]);
+        }
+        let options: Vec<&OsStr> = options.iter().map(OsString::as_os_str).collect();
+        templates.sandbox.create(&options, FAILED);
+        let stderr = templates.sandbox.stderr();
+        assert!(
+            stderr.contains("kernel tuning parameter") && stderr.contains(refused),
+            "{tuning:?}: {stderr}"
+        );
+        assert!(!templates.sandbox.store.exists(), "{tuning:?}");
     }
 }
 

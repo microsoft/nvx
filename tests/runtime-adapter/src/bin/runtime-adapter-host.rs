@@ -73,7 +73,8 @@
 //!   end, abandons it, and checks that the VM ended with success and a complete teardown.
 //! - `runtime-adapter-host create STORE --guest-agent PATH --distro FORMAT:PATH --distro-identity
 //!   UUID [--hypervisor NAME] [--cpu-profile PROFILE] [--processors N] [--boot-processors B]
-//!   [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]` serves a
+//!   [--memory MIB] [--memory-capacity MIB] [--scratch-length BYTES] [--network FILE]
+//!   [--kernel-tuning PARAMETER]...` serves a
 //!   template of the guest agent PATH from the template store STORE, an
 //!   `nvx::host::template::Store`, which it creates if needed: a generation of the template's
 //!   class that the store holds, and that is eligible at the host's time, or else a new one,
@@ -90,7 +91,11 @@
 //!   its network, under the complete deny-all policy, whatever the network's own, which each
 //!   clone's restore replaces with the clone's, unless the network's policy lets nothing through,
 //!   and none without a network: the networks of every policy at one guest's address share one
-//!   class, and so one template. The creation
+//!   class, and so one template. Its kernel boots with the kernel tuning parameters that each
+//!   `--kernel-tuning` names, in their order, such as `mitigations=off`, so that its clones run
+//!   with them: NVX's class takes them, and refuses one that is not one of
+//!   `nvx::host::template::KERNEL_TUNING_PARAMETERS`, and a parameter that two of them name, such
+//!   as `mitigations=` with two values. The creation
 //!   reads the network before anything else, then stages the placeholder as `stage` stages an
 //!   image, verifying it explicitly, which hashes it only when a manifest is beside it, and checks
 //!   the class before it creates the store. A capture boots the template's VM through NVX's
@@ -612,7 +617,7 @@ const USAGE: &str = concat!(
     " [--processors N]\n",
     "           [--boot-processors N] [--memory MIB] [--memory-capacity MIB]",
     " [--scratch-length BYTES]\n",
-    "           [--network FILE]\n",
+    "           [--network FILE] [--kernel-tuning PARAMETER]...\n",
     "       runtime-adapter-host list STORE\n",
     "       runtime-adapter-host (inspect | remove) STORE GENERATION\n",
     "       runtime-adapter-host (reattach | stop) STORE [--guest-build BUILD]",
@@ -904,6 +909,8 @@ struct Template {
     scratch_length: u64,
     /// The file of the template's network, if it has one.
     network: Option<PathBuf>,
+    /// The kernel tuning parameters of the template, in their order.
+    kernel_tuning: Vec<String>,
     /// The delay of each clone's repair, for tests, if `RUNTIME_ADAPTER_REPAIR_DELAY` sets one.
     repair_delay: Option<Duration>,
 }
@@ -1032,6 +1039,8 @@ struct Options {
     memory_capacity: Option<u64>,
     /// `--scratch-length`.
     scratch_length: Option<u64>,
+    /// `--kernel-tuning`, in order.
+    kernel_tuning: Vec<String>,
     /// `--boot-console`: whether the clone's launch attaches a boot console that listens.
     boot_console: Option<bool>,
 }
@@ -1310,6 +1319,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Command, String> {
                     memory_capacity: options.memory_capacity.unwrap_or(memory),
                     scratch_length: options.scratch_length.unwrap_or(DEFAULT_SCRATCH_LENGTH),
                     network: options.network,
+                    kernel_tuning: options.kernel_tuning,
                     repair_delay: repair_delay_from_env()?,
                 }),
                 serving: if name == "refresh" {
@@ -1528,6 +1538,7 @@ fn parse_option(
                 format!("--scratch-length takes a positive number of bytes, not {value:?}")
             })?);
         }
+        ("create", "--kernel-tuning") => options.kernel_tuning.push(text(value)?),
         (_, "--guest-build") if name != "stage" && options.guest_build.is_none() => {
             options.guest_build = Some(text(value)?);
         }
@@ -2279,6 +2290,7 @@ fn create(
         memory_capacity: template.memory_capacity,
         scratch_length: template.scratch_length,
         network,
+        kernel_tuning: template.kernel_tuning.clone(),
         repair_delay: template.repair_delay,
     };
     // The placeholder is staged as `stage` stages an image: its explicit verification may hash it,

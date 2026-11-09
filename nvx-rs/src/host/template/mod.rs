@@ -11,7 +11,8 @@
 //!
 //! - [`CaptureClass`] holds the invariant inputs of a capture, known before it: the runtime, the
 //!   guest's build, the backend, the CPU profile, the resources, the geometries of the disks, the
-//!   network, and the other invariant settings.
+//!   network, the other invariant settings, and the kernel tuning parameters, of
+//!   [`KERNEL_TUNING_PARAMETERS`], with which the template's kernel boots.
 //! - [`TemplateManifest::read`] reads the manifest that OpenVMM wrote for a capture, with its time
 //!   contract, and refuses one that is not a template's.
 //! - [`TemplateKey::new`] derives the key of a template from its class and its manifest, after it
@@ -81,7 +82,8 @@
 //! - A list is its count, a `u32`, then its items in order.
 //!
 //! [`TemplateKey::from_bytes`] refuses any other encoding, and bytes left after it. The vectors in
-//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding and of a class's.
+//! `tests/vectors/template-key-v1.txt` fix version 1 of a key's encoding, and those in
+//! `tests/vectors/capture-class-v2.txt` version 2 of a class's.
 
 mod canonical;
 mod clone;
@@ -101,7 +103,9 @@ pub use self::clone::{
     RestoreDeadlines, Restoring, Stage, Started, Teardown, reattach_clone, status_evidence,
 };
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
-pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, TemplateKey};
+pub use self::key::{
+    CaptureClass, ClassIdentity, Invariants, KERNEL_TUNING_PARAMETERS, KeyIdentity, TemplateKey,
+};
 #[cfg(feature = "cli")]
 pub(crate) use self::manifest::read_attachments;
 pub use self::manifest::{

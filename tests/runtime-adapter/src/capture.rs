@@ -5,7 +5,8 @@
 //!
 //! A [`Request`] holds what the host program's options choose of a template: its placeholder, the
 //! backend, the CPU profile, the processors and those online at boot, the RAM and its capacity,
-//! the length of the dormant scratch, and the network, if any. [`Request::capture`] returns NVX's
+//! the length of the dormant scratch, the network, if any, and the kernel tuning parameters, if
+//! any. [`Request::capture`] returns NVX's
 //! `Capture` of it: the adapter's plan of the placeholder, which the host program plans as it
 //! plans an image, with the network, the placeholder's binding, which the host program stages as
 //! it stages an image, NVX's artifacts with the initramfs of the adapter's VMs, and the class of
@@ -23,6 +24,9 @@
 //! - the network, of which the class takes the NIC alone, at the guest's address, under the
 //!   complete deny-all policy, whatever the network's own, which each clone's restore replaces
 //!   with the clone's;
+//! - the kernel tuning parameters with which the template's kernel boots, such as
+//!   `mitigations=off`, so that the template's clones run the kernel configuration of the cold
+//!   sandboxes that boot with them: Linux applies some, such as `mitigations=`, once, as it boots;
 //! - for tests, the delay of each clone's repair, if [`REPAIR_DELAY_VARIABLE`] sets one, as the
 //!   invariant setting [`REPAIR_DELAY_SETTING`], and no other invariant setting, so that a
 //!   template whose clones delay their repair is of a class of its own.
@@ -32,7 +36,8 @@
 //! if any; see [`crate::initramfs`]. NVX gives it the kernel command
 //! line `nvx_sandbox=1`, with which NVX's `/init` hands it to the guest agent's PID 1 of a layered
 //! root, and for a template whose processors are not all online at boot, `maxcpus=` with those
-//! that are, and OpenVMM adds the platform tier's tokens, `nvx_snapshot_tier=platform` among them:
+//! that are, then the template's kernel tuning parameters, and OpenVMM adds the platform tier's
+//! tokens, `nvx_snapshot_tier=platform` among them:
 //! the worker then captures the VM before it assembles any root, and the capture ends the VM.
 
 use std::env;
@@ -116,6 +121,11 @@ pub struct Request {
     /// The network at whose guest's address the template has its fixed NIC, under the complete
     /// deny-all policy, or `None` for a template without a NIC.
     pub network: Option<SandboxNetwork>,
+    /// The kernel tuning parameters with which the template's kernel boots, in their order, as
+    /// `CaptureClass::kernel_tuning` holds them: each one of
+    /// `nvx::host::template::KERNEL_TUNING_PARAMETERS`, such as `mitigations=off`, and each
+    /// parameter at most once, which `CaptureClass::check` checks.
+    pub kernel_tuning: Vec<String>,
     /// How long each clone of the template delays its repair, for tests, or `None` for no delay.
     pub repair_delay: Option<Duration>,
 }
@@ -173,6 +183,7 @@ impl Request {
             scratch: geometry(scratch, self.scratch_length)?,
             network: self.network.clone(),
             invariants,
+            kernel_tuning: self.kernel_tuning.clone(),
         };
         Ok(Capture {
             class,

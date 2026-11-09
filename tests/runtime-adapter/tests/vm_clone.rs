@@ -25,6 +25,9 @@
 //!   NVX's plan refuses a count that a microVM cannot have, and one beyond the capacity, before
 //!   any VMM starts. The generation of a template that boots with 2 of its 4 processors online
 //!   refuses a clone of 1, and serves those of 2, its default, and 4.
+//! - A template whose kernel boots with the kernel tuning parameter `mitigations=off`, which Linux
+//!   applies once, as it boots, holds it in its key's kernel command line, and its clone runs with
+//!   it: the clone's `/proc/cmdline` is the template's command line, which the restore keeps.
 //! - One generation serves clones of either format over either upper, at once: the platform's
 //!   EROFS image, and GPT disks of other layouts than the template's placeholder, a GPT disk too,
 //!   and than each other's. The guest of a GPT clone rereads its disk's partition table before it
@@ -2888,6 +2891,42 @@ fn a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with
         assert_processors(&facts, online, "0-3", restored);
         cloned.stop();
     }
+    assert!(template.leases().is_empty());
+}
+
+#[test]
+#[ignore = "boots VMs; see the module documentation for what they need"]
+fn a_template_s_clones_run_with_its_kernel_tuning_parameters() {
+    // Linux applies `mitigations=` once, as it boots, so a clone gets it from its template alone.
+    let tuning = ["--kernel-tuning", "mitigations=off"];
+    let template = Template::captured("cl-tune", None, None, &tuning, &[]);
+    let key = template
+        .store()
+        .read_key(&template.generation())
+        .expect("the store holds the template's key");
+    let count = |command_line: &str| {
+        command_line
+            .split_ascii_whitespace()
+            .filter(|token| *token == "mitigations=off")
+            .count()
+    };
+    assert_eq!(count(key.command_line()), 1, "{}", key.command_line());
+
+    // The clone's kernel command line, the template's, which the restore keeps, holds it.
+    let mut cloned = template.start("cl-t", StartOf::default(), 0);
+    cloned.assert_started();
+    let lines = cloned.script("cat /proc/cmdline");
+    let [command_line] = lines.as_slice() else {
+        panic!("{lines:?}");
+    };
+    assert_eq!(count(command_line), 1, "{command_line}");
+    assert_eq!(
+        command_line.split_ascii_whitespace().collect::<Vec<_>>(),
+        key.command_line()
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>()
+    );
+    cloned.stop();
     assert!(template.leases().is_empty());
 }
 

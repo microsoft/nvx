@@ -679,9 +679,11 @@ policy, whatever the network's own, which each clone's restore replaces with the
 clone's; `TemplateResources`, with the processors, 1, 2, 4, or 8, and those
 online at boot, as many or fewer, and RAM and a `--memory-capacity` in blocks of
 `MEMORY_BLOCK_SIZE`; the kernel command line `nvx_sandbox=1`, with `maxcpus=`
-and the processors online at boot when they are fewer, so that the capture's
-whole command line holds tokens of OpenVMM's platform allowlist alone, and no
-tenant data, which the tests check with a copy of the allowlist's source; and
+and the processors online at boot when they are fewer, then the kernel tuning
+parameters of the template's class, which `TemplatePlan::with_kernel_tuning`
+sets, in their order, so that the capture's whole command line holds tokens of
+OpenVMM's platform allowlist alone, and no tenant data, which the tests check
+with a copy of the allowlist's source; and
 the capture's options, `--snapshot-tier platform`, a `--snapshot-destination`,
 `SNAPSHOT_NAME` in the transaction directory, and `--snapshot-generation-id`
 with the capture's bound-block `StorageGeneration`, which OpenVMM does not
@@ -701,11 +703,18 @@ those that make a manifest a template's.
 runtime, the guest's build, the backend, the requested CPU profile, the
 processors, those online at boot, and RAM, the geometries of the disks, the
 network, of which it takes what the template captures alone, its NIC at the
-guest's address under the complete deny-all policy, and the adapter's other
-`Invariants`.
+guest's address under the complete deny-all policy, the adapter's other
+`Invariants`, and the kernel tuning parameters with which the template's kernel
+boots, as the adapter's cold sandboxes do, so that its clones run their kernel
+configuration: those of `KERNEL_TUNING_PARAMETERS`, `mitigations=off`,
+`mitigations=auto`, or `mitigations=auto,nosmt`, `no_timer_check`, `quiet`,
+and `loglevel=0` to `loglevel=7`, each parameter at most once, which OpenVMM
+admits on a platform capture's command line, and which `CaptureClass::check`
+checks before any VM boots.
 
 `TemplateKey::new` checks that the capture made the machine that its class
-requested, and derives the template's compatibility key, from metadata alone:
+requested, the class's kernel tuning parameters on its kernel command line
+among it, and derives the template's compatibility key, from metadata alone:
 the runtime and contract versions through which its clones are restored, the
 backend, CPU profile and effective CPUID, topology, rates, resources, kernel
 command line, disks, and devices of its machine, with the NIC's addresses and
@@ -718,12 +727,17 @@ A key and a class each have one canonical, versioned encoding, whose
 domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
 to and from the `nvx::activation::Identity` by which a clone's activation record
 names its template's key, or a `ClassIdentity`; the
-[conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/template-key-v1.txt`, pin both encodings and identities. The
+[conformance vectors](tests/vectors/README.md) of version 1 of a key's,
+`tests/vectors/template-key-v1.txt`, and of version 2 of a class's,
+`tests/vectors/capture-class-v2.txt`, pin both encodings and identities. The
 key's encoding, version 1, leaves the network policy out, since templates
 capture their NIC under the complete deny-all policy, and has not been released,
 so a template store that an earlier build created is not supported: delete it
-and create a new one. There is no migration.
+and create a new one. There is no migration. A class's encoding, version 2,
+adds the kernel tuning parameters to version 1, so a creation finds no
+generation that a class of version 1 captured, and captures one again, while
+those generations still serve the clones that select them by their keys, which
+version 2 leaves as they were.
 
 `Store` keeps the generations of templates that a host published, apart from
 every sandbox's store, at a location that the adapter chooses: a private

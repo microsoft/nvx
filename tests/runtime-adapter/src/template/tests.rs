@@ -42,9 +42,27 @@ const WHOLE: [&str; 9] = [
     "nvx_control_tty=hvc2",
 ];
 
+/// The kernel tuning parameters that the platform tier's allowlist holds whole too, which a
+/// template boots with as its adapter's cold sandboxes do.
+const TUNING: [&str; 13] = [
+    "mitigations=off",
+    "mitigations=auto",
+    "mitigations=auto,nosmt",
+    "no_timer_check",
+    "quiet",
+    "loglevel=0",
+    "loglevel=1",
+    "loglevel=2",
+    "loglevel=3",
+    "loglevel=4",
+    "loglevel=5",
+    "loglevel=6",
+    "loglevel=7",
+];
+
 #[test]
 fn the_platform_tier_s_allowlist_is_openvmm_s() {
-    for token in WHOLE {
+    for token in WHOLE.into_iter().chain(TUNING) {
         assert!(is_platform_token(token.as_bytes()), "{token}");
     }
     for token in [
@@ -105,7 +123,17 @@ fn the_platform_tier_s_allowlist_is_openvmm_s() {
         "driver_async_probe=virtio_mmio",
         "init=/bin/sh",
         "rdinit=/bin/sh",
-        "quiet",
+        // Other values of the kernel tuning parameters, and other spellings of them.
+        "mitigations=on",
+        "mitigations=",
+        "mitigations",
+        "loglevel=8",
+        "loglevel=07",
+        "loglevel",
+        "quiet=1",
+        "no_timer_check=1",
+        "no-timer-check",
+        "nokaslr",
         "--",
         "--=1",
     ] {
@@ -128,16 +156,16 @@ fn the_platform_tier_s_allowlist_takes_tokens_as_openvmm_splits_them() {
     // but the kernel splits each in two at the vertical tab or at the no-break space's 0xa0,
     // and its second parameter is not on the allowlist, so a template's VM refuses it.
     for token in [
-        "virtnet_dns=10.0.2.3\u{0b}quiet",
-        "virtnet_dns=10.0.2.3\u{a0}quiet",
+        "virtnet_dns=10.0.2.3\u{0b}nokaslr",
+        "virtnet_dns=10.0.2.3\u{a0}nokaslr",
     ] {
         assert!(is_platform_token(token.as_bytes()), "{token:?}");
         let names: Vec<&[u8]> = cmdline::parameters(token.as_bytes())
             .map(|parameter| parameter.name)
             .collect();
-        assert_eq!(names, [&b"virtnet_dns"[..], b"quiet"], "{token:?}");
+        assert_eq!(names, [&b"virtnet_dns"[..], b"nokaslr"], "{token:?}");
     }
-    assert!(!is_platform_token(b"quiet"));
+    assert!(!is_platform_token(b"nokaslr"));
 }
 
 #[test]
@@ -209,6 +237,26 @@ fn a_template_s_command_line_holds_the_platform_tier_s_tokens_alone() {
 }
 
 #[test]
+fn a_template_s_command_line_may_hold_kernel_tuning_parameters() {
+    // NVX gives a template the kernel tuning parameters of its class after its own tokens.
+    let tuned = TEMPLATE.replacen(
+        "nvx_sandbox=1",
+        "nvx_sandbox=1 mitigations=off no_timer_check quiet loglevel=0",
+        1,
+    );
+    assert_eq!(boot(tuned.as_bytes()), Ok(Boot::Template { gateway: None }));
+    for parameter in TUNING {
+        for command_line in with(parameter) {
+            assert_eq!(
+                boot(command_line.as_bytes()),
+                Ok(Boot::Template { gateway: None }),
+                "{command_line:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn template_mode_refuses_a_gateway_that_openvmm_would_not_render() {
     for (gateway, problem) in [
         (
@@ -242,7 +290,9 @@ fn template_mode_refuses_a_gateway_that_openvmm_would_not_render() {
 #[test]
 fn template_mode_refuses_a_token_outside_the_allowlist() {
     for token in [
-        "quiet",
+        "nokaslr",
+        "mitigations=on",
+        "loglevel=8",
         "init=/bin/sh",
         "console=ttyS0",
         "nvx_config=0xd0010000,65537",
@@ -295,11 +345,11 @@ fn template_mode_refuses_a_token_outside_the_allowlist() {
     // no-break space's 0xa0, its first byte, 0xc2, stays in the platform token, which is then
     // not text, and so not on the allowlist, which takes tokens as OpenVMM's text.
     for (separator, refused) in [
-        ("\u{0b}", &b"quiet"[..]),
+        ("\u{0b}", &b"nokaslr"[..]),
         ("\u{a0}", b"virtnet_dns=10.0.2.3\xc2"),
     ] {
         let command_line = format!(
-            "{} virtnet_dns=10.0.2.3{separator}quiet\n",
+            "{} virtnet_dns=10.0.2.3{separator}nokaslr\n",
             TEMPLATE.trim_end()
         );
         assert_eq!(
@@ -309,10 +359,10 @@ fn template_mode_refuses_a_token_outside_the_allowlist() {
         );
     }
     let mut latin1 = format!("{} virtnet_dns=10.0.2.3", TEMPLATE.trim_end()).into_bytes();
-    latin1.extend_from_slice(b"\xa0quiet\n");
+    latin1.extend_from_slice(b"\xa0nokaslr\n");
     assert_eq!(
         boot(&latin1),
-        Err(CommandLineError::Token(b"quiet".to_vec()))
+        Err(CommandLineError::Token(b"nokaslr".to_vec()))
     );
     assert_eq!(
         CommandLineError::Token(b"\xff=\x01".to_vec()).to_string(),

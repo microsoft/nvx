@@ -114,7 +114,8 @@
 //! share, `--snapshot-destination`, `--snapshot-tier platform`, a nonzero
 //! `--snapshot-generation-id` of 32 hexadecimal digits, the options of a cold boot of a run with
 //! a `--memory-capacity` that is a multiple of 128 MiB, `nvx_sandbox=1` on the kernel command
-//! line, alone or followed by a canonical `maxcpus=` of 1, 2, 4, or 8 of its `--processors`,
+//! line, alone or followed by a canonical `maxcpus=` of 1, 2, 4, or 8 of its `--processors`, then
+//! by kernel tuning parameters that OpenVMM admits on a capture's command line, each at most once,
 //! `--virtio-console none`, the control console with its capability on standard input, and an
 //! outcome report. On Unix, the
 //! control console's socket must be in the directory of the snapshot's destination, as above. The
@@ -208,7 +209,27 @@ const CAPTURE_SCENARIO_NAME: &str = "fake-openvmm-capture.json";
 
 /// The refusal of a capture whose kernel command line is not a template's.
 const CAPTURE_COMMAND_LINE: &str = "a capture's kernel command line is nvx_sandbox=1, alone or \
-                                    with a canonical maxcpus= of 1, 2, 4, or 8 of its processors";
+                                    with a canonical maxcpus= of 1, 2, 4, or 8 of its processors, \
+                                    then kernel tuning parameters that OpenVMM admits, each at \
+                                    most once";
+
+/// The kernel tuning parameters that OpenVMM admits on the command line of a capture of its
+/// platform tier, each parameter at most once.
+const KERNEL_TUNING_PARAMETERS: [&str; 13] = [
+    "mitigations=off",
+    "mitigations=auto",
+    "mitigations=auto,nosmt",
+    "no_timer_check",
+    "quiet",
+    "loglevel=0",
+    "loglevel=1",
+    "loglevel=2",
+    "loglevel=3",
+    "loglevel=4",
+    "loglevel=5",
+    "loglevel=6",
+    "loglevel=7",
+];
 
 /// Prefix of the name of the file that backs the RAM of a capture's VM, beside the snapshot's
 /// destination, which the process ID of the VMM follows.
@@ -1379,14 +1400,13 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         if capture {
             // A template's VM boots the invariant configuration alone, without a tenant, with at
             // most the limit of its processors online at boot, which OpenVMM records in the
-            // canonical form alone.
+            // canonical form alone, and then the kernel tuning parameters that OpenVMM admits.
             let processors = values
                 .get("--processors")
                 .and_then(|given| given.first())
                 .and_then(|given| given.parse::<u32>().ok());
-            let invariant = match tokens.as_slice() {
-                ["nvx_sandbox=1"] => true,
-                ["nvx_sandbox=1", limit] => limit
+            let is_limit = |limit: &str| {
+                limit
                     .strip_prefix("maxcpus=")
                     .and_then(|count| {
                         count
@@ -1396,7 +1416,13 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
                     })
                     .is_some_and(|count| {
                         [1, 2, 4, 8].contains(&count) && processors.is_some_and(|all| count <= all)
-                    }),
+                    })
+            };
+            let invariant = match tokens.as_slice() {
+                ["nvx_sandbox=1", limit, tuning @ ..] if limit.starts_with("maxcpus=") => {
+                    is_limit(limit) && is_kernel_tuning(tuning)
+                }
+                ["nvx_sandbox=1", tuning @ ..] => is_kernel_tuning(tuning),
                 _ => false,
             };
             if !invariant {
@@ -1907,6 +1933,22 @@ fn ram_overlay_requested(tokens: &[&str]) -> Result<bool, String> {
         ["ramfs"] => Ok(true),
         _ => Err("microVM nvx_overlay_upper must appear once and equal ramfs".to_owned()),
     }
+}
+
+/// Returns whether `tokens` are kernel tuning parameters that OpenVMM admits on the command line of
+/// a capture: each one of [`KERNEL_TUNING_PARAMETERS`], and each parameter, by its name, at most
+/// once.
+fn is_kernel_tuning(tokens: &[&str]) -> bool {
+    /// Returns the name of the kernel parameter `token`.
+    fn name(token: &str) -> &str {
+        token.split_once('=').map_or(token, |(name, _)| name)
+    }
+    tokens.iter().enumerate().all(|(index, token)| {
+        KERNEL_TUNING_PARAMETERS.contains(token)
+            && !tokens[..index]
+                .iter()
+                .any(|earlier| name(earlier) == name(token))
+    })
 }
 
 /// Returns the number of host mappings that the `nvx_maps=` tokens of a kernel command line,

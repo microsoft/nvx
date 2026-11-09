@@ -8,13 +8,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use nvx::Hypervisor;
 use nvx::host::artifacts::Artifacts;
 use nvx::host::sandbox::SandboxNetwork;
 use nvx::host::sandbox::distro::DISTRO_POLICY_REVISION;
 use nvx::host::store::{ArtifactIdentity, RuntimeIdentity};
+use nvx::host::template::CaptureClass;
 use nvx::protocol::root::{ImageFormat, RootImage};
 use nvx::uuid::Uuid;
+use nvx::{ErrorKind, Hypervisor};
 use runtime_adapter::capture::{
     DEFAULT_BOOT_PROCESSORS, DEFAULT_CPU_PROFILE, DEFAULT_PROCESSORS, DEFAULT_SCRATCH_LENGTH,
     LOGICAL_BLOCK_SIZE, REPAIR_DELAY_SETTING, REPAIR_DELAY_VARIABLE, Request, geometry,
@@ -88,6 +89,7 @@ fn template(distro: &Path, network: Option<SandboxNetwork>) -> Request {
         memory_capacity: 256 * MIB,
         scratch_length: DEFAULT_SCRATCH_LENGTH,
         network,
+        kernel_tuning: Vec::new(),
         repair_delay: None,
     }
 }
@@ -244,6 +246,69 @@ fn a_capture_takes_its_class_and_inputs_from_the_request() {
     assert_eq!(presented.logical_block_size, 512);
     assert!(presented.physical_block_size >= 512);
     assert!(presented.physical_block_size.is_power_of_two());
+}
+
+#[test]
+fn a_capture_takes_its_kernel_tuning_from_the_request() {
+    let directory = directory("template-capture-tuning");
+    let distro = directory.join("placeholder.erofs");
+    fs::write(&distro, vec![0; 2 * MIB as usize]).unwrap();
+    let runtime = runtime(&directory);
+    let initramfs = directory.join("template.cpio.gz");
+    let staged = Staged::stage(&distro, ImageFormat::Erofs, identity(), None).unwrap();
+    let capture = |kernel_tuning: &[&str]| {
+        let request = Request {
+            kernel_tuning: kernel_tuning
+                .iter()
+                .map(|parameter| (*parameter).to_owned())
+                .collect(),
+            ..template(&distro, None)
+        };
+        request
+            .capture(
+                staged.distro.binding.clone(),
+                &runtime,
+                "build",
+                &initramfs,
+                &directory,
+            )
+            .unwrap()
+    };
+
+    // The class takes the request's kernel tuning parameters, in their order, and nothing else
+    // changes, but the class, which is one of its own.
+    let untuned = capture(&[]);
+    assert!(untuned.class.kernel_tuning.is_empty());
+    let tuned = capture(&["mitigations=off", "quiet", "loglevel=0"]);
+    assert_eq!(
+        tuned.class.kernel_tuning,
+        ["mitigations=off", "quiet", "loglevel=0"]
+    );
+    assert_eq!(tuned.adapter, untuned.adapter);
+    assert_eq!(
+        CaptureClass {
+            kernel_tuning: Vec::new(),
+            ..tuned.class.clone()
+        },
+        untuned.class
+    );
+    let identity = tuned.class.identity().unwrap();
+    assert_ne!(identity, untuned.class.identity().unwrap());
+    let reordered = capture(&["mitigations=off", "loglevel=0", "quiet"]);
+    assert_ne!(reordered.class.identity().unwrap(), identity);
+
+    // NVX's class refuses a parameter that no capture takes, and a parameter given twice, which
+    // the host program checks before it creates the store.
+    for refused in [
+        &["nokaslr"][..],
+        &["mitigations=on"][..],
+        &["no-timer-check"][..],
+        &["quiet", "quiet"][..],
+        &["mitigations=off", "mitigations=auto"][..],
+    ] {
+        let error = capture(refused).class.identity().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{refused:?}: {error}");
+    }
 }
 
 #[test]
