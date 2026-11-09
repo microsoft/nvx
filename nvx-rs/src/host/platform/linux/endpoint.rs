@@ -189,14 +189,14 @@ fn check_original_peer(connection: &UnixStream) -> io::Result<()> {
         ) => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "restore-ready peer authentication requires SO_PEERPIDFD",
+                "socket peer authentication requires SO_PEERPIDFD",
             ));
         }
         // Before Linux 6.16, a reaped peer yields EINVAL rather than a readable pidfd.
         Err(sys::Errno::EINVAL | sys::Errno::ESRCH | sys::Errno::ENODATA) => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "the original restore-ready socket peer exited",
+                "the original socket peer exited",
             ));
         }
         result => result?,
@@ -209,11 +209,11 @@ fn check_original_peer(connection: &UnixStream) -> io::Result<()> {
     if events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "the original restore-ready socket peer exited",
+            "the original socket peer exited",
         ));
     }
     Err(io::Error::other(format!(
-        "the restore-ready peer pidfd reported unexpected events {events:?}"
+        "the socket peer pidfd reported unexpected events {events:?}"
     )))
 }
 
@@ -248,6 +248,8 @@ fn set_ready_socket_mode(socket_path: &Path) -> io::Result<()> {
 
 /// Connects to a control endpoint served by the process `expected_pid`.
 ///
+/// Requires a live original socket peer through `SO_PEERPIDFD`, not just its cached numeric PID.
+///
 /// The connection attempt never blocks: a listener whose backlog is full yields
 /// [`io::ErrorKind::WouldBlock`], and the caller retries within its deadline.
 pub(crate) fn connect_endpoint(
@@ -265,6 +267,7 @@ pub(crate) fn connect_endpoint(
             ),
         ));
     }
+    check_original_peer(&stream)?;
     Ok(Box::new(UnixTransport { stream }))
 }
 
