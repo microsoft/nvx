@@ -430,23 +430,28 @@ def _fetch(
         _extract(archive, results)
         # Windows can briefly deny a directory rename while a child file is open.
         rename_deadline = min(deadline, time.monotonic() + _RENAME_RETRY_SECONDS)
-        while True:
+        first_attempt = True
+        rename_error: PermissionError | None = None
+        while first_attempt or time.monotonic() < rename_deadline:
+            first_attempt = False
             try:
                 results.rename(directory)
             except PermissionError as error:
-                remaining = rename_deadline - time.monotonic()
                 if (
                     getattr(error, "winerror", None) not in (5, 32)
-                    or remaining <= 0
                     or not results.is_dir()
                     or directory.exists()
                 ):
                     raise
-                time.sleep(min(_RENAME_RETRY_INTERVAL_SECONDS, remaining))
-                if time.monotonic() >= rename_deadline:
-                    raise
+                rename_error = error
+                remaining = rename_deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(_RENAME_RETRY_INTERVAL_SECONDS, remaining))
             else:
                 break
+        else:
+            assert rename_error is not None
+            raise rename_error
     return directory
 
 
