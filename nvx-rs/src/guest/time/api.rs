@@ -583,6 +583,8 @@ pub struct Restore {
     memory_ranges: Vec<MemoryRange>,
     /// The network settings that the restore packet carries, if any.
     network: Option<RestoreNetwork>,
+    /// The activation record that the restore packet ends with, if any, undecoded.
+    activation: Option<Vec<u8>>,
     /// Whether the call finished the restore.
     finished: bool,
     /// The restore's fresh entropy, in the in-memory mode, until the caller takes it.
@@ -656,6 +658,15 @@ impl Restore {
     /// finishes the restore, or `None` for a restore that carries none.
     pub fn network(&self) -> Option<RestoreNetwork> {
         self.network
+    }
+
+    /// Returns the activation record that the restore packet ends with: the bytes, 1 to
+    /// [`MAX_RECORD_BYTES`](crate::activation::MAX_RECORD_BYTES) of them, that the host handed a
+    /// platform clone with its restore, which the time ABI does not decode, or `None` for a
+    /// restore that handed over none. A clone decodes them with
+    /// [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode).
+    pub fn activation_record(&self) -> Option<&[u8]> {
+        self.activation.as_deref()
     }
 }
 
@@ -869,7 +880,13 @@ fn read_packet(runtime: &Runtime<'_>, ports: &PortAccess<'_>, recorded: u32) -> 
     }
     let mut body = vec![0_u8; header.body_size()];
     portb_read(ports, Port::PortbData, &mut body);
-    let packet = RestorePacket::parse(header, &body);
+    // The activation record follows the body, which ends with its length, a multiple of four
+    // bytes after the header, so its reads start on a four-byte boundary of the packet.
+    let packet = RestorePacket::parse(header, &body, |size| {
+        let mut record = vec![0_u8; size];
+        portb_read(ports, Port::PortbData, &mut record);
+        record
+    });
     // The packet owns its entropy now, in the seed's allocation.
     sys::zeroize(&mut body);
     PacketRead::Packet(packet.map(|packet| {
@@ -940,6 +957,7 @@ fn repair_restore(
         ranges,
         entropy,
         network,
+        activation,
     } = packet;
     let generation_id = entropy.generation_id();
     if generation_id == target.previous_id {
@@ -1022,6 +1040,7 @@ fn repair_restore(
             .map(|&(start, length)| MemoryRange { start, length })
             .collect(),
         network,
+        activation,
         finished,
         seed,
     }))

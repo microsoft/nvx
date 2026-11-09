@@ -17,6 +17,11 @@ fn plain_body(entropy: &[u8]) -> Vec<u8> {
     [entropy, &[0; PACKET_DNS_SIZE]].concat()
 }
 
+/// Reads the activation record of a packet that has none.
+fn unread(_: usize) -> Vec<u8> {
+    unreachable!("the packet has no activation record")
+}
+
 #[test]
 fn packets_decode_their_header_then_their_body() {
     let header = PacketHeader::parse(&valid_header()).unwrap();
@@ -24,11 +29,11 @@ fn packets_decode_their_header_then_their_body() {
     assert_eq!(header.body_size(), PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE);
     let entropy: Vec<u8> = (0..64).collect();
     let body = plain_body(&entropy);
-    let packet = RestorePacket::parse(header, &body).unwrap();
+    let packet = RestorePacket::parse(header, &body, unread).unwrap();
     assert_eq!(packet.entropy.bytes().as_slice(), entropy);
     assert_eq!(packet.generation_id(), &entropy[..GENERATION_ID_SIZE]);
     assert_eq!(
-        RestorePacket::parse(header, &body[1..]).unwrap_err(),
+        RestorePacket::parse(header, &body[1..], unread).unwrap_err(),
         PacketError::IncompleteBody
     );
     assert_eq!(
@@ -54,7 +59,7 @@ fn packet_errors_name_the_invalid_field() {
     let mut body = [0; PACKET_RANGE_SIZE + PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE];
     body[..8].copy_from_slice(&u64::MAX.to_le_bytes());
     body[8..16].copy_from_slice(&1_u64.to_le_bytes());
-    let error = RestorePacket::parse(header, &body).unwrap_err();
+    let error = RestorePacket::parse(header, &body, unread).unwrap_err();
     assert_eq!(error.to_string(), "restore memory range 0 is invalid");
 }
 
@@ -105,11 +110,11 @@ fn network_packets_carry_their_network_settings() {
         assert_eq!(header.network_repair(), network != 0);
         assert_eq!(header.body_size(), PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE);
         let body = [entropy.as_slice(), &dns_server].concat();
-        let packet = RestorePacket::parse(header, &body).unwrap();
+        let packet = RestorePacket::parse(header, &body, unread).unwrap();
         assert_eq!(packet.entropy.bytes().as_slice(), entropy);
         assert_eq!(packet.network, Some(expected), "{network:#04x}");
         assert_eq!(
-            RestorePacket::parse(header, &body[1..]).unwrap_err(),
+            RestorePacket::parse(header, &body[1..], unread).unwrap_err(),
             PacketError::IncompleteBody
         );
     }
@@ -119,7 +124,7 @@ fn network_packets_carry_their_network_settings() {
     let header = PacketHeader::parse(&valid_header()).unwrap();
     assert_eq!(header.network, None);
     assert!(!header.network_repair());
-    let packet = RestorePacket::parse(header, &plain_body(&entropy)).unwrap();
+    let packet = RestorePacket::parse(header, &plain_body(&entropy), unread).unwrap();
     assert_eq!(packet.network, None);
 }
 
@@ -151,7 +156,7 @@ fn packets_refuse_malformed_network_settings() {
     let mut body = plain_body(&[0; PACKET_ENTROPY_SIZE]);
     body[PACKET_ENTROPY_SIZE] = 10;
     assert_eq!(
-        RestorePacket::parse(header, &body).unwrap_err(),
+        RestorePacket::parse(header, &body, unread).unwrap_err(),
         PacketError::DnsServer
     );
 
@@ -169,9 +174,81 @@ fn packets_refuse_malformed_network_settings() {
     ] {
         let header = PacketHeader::parse(&network_header(network)).unwrap();
         let body = [&[0; PACKET_ENTROPY_SIZE][..], &dns_server].concat();
-        let error = RestorePacket::parse(header, &body).unwrap_err();
+        let error = RestorePacket::parse(header, &body, unread).unwrap_err();
         assert_eq!(error, PacketError::DnsServer, "{network:#04x}");
         assert_eq!(error.to_string(), "restore packet DNS server is invalid");
+    }
+}
+
+/// Returns a valid packet header with an activation record, without memory ranges, of
+/// generation 1.
+fn activation_header() -> [u8; PACKET_HEADER_SIZE] {
+    let mut bytes = valid_header();
+    bytes[4] = PACKET_ACTIVATION | PACKET_ACK_REQUIRED;
+    bytes
+}
+
+#[test]
+fn packets_end_with_their_activation_record() {
+    let header = PacketHeader::parse(&activation_header()).unwrap();
+    assert!(header.activation() && header.acknowledgement_required());
+    // The body ends with the record's length, so the record starts on a four-byte boundary.
+    assert_eq!(
+        header.body_size(),
+        PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE + PACKET_ACTIVATION_LENGTH_SIZE
+    );
+    assert_eq!((PACKET_HEADER_SIZE + header.body_size()) % 4, 0);
+    let entropy: Vec<u8> = (0..64).collect();
+    for length in [1, 3, 602, PACKET_ACTIVATION_MAX] {
+        let record: Vec<u8> = (0..length).map(|index| index as u8 ^ 0x5a).collect();
+        let body = [plain_body(&entropy), (length as u32).to_le_bytes().to_vec()].concat();
+        let mut requested = None;
+        let packet = RestorePacket::parse(header, &body, |size| {
+            requested = Some(size);
+            record.clone()
+        })
+        .unwrap();
+        assert_eq!(requested, Some(length));
+        assert_eq!(packet.activation.as_deref(), Some(record.as_slice()));
+        assert_eq!(packet.entropy.bytes().as_slice(), entropy);
+    }
+    // A packet without the flag has none, and reads none.
+    let header = PacketHeader::parse(&valid_header()).unwrap();
+    assert!(!header.activation());
+    let packet = RestorePacket::parse(header, &plain_body(&entropy), unread).unwrap();
+    assert_eq!(packet.activation, None);
+}
+
+#[test]
+fn packets_refuse_activation_records_beyond_the_bounds() {
+    let header = PacketHeader::parse(&activation_header()).unwrap();
+    for length in [0, PACKET_ACTIVATION_MAX as u32 + 1, u32::MAX] {
+        let body = [
+            plain_body(&[0; PACKET_ENTROPY_SIZE]),
+            length.to_le_bytes().to_vec(),
+        ]
+        .concat();
+        let error = RestorePacket::parse(header, &body, unread).unwrap_err();
+        assert_eq!(error, PacketError::ActivationLength(length));
+        assert_eq!(
+            error.to_string(),
+            format!("restore packet activation record length {length} is not 1 to 1024")
+        );
+    }
+    // A body that ends within the record's length.
+    let body = plain_body(&[0; PACKET_ENTROPY_SIZE]);
+    assert_eq!(
+        RestorePacket::parse(header, &[body.as_slice(), &[1, 0]].concat(), unread).unwrap_err(),
+        PacketError::IncompleteBody
+    );
+    // The bits after the activation flag, which no version defines.
+    for flags in [0x40, 0x80] {
+        let mut bytes = valid_header();
+        bytes[4] = flags;
+        assert_eq!(
+            PacketHeader::parse(&bytes),
+            Err(PacketError::ReservedFlags(flags))
+        );
     }
 }
 

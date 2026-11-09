@@ -64,8 +64,18 @@ pub(crate) const PACKET_ACK_REQUIRED: u8 = 0x04;
 /// at a restore that replaces the network policy of a snapshot without a tier. Without it, both
 /// are zero.
 pub(crate) const PACKET_NETWORK: u8 = 0x10;
+/// Restore flag indicating that the packet ends with a platform clone's activation record: its
+/// length, then its bytes.
+pub(crate) const PACKET_ACTIVATION: u8 = 0x20;
 /// Mask of restore flags defined by the ABI.
-const PACKET_KNOWN_FLAGS: u8 = 0x1f;
+const PACKET_KNOWN_FLAGS: u8 = 0x3f;
+/// Encoded length of the activation record's length, a little-endian `u32`, which follows the DNS
+/// server in a packet with an [activation record](PACKET_ACTIVATION), and keeps the record's bytes
+/// aligned to the guest's four-byte reads.
+pub(crate) const PACKET_ACTIVATION_LENGTH_SIZE: usize = 4;
+/// The most bytes of a packet's activation record: as many as a record's encoding holds,
+/// [`MAX_RECORD_BYTES`](crate::activation::MAX_RECORD_BYTES).
+pub(crate) const PACKET_ACTIVATION_MAX: usize = crate::activation::MAX_RECORD_BYTES;
 /// The online VP counts that a restore packet may give.
 const PACKET_ONLINE_VP_COUNTS: [u8; 5] = [0, 1, 2, 4, 8];
 /// The time-sample version.
@@ -198,6 +208,9 @@ pub(crate) enum PacketError {
     /// not zero when the network byte names no DNS server or the packet carries no network
     /// settings.
     DnsServer,
+    /// The length of the packet's activation record is 0, or more than
+    /// [`PACKET_ACTIVATION_MAX`].
+    ActivationLength(u32),
 }
 
 impl Display for PacketError {
@@ -241,6 +254,11 @@ impl Display for PacketError {
             Self::IncompleteBody => formatter.write_str("restore packet body is incomplete"),
             Self::Range(index) => write!(formatter, "restore memory range {index} is invalid"),
             Self::DnsServer => formatter.write_str("restore packet DNS server is invalid"),
+            Self::ActivationLength(length) => write!(
+                formatter,
+                "restore packet activation record length {length} is not 1 to \
+                 {PACKET_ACTIVATION_MAX}"
+            ),
         }
     }
 }
@@ -319,9 +337,24 @@ impl PacketHeader {
         Ok(header)
     }
 
-    /// Returns the length of the body that follows the header.
+    /// Returns the length of the body that follows the header: the memory ranges, the entropy,
+    /// the DNS server, and the length of the packet's activation record, if it has one, whose
+    /// bytes follow the body.
     pub(crate) fn body_size(&self) -> usize {
-        usize::from(self.range_count) * PACKET_RANGE_SIZE + PACKET_ENTROPY_SIZE + PACKET_DNS_SIZE
+        let activation = if self.activation() {
+            PACKET_ACTIVATION_LENGTH_SIZE
+        } else {
+            0
+        };
+        usize::from(self.range_count) * PACKET_RANGE_SIZE
+            + PACKET_ENTROPY_SIZE
+            + PACKET_DNS_SIZE
+            + activation
+    }
+
+    /// Returns whether the packet ends with a platform clone's activation record.
+    pub(crate) const fn activation(&self) -> bool {
+        self.flags & PACKET_ACTIVATION != 0
     }
 
     /// Returns whether the packet asks the guest to apply network settings: a DNS server, or the
@@ -361,12 +394,19 @@ pub(crate) struct RestorePacket {
     pub(crate) entropy: Seed,
     /// The network settings of a packet that carries them.
     pub(crate) network: Option<RestoreNetwork>,
+    /// The activation record that the packet ends with, if any: its bytes, undecoded.
+    pub(crate) activation: Option<Vec<u8>>,
 }
 
 impl RestorePacket {
     /// Decodes and validates the memory ranges, the entropy, and the DNS server that follow
-    /// `header` in `body`.
-    pub(crate) fn parse(header: PacketHeader, body: &[u8]) -> Result<Self, PacketError> {
+    /// `header` in `body`, and, for a packet with an activation record, the record's length,
+    /// with which `read_record` reads the record's bytes, which follow the body.
+    pub(crate) fn parse(
+        header: PacketHeader,
+        body: &[u8],
+        read_record: impl FnOnce(usize) -> Vec<u8>,
+    ) -> Result<Self, PacketError> {
         let mut fields = Fields::new(body, PacketError::IncompleteBody);
         let ranges = (0..usize::from(header.range_count))
             .map(|index| {
@@ -387,11 +427,22 @@ impl RestorePacket {
             None if dns_server == [0; PACKET_DNS_SIZE] => None,
             None => return Err(PacketError::DnsServer),
         };
+        let activation = if header.activation() {
+            let length = fields.u32()?;
+            let size = usize::try_from(length)
+                .ok()
+                .filter(|size| (1..=PACKET_ACTIVATION_MAX).contains(size))
+                .ok_or(PacketError::ActivationLength(length))?;
+            Some(read_record(size))
+        } else {
+            None
+        };
         Ok(Self {
             header,
             ranges,
             entropy: Seed::copy_from(entropy),
             network,
+            activation,
         })
     }
 

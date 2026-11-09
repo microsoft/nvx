@@ -151,13 +151,15 @@ fn test_packet(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
         return Ok(());
     }
     let body = record(&bytes, PACKET_HEADER_SIZE, header.body_size());
-    let packet = match RestorePacket::parse(header, &body) {
-        Ok(packet) => packet,
-        Err(error) => {
-            let _ = writeln!(out, "error {} {error}", ViolationCode::RepairPacket);
-            return Ok(());
-        }
-    };
+    let record_offset = PACKET_HEADER_SIZE + header.body_size();
+    let packet =
+        match RestorePacket::parse(header, &body, |size| record(&bytes, record_offset, size)) {
+            Ok(packet) => packet,
+            Err(error) => {
+                let _ = writeln!(out, "error {} {error}", ViolationCode::RepairPacket);
+                return Ok(());
+            }
+        };
     if packet.generation_id() == previous {
         let _ = writeln!(
             out,
@@ -190,6 +192,9 @@ fn test_packet(arguments: &[&[u8]], out: &mut dyn Write) -> Result<(), CommandEr
             " dns={dns_server} announce={}",
             u8::from(network.announces_listeners())
         );
+    }
+    if let Some(activation) = &packet.activation {
+        let _ = write!(out, " activation={}", decoders::format_hex(activation));
     }
     let _ = writeln!(out);
     Ok(())
