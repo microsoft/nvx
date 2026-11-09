@@ -1,10 +1,13 @@
 # Guest-agent guidelines
 
-`nvx` parses the contracts, captures the guest and drives a restore's activation.
-It builds no space, runs no executions and enforces none of the init-agent
-obligations below. Each init agent owns its space, executions and lifecycle.
-The one exception is `TimeAbi::start_daemon`, which forks the time daemon.
-`nvx-init` is the single worked example here, not a public space API.
+In the capture/activation reference model, `nvx` parses the contracts, captures
+the guest and drives a restore's activation. It builds no space, runs no
+workload executions and enforces none of the init-agent obligations below.
+Each init agent owns its space, executions and lifecycle. The named exception
+in this reference workflow is `TimeAbi::start_daemon`, which forks the time
+daemon. `nvx-init` is the single worked example here, not a public space API.
+This is an ownership contract, not a globally enforced no-fork property of
+every retained library API.
 
 The architecture and its boundaries are in
 [Guest Agents and Workload Model](design/4.2-guest-agents-and-workload-model.md)
@@ -27,8 +30,18 @@ The library's capture call does not freeze executions or drive the transport.
 The activation state machine holds no workspace fence, makes no system call
 and starts no process. The internal application of a record builds the space
 without starting helpers; its caller starts and owns the announcer. Starting
-the time daemon through `TimeAbi::start_daemon` is the explicit process-starting
-exception, not permission for the library to run workloads.
+the time daemon through the reference workflow's `TimeAbi::start_daemon` is
+not permission for the library to run workloads.
+
+Retained compatibility paths also start helpers. An init may use
+[`Announcer::start`](../nvx-rs/src/guest/ingress/announcer.rs), which spawns
+`nvx-ingress inherit`; the caller owns that announcer, while `nvx-init` starts
+and owns its own announcer. In report-only mode without a running time daemon,
+[`TimeAbi::restore_finish`](../nvx-rs/src/guest/time/api.rs) forks a child for
+deferred checks and detector release and waits for that child, which coordinates
+an RCU-check grandchild. An enforcing or strict finish instead reports the
+missing daemon as a time-ABI violation. These are actual retained helper
+call paths, not new workload orchestration or workspace enforcement.
 
 ## Construct the space
 
