@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use crate::harness::mode;
 use crate::harness::{
-    Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID, entries,
-    in_parallel, is_hex, json,
+    Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID,
+    canonical, entries, in_parallel, is_hex, json,
 };
 use crate::openvmm::{
     NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_endpoint, assert_opened_distro,
@@ -1557,6 +1557,183 @@ fn refusals_of_lifecycle_operations() {
         eprintln!("case: {name}");
         refusal(&Root::new());
     });
+}
+
+/// The host paths of shares of a sandbox's own files, which `provision` and `start` refuse, and
+/// which of its files each one reaches first: its state directory, image, scratch image, kernel,
+/// initramfs, and OpenVMM, a directory that holds one of them, and a directory inside its state
+/// directory.
+const OWN_FILES: [(&str, &str); 11] = [
+    ("{root/control/state}", "state directory"),
+    ("{root/control}", "state directory"),
+    ("{root/control/state/inside}", "state directory"),
+    ("{root/images/distro.erofs}", "image"),
+    ("{root/images}", "image"),
+    ("{root/upper/scratch.ext4}", "scratch image"),
+    ("{root/upper}", "scratch image"),
+    ("{root/build/vmlinux}", "kernel"),
+    ("{root/build/initramfs.cpio.gz}", "initramfs"),
+    ("{root/build}", "kernel"),
+    ("{root/openvmm/target/release/openvmm{exe}}", "OpenVMM"),
+];
+
+/// Returns a root whose image and scratch image are in directories of their own.
+fn own_files_root() -> Root {
+    let root = Root::new();
+    root.write("images/distro.erofs", "distro\n");
+    root.write("upper/scratch.ext4", "scratch\n");
+    root
+}
+
+/// Returns the arguments that provision the sandbox of the image and scratch image of
+/// [`own_files_root`] in `{root/control/state}`, with a share of `host` at `/data`, if given.
+fn own_files_provision(host: Option<&str>) -> Vec<String> {
+    let mut options = vec![
+        "--layer".to_owned(),
+        format!("distro,{{root/images/distro.erofs}},{UUID}"),
+        "--scratch".to_owned(),
+        "{root/upper/scratch.ext4}".to_owned(),
+    ];
+    if let Some(host) = host {
+        options.extend(["--mount".to_owned(), format!("/data,{host}")]);
+    }
+    sandbox("provision", "{root/control/state}", &options)
+}
+
+/// Returns `host`, with its placeholders replaced, and resolved if it is a link, as the root's
+/// OpenVMM is on POSIX hosts, since a share's host path must not be one.
+fn share_host(root: &Root, host: &str) -> String {
+    let host = root.expand(host);
+    if Path::new(&host).is_symlink() {
+        canonical(Path::new(&host)).to_str().unwrap().to_owned()
+    } else {
+        host
+    }
+}
+
+#[test]
+fn provision_refuses_shares_of_its_own_files() {
+    in_parallel(&OWN_FILES, |(host, name)| {
+        let root = own_files_root();
+        fs::create_dir_all(root.below("control/state/inside")).unwrap();
+        let host = share_host(&root, host);
+        let before = root.snapshot();
+        root.nvx_rs(&own_files_provision(Some(&host)))
+            .assert_error("unsupported", &[&format!("overlaps the sandbox's {name} ")]);
+        assert_eq!(root.snapshot(), before, "{host}");
+    });
+}
+
+#[test]
+fn provision_refuses_a_share_that_holds_the_state_directory_that_it_would_create() {
+    let root = own_files_root();
+    fs::create_dir(root.below("control")).unwrap();
+    let before = root.snapshot();
+    root.nvx_rs(&own_files_provision(Some("{root/control}")))
+        .assert_error("unsupported", &["overlaps the sandbox's state directory "]);
+    assert_eq!(root.snapshot(), before);
+}
+
+/// A state directory that only a verbatim path names, as one whose name ends in a period, lies
+/// inside a share of its parent all the same.
+#[cfg(windows)]
+#[test]
+fn provision_refuses_a_share_that_holds_a_state_directory_that_only_a_verbatim_path_names() {
+    let root = Root::new();
+    let outside = tempfile::tempdir().unwrap();
+    let parent = canonical(outside.path());
+    let state = format!(r"\\?\{}\state.", parent.display());
+    fs::create_dir(&state).unwrap();
+    let share = format!("/data,{}", parent.display());
+    root.nvx_rs(&provision(&state, &["--mount", &share]))
+        .assert_error("unsupported", &["overlaps the sandbox's state directory "]);
+    assert!(fs::read_dir(&state).unwrap().next().is_none());
+    fs::remove_dir(&state).unwrap();
+}
+
+/// The OpenVMM that `provision` protects is the root's, which `start` runs, and not the one that
+/// `NVX_OPENVMM` names.
+#[test]
+fn provision_refuses_a_share_of_the_roots_openvmm_whatever_the_variable_names() {
+    let root = own_files_root();
+    let host = share_host(&root, &format!("{{root/{OPENVMM}}}"));
+    let before = root.snapshot();
+    root.nvx_rs_with(
+        &own_files_provision(Some(&host)),
+        &[("NVX_OPENVMM", "{root/single.txt}")],
+    )
+    .assert_error("unsupported", &["overlaps the sandbox's OpenVMM "]);
+    assert_eq!(root.snapshot(), before);
+}
+
+#[test]
+fn start_refuses_recorded_shares_of_its_own_files() {
+    in_parallel(&OWN_FILES, |(host, name)| {
+        let root = own_files_root();
+        root.nvx_rs(&own_files_provision(None))
+            .assert_silent_success();
+        fs::create_dir(root.below("control/state/inside")).unwrap();
+        let host = share_host(&root, host);
+        let mut shared = child(&host, false);
+        shared["file"] = json!(Path::new(&host).is_file());
+        let mut config = json(&root.below("control/state/config.json"));
+        config["export"] = json!({"binds": [bind(0, "/data", true)], "children": [shared]});
+        root.write("control/state/config.json", config.to_string());
+        let before = root.snapshot();
+        root.nvx_rs(&sandbox::<&str>("start", "{root/control/state}", &[]))
+            .assert_error("unsupported", &[&format!("overlaps the sandbox's {name} ")]);
+        assert_eq!(root.snapshot(), before, "{host}");
+        assert!(root.openvmm_records().is_empty(), "{host}");
+    });
+}
+
+/// `start` resolves the recorded shares again, so a share that came to reach the sandbox's own
+/// files through a link since `provision` is refused.
+#[test]
+fn start_refuses_a_share_that_came_to_reach_its_own_files() {
+    let root = Root::new();
+    root.write("external/config.json", "{}");
+    root.nvx_rs(&provision(
+        "{root/state}",
+        &["--mount", "/data,{root/external/config.json}"],
+    ))
+    .assert_silent_success();
+    fs::remove_dir_all(root.below("external")).unwrap();
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(root.below("state"), root.below("external"));
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(root.below("state"), root.below("external"));
+    if let Err(error) = linked {
+        // Windows creates one only with a privilege, or in Developer Mode.
+        assert!(
+            cfg!(windows) && error.raw_os_error() == Some(1314),
+            "cannot create the link: {error}"
+        );
+        eprintln!("skipped: this host does not let the test create a symbolic link");
+        return;
+    }
+    let before = root.snapshot();
+    operate(&root, "start", "state", &[])
+        .assert_error("unsupported", &["overlaps the sandbox's state directory "]);
+    assert_eq!(root.snapshot(), before);
+    assert!(root.openvmm_records().is_empty());
+}
+
+/// Shares beside the sandbox's own files, whose names only start as theirs do, are no shares of
+/// them.
+#[test]
+fn shares_beside_its_own_files_provision_and_start() {
+    let root = own_files_root();
+    root.write("control/state2/data.txt", "data\n");
+    root.write("images/distro.erofs.txt", "notes\n");
+    let mut provision = own_files_provision(Some("{root/control/state2}"));
+    provision
+        .extend(["--mount", "/etc/notes.txt,{root/images/distro.erofs.txt}"].map(str::to_owned));
+    root.nvx_rs(&provision).assert_silent_success();
+    for operation in ["start", "stop", "deprovision"] {
+        root.nvx_rs(&sandbox::<&str>(operation, "{root/control/state}", &[]))
+            .assert_silent_success();
+    }
 }
 
 /// The lock files that Windows refuses to open: every lifecycle operation fails at once for one

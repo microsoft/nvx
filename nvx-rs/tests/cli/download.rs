@@ -201,9 +201,10 @@ fn restores_download_nothing_for_snapshots_that_they_cannot_read() {
 
 #[test]
 fn provision_and_deprovision_need_no_artifact_root() {
-    // A provision runs no artifact, and a deprovision of a sandbox that records no launch reads
-    // none, so both succeed where nvx-rs finds no artifact root: from an executable outside any
-    // release or checkout, without --root.
+    // A provision runs no artifact, and checks its shares against the artifacts only where it
+    // finds them, and a deprovision of a sandbox that records no launch reads none, so both
+    // succeed where nvx-rs finds no artifact root: from an executable outside any release or
+    // checkout, without --root.
     let root = Root::new();
     let elsewhere = tempfile::tempdir().unwrap();
     let executable = elsewhere
@@ -239,10 +240,11 @@ fn provision_and_deprovision_need_no_artifact_root() {
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    let provision: Vec<String> = crate::provision(&root, "state", "")
+    let mut provision: Vec<String> = crate::provision(&root, "state", "")
         .iter()
         .map(|argument| root.expand(argument))
         .collect();
+    provision.extend(["--mount".to_owned(), root.expand("/data,{root/share}")]);
     nvx_rs(&provision);
     nvx_rs(&crate::lifecycle("deprovision", &root, "state"));
     assert!(!root.below("state").exists());

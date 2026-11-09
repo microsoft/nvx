@@ -10,11 +10,12 @@ use super::{
     CONFIG_NAME, Found, REQUIRED_FEATURES, connect, find_vm, mismatched, require_config,
     running_vm, runtime_for,
 };
+use crate::host::cli::artifacts::locate;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::exec_lock::ExecLock;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{Config, read_config};
-use crate::host::cli::sandbox::{Artifacts, error_with_cause};
+use crate::host::cli::sandbox::{Artifacts, error_with_cause, refuse_own_files};
 use crate::host::cli::session::{ExecRequest, ExecResult, Session};
 use crate::host::cli::{Exit, Result, output};
 use crate::host::process::KILL_TIMEOUT;
@@ -63,6 +64,7 @@ fn start_locked(
     }
     let config = Config::new(config)?;
     let launch = config.launch()?;
+    refuse_own_files(state_dir, &launch, Some(&locate(artifacts.root)?.dir))?;
     let binding = config.distro_binding();
     let scratch_binding = config.scratch_binding()?;
     let distro = binding

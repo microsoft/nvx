@@ -1170,6 +1170,18 @@ as through a hard link or a bind mount. NVX no longer reads earlier
 configuration formats, including those that recorded the shares as requested;
 deprovision such a sandbox and provision it again.
 
+A share must not reach the sandbox's own files, which the workload could
+otherwise read or change: `provision` refuses a share whose resolved host path
+equals, contains, or lies inside the sandbox's state directory, its image, its
+scratch image, or the OpenVMM, kernel, or initramfs of the artifact root, before
+it records the sandbox, and `start` refuses one again before it launches the VM.
+`start` resolves the recorded host paths again, so a share that came to reach
+one of these files through a link since `provision` is refused too. A
+`provision` that finds no artifact root leaves the artifacts to `start`. Only
+resolved paths are compared, so don't share a directory that holds a link
+through which the host reaches one of these files, nor a hard link or bind
+mount of one.
+
 #### Access policy
 
 Each share can narrow what the workload can see and modify inside it. OpenVMM
