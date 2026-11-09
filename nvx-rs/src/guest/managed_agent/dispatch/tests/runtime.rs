@@ -558,7 +558,7 @@ fn reset_peer(host: &mut UnixStream) {
 fn only_stdout_prefix(mut traffic: &[u8]) {
     assert!(!traffic.is_empty());
     while traffic.len() >= OUTER_HEADER_LEN {
-        let header = decode_outer_header(&traffic[..OUTER_HEADER_LEN]).unwrap();
+        let header = decode_outer_header(traffic[..OUTER_HEADER_LEN].try_into().unwrap()).unwrap();
         assert_eq!(header.record_type, OUTER_DATA);
         let length = OUTER_HEADER_LEN + header.length;
         if traffic.len() < length {
