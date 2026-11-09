@@ -55,10 +55,13 @@ fn verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint
     let mut other = saved.runtime.clone();
     other.control_session += 1;
     saved.process.pid = 0;
-    assert_eq!(
-        verify(&saved, &other).unwrap_err().kind(),
-        ErrorKind::RuntimeMismatch,
-    );
+    let error = verify(&saved, &other).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::RuntimeMismatch);
+    assert!(error.to_string().contains("control session"));
+    other.kernel = ArtifactIdentity::new("other-kernel").unwrap();
+    let error = verify(&saved, &other).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::RuntimeMismatch);
+    assert!(error.to_string().contains("kernel, control session"));
     assert_eq!(
         reattach(
             &saved,
@@ -150,7 +153,7 @@ struct ServerChild {
 }
 
 impl ServerChild {
-    fn start(vm: &VmDir) -> (Self, SavedVm) {
+    fn start(vm: &VmDir, silent: bool) -> (Self, SavedVm) {
         let endpoint = vm.outputs(false).unwrap().endpoint;
         let ready = vm.path().join("owned-endpoint-ready");
         let log = vm.path().join("owned-endpoint.log");
@@ -168,6 +171,9 @@ impl ServerChild {
             .stdin(Stdio::null())
             .stdout(output.try_clone().unwrap())
             .stderr(output);
+        if silent {
+            command.env("NVX_SAVED_VM_SILENT_ATTACH", "1");
+        }
         let mut owner = Self {
             child: crate::host::tests::spawn_locked(&mut command).unwrap(),
             log,
@@ -222,7 +228,7 @@ impl Drop for ServerChild {
 #[test]
 fn reattaching_returns_the_held_owned_child_and_authenticated_connection() {
     let (_directory, vm) = vm_dir();
-    let (mut owner, saved) = ServerChild::start(&vm);
+    let (mut owner, saved) = ServerChild::start(&vm, false);
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut attached = reattach(&saved, &cold_runtime(), deadline).unwrap();
     assert_eq!(attached.process.reference(), &saved.process);
@@ -244,7 +250,7 @@ fn reattaching_returns_the_held_owned_child_and_authenticated_connection() {
 #[test]
 fn reattaching_keeps_the_brokers_authentication_refusal() {
     let (_directory, vm) = vm_dir();
-    let (mut owner, mut saved) = ServerChild::start(&vm);
+    let (mut owner, mut saved) = ServerChild::start(&vm, false);
     saved.capability[0] ^= 1;
     let error = reattach(
         &saved,
@@ -261,6 +267,33 @@ fn reattaching_keeps_the_brokers_authentication_refusal() {
             .downcast_ref::<HostConnectionError>(),
         Some(HostConnectionError::Rejected(ErrorCode::Authentication)),
     ));
+    owner.wait();
+}
+
+#[test]
+fn reattaching_keeps_the_callers_deadline_while_the_broker_is_silent() {
+    let (_directory, vm) = vm_dir();
+    let (mut owner, saved) = ServerChild::start(&vm, true);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let started = Instant::now();
+        let result = reattach(
+            &saved,
+            &cold_runtime(),
+            started + Duration::from_millis(300),
+        )
+        .map(|_| ());
+        sender.send((result, started.elapsed())).unwrap();
+    });
+    let completed = receiver.recv_timeout(Duration::from_secs(3));
+    if completed.is_err() && owner.child.try_wait().unwrap().is_none() {
+        owner.child.kill().unwrap();
+        owner.child.wait().unwrap();
+    }
+    worker.join().unwrap();
+    let (result, elapsed) = completed.expect("reattach did not honor the attach deadline");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::TimedOut);
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
     owner.wait();
 }
 
@@ -319,6 +352,15 @@ fn owned_endpoint_child() {
             &ErrorCode::Authentication.code().to_le_bytes(),
         ))
         .unwrap();
+        return;
+    }
+    if std::env::var_os("NVX_SAVED_VM_SILENT_ATTACH").is_some() {
+        match peer.read(&mut [0]) {
+            Ok(0) => {}
+            #[cfg(windows)]
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+            result => panic!("silent owned endpoint was not closed: {result:?}"),
+        }
         return;
     }
     peer.write_all(&record(RecordType::Ready, 0, &[])).unwrap();
