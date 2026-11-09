@@ -230,14 +230,24 @@ impl fmt::Debug for SavedVm {
 /// Checks the saved runtime and process, returning the verified held process.
 ///
 /// Opens no endpoint and reads no runtime artifact. A different runtime is
-/// [`ErrorKind::RuntimeMismatch`](crate::ErrorKind::RuntimeMismatch), an exited recorded process is
-/// [`ErrorKind::Exited`](crate::ErrorKind::Exited), and an indeterminate process check is
+/// [`ErrorKind::RuntimeMismatch`](crate::ErrorKind::RuntimeMismatch), whose message names the
+/// differing identity parts. An exited recorded process is [`ErrorKind::Exited`](crate::ErrorKind::Exited),
+/// and an indeterminate process check is
 /// [`ErrorKind::Io`](crate::ErrorKind::Io), retaining its original I/O source.
 pub fn verify(saved: &SavedVm, runtime: &RuntimeIdentity) -> Result<Process> {
     if saved.runtime != *runtime {
+        let parts: Vec<&str> = saved
+            .runtime
+            .differences(runtime)
+            .iter()
+            .map(|part| part.name())
+            .collect();
         return Err(Error::new(
             crate::ErrorKind::RuntimeMismatch,
-            "the saved VM runtime does not match the current runtime",
+            format!(
+                "the saved VM runtime does not match the current runtime, which differs in {}",
+                parts.join(", ")
+            ),
         ));
     }
     Process::open(&saved.process)

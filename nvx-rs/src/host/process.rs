@@ -170,6 +170,7 @@ pub type ExitHandle = std::os::fd::OwnedFd;
 ///
 /// Implements the standard handle traits, including [`std::os::windows::io::AsHandle`]. Dropping it
 /// closes only this copy, without keeping the process running or affecting the original [`Process`].
+/// The duplicate retains the original process handle's access rights.
 #[cfg(windows)]
 pub type ExitHandle = std::os::windows::io::OwnedHandle;
 
