@@ -312,32 +312,43 @@ impl Line {
     /// Parses one line of the mount table, without its newline, or returns `None` for a line of
     /// another form than the kernel's.
     fn parse(line: &[u8]) -> Option<Self> {
-        let fields = line.split(|&byte| byte == b' ').collect::<Vec<_>>();
-        if fields.len() < FIXED_FIELDS {
-            return None;
-        }
-        parse_decimal(fields[0])?;
-        parse_decimal(fields[1])?;
-        let device = DeviceNumber::parse(fields[2])?;
-        let separator = FIXED_FIELDS
-            + fields[FIXED_FIELDS..]
-                .iter()
-                .position(|&field| field == SEPARATOR)?;
-        let [filesystem, source, ..] = &fields[separator + 1..] else {
+        let mut fields = line.split(|&byte| byte == b' ');
+        let fixed: [Option<&[u8]>; FIXED_FIELDS] = std::array::from_fn(|_| fields.next());
+        let [
+            Some(id),
+            Some(parent),
+            Some(device),
+            Some(root),
+            Some(mount_point),
+            Some(options),
+        ] = fixed
+        else {
             return None;
         };
+        parse_decimal(id)?;
+        parse_decimal(parent)?;
+        let device = DeviceNumber::parse(device)?;
         // The kernel writes each field with a byte at least, but the source, which is empty when
         // the mounter named an empty one.
-        if fields[..separator]
-            .iter()
-            .chain([filesystem])
-            .any(|field| field.is_empty())
-        {
+        if root.is_empty() || mount_point.is_empty() || options.is_empty() {
+            return None;
+        }
+        for field in fields.by_ref() {
+            if field == SEPARATOR {
+                break;
+            }
+            if field.is_empty() {
+                return None;
+            }
+        }
+        let filesystem = fields.next()?;
+        let source = fields.next()?;
+        if filesystem.is_empty() {
             return None;
         }
         Some(Self {
             device,
-            mount_point: PathBuf::from(OsString::from_vec(unescape(fields[4]))),
+            mount_point: PathBuf::from(OsString::from_vec(unescape(mount_point))),
             filesystem: unescape(filesystem),
             source: unescape(source),
         })

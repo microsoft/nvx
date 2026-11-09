@@ -1395,7 +1395,7 @@ impl Display for Violation {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum TimeError {
-    /// The caller's absolute pre-request deadline expired.
+    /// The caller's absolute deadline expired.
     Deadline,
     /// The calling thread could not take the permission for OpenVMM's ports, which needs
     /// `CAP_SYS_RAWIO`.
@@ -1439,7 +1439,7 @@ impl From<PortError> for TimeError {
 impl Display for TimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Deadline => formatter.write_str("the capture preparation deadline expired"),
+            Self::Deadline => formatter.write_str("the caller deadline expired"),
             Self::PortAccess(error) => write!(formatter, "ioperm: {}", sys::describe(error)),
             Self::PortRelease(error) => {
                 write!(formatter, "ioperm revoke: {}", sys::describe(error))
