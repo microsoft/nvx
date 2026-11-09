@@ -8,10 +8,11 @@
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131.
-- NVX's pinned OpenVMM revision: `6cb6ba87cfb6707078d19f09ec81d9a78fcd1ede`, position 232, the
-  head of microsoft/openvmm#4995, whose commit follows position 231, `98e5b3ca5`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#4994 merged with position 230 after position 229,
-  `ed8fc0713`, which microsoft/openvmm#4993 merged after position 228, `d6addf8c1`, which
+- NVX's pinned OpenVMM revision: `d501e50660136000ec93412aea78fdafb9cf391c`, position 233, the
+  head of microsoft/openvmm#4996, whose commit follows position 232, `6cb6ba87c`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#4995 merged after position 231, `98e5b3ca5`,
+  which microsoft/openvmm#4994 merged with position 230 after position 229, `ed8fc0713`, which
+  microsoft/openvmm#4993 merged after position 228, `d6addf8c1`, which
   microsoft/openvmm#4992 merged after position 227, `154548a0e`, which
   microsoft/openvmm#4991 merged after position 226, `881619911`, which
   microsoft/openvmm#4989 merged after position 225, `99aac19b3`, which
@@ -25,8 +26,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 101 commits past
-  the mapped tip on the same first-parent chain. Positions 132-232 are not yet assigned to PRs; see
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 102 commits past
+  the mapped tip on the same first-parent chain. Positions 132-233 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -986,7 +987,8 @@ ba105dd7f
   -> earlier snapshot formats refused before decoding [230]
   -> manifest fields reserved for upstream [231]
   -> unknown paired-scratch restore mode refused [232]
-  -> 6cb6ba87c (NVX pin)
+  -> clone's activation record carried in the restore packet [233]
+  -> d501e5066 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1002,13 +1004,13 @@ reorganization folded the PR20 and PR12 fixups into the commits that they fix; s
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. None of the 101 later commits is a
+The NVX pin extends the chain past position 131 without merges. None of the 102 later commits is a
 fixup of a mapped PR, and none is yet classified or assigned to PRs. Each of positions 132-186
 combines the v2.4 commits that the table lists, as v3.0 positions 145-160 and 162-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 187-191
 followed the v3.0 reorganization, positions 192-205 are the ABI restart of the v4.0
 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-232 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-233 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1118,6 +1120,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 230 | `8a994544a` | - | - | - | - | openvmm_helpers: refuse earlier snapshot formats before decoding them (microsoft/openvmm#4994) |
 | 231 | `98e5b3ca5` | - | - | - | - | openvmm_helpers: reserve the manifest fields that upstream assigns (microsoft/openvmm#4994) |
 | 232 | `6cb6ba87c` | - | - | - | - | openvmm_helpers: refuse an unknown paired-scratch restore mode (microsoft/openvmm#4995) |
+| 233 | `d501e5066` | - | - | - | - | microvm: carry a clone's activation record in the restore packet (microsoft/openvmm#4996) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1222,7 +1225,14 @@ fields 18-20 for upstream's SaveVM and RestoreVM, microsoft/openvmm#4553. Positi
 restore-mode match that position 166 adds to the capture-tier check of PR19's position 093:
 restore runs that check before the machine contract's shape check, so the match now refuses a mode
 that it does not know with the shape check's error, where it panicked on the assumption that the
-shape check had refused the mode.
+shape check had refused the mode. Position 233 lets a platform restore end the restore packet with
+its clone's activation record: it defines bit 5 of the packet's flags, which position 193 reserved
+when it restarted the packet at version 1, beside the network settings of position 181; adds
+`--restore-activation-record`, which the restore preparation of PR17's position 079 reads before
+any vCPU runs, only for the platform tier of PR19's position 093, and with the post-restore gate of
+PR20's position 095; adds the field that the management RPC's conversion of position 228 turns into
+that option, in the protocol that PR25's position 124 extends; and adds a test of the restore
+packet that the portb device of PR15's position 060 serves since position 137.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1428,6 +1438,17 @@ PR17's position 076, PR19's positions 092 and 093, and positions 147, 166, 184, 
 claim of position 093. Replaying it on upstream main conflicts in both of its files: upstream main
 lacks the microVM snapshot module of position 074 and the tiers and paired scratch that positions
 092, 093, and 166 add to the restore, so it follows PR17 and PR19 upstream.
+
+Position 233 changes the restore packet of the time ABI series in `chipset_resources`, which
+position 132 adds and positions 160, 181, and 193 change, and adds a test to the portb device that
+serves it, which PR15's positions 060 and 061, PR17's position 071, PR19's position 092, PR20's
+positions 094, 095, 097, and 099, PR24's position 119, and positions 137, 139, 147, 160, 181, 193,
+195, 208, and 226 also change. It changes the microVM CLI of PR15's position 064, the restore
+preparation of PR17's position 079, the management RPC's microVM conversion of position 228 and
+the protocol of PR25's position 124, and their Guide pages. Replaying it on upstream main
+conflicts in all nine of its files: upstream main lacks the time ABI series, the microVM CLI and
+restore of PR15 and PR17, and the conversion of position 228, so it follows that series, PR15,
+PR17, PR19, PR20, and PR25 upstream.
 
 ## PR summary
 
