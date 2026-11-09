@@ -22,14 +22,16 @@ mod one_shot;
 mod options;
 mod state;
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::artifacts::{Located, OPENVMM_VARIABLE, locate};
 use super::download::{self, Hold};
 use super::shell::format_command;
-use super::{Exit, Result, output};
+use super::{Exit, Result, io_error, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
+use crate::host::artifacts::{ArtifactDir, Guest, KERNEL_NAME, require_artifact};
+use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::options::{
@@ -250,6 +252,14 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             // binding, with the manifest beside that path.
             let distro = RecordedDistro::new(&launch, binding)?;
             let state_dir = state_dir("provision")?;
+            // A provision runs no artifact, so it needs no artifact root; without one, `start`
+            // checks the shares against the artifacts that it runs.
+            let located = locate(root).ok();
+            refuse_own_files(
+                Path::new(state_dir),
+                &launch,
+                located.as_ref().map(|located| &located.dir),
+            )?;
             lifecycle::provision(
                 state_dir,
                 &launch,
@@ -383,6 +393,79 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         (SandboxOperation::Run | SandboxOperation::Provision, None) => {
             unreachable!("run and provision build their launch")
         }
+    }
+}
+
+/// Refuses a share of the sandbox's own files: one whose host path equals, contains, or lies
+/// inside the state directory `state_dir`, the image or scratch image of `launch`, or the OpenVMM,
+/// kernel, or Alpine initramfs of `artifacts`, if known. Through it, the guest could read or
+/// change the sandbox's records, its storage, or what the host runs.
+///
+/// The paths are compared once [`paths::resolve`] has resolved them, without a Windows verbatim
+/// prefix. Resolution follows symbolic links and junctions, but not hard links or bind mounts.
+/// `provision` checks before it records the sandbox, and `start` again before it launches it,
+/// since the shares' paths may have come to resolve elsewhere.
+fn refuse_own_files(
+    state_dir: &Path,
+    launch: &SandboxLaunch,
+    artifacts: Option<&ArtifactDir>,
+) -> Result {
+    let Some(export) = launch.export() else {
+        return Ok(());
+    };
+    let mut owned = vec![
+        ("state directory", state_dir.to_owned()),
+        ("image", launch.distro().path().to_owned()),
+    ];
+    owned.extend(
+        launch
+            .scratch()
+            .map(|path| ("scratch image", path.to_owned())),
+    );
+    if let Some(dir) = artifacts {
+        owned.extend([
+            ("OpenVMM", dir.openvmm()),
+            ("kernel", dir.kernel()),
+            ("initramfs", dir.initramfs(Guest::Alpine)),
+        ]);
+    }
+    let resolve = |path: &Path| {
+        paths::resolve(path)
+            .map(without_verbatim_prefix)
+            .map_err(|error| io_error(ErrorCode::Io, &error, path))
+    };
+    let owned = owned
+        .into_iter()
+        .map(|(name, path)| Ok((name, resolve(&path)?)))
+        .collect::<Result<Vec<_>>>()?;
+    for child in &export.children {
+        let shared = resolve(&child.root)?;
+        let overlap = owned
+            .iter()
+            .find(|(_, path)| shared.starts_with(path) || path.starts_with(&shared));
+        if let Some((name, path)) = overlap {
+            return Err(Exit::error(
+                ErrorCode::Unsupported,
+                format!(
+                    "sandbox mount host path {} overlaps the sandbox's {name} {}; a share cannot \
+                     expose the sandbox's own files",
+                    shared.display(),
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Returns `path` without the verbatim prefix, `\\?\`, with which [`paths::resolve`] keeps a
+/// Windows path that only that prefix names, such as one whose name ends in a period: its
+/// components would otherwise differ from those of a path that it lies inside. A network path
+/// keeps its prefix, since no share is one.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
     }
 }
 
