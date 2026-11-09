@@ -1,7 +1,13 @@
 //! The tests of packages: the names of their members, their extraction with the host's `tar`,
 //! and their checksums.
+//!
+//! Each test that runs `tar` holds the tests' spawn lock while it does: the CLI downloads before it
+//! launches a VM, but these tests run beside tests that launch stand-in VMs, and on Windows a `tar`
+//! that starts during a VM's start inherits that VM's handles, such as its log, which it holds
+//! until it exits.
 
 use super::*;
+use crate::host::tests::hold_spawns;
 
 /// The root directory of the packages of the tests.
 const ROOT: &str = "nvx-0.1.0-linux-kvm";
@@ -43,10 +49,11 @@ fn archive(source: &Path, archive: &Path) {
     } else {
         command.arg("-czf");
     }
-    let status = spawn_command(command.arg(archive).arg(ROOT).current_dir(source))
-        .unwrap()
-        .wait()
-        .unwrap();
+    let status =
+        crate::host::tests::spawn_locked(command.arg(archive).arg(ROOT).current_dir(source))
+            .unwrap()
+            .wait()
+            .unwrap();
     assert!(status.success());
 }
 
@@ -65,6 +72,7 @@ fn staged(directory: &Path, name: &str, change: impl FnOnce(&Path)) -> PathBuf {
 
 #[test]
 fn gzipped_packages_extract_once_their_names_and_checksums_pass() {
+    let _spawns = hold_spawns();
     let directory = tempfile::tempdir().unwrap();
     let archive = staged(directory.path(), "nvx-0.1.0-linux-kvm.tar.gz", |_| {});
     let package = extract(&archive).unwrap();
@@ -80,6 +88,7 @@ fn gzipped_packages_extract_once_their_names_and_checksums_pass() {
 #[cfg(windows)]
 #[test]
 fn zip_packages_extract_with_the_tar_of_windows() {
+    let _spawns = hold_spawns();
     let directory = tempfile::tempdir().unwrap();
     let archive = staged(directory.path(), "nvx-0.1.0-windows-whp.zip", |_| {});
     let package = extract(&archive).unwrap();
@@ -91,6 +100,7 @@ fn zip_packages_extract_with_the_tar_of_windows() {
 
 #[test]
 fn packages_whose_checksums_fail_are_refused() {
+    let _spawns = hold_spawns();
     for (change, expected) in [
         (
             (|root: &Path| fs::write(root.join("guest").join("vmlinux"), "other\n").unwrap())
@@ -120,6 +130,7 @@ fn packages_whose_checksums_fail_are_refused() {
 #[cfg(unix)]
 #[test]
 fn packages_with_symlinks_are_refused() {
+    let _spawns = hold_spawns();
     let directory = tempfile::tempdir().unwrap();
     let archive = staged(directory.path(), "nvx-0.1.0-linux-kvm.tar.gz", |root| {
         std::os::unix::fs::symlink("/etc/passwd", root.join("guest").join("link")).unwrap();
@@ -133,6 +144,7 @@ fn packages_with_symlinks_are_refused() {
 
 #[test]
 fn archives_that_tar_cannot_read_are_refused() {
+    let _spawns = hold_spawns();
     let directory = tempfile::tempdir().unwrap();
     let archive = directory.path().join("nvx-0.1.0-linux-kvm.tar.gz");
     fs::write(&archive, "not an archive").unwrap();

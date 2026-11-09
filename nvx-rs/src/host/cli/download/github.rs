@@ -18,7 +18,6 @@ use serde_json::Value;
 use super::{Asset, Releases, remove_stale, system_program};
 use crate::ErrorCode;
 use crate::host::cli::{Exit, Result, check_interrupt, io_error};
-use crate::host::supervisor::spawn_command;
 
 /// The base URL of the GitHub REST API.
 const API: &str = "https://api.github.com";
@@ -323,7 +322,7 @@ impl Curl {
             } else {
                 Stdio::piped()
             });
-        let mut child = spawn_command(&mut command).map_err(|error| {
+        let mut child = command.spawn().map_err(|error| {
             Exit::error(
                 ErrorCode::Unavailable,
                 format!(

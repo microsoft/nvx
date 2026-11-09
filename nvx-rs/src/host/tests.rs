@@ -32,12 +32,22 @@ pub(crate) fn released(mut free: impl FnMut() -> bool) -> bool {
 /// Spawns `command` under a `SpawnLock`, which it releases once the process exists, so that on
 /// Windows the process inherits no handle of a VMM that a concurrent test spawns, such as the
 /// VMM's log, which it would hold until it exits.
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", windows, feature = "cli"))]
 pub(crate) fn spawn_locked(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::Child> {
     let _lock = super::platform::inherit::lock_spawns();
     command.spawn()
+}
+
+/// Returns a `SpawnLock`, which a test holds while the code that it tests spawns processes with
+/// `std::process`, as the download spawns `tar` and `curl`, so that on Windows none of them
+/// inherits a handle of a VMM that a concurrent test spawns, such as the VMM's log, which it would
+/// hold until it exits. A concurrent spawn of a VMM waits for the lock, so a test holds it only
+/// while it runs those processes.
+#[cfg(feature = "cli")]
+pub(crate) fn hold_spawns() -> super::platform::inherit::SpawnLock {
+    super::platform::inherit::lock_spawns()
 }
 
 /// Makes `link` a junction to the directory `target`, which any user may create, with `cmd`'s
