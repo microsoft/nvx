@@ -152,7 +152,7 @@ fn attachment_keeps_forwarding_until_the_handshake_completes() {
     let (observed, progress) = mpsc::sync_channel(0);
     let mut sent = false;
     let result = attach_with_output(
-        move || {
+        move |_| {
             progress.recv_timeout(Duration::from_secs(2)).unwrap();
             Ok(7)
         },
@@ -177,7 +177,7 @@ fn failed_attachment_drains_output_that_arrived_with_its_failure() {
     let complete = AtomicBool::new(false);
     let mut drained = 0;
     let result = attach_with_output::<()>(
-        || {
+        |_| {
             complete.store(true, Ordering::SeqCst);
             Err(Exit::error(ErrorCode::Protocol, "attachment refused"))
         },
@@ -195,6 +195,57 @@ fn failed_attachment_drains_output_that_arrived_with_its_failure() {
         "{result:?}"
     );
     assert_eq!(drained, 3);
+}
+
+#[test]
+fn ready_logs_poll_the_console_without_waiting_and_still_serve_it_each_pass() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    struct Console(Arc<Mutex<Vec<Option<Duration>>>>);
+    impl Transport for Console {
+        fn read(&mut self, buffer: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
+            let mut reads = self.0.lock().unwrap();
+            reads.push(timeout);
+            if reads.len() == 2 {
+                buffer[0] = b'c';
+                Ok(1)
+            } else {
+                Err(io::ErrorKind::TimedOut.into())
+            }
+        }
+
+        fn write_all(&mut self, _: &[u8], _: Option<Duration>) -> io::Result<()> {
+            unreachable!("this is the console reader")
+        }
+    }
+
+    fn accept(_: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    let mut log = tempfile::NamedTempFile::new().unwrap();
+    log.write_all(&vec![b'l'; 3 * 8192]).unwrap();
+    log.flush().unwrap();
+    let mut reader = File::open(log.path()).unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let mut output = ForegroundOutput::new(&mut reader);
+    output.stderr.write = accept;
+    output.stdout.write = accept;
+    output.console = Some(Box::new(Console(Arc::clone(&reads))));
+    for _ in 0..3 {
+        assert!(output.forward().unwrap());
+    }
+    assert!(!output.forward().unwrap());
+    assert_eq!(
+        *reads.lock().unwrap(),
+        [
+            Some(Duration::ZERO),
+            Some(Duration::ZERO),
+            Some(Duration::ZERO),
+            Some(Duration::from_millis(10)),
+        ]
+    );
 }
 
 #[cfg(windows)]
