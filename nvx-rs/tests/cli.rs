@@ -2538,7 +2538,7 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
     let dry_run = text(&run(&root, &arguments(&["--dry-run"])).stdout);
     let (openvmm, _) = dry_run
         .strip_prefix(">> ")
-        .and_then(|command| command.split_once(" --single-process "))
+        .and_then(|command| command.split_once(" --machine "))
         .unwrap();
     let default = if cfg!(windows) { "whp" } else { "kvm" };
     // OpenVMM fails the cold boot, or refuses its command line with the status of a usage error;
@@ -2556,13 +2556,6 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
             &["--cmdline", "fake_exit_status=2"][..],
             2,
             "",
-            unserved,
-            default,
-        ),
-        (
-            &["--host-loopback-forward", "tcp:8080:80"][..],
-            2,
-            "openvmm: --host-loopback-forward requires explicit --host-loopback allow\n",
             unserved,
             default,
         ),
@@ -2656,6 +2649,7 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
         ),
         (&["--restore-snapshot", "missing"][..], 1),
         (&["--net", "10.0.0.2/24"][..], 1),
+        (&["--host-loopback-forward", "tcp:8080:80"][..], 1),
         (
             &["--mount", "/data", "--cmdline", "fake_exit_status=1"][..],
             1,
@@ -2666,6 +2660,13 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
     ] {
         let output = run(&root, &arguments(options));
         assert_eq!(output.status.code(), Some(status), "{options:?}");
+        if options.first() == Some(&"--host-loopback-forward") {
+            assert!(output.stdout.is_empty(), "{options:?}");
+            assert!(
+                text(&output.stderr).starts_with("error[unsupported]:"),
+                "{options:?}"
+            );
+        }
         assert!(
             !text(&output.stderr).contains("nvx: "),
             "{options:?}: {}",
@@ -2702,9 +2703,8 @@ fn run_boots_each_guest_with_its_default_memory() {
 
 #[test]
 fn run_shares_relative_roots_with_absolute_policy_paths() {
-    // nvx-rs run passes the host path of each share as given, so the children of an aggregate may
-    // be relative to the working directory, while their policy paths must be absolute: OpenVMM
-    // attributes each one to the share whose root contains it once it has resolved both.
+    // The cold path resolves each relative root in its checked export plan, while an aggregate's
+    // policy paths must be absolute.
     let root = Root::new();
     let path = |parts: &[&str]| {
         parts
@@ -2728,9 +2728,11 @@ fn run_shares_relative_roots_with_absolute_policy_paths() {
     let output = run(&root, &arguments);
     assert!(output.status.success(), "{}", text(&output.stderr));
     let stdout = text(&output.stdout);
-    let child = nvx::host::sandbox::mount::aggregate_child_name(0, "/data");
+    let canonical = fs::canonicalize(root.path.join("share")).unwrap();
+    let child = canonical.to_str().unwrap();
+    let child = child.strip_prefix(r"\\?\").unwrap_or(child);
     assert!(
-        stdout.contains(&format!(" --mount-child {child},share,rw ")),
+        stdout.contains(&format!(" --mount-child 0,{child},rw ")),
         "{stdout}"
     );
     assert!(

@@ -228,13 +228,15 @@ fn children_inherit_only_their_standard_handles() {
     let stderr = stdout.try_clone().unwrap();
     let system = std::env::var_os("SystemRoot").unwrap();
     let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let child = spawn_detached(
+    let child = spawn_with_stdio(
         &cmd,
         &[OsString::from("/c"), OsString::from("ping -n 30 127.0.0.1")],
         &std::env::temp_dir(),
         [stdin.into(), stdout.into(), stderr.into()],
         &[],
-        false,
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
         None,
     )
     .unwrap();
@@ -313,13 +315,15 @@ fn a_child_loses_only_the_inherited_handle_that_is_closed_in_it() {
     let stderr = stdout.try_clone().unwrap();
     let system = std::env::var_os("SystemRoot").unwrap();
     let ping = Path::new(&system).join("System32").join("PING.EXE");
-    let child = spawn_detached(
+    let child = spawn_with_stdio(
         &ping,
         &["-n", "30", "127.0.0.1"].map(OsString::from),
         &std::env::temp_dir(),
         [stdin.into(), stdout.into(), stderr.into()],
         &[Inherited::new(&closed), Inherited::new(&kept)],
-        false,
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
         None,
     )
     .unwrap();
@@ -371,13 +375,15 @@ fn children_inherit_the_allowed_handles_while_they_are_created() {
         Inherited::new(&kept),
         Inherited::new(&allowed),
     ];
-    let child = spawn_detached(
+    let child = spawn_with_stdio(
         &ping,
         &["-n", "30", "127.0.0.1"].map(OsString::from),
         &std::env::temp_dir(),
         [stdin.into(), stdout.into(), stderr.into()],
         &inherit,
-        false,
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
         None,
     )
     .unwrap();
@@ -457,13 +463,15 @@ fn batch_files_are_refused_before_cmd_could_read_their_arguments() {
         let (stdin, _stdin_writer) = io::pipe().unwrap();
         let (_stdout_reader, stdout) = io::pipe().unwrap();
         let stderr = stdout.try_clone().unwrap();
-        refused(spawn_detached(
+        refused(spawn_with_stdio(
             &program,
             &arguments,
             directory.path(),
             [stdin.into(), stdout.into(), stderr.into()],
             &[],
-            false,
+            SpawnMode::Detached {
+                breakaway_from_job: false,
+            },
             None,
         ));
     }
@@ -492,13 +500,15 @@ fn concurrent_spawns_that_allow_one_handle_all_inherit_it_and_restore_it() {
                     let (stdin, _stdin_writer) = io::pipe().unwrap();
                     let (_stdout_reader, stdout) = io::pipe().unwrap();
                     let stderr = stdout.try_clone().unwrap();
-                    let child = spawn_detached(
+                    let child = spawn_with_stdio(
                         &ping,
                         &["-n", "30", "127.0.0.1"].map(OsString::from),
                         &std::env::temp_dir(),
                         [stdin.into(), stdout.into(), stderr.into()],
                         &[Inherited::new(&shared)],
-                        false,
+                        SpawnMode::Detached {
+                            breakaway_from_job: false,
+                        },
                         None,
                     )
                     .unwrap();
@@ -524,13 +534,15 @@ fn a_spawn_that_panics_in_its_window_restores_the_handles_and_lets_other_spawns_
         let (stdin, _stdin_writer) = io::pipe()?;
         let (_stdout_reader, stdout) = io::pipe()?;
         let stderr = stdout.try_clone()?;
-        spawn_detached(
+        spawn_with_stdio(
             &cmd,
             &["/c", "exit", "0"].map(OsString::from),
             &std::env::temp_dir(),
             [stdin.into(), stdout.into(), stderr.into()],
             inherit,
-            false,
+            SpawnMode::Detached {
+                breakaway_from_job: false,
+            },
             None,
         )
     }
@@ -649,13 +661,15 @@ impl HeldSpawn {
             })));
             let (stdin, _stdin_writer) = io::pipe()?;
             let stderr = file.try_clone()?;
-            spawn_detached(
+            spawn_with_stdio(
                 &program,
                 &arguments,
                 &std::env::temp_dir(),
                 [stdin.into(), file.into(), stderr.into()],
                 &[],
-                false,
+                SpawnMode::Detached {
+                    breakaway_from_job: false,
+                },
                 job,
             )
         });
@@ -1122,13 +1136,15 @@ fn a_thread_that_holds_the_spawn_lock_spawns_under_it_until_its_last_lock_is_dro
     let stderr = stdout.try_clone().unwrap();
     let system = std::env::var_os("SystemRoot").unwrap();
     let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let vmm = spawn_detached(
+    let vmm = spawn_with_stdio(
         &cmd,
         &["/c", "exit", "0"].map(OsString::from),
         &std::env::temp_dir(),
         [stdin.into(), stdout.into(), stderr.into()],
         &[],
-        false,
+        SpawnMode::Detached {
+            breakaway_from_job: false,
+        },
         None,
     )
     .unwrap();
