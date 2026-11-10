@@ -1372,15 +1372,18 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     let mut option_arguments = arguments.iter();
     let mut run = true;
     let mut capture = false;
+    let mut lifecycle_option = false;
     while let Some(argument) = option_arguments.next() {
         let name = argument.as_str();
         if name == "--microvm-lifecycle" || name == "--microvm-sandbox-block" {
             run = false;
         }
         capture |= name == "--snapshot-destination";
+        lifecycle_option |= name == "--microvm-lifecycle";
         if VALUED.contains(&name) || RUN_VALUED.contains(&name) || CAPTURE_VALUED.contains(&name) {
             let _ = option_arguments.next();
         }
+        let cold_sandbox = !run && !capture && !lifecycle_option;
     }
     let mut values: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut flags = BTreeSet::new();
@@ -1393,7 +1396,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         {
             flags.insert(name);
         } else if VALUED.contains(&name)
-            || ((run || capture) && RUN_VALUED.contains(&name))
+            || ((run || capture || cold_sandbox) && RUN_VALUED.contains(&name))
             || (capture && CAPTURE_VALUED.contains(&name))
         {
             let value = iterator
@@ -1422,7 +1425,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     // whatever tokens its command line has.
     let run_mode = if run && values.contains_key("--restore-snapshot") {
         Some((Lifecycle::Run, DEFAULT_WORKLOAD_UID))
-    } else if run {
+    } else if run || cold_sandbox {
         let command_line = values.get("--cmdline").and_then(|given| given.first());
         Some(run_lifecycle(command_line.copied().unwrap_or_default())?)
     } else {
@@ -1444,6 +1447,12 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     };
     if !flags.contains("--single-process") {
         return Err("--single-process is required".to_owned());
+    }
+    if cold_sandbox {
+        if !matches!(lifecycle, Lifecycle::Managed) {
+            return Err("a cold persistent sandbox selects nvx_mode=managed".to_owned());
+        }
+        expect("--guest-shutdown-action", "exit")?;
     }
     let boot_console = if run && values.contains_key("--guest-shutdown-action") {
         if values.contains_key("--restore-snapshot") {
@@ -1516,7 +1525,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     // A run uses the workload identity that the CLI's tokens name, or else, like a capture, the
     // default workload identity of the guest, and records its command line next to the kernel of
     // a cold boot or to the snapshot of a restore.
-    let (workload_uid, anchor, restore) = if run || capture {
+    let (workload_uid, anchor, restore) = if run || capture || cold_sandbox {
         if values.contains_key("--microvm-workload-identity") {
             return Err(format!(
                 "{} takes no --microvm-workload-identity",
@@ -1636,7 +1645,11 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             }
             (0, Vec::new(), Vec::new(), Vec::new(), blocks)
         } else {
-            let workload = entrypoint_and_arguments()?;
+            let workload = if cold_sandbox {
+                Vec::new()
+            } else {
+                entrypoint_and_arguments()?
+            };
             if token_values("nvx_hostname=").len() != 1 {
                 return Err("the kernel command line must set one nvx_hostname".to_owned());
             }
