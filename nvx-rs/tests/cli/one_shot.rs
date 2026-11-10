@@ -1084,6 +1084,135 @@ fn cold_console_output_preserves_non_utf8_bytes() {
     );
 }
 
+#[test]
+fn a_ready_console_stream_is_not_throttled_by_idle_sleeps() {
+    use std::time::{Duration, Instant};
+
+    let root = Root::new();
+    let started = Instant::now();
+    let outcome = root.nvx_rs(&[
+        "run",
+        "--cmdline",
+        "fake_console_bytes=8388608 fake_exit_status=7",
+    ]);
+    assert_eq!(outcome.status, Some(7), "the bulk-console run failed");
+    let output = outcome.command().1;
+    assert_eq!(output.len(), 8 * 1024 * 1024);
+    assert!(output.iter().all(|&byte| byte == b'x'));
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "the ready console stream was throttled: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_foreground_output_error_keeps_the_requested_native_report() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let root = Root::new();
+    let mut process = root
+        .command(&[
+            "run",
+            "--cmdline",
+            "fake_boot_delay_ms=100 fake_report_before_console=1",
+        ])
+        .arg("--outcome-report")
+        .arg(root.below("reports/outcome.json"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(process.stdout.take().unwrap());
+    let mut command = String::new();
+    stdout.read_line(&mut command).unwrap();
+    assert!(command.starts_with(">> "), "{command}");
+    drop(stdout);
+    let output = process.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("error[io]:"),
+        "{output:?}"
+    );
+    assert_outcome_report(
+        &root.json("reports/outcome.json"),
+        crate::harness::HYPERVISOR,
+        ("run", "success", 0),
+        NO_NETWORK,
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_interrupted_cold_run_keeps_its_already_written_native_report() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    let root = Root::new();
+    let temporary = tempfile::Builder::new().prefix("nvx-c-").tempdir().unwrap();
+    let mut process = root
+        .command(&[
+            "run",
+            "--cmdline",
+            "fake_boot_delay_ms=60000 fake_report_before_console=1",
+        ])
+        .arg("--outcome-report")
+        .arg(root.below("reports/outcome.json"))
+        .env("TMPDIR", temporary.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let original = loop {
+        let report = std::fs::read_dir(temporary.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("outcome.json"))
+            .find(|path| path.is_file());
+        if let Some(report) = report {
+            let bytes = std::fs::read(report).unwrap();
+            if bytes.ends_with(b"\n") && serde_json::from_slice::<serde_json::Value>(&bytes).is_ok()
+            {
+                break bytes;
+            }
+        }
+        if process.try_wait().unwrap().is_some() {
+            panic!(
+                "the cold run exited before writing its report: {:?}",
+                process.wait_with_output()
+            );
+        }
+        if Instant::now() >= deadline {
+            kill(
+                Pid::from_raw(process.id().try_into().unwrap()),
+                Signal::SIGINT,
+            )
+            .unwrap();
+            let output = process.wait_with_output().unwrap();
+            panic!("the fake did not write its early report: {output:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    kill(
+        Pid::from_raw(process.id().try_into().unwrap()),
+        Signal::SIGINT,
+    )
+    .unwrap();
+    let output = process.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(130), "{output:?}");
+    assert_eq!(
+        std::fs::read(root.below("reports/outcome.json")).unwrap(),
+        original
+    );
+    assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn cold_runs_keep_the_native_child_in_the_callers_session_and_process_group() {
