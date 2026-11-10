@@ -461,12 +461,12 @@ fn cold_runtime() -> Runtime {
     }
 }
 
-fn capture_config(vm: &VmDir) -> VmConfig {
+fn capture_config(_vm: &VmDir) -> VmConfig {
     #[cfg(target_os = "linux")]
     let physical_block_size = {
         use std::os::unix::fs::MetadataExt;
 
-        u32::try_from(fs::metadata(vm.path()).unwrap().blksize()).unwrap()
+        u32::try_from(fs::metadata(_vm.path()).unwrap().blksize()).unwrap()
     };
     #[cfg(windows)]
     let physical_block_size = 4096;
