@@ -175,16 +175,19 @@ fn an_interruption_keeps_the_journal_and_capability_without_publishing_runtime()
                 launch.record_process(&saved.process).unwrap();
             }
         }
+        let before = fs::read(state.path(StateFile::Journal)).unwrap();
+        assert!(locked.begin_launch(&prepared, &runtime).is_err());
+        assert_eq!(fs::read(state.path(StateFile::Journal)).unwrap(), before);
         drop(locked);
-        let mut reopened = state.lock(Deadline::after(10.0)).unwrap();
-        let journal = reopened.journal().unwrap().unwrap();
+        let journal: record::LaunchJournal =
+            serde_json::from_slice(&fs::read(state.path(StateFile::Journal)).unwrap()).unwrap();
         assert_eq!(journal.process(), spawned.then_some(&saved.process));
         assert_eq!(journal.capability, saved.capability);
-        assert_eq!(reopened.capability().unwrap(), Some(saved.capability));
-        assert!(reopened.runtime().unwrap().is_none());
-        let before = fs::read(state.path(StateFile::Journal)).unwrap();
-        assert!(reopened.begin_launch(&prepared, &runtime).is_err());
-        assert_eq!(fs::read(state.path(StateFile::Journal)).unwrap(), before);
+        assert_eq!(
+            fs::read(state.path(StateFile::Capability)).unwrap(),
+            saved.capability
+        );
+        assert!(!state.path(StateFile::Runtime).exists());
     }
 }
 

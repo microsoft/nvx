@@ -1,13 +1,17 @@
-//! Locked launch transitions, without spawning, recovery, or process termination.
+//! Locked launch transitions and bounded recovery of an interrupted launch.
+
+use std::thread;
+use std::time::{Duration, Instant};
 
 use super::StateFile;
 use super::files;
 use super::locked::LockedState;
 use super::record::{LaunchJournal, RuntimeRecord};
-use crate::host::process::ProcessRef;
+use crate::host::cli::deadline::RETRY_INTERVAL;
+use crate::host::process::{BootId, KILL_TIMEOUT, Opened, Process, ProcessRef};
 use crate::host::runtime::RuntimeIdentity;
 use crate::host::vm::{Prepared, SavedVm};
-use crate::{Error, Result};
+use crate::{Error, ErrorKind, Result};
 
 /// A launch whose lock stays borrowed until commit or until its journal is left behind.
 #[derive(Debug)]
@@ -17,6 +21,77 @@ pub(crate) struct Launch<'a> {
 }
 
 impl LockedState {
+    /// Resolves only an uncommitted journal, before the next command can mutate state.
+    pub(crate) fn recover(&mut self, deadline: Instant) -> Result<()> {
+        if self.runtime()?.is_some() {
+            return Ok(());
+        }
+        let Some(journal) = self.journal()? else {
+            return Ok(());
+        };
+        if journal.vm_dir != self.dir() || journal.log != self.path(StateFile::Log) {
+            return Err(Error::io(
+                "the launch journal belongs to another sandbox directory",
+            ));
+        }
+        match journal.process() {
+            Some(reference) => self.end_recorded(&journal, reference, deadline)?,
+            None if !self.released_claim(&journal, deadline)? => {
+                let process = self.endpoint_owner(&journal)?;
+                end_process(&process, deadline)?;
+            }
+            None => {}
+        }
+        if self.capability()?.is_some() {
+            files::remove(self, StateFile::Capability)?;
+        }
+        // Keep the journal until cleanup has finished, including after a partial removal.
+        files::remove(self, StateFile::Journal)
+    }
+
+    /// Ends only the recorded process, or accepts an independently proved release of its claim.
+    fn end_recorded(
+        &self,
+        journal: &LaunchJournal,
+        reference: &ProcessRef,
+        deadline: Instant,
+    ) -> Result<()> {
+        let boot = BootId::current().map_err(|error| {
+            Error::io("cannot identify the current host boot").with_source(error)
+        })?;
+        if boot != reference.boot {
+            return Ok(());
+        }
+        let unheld = match Process::open(reference) {
+            Ok(Opened::Running(process)) => return end_process(&process, deadline),
+            Ok(Opened::Exited(_)) => Error::new(
+                ErrorKind::StillRunning,
+                "the recorded VM exited, but a process may still hold its launch log",
+            ),
+            Err(error) => Error::io("cannot verify the recorded VM process").with_source(error),
+        };
+        if self.released_claim(journal, deadline)? {
+            Ok(())
+        } else {
+            Err(unheld)
+        }
+    }
+
+    /// Rechecks transient fork-inherited descriptors for at most one second.
+    fn released_claim(&self, journal: &LaunchJournal, deadline: Instant) -> Result<bool> {
+        let until = deadline.min(Instant::now() + Duration::from_secs(1));
+        loop {
+            if !self.claim_held(journal)? {
+                return Ok(true);
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            thread::sleep(left.min(RETRY_INTERVAL));
+        }
+    }
+
     /// Durably publishes the capability and complete prepared journal before the caller spawns.
     pub(crate) fn begin_launch(
         &mut self,
@@ -36,6 +111,48 @@ impl LockedState {
             journal,
         })
     }
+}
+
+/// Ends a held, verified process and requires confirmation of its exit before the deadline.
+fn end_process(process: &Process, deadline: Instant) -> Result<()> {
+    let failed = |message: &str| {
+        Error::new(
+            ErrorKind::StillRunning,
+            format!(
+                "cannot confirm exit of VM process {}: {message}",
+                process.reference().pid
+            ),
+        )
+    };
+    if process
+        .wait(Instant::now())
+        .map_err(|error| failed("the exit check failed").with_source(error))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let until = deadline.min(Instant::now() + KILL_TIMEOUT);
+    if until <= Instant::now() {
+        return Err(failed("the recovery deadline passed"));
+    }
+    let kill_error = process.kill().err();
+    let exited = process.wait(until).map_err(|error| {
+        let mut failure = failed("the exit wait failed");
+        if let Some(kill_error) = &kill_error {
+            failure = failed(&format!(
+                "termination failed: {kill_error}; the exit wait failed"
+            ));
+        }
+        failure.with_source(error)
+    })?;
+    if exited.is_some() {
+        return Ok(());
+    }
+    let failure = failed("the verified process has not exited");
+    Err(match kill_error {
+        Some(error) => failure.with_source(error),
+        None => failure,
+    })
 }
 
 impl Launch<'_> {
