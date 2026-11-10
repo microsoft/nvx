@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::endpoint::UnixTransport;
+use super::endpoint::{UnixTransport, endpoint_server_pid_until};
 pub(crate) use super::private::{owner_only_problem, store_dir_problem};
 use super::process::wait_step;
 pub(crate) use super::process::{check_identity, start_time_from_stat};
