@@ -147,6 +147,15 @@ pub fn spawn_vm(
     command: &VmmCommand<'_>,
     capability: &[u8; CAPABILITY_LEN],
     log: File,
+) -> io::Result<Launched> {
+    spawn_vm_with_mode(command, capability, log, false)
+}
+
+/// Shares the strict VM spawn with the CLI's private foreground mode.
+pub(crate) fn spawn_vm_with_mode(
+    command: &VmmCommand<'_>,
+    capability: &[u8; CAPABILITY_LEN],
+    log: File,
     foreground: bool,
 ) -> io::Result<Launched> {
     spawn_inner(command, capability, log, true, foreground)

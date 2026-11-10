@@ -871,7 +871,7 @@ fn spawn_verified_with_cleanup(
         inherit: inherit.iter().map(Inherited::new).collect(),
     };
     let child =
-        spawn::spawn_vm(&command, capability.as_bytes(), log, foreground).map_err(|error| {
+        spawn::spawn_vm_with_mode(&command, capability.as_bytes(), log, foreground).map_err(|error| {
             let unconfirmed = error
                 .get_ref()
                 .and_then(|source| source.downcast_ref::<Error>())
