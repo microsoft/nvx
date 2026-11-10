@@ -1187,22 +1187,57 @@ fn capture_arguments_accept_platform_tokens_and_refuse_nonplatform_tokens() {
 
 #[test]
 fn capture_command_lines_keep_only_unowned_platform_tokens() {
-    for token in [
-        "",
-        "reboot=t",
-        "panic=-1",
+    for command_line in [
         "nvx_sandbox=1",
-        "nvx_config=0xd0010000,65536",
+        "nvx_sandbox=1 reboot=t",
+        "nvx_sandbox=1 panic=-1",
+        "nvx_sandbox=1 nvx_config=0xd0010000,65536",
+        "\t nvx_sandbox=1\nreboot=t\tpanic=-1\n",
     ] {
         let mut config = captured();
-        config.boot.as_mut().unwrap().command_line = token.to_owned();
-        let expected = if token.is_empty() {
-            "maxcpus=1".to_owned()
-        } else {
-            format!("{token} maxcpus=1")
-        };
-        assert_eq!(config.kernel_command_line().unwrap(), expected);
+        config.boot.as_mut().unwrap().command_line = command_line.to_owned();
+        assert_eq!(
+            config.kernel_command_line().unwrap(),
+            format!("{command_line} maxcpus=1")
+        );
         config.check_command_line().unwrap();
+    }
+}
+
+#[test]
+fn capture_command_lines_require_one_init_sandbox_selector() {
+    for command_line in [
+        "",
+        " \t\n",
+        "reboot=t",
+        "nvx_sandbox=1 nvx_sandbox=1",
+        "nvx_sandbox=1\tnvx_sandbox=1",
+        "nvx_sandbox=1\nnvx_sandbox=1",
+        "nvx_sandbox=1\rreboot=t",
+        "nvx_sandbox=1\x0creboot=t",
+        "\rnvx_sandbox=1",
+        "nvx_sandbox",
+        "nvx_sandbox=",
+        "nvx_sandbox=0",
+    ] {
+        let mut config = captured();
+        config.boot.as_mut().unwrap().command_line = command_line.to_owned();
+        for result in [
+            config.kernel_command_line().map(|_| ()),
+            config.check_command_line(),
+            config
+                .openvmm_arguments(
+                    &runtime(),
+                    "/missing/control",
+                    Path::new("/missing/report"),
+                    Some("/missing/console"),
+                )
+                .map(|_| ()),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{command_line:?}");
+            assert!(error.to_string().contains("nvx_sandbox"), "{error}");
+        }
     }
 }
 
