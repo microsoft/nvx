@@ -30,6 +30,12 @@
 //! A locked launch writes its prepared capability and outputs before spawn, records the spawned
 //! process durably, and publishes the caller's exact saved VM only at commit. Dropping an
 //! uncommitted launch keeps its journal; these transitions do not recover or signal a process.
+//! Its journal also identifies the inherited log claim: held means a launch process may run,
+//! and released proves exit. An endpoint owner is held and rechecked before it is returned;
+//! Linux additionally verifies that this process holds that launch's log.
+//! Taking the next lock recovers an interrupted, uncommitted launch before allowing mutation:
+//! it ends only a verified process, removes its journal and capability only after proved exit,
+//! and refuses indeterminate recovery without changing that evidence.
 #![cfg_attr(
     not(test),
     expect(
@@ -40,6 +46,7 @@
 
 mod files;
 mod launch;
+mod liveness;
 mod locked;
 mod names;
 mod record;
