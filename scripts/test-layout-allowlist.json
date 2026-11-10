@@ -11,6 +11,8 @@
     "nvx-rs/src/guest/sys/entry.rs": 3,
     "nvx-rs/src/guest/sys/spawn.rs": 7,
     "nvx-rs/src/guest/time/system.rs": 3,
+    "nvx-rs/src/host/cli/sandbox/state.rs": 1,
+    "nvx-rs/src/host/cli/snapshots.rs": 1,
     "nvx-rs/src/host/cli/store/mod.rs": 1,
     "nvx-rs/src/host/network/address.rs": 2,
     "nvx-rs/src/host/platform/windows/spawn.rs": 1,
