@@ -1344,11 +1344,12 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
 #[ignore]
 #[allow(unsafe_code)]
 fn windows_terminal_ctrl_c_helper() {
+    use std::os::windows::io::AsRawHandle;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::Console::{
         CTRL_C_EVENT, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, GetConsoleMode,
-        GetStdHandle, STD_INPUT_HANDLE, SetConsoleCtrlHandler,
+        GetConsoleProcessList, SetConsoleCtrlHandler,
     };
 
     unsafe extern "system" fn keep_helper(control: u32) -> windows_sys::core::BOOL {
@@ -1360,15 +1361,30 @@ fn windows_terminal_ctrl_c_helper() {
     );
     // SAFETY: this callback affects only this helper, not its children or any other console.
     assert_ne!(unsafe { SetConsoleCtrlHandler(Some(keep_helper), 1) }, 0);
+    let mut members = [0; 8];
+    // SAFETY: no CLI or VM exists yet; only this helper may belong to its private pseudoconsole.
+    let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
+    assert_eq!(count, 1);
+    assert_eq!(members[0], std::process::id());
+    let console_input = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("CONIN$")
+        .unwrap();
+    let input = console_input.as_raw_handle().cast();
     for phase in ["console", "handshake"] {
         let root = Root::new();
         let gate = root.below("build/foreground-gate");
         std::fs::create_dir(&gate).unwrap();
         let temporary = tempfile::Builder::new().prefix("nf3-").tempdir().unwrap();
         let mut original = 0;
-        // SAFETY: this helper's stdin belongs to the parent's private pseudoconsole.
-        let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-        assert_ne!(unsafe { GetConsoleMode(input, &mut original) }, 0);
+        // SAFETY: this opened console input belongs to the parent's verified private pseudoconsole.
+        assert_ne!(
+            unsafe { GetConsoleMode(input, &mut original) },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
         let mut process = root
             .command(&[
                 "run",
@@ -1378,7 +1394,7 @@ fn windows_terminal_ctrl_c_helper() {
             .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
             .env("TMP", temporary.path())
             .env("TEMP", temporary.path())
-            .stdin(Stdio::inherit())
+            .stdin(Stdio::from(console_input.try_clone().unwrap()))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1395,6 +1411,16 @@ fn windows_terminal_ctrl_c_helper() {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         };
+        let mut active_members = [0; 8];
+        // SAFETY: admit a keyboard interrupt only for this helper and its two verified children.
+        let active = unsafe {
+            GetConsoleProcessList(active_members.as_mut_ptr(), active_members.len() as u32)
+        };
+        assert_eq!(active, 3);
+        let mut expected = [std::process::id(), process.id(), native.reference().pid];
+        expected.sort_unstable();
+        active_members[..3].sort_unstable();
+        assert_eq!(active_members[..3], expected);
         std::fs::write(directory.join(format!("{phase}.ready")), b"raw").unwrap();
         foreground_exits_promptly(&mut process, &native);
         let output = process.wait_with_output().unwrap();
@@ -1410,6 +1436,8 @@ fn windows_terminal_ctrl_c_helper() {
             "phase":phase, "terminal_keyboard_byte":3, "raw_mode":raw,
             "original_mode":original, "restored_mode":restored, "status":130,
             "held_native_exited":native.has_exited().unwrap(), "private_directory_removed":true,
+            "console_members_before_launch":count, "cli_exclusive_native_stop_causality":false,
+            "verified_console_members_before_key":expected,
         });
         std::fs::write(directory.join(format!("{phase}.json")), receipt.to_string()).unwrap();
     }
