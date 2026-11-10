@@ -1119,7 +1119,10 @@ unrecorded VMM running.
 Windows log-job requirement as `vm::spawn`: an untrusted job name or a log that
 cannot name a job is refused before child creation. The legacy `spawn` keeps
 its fallback without a job for those logs and names. Other spawn behavior is
-shared.
+shared. If setup fails after a child is created, including failed process
+verification, `Launched::kill_and_confirm_exit` waits without a deadline for
+its exit and reaps it on Unix. The caller reports any cleanup error; the
+legacy `kill_and_wait` remains time-bounded and may release a running child.
 
 `VmmCommand::inherit` lists the descriptors (Linux) or handles (Windows) that
 the VMM inherits under their numbers, besides its standard streams, and it

@@ -129,9 +129,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok(())
     })();
     if let Err(error) = result {
-        if !launched.kill_and_wait() {
+        if let Err(cleanup) = launched.kill_and_confirm_exit() {
             return Err(
-                io::Error::other(format!("{error}; could not reap the launched VM")).into(),
+                io::Error::other(format!(
+                    "{error}; could not confirm exit of the launched VM: {cleanup}"
+                ))
+                .into(),
             );
         }
         return Err(error);
