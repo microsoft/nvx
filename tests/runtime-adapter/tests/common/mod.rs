@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use nvx::Hypervisor;
 use nvx::host::artifacts::{ArtifactDir, Artifacts, Guest};
-use nvx::host::process::Process;
+use nvx::host::process::{Opened, Process};
 use nvx::host::store::{LOG_NAME, RuntimeRecord, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, StopOutcome};
 use nvx::host::template::{CAPTURES_NAME, Store, TRANSACTION_NAME};
@@ -407,7 +407,10 @@ impl Sandbox {
 
     /// Returns the VMM of the sandbox's runtime record, if the record names one that runs.
     pub(crate) fn vmm(&self) -> Option<Process> {
-        Process::open(self.record()?.process()).unwrap()
+        match Process::open(self.record()?.process()).unwrap() {
+            Opened::Running(process) => Some(process),
+            Opened::Exited(_) => None,
+        }
     }
 
     /// Ends the VM that the sandbox's store records, whatever its runtime identity: reattach ends

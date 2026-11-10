@@ -51,7 +51,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nvx::host::process::{Process, ProcessRef};
+use nvx::host::process::{Opened, Process, ProcessRef};
 use serde_json::{Value, json};
 
 use self::harness::{FAKE_OPENVMM, NVX_RS, Root, canonical};
@@ -800,7 +800,10 @@ fn runtime_record(root: &Root, state: &str) -> Option<Value> {
 fn recorded_process(root: &Root, state: &str) -> Option<Process> {
     let record = runtime_record(root, state)?;
     let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
-    Process::open(&reference).unwrap()
+    match Process::open(&reference).unwrap() {
+        Opened::Running(process) => Some(process),
+        Opened::Exited(_) => None,
+    }
 }
 
 /// Returns the names in the state directory `state` below the root, sorted.
@@ -1057,9 +1060,9 @@ fn a_start_that_was_interrupted_is_ended_under_another_identity_too() {
     // The CLI dies, as a crash would, and leaves its OpenVMM running.
     start.kill().unwrap();
     start.wait().unwrap();
-    let process = Process::open(&reference)
-        .unwrap()
-        .expect("the OpenVMM of the start runs");
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the OpenVMM of the start runs");
+    };
 
     // Under another runtime identity, the next transition ends the start, whose OpenVMM it
     // verifies through the journal.
@@ -2059,9 +2062,9 @@ fn a_start_that_ends_before_openvmm_opens_the_images_leaves_it_the_checked_ones(
     // The CLI dies, as a crash would, before OpenVMM has opened its images, and leaves it running.
     start.kill().unwrap();
     start.wait().unwrap();
-    let process = Process::open(&reference)
-        .unwrap()
-        .expect("the OpenVMM of the start runs");
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the OpenVMM of the start runs");
+    };
     let blocks = root
         .path
         .join("build")

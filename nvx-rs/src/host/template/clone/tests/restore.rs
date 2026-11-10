@@ -20,7 +20,7 @@ use super::launch::{
 use super::*;
 use crate::activation::{ReadyActivation, RestoreSection, TransactionId};
 use crate::host::platform::Transport;
-use crate::host::process::{BootId, Process};
+use crate::host::process::{BootId, Opened, Process};
 use crate::host::store::{CLONE_ACTIVATION_NAME, Recovery};
 use crate::host::supervisor::{Starting, StopOutcome};
 use crate::host::template::clone::launch::Hooks;
@@ -421,7 +421,7 @@ fn vmm_with(plan: &str) -> VmmDir {
 /// Checks that the VMM of `vmm` has exited.
 fn assert_vmm_ended(vmm: &VmmDir) {
     let reference = vmm.reference.as_ref().unwrap();
-    if let Some(process) = Process::open(reference).unwrap() {
+    if let Opened::Running(process) = Process::open(reference).unwrap() {
         assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     }
 }
@@ -1193,7 +1193,10 @@ fn a_launch_that_cannot_be_ended_keeps_its_records_and_its_lease_until_a_reattac
     assert_eq!(refusal.code(), ErrorCode::SandboxRunning, "{refusal}");
     let records = CloneRecords::read(locked).unwrap().unwrap();
     assert_eq!(records.journal.unwrap().process(), Some(&reference));
-    assert!(Process::open(&reference).unwrap().is_some());
+    assert!(matches!(
+        Process::open(&reference).unwrap(),
+        Opened::Running(_)
+    ));
     // A reattach ends the launch through its VMM's verified identity: the record keeps the
     // failure's stage, evidence, and original outcome, with the teardown that resolved it.
     let mut control = FakeControl::default();
