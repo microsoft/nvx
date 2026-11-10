@@ -569,9 +569,9 @@ Read the resolved NIC or build an activation record before consuming
 `Prepared` into the command.
 
 The compiled [external-launch example](examples/external-launch.rs) consumes
-this command, uses the existing public low-level spawn primitive without a
-sandbox store, checks the cold guest's boot marker and shell response, then asks
-it to exit cleanly. It requires the VMM's actual exit status 0 and a successful
+this command, uses `supervisor::spawn_vm` without a sandbox store, checks the
+cold guest's boot marker and shell response, then asks it to exit cleanly.
+It requires the VMM's actual exit status 0 and a successful
 outcome with complete teardown. Build with
 `cargo build --locked --example external-launch` and supply the backend, OpenVMM,
 kernel, initramfs, new VM directory, and the three artifact SHA-256 digests from
@@ -1094,6 +1094,12 @@ launch, spawns OpenVMM with the claimed log, records its `ProcessRef` right
 after, and returns a `Starting` launch that the caller commits once the VMM
 serves its control endpoint, or abandons. A launch that fails never leaves an
 unrecorded VMM running.
+
+`spawn_vm` starts a caller-owned command without a store, with the same strict
+Windows log-job requirement as `vm::spawn`: an untrusted job name or a log that
+cannot name a job is refused before child creation. The legacy `spawn` keeps
+its fallback without a job for those logs and names. Other spawn behavior is
+shared.
 
 `VmmCommand::inherit` lists the descriptors (Linux) or handles (Windows) that
 the VMM inherits under their numbers, besides its standard streams, and it
