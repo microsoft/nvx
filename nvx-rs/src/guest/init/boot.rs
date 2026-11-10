@@ -1,13 +1,17 @@
-//! The fixed cold-boot sequence of the VM's shared layered root.
+//! The fixed cold-boot and restored-space setup of the VM's shared layered root.
 
 use std::ffi::{CString, OsStr};
 use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::activation::{self, View};
 use crate::gpt::Expected;
+use crate::guest::activation::{
+    self as guest_activation, Activation, ActivationAction, ActivationInput, ActivationState,
+    Applied, RootTemplate,
+};
 use crate::guest::mappings::{Access, Mapper, MappingTable, Reserved, SourceRoot, TargetRoot};
 use crate::guest::root::{self, Assembly, Device, Root, ShareChild, ShareKind};
 use crate::guest::sys::FileDescriptor;
@@ -321,6 +325,188 @@ fn share_child(value: &[u8]) -> Result<ShareChild> {
         access: access(mode)?,
         kind,
     })
+}
+
+/// One repaired activation and the space it owns across control epochs.
+pub(crate) struct Restored {
+    pub(crate) activation: Activation,
+    payload: Option<Vec<u8>>,
+    _applied: Option<Applied>,
+}
+
+/// The account and open mapping handles handed to the shared dispatcher after activation.
+pub(crate) struct RestoreHandoff {
+    pub(crate) workload: protocol::workload::WorkloadIdentity,
+    pub(crate) user: CString,
+    pub(crate) home: CString,
+    pub(crate) hostname: CString,
+    pub(crate) table: MappingTable,
+    pub(crate) mapper: Mapper,
+    pub(crate) export: Option<SourceRoot>,
+}
+
+impl Restored {
+    /// Anchors the activation once, even when the next session attaches later.
+    pub(crate) fn new(repaired: &crate::guest::snapshot::Repaired, now: Instant) -> Self {
+        Self {
+            activation: Activation::new(repaired, Duration::from_secs(30), now),
+            payload: None,
+            _applied: None,
+        }
+    }
+
+    /// Takes the first bootstrap reset or checks the same deadline on a replacement session.
+    pub(crate) fn reset(&mut self, now: Instant) -> Result<()> {
+        if self.activation.state() == ActivationState::Bootstrap {
+            self.activation
+                .input(now, ActivationInput::Reset)
+                .map_err(activation_error)?;
+        } else {
+            self.activation.tick(now).map_err(activation_error)?;
+        }
+        Ok(())
+    }
+
+    /// Compares the complete retry payload before delegating record replay to the state machine.
+    pub(crate) fn accept(
+        &mut self,
+        payload: &[u8],
+        now: Instant,
+    ) -> Result<(ActivationAction, protocol::workload::WorkloadIdentity)> {
+        if self
+            .payload
+            .as_deref()
+            .is_some_and(|accepted| accepted != payload)
+        {
+            return Err(Error::unsupported(
+                "the activate request changed after acceptance",
+            ));
+        }
+        let (_, workload) = protocol::decode_activate_payload(payload).map_err(protocol_error)?;
+        let action = self
+            .activation
+            .input(now, ActivationInput::Activate(&payload[9..]))
+            .map_err(activation_error)?;
+        if matches!(action, ActivationAction::Apply(_)) {
+            self.payload = Some(payload.to_vec());
+        }
+        Ok((action, workload))
+    }
+
+    /// Applies and switches one restored space, retaining its root and handing over its mapper.
+    pub(crate) fn apply(
+        &mut self,
+        record: &activation::ActivationRecord,
+        workload: protocol::workload::WorkloadIdentity,
+        mut announce: impl FnMut(activation::Publication, Option<std::net::Ipv4Addr>) -> Result<()>,
+    ) -> Result<RestoreHandoff> {
+        let command_line = std::fs::read("/proc/cmdline").map_err(activation_error)?;
+        let template = RootTemplate {
+            runtime: "/run/nvx".into(),
+            distro: Device {
+                mmio: DISTRO_MMIO_BASE,
+                sectors: None,
+            },
+            scratch: Device {
+                mmio: SCRATCH_MMIO_BASE,
+                sectors: None,
+            },
+            timeout: Duration::from_secs(30),
+            filesystem_tag: "microvm".into(),
+            gateway: cmdline::gateway(&command_line).map_err(protocol_error)?,
+        };
+        let (applied, handoff) = restore_in_order(
+            self.activation.deadline(),
+            || {
+                guest_activation::apply(record, &template, self.activation.deadline())
+                    .map_err(activation_error)
+            },
+            |applied| {
+                applied
+                    .root_mut()
+                    .mount_runtime(Some(Path::new("/run/nvx/time")))
+                    .map_err(activation_error)?;
+                let mut target =
+                    TargetRoot::open(applied.root().path()).map_err(activation_error)?;
+                target
+                    .add_mount(&applied.root().path().join("run"))
+                    .map_err(activation_error)?;
+                let (user, home) = account::resolve(
+                    applied.root().path(),
+                    (workload.uid, workload.gid),
+                    workload.create_account,
+                )?;
+                Ok(RestoreHandoff {
+                    workload,
+                    user,
+                    home,
+                    hostname: CString::new(applied.hostname()).map_err(activation_error)?,
+                    table: u32::try_from(record.configuration().mappings)
+                        .ok()
+                        .and_then(MappingTable::new)
+                        .ok_or_else(|| {
+                            Error::unsupported("the restored mapping count is invalid")
+                        })?,
+                    mapper: Mapper::new(target, Reserved::container_root()),
+                    export: applied.take_export(),
+                })
+            },
+            |applied| {
+                if applied.publication() == activation::Publication::Published {
+                    announce(applied.publication(), applied.gateway())?;
+                }
+                Ok(())
+            },
+            |applied| applied.root_mut().switch().map_err(activation_error),
+            |applied| applied.teardown().map_err(activation_error),
+        )?;
+        self._applied = Some(applied);
+        Ok(handoff)
+    }
+}
+
+/// Closes prepared handles before tearing down a space whose setup failed.
+fn restore_in_order<T, R>(
+    deadline: Option<Instant>,
+    apply: impl FnOnce() -> Result<T>,
+    mount_runtime: impl FnOnce(&mut T) -> Result<R>,
+    announce: impl FnOnce(&T) -> Result<()>,
+    switch: impl FnOnce(&mut T) -> Result<()>,
+    teardown: impl FnOnce(T) -> Result<()>,
+) -> Result<(T, R)> {
+    let check = || {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Err(Error::io(
+                "the activation deadline expired before the next space step",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
+    let mut applied = apply()?;
+    let result = check()
+        .and_then(|()| mount_runtime(&mut applied))
+        .and_then(|retained| {
+            check()?;
+            announce(&applied)?;
+            check()?;
+            switch(&mut applied)?;
+            Ok(retained)
+        });
+    match result {
+        Ok(retained) => Ok((applied, retained)),
+        Err(error) => match teardown(applied) {
+            Ok(()) => Err(error),
+            Err(cleanup) => {
+                Err(Error::io(format!("{error}; cleanup failed: {cleanup}")).with_source(error))
+            }
+        },
+    }
+}
+
+fn activation_error(error: impl std::error::Error + Send + Sync + 'static) -> Error {
+    Error::io(format!("failed to activate the restored root: {error}")).with_source(error)
 }
 
 #[cfg(test)]
