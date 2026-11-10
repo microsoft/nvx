@@ -1626,6 +1626,7 @@ method nvx::host::snapshot::CaptureClass::to_bytes
 struct nvx::host::snapshot::ClassIdentity
 method nvx::host::snapshot::ClassIdentity::as_bytes
 method nvx::host::snapshot::ClassIdentity::from_bytes
+const nvx::host::snapshot::DESCRIPTION_FILE
 struct nvx::host::snapshot::Downtime
 field nvx::host::snapshot::Downtime::nanos
 field nvx::host::snapshot::Downtime::source
@@ -1663,13 +1664,18 @@ method nvx::host::snapshot::Invariants::iter
 method nvx::host::snapshot::Invariants::len
 method nvx::host::snapshot::Invariants::new
 method nvx::host::snapshot::Invariants::with
+const nvx::host::snapshot::KEY_FILE
 struct nvx::host::snapshot::KeyIdentity
 method nvx::host::snapshot::KeyIdentity::as_bytes
 method nvx::host::snapshot::KeyIdentity::from_bytes
 const nvx::host::snapshot::MANIFEST_NAME
 const nvx::host::snapshot::MAX_DOWNTIME_NS
 const nvx::host::snapshot::MAX_MANIFEST_LEN
+const nvx::host::snapshot::OPENVMM_DIR
 struct nvx::host::snapshot::Snapshot
+method nvx::host::snapshot::Snapshot::key
+method nvx::host::snapshot::Snapshot::manifest
+method nvx::host::snapshot::Snapshot::open
 struct nvx::host::snapshot::SnapshotKey
 const nvx::host::snapshot::SnapshotKey::MAX_LEN
 const nvx::host::snapshot::SnapshotKey::VERSION
