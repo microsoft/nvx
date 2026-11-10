@@ -124,7 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, confirmed stop, and caller-saved reattachment |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, owned cold-launch command, verified detached launch, confirmed stop, and caller-saved reattachment |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshot directories, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
@@ -528,7 +528,7 @@ these names before creating any output, including the log.
 
 `Prepared::capability()` and `outputs()` return what the caller may journal
 before a spawn. `log()` returns the same opened log, without reopening its
-path. `inherit(file)` moves an already opened resource into the preparation's
+path. `inherit(resource)` moves an already opened resource into the preparation's
 inheritance allowlist and keeps it open. `arguments()` returns the whole
 configuration's OpenVMM arguments. Creation makes caller-relative runtime
 and block-image paths absolute without resolving links or `..` components,
@@ -539,6 +539,25 @@ including quoting and the terminating NUL, on every host. Callers keep the
 directory and runtime inputs stable through creation and a later spawn.
 Dropping a successful preparation closes its resources but leaves its output
 paths owned by the caller.
+
+`Prepared::into_command()` moves the complete launch into `VmmCommand`: its
+program, arguments, working directory, capability, outputs, inherited resources,
+opened log and Windows breakaway setting. It neither reopens nor duplicates
+resources, renders again nor rediscovers paths. `InheritedHandle` owns its
+resource, converts from and back to `OwnedFd` on Unix or `OwnedHandle` on Windows,
+and also accepts an opened `File`. The command documents the caller's spawn
+contract, including standard streams, allowlisted inheritance, Linux detachment
+and umask, Windows log job and breakaway, and cleanup of a failed child.
+
+The compiled [external-launch example](examples/external-launch.rs) consumes
+this command, uses the existing public low-level spawn primitive without a
+sandbox store, checks the cold guest's boot marker and shell response, then asks
+it to exit cleanly. It requires the VMM's actual exit status 0 and a successful
+outcome with complete teardown. Build with
+`cargo build --locked --example external-launch` and supply the backend, OpenVMM,
+kernel, initramfs, new VM directory, and the three artifact SHA-256 digests from
+their installation metadata, in that order. Artifact paths may be relative to
+the caller's directory.
 
 `vm::spawn(prepared)` consumes that preparation and returns `Launched` with
 its verified `process`, the same `outputs`, and the same `capability`. The log
