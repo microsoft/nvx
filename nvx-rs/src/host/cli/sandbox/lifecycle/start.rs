@@ -115,18 +115,20 @@ fn start_locked(
         .map_err(error_with_cause)
         .and_then(|()| check_ready(&saved, &runtime, timeout))
         .and_then(|mut session| {
-            session
-                .map_host_paths(&config.mapping_table(), timeout)
-                .inspect_err(|error| {
-                    if !matches!(error, Exit::Interrupted) {
-                        match session.stop(timeout) {
-                            Ok(()) => stopping = true,
-                            Err(error) => output::print_stderr(&format!(
-                                "warning: startup guest shutdown failed: {error:?}"
-                            )),
-                        }
+            let maps = config.mapping_table();
+            if maps.is_empty() {
+                return Ok(());
+            }
+            session.map_host_paths(&maps, timeout).inspect_err(|error| {
+                if !matches!(error, Exit::Interrupted) {
+                    match session.stop(timeout) {
+                        Ok(()) => stopping = true,
+                        Err(error) => output::print_stderr(&format!(
+                            "warning: startup guest shutdown failed: {error:?}"
+                        )),
                     }
-                })
+                }
+            })
         });
     let Err(error) = ready else {
         return starting.commit(&saved).map_err(error_with_cause);
