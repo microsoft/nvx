@@ -317,6 +317,7 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// Keeps this CLI launch in its caller's session, process group, and console.
     #[cfg(feature = "cli")]
     pub(crate) fn for_foreground(mut self) -> Self {
         self.foreground = true;
@@ -511,10 +512,12 @@ pub struct Launched {
     pub outputs: VmOutputs,
     /// The control credential, never written to disk.
     pub capability: Capability,
+    /// Retains only a foreground caller's child for status and control attachment.
     #[cfg(feature = "cli")]
     child: ForegroundChild,
 }
 
+/// Reaps a foreground child on release without adding `Drop` to the public launch value.
 #[cfg(feature = "cli")]
 #[derive(Debug)]
 struct ForegroundChild(Option<spawn::Launched>);
@@ -530,6 +533,7 @@ impl Drop for ForegroundChild {
 
 #[cfg(feature = "cli")]
 impl Launched {
+    /// Polls the owned child independently of its optional outcome report.
     pub(crate) fn wait_status(&mut self, timeout: Duration) -> io::Result<Option<i32>> {
         Ok(self
             .child_mut()?
@@ -537,6 +541,7 @@ impl Launched {
             .map(|status| status as i32))
     }
 
+    /// Gives the CLI connector the same owned child whose exit it observes.
     pub(crate) fn child_mut(&mut self) -> io::Result<&mut spawn::Launched> {
         self.child
             .0
