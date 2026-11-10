@@ -63,6 +63,75 @@ const SENDING: u8 = 1;
 /// See [`SENDING`].
 const RECEIVING: u8 = 2;
 
+/// Scoped foreground cancellation, including I/O already pending on its verified connection.
+#[derive(Clone, Default)]
+pub(super) struct AttachmentCancellation {
+    /// Whether forwarding ended before the attachment did.
+    cancelled: Arc<AtomicBool>,
+    /// A duplicate of this attachment's connection, never another endpoint or process.
+    #[cfg(any(target_os = "linux", windows))]
+    transport: Arc<std::sync::Mutex<Option<platform::TransportHandle>>>,
+}
+
+impl AttachmentCancellation {
+    /// Refuses new work after the foreground owner cancelled attachment.
+    fn check(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            Err(io::Error::other("foreground attachment cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Retains only the already verified connection before the handshake may use it.
+    fn register(&self, transport: &dyn Transport) -> io::Result<()> {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            let handle = transport.try_clone_handle()?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Unsupported, "attachment I/O cannot be cancelled")
+            })?;
+            *self.transport.lock().expect("attachment lock poisoned") = Some(handle);
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let _ = transport;
+        self.check()
+    }
+
+    /// Ends pending I/O; repeated calls also cover cancellation racing with an I/O submission.
+    #[allow(unsafe_code)]
+    pub(super) fn cancel(&self) -> io::Result<()> {
+        self.cancelled.store(true, Ordering::SeqCst);
+        #[cfg(any(target_os = "linux", windows))]
+        if let Some(handle) = &*self.transport.lock().expect("attachment lock poisoned") {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::fd::AsRawFd;
+                use nix::sys::socket::{Shutdown, shutdown};
+
+                match shutdown(handle.as_raw_fd(), Shutdown::Both) {
+                    Ok(()) | Err(nix::errno::Errno::ENOTCONN) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawHandle;
+                use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+                use windows_sys::Win32::System::IO::CancelIoEx;
+
+                // SAFETY: the retained handle belongs only to this attachment's connection.
+                if unsafe { CancelIoEx(handle.as_raw_handle().cast(), std::ptr::null()) } == 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What the transport observed of the failure of a transfer.
 #[derive(Default)]
 struct Probe {
@@ -72,6 +141,8 @@ struct Probe {
     closed: AtomicBool,
     /// Whether Ctrl-C ended a wait.
     interrupted: AtomicBool,
+    /// The foreground owner's cancellation, absent for ordinary sessions.
+    cancellation: Option<AttachmentCancellation>,
 }
 
 /// A transport that records what [`Probe`] reports, and waits in slices that Ctrl-C can end.
@@ -111,6 +182,9 @@ impl Transport for ProbedTransport {
             if platform::interrupted() {
                 return Err(self.interrupted());
             }
+            if let Some(cancellation) = &self.probe.cancellation {
+                cancellation.check()?;
+            }
             let left = deadline
                 .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
             let slice = left.map_or(POLL_SLICE, |left| left.min(POLL_SLICE));
@@ -139,6 +213,9 @@ impl Transport for ProbedTransport {
 
     fn write_all(&mut self, data: &[u8], timeout: Option<Duration>) -> io::Result<()> {
         self.probe.direction.store(SENDING, Ordering::SeqCst);
+        if let Some(cancellation) = &self.probe.cancellation {
+            cancellation.check()?;
+        }
         // The platform's transports bound the whole write by `timeout`, however slowly the
         // endpoint drains it.
         match self.inner.write_all(data, timeout) {
@@ -205,7 +282,7 @@ impl Session {
         capability: &[u8; CAPABILITY_LEN],
         timeout: f64,
     ) -> Result<Self> {
-        Self::connect_unless_exited(endpoint, pid, capability, timeout, || false)
+        Self::connect_unless_exited(endpoint, pid, capability, timeout, || false, None)
     }
 
     /// Connects to `endpoint`, which `launched`, the OpenVMM process that a start launched,
@@ -221,11 +298,33 @@ impl Session {
         timeout: f64,
     ) -> Result<Self> {
         let pid = launched.id();
-        Self::connect_unless_exited(endpoint, pid, capability, timeout, || {
-            launched
-                .wait_timeout(Duration::ZERO)
-                .is_ok_and(|status| status.is_some())
-        })
+        Self::connect_unless_exited(
+            endpoint,
+            pid,
+            capability,
+            timeout,
+            || launched.wait_timeout(Duration::ZERO).is_ok_and(|status| status.is_some()),
+            None,
+        )
+    }
+
+    /// Connects an owned foreground launch whose output owner can cancel both wait phases.
+    pub(super) fn connect_launched_cancellable(
+        endpoint: &str,
+        launched: &mut Launched,
+        capability: &[u8; CAPABILITY_LEN],
+        timeout: f64,
+        cancellation: AttachmentCancellation,
+    ) -> Result<Self> {
+        let pid = launched.id();
+        Self::connect_unless_exited(
+            endpoint,
+            pid,
+            capability,
+            timeout,
+            || launched.wait_timeout(Duration::ZERO).is_ok_and(|status| status.is_some()),
+            Some(cancellation),
+        )
     }
 
     /// Connects as [`connect`](Self::connect) does, but fails as soon as `exited`, which it calls
@@ -238,10 +337,14 @@ impl Session {
         capability: &[u8; CAPABILITY_LEN],
         timeout: f64,
         mut exited: impl FnMut() -> bool,
+        cancellation: Option<AttachmentCancellation>,
     ) -> Result<Self> {
         let deadline = Deadline::after(timeout);
         let transport = loop {
             check_interrupt()?;
+            if let Some(cancellation) = &cancellation {
+                cancellation.check().map_err(Exit::from_os_error)?;
+            }
             let slice = deadline
                 .remaining()
                 .map_or(POLL_SLICE, |left| left.min(POLL_SLICE));
@@ -272,7 +375,7 @@ impl Session {
                 }
             }
         };
-        Self::attach(transport, capability, timeout)
+        Self::attach(transport, capability, timeout, cancellation)
     }
 
     /// Attaches over a connected `transport` with `capability` within `timeout` seconds, as the
@@ -281,8 +384,12 @@ impl Session {
         transport: Box<dyn Transport>,
         capability: &[u8; CAPABILITY_LEN],
         timeout: f64,
+        cancellation: Option<AttachmentCancellation>,
     ) -> Result<Self> {
-        let probe = Arc::new(Probe::default());
+        if let Some(cancellation) = &cancellation {
+            cancellation.register(transport.as_ref()).map_err(Exit::from_os_error)?;
+        }
+        let probe = Arc::new(Probe { cancellation, ..Probe::default() });
         let transport = Box::new(ProbedTransport {
             inner: transport,
             probe: Arc::clone(&probe),

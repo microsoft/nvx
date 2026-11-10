@@ -59,7 +59,7 @@ use super::sandbox::{
     HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, copy_openvmm_outcome, error_with_cause, hypervisor,
     path_string, path_text, run_openvmm, sandbox_network, validate_outcome_destination,
 };
-use super::session::Session;
+use super::session::{AttachmentCancellation, Session};
 use super::shell::format_command;
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
@@ -750,7 +750,48 @@ impl TerminalGuard {
         if terminal {
             crossterm::terminal::enable_raw_mode().map_err(Exit::from_os_error)?;
         }
-        Ok(Self(terminal))
+        let guard = Self(terminal);
+        if terminal {
+            Self::enable_interrupts().map_err(Exit::from_os_error)?;
+        }
+        Ok(guard)
+    }
+
+    #[cfg(unix)]
+    fn enable_interrupts() -> io::Result<()> {
+        use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
+
+        let stdin = io::stdin();
+        let mut mode = tcgetattr(&stdin)?;
+        mode.local_flags.insert(LocalFlags::ISIG);
+        tcsetattr(&stdin, SetArg::TCSANOW, &mode)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn enable_interrupts() -> io::Result<()> {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_PROCESSED_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+            SetConsoleMode,
+        };
+
+        let mut mode = 0;
+        // SAFETY: stdin is this process's terminal, whose saved entry mode the guard restores.
+        unsafe {
+            let input = GetStdHandle(STD_INPUT_HANDLE);
+            if GetConsoleMode(input, &mut mode) == 0
+                || SetConsoleMode(input, mode | ENABLE_PROCESSED_INPUT) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn enable_interrupts() -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -925,7 +966,12 @@ impl<'a> ForegroundOutput<'a> {
             .write_all(&buffer[..count])
             .map_err(Exit::from_os_error)?;
         if let Some(transport) = &mut self.console {
-            match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
+            let timeout = if progressed {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(10)
+            };
+            match transport.read(&mut buffer, Some(timeout)) {
                 Ok(0) => {
                     self.console = None;
                     self.stdout.finish().map_err(Exit::from_os_error)?;
@@ -965,20 +1011,43 @@ impl<'a> ForegroundOutput<'a> {
 }
 
 /// Keeps both boot streams moving during the synchronous control handshake.
-fn attach_with_output<T: Send>(
-    attach: impl FnOnce() -> Result<T> + Send,
+pub(super) fn attach_with_output<T: Send>(
+    attach: impl FnOnce(AttachmentCancellation) -> Result<T> + Send,
     mut forward: impl FnMut() -> Result<bool>,
 ) -> Result<T> {
     thread::scope(|scope| {
+        let cancellation = AttachmentCancellation::default();
+        let pending = cancellation.clone();
         let attaching = thread::Builder::new()
             .name("nvx-run-attach".to_owned())
-            .spawn_scoped(scope, attach)
+            .spawn_scoped(scope, move || attach(pending))
             .map_err(Exit::from_os_error)?;
-        while !attaching.is_finished() {
-            check_interrupt()?;
-            if !forward()? {
+        let forwarded: Result = (|| {
+            while !attaching.is_finished() {
+                check_interrupt()?;
+                if !forward()? {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = forwarded {
+            let mut cancel_failure = None;
+            while !attaching.is_finished() {
+                if let Err(failure) = cancellation.cancel() {
+                    cancel_failure.get_or_insert(failure);
+                }
                 thread::sleep(Duration::from_millis(10));
             }
+            let _ = attaching
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            if !platform::interrupted()
+                && let Some(failure) = cancel_failure
+            {
+                Exit::from_os_error(failure).report();
+            }
+            return Err(error);
         }
         let attached = attaching
             .join()
@@ -1029,7 +1098,15 @@ fn foreground(
         let capability = *launched.capability.as_bytes();
         let child = launched.child_mut().map_err(Exit::from_os_error)?;
         match attach_with_output(
-            || Session::connect_launched(&endpoint, child, &capability, 60.0),
+            |cancellation| {
+                Session::connect_launched_cancellable(
+                    &endpoint,
+                    child,
+                    &capability,
+                    60.0,
+                    cancellation,
+                )
+            },
             || output.forward(),
         ) {
             Ok(session) => *control = Some(session),

@@ -348,7 +348,7 @@ fn overlapped(
     let wait = timeout.map_or(INFINITE, |timeout| {
         u32::try_from(timeout.as_millis())
             .unwrap_or(INFINITE - 1)
-            .clamp(1, INFINITE - 1)
+            .min(INFINITE - 1)
     });
     // SAFETY: the event belongs to the caller.
     let signaled = unsafe { WaitForSingleObject(overlapped.hEvent, wait) } == WAIT_OBJECT_0;

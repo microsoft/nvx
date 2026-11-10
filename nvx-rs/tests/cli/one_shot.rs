@@ -923,6 +923,179 @@ fn cold_terminal_runs_forward_raw_output_and_restore_the_callers_terminal() {
     }
 }
 
+fn gated_native(
+    process: &mut std::process::Child,
+    directory: &std::path::Path,
+) -> nvx::host::process::Process {
+    use std::time::{Duration, Instant};
+    use nvx::host::process::{BootId, Opened, Process, ProcessRef};
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let marker = directory.join("phase.json");
+    while !marker.is_file() {
+        assert!(process.try_wait().unwrap().is_none(), "the CLI exited before its gate");
+        if Instant::now() >= deadline {
+            process.kill().unwrap();
+            process.wait().unwrap();
+            panic!("the fake did not reach its foreground gate");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
+    let pid = record["pid"].as_u64().unwrap().try_into().unwrap();
+    let reference = ProcessRef {
+        pid,
+        start_time: nvx::host::platform::process_start_time(pid).unwrap(),
+        boot: BootId::current().unwrap(),
+    };
+    match Process::open(&reference).unwrap() {
+        Opened::Running(process) => process,
+        Opened::Exited(_) => panic!("the gated fake already exited"),
+    }
+}
+
+fn foreground_exits_promptly(
+    process: &mut std::process::Child,
+    native: &nvx::host::process::Process,
+) {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            native.kill().unwrap();
+            assert!(native.wait(Instant::now() + Duration::from_secs(2)).unwrap().is_some());
+            process.kill().unwrap();
+            process.wait().unwrap();
+            panic!("foreground cancellation waited for an attachment timeout");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(native.wait(Instant::now() + Duration::from_secs(1)).unwrap().is_some());
+}
+
+#[test]
+fn forwarding_failure_stops_the_verified_vm_during_connect_and_handshake() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    for phase in ["connect", "handshake"] {
+        let root = Root::new();
+        let gate = root.below("build/foreground-gate");
+        std::fs::create_dir(&gate).unwrap();
+        let temporary = tempfile::Builder::new().prefix("nf3-").tempdir().unwrap();
+        let mut process = root.command(&[
+            "run", "--cmdline",
+            &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
+        ])
+            .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
+            .env("TMPDIR", temporary.path())
+            .env("TMP", temporary.path())
+            .env("TEMP", temporary.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn().unwrap();
+        let mut stdout = BufReader::new(process.stdout.take().unwrap());
+        let mut command = String::new();
+        stdout.read_line(&mut command).unwrap();
+        assert!(command.starts_with(">> "), "{command}");
+        let native = gated_native(&mut process, &gate);
+        drop(stdout);
+        std::fs::write(gate.join("release"), b"go").unwrap();
+        foreground_exits_promptly(&mut process, &native);
+        let output = process.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("error[io]:"), "{stderr}");
+        assert!(!stderr.contains("timed out"), "{stderr}");
+        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(unsafe_code)]
+fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    use nix::pty::openpty;
+    use nix::sys::termios::{LocalFlags, tcgetattr};
+
+    for phase in ["console", "handshake"] {
+        let root = Root::new();
+        let gate = root.below("build/foreground-gate");
+        std::fs::create_dir(&gate).unwrap();
+        let temporary = tempfile::Builder::new().prefix("nf3-").tempdir().unwrap();
+        let terminal = openpty(None, None).unwrap();
+        let original = tcgetattr(&terminal.slave).unwrap();
+        let mut command = root.command(&[
+            "run", "--cmdline",
+            &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
+        ]);
+        command.env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
+            .env("TMPDIR", temporary.path())
+            .stdin(Stdio::from(terminal.slave.try_clone().unwrap()))
+            .stdout(Stdio::from(terminal.slave.try_clone().unwrap()))
+            .stderr(Stdio::piped());
+        // SAFETY: the isolated child's pre-exec hook uses only session/terminal syscalls.
+        unsafe {
+            command.pre_exec(|| {
+                nix::unistd::setsid()?;
+                if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut process = command.spawn().unwrap();
+        let native = gated_native(&mut process, &gate);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let raw = loop {
+            let mode = tcgetattr(&terminal.slave).unwrap();
+            if !mode.local_flags.intersects(LocalFlags::ICANON | LocalFlags::ECHO) {
+                break mode;
+            }
+            assert!(Instant::now() < deadline, "the terminal never became raw");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let mut keyboard = File::from(terminal.master);
+        keyboard.write_all(b"\x03").unwrap();
+        foreground_exits_promptly(&mut process, &native);
+        let output = process.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(130), "{output:?}");
+        assert!(raw.local_flags.contains(LocalFlags::ISIG));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("error[io]:"));
+        let restored = tcgetattr(&terminal.slave).unwrap();
+        assert_eq!(restored.input_flags, original.input_flags);
+        assert_eq!(restored.output_flags, original.output_flags);
+        assert_eq!(restored.local_flags, original.local_flags);
+        assert_eq!(restored.control_flags, original.control_flags);
+        assert_eq!(restored.control_chars, original.control_chars);
+        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn a_ctrl_c_byte_in_redirected_stdin_is_not_terminal_cancellation() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let root = Root::new();
+    let mut process = root.command(&[
+        "run", "--cmdline", "fake_boot_delay_ms=100 fake_exit_status=7",
+    ])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    process.stdin.take().unwrap().write_all(b"\x03").unwrap();
+    let output = process.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+}
+
 #[test]
 fn cold_runs_refuse_existing_and_missing_parent_reports_before_launch() {
     let root = Root::new();

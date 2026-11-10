@@ -54,6 +54,7 @@
 //! `fake_report_before_console=1` writes a run's report before console output or its boot delay.
 //! `fake_boot_diagnostics=1` emits console output and a binary log before control attachment.
 //! `fake_refuse_attach=1` refuses attachment after the endpoint has accepted its client.
+//! `fake_foreground_gate=console|connect|handshake` synchronizes foreground wait regressions.
 //! `fake_guest_features=MASK` advertises the decimal feature mask `MASK` instead of the current
 //! guest's, `fake_legacy_guest=1` refuses the features request like a guest agent that
 //! predates it, and `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot
@@ -395,6 +396,8 @@ struct Options {
     boot_diagnostics: bool,
     /// Whether the control handshake refuses even the correct credential.
     refuse_attach: bool,
+    /// The wait phase and private directory of a synchronized foreground-failure fixture.
+    foreground_gate: Option<(String, PathBuf)>,
     /// Artificial delay before the fake OpenVMM crashes, when requested.
     crash_after: Option<Duration>,
     /// Whether stop requests are deliberately left unanswered.
@@ -523,6 +526,10 @@ pub fn main() -> ExitCode {
     } else {
         None
     };
+    if let Err(error) = foreground_gate(&options, "console") {
+        eprintln!("{program}: {error}");
+        return ExitCode::from(1);
+    }
     let mut console = match boot_console(&options) {
         Ok(console) => console,
         Err(error) => {
@@ -577,6 +584,23 @@ pub fn main() -> ExitCode {
             }
         },
     };
+    if let Some((_, directory)) = options.foreground_gate.clone() {
+        thread::spawn(move || {
+            while !directory.join("release").is_file() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if let Err(error) = console
+                .write_all(b"gated foreground output\n")
+                .and_then(|()| console.flush())
+            {
+                eprintln!("gated console output failed: {error}");
+            }
+        });
+    }
+    if let Err(error) = foreground_gate(&options, "connect") {
+        eprintln!("{program}: {error}");
+        return ExitCode::from(1);
+    }
     thread::sleep(options.boot_delay);
     if let Some(after) = options.crash_after {
         thread::spawn(move || {
@@ -591,6 +615,21 @@ pub fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Holds one named fixture phase until the CLI's verified stop terminates this fake.
+fn foreground_gate(options: &Options, phase: &str) -> io::Result<()> {
+    if let Some((requested, directory)) = &options.foreground_gate
+        && requested == phase
+    {
+        let record = serde_json::json!({"pid": std::process::id(), "phase": phase});
+        fs::write(directory.join("phase.tmp"), serde_json::to_vec(&record)?)?;
+        fs::rename(directory.join("phase.tmp"), directory.join("phase.json"))?;
+        loop {
+            thread::park();
+        }
+    }
+    Ok(())
 }
 
 /// Returns `status` for [`main`] to return, or exits with it if `ExitCode` cannot hold it.
@@ -1779,6 +1818,16 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         report_before_console: knob("fake_report_before_console") == Some("1"),
         boot_diagnostics: knob("fake_boot_diagnostics") == Some("1"),
         refuse_attach: knob("fake_refuse_attach") == Some("1"),
+        foreground_gate: knob("fake_foreground_gate")
+            .map(|phase| {
+                if !matches!(phase, "console" | "connect" | "handshake") {
+                    return Err("fake_foreground_gate must be console, connect or handshake".to_owned());
+                }
+                std::env::var_os("NVX_TEST_FOREGROUND_GATE_DIR")
+                    .map(|directory| (phase.to_owned(), PathBuf::from(directory)))
+                    .ok_or_else(|| "the foreground gate needs its private directory".to_owned())
+            })
+            .transpose()?,
         crash_after: millis("fake_crash_after_ms"),
         ignore_stop: knob("fake_ignore_stop") == Some("1"),
         exit_delay: millis("fake_exit_delay_ms").unwrap_or_default(),
@@ -2869,6 +2918,10 @@ fn serve_client<S: Read + Write + Pending>(
         let _ = stream.write_all(&control_record(OUTER_ERROR, &[0; 16], 0, &code));
         return Flow::Continue;
     }
+    if let Err(error) = foreground_gate(options, "handshake") {
+        eprintln!("foreground handshake gate failed: {error}");
+        return Flow::Continue;
+    }
     let mut instance = [0u8; 16];
     while instance == [0; 16] {
         if getrandom::fill(&mut instance).is_err() {
@@ -2968,7 +3021,7 @@ fn record_session(options: &Options) {
     }
 }
 
-fn boot_console(options: &Options) -> io::Result<Box<dyn Write>> {
+fn boot_console(options: &Options) -> io::Result<Box<dyn Write + Send>> {
     let Some(endpoint) = &options.boot_console else {
         return Ok(Box::new(io::stdout()));
     };
