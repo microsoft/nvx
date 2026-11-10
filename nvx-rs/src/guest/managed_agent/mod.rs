@@ -105,6 +105,8 @@ pub(crate) struct AgentConfig {
     user: CString,
     /// Workload home directory.
     home: CString,
+    /// An accepted restore's proxy; outer `None` preserves cold/legacy defaults.
+    restored_proxy: Option<Option<String>>,
     /// Whether this process is the direct PID-1 agent.
     direct: bool,
     /// The entry of the sandbox agent's executions, which the direct agent has none of.
@@ -131,6 +133,7 @@ fn run(system: &mut impl System, arguments: &[CString]) -> Result<(), CommandErr
         gid: arguments[5].clone(),
         user: arguments[6].clone(),
         home: arguments[7].clone(),
+        restored_proxy: None,
         direct: arguments[2].as_bytes() == b"-",
         entry: None,
     };

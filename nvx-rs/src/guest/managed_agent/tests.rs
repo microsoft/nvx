@@ -32,6 +32,7 @@ impl AgentConfig {
             gid: c"1000".to_owned(),
             user: c"workload".to_owned(),
             home: c"/home/workload".to_owned(),
+            restored_proxy: None,
             entry,
         }
     }
@@ -45,6 +46,7 @@ fn sandbox_config(hostname: &[u8], uid: &[u8]) -> AgentConfig {
         gid: c"65534".to_owned(),
         user: c"nobody".to_owned(),
         home: c"/nonexistent".to_owned(),
+        restored_proxy: None,
         direct: false,
         entry: None,
     }

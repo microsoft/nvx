@@ -72,6 +72,20 @@ fn private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
+fn create_export(root: &Path) -> io::Result<PathBuf> {
+    let export = root.join("export");
+    fs::create_dir(&export)?;
+    let proof = export.join("proof");
+    fs::write(&proof, b"CURRENT_573F_HOST_MAP\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&export, fs::Permissions::from_mode(0o755))?;
+        fs::set_permissions(&proof, fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(export)
+}
+
 fn ready(
     connection: &mut HostConnection,
     id: u64,
@@ -86,12 +100,12 @@ fn ready(
     )
 }
 
-fn workload(script: &str) -> Result<Vec<u8>, AnyError> {
+fn workload(script: &str, environment: WorkloadEnvironment<'_>) -> Result<Vec<u8>, AnyError> {
     Ok(encode_exec_payload(&Workload {
         argv: vec!["/bin/sh".into(), "-eu".into(), "-c".into(), script.into()],
         timeout_ms: 10_000,
         cwd: Some("/"),
-        environment: WorkloadEnvironment::Default,
+        environment,
     })?)
 }
 
@@ -99,9 +113,13 @@ fn execute(
     connection: &mut HostConnection,
     id: u64,
     script: &str,
+    environment: WorkloadEnvironment<'_>,
     by: Instant,
 ) -> Result<String, AnyError> {
-    connection.send(&encode_app(APP_EXEC, id, 0, &workload(script)?), Some(by))?;
+    connection.send(
+        &encode_app(APP_EXEC, id, 0, &workload(script, environment)?),
+        Some(by),
+    )?;
     let mut output = Vec::new();
     loop {
         let bytes = connection.receive(Some(by))?;
@@ -188,9 +206,7 @@ fn run() -> Result<(), AnyError> {
         "preserve existing fixture effects",
     )?;
     private_directory(&root)?;
-    let export = root.join("export");
-    fs::create_dir(&export)?;
-    fs::write(export.join("proof"), b"CURRENT_573F_HOST_MAP\n")?;
+    let export = create_export(&root)?;
     let endpoint = if cfg!(windows) {
         format!(
             "//./pipe/openvmm-microvm-sl77b-live-{}-{case}",
@@ -364,7 +380,7 @@ fn run() -> Result<(), AnyError> {
                     } else {
                         Publication::Unpublished
                     },
-                    proxy: None,
+                    proxy: published.then(|| "http://10.88.0.1:3128".to_owned()),
                 }),
                 view: View {
                     hostname: b"restored-573f".to_vec(),
@@ -399,7 +415,15 @@ fn run() -> Result<(), AnyError> {
             expected_status = 125;
             println!("CHANGED_IDENTITY_REPLAY_FATAL");
         } else {
-            connection.send(&encode_app(APP_EXEC, 102, 0, &workload("true")?), Some(by))?;
+            connection.send(
+                &encode_app(
+                    APP_EXEC,
+                    102,
+                    0,
+                    &workload("true", WorkloadEnvironment::Default)?,
+                ),
+                Some(by),
+            )?;
             let bytes = connection.receive(Some(by))?;
             let frame = decode_app(&bytes)?;
             require(
@@ -423,6 +447,14 @@ test "$(id -u)" = 1000
 test "$(id -g)" = 1001
 test "$(hostname)" = restored-573f
 grep -q 'nameserver 10.88.0.53' /etc/resolv.conf
+test "${{http_proxy-}}" = '{1}'
+test "${{https_proxy-}}" = '{1}'
+test "${{HTTP_PROXY-}}" = '{1}'
+test "${{HTTPS_PROXY-}}" = '{1}'
+if test '{1}' = ''; then
+    test "${{http_proxy+x}}${{https_proxy+x}}${{HTTP_PROXY+x}}${{HTTPS_PROXY+x}}" = ''
+fi
+printf 'RESTORED_PROXY_DEFAULTS_OK\n'
 test "$(cat /mnt/restore-map/proof)" = CURRENT_573F_HOST_MAP
 test ! -e /sbin/nvx-ingress
 count=0
@@ -444,10 +476,32 @@ cat /etc/machine-id
 printf '\n'
 printf 'REAL_READY_MAPS_EXEC_OK\n'
 "#,
-                u8::from(published)
+                u8::from(published),
+                if published {
+                    "http://10.88.0.1:3128"
+                } else {
+                    ""
+                },
             );
-            let first = execute(&mut connection, 104, &script, by)?;
+            let first = execute(
+                &mut connection,
+                104,
+                &script,
+                WorkloadEnvironment::Default,
+                by,
+            )?;
             print!("{first}");
+            let proxy = execute(
+                &mut connection,
+                105,
+                "test \"$HTTP_PROXY\" = http://exec.example:2; printf 'EXEC_PROXY_OVERRIDE_OK\\n'",
+                WorkloadEnvironment::Layered(&[
+                    "HTTP_PROXY=http://first.example:1".to_owned(),
+                    "HTTP_PROXY=http://exec.example:2".to_owned(),
+                ]),
+                by,
+            )?;
+            print!("{proxy}");
             let machine = first
                 .lines()
                 .find(|line| line.starts_with("MACHINE_ID="))
@@ -455,7 +509,7 @@ printf 'REAL_READY_MAPS_EXEC_OK\n'
                 .to_owned();
             for kill in [0, 1] {
                 connection.send(
-                    &encode_app(CAPTURE, 105 + u64::from(kill), 0, &[kill]),
+                    &encode_app(CAPTURE, 106 + u64::from(kill), 0, &[kill]),
                     Some(by),
                 )?;
                 let bytes = connection.receive(Some(by))?;
@@ -468,11 +522,11 @@ printf 'REAL_READY_MAPS_EXEC_OK\n'
             drop(connection);
             let transport = session::connect(&endpoint, pid, process.reference().start_time, by)?;
             connection = HostConnection::attach(transport, &capability, by)?;
-            connection.send(&encode_app(ACTIVATE, 107, 0, &activation), Some(by))?;
-            ready(&mut connection, 107, &expected_ready, by)?;
+            connection.send(&encode_app(ACTIVATE, 108, 0, &activation), Some(by))?;
+            ready(&mut connection, 108, &expected_ready, by)?;
             let replay = execute(
                 &mut connection,
-                108,
+                109,
                 r#"
 test "$(cat /tmp/restore-sentinel)" = PRESERVED_573F_UPPER
 test "$(cat /mnt/restore-map/proof)" = CURRENT_573F_HOST_MAP
@@ -481,6 +535,7 @@ cat /etc/machine-id
 printf '\n'
 printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
 "#,
+                WorkloadEnvironment::Default,
                 by,
             )?;
             require(
@@ -488,7 +543,7 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
                 "retry regenerated the machine ID",
             )?;
             print!("{replay}");
-            connection.send(&encode_app(APP_STOP, 109, 0, &[]), Some(by))?;
+            connection.send(&encode_app(APP_STOP, 110, 0, &[]), Some(by))?;
             let bytes = connection.receive(Some(by))?;
             let frame = decode_app(&bytes)?;
             require(
@@ -518,6 +573,43 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
     print!("{text}");
     owned.0.take().ok_or("missing owned restore")?.detach();
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn restored_export_is_readable_under_restrictive_umask() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const CHILD: &str = "NVX_RESTORED_EXPORT_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host::restore::tests::live_init::restored_export_is_readable_under_restrictive_umask",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("vm");
+    private_directory(&root).unwrap();
+    let export = create_export(&root).unwrap();
+    for (path, mode) in [
+        (root, 0o700),
+        (export.clone(), 0o755),
+        (export.join("proof"), 0o644),
+    ] {
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+            mode
+        );
+    }
 }
 
 #[test]

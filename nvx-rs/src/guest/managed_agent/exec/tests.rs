@@ -13,6 +13,7 @@ fn config(direct: bool) -> AgentConfig {
         gid: c"1000".to_owned(),
         user: c"workload".to_owned(),
         home: c"/home/workload".to_owned(),
+        restored_proxy: None,
         direct,
         entry: (!direct).then(|| Entry::new("/rootfs", Identity::new(1000, 1000))),
     }

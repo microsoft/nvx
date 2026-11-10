@@ -42,6 +42,7 @@ impl AgentConfig {
             gid: sys::c_string(gid)?,
             user,
             home,
+            restored_proxy: None,
             direct: true,
             entry: None,
         })
@@ -71,6 +72,7 @@ impl AgentConfig {
             gid: c"0".to_owned(),
             user: c"".to_owned(),
             home: c"".to_owned(),
+            restored_proxy: None,
             direct: true,
             entry: None,
         };
@@ -222,6 +224,7 @@ fn handle_data(
                     gid: CString::new(handoff.workload.gid.to_string()).expect("decimal GID"),
                     user: handoff.user,
                     home: handoff.home,
+                    restored_proxy: Some(handoff.proxy),
                     direct: true,
                     entry: None,
                 });
