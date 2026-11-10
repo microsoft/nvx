@@ -1,4 +1,4 @@
-//! The detached spawn of a VMM, with an explicit allowlist of the descriptors or handles of the
+//! The spawn of a VMM, with an explicit allowlist of the descriptors or handles of the
 //! caller that it inherits, and the child that the spawn returns until its caller releases it.
 
 use std::ffi::OsString;
@@ -106,7 +106,7 @@ pub fn spawn(
     capability: &[u8; CAPABILITY_LEN],
     log: File,
 ) -> io::Result<Launched> {
-    spawn_inner(command, capability, log, false)
+    spawn_inner(command, capability, log, false, false)
 }
 
 /// Starts a VMM with the strict launch contract of [`crate::host::vm::VmmCommand`].
@@ -124,8 +124,9 @@ pub fn spawn_vm(
     command: &VmmCommand<'_>,
     capability: &[u8; CAPABILITY_LEN],
     log: File,
+    foreground: bool,
 ) -> io::Result<Launched> {
-    spawn_inner(command, capability, log, true)
+    spawn_inner(command, capability, log, true, foreground)
 }
 
 /// Shares the legacy spawn mechanics without its optional Windows log-job fallback for a VM.
@@ -134,6 +135,7 @@ fn spawn_inner(
     capability: &[u8; CAPABILITY_LEN],
     log: File,
     require_log_job: bool,
+    foreground: bool,
 ) -> io::Result<Launched> {
     #[cfg(not(windows))]
     let _ = require_log_job;
@@ -150,13 +152,20 @@ fn spawn_inner(
                 "the VM log has no trusted log-named job",
             ));
         }
-        platform::spawn_detached(
+        let mode = if foreground {
+            platform::SpawnMode::Foreground
+        } else {
+            platform::SpawnMode::Detached {
+                breakaway_from_job: command.breakaway_from_job,
+            }
+        };
+        platform::spawn_with_stdio(
             &command.program,
             &command.arguments,
             &command.working_dir,
             [stdin.into(), log.into(), stderr.into()],
             &command.inherit,
-            command.breakaway_from_job,
+            mode,
             job,
         )
         .map(|process| Launched { process })
@@ -173,7 +182,17 @@ fn spawn_inner(
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr));
-        platform::detach(&mut child, &command.inherit)?;
+        #[cfg(feature = "cli")]
+        if foreground {
+            platform::inherit_only(&mut child, &command.inherit)?;
+        } else {
+            platform::detach(&mut child, &command.inherit)?;
+        }
+        #[cfg(not(feature = "cli"))]
+        {
+            let _ = foreground;
+            platform::detach(&mut child, &command.inherit)?;
+        }
         child.spawn().map(|child| Launched {
             child,
             reaped: false,

@@ -41,6 +41,8 @@ struct DryRun {
     arguments: Vec<String>,
     /// The options of the OpenVMM command line that it prints, with placeholders.
     options: Options,
+    /// The specific unsupported configuration this case expects instead of a command.
+    refusal: Option<&'static str>,
 }
 
 /// Returns the dry run `name` of `arguments`, which prints an OpenVMM command line of `options`,
@@ -61,10 +63,16 @@ fn dry_run<S: ToString>(
             .map(|argument| argument.to_string())
             .collect(),
         options,
+        refusal: None,
     }
 }
 
 impl DryRun {
+    fn refusing(mut self, message: &'static str) -> Self {
+        self.refusal = Some(message);
+        self
+    }
+
     /// Returns the case with the file `relative` written first, with `content`.
     fn with_file(mut self, relative: &'static str, content: Content) -> Self {
         self.files.push((relative, content));
@@ -412,8 +420,7 @@ fn run_dry_runs() -> Vec<DryRun> {
     let many_children: Vec<String> = (0..20)
         .map(|index| mount_child(index, &format!("/share/{index:02}"), "{root/share}", "ro"))
         .collect();
-    let long = "x".repeat(1100);
-    let fits = "x".repeat(841);
+    let fits = "x".repeat(crate::openvmm::two_share_command_line_room());
     vec![
         dry_run("run: Alpine default", run(&[]), cold_boot()),
         dry_run(
@@ -721,7 +728,8 @@ fn run_dry_runs() -> Vec<DryRun> {
             cold_boot()
                 .with("--mount-deny", ["{root/share/hidden}"])
                 .with("--mount-allow", ["x"]),
-        ),
+        )
+        .refusing("mount policy options require --mount"),
         dry_run(
             "run: several shares with policy paths",
             run(&[
@@ -778,7 +786,8 @@ fn run_dry_runs() -> Vec<DryRun> {
                     )],
                 )
                 .kernel(&[share_token(0, "/etc/single.txt", "ro", true)]),
-        ),
+        )
+        .refusing("the guest target /etc/single.txt, which would cover the guest's /etc"),
         dry_run(
             "run: one relative shared file",
             run(&["--mount", "/etc/single.txt,single.txt"]),
@@ -789,6 +798,29 @@ fn run_dry_runs() -> Vec<DryRun> {
                     [mount_child(0, "/etc/single.txt", "single.txt", "ro,file")],
                 )
                 .kernel(&[share_token(0, "/etc/single.txt", "ro", true)]),
+        )
+        .refusing("the guest target /etc/single.txt, which would cover the guest's /etc"),
+        dry_run(
+            "run: one shared file outside system paths",
+            run(&["--mount", "/config/single.txt,{root/single.txt},ro"]),
+            cold_boot()
+                .with("--mount-aggregate", ["/run/nvx/shares"])
+                .with(
+                    "--mount-child",
+                    [mount_child(0, "/config/single.txt", "{root/single.txt}", "ro,file")],
+                )
+                .kernel(&[share_token(0, "/config/single.txt", "ro", true)]),
+        ),
+        dry_run(
+            "run: one relative shared file outside system paths",
+            run(&["--mount", "/config/single.txt,single.txt"]),
+            cold_boot()
+                .with("--mount-aggregate", ["/run/nvx/shares"])
+                .with(
+                    "--mount-child",
+                    [mount_child(0, "/config/single.txt", "single.txt", "ro,file")],
+                )
+                .kernel(&[share_token(0, "/config/single.txt", "ro", true)]),
         ),
         dry_run(
             "run: a directory and a file",
@@ -860,12 +892,14 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: host path ending in a mode",
             run(&["--mount", "/data,{root/share},rw,ro"]),
             cold_boot().with("--mount", ["/data,{root/share},rw,ro"]),
-        ),
+        )
+        .with_file("share,rw/data.txt", Content::Text("data\n")),
         dry_run(
             "run: host path ending in a comma",
             run(&["--mount", "/data,{root/share},,rw"]),
             cold_boot().with("--mount", ["/data,{root/share},,rw"]),
-        ),
+        )
+        .with_file("share,/data.txt", Content::Text("data\n")),
         dry_run(
             "run: vmm owner",
             run(&["--mount", "/data,{root/share}", "--mount-owner", "vmm"]),
@@ -934,7 +968,7 @@ fn run_dry_runs() -> Vec<DryRun> {
                 )
                 .with("--cmdline", ["quiet"]),
         ),
-        // `nvx-rs run` passes the network options to OpenVMM as they are.
+        // A proxy is exclusive of direct egress allow rules.
         dry_run(
             "run: network",
             run(&[
@@ -974,12 +1008,69 @@ fn run_dry_runs() -> Vec<DryRun> {
                 .with("--host-loopback", ["allow"])
                 .with("--network-proxy", ["10.0.0.1:3128"])
                 .with("--host-loopback-forward", ["tcp:8080:80", "udp:5353:53"]),
+        )
+        .refusing("a network proxy takes no --network-egress-allow rules"),
+        dry_run(
+            "run: direct network rules and forwards",
+            run(&[
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "allow",
+                "--network-ingress",
+                "allow",
+                "--network-egress-allow",
+                "10.0.0.0/8:tcp:443",
+                "--network-egress-allow",
+                "2001:db8::/32",
+                "--network-egress-deny",
+                "10.1.0.0/16",
+                "--host-loopback",
+                "allow",
+                "--host-loopback-forward",
+                "tcp:8080:80",
+                "--host-loopback-forward",
+                "udp:5353:53",
+            ]),
+            cold_boot()
+                .with("--net", ["10.0.0.2/24"])
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["allow"])
+                .with("--network-ingress", ["allow"])
+                .with("--network-egress-allow", ["10.0.0.0/8:tcp:443", "2001:db8::/32"])
+                .with("--network-egress-deny", ["10.1.0.0/16"])
+                .with("--host-loopback", ["allow"])
+                .with("--host-loopback-forward", ["tcp:8080:80", "udp:5353:53"]),
+        ),
+        dry_run(
+            "run: proxy-only network",
+            run(&[
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
+                "--network-egress",
+                "deny",
+                "--host-loopback",
+                "deny",
+                "--network-proxy",
+                "10.0.0.1:3128",
+            ]),
+            cold_boot()
+                .with("--net", ["10.0.0.2/24"])
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["deny"])
+                .with("--host-loopback", ["deny"])
+                .with("--network-proxy", ["10.0.0.1:3128"]),
         ),
         dry_run(
             "run: egress default",
             run(&["--network-egress", "deny"]),
             cold_boot().with("--network-egress", ["deny"]),
-        ),
+        )
+        .refusing("network policy options require --net"),
         // A restore takes the addressing of its NIC from the snapshot, so it passes the profile
         // and the policy without `--net`.
         dry_run(
@@ -1072,16 +1163,23 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: host loopback forward",
             run(&["--host-loopback-forward", "tcp:8080:80"]),
             cold_boot().with("--host-loopback-forward", ["tcp:8080:80"]),
-        ),
+        )
+        .refusing("network policy options require --net"),
         dry_run(
             "run: egress policy file",
             run(&[
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
                 "--network-egress",
                 "deny",
                 "--network-egress-policy-file",
                 "{root/policy.json}",
             ]),
             cold_boot()
+                .with("--net", ["10.0.0.2/24"])
+                .with("--network-profile", ["portable"])
                 .with("--network-egress", ["deny"])
                 .with("--network-egress-allow", COMPILED_ALLOW)
                 .with("--network-egress-deny", COMPILED_DENY),
@@ -1090,12 +1188,19 @@ fn run_dry_runs() -> Vec<DryRun> {
         dry_run(
             "run: empty egress policy file",
             run(&[
+                "--net",
+                "10.0.0.2/24",
+                "--network-profile",
+                "portable",
                 "--network-egress",
                 "allow",
                 "--network-egress-policy-file",
                 "{root/./policy.json}",
             ]),
-            cold_boot().with("--network-egress", ["allow"]),
+            cold_boot()
+                .with("--net", ["10.0.0.2/24"])
+                .with("--network-profile", ["portable"])
+                .with("--network-egress", ["allow"]),
         )
         .with_file("policy.json", Content::Text("{}")),
         dry_run(
@@ -1107,6 +1212,27 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: quoted command line",
             run(&["--cmdline", "a=\"b c\" d"]),
             cold_boot().with("--cmdline", ["a=\"b c\" d"]),
+        )
+        .refusing(
+            "boot.command_line cannot contain double quotes or a standalone -- with the OpenVMM control console",
+        ),
+        dry_run(
+            "run: standalone command line delimiter",
+            run(&["--cmdline", "quiet -- debug"]),
+            cold_boot().with("--cmdline", ["quiet -- debug"]),
+        )
+        .refusing(
+            "boot.command_line cannot contain double quotes or a standalone -- with the OpenVMM control console",
+        ),
+        dry_run(
+            "run: restore retains quoted command line and delimiter",
+            run(&[
+                "--restore-snapshot",
+                "{root/snapshot}",
+                "--cmdline",
+                "a=\"b c\" -- d",
+            ]),
+            restore().with("--cmdline", ["a=\"b c\" -- d"]),
         ),
         dry_run(
             "run: command line starting with a dash",
@@ -1132,14 +1258,6 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: last command line",
             run(&["--cmdline", "a", "--cmdline", "b"]),
             cold_boot().with("--cmdline", ["b"]),
-        ),
-        // One directory takes no boot token, so no budget limits the command line.
-        dry_run(
-            "run: long command line of one directory share",
-            run(&["--mount", "/data,{root/share}", "--cmdline", &long]),
-            cold_boot()
-                .with("--mount", ["/data,{root/share},ro"])
-                .with("--cmdline", [long.as_str()]),
         ),
         dry_run(
             "run: restore without the budget",
@@ -1202,8 +1320,35 @@ fn dry_runs_print_the_openvmm_command_and_launch_nothing() {
         }
         let before = root.snapshot();
         let arguments: Vec<&str> = case.arguments.iter().map(String::as_str).collect();
+        let cold = case
+            .arguments
+            .first()
+            .is_some_and(|command| command == "run")
+            && !case
+                .arguments
+                .iter()
+                .any(|argument| argument == "--restore-snapshot");
         let outcome = root.nvx_rs(&arguments);
         eprintln!("case: {}", case.name);
+        if let Some(message) = case.refusal {
+            assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+            assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
+            assert!(
+                outcome.stderr().starts_with("error[unsupported]:"),
+                "{}",
+                outcome.describe()
+            );
+            assert!(outcome.stderr().contains(message), "{}", outcome.describe());
+            assert_eq!(root.snapshot(), before, "{}", case.name);
+            return;
+        }
+        let expected = if cold {
+            case.options
+                .cold_run_expected(&root, "one-shot")
+                .unwrap_or_else(|error| panic!("{} unexpectedly refused: {error}", case.name))
+        } else {
+            case.options.expanded(&root)
+        };
         outcome.assert_success();
         let (command, rest) = outcome.command();
         assert!(rest.is_empty(), "{}: {}", case.name, outcome.describe());
@@ -1214,8 +1359,13 @@ fn dry_runs_print_the_openvmm_command_and_launch_nothing() {
             "{}",
             case.name
         );
-        case.options
-            .assert_matches(&root, &Options::parse(arguments), case.name);
+        let actual = Options::parse(arguments);
+        let actual = if cold {
+            actual.normalized_cold_outputs(true)
+        } else {
+            actual
+        };
+        expected.assert_matches(&root, &actual, case.name);
         // The run launched no OpenVMM, which records its command line once it has accepted it.
         assert_eq!(root.snapshot(), before, "{}", case.name);
     });
@@ -1238,8 +1388,7 @@ fn command_lines() -> impl Strategy<Value = String> {
 
 #[test]
 fn the_openvmm_command_of_a_run_splits_back_into_its_arguments() {
-    // `nvx-rs run` passes its kernel command line to OpenVMM as it is, so the `>> ` line, split as
-    // this host splits command lines, must give it back whatever characters it holds: with a
+    // Accepted caller text survives the `>> ` line: with a
     // shell-word splitter on POSIX, and with `CommandLineToArgvW` on Windows.
     let root = Root::new();
     let openvmm = root.below(OPENVMM).to_str().unwrap().to_owned();
@@ -1257,16 +1406,27 @@ fn the_openvmm_command_of_a_run_splits_back_into_its_arguments() {
             ];
             let output = root.command(&arguments).output().unwrap();
             let outcome = Outcome::new(arguments, output);
+            if command_line.contains('"')
+                || command_line.split_ascii_whitespace().any(|token| token == "--")
+            {
+                prop_assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+                prop_assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
+                prop_assert_eq!(
+                    outcome.stderr(),
+                    format!("error[unsupported]: boot.command_line cannot contain double quotes or a standalone -- with the OpenVMM control console{}", crate::harness::LINE_END)
+                );
+                return Ok(());
+            }
+            let expected = cold_boot()
+                .with("--cmdline", [command_line.clone()])
+                .cold_run_expected(&root, "one-shot")
+                .unwrap();
             outcome.assert_success();
             let (command, rest) = outcome.command();
             prop_assert!(rest.is_empty(), "{}", outcome.describe());
             prop_assert_eq!(&command[0], &openvmm);
-            let mut expected = cold_boot().expanded(&root);
-            if !command_line.is_empty() {
-                expected = expected.with("--cmdline", [command_line.clone()]);
-            }
             prop_assert_eq!(
-                Options::parse(&command[1..]),
+                Options::parse(&command[1..]).normalized_cold_outputs(true),
                 expected,
                 "{}",
                 outcome.describe()
