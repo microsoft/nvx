@@ -60,6 +60,7 @@ fn control_session_broker_and_real_agent_loop_back() {
             gid: c"1000".to_owned(),
             user: c"workload".to_owned(),
             home: c"/".to_owned(),
+            restored_proxy: None,
             direct: true,
             entry: None,
         };
@@ -203,6 +204,7 @@ fn output_limit_forwards_nothing_after_the_cap() {
             gid: c"1000".to_owned(),
             user: c"workload".to_owned(),
             home: c"/".to_owned(),
+            restored_proxy: None,
             direct: true,
             entry: None,
         };
