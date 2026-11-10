@@ -152,7 +152,7 @@ fn attachment_keeps_forwarding_until_the_handshake_completes() {
     let (observed, progress) = mpsc::sync_channel(0);
     let mut sent = false;
     let result = attach_with_output(
-        || {
+        move || {
             progress.recv_timeout(Duration::from_secs(2)).unwrap();
             Ok(7)
         },
