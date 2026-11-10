@@ -65,20 +65,19 @@ pub(crate) fn provision(state: &str, options: &[&str]) -> Vec<String> {
     sandbox("provision", state, &all)
 }
 
-/// Returns the configuration that provision records for the minimal sandbox, in format 8, with
+/// Returns the configuration that provision records for the minimal sandbox, in format 9, with
 /// placeholders, and without the bindings of its images, which [`assert_bindings`] checks.
 pub(crate) fn minimal_config() -> Value {
     json!({
         "cmdline": "",
         "export": null,
-        "format": 8,
+        "format": 9,
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
-        "layers": [{"path": "{root/distro.erofs}", "role": "distro", "uuid": UUID}],
+        "image": {"path": "{root/distro.erofs}", "format": "erofs", "identity": UUID},
         "memory_mib": 256,
         "network": null,
-        "scratch": "{root/scratch.ext4}",
-        "upper": "scratch",
+        "upper": {"kind": "scratch", "path": "{root/scratch.ext4}"},
         "workload_gid": 65534,
         "workload_uid": 65534,
     })
@@ -629,9 +628,7 @@ fn lifecycles_of_every_configuration() {
     in_parallel(&cases, check_lifecycle);
 }
 
-/// A sandbox whose upper is in RAM needs no scratch image: provision records `ram` and neither a
-/// scratch image nor its binding, and each start attaches the distro layer alone, which OpenVMM
-/// opens, and asks the guest for the RAM upper.
+/// A RAM upper records its default cap and no scratch image, and each start uses that cap.
 #[test]
 fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
     let root = Root::new();
@@ -662,8 +659,7 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
     );
     let mut expected = minimal_config();
     for (name, value) in [
-        ("upper", json!("ram")),
-        ("scratch", Value::Null),
+        ("upper", json!({"kind": "ram", "max_memory_percent": 50})),
         ("scratch_binding", Value::Null),
     ] {
         expected[name] = value;
@@ -1209,8 +1205,7 @@ fn start_without_openvmm(root: &Root) {
 fn malformed_configuration(root: &Root) {
     root.nvx_rs(&provision("{root/state}", &[]))
         .assert_silent_success();
-    // Format 8 records the shares under `export`, `null` for none, and the upper under `upper`;
-    // format 7 records no `upper`, and format 1 records no `export` either.
+    // The sole typed record requires the image, the upper's own fields, and the export plan.
     let config = json(&root.below("state/config.json"));
     let mut without_export = config.clone();
     without_export.as_object_mut().unwrap().remove("export");
@@ -1223,30 +1218,31 @@ fn malformed_configuration(root: &Root) {
     let mut format_7_with_upper = config.clone();
     format_7_with_upper["format"] = json!(7);
     let mut other_upper = config.clone();
-    other_upper["upper"] = json!("tmpfs");
+    other_upper["upper"] = json!({"kind": "tmpfs"});
     let mut scratch_without_image = config.clone();
-    scratch_without_image["scratch"] = Value::Null;
+    scratch_without_image["upper"]["path"] = Value::Null;
     // An upper in RAM has no scratch image, nor its binding.
     let mut ram_with_scratch = config.clone();
-    ram_with_scratch["upper"] = json!("ram");
+    ram_with_scratch["upper"] =
+        json!({"kind": "ram", "max_memory_percent": 50, "path": "{root/scratch.ext4}"});
     let mut ram_with_binding = ram_with_scratch.clone();
-    ram_with_binding["scratch"] = Value::Null;
+    ram_with_binding["upper"] = json!({"kind": "ram", "max_memory_percent": 50});
     let mut format_1_with_export = without_upper.clone();
     format_1_with_export["format"] = json!(1);
     let unsupported = &["unsupported format", "{root/state/config.json}"][..];
-    let mismatched = &["format does not match its mounts"][..];
+    let missing_export = &["sandbox configuration has no export plan"][..];
     let malformed = &["sandbox configuration is malformed"][..];
     for (text, code, fragments) in [
         (
-            r#"{"format": 9}"#.to_owned(),
+            r#"{"format": 10}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
         ("[]".to_owned(), "format-unsupported", unsupported),
-        // Only the integers 8, 7, and 1 are formats, and the configuration is strict JSON, in
+        // Only the integer 9 is a format, and the configuration is strict JSON, in
         // which no object repeats a field.
         (
-            r#"{"format": 8.0}"#.to_owned(),
+            r#"{"format": 9.0}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
@@ -1259,7 +1255,7 @@ fn malformed_configuration(root: &Root) {
             ][..],
         ),
         (
-            r#"{"format": 8, "format": 8}"#.to_owned(),
+            r#"{"format": 9, "format": 9}"#.to_owned(),
             "io",
             &[
                 "failed to read sandbox configuration",
@@ -1267,21 +1263,37 @@ fn malformed_configuration(root: &Root) {
                 "duplicate field \"format\"",
             ][..],
         ),
-        (r#"{"format": 1}"#.to_owned(), "io", malformed),
-        (r#"{"format": 8}"#.to_owned(), "io", malformed),
+        (
+            r#"{"format": 1}"#.to_owned(),
+            "format-unsupported",
+            unsupported,
+        ),
+        (
+            r#"{"format": 8}"#.to_owned(),
+            "format-unsupported",
+            unsupported,
+        ),
         (memory_text.to_string(), "io", malformed),
         (uid_beyond_32_bits.to_string(), "io", malformed),
         (without_upper.to_string(), "io", malformed),
-        (format_7_with_upper.to_string(), "io", malformed),
+        (
+            format_7_with_upper.to_string(),
+            "format-unsupported",
+            unsupported,
+        ),
         (other_upper.to_string(), "io", malformed),
         (scratch_without_image.to_string(), "io", malformed),
         (ram_with_scratch.to_string(), "io", malformed),
         (ram_with_binding.to_string(), "io", malformed),
-        (without_export.to_string(), "format-unsupported", mismatched),
+        (
+            without_export.to_string(),
+            "format-unsupported",
+            missing_export,
+        ),
         (
             format_1_with_export.to_string(),
             "format-unsupported",
-            mismatched,
+            unsupported,
         ),
     ] {
         root.write("state/config.json", &text);
