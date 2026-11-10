@@ -2761,9 +2761,19 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
             assert state is not None
             path = state / "config.json"
             config = json.loads(path.read_text(encoding="utf-8"))
-            config.update(format=8, upper="ram", scratch=None, scratch_binding=None)
+            _role, image, identity = values["--layer"].split(",")
+            config.update(
+                format=9,
+                image={"format": "erofs", "path": image, "identity": identity},
+                upper={"kind": "ram", "max_memory_percent": 50},
+                scratch_binding=None,
+            )
             if "records-scratch" in self.faults:
-                config.update(upper="scratch", scratch="scratch.ext4")
+                config["upper"] = {"kind": "scratch", "path": "scratch.ext4"}
+            if "records-old-format" in self.faults:
+                config["format"] = 8
+            if "records-other-cap" in self.faults:
+                config["upper"]["max_memory_percent"] = 51
             path.write_text(json.dumps(config), encoding="utf-8")
         return result
 
@@ -2936,6 +2946,8 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
             "partial-teardown": "the one-shot run's teardown is",
             "incomplete-teardown": "the one-shot run's teardown is",
             "records-scratch": "provision recorded the RAM upper as",
+            "records-old-format": "provision recorded the RAM upper as",
+            "records-other-cap": "provision recorded the RAM upper as",
             "has-scratch-device": "has the virtio block devices ['vda', 'vdb']",
             "keeps-state": "the restarted sandbox's empty upper returned status 1",
         }
