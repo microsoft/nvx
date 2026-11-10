@@ -12,7 +12,7 @@ use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::sandbox::{
     Artifacts, HYPERVISORS, MAX_MEMORY_MIB, error_with_cause, hypervisor,
 };
-use crate::host::cli::store::{LockedState, StateDir};
+use crate::host::cli::store::{LockedState, StateDir, StateFile};
 use crate::host::cli::{Exit, Result, check_interrupt, io_error, output};
 use crate::host::config::{
     BlockGeometry, Boot, Capacity, CaptureConfig, ConsoleAttachment, DiskCapture, Invariants,
@@ -278,29 +278,32 @@ fn capture(
     let mut launch = locked.begin_launch(&prepared, &runtime.identity)?;
     check_interrupt()?;
     let process = spawn(prepared).map_err(error_with_cause)?;
-    launch.record_process(process.reference())?;
-    drop(launch);
-    let exited = match request_and_wait(&process, &outputs, &capability, deadline) {
+    let result = (|| {
+        launch
+            .record_process(process.reference())
+            .map_err(error_with_cause)?;
+        drop(launch);
+        request_and_wait(&process, &outputs, &capability, deadline)
+    })();
+    let exited = match result {
         Ok(exited) => exited,
-        Err(error)
-            if !matches!(error, Exit::Interrupted)
-                && (error.code() == Some(ErrorCode::TimedOut) || deadline.passed()) =>
-        {
+        Err(Exit::Interrupted) => return Err(Exit::Interrupted),
+        Err(error) => {
             let now = Instant::now();
-            let stopped = vm::stop(&process, &outputs, |_| false, now, now + KILL_TIMEOUT)
+            vm::stop(&process, &outputs, |_| false, now, now + KILL_TIMEOUT)
+                .and_then(|stopped| stopped.report.map(|_| ()))
                 .map_err(|cleanup| {
                     Exit::error(
                         cleanup.code(),
                         format!(
-                            "capture timed out; stopping its VM failed: {}",
+                            "{}; ending its capture VM failed: {}",
+                            error.message().unwrap_or_default(),
                             error_with_cause(cleanup).message().unwrap_or_default()
                         ),
                     )
                 })?;
-            stopped.report.map_err(error_with_cause)?;
             return Err(error);
         }
-        Err(error) => return Err(error),
     };
     check_interrupt()?;
     finish_capture(&dir, &context, &exited).map_err(error_with_cause)?;
@@ -362,6 +365,40 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
         Err(error) if error.code() == Some(ErrorCode::NotFound) => return Ok(()),
         Err(error) => return Err(error),
     };
+    let journaled = state
+        .path(StateFile::Journal)
+        .try_exists()
+        .map_err(Exit::from_os_error)?;
+    for entry in fs::read_dir(&path).map_err(Exit::from_os_error)? {
+        let entry = entry.map_err(Exit::from_os_error)?;
+        let name = entry.file_name();
+        let known = StateFile::ALL.iter().any(|file| name == file.name())
+            || [
+                "geometry.raw",
+                "capture-image.raw",
+                "capture-scratch.raw",
+                "console.sock",
+                KEY_FILE,
+                DESCRIPTION_FILE,
+                OPENVMM_DIR,
+            ]
+            .iter()
+            .any(|file| name == *file)
+            || name
+                .to_str()
+                .is_some_and(|name| name.starts_with(".openvmm"));
+        let empty_lock = name == StateFile::Lock.name()
+            && entry.metadata().map_err(Exit::from_os_error)?.len() == 0;
+        if !known || name == StateFile::Config.name() || (!journaled && !empty_lock) {
+            return Err(Exit::error(
+                ErrorCode::Io,
+                format!(
+                    "refusing to remove unowned capture content {}",
+                    entry.path().display()
+                ),
+            ));
+        }
+    }
     let locked: LockedState = state.lock(deadline)?;
     if locked.runtime()?.is_some() {
         return Err(Exit::error(

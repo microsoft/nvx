@@ -15,8 +15,8 @@ use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, class};
 use crate::host::snapshot::{MANIFEST_NAME, Snapshot};
 use crate::host::spawn::{self, VmmCommand};
 use crate::protocol::{
-    APP_CAPTURE, APP_READY, CAPABILITY_LEN, OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH,
-    OUTER_READY, decode_app, decode_outer_header, encode_app, encode_outer,
+    APP_CAPTURE, APP_ERROR, APP_READY, CAPABILITY_LEN, OUTER_DATA, OUTER_HEADER_LEN,
+    OUTER_HOST_ATTACH, OUTER_READY, decode_app, decode_outer_header, encode_app, encode_outer,
 };
 
 const HELPER: &str = "host::cli::snapshots::capture::tests::capture_helper";
@@ -208,7 +208,7 @@ fn fake_spawn(root: &Path, prepared: Prepared, behavior: &str) -> Process {
         "manifest": manifest.encode(), "memory": manifest.memory_size, "state": manifest.state_size,
     });
     fs::write(
-        dir.join("helper.json"),
+        root.join("helper.json"),
         serde_json::to_vec(&recipe).unwrap(),
     )
     .unwrap();
@@ -388,6 +388,48 @@ fn a_capture_ack_and_successful_output_without_timely_exit_are_stopped_but_never
     );
 }
 
+#[test]
+fn a_capture_rejection_stops_its_verified_vm_without_finishing_or_publishing() {
+    let fixture = Fixture::new();
+    let error = fixture.capture("refused", "refuse", 20).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Protocol), "{error:?}");
+    assert!(matches!(
+        Process::open(&fixture.references()[0]).unwrap(),
+        Opened::Exited(_)
+    ));
+    assert!(fixture.vm_dir().join("launch.json").exists());
+    assert!(!fixture.vm_dir().join(KEY_FILE).exists());
+    assert!(!fixture.vm_dir().join(DESCRIPTION_FILE).exists());
+    assert_eq!(
+        fs::read_dir(fixture.store().entries.dir()).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn unjournaled_user_content_is_preserved_before_any_capture_slot_mutation() {
+    for entry in ["personal.txt", KEY_FILE, OPENVMM_DIR, ".openvmm-personal"] {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        StateDir::create(&fixture.vm_dir()).unwrap();
+        let path = fixture.vm_dir().join(entry);
+        let data = if entry == OPENVMM_DIR {
+            StateDir::create(&path).unwrap();
+            path.join("personal.txt")
+        } else {
+            path
+        };
+        fs::write(&data, b"preserve user content").unwrap();
+        let missing_artifacts = fixture.root.path().join("missing-artifacts");
+        let error = run(missing_artifacts.to_str(), fixture.options("first")).unwrap_err();
+        assert!(error.message().unwrap().contains("unowned capture content"));
+        assert_eq!(fs::read(data).unwrap(), b"preserve user content");
+        assert!(!fixture.vm_dir().join("sandbox.lock").exists());
+        assert!(!fixture.vm_dir().join("launch.json").exists());
+        assert_eq!(fs::read_dir(store.entries.dir()).unwrap().count(), 0);
+    }
+}
+
 struct OwnedCommand(Child);
 
 impl Drop for OwnedCommand {
@@ -491,7 +533,7 @@ fn read_record(stream: &mut (impl Read + Write)) -> (u8, Vec<u8>) {
     (header.record_type, payload)
 }
 
-fn respond(stream: &mut (impl Read + Write), capability: &[u8]) {
+fn respond(stream: &mut (impl Read + Write), capability: &[u8], refused: bool) {
     let (kind, payload) = read_record(stream);
     assert_eq!(kind, OUTER_HOST_ATTACH);
     assert_eq!(payload, capability);
@@ -503,7 +545,11 @@ fn respond(stream: &mut (impl Read + Write), capability: &[u8]) {
     let request = decode_app(&payload).unwrap();
     assert_eq!(request.kind, APP_CAPTURE);
     assert_eq!(request.payload, [0]);
-    let reply = encode_app(APP_READY, request.request_id, 0, &[]);
+    let reply = if refused {
+        encode_app(APP_ERROR, request.request_id, 22, b"capture-failed")
+    } else {
+        encode_app(APP_READY, request.request_id, 0, &[])
+    };
     stream
         .write_all(&encode_outer(OUTER_DATA, &[7; 16], 1, 1, &reply).unwrap())
         .unwrap();
@@ -516,19 +562,27 @@ fn capture_helper() {
     std::io::stdin().read_to_end(&mut capability).unwrap();
     assert_eq!(capability.len(), CAPABILITY_LEN);
     assert_eq!(fs::read("control.capability").unwrap(), capability);
-    let recipe: Value = serde_json::from_slice(&fs::read("helper.json").unwrap()).unwrap();
+    let directory = std::env::current_dir().unwrap();
+    let recipe_path = directory
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("helper.json");
+    let recipe: Value = serde_json::from_slice(&fs::read(recipe_path).unwrap()).unwrap();
     let endpoint = recipe["endpoint"].as_str().unwrap();
+    let refused = recipe["behavior"] == "refuse";
     #[cfg(target_os = "linux")]
     {
         let server = std::os::unix::net::UnixListener::bind(endpoint).unwrap();
         let (mut stream, _) = server.accept().unwrap();
-        respond(&mut stream, &capability);
+        respond(&mut stream, &capability, refused);
     }
     #[cfg(windows)]
     {
         let mut server = platform::tests::control_server(endpoint);
         platform::tests::accept_control(&server);
-        respond(&mut server, &capability);
+        respond(&mut server, &capability, refused);
     }
     let journal: Value = serde_json::from_slice(&fs::read("launch.json").unwrap()).unwrap();
     assert_eq!(journal["process"]["pid"], std::process::id());
@@ -545,6 +599,10 @@ fn capture_helper() {
         &manifest,
     )
     .unwrap();
+    if refused {
+        thread::sleep(Duration::from_secs(120));
+        return;
+    }
     for (entry, field) in [("memory.bin", "memory"), ("state.bin", "state")] {
         let file =
             crate::host::store::files::create_new(&Path::new(OPENVMM_DIR).join(entry)).unwrap();

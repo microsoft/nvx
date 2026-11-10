@@ -366,11 +366,14 @@ Only a successful capture whose own VMM exits within `--timeout` (60 whole
 seconds by default) can publish. The immutable named directory contains exactly
 `key.bin`, `snapshot.json` and `openvmm/`; an existing name is never replaced.
 Capture's own VM directory is then removed. A timed-out VM is stopped but its
-capture is never finished. The next capture command using this store ends and
-removes an interrupted attempt through ordinary launch recovery, without
-resuming or publishing it. Indeterminate recovery retains its evidence and
-reports an error. Captures in one store serialize; snapshot locks remain
-separate from their immutable directories. Restore commands are not added here.
+capture is never finished. Other control or launch-record failures also stop
+the command's verified VM without finishing it. The next capture command using
+this store ends and removes an interrupted attempt through ordinary launch
+recovery, without resuming or publishing it. Indeterminate recovery retains its
+evidence and reports an error. Unknown files or nonempty unjournaled capture-slot
+contents are kept for inspection, not deleted; an empty launch lock alone is
+harmless. Captures in one store serialize; snapshot locks remain separate from
+their immutable directories. Restore commands are not added here.
 
 ### `download`
 
