@@ -16,6 +16,7 @@ use crate::protocol::{
 use super::super::seam::Paths;
 use super::super::seam::tests::{TestSystem, attach_calls};
 use super::*;
+use crate::guest::init::Capture;
 use crate::guest::mappings::Access;
 use crate::guest::sys::tests::{
     CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SETGID, CAP_SETUID, holds_capability,
@@ -73,11 +74,23 @@ impl Harness {
         Self::spawn_with(system, config, mappings)
     }
 
-    fn spawn_with(mut system: TestSystem, config: AgentConfig, mut mappings: HostMappings) -> Self {
+    fn spawn_with(system: TestSystem, config: AgentConfig, mappings: HostMappings) -> Self {
+        Self::spawn_with_capture(system, config, mappings, None)
+    }
+
+    fn spawn_with_capture(
+        mut system: TestSystem,
+        config: AgentConfig,
+        mut mappings: HostMappings,
+        capture: Option<Capture>,
+    ) -> Self {
         let (host, guest) = UnixStream::pair().unwrap();
         let descriptor = FileDescriptor::from_owned(guest.into());
         let thread = thread::spawn(move || {
             let mut session = Session::new(descriptor);
+            if let Some(capture) = capture {
+                session = session.with_capture(capture);
+            }
             let outcome = run(&mut system, &mut session, &config, &mut mappings);
             (outcome, system)
         });
@@ -311,6 +324,48 @@ fn agent_advertises_the_control_features_of_its_mode_and_stops() {
         let system = harness.stop();
         assert_eq!(system.tty_drained, 1);
     }
+}
+
+#[test]
+fn fresh_session_refuses_root_requests_and_routes_capture_before_stopping() {
+    let config = AgentConfig::for_test(None);
+    let mappings = HostMappings::announced_for(&config, 0);
+    let mut harness = Harness::spawn_with_capture(
+        TestSystem::new(Paths::default()),
+        config,
+        mappings,
+        Some(Capture::fixture(true)),
+    );
+    harness.reset(1, 7);
+    for (kind, payload) in [
+        (APP_EXEC, exec_payload(None)),
+        (APP_MAPS, maps_payload(0, &[], None)),
+        (APP_PING, Vec::new()),
+    ] {
+        assert_eq!(
+            harness.request(kind, &payload),
+            response(
+                APP_ERROR,
+                42,
+                Errno::ENOTSUP as i32,
+                b"unsupported-operation"
+            )
+        );
+    }
+    assert_eq!(
+        harness.request(APP_CAPTURE, &[0]),
+        response(APP_ERROR, 42, Errno::EPERM as i32, b"capture-failed")
+    );
+    harness.host.set_nonblocking(true).unwrap();
+    assert_eq!(
+        harness.host.read(&mut [0]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    harness.host.set_nonblocking(false).unwrap();
+    let system = harness.stop();
+    assert_eq!(system.spawn_calls, 0);
+    assert!(system.kernel.calls().is_empty());
+    assert!(system.diagnostics.is_empty());
 }
 
 #[test]
@@ -2117,6 +2172,83 @@ fn a_running_workload_refuses_other_requests_and_ends_when_cancelled_or_late() -
         vec![response(APP_EXIT, 44, 124, b"timeout")]
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(harness.stop().diagnostics.is_empty());
+    Ok(())
+}
+
+#[test]
+fn rooted_capture_refuses_both_kill_flags_and_leaves_the_exec_group_running() -> TestResult {
+    if super::super::tests::isolate_process_test(
+        "NVX_ROOTED_CAPTURE_REFUSAL_TEST_CHILD",
+        "guest::managed_agent::dispatch::tests::rooted_capture_refuses_both_kill_flags_and_leaves_the_exec_group_running",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (_temporary, mut system) = TestSystem::with_direct();
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
+    let config = AgentConfig::for_test(None);
+    let mappings = HostMappings::announced_for(&config, 0);
+    let mut harness =
+        Harness::spawn_with_capture(system, config, mappings, Some(Capture::fixture(false)));
+    harness.reset(1, 7);
+    harness.send(
+        42,
+        APP_EXEC,
+        &workload_payload(&["/bin/sh", "-c", "sleep 30 & echo \"$$ $!\"; wait"], None)?,
+    );
+    let mut output = Vec::new();
+    while !output.ends_with(b"\n") {
+        let reply = harness.next_response();
+        assert_eq!(
+            (reply.kind, reply.request_id, reply.status),
+            (APP_STDOUT, 42, 0)
+        );
+        output.extend_from_slice(&reply.payload);
+    }
+    let group: Vec<_> = std::str::from_utf8(&output)?
+        .split_whitespace()
+        .map(|id| {
+            id.parse::<i64>()
+                .map(|id| sys::ProcessId::from_positive(id).unwrap())
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(group.len(), 2);
+    for (request_id, kill) in [(43, 0), (44, 1)] {
+        assert_eq!(
+            harness.request_all(request_id, APP_CAPTURE, &[kill]),
+            vec![response(
+                APP_ERROR,
+                request_id,
+                Errno::ENOTSUP as i32,
+                b"unsupported-operation"
+            )]
+        );
+        let live = sys::ProcessId::live_userspace()?;
+        assert!(group.iter().all(|process| live.contains(process)));
+        harness.host.set_nonblocking(true)?;
+        assert_eq!(
+            harness.host.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        harness.host.set_nonblocking(false)?;
+    }
+    assert_eq!(
+        harness.request_all(42, APP_CANCEL, &[]),
+        vec![response(APP_EXIT, 42, 137, b"cancelled")]
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let live = sys::ProcessId::live_userspace()?;
+        if group.iter().all(|process| !live.contains(process)) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cancelled process group did not exit"
+        );
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert!(harness.stop().diagnostics.is_empty());
     Ok(())
 }

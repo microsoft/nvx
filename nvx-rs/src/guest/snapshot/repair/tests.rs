@@ -269,6 +269,11 @@ fn capture_repaired(restore: Restore, system: impl RepairSystem + 'static) -> Re
     repaired
 }
 
+/// Returns genuine repaired data for the capture caller's outcome/session regression.
+pub(crate) fn repaired_fixture() -> Repaired {
+    capture_repaired(restore(), FakeSystem::new(&Calls::default()))
+}
+
 /// Returns the calls of a repair once its memory target is active: the listing of the memory
 /// blocks, whose online ones it counts, the reseed, the drop of the seed, which zeroed it before
 /// the finish, and the finish, with the acknowledgement.
