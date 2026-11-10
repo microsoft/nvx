@@ -54,7 +54,6 @@ use crate::host::config::{
 };
 use crate::host::paths::{absolute, normalized};
 use crate::host::runtime::{Runtime, RuntimeIdentity};
-use crate::host::store::regular;
 use crate::host::{filesystem, platform, sandbox, seal};
 use crate::net::Ipv4Cidr;
 use crate::{Error, Hypervisor, Result};
@@ -141,9 +140,9 @@ impl Snapshot {
         }
         let manifest = check_openvmm(&dir.join(OPENVMM_DIR))?;
         let path = dir.join(KEY_FILE);
-        let bytes = regular::open_regular(&path)
+        let bytes = platform::open_regular(&path)
             .and_then(|file| {
-                regular::read_at_most(file, SnapshotKey::MAX_LEN as u64, "a snapshot key")
+                platform::read_at_most(file, SnapshotKey::MAX_LEN as u64, "a snapshot key")
             })
             .map_err(|error| entry_error(&path, error))?;
         let key = SnapshotKey::from_bytes(&bytes)?;

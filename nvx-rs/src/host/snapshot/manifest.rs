@@ -20,9 +20,9 @@ use sha2::{Digest, Sha256};
 use super::wire::{Field, Message, WireError};
 use crate::contract;
 use crate::error::{Error, ErrorCode, Result};
+use crate::host::platform;
 use crate::host::process::BootId;
 pub use crate::host::sandbox::geometry::BlockGeometry;
-use crate::host::store::regular;
 use crate::hypervisor::Hypervisor;
 
 /// Name of the manifest in a snapshot's directory.
@@ -827,8 +827,8 @@ const CAPTURE_TEMPLATE: &str = "the template again with the runtime of this buil
 fn read_manifest(snapshot: &Path) -> Result<(Vec<u8>, String)> {
     let path = snapshot.join(MANIFEST_NAME);
     let description = format!("the snapshot manifest {}", path.display());
-    let bytes = regular::open_regular(&path)
-        .and_then(|file| regular::read_at_most(file, MAX_MANIFEST_LEN, "a manifest"))
+    let bytes = platform::open_regular(&path)
+        .and_then(|file| platform::read_at_most(file, MAX_MANIFEST_LEN, "a manifest"))
         .map_err(|error| {
             let code = match error.kind() {
                 io::ErrorKind::NotFound => ErrorCode::NotFound,

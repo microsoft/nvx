@@ -7,8 +7,15 @@
 //! with its recorded identity, or a child that the caller has not reaped yet: a pidfd on Linux,
 //! when the host provides them, and a process handle on Windows. Waits and termination go through
 //! it, so they reach that process and never another that reuses its ID.
+//!
+//! Its crate-private reads of regular files open a file without following a link, or on Windows
+//! any other reparse point, refuse one that is not a regular file before reading anything from
+//! it, and read it within a bound; `is_refused` tells their refusals from failures of the host's.
 
-use std::io;
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
+use std::path::Path;
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -35,6 +42,109 @@ use windows as imp;
 
 pub(crate) use imp::*;
 pub use imp::{SUPPORTED, create_private_dir, file_identity, process_start_time};
+
+/// Why this module refused a file for what the file is, as [`is_refused`] tells.
+#[derive(Debug)]
+struct Refused(String);
+
+impl fmt::Display for Refused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Returns whether `error` is one with which this module refused a file for what the file is,
+/// rather than an operation of the host's that failed: a link, or a file that is not a regular
+/// file, which [`open_regular`] refuses, as [`refused_open`] and [`regular`] do for other opens
+/// that follow no link, and a file that holds more than its bound, which [`read_at_most`]
+/// refuses.
+pub(crate) fn is_refused(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Refused>())
+}
+
+/// Returns the error of a file that is a link, or not a regular file.
+fn not_regular() -> io::Error {
+    io::Error::other(Refused("it is a link, or not a regular file".to_owned()))
+}
+
+/// Opens the file at `path` for reading, without following a link, or on Windows any other
+/// reparse point, if it is a regular file.
+///
+/// The open does not wait, as it would on Unix for a FIFO without a writer: a file that is not a
+/// regular file is refused before anything is read from it.
+pub(crate) fn open_regular(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Reads of a regular file do not depend on `O_NONBLOCK`.
+        options
+            .custom_flags((nix::fcntl::OFlag::O_NOFOLLOW | nix::fcntl::OFlag::O_NONBLOCK).bits());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        /// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a link as itself.
+        const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).map_err(refused_open)?;
+    regular(file)
+}
+
+/// Returns `error`, with which an open failed, as the error of a file that is not a regular file if
+/// the open refused one: on Unix, a link, which `O_NOFOLLOW` refuses, or a socket, which an open
+/// that does not wait refuses.
+pub(crate) fn refused_open(error: io::Error) -> io::Error {
+    #[cfg(unix)]
+    if [nix::errno::Errno::ELOOP, nix::errno::Errno::ENXIO]
+        .into_iter()
+        .any(|errno| error.raw_os_error() == Some(errno as i32))
+    {
+        return not_regular();
+    }
+    error
+}
+
+#[cfg(windows)]
+/// Returns whether Windows marks `metadata` as a reparse point.
+pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+/// Reports no reparse points on hosts whose metadata has no such Windows attribute.
+pub(crate) fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+/// Returns `file`, which an open that follows no link opened, if it is a regular file.
+pub(crate) fn regular(file: File) -> io::Result<File> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || is_reparse_point(&metadata) {
+        return Err(not_regular());
+    }
+    Ok(file)
+}
+
+/// Reads `file` to its end, failing if it holds more than `limit` bytes, the most that `what` may
+/// hold, without reading more than one byte past the limit.
+pub(crate) fn read_at_most(file: File, limit: u64, what: &str) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::other(Refused(format!(
+            "it holds more than the {limit} bytes that {what} may hold"
+        ))));
+    }
+    Ok(bytes)
+}
 
 /// Refuses a VMM working directory that exceeds Windows' process-creation limit, without
 /// accessing the filesystem.
