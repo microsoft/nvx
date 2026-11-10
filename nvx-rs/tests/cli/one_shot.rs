@@ -1246,7 +1246,9 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
     );
     let mut environment: Vec<_> = std::env::vars_os()
         .filter(|(name, _)| {
-            !name.to_string_lossy().eq_ignore_ascii_case("NVX_TEST_RAW_TERMINAL_DIR")
+            !name
+                .to_string_lossy()
+                .eq_ignore_ascii_case("NVX_TEST_RAW_TERMINAL_DIR")
         })
         .collect();
     environment.push((
