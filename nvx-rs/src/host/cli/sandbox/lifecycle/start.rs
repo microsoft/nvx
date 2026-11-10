@@ -10,23 +10,17 @@ use super::{
     CONFIG_NAME, Found, REQUIRED_FEATURES, connect, find_vm, mismatched, require_config,
     running_vm, runtime_for,
 };
-use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::cli::deadline::Deadline;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{Config, read_config};
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
 use crate::host::cli::session::{ExecRequest, ExecResult, Session};
 use crate::host::cli::{Exit, Result, output};
-use crate::host::config::{
-    Boot, ConsoleAttachment, LayeredRoot, NetworkConfig, RootConfig, UpperConfig, VmConfig,
-};
 use crate::host::process::KILL_TIMEOUT;
 use crate::host::runtime::Runtime;
 use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
 use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
-use crate::host::sandbox::{SandboxLaunch, SandboxPlan};
 use crate::host::vm::{self, SavedVm, VmDir};
-use crate::net::Ipv4Cidr;
 use crate::{ErrorCode, ErrorKind};
 
 /// Starts a provisioned sandbox, as `start` does.
@@ -68,13 +62,11 @@ fn start_locked(
     }
     let config = Config::new(config)?;
     let launch = config.launch()?;
-    let binding = config.distro_binding()?;
+    let binding = config.distro_binding();
     let scratch_binding = config.scratch_binding()?;
     let distro = binding
         .check(launch.distro(), DISTRO_POLICY_REVISION)
         .map_err(binding_error)?;
-    // Reading the network checks its policy again, as provision did, before anything launches.
-    let launch = launch.with_network(config.network()?);
     let scratch = match (scratch_binding, launch.scratch()) {
         (Some(scratch_binding), Some(scratch)) => Some(
             scratch_binding
@@ -83,12 +75,12 @@ fn start_locked(
         ),
         _ => None,
     };
-    let plan = launch.bound_plan(&binding)?;
+    let plan = launch.bound_plan(binding)?;
     // Keep provision's refusal of caller-owned nvx_* tokens, without launching its old plan.
     plan.kernel_command_line(config.cmdline())?;
     artifacts.require()?;
     let runtime = runtime_for(artifacts, &config, artifacts.launch_identity()?)?;
-    let config = vm_config(&config, &launch, &plan)?;
+    let config = config.vm_config(&launch)?;
     let dir = VmDir::open(state_dir).map_err(error_with_cause)?;
     lock.clear_outputs()?;
     let mut prepared = vm::create(&runtime, &config, None, &dir).map_err(error_with_cause)?;
@@ -175,59 +167,6 @@ fn start_locked(
         ));
     }
     Err(error)
-}
-
-fn vm_config(config: &Config, launch: &SandboxLaunch, plan: &SandboxPlan) -> Result<VmConfig> {
-    let (uid, gid) = launch.settings().workload_identity;
-    let mut command_line = format!("nvx_sandbox=1 nvx_mode=managed nvx_identity={uid}:{gid}");
-    if !config.cmdline().is_empty() {
-        command_line.push(' ');
-        command_line.push_str(config.cmdline());
-    }
-    let network = launch
-        .network()
-        .map(|network| -> Result<NetworkConfig> {
-            Ok(NetworkConfig {
-                guest_network: Some(
-                    Ipv4Cidr::parse(network.guest_network())
-                        .map_err(|error| Exit::error(ErrorCode::Unsupported, error.to_string()))?,
-                ),
-                policy: network.policy().clone(),
-            })
-        })
-        .transpose()?;
-    Ok(VmConfig {
-        processors: 1,
-        memory_mib: config.memory_mib(),
-        root: RootConfig::Layered(LayeredRoot {
-            image: launch.distro().path().to_path_buf(),
-            format: plan.distro().image(),
-            gpt_first_partition_bound: None,
-            upper: match launch.scratch() {
-                Some(path) => UpperConfig::Scratch {
-                    path: path.to_path_buf(),
-                    journal: Journal::Allowed,
-                },
-                None => UpperConfig::Ram {
-                    max_memory_percent: UpperConfig::DEFAULT_MAX_MEMORY_PERCENT,
-                },
-            },
-            overlay: OverlayMode::TrustedLowers,
-        }),
-        view: View {
-            hostname: launch.settings().hostname.as_bytes().to_vec(),
-            // As the sandbox agent did, nvx-init gives the workload a machine ID of the VM's own.
-            machine_id: MachineIdMode::Generated,
-        },
-        network,
-        filesystem: launch.export().cloned(),
-        console: ConsoleAttachment::Disconnected,
-        boot: Some(Boot {
-            command_line,
-            memory_capacity_mib: None,
-            capture: None,
-        }),
-    })
 }
 
 /// Returns the error of a start whose distro layer or scratch image fails the check of its
