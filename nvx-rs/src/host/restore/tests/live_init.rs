@@ -125,6 +125,21 @@ fn execute(
     }
 }
 
+fn check_restored_console(logs: &str, case: &str) -> Result<usize, AnyError> {
+    let cold_switches = logs.matches("NVX-INIT-ROOT: switched").count();
+    require(
+        cold_switches == 0,
+        "restored VM unexpectedly entered the cold-boot root path",
+    )?;
+    if matches!(case, "published" | "unpublished") {
+        require(
+            !logs.contains("NVX-INIT-ACTIVATION:"),
+            "successful restored activation emitted a failure diagnostic",
+        )?;
+    }
+    Ok(cold_switches)
+}
+
 fn run() -> Result<(), AnyError> {
     let grant = std::env::var("NVX_SL77B_LIVE_GRANT")?;
     require(
@@ -495,17 +510,7 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
         format!("wrong restore outcome: {outcome:?}"),
     )?;
     let logs = fs::read_to_string(&console)?;
-    let cold_switches = logs.matches("NVX-INIT-ROOT: switched").count();
-    require(
-        cold_switches == 0,
-        "restored VM unexpectedly entered the cold-boot root path",
-    )?;
-    if matches!(case, "published" | "unpublished") {
-        require(
-            !logs.contains("NVX-INIT-ACTIVATION:"),
-            "successful restored activation emitted a failure diagnostic",
-        )?;
-    }
+    let cold_switches = check_restored_console(&logs, case)?;
     let text = format!(
         "RESTORE_OK case={case} pid={pid} status={expected_status} cold_switches={cold_switches} teardown=true\n"
     );
@@ -513,6 +518,46 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
     print!("{text}");
     owned.0.take().ok_or("missing owned restore")?.detach();
     Ok(())
+}
+
+#[test]
+fn restored_console_accepts_success_without_a_cold_switch() {
+    for case in ["published", "unpublished"] {
+        assert_eq!(check_restored_console("", case).unwrap(), 0);
+    }
+}
+
+#[test]
+fn restored_console_rejects_a_cold_switch_for_every_case() {
+    for case in ["published", "unpublished", "changed", "deadline"] {
+        let error =
+            check_restored_console("NVX-INIT-ROOT: switched mappings=1\n", case).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "restored VM unexpectedly entered the cold-boot root path"
+        );
+    }
+}
+
+#[test]
+fn restored_console_rejects_activation_failure_on_success() {
+    for case in ["published", "unpublished"] {
+        let error = check_restored_console("NVX-INIT-ACTIVATION: failed\n", case).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "successful restored activation emitted a failure diagnostic"
+        );
+    }
+}
+
+#[test]
+fn restored_console_allows_expected_activation_failure() {
+    for case in ["changed", "deadline"] {
+        assert_eq!(
+            check_restored_console("NVX-INIT-ACTIVATION: failed\n", case).unwrap(),
+            0
+        );
+    }
 }
 
 #[test]
