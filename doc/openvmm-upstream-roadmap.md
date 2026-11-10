@@ -8,14 +8,14 @@
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131.
-- NVX's pinned OpenVMM revision: `46bfe02ed65697e858f66ce55eb60831b3ac3461`, position 238, the
-  head of microsoft/openvmm#5005, whose commit follows position 237, `cba21d109`, the head of
-  microsoft/openvmm#5004, on which it stacks, whose commit follows position 236, `ac3dc27a7`, the
-  head of microsoft/openvmm#5003, on which that one stacks, whose commit follows position 235,
-  `b4028c1aa`, the head of `feature/microvm/dev`, which microsoft/openvmm#5001 merged after
-  position 234, `f41a1ecfc`, which microsoft/openvmm#4997 merged after position 233, `d501e5066`,
-  which microsoft/openvmm#4996 merged after position 232, `6cb6ba87c`, which
-  microsoft/openvmm#4995 merged after position 231, `98e5b3ca5`, which
+- NVX's pinned OpenVMM revision: `4c2697aef28d7fa69f788ce4e65b6554c1cfb935`, position 240, the
+  head of microsoft/openvmm#5010, whose two commits, positions 239 and 240, follow position 238,
+  `46bfe02ed`, the head of `feature/microvm/dev`, which microsoft/openvmm#5005 merged after
+  position 237, `cba21d109`, which microsoft/openvmm#5004 merged after position 236,
+  `ac3dc27a7`, which microsoft/openvmm#5003 merged after position 235, `b4028c1aa`, which
+  microsoft/openvmm#5001 merged after position 234, `f41a1ecfc`, which microsoft/openvmm#4997
+  merged after position 233, `d501e5066`, which microsoft/openvmm#4996 merged after position 232,
+  `6cb6ba87c`, which microsoft/openvmm#4995 merged after position 231, `98e5b3ca5`, which
   microsoft/openvmm#4994 merged with position 230 after position 229, `ed8fc0713`, which
   microsoft/openvmm#4993 merged after position 228, `d6addf8c1`, which
   microsoft/openvmm#4992 merged after position 227, `154548a0e`, which
@@ -31,8 +31,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 107 commits past
-  the mapped tip on the same first-parent chain. Positions 132-238 are not yet assigned to PRs; see
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 109 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -998,7 +998,8 @@ ba105dd7f
   -> memory-expansion ranges placed without overflow [236]
   -> FIFO artifacts refused without waiting for a writer [237]
   -> device input gated without closing devices to the vCPUs [238]
-  -> 46bfe02ed (NVX pin)
+  -> quiesced microVM run again only through its rollback [239-240]
+  -> 4c2697aef (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1014,13 +1015,13 @@ reorganization folded the PR20 and PR12 fixups into the commits that they fix; s
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. None of the 107 later commits is a
+The NVX pin extends the chain past position 131 without merges. None of the 109 later commits is a
 fixup of a mapped PR, and none is yet classified or assigned to PRs. Each of positions 132-186
 combines the v2.4 commits that the table lists, as v3.0 positions 145-160 and 162-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 187-191
 followed the v3.0 reorganization, positions 192-205 are the ABI restart of the v4.0
 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-238 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-240 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1136,6 +1137,8 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 236 | `ac3dc27a7` | - | - | - | - | openvmm_helpers: compute memory-expansion ranges without overflow (microsoft/openvmm#5003) |
 | 237 | `cba21d109` | - | - | - | - | openvmm_helpers: refuse a FIFO artifact without waiting for a writer (microsoft/openvmm#5004) |
 | 238 | `46bfe02ed` | - | - | - | - | vmotherboard: gate a device's input without closing it to the vCPUs (microsoft/openvmm#5005) |
+| 239 | `b5d20bf84` | - | - | - | - | petri: let a microVM test be its snapshot controller (microsoft/openvmm#5010) |
+| 240 | `4c2697aef` | - | - | - | - | openvmm_core: run a quiesced microVM again only through its rollback (microsoft/openvmm#5010) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1275,7 +1278,16 @@ states, now makes the gate's synchronous part under the device's ordinary lock a
 without the device, since the vCPUs run through a gate change. It changes the gate's methods of
 `ChangeDeviceState`, the erased chipset devices, and the remote device proxy, which position 018
 adds, and the virtio transports' forwarding of the gate, which PR13's position 040 adds, and adds
-tests of the unit, both virtio transports, and the proxy.
+tests of the unit, both virtio transports, and the proxy. Positions 239 and 240 change the
+snapshot boundary of PR17. Position 239 lets a VMM test be the snapshot controller: it gives the
+snapshot-request port's handle in petri, which PR17's position 076 adds without a channel, and
+petri's launch of the VM worker, which position 072 gives the boundary's parameters, a boundary's
+channels, which the petri microVM support of PR15's position 065 keeps for the test, and adds such
+a test beside position 065's cold-boot test. Position 240 has the snapshot quiesce and the
+boundary's release, which position 072 adds to the VM worker, refuse a VM outside a boundary and
+the boundary of a quiesced VM, so that only position 072's rollback runs a quiesced VM again. It
+extends the snapshot guide's paragraph on the RPCs that a boundary refuses, which position 076
+adds, and adds tests beside position 239's.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1539,6 +1551,28 @@ transports, which PR13's positions 039 and 040 add and PR16's positions 066 and 
 transports in a new file. Replaying it on upstream main conflicts in eight of its nine files, all
 but that new one, which applies cleanly: upstream main lacks the input gate of position 018 and its
 forwarding by position 040, so it follows PR09 and PR13 upstream.
+
+Position 239 changes only petri's microVM support, which PR15's position 065 adds and PR17's
+position 076 extends with the snapshot-request port's handle, and which PR16's position 067, PR20's
+position 094, PR24's position 119, and positions 137, 147, 160, 162, 207, and 223 also change;
+petri's runtime functions, which PR15's position 065 extends with the portb waits after its
+positions 059 and 063, and position 207 changes; petri's launch of the VM worker, whose boundary
+parameters PR17's position 072 adds, and which PR09's position 016, PR12's positions 036 and 037,
+PR15's position 065, PR17's positions 075 and 078, PR20's positions 095 and 097, and positions 139
+and 147 also change; petri's start of the VM, which only PR13's position 048 also changes; and the
+microVM VMM tests of position 065, which PR17's position 080 and position 207 also change.
+Replaying it on upstream main conflicts in four of its five files, all but petri's start of the
+VM, which applies cleanly: upstream main lacks the petri microVM support of position 065, the
+boundary parameters of position 072, and the port's handle of position 076, so it follows PR15 and
+PR17 upstream.
+
+Position 240 changes only the snapshot quiesce and the boundary's release of the VM worker's
+microVM module, which PR15's position 056 adds, PR17's position 072 gives the snapshot boundary,
+and 27 other positions also change; extends the snapshot guide's paragraph on the RPCs that a
+boundary refuses, which PR17's position 076 adds; and adds VMM tests beside position 239's.
+Replaying it on upstream main conflicts in all three of its files: upstream main lacks the microVM
+module of position 056, the boundary of position 072, that paragraph, and the tests of positions
+065 and 239, so it follows PR15, PR17, and position 239 upstream.
 
 ## PR summary
 
