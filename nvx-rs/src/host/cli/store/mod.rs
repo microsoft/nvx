@@ -51,6 +51,7 @@ mod record;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub(crate) use self::locked::LockedState;
 pub(crate) use self::names::StateFile;
 use crate::ErrorCode;
 use crate::host::cli::{Exit, Result};
