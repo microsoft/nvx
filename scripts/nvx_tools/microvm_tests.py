@@ -10468,8 +10468,8 @@ def run_filesystem_comma_paths(
 ) -> None:
     """Share host directories whose paths contain commas through `nvx-rs run`:
     a read-write `alpha,beta` and a read-only `2026, final`, each with a
-    denied subdirectory, first each alone, as OpenVMM's `--mount`, and then
-    both, as the children of an aggregate. The guest must find each exact
+    denied subdirectory, first each alone and then both through the checked
+    export plan's aggregate and guest binds. The guest must find each exact
     directory, rather than the one beside it that the text before the last
     comma of its path names, with its mode, which OpenVMM enforces, and
     without its denied subdirectory."""
@@ -10514,7 +10514,9 @@ def run_filesystem_comma_paths(
                 command,
                 _render_script(
                     "filesystem-comma-paths.sh.in",
-                    AGGREGATE="1" if len(attached) > 1 else "0",
+                    EXPORT_MODE=(
+                        "rw" if any(shares[share][1] == "rw" for share in attached) else "ro"
+                    ),
                     SHARES=" ".join(":".join(shares[share]) for share in attached),
                 ),
                 FILESYSTEM_COMMA_PATHS_MARKER,

@@ -3945,7 +3945,11 @@ class FilesystemCommaPathsScenarioTests(unittest.TestCase):
                 self.assertEqual((host.parent.name, host.name), (parent, name))
                 self.assertEqual(Path(deny), host / "secret")
                 self.assertIn(f"{target}:{mode}:{seed}", script)
-            self.assertIn(f"\naggregate={int(len(shares) > 1)}\n", script)
+            export_mode = "rw" if any(share[3] == "rw" for share in shares) else "ro"
+            self.assertIn("\naggregate=/run/nvx/hostfs/root\n", script)
+            self.assertIn(f"\nexport_mode={export_mode}\n", script)
+            self.assertIn('mount -o remount,rw "$aggregate"', script)
+            self.assertIn('mount -o remount,bind,rw "$target"', script)
             self.assertNotIn("@", script)
 
     def test_scenario_rejects_a_write_to_the_read_only_directory(self):
