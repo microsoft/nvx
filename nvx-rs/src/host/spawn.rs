@@ -409,40 +409,6 @@ impl Launched {
         self.reaped |= status.is_some();
         Ok(status)
     }
-
-    /// Asks the process to end, as `Popen.terminate` does: with `SIGTERM` on Unix, and by
-    /// terminating it with status 1 on Windows. A process that has exited is left alone.
-    #[cfg(feature = "cli")]
-    pub(crate) fn terminate(&mut self) -> io::Result<()> {
-        #[cfg(windows)]
-        return self.process.request_termination();
-        #[cfg(not(windows))]
-        self.signal(nix::sys::signal::Signal::SIGTERM)
-    }
-
-    /// Ends the process, as `Popen.kill` does: with `SIGKILL` on Unix, and by terminating it with
-    /// status 1 on Windows. A process that has exited is left alone.
-    #[cfg(feature = "cli")]
-    pub(crate) fn kill(&mut self) -> io::Result<()> {
-        #[cfg(windows)]
-        return self.process.request_termination();
-        #[cfg(not(windows))]
-        self.signal(nix::sys::signal::Signal::SIGKILL)
-    }
-
-    /// Sends `signal` to the process unless it has exited. The child is not reaped until it is
-    /// waited for, so its process ID cannot name another process meanwhile.
-    #[cfg(all(feature = "cli", not(windows)))]
-    fn signal(&mut self, signal: nix::sys::signal::Signal) -> io::Result<()> {
-        if self.try_reap()?.is_some() {
-            return Ok(());
-        }
-        let pid = i32::try_from(self.child.id()).map_err(io::Error::other)?;
-        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
-            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
-    }
 }
 
 /// Returns `Popen.returncode` for `status`: the exit code, or the negated signal number.

@@ -241,17 +241,6 @@ impl<'s> Starting<'s> {
         &self.inner().process
     }
 
-    /// Returns the VMM's child, through which the CLI waits for a VMM whose start failed, reads
-    /// its exit status, and ends it as `subprocess` ends it, before it abandons the launch.
-    #[cfg(feature = "cli")]
-    pub(crate) fn child(&mut self) -> &mut Launched {
-        &mut self
-            .inner
-            .as_mut()
-            .expect("a launch is in progress until it is committed or abandoned")
-            .child
-    }
-
     /// Commits the launch of a VMM that serves its control endpoint: writes its runtime record,
     /// as [`Launch::commit`] does, releases the VMM's child, which keeps running, and returns the
     /// VM.

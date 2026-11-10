@@ -13,14 +13,6 @@ pub(super) fn os_error(error: &std::io::Error, path: &Path) -> Exit {
     io_error(ErrorCode::Io, error, path)
 }
 
-/// Removes `path` unless it is missing.
-pub(super) fn unlink_missing_ok(path: &Path) -> Result {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(os_error(&error, path)),
-        _ => Ok(()),
-    }
-}
-
 /// Returns a builder of directories of `mode`, which Windows ignores.
 fn dir_builder(mode: u32) -> std::fs::DirBuilder {
     #[cfg_attr(not(unix), allow(unused_mut))]
