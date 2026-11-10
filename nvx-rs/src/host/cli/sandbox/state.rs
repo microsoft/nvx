@@ -30,10 +30,9 @@
 //!   [`Config::network`] reads back for `start` to render. It replaces the network options that
 //!   `nvx.py` recorded, which no reader reads: `start` refuses a configuration without it.
 
-use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -44,6 +43,7 @@ use super::{MAX_MEMORY_MIB, path_string};
 use crate::ErrorCode;
 use crate::host::cli::json::{Object, pretty_serde, read_object};
 use crate::host::cli::output::LINE_SEPARATOR;
+use crate::host::cli::snapshots::Name as SnapshotName;
 use crate::host::cli::{Exit, Result, io_error, io_message};
 use crate::host::filesystem::ExportPlan;
 use crate::host::paths;
@@ -52,6 +52,11 @@ use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::scratch::ScratchBinding;
 use crate::host::sandbox::{SandboxLaunch, SandboxNetwork, SandboxSettings, SandboxUpper};
 use crate::protocol::root::RootUpper;
+
+pub(crate) use crate::host::cli::{hex, random_bytes, temporary_path};
+
+#[cfg(test)]
+mod tests;
 
 /// The configuration that earlier builds wrote for a sandbox without shares, whose `mount` is
 /// `null`, which `start` still reads.
@@ -68,44 +73,6 @@ pub(crate) const CONFIG_FORMATS: [u64; 3] =
     [CONFIG_FORMAT, EXPORT_CONFIG_FORMAT, UPPER_CONFIG_FORMAT];
 /// What messages call a configuration.
 const DESCRIPTION: &str = "sandbox configuration";
-
-/// Returns the name of a temporary file next to `path`: `.NAME.UUID.tmp`, with a fresh UUID4 in
-/// hexadecimal.
-pub(crate) fn temporary_path(path: &Path) -> Result<PathBuf> {
-    let Some(name) = path.file_name() else {
-        return Err(Exit::error(
-            ErrorCode::Other,
-            format!("{} has an empty name", path.display()),
-        ));
-    };
-    let mut temporary = OsString::from(".");
-    temporary.push(name);
-    temporary.push(format!(".{}.tmp", uuid4_hex()?));
-    Ok(path.with_file_name(temporary))
-}
-
-/// Returns 32 lowercase hexadecimal digits of 122 random bits, with the version and variant bits
-/// of a version-4 UUID.
-pub(crate) fn uuid4_hex() -> Result<String> {
-    let mut bytes = random_bytes::<16>()?;
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Ok(hex(&bytes))
-}
-
-/// Returns `N` random bytes from the operating system.
-pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
-    let mut bytes = [0u8; N];
-    getrandom::fill(&mut bytes).map_err(|error| {
-        Exit::error(ErrorCode::Io, format!("cannot read random bytes: {error}"))
-    })?;
-    Ok(bytes)
-}
-
-/// Returns `bytes` in lowercase hexadecimal.
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
 
 /// Atomically replaces `path` with the JSON `text` and a line end, with the line separator of the
 /// host for each `\n`, in a temporary file of mode 0600 that then replaces `path`.
@@ -280,6 +247,9 @@ struct Record<'a> {
     scratch_binding: Option<&'a ScratchBinding>,
     /// The export plan of the shares, or `None` without shares.
     export: Option<&'a ExportPlan>,
+    /// The immutable named snapshot that supplies this sandbox's restore view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_snapshot: Option<&'a SnapshotName>,
 }
 
 /// Returns the JSON text of the configuration that `provision` records for `launch` and the other
@@ -291,6 +261,17 @@ pub(crate) fn serialize_launch(
     distro: &RecordedDistro,
     scratch: Option<&RecordedScratch>,
     config: &ProvisionConfig<'_>,
+) -> Result<String> {
+    serialize_launch_with_snapshot(launch, distro, scratch, config, None)
+}
+
+/// Records a restored sandbox's source alongside its own launch, without a snapshot index.
+pub(crate) fn serialize_launch_with_snapshot(
+    launch: &SandboxLaunch,
+    distro: &RecordedDistro,
+    scratch: Option<&RecordedScratch>,
+    config: &ProvisionConfig<'_>,
+    source_snapshot: Option<&SnapshotName>,
 ) -> Result<String> {
     let layer = &distro.layer;
     let settings = launch.settings();
@@ -314,6 +295,7 @@ pub(crate) fn serialize_launch(
         distro_binding: &distro.binding,
         scratch_binding: scratch.map(|scratch| &scratch.binding),
         export: launch.export(),
+        source_snapshot,
     };
     pretty_serde(&record, DESCRIPTION)
 }
@@ -375,9 +357,22 @@ pub(crate) struct Config {
     /// The sandbox's network, `null` for none, if recorded.
     #[serde(default, deserialize_with = "present")]
     network: Option<Value>,
+    /// The source of a restored sandbox, absent for a cold launch.
+    source_snapshot: Option<SnapshotName>,
 }
 
 impl Config {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "SL3.8a locks a restored sandbox's source snapshot"
+        )
+    )]
+    pub(crate) fn source_snapshot(&self) -> Option<&SnapshotName> {
+        self.source_snapshot.as_ref()
+    }
+
     /// Returns the fields of `object`, a configuration that [`read_config`] read, which fails as
     /// `sandbox configuration is malformed` without a field that it requires, or with a value of
     /// another type.
@@ -403,6 +398,7 @@ impl Config {
                 ),
             ));
         }
+
         serde_json::from_value(Value::Object(object)).map_err(|_| malformed())
     }
 
