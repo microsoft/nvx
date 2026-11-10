@@ -10,7 +10,6 @@ use super::{
     CONFIG_NAME, Found, REQUIRED_FEATURES, connect, find_vm, mismatched, require_config,
     running_vm, runtime_for,
 };
-use crate::ErrorCode;
 use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::cli::deadline::Deadline;
 use crate::host::cli::sandbox::lock::LifecycleLock;
@@ -28,6 +27,7 @@ use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{SandboxLaunch, SandboxPlan};
 use crate::host::vm::{self, SavedVm, VmDir};
 use crate::net::Ipv4Cidr;
+use crate::{ErrorCode, ErrorKind};
 
 /// Starts a provisioned sandbox, as `start` does.
 pub(crate) fn start(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
