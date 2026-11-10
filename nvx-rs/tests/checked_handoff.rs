@@ -703,6 +703,7 @@ fn a_prepared_launch_hands_the_vmm_its_checked_images_alone() {
             .unwrap()
             .wait(Instant::now() + TIMEOUT)
             .unwrap()
+            .is_some()
     );
     launched.kill_and_wait();
     let scratch = fs::read_to_string(staged.scratch()).unwrap();
@@ -788,6 +789,7 @@ fn a_vmm_keeps_the_scratch_images_claim_once_its_launcher_is_gone() {
             .unwrap()
             .wait(Instant::now() + TIMEOUT)
             .unwrap()
+            .is_some()
     );
     launched.kill_and_wait();
     drop(check_written().unwrap());

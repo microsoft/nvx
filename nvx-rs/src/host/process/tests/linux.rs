@@ -152,13 +152,14 @@ fn a_process_runs_until_its_last_thread_exits() {
     .unwrap()
     .expect("a process whose main thread exited still runs");
     assert!(
-        !process
+        process
             .wait(Instant::now() + Duration::from_millis(100))
             .unwrap()
+            .is_none()
     );
     child.0.kill().unwrap();
     child.0.wait().unwrap();
-    assert!(process.wait(Instant::now()).unwrap());
+    assert!(process.wait(Instant::now()).unwrap().is_some());
 }
 
 #[test]

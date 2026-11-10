@@ -216,7 +216,8 @@ impl LockedInstance {
         };
         Ok(Stopped {
             forced,
-            report: report::read(&self.instance.report_path()),
+            // This legacy wrapper keeps its best-effort report policy.
+            report: report::read(&self.instance.report_path()).ok().flatten(),
         })
     }
 

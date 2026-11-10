@@ -19,6 +19,8 @@ pub enum ErrorKind {
     Unsupported,
     /// The OpenVMM process of a VM exited.
     Exited,
+    /// The exit of a VM's process could not be confirmed; it may still run.
+    StillRunning,
     /// A host I/O operation failed, or state that NVX recorded on the host is unreadable or
     /// malformed.
     Io,
@@ -44,6 +46,7 @@ impl ErrorKind {
             Self::Unavailable => "unavailable",
             Self::Unsupported => "unsupported",
             Self::Exited => "exited",
+            Self::StillRunning => "still-running",
             Self::Io => "io",
             Self::NotFound => "not-found",
             Self::Protocol => "protocol",
@@ -88,6 +91,8 @@ pub enum ErrorCode {
     Unsupported,
     /// `exited`: the OpenVMM process of a VM exited, as when a start fails.
     Exited,
+    /// `still-running`: the exit of a VM's process could not be confirmed.
+    StillRunning,
     /// `io`: a host I/O operation failed, or state that NVX recorded on the host is unreadable or
     /// malformed.
     Io,
@@ -170,6 +175,7 @@ impl ErrorCode {
         Self::Unavailable,
         Self::Unsupported,
         Self::Exited,
+        Self::StillRunning,
         Self::Io,
         Self::NotFound,
         Self::Protocol,
@@ -205,6 +211,7 @@ impl ErrorCode {
             Self::Unavailable => ErrorKind::Unavailable.as_str(),
             Self::Unsupported => ErrorKind::Unsupported.as_str(),
             Self::Exited => ErrorKind::Exited.as_str(),
+            Self::StillRunning => ErrorKind::StillRunning.as_str(),
             Self::Io => ErrorKind::Io.as_str(),
             Self::NotFound => ErrorKind::NotFound.as_str(),
             Self::Protocol => ErrorKind::Protocol.as_str(),
@@ -248,6 +255,7 @@ impl ErrorCode {
             | Self::ArgumentMissing
             | Self::ArgumentInvalid => ErrorKind::Unsupported,
             Self::Exited | Self::SandboxExited => ErrorKind::Exited,
+            Self::StillRunning => ErrorKind::StillRunning,
             Self::Io | Self::FormatUnsupported => ErrorKind::Io,
             Self::NotFound | Self::SandboxNotProvisioned => ErrorKind::NotFound,
             Self::Protocol | Self::ExecRefused | Self::EndpointClosed => ErrorKind::Protocol,
@@ -278,6 +286,7 @@ impl From<ErrorKind> for ErrorCode {
             ErrorKind::Unavailable => Self::Unavailable,
             ErrorKind::Unsupported => Self::Unsupported,
             ErrorKind::Exited => Self::Exited,
+            ErrorKind::StillRunning => Self::StillRunning,
             ErrorKind::Io => Self::Io,
             ErrorKind::NotFound => Self::NotFound,
             ErrorKind::Protocol => Self::Protocol,

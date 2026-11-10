@@ -110,6 +110,7 @@ each code for callers of the `nvx` library.
 | `template-ineligible` | 1 | The restore window of a template's generation, which the time contract of its capture sets, excludes the host's time, so no clone may restore it now. |
 | `template-tombstoned` | 1 | A tombstone quarantines the template's generation, which takes no new clones. |
 | `exited` | 1 | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one. |
+| `still-running` | 1 | A stop could not confirm the VM process's exit, so the caller keeps its verified process. |
 | `exec-refused` | 1 | The guest agent refused the workload, as for a working directory that it cannot use. |
 | `endpoint-closed` | 1 | OpenVMM closed the control endpoint, as it does when the VM shuts down. |
 | `protocol` | 1 | The control session failed otherwise, as when the guest breaks the protocol or the session is reset. |

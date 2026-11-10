@@ -2460,7 +2460,9 @@ impl Drop for VmmDir {
         let _ = fs::write(self.path().join(EXIT_MARKER), b"");
         if let Some(reference) = &self.reference
             && let Ok(Some(process)) = Process::open(reference)
-            && !process.wait(Instant::now() + TIMEOUT).unwrap_or(false)
+            && !process
+                .wait(Instant::now() + TIMEOUT)
+                .is_ok_and(|exited| exited.is_some())
         {
             let _ = process.kill();
             let _ = process.wait(Instant::now() + TIMEOUT);
@@ -2639,7 +2641,7 @@ fn a_clone_that_crashes_after_its_spawn_keeps_its_lease_until_its_unrecorded_vmm
     crashed.refuses_release(&mut locked);
     // Once the VMM exits, the claim that it released proves it.
     crashed.vmm.end();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     match reattach_until_determinate(&mut locked) {
         Reattached::Exited {
             record: None,
@@ -2669,7 +2671,7 @@ fn a_clone_that_crashes_after_recording_its_vmm_keeps_its_lease_until_reattach_e
         } => assert_eq!(terminated, reference),
         other => panic!("unexpected reattach: {other:?}"),
     }
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     crashed.releases(&mut locked);
 }
 

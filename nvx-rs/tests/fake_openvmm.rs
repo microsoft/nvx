@@ -478,7 +478,7 @@ fn outcome_reports_of_another_runtime_are_never_read() {
         .unwrap();
         if exits_first {
             process.kill().unwrap();
-            assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+            assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
         }
         let stopped = locked.terminate(mismatched, TIMEOUT).unwrap();
         assert_eq!(
@@ -528,11 +528,12 @@ fn records_that_name_another_process_never_end_it() {
         drop(locked);
         assert!(records_nothing(&instance));
         assert!(
-            !process
+            process
                 .wait(Instant::now() + Duration::from_millis(200))
                 .unwrap()
+                .is_none()
         );
         process.kill().unwrap();
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+        assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     }
 }

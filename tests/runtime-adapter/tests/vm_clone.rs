@@ -2321,7 +2321,7 @@ impl CloneControl for Early {
             .send(&self.early, Some(deadline))
             .map_err(io::Error::other)?;
         let answer = session.receive(Some(deadline));
-        self.exited = self.vmm.wait(deadline)?;
+        self.exited = self.vmm.wait(deadline)?.is_some();
         Err(match answer {
             Ok(message) => io::Error::other(format!("the clone answered {message:?}")),
             Err(error) => io::Error::other(error),
@@ -3910,7 +3910,9 @@ fn a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identit
     assert!(!ended.contains_key("epoch"), "{ended:?}");
     assert!(sandbox.stderr().contains("differs in initramfs"));
     assert!(
-        vmm.wait(Instant::now() + Duration::from_secs(10)).unwrap(),
+        vmm.wait(Instant::now() + Duration::from_secs(10))
+            .unwrap()
+            .is_some(),
         "the clone's VMM still runs"
     );
     assert!(sandbox.record().is_none());
@@ -3948,7 +3950,9 @@ fn a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_release
     assert_eq!(sandbox.paused(&mut stopping, &pause), "found");
     vmm.kill().unwrap();
     assert!(
-        vmm.wait(Instant::now() + Duration::from_secs(10)).unwrap(),
+        vmm.wait(Instant::now() + Duration::from_secs(10))
+            .unwrap()
+            .is_some(),
         "the clone's VMM still runs"
     );
     fs::remove_file(&pause).unwrap();
@@ -5313,7 +5317,9 @@ fn a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failu
     let vmm = sandbox.vmm().expect("the clone's VMM runs");
     vmm.kill().unwrap();
     assert!(
-        vmm.wait(Instant::now() + Duration::from_secs(10)).unwrap(),
+        vmm.wait(Instant::now() + Duration::from_secs(10))
+            .unwrap()
+            .is_some(),
         "the clone's VMM still runs"
     );
 

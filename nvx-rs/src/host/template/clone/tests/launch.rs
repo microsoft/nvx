@@ -365,14 +365,14 @@ impl VmmDir {
             .unwrap()
             .expect("the VMM runs until the test ends it");
         self.end();
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+        assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     }
 
     /// Waits until the VMM, which exits on its own, as its [plan](Self::plan) asks, has exited.
     pub(super) fn wait_exit(&self) {
         let reference = self.reference.as_ref().expect("the test knows the VMM");
         if let Some(process) = Process::open(reference).unwrap() {
-            assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+            assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
         }
     }
 
@@ -413,7 +413,9 @@ impl Drop for VmmDir {
         let _ = fs::write(self.path().join(EXIT_MARKER), b"");
         if let Some(reference) = &self.reference
             && let Ok(Some(process)) = Process::open(reference)
-            && !process.wait(Instant::now() + TIMEOUT).unwrap_or(false)
+            && !process
+                .wait(Instant::now() + TIMEOUT)
+                .is_ok_and(|exited| exited.is_some())
         {
             let _ = process.kill();
             let _ = process.wait(Instant::now() + TIMEOUT);
@@ -1567,7 +1569,7 @@ fn a_clone_whose_launch_failed_before_it_began_launches_no_more_until_its_releas
     // clone's: an inspection takes none, and the launch removes it before it records anything.
     let report = acquired.locked.outcome_path();
     fs::write(&report, guest_exit(195)).unwrap();
-    assert!(crate::host::report::read(&report).is_some());
+    assert!(crate::host::report::read(&report).unwrap().is_some());
     let records = CloneRecords::read(&acquired.locked).unwrap().unwrap();
     assert_eq!(
         (records.progress, records.report),
@@ -2323,7 +2325,7 @@ fn a_launch_whose_caller_crashes_once_its_vmm_started_ends_the_vmm_as_reattach_r
         } => assert_eq!(terminated, reference),
         other => panic!("unexpected reattach: {other:?}"),
     }
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     assert!(!exists(&crashed.socket()));
     crashed.releases(&mut locked);
 }
@@ -2356,7 +2358,10 @@ fn a_restore_whose_caller_crashes_before_its_commit_ends_its_vmm_as_reattach_rec
             } => assert_eq!(terminated, reference, "{step}"),
             other => panic!("unexpected reattach at {step}: {other:?}"),
         }
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap(), "{step}");
+        assert!(
+            process.wait(Instant::now() + TIMEOUT).unwrap().is_some(),
+            "{step}"
+        );
         assert!(!exists(&crashed.socket()), "{step}");
         crashed.releases(&mut locked);
     }

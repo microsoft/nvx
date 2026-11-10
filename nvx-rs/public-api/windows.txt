@@ -58,6 +58,7 @@ variant nvx::ErrorCode::SandboxNotRunning
 variant nvx::ErrorCode::SandboxProvisioned
 variant nvx::ErrorCode::SandboxRunning
 variant nvx::ErrorCode::ScratchClaimed
+variant nvx::ErrorCode::StillRunning
 variant nvx::ErrorCode::TemplateIneligible
 variant nvx::ErrorCode::TemplateTombstoned
 variant nvx::ErrorCode::TimedOut
@@ -73,6 +74,7 @@ variant nvx::ErrorKind::NotFound
 variant nvx::ErrorKind::Other
 variant nvx::ErrorKind::Protocol
 variant nvx::ErrorKind::RuntimeMismatch
+variant nvx::ErrorKind::StillRunning
 variant nvx::ErrorKind::TimedOut
 variant nvx::ErrorKind::Unavailable
 variant nvx::ErrorKind::Unsupported
@@ -1032,6 +1034,7 @@ method nvx::host::process::BootId::as_bytes
 method nvx::host::process::BootId::current
 method nvx::host::process::BootId::from_bytes
 type nvx::host::process::ExitHandle
+struct nvx::host::process::Exited
 struct nvx::host::process::Process
 method nvx::host::process::Process::bytes_read
 method nvx::host::process::Process::exit_handle
@@ -2362,6 +2365,10 @@ field nvx::host::vm::SavedVm::endpoint
 field nvx::host::vm::SavedVm::process
 field nvx::host::vm::SavedVm::runtime
 field nvx::host::vm::SavedVm::vm_dir
+struct nvx::host::vm::Stopped
+field nvx::host::vm::Stopped::forced
+field nvx::host::vm::Stopped::report
+field nvx::host::vm::Stopped::self_exited
 struct nvx::host::vm::VmDir
 method nvx::host::vm::VmDir::open
 method nvx::host::vm::VmDir::path
@@ -2374,6 +2381,7 @@ fn nvx::host::vm::create
 fn nvx::host::vm::create_private_dir
 fn nvx::host::vm::reattach
 fn nvx::host::vm::spawn
+fn nvx::host::vm::stop
 fn nvx::host::vm::verify
 mod nvx::net
 struct nvx::net::Cidr

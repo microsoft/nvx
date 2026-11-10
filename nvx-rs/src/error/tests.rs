@@ -52,6 +52,7 @@ fn every_kind_has_a_code_of_its_own_spelling() {
         ErrorKind::Unavailable,
         ErrorKind::Unsupported,
         ErrorKind::Exited,
+        ErrorKind::StillRunning,
         ErrorKind::Io,
         ErrorKind::NotFound,
         ErrorKind::Protocol,

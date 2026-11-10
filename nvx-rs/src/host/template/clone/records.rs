@@ -296,7 +296,7 @@ impl Recorder {
     /// report only once the clone's VM ended, or its teardown did.
     pub(super) fn observed(&self) -> Option<&Report> {
         self.observed
-            .get_or_init(|| report::read(&self.report))
+            .get_or_init(|| report::read(&self.report).ok().flatten())
             .as_ref()
     }
 
@@ -1119,7 +1119,7 @@ impl CloneRecords {
         // The launch removed the report of an earlier VM of the sandbox before it wrote the first
         // of the clone's records, which a progress past the plan shows.
         let report = (progress > Progress::Planned)
-            .then(|| report::read(&sandbox.outcome_path()))
+            .then(|| report::read(&sandbox.outcome_path()).ok().flatten())
             .flatten();
         Ok(Some(Self {
             lease,

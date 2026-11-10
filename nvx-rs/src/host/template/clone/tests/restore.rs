@@ -422,7 +422,7 @@ fn vmm_with(plan: &str) -> VmmDir {
 fn assert_vmm_ended(vmm: &VmmDir) {
     let reference = vmm.reference.as_ref().unwrap();
     if let Some(process) = Process::open(reference).unwrap() {
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+        assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     }
 }
 
