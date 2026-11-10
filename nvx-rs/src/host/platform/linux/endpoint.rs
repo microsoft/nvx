@@ -268,7 +268,14 @@ pub(crate) fn connect_endpoint(
         ));
     }
     check_original_peer(&stream)?;
-    Ok(Box::new(UnixTransport { stream }))
+    transport_from_handle(stream.into())
+}
+
+/// Adapts an owned duplicate of an already verified connection without changing its blocking mode.
+pub(crate) fn transport_from_handle(handle: TransportHandle) -> io::Result<Box<dyn Transport>> {
+    Ok(Box::new(UnixTransport {
+        stream: UnixStream::from(handle),
+    }))
 }
 
 /// Returns the process that listens on a control endpoint, or `None` if nothing listens.

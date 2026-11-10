@@ -648,7 +648,7 @@ fn restores_of_runs_resume_their_saved_guest_whatever_the_cli_tokens() {
         assert_eq!(options.lifecycle, Lifecycle::Run, "{snapshot}");
         assert!(options.workload.is_empty(), "{snapshot}");
         if snapshot.ends_with("missing") {
-            assert_eq!(run_microvm(&options), 1);
+            assert_eq!(run_microvm(&options, &mut io::sink()), 1);
         }
     }
 }

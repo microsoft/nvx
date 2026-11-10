@@ -7,10 +7,9 @@
 //! `nvx.py run` with their names, defaults, types, and choices, and ends a usage error with
 //! status 2.
 //!
-//! A cold boot attaches the guest's console, the boot console `hvc1`, to the terminal with
-//! `--virtio-console console`, so that the terminal's input reaches the guest through it rather
-//! than through the byte channel, `hvc0`, whose output, such as the kernel's early messages, goes
-//! to standard error. A restore attaches the boot console as its snapshot had it: it reads the
+//! A cold boot forwards the terminal through the VM's boot-console listener, `hvc1`, and the
+//! VM's log to standard error. Its temporary private VM directory is removed after confirmed
+//! exit. A restore attaches the boot console as its snapshot had it: it reads the
 //! snapshot's manifest, `manifest.bin` in the snapshot's directory, dry run or not, and passes
 //! `--virtio-console console` when the manifest's machine contract holds the attachment of the
 //! boot console, `console:microvm-virtio0`, with the reconnect policy
@@ -31,41 +30,61 @@
 //! new policy's DNS server and listener announcements before the host releases its input.
 //!
 //! Its shares differ from those of `sandbox`. `--mount-deny`, `--mount-allow`, and `--mount-write`
-//! name host paths, which OpenVMM attributes to the share that holds them, and which must be
-//! absolute with several shares or a shared file. One directory share uses `--mount`, several
-//! shares or a file the children of an aggregate, whose `nvx_share=` tokens a cold boot adds to
-//! the kernel command line, and a restore does not, since its guest keeps the binds that its boot
-//! made.
+//! name host paths, which must be absolute with several shares or a shared file. A cold boot
+//! checks their ownership in the filesystem export plan, exports its numbered children, and adds
+//! the plan's `nvx_share=` rows to the kernel command line. A restore keeps its existing lowering:
+//! one directory uses `--mount`, several shares or a file use an aggregate, and no new share tokens
+//! replace the binds that its saved guest already made.
 //!
 //! After OpenVMM exits with a status other than 0 from a cold boot, on a host whose CPU no built-in
 //! CPU profile serves, it prints the guidance of [`cpu_profile`] to standard error, which says
 //! what `--cpu-profile auto` does on that CPU and how to request a built-in profile for it. It
 //! never prints it after a dry run, a restore, a refused option, or Ctrl-C.
 
+mod guest_tokens;
+
+use std::fs::{self, File};
+#[cfg(windows)]
+use std::io::Write;
+use std::io::{self, IsTerminal, Read};
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 
 use super::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use super::artifacts::{Located, locate};
 use super::cpu_profile::{self, HostCpu};
-use super::download;
+use super::download::{self, Hold};
 use super::network::{NativeRules, NetworkOptions};
 use super::sandbox::{
-    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, error_with_cause, hypervisor, path_string,
-    path_text, run_openvmm,
+    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, copy_openvmm_outcome, error_with_cause, hypervisor,
+    path_string, path_text, run_openvmm, sandbox_network, validate_outcome_destination,
 };
+use super::session::Session;
 use super::shell::format_command;
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{Guest, require_artifact};
+use crate::activation::{MachineIdMode, View};
+use crate::host::artifacts::{ArtifactDir, Guest, require_artifact};
+use crate::host::config::{Boot, ConsoleAttachment, NetworkConfig, RootConfig, VmConfig};
+use crate::host::filesystem::{
+    self, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
+};
+use crate::host::platform::{self, Transport};
+use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime};
 use crate::host::sandbox::mount::{
-    AGGREGATE_MOUNT_TARGET, MountKind, MountOwner, POLICY_KINDS, PolicyKind,
+    AGGREGATE_MOUNT_TARGET, MountAccess, MountKind, MountOwner, POLICY_KINDS, PolicyKind,
     aggregate_child_argument, aggregate_child_name, aggregate_command_line_fragment,
-    aggregate_share_tokens, mount_argument, mount_kind, parse_mount_value,
-    require_mount_owner_supported,
+    aggregate_share_tokens, export_command_line_fragment, mount_argument, mount_kind,
+    parse_mount_value, require_mount_owner_supported,
 };
 use crate::host::sandbox::options::validate_run_share_targets;
 use crate::host::sandbox::{SANDBOX_COMMAND_LINE_MAX_SIZE, has_kernel_separator};
 use crate::host::template::read_attachments;
+use crate::host::vm::{self, VmDir};
 
 /// The usage and help of the parser.
 pub(super) const SYNTAX: Syntax = Syntax {
@@ -413,8 +432,12 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     // nothing, though it reads the artifacts under the lock of downloads all the same. Their
     // arguments are built again once the artifacts are in place, as a share's kind depends on what
     // its host path holds, which a download may install.
-    let refused = terminal_console.as_ref().is_some_and(Result::is_err)
-        || extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err();
+    let refused = if options.restore_snapshot.is_some() {
+        terminal_console.as_ref().is_some_and(Result::is_err)
+            || extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err()
+    } else {
+        cold_config(&options, &rules).is_err()
+    };
     let located = locate(root)?;
     // A restore boots no kernel or initramfs: the snapshot holds the guest.
     let guest = options.restore_snapshot.is_none().then_some(options.guest);
@@ -425,6 +448,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     };
     let Located { dir, openvmm } = located;
     require_artifact(&openvmm, "OpenVMM release binary")?;
+    if options.restore_snapshot.is_none() {
+        return run_cold(dir, openvmm, &options, &rules, hold);
+    }
     let mut command = vec![
         path_text(&path_string(&openvmm)?),
         "--single-process".to_owned(),
@@ -449,21 +475,6 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         if terminal_console.transpose()? == Some(true) {
             push(&mut command, "--virtio-console", "console");
         }
-    } else {
-        let kernel = dir.require_kernel()?;
-        let initrd = dir.require_initramfs(options.guest)?;
-        push(
-            &mut command,
-            "--memory",
-            format!("{}M", memory_mib(&options)),
-        );
-        push(&mut command, "--kernel", path_string(&kernel)?);
-        push(&mut command, "--initrd", path_string(&initrd)?);
-        if let Some(capacity) = &options.memory_capacity_mib {
-            push(&mut command, "--memory-capacity", format!("{capacity}M"));
-        }
-        // The guest's console takes the terminal.
-        push(&mut command, "--virtio-console", "console");
     }
     if let Some(profile) = &options.cpu_profile {
         push(&mut command, "--cpu-profile", profile.as_str());
@@ -478,19 +489,561 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         return Ok(());
     }
     let status = run_openvmm(&command, &[], hold)?;
-    if status != 0
-        && options.restore_snapshot.is_none()
-        && let Some(guidance) = cpu_profile::guidance(
-            options.cpu_profile.as_deref(),
-            HostCpu::current().as_ref(),
-            &format_command(&command[..1]),
-            hypervisor(options.hypervisor),
-        )
-    {
-        check_interrupt()?;
-        output::print_stderr(&guidance);
-    }
     Err(Exit::Status(status))
+}
+
+fn cold_config(options: &Options, rules: &NativeRules) -> Result<VmConfig> {
+    let shares = options
+        .mounts
+        .iter()
+        .map(|value| parse_mount_value(value))
+        .collect::<crate::Result<Vec<_>>>()?;
+    validate_run_share_targets(
+        &shares
+            .iter()
+            .map(|(target, _, _)| target.as_str())
+            .collect::<Vec<_>>(),
+    )?;
+    if shares.is_empty() && (options.mount_owner.is_some() || !options.policy_paths.is_empty()) {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            if options.mount_owner.is_some() {
+                "--mount-owner requires --mount"
+            } else {
+                "mount policy options require --mount"
+            },
+        ));
+    }
+    let hosts: Vec<_> = shares
+        .iter()
+        .map(|(_, host, _)| Path::new(host).to_owned())
+        .collect();
+    let aggregate =
+        shares.len() > 1 || hosts.iter().any(|host| mount_kind(host) == MountKind::File);
+    let mut policies: [Vec<std::path::PathBuf>; 3] = Default::default();
+    for kind in POLICY_KINDS {
+        for (_, given) in options.policy_paths.iter().filter(|(of, _)| *of == kind) {
+            let given = path_text(given);
+            let path = Path::new(&given);
+            if aggregate && !path.is_absolute() {
+                return Err(Exit::error(
+                    ErrorCode::Unsupported,
+                    format!(
+                        "with several --mount shares, or a shared file, {} {given} must be an absolute host path",
+                        kind.option()
+                    ),
+                ));
+            }
+            let path = if path.is_absolute() {
+                path.to_owned()
+            } else {
+                hosts[0].join(path)
+            };
+            policies[match kind {
+                PolicyKind::Denied => 0,
+                PolicyKind::Allowed => 1,
+                PolicyKind::Writable => 2,
+            }]
+            .push(path);
+        }
+    }
+    let mappings: Vec<_> = shares
+        .iter()
+        .zip(&hosts)
+        .map(|((target, _, access), host)| Mapping {
+            name: "--mount",
+            path: host,
+            target: Target::Guest(target),
+            read_only: *access == MountAccess::ReadOnly,
+        })
+        .collect();
+    let filesystem = filesystem::plan(&ExportRequest {
+        mappings: &mappings,
+        denied: PathList {
+            name: "--mount-deny",
+            paths: &policies[0],
+        },
+        allowed: PathList {
+            name: "--mount-allow",
+            paths: &policies[1],
+        },
+        write: PathList {
+            name: "--mount-write",
+            paths: &policies[2],
+        },
+        owner: if options.mount_owner == Some(MountOwner::Caller) {
+            Owner::Caller
+        } else {
+            Owner::Vmm
+        },
+        reserved: ReservedTargets::BLOCKLESS_ROOT,
+    })
+    .map_err(error_with_cause)?;
+    let network = sandbox_network(&options.network, rules)?
+        .map(|network| -> Result<NetworkConfig> {
+            Ok(NetworkConfig {
+                guest_network: Some(
+                    crate::net::Ipv4Cidr::parse(network.guest_network())
+                        .map_err(|error| Exit::error(ErrorCode::Unsupported, error.to_string()))?,
+                ),
+                policy: network.policy().clone(),
+            })
+        })
+        .transpose()?;
+    let config = VmConfig {
+        processors: options.processors,
+        memory_mib: memory_mib(options),
+        root: RootConfig::Blockless,
+        view: View {
+            hostname: b"nvx".to_vec(),
+            machine_id: MachineIdMode::Image,
+        },
+        network,
+        console: ConsoleAttachment::Listener,
+        boot: Some(Boot {
+            command_line: guest_tokens::render(&options.cmdline, filesystem.as_ref())
+                .map_err(error_with_cause)?,
+            memory_capacity_mib: options.memory_capacity_mib,
+            capture: None,
+        }),
+        filesystem,
+    };
+    if let Some(export) = &config.filesystem {
+        let line = config.kernel_command_line().map_err(error_with_cause)?;
+        if line.len() + export_command_line_fragment(export).len() + 1
+            > SANDBOX_COMMAND_LINE_MAX_SIZE
+        {
+            return Err(Exit::error(
+                ErrorCode::Unsupported,
+                "the --mount shares and --cmdline exceed the 1024-byte budget of the kernel command \
+                 line; attach fewer shares or use shorter targets",
+            ));
+        }
+    }
+    config.check_command_line().map_err(error_with_cause)?;
+    Ok(config)
+}
+
+fn remove_vm_directory(dir: &VmDir) -> Result {
+    for name in [
+        "openvmm.log",
+        "outcome.json",
+        "control.sock",
+        "console.sock",
+    ] {
+        match fs::remove_file(dir.path().join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Exit::from_os_error(error)),
+        }
+    }
+    fs::remove_dir(dir.path()).map_err(Exit::from_os_error)
+}
+
+fn connect_running(
+    launched: &mut vm::Launched,
+    endpoint: &str,
+) -> Result<Option<Box<dyn Transport>>> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        check_interrupt()?;
+        match platform::connect_endpoint(
+            endpoint,
+            launched.process.reference().pid,
+            Duration::from_millis(250),
+        ) {
+            Ok(transport) => return Ok(Some(transport)),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => return Err(Exit::from_os_error(error)),
+        }
+        if launched
+            .wait_status(Duration::ZERO)
+            .map_err(Exit::from_os_error)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            return Err(Exit::error(
+                ErrorCode::TimedOut,
+                format!("VM console endpoint did not become available: {endpoint}"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+struct TerminalGuard(bool);
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        let terminal = io::stdin().is_terminal();
+        if terminal {
+            crossterm::terminal::enable_raw_mode().map_err(Exit::from_os_error)?;
+        }
+        Ok(Self(terminal))
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.0
+            && let Err(error) = crossterm::terminal::disable_raw_mode()
+        {
+            output::print_stderr(&format!("cannot restore terminal mode: {error}"));
+        }
+    }
+}
+
+type InputCompletion = mpsc::Receiver<io::Result<()>>;
+
+fn console_input(console: Box<dyn Transport>) -> Result<(Box<dyn Transport>, InputCompletion)> {
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        let duplicate = || {
+            console
+                .try_clone_handle()
+                .map_err(Exit::from_os_error)?
+                .ok_or_else(|| {
+                    Exit::error(
+                        ErrorCode::Unsupported,
+                        "the VM console cannot be duplicated",
+                    )
+                })
+        };
+        let reader = duplicate()?;
+        let writer = duplicate()?;
+        drop(console);
+        let reader = platform::transport_from_handle(reader).map_err(Exit::from_os_error)?;
+        let mut writer = platform::transport_from_handle(writer).map_err(Exit::from_os_error)?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("nvx-run-input".to_owned())
+            .spawn(move || {
+                let result = (|| {
+                    let mut stdin = io::stdin().lock();
+                    let mut buffer = [0; 8192];
+                    loop {
+                        let count = stdin.read(&mut buffer)?;
+                        if count == 0 {
+                            return Ok(());
+                        }
+                        match writer.write_all(&buffer[..count], None) {
+                            Ok(()) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    io::ErrorKind::BrokenPipe
+                                        | io::ErrorKind::ConnectionReset
+                                        | io::ErrorKind::WriteZero
+                                ) =>
+                            {
+                                return Ok(());
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                })();
+                let _ = sender.send(result);
+            })
+            .map_err(Exit::from_os_error)?;
+        Ok((reader, receiver))
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        drop(console);
+        Err(Exit::error(
+            ErrorCode::Unsupported,
+            "foreground console I/O requires a supported NVX host",
+        ))
+    }
+}
+
+fn write_console(data: &[u8]) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+
+        if platform::interrupted() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
+        }
+        let mut stdout = io::stdout().lock();
+        stdout.flush()?;
+        File::from(stdout.as_handle().try_clone_to_owned()?).write_all(data)
+    }
+    #[cfg(not(windows))]
+    output::write_stdout(data)
+}
+
+fn foreground(
+    launched: &mut vm::Launched,
+    log: &mut File,
+    managed: bool,
+    control: &mut Option<Session>,
+) -> Result<i32> {
+    let _terminal = TerminalGuard::new()?;
+    let endpoint = launched
+        .outputs
+        .console
+        .clone()
+        .expect("a cold run requests a console listener");
+    let (mut console, input) = if let Some(console) = connect_running(launched, &endpoint)? {
+        let (console, input) = console_input(console)?;
+        (Some(console), Some(input))
+    } else {
+        (None, None)
+    };
+    let mut attach_closed = None;
+    if managed && console.is_some() {
+        let endpoint = launched.outputs.endpoint.clone();
+        let capability = *launched.capability.as_bytes();
+        match Session::connect_launched(
+            &endpoint,
+            launched.child_mut().map_err(Exit::from_os_error)?,
+            &capability,
+            60.0,
+        ) {
+            Ok(session) => *control = Some(session),
+            Err(Exit::EndpointClosed) => {
+                attach_closed = Some(Instant::now() + Duration::from_secs(60));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let mut buffer = [0; 8192];
+    loop {
+        check_interrupt()?;
+        let count = log.read(&mut buffer).map_err(Exit::from_os_error)?;
+        output::write_stderr(&buffer[..count]).map_err(Exit::from_os_error)?;
+        let status = launched
+            .wait_status(Duration::ZERO)
+            .map_err(Exit::from_os_error)?;
+        if let Some(input) = &input
+            && status.is_none()
+            && let Ok(result) = input.try_recv()
+        {
+            result.map_err(Exit::from_os_error)?;
+        }
+        if let Some(transport) = &mut console {
+            match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
+                Ok(0) => console = None,
+                Ok(count) => write_console(&buffer[..count]).map_err(Exit::from_os_error)?,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut
+                            | io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionReset
+                    ) => {}
+                Err(error) => return Err(Exit::from_os_error(error)),
+            }
+        }
+        if let Some(status) = status {
+            loop {
+                let count = log.read(&mut buffer).map_err(Exit::from_os_error)?;
+                if count == 0 {
+                    break;
+                }
+                output::write_stderr(&buffer[..count]).map_err(Exit::from_os_error)?;
+            }
+            if let Some(transport) = &mut console {
+                loop {
+                    match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            write_console(&buffer[..count]).map_err(Exit::from_os_error)?
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::TimedOut
+                                    | io::ErrorKind::BrokenPipe
+                                    | io::ErrorKind::ConnectionReset
+                            ) =>
+                        {
+                            break;
+                        }
+                        Err(error) => return Err(Exit::from_os_error(error)),
+                    }
+                }
+            }
+            return Ok(status);
+        }
+        if attach_closed.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(Exit::EndpointClosed);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn run_cold(
+    dir: ArtifactDir,
+    openvmm: std::path::PathBuf,
+    options: &Options,
+    rules: &NativeRules,
+    hold: Hold,
+) -> Result {
+    let kernel = dir.require_kernel()?;
+    let initramfs = dir.require_initramfs(options.guest)?;
+    let config = cold_config(options, rules)?;
+    if !options.dry_run
+        && let Some(report) = &options.outcome_report
+    {
+        validate_outcome_destination(report)?;
+    }
+    let mut identity = dir
+        .runtime_identity_for(options.guest)
+        .map_err(error_with_cause)?;
+    if openvmm != dir.openvmm() {
+        let mut file = File::open(&openvmm).map_err(Exit::from_os_error)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let count = file.read(&mut buffer).map_err(Exit::from_os_error)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        identity.openvmm = ArtifactIdentity::sha256(&format!("{:x}", digest.finalize()))?;
+    }
+    let runtime = Runtime {
+        openvmm,
+        kernel,
+        initramfs,
+        identity,
+        hypervisor: hypervisor(options.hypervisor).parse()?,
+        cpu_profile: options.cpu_profile.clone(),
+        windows_breakaway: false,
+        options: LaunchOptions::default(),
+    };
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|error| {
+        Exit::error(
+            ErrorCode::Io,
+            format!("cannot name the temporary VM: {error}"),
+        )
+    })?;
+    let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let path = std::env::temp_dir().join(format!("nvx-run-{name}"));
+    if path.try_exists().map_err(Exit::from_os_error)? {
+        return Err(Exit::error(
+            ErrorCode::Io,
+            "the temporary VM directory already exists",
+        ));
+    }
+    vm::create_private_dir(&path)?;
+    let vm_dir = VmDir::open(&path)?;
+    let mut cleanup = true;
+    let result = (|| {
+        let prepared = vm::create(&runtime, &config, None, &vm_dir)
+            .map_err(error_with_cause)?
+            .for_foreground();
+        let command: Vec<_> = std::iter::once(&runtime.openvmm)
+            .map(|path| path_string(path))
+            .chain(prepared.arguments().iter().map(|arg| {
+                arg.to_str().map(str::to_owned).ok_or_else(|| {
+                    Exit::error(ErrorCode::Unsupported, "an OpenVMM argument is not Unicode")
+                })
+            }))
+            .collect::<Result<_>>()?;
+        output::print_stdout(&format!(">> {}", format_command(&command)))
+            .map_err(Exit::from_os_error)?;
+        if options.dry_run {
+            return Ok(());
+        }
+        let mut log = File::open(&prepared.outputs().log).map_err(Exit::from_os_error)?;
+        if platform::opened_file_id(&log).map_err(Exit::from_os_error)?
+            != platform::opened_file_id(prepared.log()).map_err(Exit::from_os_error)?
+        {
+            return Err(Exit::error(
+                ErrorCode::Io,
+                "the VM log was replaced before its reader opened",
+            ));
+        }
+        cleanup = false;
+        let mut launched = vm::spawn(prepared).map_err(error_with_cause)?;
+        drop(hold);
+        let mut control = None;
+        let managed = config.boot.as_ref().is_some_and(|boot| {
+            boot.command_line
+                .split_ascii_whitespace()
+                .any(|token| token == "nvx_mode=managed")
+        });
+        let status = foreground(&mut launched, &mut log, managed, &mut control);
+        let now = Instant::now();
+        let mut graceful_error = None;
+        let stopped = vm::stop(
+            &launched.process,
+            &launched.outputs,
+            |deadline| {
+                let timeout = deadline.saturating_duration_since(Instant::now());
+                if timeout.is_zero() {
+                    return false;
+                }
+                control
+                    .as_mut()
+                    .is_some_and(|session| match session.stop(timeout.as_secs_f64()) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            graceful_error = Some(error);
+                            false
+                        }
+                    })
+            },
+            now + Duration::from_millis(250),
+            now + Duration::from_secs(10),
+        )
+        .map_err(error_with_cause)?;
+        cleanup = true;
+        if let Some(error) = graceful_error {
+            output::print_stderr(&format!("VM graceful stop failed: {error:?}"));
+        }
+        check_interrupt()?;
+        let status = status?;
+        if let Err(error) = stopped.report {
+            output::print_stderr(&format!(
+                "error[io]: {}",
+                error_with_cause(error)
+                    .message()
+                    .unwrap_or("cannot read VM outcome")
+            ));
+        }
+        if let Some(report) = &options.outcome_report
+            && let Err(error) = copy_openvmm_outcome(&launched.outputs.outcome, report)
+        {
+            error.report();
+        }
+        if status != 0
+            && let Some(guidance) = cpu_profile::guidance(
+                options.cpu_profile.as_deref(),
+                HostCpu::current().as_ref(),
+                &format_command(&command[..1]),
+                hypervisor(options.hypervisor),
+            )
+        {
+            check_interrupt()?;
+            output::print_stderr(&guidance);
+        }
+        Err(Exit::Status(status))
+    })();
+    if cleanup && let Err(error) = remove_vm_directory(&vm_dir) {
+        output::print_stderr(&format!(
+            "cannot remove the temporary VM directory {}: {error:?}",
+            vm_dir.path().display()
+        ));
+        if result.is_ok() || matches!(result, Err(Exit::Status(0))) {
+            return Err(error);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
