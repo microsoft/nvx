@@ -200,13 +200,24 @@ fn a_mapping_that_the_guest_refuses_leaves_no_usable_start() {
         start.extend(["--timeout".to_owned(), "2".to_owned()]);
         let output = run(&root, &start);
         assert_eq!(output.status.code(), Some(1), "{state}");
-        assert_eq!(
-            text(&output.stderr),
-            error_line(
-                "protocol",
-                "managed guest could not mount a mapped host path (error 13)"
-            )
+        let error = text(&output.stderr);
+        let primary = error_line(
+            "protocol",
+            "managed guest could not mount a mapped host path (error 13)",
         );
+        assert!(error.ends_with(&primary), "{error}");
+        if stops {
+            assert_eq!(error, primary);
+        } else {
+            assert!(
+                error.contains("warning: startup guest shutdown failed:"),
+                "{error}"
+            );
+            assert!(
+                error.contains("managed control response timed out"),
+                "{error}"
+            );
+        }
         let mut names: Vec<String> = fs::read_dir(root.path.join(state))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())

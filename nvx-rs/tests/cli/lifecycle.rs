@@ -1170,7 +1170,7 @@ fn failed_start(root: &Root) {
             root,
             &outcome,
             "exited",
-            &["OpenVMM exited during startup", "status 5"],
+            &["OpenVMM exited during startup", "without an outcome report"],
         );
         assert!(
             elapsed < Duration::from_secs(60),
