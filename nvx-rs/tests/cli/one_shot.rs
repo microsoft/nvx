@@ -1027,11 +1027,14 @@ fn forwarding_failure_stops_the_verified_vm_during_connect_and_handshake() {
         assert!(stderr.contains("error[io]:"), "{stderr}");
         assert!(!stderr.contains("timed out"), "{stderr}");
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
-        println!("NVX-FORWARD-FAILURE {}", serde_json::json!({
-            "phase":phase, "native":native.reference(), "held_native_exited":true,
-            "status":1, "original_io_error":true, "private_directory_removed":true,
-            "completion_bound_seconds":3,
-        }));
+        println!(
+            "NVX-FORWARD-FAILURE {}",
+            serde_json::json!({
+                "phase":phase, "native":native.reference(), "held_native_exited":true,
+                "status":1, "original_io_error":true, "private_directory_removed":true,
+                "completion_bound_seconds":3,
+            })
+        );
     }
 }
 
@@ -1103,11 +1106,14 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
         assert_eq!(restored.control_flags, original.control_flags);
         assert_eq!(restored.control_chars, original.control_chars);
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
-        println!("NVX-TERMINAL-CTRL-C {}", serde_json::json!({
-            "phase":phase, "native":native.reference(), "terminal_keyboard_byte":3,
-            "raw_isig":true, "terminal_restored":true, "status":130,
-            "held_native_exited":true, "private_directory_removed":true,
-        }));
+        println!(
+            "NVX-TERMINAL-CTRL-C {}",
+            serde_json::json!({
+                "phase":phase, "native":native.reference(), "terminal_keyboard_byte":3,
+                "raw_isig":true, "terminal_restored":true, "status":130,
+                "held_native_exited":true, "private_directory_removed":true,
+            })
+        );
     }
 }
 
@@ -1163,13 +1169,18 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
     }
 
     fn pipe() -> (OwnedHandle, OwnedHandle) {
-        let (mut read, mut write): (HANDLE, HANDLE) =
-            (std::ptr::null_mut(), std::ptr::null_mut());
+        let (mut read, mut write): (HANDLE, HANDLE) = (std::ptr::null_mut(), std::ptr::null_mut());
         // SAFETY: the writable outputs receive two new, non-inheritable handles.
-        assert_ne!(unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 0) }, 0);
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 0) },
+            0
+        );
         // SAFETY: only these wrappers own the handles returned by CreatePipe.
         unsafe {
-            (OwnedHandle::from_raw_handle(read.cast()), OwnedHandle::from_raw_handle(write.cast()))
+            (
+                OwnedHandle::from_raw_handle(read.cast()),
+                OwnedHandle::from_raw_handle(write.cast()),
+            )
         }
     }
 
@@ -1179,21 +1190,33 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
     let (screen, output) = pipe();
     let mut console = 0;
     // SAFETY: the pipe ends remain open throughout pseudoconsole creation.
-    assert_eq!(unsafe {
-        CreatePseudoConsole(
-            COORD { X: 100, Y: 40 },
-            input.as_raw_handle().cast(),
-            output.as_raw_handle().cast(),
-            0,
-            &mut console,
-        )
-    }, 0);
+    assert_eq!(
+        unsafe {
+            CreatePseudoConsole(
+                COORD { X: 100, Y: 40 },
+                input.as_raw_handle().cast(),
+                output.as_raw_handle().cast(),
+                0,
+                &mut console,
+            )
+        },
+        0
+    );
     let console = Console(console);
     drop(input);
     drop(output);
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        File::from(screen).read_to_end(&mut bytes).unwrap();
+        let mut screen = File::from(screen);
+        let mut buffer = [0; 8192];
+        loop {
+            match screen.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                Err(error) if error.raw_os_error() == Some(109) => break,
+                Err(error) => panic!("cannot drain the private pseudoconsole: {error}"),
+            }
+        }
         bytes
     });
     let mut bytes = 0;
@@ -1202,21 +1225,34 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
     let mut attributes = vec![0usize; bytes.div_ceil(std::mem::size_of::<usize>())];
     let attributes = attributes.as_mut_ptr().cast();
     // SAFETY: the aligned allocation has the requested size and remains live through creation.
-    assert_ne!(unsafe { InitializeProcThreadAttributeList(attributes, 1, 0, &mut bytes) }, 0);
+    assert_ne!(
+        unsafe { InitializeProcThreadAttributeList(attributes, 1, 0, &mut bytes) },
+        0
+    );
     // SAFETY: the pseudoconsole remains owned until its child and all of its output end.
-    assert_ne!(unsafe {
-        UpdateProcThreadAttribute(
-            attributes,
-            0,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-            console.0 as *const std::ffi::c_void,
-            std::mem::size_of::<HPCON>(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        )
-    }, 0);
-    let mut environment: Vec<_> = std::env::vars_os().collect();
-    environment.push(("NVX_TEST_RAW_TERMINAL_DIR".into(), directory.path().as_os_str().to_owned()));
+    assert_ne!(
+        unsafe {
+            UpdateProcThreadAttribute(
+                attributes,
+                0,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                console.0 as *const std::ffi::c_void,
+                std::mem::size_of::<HPCON>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    let mut environment: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| {
+            !name.to_string_lossy().eq_ignore_ascii_case("NVX_TEST_RAW_TERMINAL_DIR")
+        })
+        .collect();
+    environment.push((
+        "NVX_TEST_RAW_TERMINAL_DIR".into(),
+        directory.path().as_os_str().to_owned(),
+    ));
     environment.sort_by_key(|(name, _)| name.to_string_lossy().to_ascii_uppercase());
     let mut block = Vec::new();
     for (name, value) in environment {
@@ -1239,9 +1275,16 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
     // SAFETY: every buffer and attribute remains valid until CreateProcessW returns.
     let created = unsafe {
         CreateProcessW(
-            std::ptr::null(), command.as_mut_ptr(), std::ptr::null(), std::ptr::null(),
-            0, EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-            block.as_ptr().cast(), std::ptr::null(), &startup.StartupInfo, &mut child,
+            std::ptr::null(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            block.as_ptr().cast(),
+            std::ptr::null(),
+            &startup.StartupInfo,
+            &mut child,
         )
     };
     let error = std::io::Error::last_os_error();
@@ -1256,24 +1299,37 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !directory.path().join(format!("{phase}.ready")).is_file() {
             // SAFETY: the handle still owns exactly the helper that this test created.
-            assert_ne!(unsafe { WaitForSingleObject(child.hProcess, 0) }, WAIT_OBJECT_0,
-                "the private terminal helper exited before {phase}");
-            assert!(Instant::now() < deadline, "the terminal helper never reached {phase}");
+            assert_ne!(
+                unsafe { WaitForSingleObject(child.hProcess, 0) },
+                WAIT_OBJECT_0,
+                "the private terminal helper exited before {phase}"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "the terminal helper never reached {phase}"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         keyboard.write_all(b"\x03").unwrap();
     }
     // SAFETY: the helper itself bounds each CLI cancellation and confirms its owned fake's exit.
-    assert_eq!(unsafe { WaitForSingleObject(child.hProcess, 10_000) }, WAIT_OBJECT_0);
+    assert_eq!(
+        unsafe { WaitForSingleObject(child.hProcess, 10_000) },
+        WAIT_OBJECT_0
+    );
     let mut status = 0;
     // SAFETY: the process handle and writable exit-code output remain valid.
-    assert_ne!(unsafe { GetExitCodeProcess(child.hProcess, &mut status) }, 0);
+    assert_ne!(
+        unsafe { GetExitCodeProcess(child.hProcess, &mut status) },
+        0
+    );
     drop(keyboard);
     drop(console);
     let transcript = reader.join().unwrap();
     assert_eq!(status, 0, "{}", String::from_utf8_lossy(&transcript));
     for phase in ["console", "handshake"] {
-        let receipt = std::fs::read_to_string(directory.path().join(format!("{phase}.json"))).unwrap();
+        let receipt =
+            std::fs::read_to_string(directory.path().join(format!("{phase}.json"))).unwrap();
         println!("NVX-TERMINAL-CTRL-C {receipt}");
     }
     drop(process);
@@ -1287,8 +1343,8 @@ fn windows_terminal_ctrl_c_helper() {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::Console::{
-        CTRL_C_EVENT, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
-        GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, SetConsoleCtrlHandler,
+        CTRL_C_EVENT, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, GetConsoleMode,
+        GetStdHandle, STD_INPUT_HANDLE, SetConsoleCtrlHandler,
     };
 
     unsafe extern "system" fn keep_helper(control: u32) -> windows_sys::core::BOOL {
@@ -1296,7 +1352,7 @@ fn windows_terminal_ctrl_c_helper() {
     }
 
     let directory = std::path::PathBuf::from(
-        std::env::var_os("NVX_TEST_RAW_TERMINAL_DIR").expect("private pseudoconsole required")
+        std::env::var_os("NVX_TEST_RAW_TERMINAL_DIR").expect("private pseudoconsole required"),
     );
     // SAFETY: this callback affects only this helper, not its children or any other console.
     assert_ne!(unsafe { SetConsoleCtrlHandler(Some(keep_helper), 1) }, 0);
@@ -1309,14 +1365,20 @@ fn windows_terminal_ctrl_c_helper() {
         // SAFETY: this helper's stdin belongs to the parent's private pseudoconsole.
         let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
         assert_ne!(unsafe { GetConsoleMode(input, &mut original) }, 0);
-        let mut process = root.command(&[
-            "run", "--cmdline",
-            &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
-        ])
+        let mut process = root
+            .command(&[
+                "run",
+                "--cmdline",
+                &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
+            ])
             .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
-            .env("TMP", temporary.path()).env("TEMP", temporary.path())
-            .stdin(Stdio::inherit()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().unwrap();
+            .env("TMP", temporary.path())
+            .env("TEMP", temporary.path())
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         let native = gated_native(&mut process, &gate);
         let deadline = Instant::now() + Duration::from_secs(2);
         let raw = loop {
