@@ -6,11 +6,27 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use serde_json::{Value, json};
 
-use crate::harness::{Content, HYPERVISOR, Root, is_hex};
+use crate::harness::{Content, HYPERVISOR, OPENVMM, Root, is_hex};
+
+/// Caller bytes left by the two-directory fixture, its native bootstrap, and a terminating NUL.
+pub(crate) fn two_share_command_line_room() -> usize {
+    use nvx::host::filesystem::GUEST_EXPORT;
+    use nvx::host::sandbox::mount::{
+        AGGREGATE_MOUNT_TARGET, MountAccess, aggregate_command_line_fragment,
+    };
+
+    let kernel = "nvx_hostname=6e7678 nvx_machine_id=image nvx_maps=2 nvx_mode=one-shot \
+                  nvx_share=0,/a,ro nvx_share=1,/b,rw";
+    let fragment =
+        aggregate_command_line_fragment(&[MountAccess::ReadOnly, MountAccess::ReadWrite])
+            .replace(AGGREGATE_MOUNT_TARGET, GUEST_EXPORT);
+    nvx::host::config::COMMAND_LINE_BUDGET - kernel.len() - fragment.len() - 2
+}
 
 /// The options of OpenVMM that take no value.
 const FLAGS: [&str; 3] = [
@@ -168,6 +184,338 @@ impl Options {
             }
         }
         panic!("{context}: the OpenVMM options differ:\n{differences}");
+    }
+
+    /// Projects an old cold-run fixture onto the checked public VM contract, independently of
+    /// the CLI parser and its private token renderer. Restore and sandbox fixtures stay old.
+    pub(crate) fn cold_run_expected(&self, root: &Root, mode: &str) -> nvx::Result<Self> {
+        use nvx::activation::{MachineIdMode, View};
+        use nvx::host::config::{Boot, ConsoleAttachment, NetworkConfig, RootConfig, VmConfig};
+        use nvx::host::filesystem::{
+            self, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
+        };
+        use nvx::host::network::{
+            Access, EgressRule, EgressRules, HostLoopback, LoopbackForward, NetworkPolicy,
+            NetworkProxy,
+        };
+        use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
+        use nvx::host::sandbox::mount::{MountAccess, parse_mount_value};
+        use nvx::host::vm::{self, VmDir};
+
+        use nvx::host::network::{ForwardProtocol, Protocol};
+
+        let old = self.expanded(root);
+        let mut caller = old.values("--cmdline").first().cloned().unwrap_or_default();
+        let mut shares = Vec::new();
+        let mut files = BTreeSet::new();
+        for value in old.values("--mount") {
+            let (target, host, access) = parse_mount_value(value)?;
+            let host = PathBuf::from(host);
+            let host = if host.is_absolute() {
+                host
+            } else {
+                root.below(host.to_str().unwrap())
+            };
+            if host.is_file() {
+                files.insert(target.clone());
+            }
+            shares.push((target, host, access));
+        }
+        let tokens: Vec<_> = caller.split_ascii_whitespace().map(str::to_owned).collect();
+        let mut generated = Vec::new();
+        for value in old.values("--mount-child") {
+            let child = value.strip_suffix(",file").unwrap_or(value);
+            let (name, host, access) = parse_mount_value(child)?;
+            let token = tokens
+                .iter()
+                .find(|token| {
+                    token
+                        .strip_prefix("nvx_share=")
+                        .is_some_and(|share| share.starts_with(&format!("{name},")))
+                })
+                .expect("the aggregate fixture names every child's target");
+            let parts: Vec<_> = token
+                .strip_prefix("nvx_share=")
+                .unwrap()
+                .split(',')
+                .collect();
+            let target = parts[1].to_owned();
+            let host = PathBuf::from(host);
+            let host = if host.is_absolute() {
+                host
+            } else {
+                root.below(host.to_str().unwrap())
+            };
+            if value.ends_with(",file") {
+                files.insert(target.clone());
+            }
+            shares.push((target, host, access));
+            generated.push(token.clone());
+        }
+        for token in generated.iter().rev() {
+            caller = if caller == *token {
+                String::new()
+            } else {
+                caller
+                    .strip_suffix(&format!(" {token}"))
+                    .expect("fixture boot shares follow caller text")
+                    .to_owned()
+            };
+        }
+        let aggregate = shares.len() > 1 || !files.is_empty();
+        let mut policies: [Vec<PathBuf>; 3] = Default::default();
+        for (index, option) in ["--mount-deny", "--mount-allow", "--mount-write"]
+            .into_iter()
+            .enumerate()
+        {
+            for value in old.values(option) {
+                let path = PathBuf::from(value);
+                if shares.is_empty() || (aggregate && !path.is_absolute()) {
+                    return Err(nvx::Error::unsupported(
+                        "boot share policies need a mapped path and absolute aggregate paths",
+                    ));
+                }
+                policies[index].push(if path.is_absolute() {
+                    path
+                } else {
+                    shares[0].1.join(path)
+                });
+            }
+        }
+        let mappings: Vec<_> = shares
+            .iter()
+            .map(|(target, host, access)| Mapping {
+                name: "--mount",
+                path: host,
+                target: Target::Guest(target),
+                read_only: *access == MountAccess::ReadOnly,
+            })
+            .collect();
+        let export = filesystem::plan(&ExportRequest {
+            mappings: &mappings,
+            denied: PathList {
+                name: "--mount-deny",
+                paths: &policies[0],
+            },
+            allowed: PathList {
+                name: "--mount-allow",
+                paths: &policies[1],
+            },
+            write: PathList {
+                name: "--mount-write",
+                paths: &policies[2],
+            },
+            owner: if old
+                .values("--mount-owner")
+                .first()
+                .is_some_and(|value| value == "caller")
+            {
+                Owner::Caller
+            } else {
+                Owner::Vmm
+            },
+            reserved: ReservedTargets::BLOCKLESS_ROOT,
+        })?;
+        let mut boot_tokens = vec![format!("nvx_mode={mode}")];
+        if let Some(export) = &export {
+            boot_tokens.extend(export.guest_table().into_iter().map(|row| {
+                let access = if row.read_only { "ro" } else { "rw" };
+                let kind = if files.contains(&row.target) {
+                    ",file"
+                } else {
+                    ""
+                };
+                format!("nvx_share={},{},{access}{kind}", row.source, row.target)
+            }));
+        }
+        if !caller.is_empty() {
+            boot_tokens.insert(0, caller);
+        }
+        if old.values("--net").is_empty()
+            && [
+                "--network-egress",
+                "--network-ingress",
+                "--network-egress-allow",
+                "--network-egress-deny",
+                "--host-loopback",
+                "--host-loopback-forward",
+                "--network-proxy",
+            ]
+            .into_iter()
+            .any(|option| !old.values(option).is_empty())
+        {
+            return Err(nvx::Error::unsupported(
+                "network policy options require --net",
+            ));
+        }
+        let network = if let Some(net) = old.values("--net").first() {
+            let access = |option, default| match old.values(option).first().map(String::as_str) {
+                Some("allow") => Access::Allow,
+                Some("deny") => Access::Deny,
+                _ => default,
+            };
+            let mut policy = NetworkPolicy::new(access("--network-egress", Access::Allow));
+            for (option, destination) in [
+                ("--network-egress-allow", &mut policy.allow),
+                ("--network-egress-deny", &mut policy.deny),
+            ] {
+                *destination = EgressRules {
+                    name: option.to_owned(),
+                    rules: old
+                        .values(option)
+                        .iter()
+                        .map(|value| {
+                            for (suffix, protocol) in [
+                                (":tcp", Protocol::Tcp),
+                                (":udp", Protocol::Udp),
+                                (":icmp", Protocol::Icmp),
+                            ] {
+                                if let Some((destination, ports)) = value.split_once(suffix) {
+                                    let rule = EgressRule::to(destination);
+                                    return if ports.is_empty() {
+                                        rule.on_protocol(protocol)
+                                    } else {
+                                        let ports = ports.strip_prefix(':').unwrap();
+                                        if let Some((first, last)) = ports.split_once('-') {
+                                            rule.on_port_range(
+                                                protocol,
+                                                first.parse().unwrap(),
+                                                last.parse().unwrap(),
+                                            )
+                                        } else {
+                                            rule.on_port(protocol, ports.parse().unwrap())
+                                        }
+                                    };
+                                }
+                            }
+                            EgressRule::to(value)
+                        })
+                        .collect(),
+                };
+            }
+            policy.ingress = access("--network-ingress", Access::Deny);
+            policy.host_loopback = match old.values("--host-loopback").first().map(String::as_str) {
+                Some("allow") => HostLoopback::Allow,
+                Some("deny") => HostLoopback::Deny,
+                _ => HostLoopback::Outbound,
+            };
+            policy.host_loopback_forwards = old
+                .values("--host-loopback-forward")
+                .iter()
+                .map(|value| {
+                    let fields: Vec<_> = value.split(':').collect();
+                    LoopbackForward {
+                        protocol: match fields[0] {
+                            "tcp" => ForwardProtocol::Tcp,
+                            "udp" => ForwardProtocol::Udp,
+                            _ => panic!("a fixture names tcp or udp"),
+                        },
+                        host_port: fields[1].parse().unwrap(),
+                        guest_port: fields[2].parse().unwrap(),
+                    }
+                })
+                .collect();
+            if let Some(proxy) = old.values("--network-proxy").first() {
+                let (gateway, port) = proxy.rsplit_once(':').unwrap();
+                assert_eq!(gateway, nvx::net::guest_gateway(net).unwrap().to_string());
+                policy.proxy = Some(NetworkProxy::new(port.parse().unwrap()));
+            }
+            Some(NetworkConfig {
+                guest_network: Some(nvx::net::Ipv4Cidr::parse(net).unwrap()),
+                policy,
+            })
+        } else {
+            None
+        };
+        let config = VmConfig {
+            processors: old.value("--processors").parse().unwrap(),
+            memory_mib: old.value("--memory").trim_end_matches('M').parse().unwrap(),
+            root: RootConfig::Blockless,
+            view: View {
+                hostname: b"nvx".to_vec(),
+                machine_id: MachineIdMode::Image,
+            },
+            network,
+            filesystem: export,
+            console: ConsoleAttachment::Listener,
+            boot: Some(Boot {
+                command_line: boot_tokens.join(" "),
+                memory_capacity_mib: old
+                    .values("--memory-capacity")
+                    .first()
+                    .map(|value| value.trim_end_matches('M').parse().unwrap()),
+                capture: None,
+            }),
+        };
+        config.check_command_line()?;
+        let identity = ArtifactIdentity::new("test-fixture").unwrap();
+        let runtime = Runtime {
+            openvmm: root.below(OPENVMM),
+            kernel: PathBuf::from(old.value("--kernel")),
+            initramfs: PathBuf::from(old.value("--initrd")),
+            identity: RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
+            hypervisor: old.value("--hypervisor").parse().unwrap(),
+            cpu_profile: old.values("--cpu-profile").first().cloned(),
+            windows_breakaway: false,
+            options: LaunchOptions::default(),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("expected-vm");
+        vm::create_private_dir(&path)?;
+        let prepared = vm::create(&runtime, &config, None, &VmDir::open(&path)?)?;
+        let arguments: Vec<_> = prepared
+            .arguments()
+            .iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        let expected = Self::parse(&arguments).normalized_cold_outputs(false);
+        drop(prepared);
+        Ok(expected)
+    }
+
+    /// Checks fresh output names rather than making random endpoint values an assertion escape.
+    pub(crate) fn normalized_cold_outputs(&self, removed: bool) -> Self {
+        let mut options = self.clone();
+        let report = PathBuf::from(options.value("--microvm-report"));
+        assert!(report.is_absolute());
+        assert_eq!(report.file_name().unwrap(), "outcome.json");
+        let parent = report.parent().unwrap();
+        if removed {
+            let name = parent.file_name().unwrap().to_str().unwrap();
+            let suffix = name
+                .strip_prefix("nvx-run-")
+                .expect("a cold CLI run owns a fresh VM directory");
+            assert_eq!(suffix.len(), 32);
+            assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert!(
+                !parent.exists(),
+                "the foreground run left its VM directory: {}",
+                parent.display()
+            );
+        }
+        let console = options
+            .value("--virtio-console")
+            .strip_prefix("listen=")
+            .unwrap();
+        let control = options
+            .value("--microvm-control-console")
+            .strip_prefix("listen=")
+            .unwrap();
+        assert_ne!(console, control);
+        for (endpoint, name) in [(console, "console.sock"), (control, "control.sock")] {
+            if cfg!(windows) {
+                let suffix = endpoint.strip_prefix("//./pipe/openvmm-microvm-").unwrap();
+                assert_eq!(suffix.len(), 32);
+                assert!(suffix.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            } else {
+                assert_eq!(Path::new(endpoint), parent.join(name));
+            }
+        }
+        options = options
+            .with("--virtio-console", ["listen=<console>"])
+            .with("--microvm-control-console", ["listen=<control>"])
+            .with("--microvm-report", ["<outcome>"]);
+        options
     }
 }
 

@@ -49,6 +49,8 @@ struct Launch {
     stderr: &'static str,
     /// The outcome report that OpenVMM writes, if the run asks for one.
     report: Option<Report>,
+    /// A specific checked-configuration refusal, with no OpenVMM launch.
+    refusal: Option<&'static str>,
 }
 
 /// Returns the launch `name` of `arguments`, which starts OpenVMM with `options` and exits with
@@ -75,10 +77,17 @@ fn launch<S: ToString>(
         stdout,
         stderr: "",
         report: None,
+        refusal: None,
     }
 }
 
 impl Launch {
+    fn refusing(mut self, message: &'static str) -> Self {
+        self.refusal = Some(message);
+        self.status = 1;
+        self
+    }
+
     /// Returns the case with the file `relative` written first, with `content`.
     fn with_file(mut self, (relative, content): (&'static str, Content)) -> Self {
         self.files.push((relative, content));
@@ -642,7 +651,16 @@ fn run_launches() -> Vec<Launch> {
             "",
         )
         .with_stderr("openvmm: --host-loopback-forward requires explicit --host-loopback allow\n")
-        .recorded_in(None),
+        .recorded_in(None)
+        .refusing("network policy options require --net"),
+        launch(
+            "run: OpenVMM exits with a usage status",
+            run(&["--cmdline", "fake_exit_on_start=2"]),
+            cold_boot().with("--cmdline", ["fake_exit_on_start=2"]),
+            2,
+            "",
+        )
+        .with_stderr("openvmm: failing the launch as requested\n"),
         // A relative NVX_OPENVMM is relative to the working directory, and the command names it
         // by its absolute path.
         launch(
@@ -652,7 +670,10 @@ fn run_launches() -> Vec<Launch> {
             0,
             booted,
         )
-        .with_variable("NVX_OPENVMM", native(OPENVMM)),
+        .with_variable("NVX_OPENVMM", native(OPENVMM))
+        .without("build/openvmm.provenance.json")
+        .without("build/vmlinux.provenance.json")
+        .without("build/initramfs.provenance.json"),
     ]
 }
 
@@ -678,8 +699,30 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
+        let cold = case
+            .arguments
+            .first()
+            .is_some_and(|command| command == "run")
+            && !case
+                .arguments
+                .iter()
+                .any(|argument| argument == "--restore-snapshot");
+        let before = case.refusal.map(|_| root.snapshot());
         let outcome = root.nvx_rs_with(&arguments, &environment);
         eprintln!("case: {}", case.name);
+        if let Some(message) = case.refusal {
+            assert_eq!(outcome.status, Some(case.status), "{}", outcome.describe());
+            assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
+            assert!(
+                outcome.stderr().starts_with("error[unsupported]:"),
+                "{}",
+                outcome.describe()
+            );
+            assert!(outcome.stderr().contains(message), "{}", outcome.describe());
+            assert_eq!(Some(root.snapshot()), before);
+            return;
+        }
+        let expected_cold = cold.then(|| case.options.cold_run_expected(&root, "one-shot"));
         assert_eq!(outcome.status, Some(case.status), "{}", outcome.describe());
         let (command, rest) = outcome.command();
         // The workload's output follows the command byte for byte, as does OpenVMM's.
@@ -705,11 +748,28 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
             case.name
         );
         // The `>> ` line splits back into the arguments that OpenVMM received.
-        if let Some(record) = case.record {
-            assert_eq!(root.openvmm_arguments(record), arguments, "{}", case.name);
-        }
         let mut options = Options::parse(arguments);
-        let mut expected = case.options.clone();
+        let record = case.record.map(|record| {
+            if cold {
+                let report = std::path::Path::new(options.value("--microvm-report"));
+                let token = report
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                format!("build/fake-openvmm-{token}.json")
+            } else {
+                record.to_owned()
+            }
+        });
+        if let Some(record) = record {
+            assert_eq!(root.openvmm_arguments(&record), arguments, "{}", case.name);
+        }
+        let mut expected = expected_cold
+            .map(|expected| expected.unwrap())
+            .unwrap_or_else(|| case.options.clone());
         // A sandbox's OpenVMM opens the images through the files that the run checked: the distro
         // layer alone for an upper in RAM, and the scratch image too for one on scratch.
         let blocks = expected.take("--microvm-sandbox-block");
@@ -728,6 +788,9 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
                 assert_opened_images(&root, token);
             }
         }
+        if cold {
+            options = options.normalized_cold_outputs(true);
+        }
         expected.assert_matches(&root, &options, case.name);
         if let Some(report) = &case.report {
             assert_outcome_report(
@@ -738,6 +801,342 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
             );
         }
     });
+}
+
+#[test]
+fn both_cold_modes_keep_their_foreground_output_and_owned_exit_status() {
+    for (mode, caller, status, stdout) in [
+        (
+            "one-shot",
+            "fake_exit_status=7",
+            7,
+            "openvmm: booted the microVM\n",
+        ),
+        ("managed", "fake_crash_after_ms=100", 3, ""),
+    ] {
+        let root = Root::new();
+        let identity = if mode == "managed" {
+            " nvx_identity=1001:1001"
+        } else {
+            ""
+        };
+        let outcome = root.nvx_rs(&[
+            "run",
+            "--cmdline",
+            &format!("{caller} nvx_mode={mode}{identity}"),
+        ]);
+        assert_eq!(outcome.status, Some(status), "{}", outcome.describe());
+        let (command, output) = outcome.command();
+        assert_eq!(output, stdout.as_bytes(), "{}", outcome.describe());
+        assert_eq!(command[0], root.below(OPENVMM).to_str().unwrap());
+        let mut expected = cold_boot()
+            .with(
+                "--cmdline",
+                [format!(
+                    "{caller}{}",
+                    if identity.is_empty() { " " } else { "  " }
+                )],
+            )
+            .cold_run_expected(&root, mode)
+            .unwrap();
+        if !identity.is_empty() {
+            let line = format!("{}{identity}", expected.value("--cmdline"));
+            expected = expected.with("--cmdline", [line]);
+        }
+        let actual = Options::parse(&command[1..]).normalized_cold_outputs(true);
+        expected.assert_matches(&root, &actual, mode);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_terminal_runs_forward_raw_output_and_restore_the_callers_terminal() {
+    use std::fs::File;
+    use std::io::{self, Read};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    use nix::pty::openpty;
+    use nix::sys::termios::{LocalFlags, OutputFlags, tcgetattr};
+
+    for status in [0, 7] {
+        let root = Root::new();
+        let terminal = openpty(None, None).unwrap();
+        let original = tcgetattr(&terminal.slave).unwrap();
+        let mut process = root
+            .command(&[
+                "run",
+                "--cmdline",
+                &format!("fake_boot_delay_ms=250 fake_exit_status={status}"),
+            ])
+            .stdin(Stdio::from(terminal.slave.try_clone().unwrap()))
+            .stdout(Stdio::from(terminal.slave.try_clone().unwrap()))
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut observed_raw = false;
+        while process.try_wait().unwrap().is_none() {
+            let current = tcgetattr(&terminal.slave).unwrap();
+            observed_raw |= !current
+                .local_flags
+                .intersects(LocalFlags::ICANON | LocalFlags::ECHO)
+                && !current.output_flags.contains(OutputFlags::OPOST);
+            if Instant::now() >= deadline {
+                process.kill().unwrap();
+                process.wait().unwrap();
+                panic!("terminal run did not exit within its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let outcome = process.wait_with_output().unwrap();
+        assert_eq!(
+            outcome.status.code(),
+            Some(status),
+            "{}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        assert!(observed_raw, "cold run left its terminal cooked");
+        let restored = tcgetattr(&terminal.slave).unwrap();
+        assert_eq!(restored.input_flags, original.input_flags);
+        assert_eq!(restored.output_flags, original.output_flags);
+        assert_eq!(restored.local_flags, original.local_flags);
+        assert_eq!(restored.control_flags, original.control_flags);
+        assert_eq!(restored.control_chars, original.control_chars);
+        fcntl(&terminal.master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+        let mut master = File::from(terminal.master);
+        let mut output = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            match master.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => output.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("cannot read terminal output: {error}"),
+            }
+        }
+        assert!(
+            output.ends_with(b"openvmm: booted the microVM\n"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn cold_runs_refuse_existing_and_missing_parent_reports_before_launch() {
+    let root = Root::new();
+    root.write("reports/existing.json", "keep\n");
+    for (path, message) in [
+        (
+            "{root/reports/existing.json}",
+            "error[outcome-report-exists]:",
+        ),
+        (
+            "{root/missing/outcome.json}",
+            "outcome report parent is not a plain directory",
+        ),
+    ] {
+        let before = root.snapshot();
+        let outcome = root.nvx_rs(&["run", "--outcome-report", path]);
+        assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+        assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
+        assert!(outcome.stderr().contains(message), "{}", outcome.describe());
+        assert_eq!(root.snapshot(), before);
+    }
+}
+
+#[test]
+fn missing_cold_reports_do_not_replace_the_owned_child_status() {
+    for line in [
+        "fake_exit_on_start=3",
+        "fake_crash_after_ms=100 nvx_mode=managed nvx_identity=1001:1001",
+    ] {
+        let root = Root::new();
+        let outcome = root.nvx_rs(&[
+            "run",
+            "--cmdline",
+            line,
+            "--outcome-report",
+            "{root/reports/outcome.json}",
+        ]);
+        assert_eq!(outcome.status, Some(3), "{}", outcome.describe());
+        assert!(
+            outcome.stderr().contains("outcome.json"),
+            "{}",
+            outcome.describe()
+        );
+        assert!(!root.below("reports/outcome.json").exists());
+    }
+}
+
+#[test]
+fn cold_report_publication_never_clobbers_a_destination_created_during_boot() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    for symlink in [false, true]
+        .into_iter()
+        .filter(|symlink| !symlink || cfg!(unix))
+    {
+        let root = Root::new();
+        let destination = root.below("reports/outcome.json");
+        root.write("reports/victim.txt", "keep\n");
+        let mut process = root
+            .command(&[
+                "run",
+                "--cmdline",
+                "fake_boot_delay_ms=250 fake_exit_status=7",
+                "--outcome-report",
+                destination.to_str().unwrap(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(process.stdout.take().unwrap());
+        let mut command = String::new();
+        stdout.read_line(&mut command).unwrap();
+        assert!(command.starts_with(">> "), "{command}");
+        if symlink {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(root.below("reports/victim.txt"), &destination).unwrap();
+        } else {
+            root.write("reports/outcome.json", "keep\n");
+        }
+        let output = process.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(7), "{output:?}");
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("outcome report already exists"),
+            "the publication failure must be reported"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"keep\n");
+        assert_eq!(
+            std::fs::read(root.below("reports/victim.txt")).unwrap(),
+            b"keep\n"
+        );
+        if symlink {
+            assert!(
+                std::fs::symlink_metadata(&destination)
+                    .unwrap()
+                    .is_symlink()
+            );
+        }
+    }
+}
+
+#[test]
+fn cold_console_backpressure_does_not_block_output_or_replace_the_child_status() {
+    use std::io::{self, Write};
+    use std::process::Stdio;
+
+    let root = Root::new();
+    let arguments = [
+        "run",
+        "--cmdline",
+        "fake_boot_delay_ms=2500 fake_exit_status=7",
+    ];
+    let mut process = root
+        .command(&arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = process.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(&vec![b'x'; 16 * 1024 * 1024]));
+    let output = process.wait_with_output().unwrap();
+    if let Err(error) = writer.join().unwrap() {
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe, "{error}");
+    }
+    let outcome = crate::harness::Outcome::new(
+        arguments
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect(),
+        output,
+    );
+    assert_eq!(outcome.status, Some(7), "{}", outcome.describe());
+    assert_eq!(
+        outcome.command().1,
+        b"openvmm: booted the microVM\n",
+        "{}",
+        outcome.describe()
+    );
+}
+
+#[test]
+fn cold_console_output_preserves_non_utf8_bytes() {
+    let root = Root::new();
+    let outcome = root.nvx_rs(&[
+        "run",
+        "--cmdline",
+        "fake_binary_console=1 fake_exit_status=7",
+    ]);
+    assert_eq!(outcome.status, Some(7), "{}", outcome.describe());
+    assert_eq!(
+        outcome.command().1,
+        &[b'A', 0xff, 0x80, b'\n'],
+        "{}",
+        outcome.describe()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_runs_keep_the_native_child_in_the_callers_session_and_process_group() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use nix::unistd::{Pid, getpgid, getsid};
+
+    let root = Root::new();
+    let process = root
+        .command(&["run", "--cmdline", "fake_boot_delay_ms=500"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let caller = Pid::from_raw(process.id() as i32);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let child = loop {
+        let children = std::fs::read_to_string(format!(
+            "/proc/{}/task/{}/children",
+            caller.as_raw(),
+            caller.as_raw()
+        ))
+        .unwrap();
+        let native = children.split_ascii_whitespace().find_map(|pid| {
+            let arguments = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+                Ok(arguments) => arguments,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+                Err(error) => panic!("cannot inspect the owned child {pid}: {error}"),
+            };
+            arguments
+                .split(|byte| *byte == 0)
+                .any(|argument| argument == b"--microvm-control-console")
+                .then(|| Pid::from_raw(pid.parse().unwrap()))
+        });
+        if let Some(child) = native {
+            break child;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the owned native child did not appear"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let caller_session = getsid(Some(caller)).unwrap();
+    let caller_group = getpgid(Some(caller)).unwrap();
+    let child_session = getsid(Some(child)).unwrap();
+    let child_group = getpgid(Some(child)).unwrap();
+    let output = process.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(child_session, caller_session);
+    assert_eq!(child_group, caller_group);
 }
 
 /// A run leaves an outcome report that the caller can read whatever its umask, even one that

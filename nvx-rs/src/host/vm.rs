@@ -16,6 +16,8 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "cli")]
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::host::config::{ConsoleAttachment, RootConfig, UpperConfig, VmConfig};
@@ -307,6 +309,8 @@ pub struct Prepared {
     working_dir: PathBuf,
     /// Whether the child leaves the caller's Windows job.
     windows_breakaway: bool,
+    /// Whether this CLI-owned child keeps the caller's session, group, and console.
+    foreground: bool,
     /// The control credential, never written to disk.
     capability: Capability,
     /// The launch's fixed file paths and chosen endpoints.
@@ -320,6 +324,13 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// Keeps this CLI launch in its caller's session, process group, and console.
+    #[cfg(feature = "cli")]
+    pub(crate) fn for_foreground(mut self) -> Self {
+        self.foreground = true;
+        self
+    }
+
     /// Returns the credential to journal before a spawn or use when attaching a session.
     pub fn capability(&self) -> &Capability {
         &self.capability
@@ -471,6 +482,7 @@ pub fn create(
             program: runtime.openvmm.clone(),
             working_dir: dir.path().to_owned(),
             windows_breakaway: runtime.windows_breakaway,
+            foreground: false,
             capability,
             outputs,
             log,
@@ -507,6 +519,42 @@ pub struct Launched {
     pub outputs: VmOutputs,
     /// The control credential, never written to disk.
     pub capability: Capability,
+    /// Retains only a foreground caller's child for status and control attachment.
+    #[cfg(feature = "cli")]
+    child: ForegroundChild,
+}
+
+/// Reaps a foreground child on release without adding `Drop` to the public launch value.
+#[cfg(feature = "cli")]
+#[derive(Debug)]
+struct ForegroundChild(Option<spawn::Launched>);
+
+#[cfg(feature = "cli")]
+impl Drop for ForegroundChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.take() {
+            child.detach();
+        }
+    }
+}
+
+#[cfg(feature = "cli")]
+impl Launched {
+    /// Polls the owned child independently of its optional outcome report.
+    pub(crate) fn wait_status(&mut self, timeout: Duration) -> io::Result<Option<i32>> {
+        Ok(self
+            .child_mut()?
+            .wait_timeout(timeout)?
+            .map(|status| status as i32))
+    }
+
+    /// Gives the CLI connector the same owned child whose exit it observes.
+    pub(crate) fn child_mut(&mut self) -> io::Result<&mut spawn::Launched> {
+        self.child
+            .0
+            .as_mut()
+            .ok_or_else(|| io::Error::other("the VM has no child owned by this caller"))
+    }
 }
 
 /// Starts a prepared cold launch and returns its verified, detached process.
@@ -612,6 +660,7 @@ fn spawn_verified(
         program,
         working_dir,
         windows_breakaway,
+        foreground,
         capability,
         outputs,
         log,
@@ -625,7 +674,7 @@ fn spawn_verified(
         breakaway_from_job: windows_breakaway,
         inherit: inherit.iter().map(Inherited::new).collect(),
     };
-    let child = spawn::spawn_vm(&command, capability.as_bytes(), log)
+    let child = spawn::spawn_vm(&command, capability.as_bytes(), log, foreground)
         .map_err(|error| Error::io("cannot spawn the VM").with_source(error))?;
     let process = match verify(&child) {
         Ok(process) => process,
@@ -640,11 +689,21 @@ fn spawn_verified(
             return Err(Error::io(message).with_source(error));
         }
     };
+    #[cfg(feature = "cli")]
+    let child = if foreground {
+        Some(child)
+    } else {
+        child.detach();
+        None
+    };
+    #[cfg(not(feature = "cli"))]
     child.detach();
     Ok(Launched {
         process,
         outputs,
         capability,
+        #[cfg(feature = "cli")]
+        child: ForegroundChild(child),
     })
 }
 

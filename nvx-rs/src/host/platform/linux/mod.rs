@@ -14,6 +14,8 @@ use crate::hypervisor::Hypervisor;
 #[cfg(feature = "cli")]
 pub(crate) use crate::host::sys::{interrupted, watch_interrupts, write_interruptibly};
 
+#[cfg(feature = "cli")]
+pub(crate) use self::endpoint::transport_from_handle;
 pub(crate) use self::endpoint::{
     ReadyListener, connect_endpoint, control_endpoint, endpoint_server_pid, listen_ready,
 };

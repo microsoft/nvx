@@ -161,6 +161,9 @@ pub struct Boot {
     /// The root's tokens, `nvx_hostname`, `nvx_machine_id`, `nvx_maps` and `virtfs_*` are reserved;
     /// every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
     pub command_line: String,
+    /// Memory capacity of a cold VM, in MiB, if it reserves more than its boot memory.
+    /// It must be at least [`VmConfig::memory_mib`] and fit a byte count.
+    pub memory_capacity_mib: Option<u64>,
     /// What a capture of the VM adds, if the VM may be captured.
     pub capture: Option<CaptureConfig>,
 }
@@ -615,6 +618,9 @@ impl VmConfig {
             "--processors".into(),
             self.processors.to_string().into(),
         ];
+        if let Some(capacity) = self.boot.as_ref().and_then(|boot| boot.memory_capacity_mib) {
+            arguments.extend(["--memory-capacity".into(), format!("{capacity}M").into()]);
+        }
         if let RootConfig::Layered(root) = &self.root {
             let scratch = match &root.upper {
                 UpperConfig::Scratch { path, .. } => Some(path),
@@ -714,6 +720,13 @@ impl VmConfig {
             capture.check()?;
         }
         if let Some(boot) = &self.boot {
+            if let Some(capacity) = boot.memory_capacity_mib
+                && (capacity < self.memory_mib || capacity > u64::MAX >> 20)
+            {
+                return Err(Error::unsupported(
+                    "a cold boot's memory capacity must be at least its memory and fit a byte count",
+                ));
+            }
             let guest = cmdline::init_tokens(boot.command_line.as_bytes()).map(|token| Parameter {
                 name: token.name,
                 value: token.value,
