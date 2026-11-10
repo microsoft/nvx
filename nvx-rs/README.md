@@ -125,7 +125,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, confirmed stop, and caller-saved reattachment |
-| [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshot directories, verified keys and manifests, time eligibility, and the input of a future VM restore |
+| [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshot directories, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
@@ -593,6 +593,34 @@ manifest's, and the canonical key is consistent with that manifest.
 `KEY_FILE`, `DESCRIPTION_FILE` and `OPENVMM_DIR` name the root entries.
 The description must exist, but its contents are never read, parsed or
 trusted. `Snapshot::key` and `manifest` expose the verified metadata.
+Opening also checks that a captured NIC address fits `NicConfig`, refusing
+its network, gateway and broadcast addresses with `Io`, and caches that
+checked value for the infallible `nic` accessor.
+
+`Snapshot::accepts(&config, &runtime, &now)` checks a layered restore against
+the captured boot resources and capacity. Processor counts are 1, 2, 4 or 8;
+an encoded boot count of zero means all capacity processors are already
+online. Memory is between boot and capacity, in multiples of 128 MiB, with
+checked conversion from MiB to bytes. The image fits the placeholder and
+keeps its logical and physical block sizes; a scratch upper matches the
+dormant scratch's complete geometry. These checks read the requested disks'
+real metadata, not the snapshot entries again.
+
+NIC presence must match, and an explicitly named address equals the captured
+one; an unnamed address inherits it. `Snapshot::nic` returns only the captured
+presence and address as an `Option<NicConfig>`, never a network policy.
+Each restore supplies its own policy. The boot console retains its captured
+attachment policy: `recreate-listener` for a listener, or
+`discard-while-disconnected` for a disconnected console. A mismatched,
+missing or unknown policy is refused. These facts come from the same
+validated manifest parse; the control listener and console device do not
+prove that attachment. The runtime uses the same backend and captured CPU
+profile, and has the same runtime identity. An omitted profile or `auto`
+names the snapshot's profile; `host` also names a captured host-derived
+profile. Requested disks must be regular files; on Linux, the geometry
+check refuses a FIFO without waiting for its writer.
+Compatibility refusals are `Unsupported`; an ineligible time contract at
+the supplied `HostTime` is `Unavailable`.
 
 The caller keeps the directory and every entry private and immutable while
 using the snapshot; opening checks them once and retains no file handles
