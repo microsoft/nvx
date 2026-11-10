@@ -736,20 +736,19 @@ fn check_writes_to_a_slow_endpoint(
 fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     let mut checks = 0;
     let started = Instant::now();
-    let failure =
-        Session::connect_unless_exited(
-            endpoint,
-            std::process::id(),
-            &CAPABILITY,
-            60.0,
-            || {
-                checks += 1;
-                checks == 3
-            },
-            None,
-        )
-        .err()
-        .unwrap();
+    let failure = Session::connect_unless_exited(
+        endpoint,
+        std::process::id(),
+        &CAPABILITY,
+        60.0,
+        || {
+            checks += 1;
+            checks == 3
+        },
+        None,
+    )
+    .err()
+    .unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "{:?}",
@@ -759,20 +758,19 @@ fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     assert_eq!(checks, 3);
     let mut checks = 0;
     let started = Instant::now();
-    let failure =
-        Session::connect_unless_exited(
-            endpoint,
-            std::process::id(),
-            &CAPABILITY,
-            0.2,
-            || {
-                checks += 1;
-                false
-            },
-            None,
-        )
-        .err()
-        .unwrap();
+    let failure = Session::connect_unless_exited(
+        endpoint,
+        std::process::id(),
+        &CAPABILITY,
+        0.2,
+        || {
+            checks += 1;
+            false
+        },
+        None,
+    )
+    .err()
+    .unwrap();
     assert!(started.elapsed() >= Duration::from_millis(200));
     assert_eq!(
         failure.message().unwrap(),
@@ -1172,7 +1170,10 @@ mod endpoints {
         let mut client = platform::transport_from_handle(stream.into()).unwrap();
         for _ in 0..3 {
             assert_eq!(
-                client.read(&mut [0], Some(Duration::ZERO)).unwrap_err().kind(),
+                client
+                    .read(&mut [0], Some(Duration::ZERO))
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::TimedOut
             );
             assert_eq!(inspect.read_timeout().unwrap(), None);
@@ -1392,7 +1393,10 @@ mod endpoints {
         let mut server = accepted.join().unwrap();
         for _ in 0..3 {
             assert_eq!(
-                client.read(&mut [0], Some(Duration::ZERO)).unwrap_err().kind(),
+                client
+                    .read(&mut [0], Some(Duration::ZERO))
+                    .unwrap_err()
+                    .kind(),
                 io::ErrorKind::TimedOut
             );
         }
