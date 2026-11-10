@@ -55,7 +55,7 @@ use self::state::RecordedDistro;
 /// The artifacts of a sandbox, found when an operation first needs them.
 pub(crate) struct Artifacts<'a> {
     /// `--root`, if given.
-    root: Option<&'a str>,
+    pub(super) root: Option<&'a str>,
 }
 
 impl Artifacts<'_> {
