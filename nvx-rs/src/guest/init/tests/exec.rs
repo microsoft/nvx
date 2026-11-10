@@ -1314,6 +1314,17 @@ fn privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers() {
                         std::thread::sleep(Duration::from_millis(1));
                     }
                     assert!(ProcessId::live_userspace().unwrap().contains(&threaded));
+                    assert_eq!(
+                        helpers.prepare_capture(true, Instant::now()),
+                        Err(Errno::ETIMEDOUT)
+                    );
+                    let live = ProcessId::live_userspace().unwrap();
+                    for process in [escaped, held_id, unrelated, threaded] {
+                        assert!(
+                            live.contains(&process),
+                            "expired preparation killed a process"
+                        );
+                    }
                     helpers.sweep(Instant::now() + CAPTURE_TIMEOUT).unwrap();
                     while let Some(child) = sys::reap_any_nonblocking() {
                         collected.reaped.push(child.process.raw().unsigned_abs());
