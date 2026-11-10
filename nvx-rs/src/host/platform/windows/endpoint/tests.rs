@@ -27,16 +27,29 @@ pub(crate) fn control_server(endpoint: &str) -> File {
 pub(crate) fn accept_control(server: &File) -> i32 {
     use std::os::windows::io::{AsHandle, AsRawHandle};
 
-    // SAFETY: the synchronous server and its handle remain valid while it accepts.
-    let connected =
-        unsafe { ConnectNamedPipe(server.as_handle().as_raw_handle(), ptr::null_mut()) };
-    if connected == 0 {
-        assert_eq!(last_error(), ERROR_PIPE_CONNECTED);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut stale = 0;
+    loop {
+        // SAFETY: the synchronous server and its handle remain valid while it accepts.
+        let connected =
+            unsafe { ConnectNamedPipe(server.as_handle().as_raw_handle(), ptr::null_mut()) };
+        if connected != 0 {
+            return connected;
+        }
+        let error = last_error();
+        if error == ERROR_PIPE_CONNECTED {
+            return connected;
+        }
+        assert_eq!(error, ERROR_NO_DATA, "unexpected control-pipe accept error");
+        stale += 1;
+        assert!(
+            stale <= 16 && Instant::now() < deadline,
+            "stale control-pipe connections exhausted the accept budget"
+        );
+        disconnect_control(server);
     }
-    connected
 }
 
-#[cfg(feature = "cli")]
 pub(crate) fn disconnect_control(server: &File) {
     use std::os::windows::io::{AsHandle, AsRawHandle};
 
@@ -47,6 +60,95 @@ pub(crate) fn disconnect_control(server: &File) {
         unsafe { DisconnectNamedPipe(server.as_handle().as_raw_handle()) },
         0
     );
+}
+
+#[test]
+fn a_stale_control_probe_is_disconnected_before_the_actual_client_is_accepted() {
+    let endpoint = format!(
+        r"\\.\pipe\nvx-stale-probe-{}-{}",
+        std::process::id(),
+        crate::host::store::LaunchId::generate().unwrap().as_str()
+    );
+    let server = control_server(&endpoint);
+    drop(connect_endpoint(&endpoint, std::process::id(), Duration::from_secs(2)).unwrap());
+    std::thread::scope(|scope| {
+        let (ready, accepting) = std::sync::mpsc::channel();
+        let accepted = scope.spawn(move || {
+            ready.send(()).unwrap();
+            accept_control(&server);
+            let mut request = [0];
+            (&server).read_exact(&mut request).unwrap();
+            assert_eq!(request, [7]);
+            (&server).write_all(&[9]).unwrap();
+        });
+        accepting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut client = loop {
+            let left = time_left(Some(deadline)).unwrap().unwrap();
+            match connect_endpoint(
+                &endpoint,
+                std::process::id(),
+                left.min(Duration::from_millis(25)),
+            ) {
+                Ok(client) => break client,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("the actual control client failed: {error}"),
+            }
+        };
+        client
+            .write_all(&[7], Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = [0];
+        assert_eq!(
+            client
+                .read(&mut response, Some(Duration::from_secs(2)))
+                .unwrap(),
+            1
+        );
+        assert_eq!(response, [9]);
+        accepted.join().unwrap();
+    });
+}
+
+#[test]
+fn a_busy_control_pipe_never_replaces_the_callers_probe_deadline() {
+    let endpoint = format!(
+        r"\\.\pipe\nvx-probe-budget-{}-{}",
+        std::process::id(),
+        crate::host::store::LaunchId::generate().unwrap().as_str()
+    );
+    let server = control_server(&endpoint);
+    let client = connect_endpoint(&endpoint, std::process::id(), Duration::from_secs(2)).unwrap();
+    for (budget, limit) in [
+        (Duration::from_millis(50), Duration::from_millis(250)),
+        (Duration::from_micros(500), Duration::from_millis(40)),
+    ] {
+        let started = Instant::now();
+        let deadline = started + budget;
+        let error = endpoint_server_pid_until(&endpoint, deadline).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < limit, "{:?}", started.elapsed());
+        assert_eq!(
+            endpoint_server_pid_until(&endpoint, started)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+    drop(client);
+    drop(server);
+    assert_eq!(
+        endpoint_server_pid_until(&endpoint, Instant::now())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::TimedOut
+    );
+    let server = control_server(&endpoint);
+    assert_eq!(
+        endpoint_server_pid(&endpoint).unwrap(),
+        Some(std::process::id())
+    );
+    drop(server);
 }
 
 #[test]

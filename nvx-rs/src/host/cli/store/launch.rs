@@ -37,7 +37,7 @@ impl LockedState {
         match journal.process() {
             Some(reference) => self.end_recorded(&journal, reference, deadline)?,
             None if !self.released_claim(&journal, deadline)? => {
-                let process = self.endpoint_owner(&journal)?;
+                let process = self.endpoint_owner(&journal, deadline)?;
                 end_process(&process, deadline)?;
             }
             None => {}
