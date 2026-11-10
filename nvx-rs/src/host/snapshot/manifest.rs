@@ -652,6 +652,8 @@ pub struct SnapshotManifest {
     time: TimeContract,
     /// The machine.
     pub(super) machine: Machine,
+    /// The captured host attachments, retained by the same strict manifest parse.
+    pub(super) attachments: Vec<Attachment>,
 }
 
 pub(in crate::host) use SnapshotManifest as TemplateManifest;
@@ -770,9 +772,10 @@ impl SnapshotManifest {
                     "has the invalid creation time of {seconds} seconds and {nanos} nanoseconds"
                 ))
             })?;
-        let Some(contract) = raw.contract else {
+        let Some(mut contract) = raw.contract else {
             return Err(invalid("has no machine contract"));
         };
+        let attachments = std::mem::take(&mut contract.attachments);
         let (machine, time) = check_contract(contract, raw.vp_count, raw.memory_size)?;
         Ok(Self {
             created_at,
@@ -780,16 +783,14 @@ impl SnapshotManifest {
             state_len: raw.state_size,
             time,
             machine,
+            attachments,
         })
     }
 }
 
 /// A host attachment of a snapshot's machine contract, `openvmm.snapshot.SnapshotAttachment`: an
-/// endpoint outside the VM, such as the backend of a console, which a restore reconnects, as far
-/// as `nvx-rs run` reads it to restore the snapshot.
-// A template's manifest checks the form of its attachments alone, so only the CLI reads what this
-// holds.
-#[cfg_attr(not(feature = "cli"), allow(dead_code))]
+/// endpoint outside the VM, such as the backend of a console, whose identity and reconnect
+/// policy snapshot compatibility and `nvx-rs run` read for a restore.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Attachment {
     /// The stable ID of the device that it attaches, such as `console:microvm-virtio0`.
