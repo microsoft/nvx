@@ -155,6 +155,7 @@ mod process {
                 &command,
                 prepared.capability().as_bytes(),
                 prepared.log().try_clone().unwrap(),
+                false,
             )
             .unwrap(),
         ));

@@ -118,6 +118,7 @@ fn the_spawned_process_inherits_the_preparations_claim() {
             &command,
             prepared.capability().as_bytes(),
             prepared.log().try_clone().unwrap(),
+            false,
         )
         .unwrap(),
     ));
