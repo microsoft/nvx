@@ -23,6 +23,22 @@ pub(crate) enum StateFile {
 }
 
 impl StateFile {
+    pub(crate) fn owns_temporary(name: &str) -> bool {
+        name.strip_prefix(".tmp").is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        }) || name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".tmp"))
+            .and_then(|name| name.rsplit_once('.'))
+            .is_some_and(|(file, suffix)| {
+                Self::ALL.iter().any(|name| name.name() == file)
+                    && (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                        || file == Self::Config.name()
+                            && suffix.len() == 32
+                            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            })
+    }
+
     /// Every file that the sandbox commands keep in a state directory.
     pub(crate) const ALL: [Self; 8] = [
         Self::Config,
