@@ -193,7 +193,7 @@ use crate::protocol::{
     APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, BUSY, CAPABILITY_LEN, CWD_FAILED, ExitCategory,
     GuestFeatures, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED, MAPPINGS_INCOMPLETE, MAPS_TOKEN,
     MAX_HOST_MAPPINGS, MAX_OUTPUT_BYTES, MapsPayload, OUTER_DATA, OUTER_ERROR, OUTER_HEADER_LEN,
-    OUTER_HOST_ATTACH, OUTER_READY, OuterHeader, UNSUPPORTED_OPERATION, decode_app,
+    OUTER_HOST_ATTACH, OUTER_READY, OUTER_WAIT, OuterHeader, UNSUPPORTED_OPERATION, decode_app,
     decode_exec_payload, decode_maps_payload, decode_outer_header, encode_app, encode_outer,
 };
 
@@ -403,10 +403,14 @@ struct Options {
     sessions_log: PathBuf,
     /// Status with which to stop immediately after launch, when requested.
     exit_on_start: Option<u8>,
+    /// Status published after closing a waiting attachment, when requested.
+    exit_during_attach: Option<u8>,
     /// Status with which a one-shot workload ends instead of its own, when requested.
     exit_status: Option<i32>,
     /// Artificial delay before the fake guest becomes ready.
     boot_delay: Duration,
+    /// Artificial delay with the host attached but no guest yet.
+    guest_delay: Duration,
     /// Whether the boot console emits the binary-output regression fixture.
     binary_console: bool,
     /// Number of bytes in the sustained-console regression fixture.
@@ -634,7 +638,15 @@ pub fn main() -> ExitCode {
         });
     }
     match serve(&options, &capability) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            if let Some(code) = options.exit_during_attach {
+                thread::sleep(options.exit_delay);
+                write_report(&options, "managed", "guest-exit", i32::from(code));
+                ExitCode::from(code)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
         Err(error) => {
             eprintln!("{program}: {error}");
             ExitCode::from(1)
@@ -1844,8 +1856,10 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         report,
         hypervisor: hypervisor.to_owned(),
         exit_on_start: knob("fake_exit_on_start").and_then(|value| value.parse().ok()),
+        exit_during_attach: knob("fake_exit_during_attach").and_then(|value| value.parse().ok()),
         exit_status: knob("fake_exit_status").and_then(|value| value.parse().ok()),
         boot_delay: millis("fake_boot_delay_ms").unwrap_or_default(),
+        guest_delay: millis("fake_guest_delay_ms").unwrap_or_default(),
         binary_console: knob("fake_binary_console") == Some("1"),
         console_bytes: match knob("fake_console_bytes") {
             None => 0,
@@ -2977,6 +2991,18 @@ fn serve_client<S: Read + Write + Pending>(
     if let Err(error) = foreground_gate(options, "handshake") {
         eprintln!("foreground handshake gate failed: {error}");
         return Flow::Continue;
+    }
+    if options.exit_during_attach.is_some() || !options.guest_delay.is_zero() {
+        if stream
+            .write_all(&control_record(OUTER_WAIT, &[0; 16], 0, &[]))
+            .is_err()
+        {
+            return Flow::Continue;
+        }
+        if options.exit_during_attach.is_some() {
+            return Flow::Exit;
+        }
+        thread::sleep(options.guest_delay);
     }
     let mut instance = [0u8; 16];
     while instance == [0; 16] {
