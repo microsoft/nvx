@@ -408,7 +408,14 @@ fn a_capture_rejection_stops_its_verified_vm_without_finishing_or_publishing() {
 
 #[test]
 fn unjournaled_user_content_is_preserved_before_any_capture_slot_mutation() {
-    for entry in ["personal.txt", KEY_FILE, OPENVMM_DIR, ".openvmm-personal"] {
+    for entry in [
+        "personal.txt",
+        KEY_FILE,
+        OPENVMM_DIR,
+        ".openvmm-personal",
+        ".tmpAb3xY9",
+        ".outcome.json.7.tmp",
+    ] {
         let fixture = Fixture::new();
         let store = fixture.store();
         StateDir::create(&fixture.vm_dir()).unwrap();
@@ -483,6 +490,82 @@ fn the_next_command_ends_an_interrupted_capture_and_removes_its_directory_withou
 }
 
 #[test]
+fn interrupted_atomic_outputs_are_recovered_only_after_their_vm_exits() {
+    for entry in [
+        ".launch.json.0.tmp",
+        ".control.capability.18446744073709551615.tmp",
+        ".outcome.json.7.tmp",
+        ".key.bin.0.tmp",
+        ".snapshot.json.1.tmp",
+        ".tmpAb3xY9",
+    ] {
+        let fixture = Fixture::new();
+        interrupted(&fixture);
+        fs::write(fixture.vm_dir().join(entry), b"interrupted atomic output").unwrap();
+        let missing_artifacts = fixture.root.path().join("missing-artifacts");
+        let error = run(missing_artifacts.to_str(), fixture.options("next")).unwrap_err();
+        let opened = Process::open(&fixture.references()[0]).unwrap();
+        assert!(
+            matches!(&opened, Opened::Exited(_)),
+            "{entry}: recovery returned {error:?}; process is {opened:?}"
+        );
+        assert!(!fixture.vm_dir().exists(), "{entry}: {error:?}");
+        assert_eq!(
+            fs::read_dir(fixture.store().entries.dir()).unwrap().count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn journaled_unknown_and_near_miss_names_are_preserved_without_recovery_or_publication() {
+    for entry in [
+        ".tmp12345",
+        ".tmp1234567",
+        ".tmpabcd\u{e9}",
+        ".outcome.json..tmp",
+        ".outcome.json.-1.tmp",
+        ".outcome.json.+1.tmp",
+        ".outcome.json.01.tmp",
+        ".outcome.json.18446744073709551616.tmp",
+        ".config.json.1.tmp",
+        ".runtime.json.1.tmp",
+        ".personal.txt.1.tmp",
+        "config.json",
+    ] {
+        let fixture = Fixture::new();
+        interrupted(&fixture);
+        let journal = fs::read(fixture.vm_dir().join("launch.json")).unwrap();
+        let capability = fs::read(fixture.vm_dir().join("control.capability")).unwrap();
+        let path = fixture.vm_dir().join(entry);
+        fs::write(&path, b"preserve user content").unwrap();
+        let missing_artifacts = fixture.root.path().join("missing-artifacts");
+        let error = run(missing_artifacts.to_str(), fixture.options("next")).unwrap_err();
+        assert!(
+            error.message().unwrap().contains("unowned capture content"),
+            "{entry}: {error:?}"
+        );
+        assert_eq!(fs::read(path).unwrap(), b"preserve user content");
+        assert_eq!(
+            fs::read(fixture.vm_dir().join("launch.json")).unwrap(),
+            journal
+        );
+        assert_eq!(
+            fs::read(fixture.vm_dir().join("control.capability")).unwrap(),
+            capability
+        );
+        assert!(matches!(
+            Process::open(&fixture.references()[0]).unwrap(),
+            Opened::Running(_)
+        ));
+        assert_eq!(
+            fs::read_dir(fixture.store().entries.dir()).unwrap().count(),
+            0
+        );
+    }
+}
+
+#[test]
 fn indeterminate_recovery_retains_the_live_vm_its_capability_and_journal() {
     let fixture = Fixture::new();
     interrupted(&fixture);
@@ -492,12 +575,18 @@ fn indeterminate_recovery_retains_the_live_vm_its_capability_and_journal() {
     fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
     let journal = fs::read(&journal_path).unwrap();
     let capability = fs::read(fixture.vm_dir().join("control.capability")).unwrap();
+    fs::write(fixture.vm_dir().join(".tmpAb3xY9"), b"owned report staging").unwrap();
     let options = fixture.options("next");
+    let error = capture(&options, &runtime(fixture.root.path()), |_| {
+        panic!("recovery must refuse")
+    })
+    .unwrap_err();
     assert!(
-        capture(&options, &runtime(fixture.root.path()), |_| panic!(
-            "recovery must refuse"
-        ))
-        .is_err()
+        error
+            .message()
+            .unwrap()
+            .contains("cannot verify the recorded VM process"),
+        "{error:?}"
     );
     assert_eq!(fs::read(journal_path).unwrap(), journal);
     assert_eq!(
