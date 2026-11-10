@@ -2656,6 +2656,11 @@ configuration, on Linux and Windows:
   in the initramfs too, and missing install metadata, which fails as NVX
   reports it.
 
+`tests/sandbox_names.rs` checks, in the host-only configuration, that a test
+process never gives a VM test's sandbox the name of one that it dropped, since
+Windows refuses to create a directory under the name of one that another test
+is still removing.
+
 `tests/staged_images.rs` checks, in the host-only configuration, on Linux and
 Windows:
 
