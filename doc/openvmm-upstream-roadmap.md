@@ -9,10 +9,11 @@
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131 and the PR09 fixups at positions
   241-243.
-- NVX's pinned OpenVMM revision: `a8a0e35178f61c0e82cbe465b7ebf70e0f0bb543`, position 245, the
-  head of microsoft/openvmm#5013, whose three commits, positions 243-245, follow position 242,
-  `6ddd6ca50`, the head of `feature/microvm/dev`, which microsoft/openvmm#5012 merged with
-  position 241 after position 240, `4c2697aef`, which microsoft/openvmm#5010 merged with
+- NVX's pinned OpenVMM revision: `cd5cd38149419c99a31564631ce6cb6e149a2a7a`, position 246, the
+  head of microsoft/openvmm#5016, whose commit follows position 245, `a8a0e3517`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5013 merged with positions 243 and 244 after
+  position 242, `6ddd6ca50`, which microsoft/openvmm#5012 merged with position 241 after position
+  240, `4c2697aef`, which microsoft/openvmm#5010 merged with
   position 239 after position 238, `46bfe02ed`, which microsoft/openvmm#5005 merged after
   position 237, `cba21d109`, which microsoft/openvmm#5004 merged after position 236,
   `ac3dc27a7`, which microsoft/openvmm#5003 merged after position 235, `b4028c1aa`, which
@@ -34,8 +35,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 114 commits past
-  the mapped tip on the same first-parent chain. Positions 132-240, 244, and 245 are not yet
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 115 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240 and 244-246 are not yet
   assigned to PRs, and positions 241-243 are PR09 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
@@ -1007,7 +1008,8 @@ ba105dd7f
   -> quiesced microVM run again only through its rollback [239-240]
   -> PR09 fixups [241-243]
   -> state changes failed rather than panicking on a lost unit [244-245]
-  -> a8a0e3517 (NVX pin)
+  -> PCI restore tests before the first start [246]
+  -> cd5cd3814 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1028,13 +1030,13 @@ position 072, which adds that rollback.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 114 later commits,
+The NVX pin extends the chain past position 131 without merges. Of the 115 later commits,
 positions 241-243 are PR09 fixups, and the others are not yet classified or assigned to PRs.
 Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-245 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-246 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1157,6 +1159,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 243 | `2fcd1573d` | - | - | - | - | state_unit: roll back a partial start without panicking on a lost unit (microsoft/openvmm#5013); fold into 015, its snapshot rollback description into 072 |
 | 244 | `5a750a862` | - | - | - | - | state_unit: fail a stop instead of panicking when a unit is lost (microsoft/openvmm#5013) |
 | 245 | `a8a0e3517` | - | - | - | - | state_unit: fail a reset, save, restore, or time advance on a lost unit (microsoft/openvmm#5013) |
+| 246 | `cd5cd3814` | - | - | - | - | virtio: test PCI re-save before start and missing queue progress (microsoft/openvmm#5016) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1331,7 +1334,11 @@ position 015 makes fallible. It makes `VmRpc::Pause` failable, as position 016 m
 `VmRpc::Resume`, and has position 241's tests check the stop's result. Position 245 has a reset, a
 save, a restore, and the time advance of PR10's position 019 fail, rather than panic, when a unit
 does not answer, leaving that unit in a terminal state of the operation, which position 241's
-check of terminal units then refuses, and adds tests in a new file.
+check of terminal units then refuses, and adds tests in a new file. Position 246 adds the PCI
+counterparts of two MMIO tests to the virtio saved-state tests of PR13's position 039, which
+positions 213 and 218 also extend, and corrects the module documentation of the virtio-net
+saved-state tests that PR13's position 048 adds, which still described the deferred restore of
+device-private state that position 039's rewrite for microsoft/nvx#1232 retired.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1642,6 +1649,11 @@ microsoft/openvmm#4872, so it follows PR09 upstream. Replaying position 245 conf
 three files, all but its new test file: upstream main lacks the terminal state of position 015,
 which `state_unit`'s `lib.rs` extends, and the time advance of PR10's position 019, so it follows
 PR09 and PR10 upstream.
+
+Position 246 changes only tests: the virtio saved-state tests that PR13's position 039 adds and
+positions 213 and 218 also change, and the module documentation of the virtio-net saved-state tests
+that PR13's position 048 adds. Replaying it on upstream main conflicts in both of its files:
+upstream main lacks both test modules, so it follows PR13 upstream.
 
 ## PR summary
 
