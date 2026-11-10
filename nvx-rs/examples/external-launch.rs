@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         console: ConsoleAttachment::Listener,
         boot: Some(Boot {
             command_line: "quiet loglevel=0".to_owned(),
+            capture: None,
         }),
     };
     vm::create_private_dir(Path::new(&args[5]))?;
