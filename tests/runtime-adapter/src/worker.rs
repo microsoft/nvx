@@ -4,7 +4,7 @@
 //!
 //! # PID 1 and the worker
 //!
-//! In a VM with a layered root, NVX's `/init` runs `/sbin/nvx-init-agent`, which the adapter's
+//! In a VM with a tokenless layered root, NVX's `/init` runs `/sbin/nvx-init`, which the adapter's
 //! initramfs replaces with `runtime-adapter-guest init /dev/hvc2 layered`; see the host side's
 //! `initramfs` module. That PID 1, [`supervise`], stays minimal:
 //!

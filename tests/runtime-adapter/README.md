@@ -1116,8 +1116,9 @@ NVX's initramfs hands a VM of the managed lifecycle to NVX's managed agent: its
 `/init` runs
 `exec /sbin/nvx-managed-agent /dev/hvc2 - nvx-managed UID GID NAME HOME` as
 PID 1. A VM with a layered root, whose kernel command line has
-`nvx_sandbox=1`, goes to NVX's init agent instead, which assembles the root:
-`/init` runs `exec /sbin/nvx-init-agent`, without arguments.
+`nvx_sandbox=1` and no old OpenVMM lifecycle token, goes to NVX's init instead:
+`/init` runs `exec /sbin/nvx-init TIME_DAEMON [ANNOUNCER]`, with the helpers'
+process IDs. Old-token layered launches keep `/sbin/nvx-init-agent`.
 `initramfs::write` copies that initramfs, and appends to the copy a second
 archive, in the `newc` format, which Linux unpacks over the first:
 
@@ -1128,8 +1129,8 @@ archive, in the `newc` format, which Linux unpacks over the first:
 - a symbolic link from `/sbin/nvx-managed-agent` to that script;
 - a script, `/sbin/runtime-adapter-layered`, that runs
   `runtime-adapter-guest init /dev/hvc2 layered`, which names the control tty
-  itself, since `/init` passes NVX's init agent none;
-- a symbolic link from `/sbin/nvx-init-agent` to that script, so that NVX's
+  itself, and ignores the helper arguments;
+- a symbolic link from `/sbin/nvx-init` to that script, so that NVX's
   init agent never assembles the root in the adapter's VMs;
 - for the capture of a template whose clones delay their repair, for tests, the
   delay's file, `/etc/runtime-adapter-repair-delay`, in the `/etc` directory of
