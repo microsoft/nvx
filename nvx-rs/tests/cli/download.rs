@@ -171,6 +171,22 @@ fn provision_and_deprovision_need_no_artifact_root() {
     let executable = elsewhere
         .path()
         .join(Path::new(NVX_RS).file_name().unwrap());
+    #[cfg(unix)]
+    {
+        // Concurrent forks of this test process must inherit no writable executable.
+        let copied = Command::new("cp")
+            .arg("-p")
+            .arg(NVX_RS)
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            copied.status.success(),
+            "cannot copy the executable: {}",
+            String::from_utf8_lossy(&copied.stderr)
+        );
+    }
+    #[cfg(windows)]
     fs::copy(NVX_RS, &executable).unwrap();
     let nvx_rs = |arguments: &[String]| {
         let output = Command::new(&executable)

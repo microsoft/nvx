@@ -183,7 +183,9 @@ fn kill(pid: u32, start_time: u64) -> io::Result<bool> {
         return Ok(true);
     };
     process.kill()?;
-    process.wait(Instant::now() + RECOVERY_TIMEOUT)
+    process
+        .wait(Instant::now() + RECOVERY_TIMEOUT)
+        .map(|exited| exited.is_some())
 }
 
 /// A VMM that a crashed orchestrator left behind, which is killed when the test ends if it still
@@ -533,7 +535,12 @@ fn a_committed_launch_names_its_vm_for_another_build() {
         .expect("the recorded VMM runs");
     assert!(!reattached.has_exited().unwrap());
     drop(vmm);
-    assert!(reattached.wait(Instant::now() + RECOVERY_TIMEOUT).unwrap());
+    assert!(
+        reattached
+            .wait(Instant::now() + RECOVERY_TIMEOUT)
+            .unwrap()
+            .is_some()
+    );
     other.lock(None).unwrap().clear_runtime().unwrap();
     assert!(other.runtime().unwrap().is_none());
 }

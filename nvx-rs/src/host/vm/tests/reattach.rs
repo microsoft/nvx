@@ -244,7 +244,7 @@ fn reattaching_returns_the_held_owned_child_and_authenticated_connection() {
         b"response"
     );
     owner.wait();
-    assert!(attached.process.wait(deadline).unwrap());
+    assert!(attached.process.wait(deadline).unwrap().is_some());
 }
 
 #[test]

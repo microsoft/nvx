@@ -2053,6 +2053,7 @@ fn launch_failed(
     let exited = starting
         .process()
         .wait(Instant::now() + STOP_TIMEOUT)
+        .map(|exited| exited.is_some())
         .map_err(|error| format!("cannot wait for the VM to exit: {error}"))?;
     starting.abandon().map_err(|error| describe(&error))?;
     println!("stopped={}", if exited { "graceful" } else { "forced" });
@@ -2078,6 +2079,7 @@ fn table_failed(
         Ok(_) => starting
             .process()
             .wait(Instant::now() + STOP_TIMEOUT)
+            .map(|exited| exited.is_some())
             .map_err(|error| format!("cannot wait for the VM to exit: {error}"))?,
         Err(_) => false,
     };
@@ -3625,12 +3627,14 @@ fn hold(locked: &mut LockedStore, runtime: &Runtime) -> Result<Result<Vmm, ExitC
 /// Reads the outcome report of the VM of `store`, prints it, and checks that the VM ended with
 /// the category `category`, the status code `status`, and a complete teardown.
 fn check_outcome(store: &SandboxStore, category: &str, status: i64) -> Result<(), String> {
-    let outcome = report::read(&store.outcome_path()).ok_or_else(|| {
-        format!(
-            "the VM left no outcome report {}",
-            store.outcome_path().display()
-        )
-    })?;
+    let outcome = report::read(&store.outcome_path())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "the VM left no outcome report {}",
+                store.outcome_path().display()
+            )
+        })?;
     print_outcome(&outcome);
     if (
         outcome.category.as_deref(),

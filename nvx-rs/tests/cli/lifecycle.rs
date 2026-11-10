@@ -604,7 +604,8 @@ fn check_lifecycle(case: &Configuration) {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
         assert_eq!(entries(&state), STOPPED, "{context}");
@@ -694,7 +695,8 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
         assert_eq!(entries(&state), STOPPED, "{context}");
@@ -737,7 +739,8 @@ fn stops_keep_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
         assert_eq!(entries(&state), STOPPED, "{context}");
@@ -1437,9 +1440,10 @@ fn recycled_process_id(root: &Root) {
     assert_refused(root, &outcome, "sandbox-exited", &["stale", "not running"]);
     assert!(!path.exists());
     assert!(
-        !openvmm
+        openvmm
             .wait(Instant::now() + Duration::from_millis(200))
-            .unwrap(),
+            .unwrap()
+            .is_none(),
         "the stale record's process was signaled"
     );
     openvmm.kill().unwrap();
@@ -1447,6 +1451,7 @@ fn recycled_process_id(root: &Root) {
         openvmm
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
     let outcome = operate(root, "stop", "state", &[]);
     assert_refused(root, &outcome, "sandbox-not-running", &["not running"]);
