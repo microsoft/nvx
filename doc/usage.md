@@ -1329,8 +1329,10 @@ Runs the consolidated suite of the [runtime adapter](../tests/runtime-adapter/RE
 the [stage scenarios](../tests/runtime-adapter/README.md#stage-scenarios) that
 `tests/runtime-adapter/scenarios.txt` names, against a real hypervisor. Each
 line of that file names one of the adapter's test targets, then one of its
-tests. The command first checks that the lines name exactly the tests of their
-targets, and that neither the adapter's library nor another target has an
+tests, optionally followed by `linux` or `windows` to select that host platform.
+Unqualified entries run on both. The command first checks that the selected
+lines name exactly the tests of their targets, and that neither the adapter's
+library nor another target has an
 ignored test, as the adapter's VM scenarios are, so that a scenario that is
 renamed, added, or gone fails it rather than drop out of the suite. It then
 runs each target's scenarios by
@@ -1340,8 +1342,10 @@ directory that `NVX_ARTIFACTS_DIR` names, from the current directory if it is
 relative, or this checkout unless it names one, and the adapter's guest agent
 from `--guest-agent` (default
 `tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest`),
-and fails unless each of them ran and passed. `--check-only` checks the names
-alone, and needs neither a hypervisor nor the guest agent.
+and fails unless each of them ran and passed. Execution and counts use the same
+platform-selected entries as the inventory check. `--check-only` compiles and
+lists the tests but runs no scenarios, and needs neither a hypervisor nor the
+guest agent.
 
 ### `test-adversarial`
 
