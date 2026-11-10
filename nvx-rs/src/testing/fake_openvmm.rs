@@ -1846,7 +1846,9 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         foreground_gate: knob("fake_foreground_gate")
             .map(|phase| {
                 if !matches!(phase, "console" | "connect" | "handshake") {
-                    return Err("fake_foreground_gate must be console, connect or handshake".to_owned());
+                    return Err(
+                        "fake_foreground_gate must be console, connect or handshake".to_owned()
+                    );
                 }
                 std::env::var_os("NVX_TEST_FOREGROUND_GATE_DIR")
                     .map(|directory| (phase.to_owned(), PathBuf::from(directory)))

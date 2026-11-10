@@ -772,8 +772,7 @@ impl TerminalGuard {
     #[allow(unsafe_code)]
     fn enable_interrupts() -> io::Result<()> {
         use windows_sys::Win32::System::Console::{
-            ENABLE_PROCESSED_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
-            SetConsoleMode,
+            ENABLE_PROCESSED_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode,
         };
 
         let mut mode = 0;
