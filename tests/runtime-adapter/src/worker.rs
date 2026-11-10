@@ -301,6 +301,8 @@ pub mod probes;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(target_arch = "x86_64")]
+use std::net::{Ipv4Addr, UdpSocket};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
@@ -323,8 +325,6 @@ use nvx::guest::clone::ApplyError;
 #[cfg(target_arch = "x86_64")]
 use nvx::guest::clone::{self, Activation, RootTemplate};
 use nvx::guest::entry::{self, Entry, Identity, Prepared, Publication};
-#[cfg(target_arch = "x86_64")]
-use nvx::guest::ingress::{Announcer, StartError};
 use nvx::guest::mappings::{Mapping, SourceRoot};
 use nvx::guest::nvxs::GuestConnectionError;
 use nvx::guest::process::Child;
@@ -1138,7 +1138,7 @@ fn run_probe(operations: &mut dyn RootOperations, body: &[u8]) -> Message {
 pub struct LibraryRoot {
     /// The temporary adapter's announcer, started by this caller only after library application.
     #[cfg(target_arch = "x86_64")]
-    announcer: Option<Announcer>,
+    announcer: Option<Announcement>,
     /// The process ID of PID 1's unrelated child, which the probes check, if PID 1 named one.
     sibling: Option<u32>,
     /// What the bootstrap prepared, once it ran.
@@ -1386,7 +1386,11 @@ impl RootOperations for LibraryRoot {
     /// down with its view binds. A root whose teardown failed keeps its mounts.
     fn teardown(&mut self) -> Result<(), String> {
         #[cfg(target_arch = "x86_64")]
-        let stopped = self.announcer.take().map(Announcer::stop).transpose();
+        let stopped = self
+            .announcer
+            .take()
+            .map(|mut announcement| announcement.stop())
+            .transpose();
         self.export = None;
         let torn = match self.root.take() {
             Some(root) => root.teardown(),
@@ -1406,7 +1410,7 @@ impl RootOperations for LibraryRoot {
     fn announcer(&self) -> Option<BorrowedFd<'_>> {
         #[cfg(target_arch = "x86_64")]
         {
-            self.announcer.as_ref().map(Announcer::pidfd)
+            self.announcer.as_ref().and_then(|child| child.0.pidfd())
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -1414,12 +1418,11 @@ impl RootOperations for LibraryRoot {
         }
     }
 
-    /// Collects the status of the announcer that this caller started, with
-    /// `nvx::guest::ingress::Announcer::try_wait`.
+    /// Collects the status of the announcer that this caller started.
     fn announcer_ended(&mut self) -> Option<String> {
         #[cfg(target_arch = "x86_64")]
         {
-            match self.announcer.as_mut()?.try_wait() {
+            match self.announcer.as_mut()?.0.try_wait() {
                 Ok(None) => None,
                 Ok(Some(status)) => Some(format!(
                     "the announcer of the workload's listeners ended: {status}"
@@ -1450,7 +1453,7 @@ impl RootOperations for LibraryRoot {
             let gateway = applied
                 .gateway()
                 .expect("application checked a published gateway");
-            let announcer = match Announcer::start(gateway) {
+            let announcer = match Announcement::start(gateway) {
                 Ok(announcer) => announcer,
                 Err(error) => {
                     let teardown = applied.teardown().err();
@@ -1468,11 +1471,11 @@ impl RootOperations for LibraryRoot {
 /// A temporary adapter caller's announcer failure, after successful library application.
 #[cfg(target_arch = "x86_64")]
 #[derive(Debug)]
-struct AnnounceFailure {
+pub struct AnnounceFailure {
     /// Why the caller could not start ingress.
-    error: StartError,
+    pub error: io::Error,
     /// Any failure while closing the export and tearing the applied root down.
-    teardown: Option<clone::AppliedTeardownError>,
+    pub teardown: Option<clone::AppliedTeardownError>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1490,6 +1493,90 @@ impl std::fmt::Display for AnnounceFailure {
 impl std::error::Error for AnnounceFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
+    }
+}
+
+/// The temporary adapter's announcer, stopped and reaped before its applied root is dropped.
+#[cfg(target_arch = "x86_64")]
+#[derive(Debug)]
+struct Announcement(Child);
+
+#[cfg(target_arch = "x86_64")]
+impl Announcement {
+    /// Binds the announcer's privileged socket before launching its program.
+    fn start(gateway: Ipv4Addr) -> io::Result<Self> {
+        for port in (512..=1023).rev() {
+            match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)) {
+                Ok(socket) => {
+                    let command = spawn::Command::new(
+                        c"/sbin/nvx-ingress".to_owned(),
+                        vec![
+                            c"nvx-ingress".to_owned(),
+                            c"inherit".to_owned(),
+                            std::ffi::CString::new(gateway.to_string())
+                                .expect("an IPv4 address has no NUL"),
+                        ],
+                    );
+                    return Self::launch(command, socket);
+                }
+                Err(error) if error.raw_os_error() == Some(Errno::EADDRINUSE as i32) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "no privileged source port, from 1023 down to 512, is free for the announcer's socket",
+        ))
+    }
+
+    /// Launches `command` with the bound socket and takes responsibility for its child.
+    fn launch(command: spawn::Command, socket: UdpSocket) -> io::Result<Self> {
+        let spawned = command
+            .stdin(socket)
+            .new_session()
+            .reset_signals()
+            .spawn()?;
+        let id = spawned.id();
+        let launched = spawned
+            .into_report()
+            .wait()
+            .and_then(|failure| match failure {
+                None => Child::with_pidfd(id),
+                Some(failure) => Err(io::Error::other(failure)),
+            });
+        match launched {
+            Ok(child) => Ok(Self(child)),
+            Err(error) => {
+                let mut failed = Self(Child::new(id)?);
+                match failed.stop() {
+                    Ok(_) => Err(error),
+                    Err(cleanup) => Err(io::Error::new(
+                        error.kind(),
+                        format!("{error}; cannot stop the failed announcer: {cleanup}"),
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Stops only this uncollected child, whose process ID cannot yet have been reused.
+    fn stop(&mut self) -> io::Result<ExitStatus> {
+        if self.0.status().is_none() {
+            match signal::kill(pid(self.0.id()), Signal::SIGKILL) {
+                Ok(()) | Err(Errno::ESRCH) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.0.wait()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Drop for Announcement {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop() {
+            eprintln!("runtime-adapter-guest: cannot stop the announcer: {error}");
+        }
     }
 }
 
