@@ -225,7 +225,25 @@ fn launched_waits_return_and_retain_the_actual_exit_status() {
         let launched = vmm.launched.as_mut().unwrap();
         assert_eq!(launched.wait_timeout(TIMEOUT).unwrap(), Some(status));
         assert_eq!(launched.wait_timeout(Duration::ZERO).unwrap(), Some(status));
+        vmm.launched.take().unwrap().kill_and_confirm_exit().unwrap();
     }
+}
+
+#[test]
+fn strict_cleanup_terminates_and_confirms_a_running_child() {
+    let mut vmm = VmmDirectory::new();
+    let command = VmmCommand::new(
+        env::current_exe().unwrap(),
+        fixture_arguments("vmm_fixture"),
+        vmm.path(),
+    );
+    let log = File::create(vmm.path().join("vmm.log")).unwrap();
+    vmm.launched = Some(supervisor::spawn_vm(&command, &CAPABILITY, log).unwrap());
+    vmm.report(STARTED_REPORT);
+    let process = vmm.launched.as_ref().unwrap().process().unwrap();
+    assert!(!process.has_exited().unwrap());
+    vmm.launched.take().unwrap().kill_and_confirm_exit().unwrap();
+    assert!(process.has_exited().unwrap());
 }
 
 /// Returns the arguments that pass a VMM fixture the `--microvm-sandbox-block` values of
