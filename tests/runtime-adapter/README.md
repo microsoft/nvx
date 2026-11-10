@@ -2559,6 +2559,11 @@ configuration, on Linux and Windows:
   in the initramfs too, and missing install metadata, which fails as NVX
   reports it.
 
+`tests/listener_client.rs` checks, in the host-only configuration, the real TCP
+greeting and answer of the VM tests' listener client on Linux and Windows.
+On Linux it also checks that a self-connection leaves the guest's publication
+port bindable and that a connection reset before inspection is retried.
+
 `tests/staged_images.rs` checks, in the host-only configuration, on Linux and
 Windows:
 
@@ -3217,8 +3222,8 @@ layered roots, captures of templates, and the starts and runs of their clones.
 
 The VM tests, `tests/vm_restart.rs`, `tests/vm_steps.rs`,
 `tests/vm_layered.rs`, `tests/vm_template.rs`, and `tests/vm_clone.rs`, share
-their sandboxes and
-the fixtures of their layered roots through `tests/common`. The sandboxes start
+their sandboxes, the fixtures of their layered roots, and their host listener
+client through `tests/common`. The sandboxes start
 the host program's commands with `nvx::host::supervisor::spawn_command`, so
 that on Windows a command cannot inherit the handles of a VM that a test
 launches in its own process meanwhile, such as its log and its capability's

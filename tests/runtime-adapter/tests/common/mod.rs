@@ -494,7 +494,12 @@ pub(crate) fn reach_guest_with(
         let connected = connect(address);
         #[cfg(target_os = "linux")]
         let connected = connected.and_then(|stream| {
-            if stream.local_addr().unwrap() == stream.peer_addr().unwrap() {
+            let peer = match stream.peer_addr() {
+                Ok(peer) => peer,
+                Err(error) if error.kind() == io::ErrorKind::NotConnected => return Err(error),
+                Err(error) => panic!("inspect the listener client's peer: {error}"),
+            };
+            if stream.local_addr().unwrap() == peer {
                 // Linux can assign the unpublished destination as this client's source port.
                 // Reset that self-connection so TIME_WAIT cannot block the later publication.
                 nix::sys::socket::setsockopt(
