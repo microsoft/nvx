@@ -161,7 +161,8 @@ pub struct Boot {
     /// The root's tokens, `nvx_hostname`, `nvx_machine_id`, `nvx_maps` and `virtfs_*` are reserved;
     /// every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
     /// A capture permits only OpenVMM's platform allowlist and refuses caller tokens whose
-    /// tier, processor, console, device or network settings the builder supplies.
+    /// tier, processor, console, device or network settings the builder supplies. It requires
+    /// exactly one `nvx_sandbox=1` token, as the guest's init splits the command line.
     pub command_line: String,
     /// What a capture of the VM adds, if the VM may be captured.
     pub capture: Option<CaptureConfig>,
@@ -501,6 +502,13 @@ impl VmConfig {
                     "Boot.command_line uses the forbidden platform capture token {name:?}"
                 )));
             }
+        }
+        let mut sandbox = cmdline::init_tokens(boot.command_line.as_bytes())
+            .filter(|token| token.name == b"nvx_sandbox");
+        if sandbox.next().and_then(|token| token.value) != Some(b"1") || sandbox.next().is_some() {
+            return Err(Error::unsupported(
+                "a fresh capture needs exactly one nvx_sandbox=1 token",
+            ));
         }
         let mut command_line = boot.command_line.clone();
         if capture.processors.boot < capture.processors.capacity {
