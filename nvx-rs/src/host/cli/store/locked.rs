@@ -43,6 +43,24 @@ impl Drop for LockedState {
     }
 }
 
+impl LockedState {
+    pub(crate) fn directory(&self) -> Result<platform::Directory> {
+        let directory = platform::Directory::open(self.dir()).map_err(Exit::from_os_error)?;
+        let held = platform::opened_file_id(&self.lock).map_err(Exit::from_os_error)?;
+        if directory
+            .entry_id(StateFile::Lock.name())
+            .map_err(Exit::from_os_error)?
+            != Some(held)
+        {
+            return Err(Exit::error(
+                ErrorCode::Io,
+                "the directory that the path names does not hold the sandbox's lock",
+            ));
+        }
+        Ok(directory)
+    }
+}
+
 impl StateDir {
     /// Takes the lock of the directory, trying it again every 25 ms until `deadline`.
     ///

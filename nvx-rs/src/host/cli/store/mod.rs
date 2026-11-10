@@ -36,14 +36,6 @@
 //! Taking the next lock recovers an interrupted, uncommitted launch before allowing mutation:
 //! it ends only a verified process, removes its journal and capability only after proved exit,
 //! and refuses indeterminate recovery without changing that evidence.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "SL3.5b switches the sandbox lifecycle commands to the CLI's own store"
-    )
-)]
-
 mod files;
 mod launch;
 mod liveness;
