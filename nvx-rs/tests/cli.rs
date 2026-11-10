@@ -380,22 +380,18 @@ fn exec_and_stop_tell_a_directory_without_a_sandbox_from_a_stopped_sandbox() {
 
 #[test]
 fn a_sandbox_whose_configuration_names_another_layer_role_does_not_start() {
-    // A sandbox takes only the distro layer, so a configuration whose layers name another role is
-    // malformed: the start refuses it before OpenVMM starts, and deprovision, which reads no
-    // layers, still removes the sandbox.
+    // The typed record takes one image, not additional named layers. Injecting another role is
+    // refused before spawn, while deprovision still removes the sandbox.
     let root = Root::new();
     let output = run(&root, &provision(&root, "other-role", ""));
     assert!(output.status.success(), "{}", text(&output.stderr));
     let config = root.path.join("other-role").join("config.json");
     let mut document: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
-    document["layers"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "path": root.path.join("runtime.erofs").to_str().unwrap(),
-            "role": "runtime",
-            "uuid": "22222222-2222-2222-2222-222222222222",
-        }));
+    document["layers"] = serde_json::json!([{
+        "path": root.path.join("runtime.erofs").to_str().unwrap(),
+        "role": "runtime",
+        "uuid": "22222222-2222-2222-2222-222222222222",
+    }]);
     fs::write(&config, serde_json::to_string_pretty(&document).unwrap()).unwrap();
     let output = run(&root, &lifecycle("start", &root, "other-role"));
     assert_eq!(output.status.code(), Some(1));
