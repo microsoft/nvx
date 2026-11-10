@@ -186,6 +186,67 @@ impl Options {
         panic!("{context}: the OpenVMM options differ:\n{differences}");
     }
 
+    /// Projects the old persistent-case inputs onto the CLI-owned managed boot contract.
+    pub(crate) fn persistent_expected(mut self) -> Self {
+        let identities = self.take("--microvm-workload-identity");
+        let [identity] = identities.as_slice() else {
+            panic!("a persistent fixture names one workload identity");
+        };
+        assert_eq!(self.take("--microvm-lifecycle"), ["managed"]);
+        let line = self.value("--cmdline").to_owned();
+        let tokens: Vec<_> = line.split_ascii_whitespace().collect();
+        let hostname = tokens
+            .iter()
+            .find_map(|token| token.strip_prefix("nvx_hostname="))
+            .unwrap();
+        let mut kernel: Vec<String> = tokens
+            .iter()
+            .filter(|token| {
+                token.starts_with("nvx_layer=")
+                    || token.starts_with("nvx_scratch=")
+                    || token.starts_with("nvx_overlay_upper=")
+            })
+            .map(|token| (*token).to_owned())
+            .collect();
+        kernel.push("nvx_overlay_mode=trusted-lowers".to_owned());
+        kernel.push(
+            if tokens.contains(&RAM_UPPER) {
+                "nvx_ram_upper_percent=50"
+            } else {
+                "nvx_scratch_journal=allowed"
+            }
+            .to_owned(),
+        );
+        kernel.push(format!(
+            "nvx_hostname={}",
+            hostname
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
+        kernel.push("nvx_machine_id=image".to_owned());
+        kernel.extend(
+            tokens
+                .iter()
+                .filter(|token| token.starts_with("nvx_maps="))
+                .map(|token| (*token).to_owned()),
+        );
+        kernel.extend([
+            "nvx_sandbox=1".to_owned(),
+            "nvx_mode=managed".to_owned(),
+            format!("nvx_identity={identity}"),
+        ]);
+        kernel.extend(
+            tokens
+                .iter()
+                .filter(|token| !token.starts_with("nvx_"))
+                .map(|token| (*token).to_owned()),
+        );
+        self.with("--processors", ["1"])
+            .with("--guest-shutdown-action", ["exit"])
+            .kernel(&kernel)
+    }
+
     /// Projects an old cold-run fixture onto the checked public VM contract, independently of
     /// the CLI parser and its private token renderer. Restore and sandbox fixtures stay old.
     pub(crate) fn cold_run_expected(&self, root: &Root, mode: &str) -> nvx::Result<Self> {

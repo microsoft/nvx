@@ -1363,8 +1363,8 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         if VALUED.contains(&name) || RUN_VALUED.contains(&name) || CAPTURE_VALUED.contains(&name) {
             let _ = option_arguments.next();
         }
-        let cold_sandbox = !run && !capture && !lifecycle_option;
     }
+    let cold_sandbox = !run && !capture && !lifecycle_option;
     let mut values: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut flags = BTreeSet::new();
     let mut iterator = arguments.iter();
