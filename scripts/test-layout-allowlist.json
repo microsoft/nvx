@@ -5,7 +5,7 @@
     "nvx-rs/src/guest/cgroup.rs": 2,
     "nvx-rs/src/guest/entry.rs": 1,
     "nvx-rs/src/guest/exec.rs": 4,
-    "nvx-rs/src/guest/init.rs": 6,
+    "nvx-rs/src/guest/init.rs": 8,
     "nvx-rs/src/guest/init/boot.rs": 1,
     "nvx-rs/src/guest/reseed.rs": 1,
     "nvx-rs/src/guest/sys/entry.rs": 3,
