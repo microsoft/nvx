@@ -450,7 +450,9 @@ impl Drop for VmmDirectory {
         let _ = File::create(self.path().join(EXIT_MARKER));
         if let Some(reference) = &self.reference
             && let Ok(Some(process)) = Process::open(reference)
-            && !process.wait(Instant::now() + TIMEOUT).unwrap_or(false)
+            && !process
+                .wait(Instant::now() + TIMEOUT)
+                .is_ok_and(|exited| exited.is_some())
         {
             let _ = process.kill();
             let _ = process.wait(Instant::now() + TIMEOUT);
@@ -613,7 +615,13 @@ fn long_stores_launch_with_a_short_working_directory() {
     let mut vmm = VmmDirectory::new();
     let mut locked = store.lock(None).unwrap();
     let running = launch_vmm(&mut locked, &mut vmm);
-    assert!(!running.process().wait(Instant::now() + SHORT_WAIT).unwrap());
+    assert!(
+        running
+            .process()
+            .wait(Instant::now() + SHORT_WAIT)
+            .unwrap()
+            .is_none()
+    );
     let stopped = running
         .stop(&mut locked, Instant::now() + TIMEOUT, None, |_, _| {
             vmm.end();
@@ -671,15 +679,15 @@ fn a_child_that_exits_wakes_its_waiter() {
     assert_eq!(process.reference().boot, BootId::current().unwrap());
     assert_eq!(process.wait_method(), WaitMethod::Event);
     assert!(!process.has_exited().unwrap());
-    assert!(!process.wait(Instant::now() + SHORT_WAIT).unwrap());
+    assert!(process.wait(Instant::now() + SHORT_WAIT).unwrap().is_none());
     // The reference finds the same process through a handle of its own.
     let found = open_running(process.reference());
     assert_eq!(found.reference(), process.reference());
 
     let started = Instant::now();
     vmm.end();
-    assert!(process.wait(started + TIMEOUT).unwrap());
-    assert!(found.wait(started + TIMEOUT).unwrap());
+    assert!(process.wait(started + TIMEOUT).unwrap().is_some());
+    assert!(found.wait(started + TIMEOUT).unwrap().is_some());
     assert!(started.elapsed() < TIMEOUT);
     assert_ended(&process);
     // Ending a process that exited does nothing.
@@ -698,12 +706,12 @@ fn a_process_that_is_not_a_child_wakes_its_waiters() {
     launcher.finish();
     let process = open_running(&reference);
     assert_eq!(process.wait_method(), WaitMethod::Event);
-    assert!(!process.wait(Instant::now() + SHORT_WAIT).unwrap());
+    assert!(process.wait(Instant::now() + SHORT_WAIT).unwrap().is_none());
 
     let started = Instant::now();
     let waiters: Vec<bool> = thread::scope(|scope| {
         let waiters: Vec<_> = (0..2)
-            .map(|_| scope.spawn(|| process.wait(started + TIMEOUT).unwrap()))
+            .map(|_| scope.spawn(|| process.wait(started + TIMEOUT).unwrap().is_some()))
             .collect();
         vmm.end();
         waiters
@@ -740,10 +748,10 @@ fn a_restarted_launcher_finds_its_vmm_again_and_ends_it() {
     vmm.record(&reference);
     let process = open_running(&reference);
     assert_eq!(process.wait_method(), WaitMethod::Event);
-    assert!(!process.wait(Instant::now() + SHORT_WAIT).unwrap());
+    assert!(process.wait(Instant::now() + SHORT_WAIT).unwrap().is_none());
     let started = Instant::now();
     process.kill().unwrap();
-    assert!(process.wait(started + TIMEOUT).unwrap());
+    assert!(process.wait(started + TIMEOUT).unwrap().is_some());
     assert_ended(&process);
 }
 
@@ -783,7 +791,7 @@ fn a_reused_process_id_is_never_signaled() {
     assert!(!process.has_exited().unwrap());
     open_running(&reference);
     vmm.end();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     assert!(launched.kill_and_wait());
 }
 
@@ -814,7 +822,7 @@ fn references_that_name_no_process_are_never_opened() {
     let launched = spawn_vmm(vmm.path(), false);
     let process = launched.process().unwrap();
     vmm.end();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     assert!(launched.kill_and_wait());
     assert!(Process::open(process.reference()).unwrap().is_none());
     assert!(process.has_exited().unwrap());
@@ -877,7 +885,7 @@ fn an_unrecorded_vmm_that_serves_no_endpoint_is_never_signaled() {
     assert!(store.journal().unwrap().is_some());
     // Once the VMM exits, the claim that it released proves it.
     vmm.end();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     match reattach_until_determinate(&mut locked) {
         Reattached::Exited {
             record: None,
@@ -1264,7 +1272,7 @@ fn check_vmm(reader: PipeReader, writer: &PipeWriter, others: &Mutex<Vec<usize>>
         }
     }
     vmm.end();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     assert!(launched.kill_and_wait());
 }
 
@@ -1493,7 +1501,7 @@ fn a_vmm_in_its_orchestrators_job_ends_with_it() {
     // The VMM did not break away, so closing the job ends it with its orchestrator.
     drop(job);
     orchestrator.wait();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     let mut locked = store.lock(Some(Instant::now() + TIMEOUT)).unwrap();
     match supervisor::reattach(&mut locked, &runtime()).unwrap() {
         Reattached::Exited {
@@ -1517,10 +1525,10 @@ fn a_job_that_ends_its_vmm_wakes_the_waiters() {
     vmm.record(&reference);
     // The VMM did not break away, so the job holds it too, and closing the job ends it.
     let process = open_running(&reference);
-    assert!(!process.wait(Instant::now() + SHORT_WAIT).unwrap());
+    assert!(process.wait(Instant::now() + SHORT_WAIT).unwrap().is_none());
     let started = Instant::now();
     drop(job);
-    assert!(process.wait(started + TIMEOUT).unwrap());
+    assert!(process.wait(started + TIMEOUT).unwrap().is_some());
     assert_ended(&process);
     launcher.wait();
 }
@@ -1587,7 +1595,7 @@ fn a_process_that_this_user_may_not_terminate_is_waited_for_but_never_signaled()
 
     // Its creator ends it, which wakes the waiter, and ending a process that exited does nothing.
     child.0.kill().unwrap();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     process.kill().unwrap();
     assert_ended(&process);
 }

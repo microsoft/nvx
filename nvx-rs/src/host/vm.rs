@@ -16,6 +16,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::host::config::{ConsoleAttachment, RootConfig, UpperConfig, VmConfig};
 use crate::host::filesystem;
@@ -25,6 +26,7 @@ use crate::host::platform;
 use crate::host::platform::{check_store_dir as check_dir, create_store_dir as create_dir};
 #[cfg(windows)]
 use crate::host::platform::{check_vm_dir as check_dir, create_vm_dir as create_dir};
+use crate::host::report::{self, Report};
 use crate::host::runtime::{Runtime, RuntimeIdentity};
 use crate::host::snapshot::Snapshot;
 use crate::host::spawn::{self, VmmCommand};
@@ -520,6 +522,78 @@ pub struct Launched {
 /// retaining their source; an exit-confirmation failure is reported with the original error.
 pub fn spawn(prepared: Prepared) -> Result<Launched> {
     spawn_verified(prepared, spawn::Launched::process)
+}
+
+/// A confirmed VM exit, with the outcome-report read kept separate from exit proof.
+#[derive(Debug)]
+pub struct Stopped {
+    /// Exit was confirmed before any forced termination was attempted.
+    pub self_exited: bool,
+    /// Forced termination through the verified process was attempted.
+    pub forced: bool,
+    /// The outcome summary, missing report, or report-read error after confirmed exit.
+    pub report: Result<Option<Report>>,
+}
+
+/// Stops a VM, returning only after its verified process has exited.
+///
+/// Unless exit is already confirmed, calls `graceful` with `grace`, bounded by `deadline`,
+/// then waits until that grace deadline. The callback must respect the supplied deadline;
+/// its boolean request result is not exit proof. If exit is still unconfirmed, attempts
+/// forced termination and waits until `deadline`. A failed termination is harmless only
+/// when that final wait confirms exit.
+///
+/// An unconfirmed exit fails with [`ErrorKind::StillRunning`](crate::ErrorKind::StillRunning),
+/// retaining host errors. The caller keeps the process in that case.
+/// Report-read errors have kind [`ErrorKind::Io`](crate::ErrorKind::Io)
+/// inside [`Stopped::report`], never hiding confirmed exit.
+pub fn stop(
+    process: &Process,
+    outputs: &VmOutputs,
+    graceful: impl FnOnce(Instant) -> bool,
+    grace: Instant,
+    deadline: Instant,
+) -> Result<Stopped> {
+    let failure = |kill_error: Option<&io::Error>| {
+        let mut message = format!(
+            "cannot confirm exit of VM process {}",
+            process.reference().pid
+        );
+        if let Some(error) = kill_error {
+            message.push_str(&format!("; forced termination failed: {error}"));
+        }
+        Error::new(crate::ErrorKind::StillRunning, message)
+    };
+    let wait = |until| {
+        process
+            .wait(until)
+            .map_err(|error| failure(None).with_source(error))
+    };
+    let self_exited = if wait(Instant::now())?.is_some() {
+        true
+    } else {
+        let grace = grace.min(deadline);
+        graceful(grace);
+        wait(grace)?.is_some()
+    };
+    if !self_exited {
+        let kill_error = process.kill().err();
+        let exited = process
+            .wait(deadline)
+            .map_err(|error| failure(kill_error.as_ref()).with_source(error))?;
+        if exited.is_none() {
+            let error = failure(kill_error.as_ref());
+            return Err(match kill_error {
+                Some(source) => error.with_source(source),
+                None => error,
+            });
+        }
+    }
+    Ok(Stopped {
+        self_exited,
+        forced: !self_exited,
+        report: report::read(&outputs.outcome),
+    })
 }
 
 /// Keeps the child owned until its process identity is verified, or its exit is confirmed.
