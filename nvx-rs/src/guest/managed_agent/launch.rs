@@ -116,6 +116,19 @@ fn defaults(
     directory: &CStr,
 ) -> Result<(Vec<CString>, bool), Errno> {
     let mut environment = environment::inherited()?;
+    if let Some(proxy) = &config.restored_proxy {
+        for name in [
+            b"http_proxy".as_slice(),
+            b"https_proxy",
+            b"HTTP_PROXY",
+            b"HTTPS_PROXY",
+        ] {
+            match proxy {
+                Some(proxy) => environment::set(&mut environment, name, proxy.as_bytes())?,
+                None => environment::remove(&mut environment, name),
+            }
+        }
+    }
     environment::set(&mut environment, b"HOME", config.home.as_bytes())?;
     environment::set(&mut environment, b"USER", config.user.as_bytes())?;
     environment::set(&mut environment, b"LOGNAME", config.user.as_bytes())?;

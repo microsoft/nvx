@@ -14,6 +14,7 @@ fn config(direct: bool) -> AgentConfig {
         gid: c"1001".to_owned(),
         user: c"workload".to_owned(),
         home: c"/home/workload".to_owned(),
+        restored_proxy: None,
         direct,
         entry: None,
     }
@@ -98,7 +99,8 @@ fn direct_launch_uses_the_plain_process_core_without_a_helper_or_cgroup() {
 #[test]
 fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
     let paths = Paths::default();
-    let config = config(true);
+    let mut config = config(true);
+    config.restored_proxy = Some(Some("http://restore.example:3128".to_owned()));
     let exact = GuestExecPayload {
         environment: Some(vec![
             b"EMPTY=".to_vec(),
@@ -144,6 +146,67 @@ fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
         strings(&prepare_direct(&paths, &config, &layered).environment),
         expected
     );
+}
+
+#[test]
+fn restored_proxy_defaults_replace_template_values_before_exec_overrides() {
+    const CHILD: &str = "NVX_RESTORED_PROXY_DEFAULTS_CHILD";
+    let names = ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"];
+    if std::env::var_os(CHILD).is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "guest::managed_agent::launch::tests::restored_proxy_defaults_replace_template_values_before_exec_overrides",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1");
+        for name in names {
+            child.env(name, "http://template.example:8080");
+        }
+        assert!(child.status().unwrap().success());
+        return;
+    }
+    let mut config = config(true);
+    config.restored_proxy = Some(Some("http://restore.example:3128".to_owned()));
+    let plan = direct_request(&config, &execution()).unwrap();
+    for name in names {
+        let expected = format!("{name}=http://restore.example:3128");
+        assert!(strings(&plan.environment).contains(&expected.as_bytes()));
+        assert_eq!(std::env::var(name).unwrap(), "http://template.example:8080");
+    }
+    let layered = GuestExecPayload {
+        environment: Some(vec![
+            b"HTTP_PROXY=http://first.example:1".to_vec(),
+            b"HTTP_PROXY=http://exec.example:2".to_vec(),
+        ]),
+        inherit_default_env: true,
+        ..execution()
+    };
+    let plan = direct_request(&config, &layered).unwrap();
+    assert!(strings(&plan.environment).contains(&b"HTTP_PROXY=http://exec.example:2".as_slice()));
+    assert!(
+        strings(&plan.environment).contains(&b"http_proxy=http://restore.example:3128".as_slice())
+    );
+
+    config.restored_proxy = Some(None);
+    let plan = direct_request(&config, &execution()).unwrap();
+    for name in names {
+        let prefix = format!("{name}=");
+        assert!(
+            strings(&plan.environment)
+                .iter()
+                .all(|entry| !entry.starts_with(prefix.as_bytes()))
+        );
+    }
+    assert!(strings(&plan.environment).contains(&b"HOME=/home/workload".as_slice()));
+    config.restored_proxy = None;
+    let plan = direct_request(&config, &execution()).unwrap();
+    for name in names {
+        let expected = format!("{name}=http://template.example:8080");
+        assert!(strings(&plan.environment).contains(&expected.as_bytes()));
+    }
 }
 
 #[test]
