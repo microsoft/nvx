@@ -62,7 +62,10 @@ pub const APP_MAPS: u8 = 6;
 pub(crate) const APP_CAPTURE: u8 = 7;
 /// Request that nvx-init activate a restored VM with its record and workload identity.
 #[cfg_attr(
-    not(test),
+    not(any(
+        test,
+        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    )),
     expect(
         dead_code,
         reason = "SL4.3 sends activation requests to nvx-init in SL7.7b"
@@ -204,7 +207,10 @@ pub(crate) fn encode_activate_payload(
 
 /// Decodes the persistent workload identity and the activation record that follows it.
 #[cfg_attr(
-    not(test),
+    not(any(
+        test,
+        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    )),
     expect(dead_code, reason = "SL7.7b makes nvx-init decode activation requests")
 )]
 pub(crate) fn decode_activate_payload(

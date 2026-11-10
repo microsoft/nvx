@@ -9,6 +9,219 @@ const CLI: &str = "nvx_identity=1000:1001 nvx_control_tty=hvc2";
 const EXPORT: &str =
     "virtfs_dir=/run/nvx/hostfs/root virtfs_tag=hostfs virtfs_mode=rw virtfs_aggregate=1";
 
+#[test]
+fn restored_sessions_keep_the_deadline_of_the_actual_repair_acknowledgement() {
+    let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
+    let acknowledged = repaired.acknowledged_at().unwrap();
+    let mut restored = Restored::new(&repaired, acknowledged + Duration::from_secs(12));
+    let deadline = acknowledged + Duration::from_secs(30);
+    assert_eq!(restored.activation.deadline(), Some(deadline));
+    restored
+        .reset(acknowledged + Duration::from_secs(13))
+        .unwrap();
+    restored
+        .reset(acknowledged + Duration::from_secs(20))
+        .unwrap();
+    assert_eq!(restored.activation.deadline(), Some(deadline));
+    let (_, payload) = super::super::Capture::activation_fixture();
+    assert!(matches!(
+        restored
+            .accept(&payload, acknowledged + Duration::from_secs(21))
+            .unwrap()
+            .0,
+        ActivationAction::Apply(_)
+    ));
+    restored
+        .reset(acknowledged + Duration::from_secs(29))
+        .unwrap();
+    assert!(matches!(
+        restored
+            .accept(&payload, acknowledged + Duration::from_secs(29))
+            .unwrap()
+            .0,
+        ActivationAction::Join
+    ));
+    assert_eq!(restored.activation.deadline(), Some(deadline));
+    assert!(
+        restored
+            .reset(deadline)
+            .unwrap_err()
+            .to_string()
+            .contains("deadline")
+    );
+    assert_eq!(restored.activation.state(), ActivationState::Failed);
+}
+
+#[test]
+fn restored_resource_steps_finish_before_completion_and_ready() {
+    use crate::activation::{Network, Publication, ReadyActivation};
+    use std::cell::RefCell;
+    let (mut capture, mut payload) = super::super::Capture::activation_fixture();
+    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+    let mut configuration = record.configuration().clone();
+    configuration.network = Some(Network {
+        dns: Some("10.88.0.53".parse().unwrap()),
+        publication: Publication::Published,
+        proxy: Some("http://10.88.0.1:3128".into()),
+    });
+    let record =
+        activation::ActivationRecord::new(record.restore().copied(), configuration).unwrap();
+    payload.truncate(9);
+    payload.extend(record.encode());
+    let restored = capture.restored.as_mut().unwrap();
+    let (ActivationAction::Apply(accepted), _) = restored.accept(&payload, Instant::now()).unwrap()
+    else {
+        panic!("one accepted activation");
+    };
+    let calls = RefCell::new(Vec::new());
+    let (retained, ()) = restore_in_order(
+        None,
+        || {
+            calls.borrow_mut().push("apply");
+            Ok(accepted.configuration().clone())
+        },
+        |space| {
+            calls.borrow_mut().push("mount-runtime");
+            assert_eq!(
+                space.network.as_ref().unwrap().dns,
+                Some("10.88.0.53".parse().unwrap())
+            );
+            assert_eq!(
+                space.upper,
+                activation::Upper::Tmpfs {
+                    max_memory_percent: 63
+                }
+            );
+            Ok(())
+        },
+        |space| {
+            assert_eq!(
+                space.network.as_ref().unwrap().publication,
+                Publication::Published
+            );
+            calls.borrow_mut().push("owned-announcer");
+            Ok(())
+        },
+        |_| {
+            calls.borrow_mut().push("switch");
+            Ok(())
+        },
+        |_| panic!("a successful switched root is retained"),
+    )
+    .unwrap();
+    assert_eq!(retained.network, accepted.configuration().network);
+    let ready = restored
+        .activation
+        .complete(Instant::now(), Ok(()))
+        .unwrap();
+    calls.borrow_mut().push("complete");
+    assert_eq!(ready, ReadyActivation::of(&accepted));
+    calls.borrow_mut().push("ready");
+    assert_eq!(
+        *calls.borrow(),
+        [
+            "apply",
+            "mount-runtime",
+            "owned-announcer",
+            "switch",
+            "complete",
+            "ready"
+        ]
+    );
+    assert!(matches!(
+        restored.accept(&payload, Instant::now()).unwrap().0,
+        ActivationAction::Ready(_)
+    ));
+}
+
+#[test]
+fn restored_setup_drops_prepared_handles_before_cleanup_and_preserves_both_errors() {
+    use std::cell::RefCell;
+    struct Handle<'a>(&'a RefCell<Vec<&'static str>>);
+    impl Drop for Handle<'_> {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("close-mapper");
+        }
+    }
+    let calls = RefCell::new(Vec::new());
+    let error = restore_in_order(
+        None,
+        || {
+            calls.borrow_mut().push("apply");
+            Ok(())
+        },
+        |_| {
+            calls.borrow_mut().push("mount-runtime");
+            Ok(Handle(&calls))
+        },
+        |_| {
+            calls.borrow_mut().push("announcer-failed");
+            Err(Error::io("announcer failed"))
+        },
+        |_| panic!("failed setup cannot switch"),
+        |_| {
+            calls.borrow_mut().push("teardown");
+            Err(Error::io("teardown failed"))
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(
+        *calls.borrow(),
+        [
+            "apply",
+            "mount-runtime",
+            "announcer-failed",
+            "close-mapper",
+            "teardown"
+        ]
+    );
+    assert!(error.to_string().contains("announcer failed"));
+    assert!(error.to_string().contains("teardown failed"));
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("announcer failed")
+    );
+}
+
+#[test]
+fn an_expired_activation_cannot_begin_or_advance_to_another_space_step() {
+    assert!(
+        restore_in_order::<(), ()>(
+            Some(Instant::now()),
+            || panic!("an expired activation cannot apply"),
+            |_| panic!("cannot mount"),
+            |_| panic!("cannot announce"),
+            |_| panic!("cannot switch"),
+            |_| panic!("nothing was applied"),
+        )
+        .is_err()
+    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let applied = std::cell::Cell::new(false);
+    let cleaned = std::cell::Cell::new(false);
+    let error = restore_in_order::<(), ()>(
+        Some(deadline),
+        || {
+            applied.set(true);
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Ok(())
+        },
+        |_| panic!("an application that used its deadline cannot mount runtime"),
+        |_| panic!("cannot announce"),
+        |_| panic!("cannot switch"),
+        |_| {
+            cleaned.set(true);
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(cleaned.get(), applied.get());
+    assert!(error.to_string().contains("deadline"));
+}
+
 fn tokens(extra: &str) -> Tokens {
     Tokens::parse(format!("{ROOT} {VIEW} {CLI} {extra}").as_bytes()).unwrap()
 }
