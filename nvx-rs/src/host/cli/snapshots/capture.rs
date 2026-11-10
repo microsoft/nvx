@@ -178,6 +178,12 @@ pub(in crate::host::cli) fn parse(arguments: &[String]) -> Result<(Options, Vec<
 
 /// Uses the identified artifacts, never an unlabelled OpenVMM override or a downloaded substitute.
 pub(in crate::host::cli) fn run(root: Option<&str>, options: Options) -> Result {
+    {
+        let store = Store::create(Path::new(&options.store_dir))?;
+        let deadline = Deadline::after(f64::from(options.timeout));
+        let _lock = store.root.lock(deadline)?;
+        remove_capture(&store, deadline)?;
+    }
     let artifacts = Artifacts { root };
     let _hold = artifacts.hold()?;
     let [openvmm, kernel, initramfs] = artifacts.require()?;
