@@ -5573,17 +5573,20 @@ mod restore_exclusion {
 
         fn helper(&self, role: &str) -> OwnedChild {
             let log = File::create(self.sandbox.store.join(format!("{role}.log"))).unwrap();
-            OwnedChild(
-                Command::new(env::current_exe().unwrap())
-                    .args(["--exact", TEST, "--ignored", "--nocapture"])
-                    .env(ROLE, role)
-                    .env(DIRECTORY, &self.sandbox.store)
-                    .stdin(Stdio::piped())
-                    .stdout(log.try_clone().unwrap())
-                    .stderr(log)
-                    .spawn()
-                    .unwrap(),
-            )
+            let child = Command::new(env::current_exe().unwrap())
+                .args(["--exact", TEST, "--ignored", "--nocapture"])
+                .env(ROLE, role)
+                .env(DIRECTORY, &self.sandbox.store)
+                .stdin(Stdio::piped())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap();
+            let start = nvx::host::platform::process_start_time(child.id())
+                .unwrap()
+                .expect("the unreaped helper has its original process identity");
+            eprintln!("SL2.15 helper role={role} pid={} start={start}", child.id());
+            OwnedChild(child)
         }
 
         fn change_link_without_lock(&self) {
@@ -5693,6 +5696,13 @@ mod restore_exclusion {
         fn drop(&mut self) {
             drop(self.controller.take());
             drop(self.vmm.take());
+            if self.log_path().is_file() {
+                eprintln!(
+                    "SL2.15 native-log {}:\n{}",
+                    self.log_path().display(),
+                    self.log()
+                );
+            }
             let _exclusion = self
                 .exclusion
                 .take()
