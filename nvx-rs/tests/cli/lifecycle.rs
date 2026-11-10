@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::harness::mode;
 use crate::harness::{
     Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID, entries,
-    in_parallel, json,
+    in_parallel, is_hex, json,
 };
 use crate::openvmm::{
     NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
