@@ -192,15 +192,13 @@ class RamUpperAcceptance(LifecycleAcceptance):
         self.require_entries(self.state, PROVISIONED_ENTRIES, "after provision")
         config = json.loads((self.state / CONFIG).read_text(encoding="utf-8"))
         recorded = {
-            name: config.get(name)
-            for name in ("format", "upper", "scratch", "scratch_binding")
+            name: config[name] for name in ("format", "upper", "scratch_binding")
         }
         if recorded != {
-            "format": 8,
-            "upper": "ram",
-            "scratch": None,
+            "format": 9,
+            "upper": {"kind": "ram", "max_memory_percent": 50},
             "scratch_binding": None,
-        }:
+        } or any(name in config for name in ("layers", "scratch")):
             raise RuntimeError(f"provision recorded the RAM upper as {recorded!r}")
         self.start(description="first start")
         result = self.exec(PROBE, "--arg=init", "--arg=entry")

@@ -2921,13 +2921,15 @@ The state directory is the directory of the sandbox's
 sandbox shares, and `config.json` is the CLI's own record beside them. It also
 records the [distro binding](#distro-bindings) and the
 [scratch binding](#checked-handoff) of the sandbox, and its network as the
-typed `SandboxNetwork`, in the serde form of the plan's network, in place of
-the network options. `nvx-rs` refuses to start a sandbox that `nvx.py` or an
-earlier `nvx-rs` provisioned, which has no bindings or no typed network:
+typed `SandboxNetwork`, in the serde form of the plan's network. The typed
+configuration names one EROFS or GPT image by path and identity, and a scratch
+upper by path or a RAM upper with its cap from 1 through 90 percent, 50 by
+default. `nvx-rs` refuses earlier configuration formats rather than migrating
+them:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 8, with the export plan of its shares under `export`, `null` for none, its upper under `upper`, `scratch` or `ram`, the binding of its distro layer under `distro_binding`, its scratch image under `scratch` and that image's binding under `scratch_binding`, both `null` for an upper in RAM, and its network under `network`, `null` for none, written by `serde_json`'s pretty printer with the members of every object sorted by name, with mode 0600, through a temporary file. `start` reads it as strict JSON, as egress policy files are read, into the typed fields of format 8, and also reads the format 7 that earlier builds wrote, which records no `upper` and keeps the upper on scratch, and the format 1 that they wrote for a sandbox without shares, with `mount` `null` and no `export` |
+| `config.json` | The provisioned sandbox, in format 9 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export and network are typed, `null` when absent. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
 | `runtime.json` | The store's runtime record of the running VM, in its format 4: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |
