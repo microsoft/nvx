@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::harness::mode;
 use crate::harness::{
     Content, HYPERVISOR, Hosts, LAYER, OPENVMM, Outcome, PROVENANCE, Root, SCRATCH, UUID, entries,
-    in_parallel, is_hex, json,
+    in_parallel, json,
 };
 use crate::openvmm::{
     NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
@@ -134,23 +134,22 @@ pub(crate) fn assert_bindings(root: &Root, mut config: Value) -> Value {
     config
 }
 
-/// Asserts that `record`, the runtime record of the sandbox in the state directory `state`, below
-/// the root, is the store's format 4 for an OpenVMM that runs: with a launch ID, the OpenVMM
-/// process by its ID, start time, and the host's boot, the control endpoint, and the runtime
-/// identity that the build provenance of the root names, with this build's contracts. Returns the
-/// endpoint and the process.
+/// Checks the CLI's exact saved VM, its verified process and its installed runtime identity.
 fn assert_runtime_record(root: &Root, state: &str, record: &Value) -> (String, Process) {
     let mut names: Vec<&String> = record.as_object().unwrap().keys().collect();
     names.sort();
     assert_eq!(
         names,
-        ["endpoint", "format", "launch", "process", "runtime"],
+        ["capability", "endpoint", "process", "runtime", "vmDir"],
         "{record}"
     );
-    assert_eq!(record["format"], 4, "{record}");
-    assert!(
-        record["launch"].as_str().is_some_and(|id| is_hex(id, 32)),
-        "{record}"
+    assert_eq!(
+        Path::new(record["vmDir"].as_str().unwrap()),
+        root.below(state)
+    );
+    assert_eq!(
+        serde_json::from_value::<Vec<u8>>(record["capability"].clone()).unwrap(),
+        fs::read(root.below(state).join("control.capability")).unwrap()
     );
     let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
     let Opened::Running(process) = Process::open(&reference).unwrap() else {

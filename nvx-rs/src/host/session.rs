@@ -145,7 +145,7 @@ pub enum ExecEvent {
 /// later calls fail.
 pub struct ControlSession {
     /// The host's NVXS connection to OpenVMM's control endpoint.
-    connection: HostConnection,
+    pub(crate) connection: HostConnection,
 }
 
 impl ControlSession {

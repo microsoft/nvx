@@ -1084,7 +1084,7 @@ fn a_start_that_was_interrupted_is_ended_under_another_identity_too() {
 }
 
 #[test]
-fn runtime_records_of_earlier_formats_fail_and_name_their_format() {
+fn runtime_records_of_earlier_stores_are_refused_without_migration() {
     let root = Root::new();
     provisioned(&root, "state");
     // The runtime record that the CLI wrote before the store, in its format 1.
@@ -1096,16 +1096,17 @@ fn runtime_records_of_earlier_formats_fail_and_name_their_format() {
         serde_json::to_string(endpoint.to_str().unwrap()).unwrap()
     );
     fs::write(&path, &record).unwrap();
-    let unsupported = format!(
-        "the sandbox runtime record {} has the unsupported format 1; this build reads format 4 \
-         only and migrates no other, so stop the sandbox with the build that started it",
-        path.display()
-    );
     for operation in ["start", "exec", "stop", "deprovision"] {
-        assert_eq!(
-            transition(&root, operation, "state", &[]),
-            failed("format-unsupported", &unsupported),
-            "{operation}"
+        let output = run(&root, &lifecycle(operation, &root, "state"));
+        assert_eq!(output.status.code(), Some(1), "{operation}");
+        let error = text(&output.stderr);
+        assert!(
+            error.contains("error[io]: cannot parse"),
+            "{operation}: {error}"
+        );
+        assert!(
+            error.contains(path.to_str().unwrap()),
+            "{operation}: {error}"
         );
     }
     assert_eq!(fs::read_to_string(&path).unwrap(), record);
@@ -1141,25 +1142,21 @@ fn a_managed_start_runs_only_the_openvmm_of_the_root() {
 }
 
 #[test]
-fn stop_reports_its_timeout_and_leaves_the_vm_running() {
+fn stop_forces_the_verified_vm_after_its_grace_period_even_after_an_acknowledgement() {
     let root = Root::new();
     // A guest that never answers the stop.
     provisioned_with(&root, "unanswered", "fake_ignore_stop=1");
     assert_eq!(transition(&root, "start", "unanswered", &[]), succeeded());
-    let record = runtime_record(&root, "unanswered").unwrap();
-    assert_eq!(
-        transition(&root, "stop", "unanswered", &["--timeout", "1"]),
-        failed("timed-out", "managed control response timed out")
-    );
-    assert_eq!(runtime_record(&root, "unanswered").unwrap(), record);
-    let process = recorded_process(&root, "unanswered").expect("the VM still runs");
-    process.kill().unwrap();
+    let process = recorded_process(&root, "unanswered").expect("the VM runs");
+    let (status, error) = transition(&root, "stop", "unanswered", &["--timeout", "1"]);
+    assert_eq!(status, Some(0), "{error}");
     assert!(
-        process
-            .wait(Instant::now() + Duration::from_secs(10))
-            .unwrap()
-            .is_some()
+        error.contains("managed control response timed out"),
+        "{error}"
     );
+    assert!(error.contains("forcibly terminated"), "{error}");
+    assert!(process.has_exited().unwrap());
+    assert_eq!(runtime_record(&root, "unanswered"), None);
     assert_eq!(
         transition(&root, "deprovision", "unanswered", &[]),
         succeeded()
@@ -1168,22 +1165,14 @@ fn stop_reports_its_timeout_and_leaves_the_vm_running() {
     // A guest that shuts down, whose OpenVMM takes longer to exit than the stop waits.
     provisioned_with(&root, "slow", "fake_exit_delay_ms=4000");
     assert_eq!(transition(&root, "start", "slow", &[]), succeeded());
-    let record = runtime_record(&root, "slow").unwrap();
-    assert_eq!(
-        transition(&root, "stop", "slow", &["--timeout", "1"]),
-        failed("timed-out", "OpenVMM did not terminate after managed stop")
-    );
-    assert_eq!(runtime_record(&root, "slow").unwrap(), record);
-    let process = recorded_process(&root, "slow").expect("the VM still runs");
-    assert!(
-        process
-            .wait(Instant::now() + Duration::from_secs(30))
-            .unwrap()
-            .is_some()
-    );
+    let process = recorded_process(&root, "slow").expect("the VM runs");
+    let (status, error) = transition(&root, "stop", "slow", &["--timeout", "1"]);
+    assert_eq!(status, Some(0), "{error}");
+    assert!(error.contains("forcibly terminated"), "{error}");
+    assert!(process.has_exited().unwrap());
     assert_eq!(
         transition(&root, "stop", "slow", &[]),
-        failed("sandbox-exited", STALE)
+        failed("sandbox-not-running", "sandbox is not running")
     );
     assert_eq!(runtime_record(&root, "slow"), None);
     assert_eq!(transition(&root, "deprovision", "slow", &[]), succeeded());
