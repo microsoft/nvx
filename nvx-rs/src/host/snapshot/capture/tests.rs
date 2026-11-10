@@ -165,6 +165,7 @@ fn finish_writes_matching_metadata_and_only_its_three_entries_are_published() {
     let key =
         SnapshotKey::from_bytes(&fs::read(fixture.dir.path().join(KEY_FILE)).unwrap()).unwrap();
     assert_eq!(key, captured.key);
+    assert_eq!(key.time(), manifest.time());
     assert_eq!(key.runtime(), &fixture.context.runtime);
     assert_eq!(key.invariants(), &fixture.context.capture.invariants);
     key.check_manifest(&manifest).unwrap();

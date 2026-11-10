@@ -15,9 +15,10 @@
 //! # Canonical encoding
 //!
 //! A key and a class each have one canonical encoding, which [`SnapshotKey::to_bytes`] and
-//! [`CaptureClass::to_bytes`] write, and whose SHA-256 digest, after a domain of its own, is its
-//! identity, a [`KeyIdentity`] or a [`ClassIdentity`]. The encoding starts with its version, and
-//! each value in it has exactly one encoding:
+//! [`CaptureClass::to_bytes`] write. A key's [`KeyIdentity`] digests its compatibility prefix,
+//! excluding the appended capture-time anchors and identities; a [`ClassIdentity`] digests the
+//! complete class encoding. Both use SHA-256 after a domain of their own. Each encoding starts
+//! with its version, and each value in it has exactly one encoding:
 //!
 //! - An integer is its fixed number of little-endian bytes: one for a `u8`, two for a `u16`, four
 //!   for a `u32`, and eight for a `u64`.
@@ -141,7 +142,7 @@ impl Snapshot {
         for path in [dir.join(KEY_FILE), dir.join(DESCRIPTION_FILE)] {
             check_file(&path)?;
         }
-        let manifest = check_snapshot(&dir.join(OPENVMM_DIR))?;
+        let manifest = check_openvmm(&dir.join(OPENVMM_DIR))?;
         let path = dir.join(KEY_FILE);
         let bytes = regular::open_regular(&path)
             .and_then(|file| {
@@ -359,6 +360,15 @@ fn restore_geometry(path: &Path, description: &str) -> Result<BlockGeometry> {
         )));
     }
     sandbox::block_geometry(&file, path, description)
+}
+
+/// Adds the snapshot format's per-file owner-only checks to the legacy capture checks.
+fn check_openvmm(path: &Path) -> Result<SnapshotManifest> {
+    let manifest = check_snapshot(path)?;
+    for name in SNAPSHOT_ARTIFACTS {
+        check_file(&path.join(name))?;
+    }
+    Ok(manifest)
 }
 
 /// Names the failing snapshot entry while retaining its I/O error.
