@@ -6,6 +6,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use sha2::{Digest, Sha256};
 
+use super::CaptureContext;
 use super::canonical::{CanonicalError, Reader, Writer};
 use super::manifest::{
     AddressSpace, BlockGeometry, CPUID_ENTRY_LEN, CpuProfile, Device, DeviceRange,
@@ -17,7 +18,7 @@ use super::manifest::{
 use crate::activation;
 use crate::contract;
 use crate::error::{Error, Result};
-use crate::host::config::check_setting;
+use crate::host::config::{DiskCapture, check_setting};
 use crate::host::platform::parse_hex32;
 use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::mount::MOUNT_TAG;
@@ -502,6 +503,32 @@ pub struct SnapshotKey {
 
 pub(in crate::host) use SnapshotKey as TemplateKey;
 
+/// The checked inputs shared by a legacy capture class and a caller-owned capture context.
+struct CaptureInputs<'a> {
+    /// The runtime's artifact and contract identities.
+    runtime: &'a RuntimeIdentity,
+    /// The requested backend.
+    hypervisor: Hypervisor,
+    /// The requested CPU profile.
+    cpu_profile: &'a str,
+    /// The processor capacity.
+    processors: u64,
+    /// The processors online at boot.
+    boot_processors: u64,
+    /// The RAM at boot, in bytes.
+    memory: u64,
+    /// The RAM capacity, in bytes.
+    memory_capacity: u64,
+    /// The placeholder image's geometry.
+    distro: &'a BlockGeometry,
+    /// The dormant scratch's geometry.
+    scratch: &'a BlockGeometry,
+    /// The resolved NIC address, without a network policy.
+    guest_network: Option<String>,
+    /// The caller's invariant settings.
+    invariants: &'a Invariants,
+}
+
 impl SnapshotKey {
     /// Version of the canonical encoding of a key, its first two bytes.
     ///
@@ -541,6 +568,65 @@ impl SnapshotKey {
     /// requested.
     pub fn new(class: &CaptureClass, manifest: &SnapshotManifest) -> Result<Self> {
         class.check()?;
+        let attached = !class.network_arguments()?.is_empty();
+        Self::from_inputs(
+            CaptureInputs {
+                runtime: &class.runtime,
+                hypervisor: class.hypervisor,
+                cpu_profile: &class.cpu_profile,
+                processors: u64::from(class.processors),
+                boot_processors: u64::from(class.boot_processors),
+                memory: class.memory,
+                memory_capacity: class.memory_capacity,
+                distro: &class.distro,
+                scratch: &class.scratch,
+                guest_network: class
+                    .network
+                    .as_ref()
+                    .filter(|_| attached)
+                    .map(|network| network.guest_network().to_owned()),
+                invariants: &class.invariants,
+            },
+            manifest,
+        )
+    }
+
+    /// Derives the key from the checked creation context and OpenVMM's validated manifest.
+    pub(super) fn from_capture(
+        context: &CaptureContext,
+        manifest: &SnapshotManifest,
+    ) -> Result<Self> {
+        context.capture.check()?;
+        context.runtime.check()?;
+        let cpu_profile = context.cpu_profile.as_deref().unwrap_or("auto");
+        if let Some(problem) = cpu_profile_problem(cpu_profile) {
+            return Err(Error::unsupported(problem));
+        }
+        let bytes = |mib: u64| {
+            mib.checked_mul(1024 * 1024)
+                .ok_or_else(|| Error::unsupported("capture memory in MiB overflows bytes"))
+        };
+        let DiskCapture::Fresh { image, scratch } = &context.capture.disks;
+        Self::from_inputs(
+            CaptureInputs {
+                runtime: &context.runtime,
+                hypervisor: context.hypervisor,
+                cpu_profile,
+                processors: context.capture.processors.capacity,
+                boot_processors: context.capture.processors.boot,
+                memory: bytes(context.capture.memory.boot)?,
+                memory_capacity: bytes(context.capture.memory.capacity)?,
+                distro: image,
+                scratch,
+                guest_network: context.nic.map(|nic| nic.guest_network.to_string()),
+                invariants: &context.capture.invariants,
+            },
+            manifest,
+        )
+    }
+
+    /// Checks the manifest's machine against the capture's inputs and takes its effective shape.
+    fn from_inputs(class: CaptureInputs<'_>, manifest: &SnapshotManifest) -> Result<Self> {
         let machine = &manifest.machine;
         let mismatch = |found: String, requested: String| {
             Err(Error::io(format!(
@@ -557,22 +643,27 @@ impl SnapshotKey {
         let profile = machine.cpu.id();
         // `auto` selects the built-in profile of the host's CPU, or falls back to a profile that
         // the host derives, whose generation is `host`, when no built-in profile serves it.
-        let selected = cpu_profile_matches(&machine.cpu, &class.cpu_profile);
+        let selected = cpu_profile_matches(&machine.cpu, class.cpu_profile);
         if !selected {
             return mismatch(
                 format!("its CPU profile is {profile}"),
-                class.cpu_profile.clone(),
+                class.cpu_profile.to_owned(),
             );
         }
         let boot_processors = match machine.boot_processors {
             0 => machine.processors,
             count => count,
         };
-        if (machine.processors, boot_processors) != (class.processors, class.boot_processors) {
+        if (u64::from(machine.processors), u64::from(boot_processors))
+            != (class.processors, class.boot_processors)
+        {
             let describe =
                 |processors, online| format!("{processors} processors, {online} online at boot");
             return mismatch(
-                format!("it has {}", describe(machine.processors, boot_processors)),
+                format!(
+                    "it has {}",
+                    describe(u64::from(machine.processors), u64::from(boot_processors))
+                ),
                 describe(class.processors, class.boot_processors),
             );
         }
@@ -588,8 +679,8 @@ impl SnapshotKey {
             );
         }
         for (role, found, requested) in [
-            ("distro", &machine.distro, &class.distro),
-            ("scratch", &machine.scratch, &class.scratch),
+            ("distro", &machine.distro, class.distro),
+            ("scratch", &machine.scratch, class.scratch),
         ] {
             if found != requested {
                 return mismatch(
@@ -598,12 +689,7 @@ impl SnapshotKey {
                 );
             }
         }
-        let attached = !class.network_arguments()?.is_empty();
-        let requested_network = class
-            .network
-            .as_ref()
-            .filter(|_| attached)
-            .map(|network| network.guest_network().to_owned());
+        let requested_network = class.guest_network;
         // A network that `SandboxNetwork` accepts has the canonical form that this writes.
         let found_network = machine.nic.as_ref().map(guest_network_of);
         if found_network != requested_network {
