@@ -5375,11 +5375,14 @@ fn a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failu
 mod restore_exclusion {
     use super::*;
     use std::io::Write as _;
-    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::{Child, Command, ExitStatus, Stdio};
 
+    use nix::fcntl::OFlag;
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    use nix::sys::stat::Mode;
+    use nix::unistd::{mkfifo, pipe2};
     use nvx::activation::{
         ExpectedResources, Image as ActivationImage, OverlayMode, RestoreSection, TransactionId,
         Upper as ActivationUpper, View,
@@ -5438,6 +5441,7 @@ mod restore_exclusion {
         lock_path: PathBuf,
         exclusion: Option<File>,
         listener: Option<UnixListener>,
+        prepare_gate: Option<File>,
         controller: Option<OwnedChild>,
         vmm: Option<OwnedChild>,
         start_time: u64,
@@ -5453,6 +5457,7 @@ mod restore_exclusion {
                 lock_path: lock_path.to_owned(),
                 exclusion: Some(exclusion),
                 listener: None,
+                prepare_gate: None,
                 controller: None,
                 vmm: None,
                 start_time: 0,
@@ -5486,6 +5491,12 @@ mod restore_exclusion {
             let store = template.store();
             let key = store.read_key(&template.generation()).unwrap();
             let log = File::create(view.log_path()).unwrap();
+            let gate = view.sandbox.store.join("prepare.fifo");
+            mkfifo(&gate, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+            let (input, output) = pipe2(OFlag::O_CLOEXEC).unwrap();
+            let mut output = File::from(output);
+            output.write_all(&CAPABILITY).unwrap();
+            drop(output);
             let mut command = Command::new(runtime.artifacts.openvmm);
             command
                 .args(
@@ -5513,9 +5524,11 @@ mod restore_exclusion {
                 .arg("--microvm-control-auth-stdin")
                 .arg("--microvm-report")
                 .arg(view.sandbox.store.join("outcome.json"))
+                .arg("--log-file")
+                .arg(gate)
                 .current_dir(&view.sandbox.store)
                 .env("OPENVMM_STARTUP_PROFILE", "1")
-                .stdin(Stdio::piped())
+                .stdin(Stdio::from(input))
                 .stdout(log.try_clone().unwrap())
                 .stderr(log)
                 .spawn()
@@ -5530,8 +5543,9 @@ mod restore_exclusion {
                 view.start_time,
                 view.sandbox.store.display()
             );
-            // OpenVMM reports artifact_open after retaining memory's ctime. Its subsequent
-            // control-capability read cannot finish until this caller closes the stdin pipe.
+            // After retaining memory's ctime, OpenVMM opens --log-file before prepare/ready.
+            // The FIFO blocks that open until proceed supplies a reader. --single-process
+            // discards this log handle, so no worker can block on an undrained log.
             view.until(|view| {
                 view.log()
                     .contains("OPENVMM_SNAPSHOT_PROFILE_V1 operation=restore phase=artifact_open ")
@@ -5596,7 +5610,9 @@ mod restore_exclusion {
         fn change_link_without_lock(&self) {
             let memory = self.snapshot().join("memory.bin");
             let before = fs::metadata(&memory).unwrap();
-            assert!(self.helper("link").wait().success());
+            let mut helper = self.helper("link");
+            drop(helper.0.stdin.take());
+            assert!(helper.wait().success());
             let after = fs::metadata(memory).unwrap();
             assert_eq!(after.nlink(), before.nlink() + 1);
             assert_eq!(
@@ -5610,8 +5626,13 @@ mod restore_exclusion {
         }
 
         fn proceed(&mut self) {
-            let mut input = self.vmm.as_mut().unwrap().0.stdin.take().unwrap();
-            input.write_all(&CAPABILITY).unwrap();
+            self.prepare_gate = Some(
+                File::options()
+                    .read(true)
+                    .custom_flags(OFlag::O_NONBLOCK.bits())
+                    .open(self.sandbox.store.join("prepare.fifo"))
+                    .unwrap(),
+            );
         }
 
         fn connected(&mut self) -> UnixStream {
@@ -5700,6 +5721,7 @@ mod restore_exclusion {
         fn drop(&mut self) {
             drop(self.controller.take());
             drop(self.vmm.take());
+            drop(self.prepare_gate.take());
             if self.log_path().is_file() {
                 eprintln!(
                     "SL2.15 native-log {}:\n{}",
@@ -5730,11 +5752,14 @@ mod restore_exclusion {
                     fs::write(directory.join("controller-bound"), b"bound").unwrap();
                     io::stdin().read_exact(&mut [0]).unwrap();
                 }
-                "link" => fs::hard_link(
-                    directory.join("openvmm/memory.bin"),
-                    directory.join("extra-memory-link"),
-                )
-                .unwrap(),
+                "link" => {
+                    assert_eq!(io::stdin().read(&mut [0]).unwrap(), 0);
+                    fs::hard_link(
+                        directory.join("openvmm/memory.bin"),
+                        directory.join("extra-memory-link"),
+                    )
+                    .unwrap();
+                }
                 role => panic!("unknown restore helper role {role}"),
             }
             return;
