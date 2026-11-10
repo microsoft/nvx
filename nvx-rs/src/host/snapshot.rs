@@ -4,6 +4,9 @@
 //! description. The caller keeps the directory and its entries private and immutable while
 //! using the opened snapshot.
 //!
+//! [`finish_capture`] validates an exited capture and writes its key and informational
+//! description without publishing or removing any VM-directory entry.
+//!
 //! [`SnapshotKey`] derives a compatibility key from a capture's class and manifest.
 //! [`SnapshotManifest::read`] reads the manifest that OpenVMM wrote, and
 //! [`TimeContract::eligibility`] checks its restore window at a [`HostTime`].
@@ -28,6 +31,7 @@
 //! in `tests/vectors/snapshot-key-v1.txt` fix version 1 of a key's encoding and of a class's.
 
 mod canonical;
+mod capture;
 pub(super) mod eligibility;
 pub(super) mod key;
 pub(super) mod manifest;
@@ -49,6 +53,8 @@ use crate::host::store::regular;
 use crate::host::{filesystem, platform};
 use crate::{Error, Hypervisor, Result};
 
+pub use self::capture::{CapturedSnapshot, finish_capture};
+pub(super) use self::capture::{check_exit, check_snapshot};
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, SnapshotKey};
 pub use self::manifest::{
@@ -61,6 +67,9 @@ pub const KEY_FILE: &str = "key.bin";
 pub const DESCRIPTION_FILE: &str = "snapshot.json";
 /// The directory of OpenVMM's manifest, RAM and saved state.
 pub const OPENVMM_DIR: &str = "openvmm";
+
+/// OpenVMM's exact platform-snapshot inventory, in name order.
+pub(super) const SNAPSHOT_ARTIFACTS: [&str; 3] = [MANIFEST_NAME, "memory.bin", "state.bin"];
 
 /// The checked configuration and effective devices of a blockless platform capture.
 ///
@@ -122,30 +131,10 @@ impl Snapshot {
     pub fn open(dir: &Path) -> Result<Self> {
         let dir = absolute(&normalized(dir)).map_err(|error| entry_error(dir, error))?;
         check_directory(&dir, &[KEY_FILE, DESCRIPTION_FILE, OPENVMM_DIR])?;
-        let openvmm = dir.join(OPENVMM_DIR);
-        check_directory(&openvmm, &[MANIFEST_NAME, "memory.bin", "state.bin"])?;
-        for path in [
-            dir.join(KEY_FILE),
-            dir.join(DESCRIPTION_FILE),
-            openvmm.join(MANIFEST_NAME),
-        ] {
+        for path in [dir.join(KEY_FILE), dir.join(DESCRIPTION_FILE)] {
             check_file(&path)?;
         }
-        let manifest = SnapshotManifest::read(&openvmm)?;
-        for (name, expected) in [
-            ("memory.bin", manifest.memory_len()),
-            ("state.bin", manifest.state_len()),
-        ] {
-            let path = openvmm.join(name);
-            let found = check_file(&path)?.len();
-            if found != expected {
-                return Err(Error::io(format!(
-                    "the snapshot artifact {} is {found} bytes long, not the {expected} bytes \
-                     that its manifest records",
-                    path.display()
-                )));
-            }
-        }
+        let manifest = check_snapshot(&dir.join(OPENVMM_DIR))?;
         let path = dir.join(KEY_FILE);
         let bytes = regular::open_regular(&path)
             .and_then(|file| {

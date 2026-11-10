@@ -26,8 +26,9 @@ use crate::host::instance::generate_capability;
 use crate::host::platform;
 use crate::host::sandbox::distro::{CheckedDistro, DistroBinding, DistroFormat};
 use crate::host::sandbox::{LayerRole, SandboxLayer, SandboxPlan};
+use crate::host::snapshot::{check_exit, check_snapshot};
 use crate::host::store::files::{create_new, remove_if_present, sync_dir, write_private};
-use crate::host::store::regular::{identity_of, open_regular, read_at_most};
+use crate::host::store::regular::{identity_of, open_regular};
 use crate::host::store::{
     JOURNAL_NAME, LOCK_NAME, LOG_NAME, LaunchId, LockedStore, OUTCOME_NAME, Recovery, SOCKET_NAME,
     SandboxStore,
@@ -35,7 +36,7 @@ use crate::host::store::{
 use crate::host::supervisor::{self, VmmCommand};
 use crate::host::template::eligibility::HostTime;
 use crate::host::template::key::{CaptureClass, ClassIdentity, KeyIdentity, TemplateKey};
-use crate::host::template::manifest::{MANIFEST_NAME, TemplateManifest, TimeContract};
+use crate::host::template::manifest::{TemplateManifest, TimeContract};
 use crate::host::template::plan::{SCRATCH_NAME, TemplatePlan, TemplateResources};
 
 /// Name of the directory of a store's captures, in which each capture class has a slot.
@@ -45,15 +46,6 @@ pub const CAPTURES_NAME: &str = "captures";
 pub const TRANSACTION_NAME: &str = "transaction";
 /// Name of the record of a capture, in its transaction and then in its generation's payload.
 pub const CAPTURE_RECORD_NAME: &str = "capture.json";
-
-/// Name of the saved state of a snapshot.
-const STATE_NAME: &str = "state.bin";
-/// Name of the RAM of a snapshot.
-const MEMORY_NAME: &str = "memory.bin";
-/// The artifacts of a platform-tier snapshot, in the order of their names: its manifest, its RAM,
-/// and its saved state.
-pub(in crate::host::template) const SNAPSHOT_ARTIFACTS: [&str; 3] =
-    [MANIFEST_NAME, MEMORY_NAME, STATE_NAME];
 
 /// Prefix of the name of the file that backs the RAM of a capture's VM, which OpenVMM creates
 /// beside the snapshot's destination, and removes as the VM ends.
@@ -72,9 +64,6 @@ pub(in crate::host::template) const SOCKET_PATH_LIMIT: usize = 108;
 
 /// Longest record of a capture, in bytes.
 const MAX_CAPTURE_RECORD_LEN: u64 = 4 * 1024;
-
-/// Longest outcome report of a capture's VM that the capture reads, in bytes.
-const MAX_REPORT_LEN: u64 = 1024 * 1024;
 
 /// Interval at which a rename that Windows refuses, while another process holds a file below the
 /// renamed directory open, is tried again, until the capture's deadline.
@@ -1112,128 +1101,6 @@ fn check_scratch(template: &TemplatePlan, created: (u64, u128)) -> Result<()> {
         return Err(refused(problem));
     }
     Ok(())
-}
-
-/// The outcome report of a VM, as OpenVMM writes it, of which a capture reads the outcome.
-#[derive(Deserialize)]
-struct OutcomeReport {
-    /// The outcome of the VM.
-    outcome: Outcome,
-}
-
-/// The outcome of a VM, as its outcome report records it.
-#[derive(Deserialize)]
-struct Outcome {
-    /// The operation of the VM: `capture` for a VM that OpenVMM captures.
-    operation: String,
-    /// The category of the outcome: `success` for a capture that OpenVMM published.
-    category: String,
-    /// The status code of the outcome: 0 for a capture that OpenVMM published.
-    status_code: i64,
-}
-
-/// Checks the source's exit through the outcome report of the capture's VM at `path`: that
-/// OpenVMM wrote one, for a capture that succeeded, as it does once it has published the snapshot
-/// and torn the VM down, and before it exits. The launch removed the report of the slot's previous
-/// VM, as [`LockedStore::begin_launch`] does, and OpenVMM publishes its report without replacing
-/// a file, so the report is the VM's own.
-fn check_exit(path: &Path) -> Result<()> {
-    let description = format!("the outcome report {}", path.display());
-    let file = match open_regular(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::exited(format!(
-                "the VM of the capture ended without {description}"
-            )));
-        }
-        Err(error) => {
-            return Err(Error::io(format!("cannot read {description}")).with_source(error));
-        }
-    };
-    let bytes = read_at_most(file, MAX_REPORT_LEN, "an outcome report")
-        .map_err(|error| Error::io(format!("cannot read {description}")).with_source(error))?;
-    let report: OutcomeReport = serde_json::from_slice(&bytes)
-        .map_err(|error| Error::io(format!("{description} is malformed")).with_source(error))?;
-    let Outcome {
-        operation,
-        category,
-        status_code,
-    } = report.outcome;
-    if operation != "capture" || category != "success" || status_code != 0 {
-        return Err(Error::exited(format!(
-            "the VM of the capture ended without a capture: {description} records the outcome \
-             {category} with status {status_code} of the operation {operation}"
-        )));
-    }
-    Ok(())
-}
-
-/// Checks the snapshot at `snapshot` that OpenVMM published: a directory private to the current
-/// user, as [`platform::check_snapshot_dir`] checks it, whose manifest
-/// [`TemplateManifest::read`] reads, and whose artifacts are exactly its manifest, RAM, and saved
-/// state, each a regular file private to the current user, of the length that the manifest
-/// records. Reads no artifact but the manifest. Returns the manifest.
-fn check_snapshot(snapshot: &Path) -> Result<TemplateManifest> {
-    let what = "the snapshot of the capture";
-    // A snapshot that is missing once its capture reported it is lost, not merely absent.
-    let problem = platform::check_snapshot_dir(snapshot).map_err(|error| {
-        Error::io(format!("cannot open {what} {}", snapshot.display())).with_source(error)
-    })?;
-    refuse_problem(snapshot, what, problem)?;
-    // So is a manifest that is missing from the snapshot.
-    let manifest = TemplateManifest::read(snapshot).map_err(|error| {
-        if error.kind() != ErrorKind::NotFound {
-            return error;
-        }
-        let (_, message, source) = error.into_parts();
-        let error = Error::io(message);
-        match source {
-            Some(source) => error.with_source(source),
-            None => error,
-        }
-    })?;
-    let mut names = entries(snapshot)?;
-    names.sort();
-    if names != SNAPSHOT_ARTIFACTS {
-        return Err(Error::io(format!(
-            "{what} {} holds {}, not exactly the manifest, RAM, and saved state of a platform-tier \
-             snapshot",
-            snapshot.display(),
-            names.join(", ")
-        )));
-    }
-    for (name, length) in [
-        (MANIFEST_NAME, None),
-        (MEMORY_NAME, Some(manifest.memory_len())),
-        (STATE_NAME, Some(manifest.state_len())),
-    ] {
-        let path = snapshot.join(name);
-        let refused = |problem: String| {
-            Error::io(format!(
-                "the artifact {} of {what} {problem}",
-                path.display()
-            ))
-        };
-        let file =
-            open_regular(&path).map_err(|error| refused(format!("cannot be used: {error}")))?;
-        if let Some(problem) = platform::private_file_problem(&file)
-            .map_err(|error| refused(format!("cannot be checked: {error}")))?
-        {
-            return Err(refused(problem));
-        }
-        let found = file
-            .metadata()
-            .map_err(|error| refused(format!("cannot be examined: {error}")))?
-            .len();
-        if let Some(length) = length
-            && found != length
-        {
-            return Err(refused(format!(
-                "is {found} bytes long, not the {length} bytes that its manifest records"
-            )));
-        }
-    }
-    Ok(manifest)
 }
 
 /// Removes from the capture's transaction `transaction` what the template does not keep: the lock

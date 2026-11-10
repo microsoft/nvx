@@ -3038,6 +3038,8 @@ field nvx::host::snapshot::CaptureClass::runtime
 field nvx::host::snapshot::CaptureClass::scratch
 method nvx::host::snapshot::CaptureClass::to_bytes
 struct nvx::host::snapshot::CaptureContext
+struct nvx::host::snapshot::CapturedSnapshot
+field nvx::host::snapshot::CapturedSnapshot::key
 struct nvx::host::snapshot::ClassIdentity
 method nvx::host::snapshot::ClassIdentity::as_bytes
 method nvx::host::snapshot::ClassIdentity::from_bytes
@@ -3136,6 +3138,7 @@ field nvx::host::snapshot::TimeContract::host_id
 field nvx::host::snapshot::TimeContract::lineage
 field nvx::host::snapshot::TimeContract::tsc_frequency_hz
 field nvx::host::snapshot::TimeContract::tsc_tolerance_ppm
+fn nvx::host::snapshot::finish_capture
 mod nvx::host::store
 struct nvx::host::store::ArtifactIdentity
 method nvx::host::store::ArtifactIdentity::as_str
