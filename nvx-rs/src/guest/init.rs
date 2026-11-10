@@ -37,6 +37,7 @@
 
 use std::ffi::{CStr, CString, OsStr};
 use std::io::{self, Read};
+use std::net::Ipv4Addr;
 use std::os::fd::BorrowedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
@@ -44,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus as ProcessStatus};
 use std::time::{Duration, Instant};
 
+use crate::activation::Publication;
 use crate::protocol::cmdline;
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 
@@ -56,6 +58,7 @@ use super::sys::{
 };
 
 mod boot;
+pub(crate) use boot::{RestoreHandoff, Restored};
 
 /// The process ID of the init process.
 const INIT_PROCESS: i32 = 1;
@@ -188,7 +191,7 @@ pub(crate) struct Capture {
     /// Request ID, kill flag and the original pre-request deadline.
     pending: Option<(u64, bool, Instant)>,
     /// The repair whose RESET must be acknowledged before later activation.
-    repaired: Option<Repaired>,
+    pub(crate) restored: Option<Restored>,
     /// A fatal capture disposition, whose status PID 1 must preserve.
     shutdown: Option<u8>,
 }
@@ -218,14 +221,14 @@ impl Capture {
             helpers,
             fresh,
             pending: None,
-            repaired: None,
+            restored: None,
             shutdown: None,
         }
     }
 
     /// Keeps one pending request and anchors its deadline before cleanup.
     pub(crate) fn queue(&mut self, request_id: u64, kill: bool) -> bool {
-        if self.pending.is_some() || self.repaired.is_some() || self.shutdown.is_some() {
+        if self.pending.is_some() || self.restored.is_some() || self.shutdown.is_some() {
             return false;
         }
         self.pending = Some((request_id, kill, Instant::now() + CAPTURE_TIMEOUT));
@@ -244,12 +247,14 @@ impl Capture {
 
     /// Whether this session must admit no root-dependent operation.
     pub(crate) fn rootless(&self) -> bool {
-        self.fresh || self.repaired.is_some()
+        self.restored.as_ref().map_or(self.fresh, |restored| {
+            restored.activation.established().is_none()
+        })
     }
 
-    /// Keeps the original repair for later activation, which this slice does not perform.
+    /// Starts one activation from the repair's original acknowledgement.
     pub(crate) fn restored(&mut self, repaired: Repaired) {
-        self.repaired = Some(repaired);
+        self.restored = Some(Restored::new(&repaired, Instant::now()));
     }
 
     /// Records the fatal status before the loop returns directly to PID 1.
@@ -315,6 +320,14 @@ pub(crate) fn report_capture(failure: impl std::fmt::Display) {
     write_console(
         kernel::CONSOLE_DEVICE,
         format!("NVX-INIT-CAPTURE: {failure}\n").as_bytes(),
+    );
+}
+
+/// Reports an activation failure before PID 1 ends the VM.
+pub(crate) fn report_activation(failure: impl std::fmt::Display) {
+    write_console(
+        kernel::CONSOLE_DEVICE,
+        format!("NVX-INIT-ACTIVATION: {failure}\n").as_bytes(),
     );
 }
 
@@ -1001,6 +1014,57 @@ impl Runtime {
             helpers,
             terminating: false,
         })
+    }
+
+    /// Starts ingress from the applied root's publication and gateway, before its root switch.
+    /// The fork keeps the initramfs root and PID 1's priority; the sole collector owns its exit.
+    pub(crate) fn restore_announcer(
+        &mut self,
+        publication: Publication,
+        gateway: Option<Ipv4Addr>,
+    ) -> crate::Result<()> {
+        if publication == Publication::Unpublished {
+            return Ok(());
+        }
+        if self.helpers.announcer.is_some() {
+            return Err(crate::Error::unsupported(
+                "an announcer is already registered",
+            ));
+        }
+        let gateway = gateway
+            .ok_or_else(|| crate::Error::unsupported("published listeners require a gateway"))?;
+        let program = super::ingress::PROGRAM.to_owned();
+        #[cfg(test)]
+        let program = tests::restore::announcer_program(program);
+        let arguments = [
+            c"nvx-ingress".to_owned(),
+            CString::new(gateway.to_string()).expect("an IPv4 address has no NUL"),
+        ];
+        sys::check_released().map_err(|error| {
+            crate::Error::io("cannot fork the restored announcer with port permission")
+                .with_source(error)
+        })?;
+        let fork = sys::fork().map_err(|error| {
+            crate::Error::io("cannot fork the restored announcer")
+                .with_source(io::Error::from(error))
+        })?;
+        if let sys::ForkResult::Parent(process) = fork {
+            self.helpers.announcer = Some(process);
+            return Ok(());
+        }
+        if let Err(error) = sys::reset_signals() {
+            write_console(
+                kernel::CONSOLE_DEVICE,
+                format!("NVX-INIT-ERROR: cannot reset announcer signals: {error}\n").as_bytes(),
+            );
+            sys::exit_immediately(FAILURE);
+        }
+        let error = sys::exec(&program, &arguments, None);
+        write_console(
+            kernel::CONSOLE_DEVICE,
+            format!("NVX-INIT-ERROR: cannot exec /sbin/nvx-ingress: {error}\n").as_bytes(),
+        );
+        sys::exit_immediately(FAILURE);
     }
 
     /// Poll alongside control input so a blocked peer cannot hide a helper's end.

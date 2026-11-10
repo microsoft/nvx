@@ -1,8 +1,10 @@
 use std::cell::{Cell, RefCell};
 use std::io::{self, Read, Write};
 use std::process::ExitStatus;
+use std::time::{Duration, Instant};
 
-use crate::guest::init::{self, Capture, CaptureStep, Runtime};
+use crate::guest::activation::{ActivationAction, ActivationState};
+use crate::guest::init::{self, Capture, CaptureStep, RestoreHandoff, Restored, Runtime};
 use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
 use crate::guest::snapshot::{Captured, Disposition};
 use crate::guest::sys::{self, Errno, FileDescriptor, Pollable};
@@ -28,9 +30,23 @@ struct Control<'r> {
     leader: Cell<u32>,
     status: Cell<Option<(u32, ExitStatus)>>,
     outcome: RefCell<Result<bool, String>>,
+    /// Bounds partial I/O until the restored activation's Ready has been written.
+    deadline: Cell<Option<Instant>>,
 }
 
 impl Control<'_> {
+    fn remaining(&self) -> Result<Option<Duration>, Errno> {
+        self.deadline
+            .get()
+            .map(|deadline| {
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or(Errno::ETIMEDOUT)
+            })
+            .transpose()
+    }
+
     fn service_leader(&self) -> Result<(), Errno> {
         if self.service(|id, status| {
             // Keep the first leader status across partial I/O, not unrelated orphans.
@@ -65,24 +81,32 @@ impl Read for Control<'_> {
         if bytes.is_empty() {
             return Read::read(&mut self.descriptor, bytes);
         }
-        let Some(runtime) = &self.runtime else {
+        if self.runtime.is_none() && self.deadline.get().is_none() {
             return Read::read(&mut self.descriptor, bytes);
-        };
+        }
         loop {
-            self.service_leader()?;
-            let signals = sys::poll(
-                [Pollable::File(&self.descriptor), runtime.borrow().wake()],
-                None,
-            )?[1];
-            if signals.error {
-                return Err(Errno::EIO.into());
+            if self.runtime.is_some() {
+                self.service_leader()?;
             }
-            if !signals.readable {
-                // A control-only wake includes HUP, which PollEvents does not expose.
-                match self.descriptor.read(bytes) {
-                    Err(Errno::EAGAIN) => {}
-                    result => return result.map_err(io::Error::from),
+            let timeout = self.remaining()?;
+            if let Some(runtime) = &self.runtime {
+                let signals = sys::poll(
+                    [Pollable::File(&self.descriptor), runtime.borrow().wake()],
+                    timeout,
+                )?[1];
+                if signals.error {
+                    return Err(Errno::EIO.into());
                 }
+                if signals.readable {
+                    continue;
+                }
+            } else {
+                sys::poll([Pollable::File(&self.descriptor)], timeout)?;
+            }
+            self.remaining()?;
+            match self.descriptor.read(bytes) {
+                Err(Errno::EAGAIN) => {}
+                result => return result.map_err(io::Error::from),
             }
         }
     }
@@ -90,31 +114,42 @@ impl Read for Control<'_> {
 
 impl Write for Control<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let Some(runtime) = &self.runtime else {
+        if self.runtime.is_none() && self.deadline.get().is_none() {
             return Write::write(&mut self.descriptor, bytes);
-        };
+        }
         if bytes.is_empty() {
             return Write::write(&mut self.descriptor, bytes);
         }
         loop {
-            self.service_leader()?;
+            self.remaining()?;
+            if self.runtime.is_some() {
+                self.service_leader()?;
+            }
             match self.descriptor.write(bytes) {
-                Err(Errno::EAGAIN) => loop {
-                    let events = sys::poll(
-                        [
-                            Pollable::Writable(&self.descriptor),
-                            runtime.borrow().wake(),
-                        ],
-                        None,
-                    )?;
-                    if events[1].error {
-                        return Err(Errno::EIO.into());
+                Err(Errno::EAGAIN) => {
+                    if let Some(runtime) = &self.runtime {
+                        loop {
+                            let events = sys::poll(
+                                [
+                                    Pollable::Writable(&self.descriptor),
+                                    runtime.borrow().wake(),
+                                ],
+                                self.remaining()?,
+                            )?;
+                            self.remaining()?;
+                            if events[1].error {
+                                return Err(Errno::EIO.into());
+                            }
+                            self.service_leader()?;
+                            if events[0].writable || !events[1].readable {
+                                break;
+                            }
+                        }
+                    } else {
+                        sys::poll([Pollable::Writable(&self.descriptor)], self.remaining()?)?;
+                        self.remaining()?;
                     }
-                    self.service_leader()?;
-                    if events[0].writable || !events[1].readable {
-                        break;
-                    }
-                },
+                }
                 result => return result.map_err(io::Error::from),
             }
         }
@@ -206,6 +241,7 @@ impl<'r> Session<'r> {
                 leader: Cell::new(0),
                 status: Cell::new(None),
                 outcome: RefCell::new(Ok(false)),
+                deadline: Cell::new(None),
             }),
             capture: None,
             last_error: None,
@@ -221,6 +257,12 @@ impl<'r> Session<'r> {
     /// Whether the serving caller is init rather than the old agent.
     pub(crate) fn has_capture(&self) -> bool {
         self.capture.is_some()
+    }
+
+    pub(crate) fn has_restored(&self) -> bool {
+        self.capture
+            .as_ref()
+            .is_some_and(|capture| capture.restored.is_some())
     }
 
     /// Whether root-dependent requests must remain refused.
@@ -314,8 +356,17 @@ impl<'r> Session<'r> {
                     }
                     Ok(Captured::Restored(repaired)) => {
                         capture.restored(repaired);
+                        let restored = capture.restored.as_mut().expect("the repair was retained");
+                        self.descriptor().set_nonblocking()?;
+                        self.connection
+                            .get_ref()
+                            .deadline
+                            .set(restored.activation.deadline());
                         match self.next_event() {
-                            Ok(Event::Reset) => self.acknowledge()?,
+                            Ok(Event::Reset) => {
+                                restored.reset(Instant::now()).map_err(activation_failure)?;
+                                self.acknowledge()?;
+                            }
                             Ok(Event::Data(_)) => return Err(Errno::EPROTO),
                             Err(failure) => {
                                 return Err(super::dispatch::report_failure_for_capture(failure));
@@ -340,6 +391,117 @@ impl<'r> Session<'r> {
         })();
         self.capture = Some(capture);
         result
+    }
+
+    /// Runs init's restored space setup or returns its cached activation result.
+    pub(crate) fn activate(
+        &mut self,
+        request: protocol::AppFrame<'_>,
+    ) -> Result<Option<RestoreHandoff>, Errno> {
+        self.activate_with(request, |restored, session, record, workload| {
+            let runtime = session
+                .connection
+                .get_ref()
+                .runtime
+                .as_ref()
+                .ok_or_else(|| crate::Error::unsupported("activation needs the init runtime"))?;
+            restored.apply(record, workload, |publication, gateway| {
+                runtime.borrow_mut().restore_announcer(publication, gateway)
+            })
+        })
+    }
+
+    /// Keeps one application and its result while replacement sessions join before Ready.
+    fn activate_with<R>(
+        &mut self,
+        request: protocol::AppFrame<'_>,
+        apply: impl FnOnce(
+            &mut Restored,
+            &mut Self,
+            &crate::activation::ActivationRecord,
+            protocol::workload::WorkloadIdentity,
+        ) -> crate::Result<R>,
+    ) -> Result<Option<R>, Errno> {
+        let mut capture = self.capture.take().ok_or(Errno::ENOTSUP)?;
+        let result = (|| {
+            let restored = capture.restored.as_mut().ok_or(Errno::EPROTO)?;
+            let (action, workload) = restored
+                .accept(request.payload, Instant::now())
+                .map_err(activation_failure)?;
+            let (retained, ready, replies) = match action {
+                ActivationAction::Apply(record) => {
+                    let retained = match apply(restored, self, &record, workload) {
+                        Ok(retained) => retained,
+                        Err(error) => {
+                            init::report_activation(&error);
+                            return Err(activation_failure(
+                                restored
+                                    .activation
+                                    .complete(Instant::now(), Err(error.into()))
+                                    .expect_err("a failed application cannot become ready"),
+                            ));
+                        }
+                    };
+                    let mut replies = vec![request.request_id];
+                    while sys::readable_or_hung_up(&[self.descriptor().borrowed()], 0)?[0] {
+                        match self
+                            .next_event()
+                            .map_err(super::dispatch::report_failure_for_capture)?
+                        {
+                            Event::Reset => {
+                                restored.reset(Instant::now()).map_err(activation_failure)?;
+                                self.acknowledge()?;
+                                replies.clear();
+                            }
+                            Event::Data(bytes) => {
+                                let retry = self
+                                    .accept_request(&bytes)
+                                    .map_err(DataFailure::into_error)?;
+                                if retry.kind != protocol::APP_ACTIVATE
+                                    || !matches!(
+                                        restored
+                                            .accept(retry.payload, Instant::now())
+                                            .map_err(activation_failure)?
+                                            .0,
+                                        ActivationAction::Join
+                                    )
+                                {
+                                    return Err(Errno::EPROTO);
+                                }
+                                replies.push(retry.request_id);
+                            }
+                        }
+                    }
+                    let ready = restored
+                        .activation
+                        .complete(Instant::now(), Ok(()))
+                        .map_err(activation_failure)?;
+                    (Some(retained), ready, replies)
+                }
+                ActivationAction::Ready(ready) => (None, ready, vec![request.request_id]),
+                _ => return Err(Errno::EPROTO),
+            };
+            for id in replies {
+                self.send_app(protocol::APP_READY, id, 0, &ready.encode())?;
+            }
+            self.connection.get_ref().deadline.set(None);
+            Ok(retained)
+        })();
+        self.capture = Some(capture);
+        result
+    }
+
+    /// Takes the first valid mapped EXEC as the start transition, never starting twice.
+    pub(crate) fn start_activation(&mut self) -> Result<(), Errno> {
+        if let Some(restored) = self
+            .capture
+            .as_mut()
+            .and_then(|capture| capture.restored.as_mut())
+            && restored.activation.state() != ActivationState::Started
+        {
+            restored.activation.start().map_err(activation_failure)?;
+        }
+        Ok(())
     }
 
     /// Borrows init's sole collector for the lifetime of this control session.
@@ -419,6 +581,11 @@ impl<'r> Session<'r> {
             Ok(GuestEvent::Reset(_)) => {
                 if let Some(capture) = &mut self.capture {
                     capture.reset();
+                    if let Some(restored) = &mut capture.restored {
+                        restored
+                            .reset(Instant::now())
+                            .map_err(|error| ReceiveFailure::Read(activation_failure(error)))?;
+                    }
                 }
                 Ok(Event::Reset)
             }
@@ -515,6 +682,11 @@ impl<'r> Session<'r> {
         self.last_error = Some(error);
         error
     }
+}
+
+fn activation_failure(error: impl std::fmt::Display) -> Errno {
+    init::report_activation(error);
+    Errno::EPROTO
 }
 
 /// Returns the stage at which the C agent reported a record that the session refused, or `None`
