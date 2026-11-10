@@ -23,8 +23,8 @@ use crate::activation::{
     TransactionId, Upper,
 };
 use crate::host::config::{
-    BlockGeometry, CaptureConfig, ConsoleAttachment, DiskCapture, NetworkConfig, NicConfig, RootConfig,
-    UpperConfig, VmConfig, fit_process_command_line, reject_disk_path,
+    BlockGeometry, CaptureConfig, ConsoleAttachment, DiskCapture, NetworkConfig, NicConfig,
+    RootConfig, UpperConfig, VmConfig, fit_process_command_line, reject_disk_path,
 };
 use crate::host::filesystem;
 use crate::host::network;
