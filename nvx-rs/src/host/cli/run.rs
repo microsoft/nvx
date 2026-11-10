@@ -491,6 +491,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
 /// Checks only options, not paths that artifact installation may create or replace.
 fn cold_preflight(options: &Options, rules: &NativeRules) -> Result {
     let shares = cold_shares(options)?;
+    if let Some(owner) = options.mount_owner {
+        require_mount_owner_supported(owner)?;
+    }
     for (target, _, _) in &shares {
         if let Some(reserved) = ReservedTargets::BLOCKLESS_ROOT.reservation(target) {
             return Err(Exit::error(
@@ -536,9 +539,6 @@ fn cold_shares(options: &Options) -> Result<Vec<(String, String, MountAccess)>> 
                 "mount policy options require --mount"
             },
         ));
-    }
-    if let Some(owner) = options.mount_owner {
-        require_mount_owner_supported(owner)?;
     }
     Ok(shares)
 }
@@ -856,7 +856,10 @@ impl ConsoleOutput {
             write: output::write_stderr,
             #[cfg(windows)]
             console: io::stderr().is_terminal(),
-            ..Self::new()
+            #[cfg(windows)]
+            pending: [0; 3],
+            #[cfg(windows)]
+            pending_len: 0,
         }
     }
 

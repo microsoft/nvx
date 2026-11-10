@@ -84,9 +84,15 @@ fn run_downloads_before_checking_mount_sources_that_installation_can_create() {
         fs::remove_dir(root.below("build")).unwrap();
         let mount = format!("/workspace,{},ro", root.below(source).display());
         let outcome = root.nvx_rs(&["run", "--dry-run", "--mount", &mount]);
-        outcome.assert_error(
-            "unavailable",
-            &["download needs a Git checkout to find its release"],
+        assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+        assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
+        let stderr = outcome.stderr();
+        assert!(
+            stderr.lines().last().unwrap().starts_with(
+                "error[unavailable]: download needs a Git checkout to find its release: "
+            ),
+            "{}",
+            outcome.describe()
         );
         assert!(
             outcome.stderr().contains("holds no NVX artifacts"),
