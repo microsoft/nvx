@@ -363,7 +363,7 @@ pub(crate) fn path_string(path: &Path) -> Result<String> {
     })
 }
 
-/// Returns the network that the network options of `options` describe, with `rules`, the egress
+/// Returns the network that `network` describes, with `rules`, the egress
 /// rules that [`NetworkOptions::egress_rules`] resolved: the typed policy at the guest network of
 /// `--net`, which [`SandboxNetwork::new`] checks before any launch, or `None` without `--net`, which
 /// no other network option may then accompany.
@@ -373,11 +373,10 @@ pub(crate) fn path_string(path: &Path) -> Result<String> {
 /// egress rules only with an explicit `--network-egress`, and reads `--network-egress-allow`,
 /// `--network-egress-deny`, and `--host-loopback-forward` in OpenVMM's form. `--network-proxy` must
 /// name the guest's gateway, and makes the policy proxy-only, with no scheme in its URL.
-pub(super) fn sandbox_network(
-    options: &Options,
+pub(in crate::host::cli) fn sandbox_network(
+    network: &NetworkOptions,
     rules: &NativeRules,
 ) -> Result<Option<SandboxNetwork>> {
-    let network = &options.network;
     let Some(net) = &network.net else {
         let network_options = network.network_egress.is_some()
             || network.network_ingress.is_some()

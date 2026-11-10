@@ -1,7 +1,7 @@
 //! Publication and reading of managed-workload and OpenVMM outcome reports.
 
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -39,11 +39,15 @@ fn outcome_destination(path: &str) -> Result<PathBuf> {
     let resolved = paths::resolve(parent)
         .map_err(Exit::from_os_error)?
         .join(name);
-    if std::fs::symlink_metadata(&resolved).is_ok() {
-        return Err(Exit::error(
-            ErrorCode::OutcomeReportExists,
-            format!("outcome report already exists: {}", resolved.display()),
-        ));
+    match std::fs::symlink_metadata(&resolved) {
+        Ok(_) => {
+            return Err(Exit::error(
+                ErrorCode::OutcomeReportExists,
+                format!("outcome report already exists: {}", resolved.display()),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(os_error(&error, &resolved)),
     }
     Ok(resolved)
 }
@@ -57,6 +61,24 @@ pub(crate) fn validate_outcome_destination(path: &str) -> Result {
 /// Writes the JSON `text` to a new file at `path`: through a temporary file of mode 0600, synced,
 /// then linked to its name, which must not exist, with `\n` line ends on every host.
 fn write_new_json(path: &str, text: &str) -> Result {
+    let text = format!("{text}\n");
+    write_new_file(path, |file| file.write_all(text.as_bytes()))
+}
+
+/// Publishes an OpenVMM report's exact bytes without replacing an existing destination.
+pub(crate) fn copy_openvmm_outcome(source: &Path, path: &str) -> Result {
+    let mut report = File::open(source).map_err(|error| os_error(&error, source))?;
+    let permissions = report
+        .metadata()
+        .map_err(|error| os_error(&error, source))?
+        .permissions();
+    write_new_file(path, |file| {
+        io::copy(&mut report, file)?;
+        file.set_permissions(permissions)
+    })
+}
+
+fn write_new_file(path: &str, write: impl FnOnce(&mut File) -> io::Result<()>) -> Result {
     let resolved = outcome_destination(path)?;
     let temporary = temporary_path(&resolved)?;
     let mut options = OpenOptions::new();
@@ -74,8 +96,7 @@ fn write_new_json(path: &str, text: &str) -> Result {
         Err(error) => return Err(os_error(&error, &temporary)),
     };
     let written = (|| -> Result {
-        let text = format!("{text}\n");
-        file.write_all(text.as_bytes())
+        write(&mut file)
             .and_then(|()| file.sync_all())
             .map_err(Exit::from_os_error)?;
         match std::fs::hard_link(&temporary, &resolved) {
@@ -84,10 +105,7 @@ fn write_new_json(path: &str, text: &str) -> Result {
                 ErrorCode::OutcomeReportExists,
                 format!("outcome report already exists: {}", resolved.display()),
             )),
-            Err(_) => Err(Exit::error(
-                ErrorCode::Io,
-                format!("failed to publish outcome report: {}", resolved.display()),
-            )),
+            Err(error) => Err(os_error(&error, &resolved)),
         }
     })();
     drop(file);

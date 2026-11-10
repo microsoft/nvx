@@ -673,6 +673,7 @@ field nvx::host::config::BlockGeometry::physical_block_size
 struct nvx::host::config::Boot
 field nvx::host::config::Boot::capture
 field nvx::host::config::Boot::command_line
+field nvx::host::config::Boot::memory_capacity_mib
 const nvx::host::config::COMMAND_LINE_BUDGET
 struct nvx::host::config::Capacity
 field nvx::host::config::Capacity::boot

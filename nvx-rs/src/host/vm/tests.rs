@@ -84,6 +84,7 @@ fn cold_config() -> VmConfig {
         filesystem: None,
         console: ConsoleAttachment::Listener,
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: "nvx_entrypoint=/bin/sh nvx_arg=-c nvx_arg=exit".to_owned(),
             capture: None,
         }),
@@ -127,6 +128,7 @@ fn capture_config(_vm: &VmDir) -> VmConfig {
     VmConfig {
         processors: 2,
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: "nvx_sandbox=1".to_owned(),
             capture: Some(CaptureConfig {
                 disks: DiskCapture::Fresh {
@@ -1540,8 +1542,49 @@ fn a_library_vm_outlives_the_caller_that_spawned_it_without_retaining_its_output
         process,
         outputs: VmDir::open(&vm).unwrap().outputs(false).unwrap(),
         capability: Capability([0; CAPABILITY_LEN]),
+        #[cfg(feature = "cli")]
+        child: ForegroundChild(None),
     });
     assert!(!launched.0.process.has_exited().unwrap());
+}
+
+#[cfg(all(feature = "cli", any(target_os = "linux", windows)))]
+#[test]
+fn an_owned_child_status_is_kept_when_its_outcome_is_missing_or_malformed() {
+    for malformed in [false, true] {
+        let (_directory, dir) = vm_dir();
+        let mut prepared = stand_in(&dir).for_foreground();
+        #[cfg(target_os = "linux")]
+        {
+            prepared.program = PathBuf::from("/bin/sh");
+            prepared.arguments = ["-c", "exit 37"].map(OsString::from).to_vec();
+        }
+        #[cfg(windows)]
+        {
+            prepared.program = PathBuf::from(std::env::var_os("ComSpec").unwrap());
+            prepared.arguments = ["/d", "/c", "exit 37"].map(OsString::from).to_vec();
+        }
+        let mut launched = RunningVm(spawn(prepared).unwrap());
+        assert_eq!(
+            launched.0.wait_status(Duration::from_secs(10)).unwrap(),
+            Some(37)
+        );
+        if malformed {
+            fs::write(&launched.0.outputs.outcome, b"not-json").unwrap();
+        }
+        let now = Instant::now();
+        let stopped = stop(
+            &launched.0.process,
+            &launched.0.outputs,
+            |_| false,
+            now,
+            now,
+        )
+        .unwrap();
+        assert!(stopped.self_exited);
+        assert_eq!(stopped.report.is_err(), malformed);
+        assert_eq!(launched.0.wait_status(Duration::ZERO).unwrap(), Some(37));
+    }
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -1685,6 +1728,7 @@ fn current_cold_spawn_boots_a_guest_accepts_shell_input_and_exits_cleanly() {
     let vm = VmDir::open(&path).unwrap();
     let config = VmConfig {
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: "quiet loglevel=0".to_owned(),
             capture: None,
         }),
