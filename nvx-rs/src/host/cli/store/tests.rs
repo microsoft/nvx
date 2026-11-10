@@ -8,6 +8,8 @@ use super::*;
 use crate::host::cli::deadline::Deadline;
 use crate::host::store::{JOURNAL_NAME, RUNTIME_NAME, SandboxStore};
 
+mod launch;
+
 /// How long a test waits for a lock that it released to be free.
 ///
 /// A process that a concurrent test spawns holds a copy of each descriptor of the test process

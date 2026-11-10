@@ -51,7 +51,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nvx::host::process::{Process, ProcessRef};
+use nvx::host::process::{Opened, Process, ProcessRef};
 use serde_json::{Value, json};
 
 use self::harness::{FAKE_OPENVMM, NVX_RS, Root, canonical};
@@ -800,7 +800,10 @@ fn runtime_record(root: &Root, state: &str) -> Option<Value> {
 fn recorded_process(root: &Root, state: &str) -> Option<Process> {
     let record = runtime_record(root, state)?;
     let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
-    Process::open(&reference).unwrap()
+    match Process::open(&reference).unwrap() {
+        Opened::Running(process) => Some(process),
+        Opened::Exited(_) => None,
+    }
 }
 
 /// Returns the names in the state directory `state` below the root, sorted.
@@ -1007,9 +1010,10 @@ fn a_stop_under_another_identity_never_ends_a_process_that_its_record_does_not_n
         );
         assert_eq!(runtime_record(&root, "state"), None);
         assert!(
-            !process
+            process
                 .wait(Instant::now() + Duration::from_millis(200))
-                .unwrap(),
+                .unwrap()
+                .is_none(),
             "{field}"
         );
         process.kill().unwrap();
@@ -1017,6 +1021,7 @@ fn a_stop_under_another_identity_never_ends_a_process_that_its_record_does_not_n
             process
                 .wait(Instant::now() + Duration::from_secs(10))
                 .unwrap()
+                .is_some()
         );
     }
     assert_eq!(transition(&root, "deprovision", "state", &[]), succeeded());
@@ -1055,9 +1060,9 @@ fn a_start_that_was_interrupted_is_ended_under_another_identity_too() {
     // The CLI dies, as a crash would, and leaves its OpenVMM running.
     start.kill().unwrap();
     start.wait().unwrap();
-    let process = Process::open(&reference)
-        .unwrap()
-        .expect("the OpenVMM of the start runs");
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the OpenVMM of the start runs");
+    };
 
     // Under another runtime identity, the next transition ends the start, whose OpenVMM it
     // verifies through the journal.
@@ -1153,6 +1158,7 @@ fn stop_reports_its_timeout_and_leaves_the_vm_running() {
         process
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
     assert_eq!(
         transition(&root, "deprovision", "unanswered", &[]),
@@ -1173,6 +1179,7 @@ fn stop_reports_its_timeout_and_leaves_the_vm_running() {
         process
             .wait(Instant::now() + Duration::from_secs(30))
             .unwrap()
+            .is_some()
     );
     assert_eq!(
         transition(&root, "stop", "slow", &[]),
@@ -1194,6 +1201,7 @@ fn a_sandbox_whose_openvmm_exited_reports_it_once_and_starts_again() {
             process
                 .wait(Instant::now() + Duration::from_secs(10))
                 .unwrap()
+                .is_some()
         );
     };
     crash();
@@ -2054,9 +2062,9 @@ fn a_start_that_ends_before_openvmm_opens_the_images_leaves_it_the_checked_ones(
     // The CLI dies, as a crash would, before OpenVMM has opened its images, and leaves it running.
     start.kill().unwrap();
     start.wait().unwrap();
-    let process = Process::open(&reference)
-        .unwrap()
-        .expect("the OpenVMM of the start runs");
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the OpenVMM of the start runs");
+    };
     let blocks = root
         .path
         .join("build")

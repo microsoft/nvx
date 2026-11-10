@@ -11,6 +11,8 @@ use crate::host::config::{
     Boot, LayeredRoot, PROCESS_COMMAND_LINE_LIMIT, RootConfig, UpperConfig,
     process_command_line_units,
 };
+#[cfg(any(target_os = "linux", windows))]
+use crate::host::process::Opened;
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
 use crate::protocol::root::RootImage;
@@ -494,7 +496,8 @@ fn a_missing_boot_and_a_snapshot_are_refused_before_any_output_is_created() {
     let runtime = cold_runtime();
     let mut config = cold_config();
     config.boot = None;
-    let snapshot = Snapshot { _private: () };
+    let fixture = crate::host::snapshot::tests::SnapshotFixture::new();
+    let snapshot = Snapshot::open(&fixture.dir).unwrap();
     for (from, config, expected) in [
         (None, &config, "Boot"),
         (Some(&snapshot), &cold_config(), "Snapshot"),
@@ -901,7 +904,9 @@ fn spawn_returns_the_same_outputs_and_capability_with_a_verified_process() {
     assert_eq!(launched.0.capability.as_bytes(), &capability);
     let reference = launched.0.process.reference();
     assert_ne!(reference.pid, std::process::id());
-    let reopened = Process::open(reference).unwrap().unwrap();
+    let Opened::Running(reopened) = Process::open(reference).unwrap() else {
+        panic!("the recorded VMM runs");
+    };
     assert_eq!(reopened.reference(), reference);
     assert!(!reopened.has_exited().unwrap());
     assert!(!format!("{:?}", launched.0).contains(&format!("{capability:?}")));
@@ -1073,7 +1078,9 @@ fn a_library_vm_outlives_the_caller_that_spawned_it_without_retaining_its_output
     );
     let reference =
         serde_json::from_slice(&fs::read(vm.join("caller-process.json")).unwrap()).unwrap();
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the caller's recorded VMM runs");
+    };
     let launched = RunningVm(Launched {
         process,
         outputs: VmDir::open(&vm).unwrap().outputs(false).unwrap(),
@@ -1098,6 +1105,7 @@ fn spawn_caller_helper() {
                 .process
                 .wait(Instant::now() + Duration::from_secs(10))
                 .unwrap()
+                .is_some()
         );
         panic!("cannot record the helper's child: {error}");
     }
@@ -1181,6 +1189,7 @@ fn an_unrelated_process_started_in_the_library_spawn_window_gets_no_vm_claim() {
             .process
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
     assert!(
         platform::tests::claim_released_within(&log, identity, Duration::from_secs(10)),
@@ -1231,7 +1240,9 @@ fn current_cold_spawn_boots_a_guest_accepts_shell_input_and_exits_cleanly() {
     let launched = RunningVm(spawn(prepared).unwrap());
     assert_eq!(launched.0.capability.as_bytes(), &capability);
     let reference = launched.0.process.reference();
-    let reopened = Process::open(reference).unwrap().unwrap();
+    let Opened::Running(reopened) = Process::open(reference).unwrap() else {
+        panic!("the recorded VMM runs");
+    };
     assert_eq!(reopened.reference(), reference);
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut console = loop {
@@ -1282,10 +1293,195 @@ fn current_cold_spawn_boots_a_guest_accepts_shell_input_and_exits_cleanly() {
         )
         .unwrap();
     read_until(&mut *console, b"NVX-SPAWN-COLD-OK");
-    assert!(launched.0.process.wait(deadline).unwrap());
+    assert!(launched.0.process.wait(deadline).unwrap().is_some());
     assert!(reopened.has_exited().unwrap());
-    let outcome = crate::host::report::read(&launched.0.outputs.outcome).unwrap();
+    let outcome = crate::host::report::read(&launched.0.outputs.outcome)
+        .unwrap()
+        .unwrap();
     assert_eq!(outcome.category.as_deref(), Some("success"));
     assert_eq!(outcome.status_code, Some(0));
     println!("NVX-LIBRARY-COLD-SPAWN-EXIT-OK: {}", reference.pid);
+}
+
+#[cfg(any(target_os = "linux", windows))]
+struct StopChild {
+    child: std::process::Child,
+    process: Process,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl StopChild {
+    fn start() -> Self {
+        use std::io::{BufRead, BufReader};
+
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new(
+                PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32\\cmd.exe"),
+            );
+            command.args(["/d", "/q", "/c", "echo ready & set /p wait="]);
+            command
+        };
+        #[cfg(target_os = "linux")]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "printf 'ready\\n'; read -r wait"]);
+            command
+        };
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = crate::host::tests::spawn_locked(&mut command).unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim_end(), "ready");
+        let reference = crate::host::process::ProcessRef {
+            pid: child.id(),
+            start_time: platform::process_start_time(child.id()).unwrap().unwrap(),
+            boot: crate::host::process::BootId::current().unwrap(),
+        };
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the owned child runs");
+        };
+        Self { child, process }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl Drop for StopChild {
+    fn drop(&mut self) {
+        if self.child.try_wait().unwrap().is_none() {
+            self.child.kill().unwrap();
+        }
+        self.child.wait().unwrap();
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn stop_preserves_report_results_after_a_real_self_exit() {
+    for report in ["missing", "valid", "malformed", "unreadable"] {
+        let (_directory, vm) = vm_dir();
+        let outputs = vm.outputs(false).unwrap();
+        match report {
+            "missing" => {}
+            "valid" => fs::write(
+                &outputs.outcome,
+                br#"{"outcome":{"category":"success","status_code":0},"teardown":{"workers":true}}"#,
+            ).unwrap(),
+            "malformed" => fs::write(&outputs.outcome, b"{ truncated").unwrap(),
+            "unreadable" => fs::create_dir(&outputs.outcome).unwrap(),
+            _ => unreachable!(),
+        }
+        let mut child = StopChild::start();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let stopped = stop(
+            &child.process,
+            &outputs,
+            |supplied| {
+                assert_eq!(supplied, deadline);
+                drop(child.child.stdin.take());
+                false
+            },
+            deadline,
+            deadline,
+        )
+        .unwrap();
+        assert!(stopped.self_exited);
+        assert!(!stopped.forced);
+        assert!(child.process.wait(Instant::now()).unwrap().is_some());
+        assert!(child.child.try_wait().unwrap().is_some());
+        let already_exited = stop(
+            &child.process,
+            &outputs,
+            |_| panic!("an exited process needs no graceful request"),
+            Instant::now(),
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(already_exited.self_exited);
+        assert!(!already_exited.forced);
+        match report {
+            "missing" => assert!(stopped.report.unwrap().is_none()),
+            "valid" => assert_eq!(
+                stopped.report.unwrap(),
+                Some(Report {
+                    category: Some("success".to_owned()),
+                    status_code: Some(0),
+                    teardown_complete: Some(true),
+                })
+            ),
+            _ => {
+                let error = stopped.report.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Io);
+                assert!(std::error::Error::source(&error).is_some());
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn stop_forces_only_its_verified_process_after_grace() {
+    let (_directory, vm) = vm_dir();
+    let outputs = vm.outputs(false).unwrap();
+    let mut child = StopChild::start();
+    let mut other = StopChild::start();
+    let grace = Instant::now() + Duration::from_millis(80);
+    let deadline = grace + Duration::from_secs(10);
+    let stopped = stop(
+        &child.process,
+        &outputs,
+        |supplied| {
+            assert_eq!(supplied, grace);
+            true
+        },
+        grace,
+        deadline,
+    )
+    .unwrap();
+    assert!(!stopped.self_exited);
+    assert!(stopped.forced);
+    assert!(stopped.report.unwrap().is_none());
+    assert!(child.process.wait(Instant::now()).unwrap().is_some());
+    assert!(child.child.try_wait().unwrap().is_some());
+    assert!(other.process.wait(Instant::now()).unwrap().is_none());
+    assert!(other.child.try_wait().unwrap().is_none());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn stop_returns_still_running_without_exit_confirmation_at_its_deadline() {
+    let (_directory, vm) = vm_dir();
+    let outputs = vm.outputs(false).unwrap();
+    fs::write(&outputs.outcome, b"{ truncated").unwrap();
+    let mut child = StopChild::start();
+    #[cfg(target_os = "linux")]
+    let handle = platform::ProcessHandle::without_pidfd();
+    #[cfg(windows)]
+    let handle = platform::ProcessHandle::wait_only(child.child.id());
+    let process = Process::held(child.process.reference().clone(), handle);
+    let grace = Instant::now();
+    let deadline = grace + Duration::from_millis(80);
+    let error = stop(&process, &outputs, |_| false, grace, deadline).unwrap_err();
+    assert!(Instant::now() >= deadline);
+    assert_eq!(error.kind(), ErrorKind::StillRunning);
+    assert_eq!(error.code().as_str(), "still-running");
+    let cause = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<io::Error>()
+        .unwrap();
+    assert_eq!(
+        cause.kind(),
+        if cfg!(windows) {
+            io::ErrorKind::PermissionDenied
+        } else {
+            io::ErrorKind::Unsupported
+        }
+    );
+    assert!(process.wait(Instant::now()).unwrap().is_none());
+    assert!(child.child.try_wait().unwrap().is_none());
 }

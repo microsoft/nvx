@@ -783,7 +783,10 @@ fn a_capture_sweep_refuses_to_run_outside_pid_1() {
         time: pid(42),
         announcer: Some(pid(43)),
     };
-    assert_eq!(helpers.sweep(), Err(Errno::EPERM));
+    assert_eq!(
+        helpers.sweep(Instant::now() + CAPTURE_TIMEOUT),
+        Err(Errno::EPERM)
+    );
 }
 
 #[test]
@@ -808,16 +811,17 @@ fn the_sweep_repeats_and_preserves_only_pid_1_and_registered_helpers() {
                 killed.push(process.raw());
                 Ok(())
             },
+            || Ok(()),
         )
         .unwrap();
     assert_eq!(passes, 3);
     assert_eq!(killed, [51, 52]);
     assert_eq!(
-        helpers.sweep_with(|| Err(Errno::EIO), |_| Ok(())),
+        helpers.sweep_with(|| Err(Errno::EIO), |_| Ok(()), || Ok(())),
         Err(Errno::EIO)
     );
     assert_eq!(
-        helpers.sweep_with(|| Ok(vec![pid(51)]), |_| Err(Errno::EPERM)),
+        helpers.sweep_with(|| Ok(vec![pid(51)]), |_| Err(Errno::EPERM), || Ok(())),
         Err(Errno::EPERM)
     );
     let mut passes = 0;
@@ -828,6 +832,7 @@ fn the_sweep_repeats_and_preserves_only_pid_1_and_registered_helpers() {
                 Ok(if passes == 1 { vec![pid(51)] } else { vec![] })
             },
             |_| Err(Errno::ESRCH),
+            || Ok(()),
         )
         .unwrap();
 }
@@ -1309,7 +1314,18 @@ fn privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers() {
                         std::thread::sleep(Duration::from_millis(1));
                     }
                     assert!(ProcessId::live_userspace().unwrap().contains(&threaded));
-                    helpers.sweep().unwrap();
+                    assert_eq!(
+                        helpers.prepare_capture(true, Instant::now()),
+                        Err(Errno::ETIMEDOUT)
+                    );
+                    let live = ProcessId::live_userspace().unwrap();
+                    for process in [escaped, held_id, unrelated, threaded] {
+                        assert!(
+                            live.contains(&process),
+                            "expired preparation killed a process"
+                        );
+                    }
+                    helpers.sweep(Instant::now() + CAPTURE_TIMEOUT).unwrap();
                     while let Some(child) = sys::reap_any_nonblocking() {
                         collected.reaped.push(child.process.raw().unsigned_abs());
                     }

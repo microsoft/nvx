@@ -390,6 +390,28 @@ fn rooted_capture_refuses_both_kill_flags_without_acknowledgement_or_pending_cle
 }
 
 #[test]
+fn timed_out_cleanup_refuses_before_ready_and_keeps_capture_admission_open() {
+    let (mut session, mut peer) = connected(true);
+    assert!(queue(&mut session, &mut peer, 39, &[1], false));
+    assert!(
+        session
+            .finish_capture_with(|capture, session| {
+                capture.perform_with(
+                    |_, _| Err(Errno::ETIMEDOUT),
+                    |id| session.send_app(APP_READY, id, 0, &[]),
+                    |_, _, _| panic!("timed-out cleanup does not capture"),
+                )
+            })
+            .unwrap()
+            .is_none()
+    );
+    peer.app(APP_ERROR, 39, Errno::ETIMEDOUT as i32, b"capture-failed");
+    assert!(!session.capture_pending());
+    assert_eq!(session.capture_status(), None);
+    assert!(queue(&mut session, &mut peer, 40, &[0], false));
+}
+
+#[test]
 fn capture_acknowledges_then_sends_nothing_until_return_and_reports_on_the_same_session() {
     let (mut session, mut peer) = connected(true);
     assert!(queue(&mut session, &mut peer, 33, &[0], false));
@@ -398,7 +420,7 @@ fn capture_acknowledges_then_sends_nothing_until_return_and_reports_on_the_same_
     let worker = thread::spawn(move || {
         let result = session.finish_capture_with(|capture, session| {
             capture.perform_with(
-                |_| Ok(()),
+                |_, _| Ok(()),
                 |id| session.send_app(APP_READY, id, 0, &[]),
                 |_, _, _| {
                     entered_tx.send(()).unwrap();
@@ -436,7 +458,7 @@ fn resumed_capture_reports_on_the_same_epoch_without_attaching_again() {
         session
             .finish_capture_with(|capture, session| {
                 capture.perform_with(
-                    |_| Ok(()),
+                    |_, _| Ok(()),
                     |id| session.send_app(APP_READY, id, 0, &[]),
                     |_, _, _| {
                         Err(CaptureFailure {
@@ -462,7 +484,7 @@ fn restored_capture_consumes_reset_and_acknowledges_the_existing_connection() {
     let worker = thread::spawn(move || {
         let result = session.finish_capture_with(|capture, session| {
             capture.perform_with(
-                |_| Ok(()),
+                |_, _| Ok(()),
                 |id| session.send_app(APP_READY, id, 0, &[]),
                 |_, _, _| {
                     Ok(Captured::Restored(
@@ -518,7 +540,7 @@ fn must_end_returns_the_exact_status_without_a_report_or_more_control_work() {
         let returned = session
             .finish_capture_with(|capture, session| {
                 capture.perform_with(
-                    |_| Ok(()),
+                    |_, _| Ok(()),
                     |id| session.send_app(APP_READY, id, 0, &[]),
                     |_, _, _| {
                         Err(CaptureFailure {

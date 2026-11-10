@@ -14,7 +14,7 @@ use crate::activation::{
     OverlayMode, ReadyActivation, RestoreSection, TransactionId, Upper, View,
 };
 use crate::host::platform::inherit::spawn_command;
-use crate::host::process::BootId;
+use crate::host::process::{BootId, Opened};
 use crate::host::vm::create_private_dir;
 use crate::protocol::restore_ready::parse_ready_event;
 
@@ -27,13 +27,15 @@ fn vm_directory() -> (tempfile::TempDir, VmDir) {
 }
 
 fn held_process(pid: u32) -> Process {
-    Process::open(&ProcessRef {
+    let Opened::Running(process) = Process::open(&ProcessRef {
         pid,
         start_time: platform::process_start_time(pid).unwrap().unwrap(),
         boot: BootId::current().unwrap(),
     })
-    .unwrap()
-    .unwrap()
+    .unwrap() else {
+        panic!("the fixture process runs");
+    };
+    process
 }
 
 /// A separate process, held before it may connect, and alive until the test ends it.

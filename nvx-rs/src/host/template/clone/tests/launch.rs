@@ -18,7 +18,7 @@ use super::*;
 use crate::activation::{ReadyActivation, StoreGeneration, TransactionId};
 use crate::host::artifacts;
 use crate::host::platform::Transport;
-use crate::host::process::{BootId, Process, ProcessRef};
+use crate::host::process::{BootId, Opened, Process, ProcessRef};
 use crate::host::snapshot::tests::artifact;
 use crate::host::store::files::{sync_dir, write_private};
 use crate::host::store::{
@@ -361,18 +361,18 @@ impl VmmDir {
     /// before it asks, since a process that has exited no longer opens.
     pub(super) fn end_and_wait(&self) {
         let reference = self.reference.as_ref().expect("the test knows the VMM");
-        let process = Process::open(reference)
-            .unwrap()
-            .expect("the VMM runs until the test ends it");
+        let Opened::Running(process) = Process::open(reference).unwrap() else {
+            panic!("the VMM runs until the test ends it");
+        };
         self.end();
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+        assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     }
 
     /// Waits until the VMM, which exits on its own, as its [plan](Self::plan) asks, has exited.
     pub(super) fn wait_exit(&self) {
         let reference = self.reference.as_ref().expect("the test knows the VMM");
-        if let Some(process) = Process::open(reference).unwrap() {
-            assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+        if let Opened::Running(process) = Process::open(reference).unwrap() {
+            assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
         }
     }
 
@@ -412,8 +412,10 @@ impl Drop for VmmDir {
     fn drop(&mut self) {
         let _ = fs::write(self.path().join(EXIT_MARKER), b"");
         if let Some(reference) = &self.reference
-            && let Ok(Some(process)) = Process::open(reference)
-            && !process.wait(Instant::now() + TIMEOUT).unwrap_or(false)
+            && let Ok(Opened::Running(process)) = Process::open(reference)
+            && !process
+                .wait(Instant::now() + TIMEOUT)
+                .is_ok_and(|exited| exited.is_some())
         {
             let _ = process.kill();
             let _ = process.wait(Instant::now() + TIMEOUT);
@@ -1567,7 +1569,7 @@ fn a_clone_whose_launch_failed_before_it_began_launches_no_more_until_its_releas
     // clone's: an inspection takes none, and the launch removes it before it records anything.
     let report = acquired.locked.outcome_path();
     fs::write(&report, guest_exit(195)).unwrap();
-    assert!(crate::host::report::read(&report).is_some());
+    assert!(crate::host::report::read(&report).unwrap().is_some());
     let records = CloneRecords::read(&acquired.locked).unwrap().unwrap();
     assert_eq!(
         (records.progress, records.report),
@@ -2299,7 +2301,9 @@ fn a_reattach_takes_the_report_of_a_vmm_whose_launch_a_recovery_of_the_sandbox_e
 fn a_launch_whose_caller_crashes_once_its_vmm_started_ends_the_vmm_as_reattach_recovers_it() {
     let crashed = Crashed::at("launched");
     let reference = crashed.vmm.reference.clone().unwrap();
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the crashed caller's VMM runs");
+    };
     // The VMM listens beside the snapshot on Linux, as it has once it tried to send its event.
     crashed.vmm.started();
     assert_eq!(exists(&crashed.socket()), cfg!(target_os = "linux"));
@@ -2323,7 +2327,7 @@ fn a_launch_whose_caller_crashes_once_its_vmm_started_ends_the_vmm_as_reattach_r
         } => assert_eq!(terminated, reference),
         other => panic!("unexpected reattach: {other:?}"),
     }
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     assert!(!exists(&crashed.socket()));
     crashed.releases(&mut locked);
 }
@@ -2336,7 +2340,9 @@ fn a_restore_whose_caller_crashes_before_its_commit_ends_its_vmm_as_reattach_rec
     for step in ["activating", "activated", "starting", "started"] {
         let crashed = Crashed::at(step);
         let reference = crashed.vmm.reference.clone().unwrap();
-        let process = Process::open(&reference).unwrap().unwrap();
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the crashed caller's VMM runs");
+        };
         // The caller read the VMM's restore-ready event, whose flush waited for that on Windows.
         assert!(crashed.vmm.started().ends_with(" true"), "{step}");
         assert!(crashed.vmm.flushed(), "{step}");
@@ -2356,7 +2362,10 @@ fn a_restore_whose_caller_crashes_before_its_commit_ends_its_vmm_as_reattach_rec
             } => assert_eq!(terminated, reference, "{step}"),
             other => panic!("unexpected reattach at {step}: {other:?}"),
         }
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap(), "{step}");
+        assert!(
+            process.wait(Instant::now() + TIMEOUT).unwrap().is_some(),
+            "{step}"
+        );
         assert!(!exists(&crashed.socket()), "{step}");
         crashed.releases(&mut locked);
     }
@@ -3658,7 +3667,10 @@ fn a_reattach_that_cannot_record_a_failure_ends_and_forgets_nothing_of_the_clone
         .journal()
         .unwrap()
         .expect("the reattach kept the journal");
-    assert!(Process::open(journal.process().unwrap()).unwrap().is_some());
+    assert!(matches!(
+        Process::open(journal.process().unwrap()).unwrap(),
+        Opened::Running(_)
+    ));
     crashed.refuses_release(&mut locked);
     // Once the record can be written, the reattach ends the launch, and records its failure.
     fs::remove_dir(&path).unwrap();
@@ -3714,7 +3726,7 @@ fn a_reattach_that_cannot_record_a_failure_ends_and_forgets_nothing_of_the_clone
             .unwrap()
             .expect("the reattach kept the record");
         assert!(
-            Process::open(record.process()).unwrap().is_some(),
+            matches!(Process::open(record.process()).unwrap(), Opened::Running(_)),
             "{evidence:?}"
         );
         crashed.refuses_release(&mut locked);
@@ -3770,7 +3782,10 @@ fn a_reattach_makes_the_record_of_an_earlier_failure_durable_before_it_ends_the_
         .journal()
         .unwrap()
         .expect("the reattach kept the journal");
-    assert!(Process::open(journal.process().unwrap()).unwrap().is_some());
+    assert!(matches!(
+        Process::open(journal.process().unwrap()).unwrap(),
+        Opened::Running(_)
+    ));
     crashed.refuses_release(&mut locked);
     // One that can syncs the sandbox's directory before it ends the launch.
     let synced = RefCell::new(Vec::new());

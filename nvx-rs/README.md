@@ -124,8 +124,8 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, and caller-saved reattachment |
-| [`nvx::host::snapshot`](#nvxhostsnapshot) | Snapshot compatibility keys, strict manifests, restore-time eligibility, and the opaque input of a future VM restore |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, confirmed stop, and caller-saved reattachment |
+| [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshot directories, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
@@ -500,6 +500,17 @@ or reading runtime files.
 `Reattached` holds both the process and authenticated connection. Failures
 retain their original kinds and sources and leave the saved values unchanged.
 
+`stop(process, outputs, graceful, grace, deadline)` waits through the verified
+process, first after the caller's graceful request, then after forced termination
+if needed. It returns `Stopped` only after confirmed exit. `self_exited` records
+confirmation before a forced attempt, and `forced` records that attempt, not
+proof from kill success. An unconfirmed exit is `StillRunning`, and the caller
+keeps the process. The callback receives the bounded grace deadline and must
+respect it; its boolean result is never exit proof.
+
+`Stopped::report` retains the outcome-report read's result separately, so report
+failure never hides confirmed exit.
+
 `vm::create(&runtime, &config, None, &dir)` creates an inspectable cold
 `Prepared` launch without starting a process or binding a listener. It requires
 `config.boot`, refuses a snapshot input, rechecks the directory's privacy, and
@@ -568,9 +579,47 @@ The key's canonical encoding and identity use the snapshot names and omit
 and no reader or migration of the prior encoding is supported. `CaptureClass`
 still records the legacy capture inputs, including its guest build.
 
-`Snapshot` is an opaque input of a future restore. `vm::create` currently
-refuses `Some(snapshot)` with `ErrorKind::Unsupported`; only cold boots are
-supported.
+`Snapshot::open` checks exactly `key.bin`, `snapshot.json` and
+`openvmm/{manifest.bin,memory.bin,state.bin}`. Directories are private, files
+are regular and private to their owner, artifact lengths equal the strict
+manifest's, and the canonical key is consistent with that manifest.
+`KEY_FILE`, `DESCRIPTION_FILE` and `OPENVMM_DIR` name the root entries.
+The description must exist, but its contents are never read, parsed or
+trusted. `Snapshot::key` and `manifest` expose the verified metadata.
+Opening also checks that a captured NIC address fits `NicConfig`, refusing
+its network, gateway and broadcast addresses with `Io`, and caches that
+checked value for the infallible `nic` accessor.
+
+`Snapshot::accepts(&config, &runtime, &now)` checks a layered restore against
+the captured boot resources and capacity. Processor counts are 1, 2, 4 or 8;
+an encoded boot count of zero means all capacity processors are already
+online. Memory is between boot and capacity, in multiples of 128 MiB, with
+checked conversion from MiB to bytes. The image fits the placeholder and
+keeps its logical and physical block sizes; a scratch upper matches the
+dormant scratch's complete geometry. These checks read the requested disks'
+real metadata, not the snapshot entries again.
+
+NIC presence must match, and an explicitly named address equals the captured
+one; an unnamed address inherits it. `Snapshot::nic` returns only the captured
+presence and address as an `Option<NicConfig>`, never a network policy.
+Each restore supplies its own policy. The boot console retains its captured
+attachment policy: `recreate-listener` for a listener, or
+`discard-while-disconnected` for a disconnected console. A mismatched,
+missing or unknown policy is refused. These facts come from the same
+validated manifest parse; the control listener and console device do not
+prove that attachment. The runtime uses the same backend and captured CPU
+profile, and has the same runtime identity. An omitted profile or `auto`
+names the snapshot's profile; `host` also names a captured host-derived
+profile. Requested disks must be regular files; on Linux, the geometry
+check refuses a FIFO without waiting for its writer.
+Compatibility refusals are `Unsupported`; an ineligible time contract at
+the supplied `HostTime` is `Unavailable`.
+
+The caller keeps the directory and every entry private and immutable while
+using the snapshot; opening checks them once and retains no file handles
+or lock. `Snapshot` remains an opaque input of a future restore:
+`vm::create` still refuses `Some(snapshot)` with `ErrorKind::Unsupported`;
+only cold boots are supported.
 
 ### `nvx::host::config`
 
@@ -959,13 +1008,15 @@ compatibility wrapper.
 Verified process references. A `ProcessRef` names one process by its ID, its
 start time, and the `BootId` of the host boot during which it started.
 
-`Process::open` checks a reference and holds its process through a pidfd on
-Linux or a process handle on Windows, whether or not the caller started it, so
-that waits sleep until the process exits and termination never reaches a process
-that reuses its ID. A reference from an earlier boot names an exited process,
-and a process whose identity this user cannot check, such as another user's,
-makes `Process::open` fail rather than report an exit. Linux hosts without
-pidfds poll the reference instead, and cannot terminate the process.
+`Process::open` returns `Opened::Running(Process)` only after checking the
+recorded boot, ID, and start time. It holds the process through a pidfd on
+Linux or a process handle on Windows, whether or not the caller started it,
+so that waits and termination never reach a process that reuses its ID.
+`Opened::Exited(Exited)` proves that the recorded boot ended or no running
+process matches both its ID and start time. A process whose identity this
+user cannot check makes `Process::open` fail rather than report an exit.
+Linux hosts without pidfds poll the reference instead, and cannot terminate
+the process.
 
 On Linux and Windows, `Process::exit_handle()` returns
 `Result<Option<ExitHandle>>`: an independently owned duplicate of the pidfd
@@ -975,6 +1026,10 @@ dropping the original `Process` or another duplicate leaves it valid.
 On Windows, the duplicate retains the original handle's access rights.
 Duplication failures have kind `Io` and retain their original I/O source.
 No watcher thread, future or callback is created by the library.
+
+`Process::wait(deadline)` returns `Some(Exited)` only after verified exit, or
+`None` when the deadline passes without confirmation. `Exited` proves exit,
+not an exit status, and cannot be made by a caller.
 
 `Process::bytes_read` reports how many bytes the process has read through the
 operating system's read calls, whether the host's cache served them or not:
@@ -1421,6 +1476,11 @@ tampering; see [Distro bindings](#distro-bindings).
 The authenticated control session, which carries NVX's control protocol, `NVXC`,
 one frame per DATA record of a `HostConnection`; Linux and Windows primitives;
 and OpenVMM's outcome report.
+
+`report::read` returns `Ok(None)` for a missing report, and an `Io` error for an
+unreadable or malformed report, retaining the underlying error. It keeps today's
+summary of the outcome category, status code and teardown steps, not free-form
+fields.
 
 A `Transport` to an OpenVMM control endpoint reads and writes with deadlines,
 and tells, through `Transport::unread`, what the endpoint has not read yet of
@@ -3055,6 +3115,7 @@ optional cause.
 | `Unavailable` | A missing or unusable artifact, hypervisor, or release, a guest image without a required control feature, or an unsupported host |
 | `Unsupported` | A request that NVX refuses: a value that it does not accept, such as a malformed or out-of-range one, options that it cannot combine, or a request that it cannot represent or enforce, such as a policy beyond a limit of OpenVMM or the guest agent |
 | `Exited` | The VM's OpenVMM process exited |
+| `StillRunning` | A stop could not confirm the VM process's exit, so the caller keeps its verified process |
 | `Io` | A host I/O failure, or state that NVX recorded on the host and cannot read |
 | `NotFound` | State that an operation names and that does not exist on the host, such as the store of a sandbox that was never created or that a removal deleted |
 | `Protocol` | A control session that failed, or a request that the guest agent refused |
@@ -3087,6 +3148,7 @@ usage errors, which no library error has.
 | `unavailable` | `Unavailable` | A dependency is missing or unusable, other than as a finer code says: install metadata, the hypervisor, a release, a distro layer or scratch image that the request names, or a host that NVX does not support |
 | `unsupported` | `Unsupported` | NVX refuses the request: options that it cannot combine, a value that it does not accept, or a policy that it cannot represent or enforce. The message names the option or field |
 | `exited` | `Exited` | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one |
+| `still-running` | `StillRunning` | A stop could not confirm the VM process's exit, so the caller keeps its verified process |
 | `io` | `Io` | A host I/O operation failed, or state that NVX recorded on the host is unreadable or malformed |
 | `not-found` | `NotFound` | Other state that the operation names does not exist on the host |
 | `protocol` | `Protocol` | The control session failed otherwise: the peer violated the protocol, reset the session, or failed authentication |

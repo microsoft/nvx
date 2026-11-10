@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::activation::TemplateReference;
-use crate::host::process::{Process, ProcessRef};
+use crate::host::process::{Opened, Process, ProcessRef};
 use crate::host::snapshot::tests::{ManifestSpec, artifact, network_class};
 use crate::host::store::files::write_private;
 use crate::host::store::{
@@ -2459,8 +2459,10 @@ impl Drop for VmmDir {
     fn drop(&mut self) {
         let _ = fs::write(self.path().join(EXIT_MARKER), b"");
         if let Some(reference) = &self.reference
-            && let Ok(Some(process)) = Process::open(reference)
-            && !process.wait(Instant::now() + TIMEOUT).unwrap_or(false)
+            && let Ok(Opened::Running(process)) = Process::open(reference)
+            && !process
+                .wait(Instant::now() + TIMEOUT)
+                .is_ok_and(|exited| exited.is_some())
         {
             let _ = process.kill();
             let _ = process.wait(Instant::now() + TIMEOUT);
@@ -2623,7 +2625,9 @@ fn a_clone_that_crashes_before_its_spawn_keeps_its_lease_until_its_launch_ends()
 fn a_clone_that_crashes_after_its_spawn_keeps_its_lease_until_its_unrecorded_vmm_exits() {
     let crashed = Crashed::after("after-spawn");
     let reference = crashed.vmm.reference.clone().unwrap();
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the unrecorded VMM runs");
+    };
     let mut locked = crashed.lock();
     assert_eq!(
         locked.journal().unwrap().unwrap().state(),
@@ -2639,7 +2643,7 @@ fn a_clone_that_crashes_after_its_spawn_keeps_its_lease_until_its_unrecorded_vmm
     crashed.refuses_release(&mut locked);
     // Once the VMM exits, the claim that it released proves it.
     crashed.vmm.end();
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     match reattach_until_determinate(&mut locked) {
         Reattached::Exited {
             record: None,
@@ -2654,7 +2658,9 @@ fn a_clone_that_crashes_after_its_spawn_keeps_its_lease_until_its_unrecorded_vmm
 fn a_clone_that_crashes_after_recording_its_vmm_keeps_its_lease_until_reattach_ends_it() {
     let crashed = Crashed::after("after-identity");
     let reference = crashed.vmm.reference.clone().unwrap();
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the recorded VMM runs");
+    };
     let mut locked = crashed.lock();
     let journal = locked.journal().unwrap().unwrap();
     assert_eq!(journal.launch(), crashed.lease.launch());
@@ -2669,7 +2675,7 @@ fn a_clone_that_crashes_after_recording_its_vmm_keeps_its_lease_until_reattach_e
         } => assert_eq!(terminated, reference),
         other => panic!("unexpected reattach: {other:?}"),
     }
-    assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+    assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     crashed.releases(&mut locked);
 }
 

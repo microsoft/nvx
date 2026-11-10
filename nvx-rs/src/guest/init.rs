@@ -121,18 +121,21 @@ impl Helpers {
     }
 
     /// Kills every remaining userspace process but PID 1 and the registered helpers, repeating
-    /// until none remains, including descendants that left their execution's process group.
-    pub(crate) fn sweep(self) -> Result<(), Errno> {
+    /// until none remains or the deadline expires, including descendants that left their
+    /// execution's process group.
+    pub(crate) fn sweep(self, deadline: Instant) -> Result<(), Errno> {
         if sys::current_process().raw() != INIT_PROCESS {
             return Err(Errno::EPERM);
         }
-        self.sweep_with(ProcessId::live_userspace, sys::kill_process)
+        self.sweep_with(ProcessId::live_userspace, sys::kill_process, || {
+            sys::FileLock::check_deadline(Some(deadline))
+        })
     }
 
     /// A capture without permission to kill must leave no unregistered process running.
-    fn prepare_capture(self, kill: bool) -> Result<(), Errno> {
+    fn prepare_capture(self, kill: bool, deadline: Instant) -> Result<(), Errno> {
         if kill {
-            return self.sweep();
+            return self.sweep(deadline);
         }
         if sys::current_process().raw() != INIT_PROCESS {
             return Err(Errno::EPERM);
@@ -146,15 +149,18 @@ impl Helpers {
         Ok(())
     }
 
-    /// Runs the narrow process-table sweep with the supplied walk and kill operations.
+    /// Runs the narrow process-table sweep with the supplied walk, kill and deadline checks.
     fn sweep_with(
         self,
         mut processes: impl FnMut() -> Result<Vec<ProcessId>, Errno>,
         mut kill: impl FnMut(ProcessId) -> Result<(), Errno>,
+        mut check_deadline: impl FnMut() -> Result<(), Errno>,
     ) -> Result<(), Errno> {
         loop {
+            check_deadline()?;
             let mut found = false;
             for process in processes()? {
+                check_deadline()?;
                 if process.raw() == INIT_PROCESS || self.name(process).is_some() {
                     continue;
                 }
@@ -164,6 +170,7 @@ impl Helpers {
                     Err(error) => return Err(error),
                 }
             }
+            check_deadline()?;
             if !found {
                 return Ok(());
             }
@@ -262,7 +269,8 @@ impl Capture {
 
     /// Performs the existing repeated sweep after group termination.
     pub(crate) fn sweep(&self) -> Result<(), Errno> {
-        self.helpers.sweep()
+        let (_, _, deadline) = self.pending.ok_or(Errno::EINVAL)?;
+        self.helpers.sweep(deadline)
     }
 
     /// Prepares workloads, acknowledges the request, then calls the snapshot library once.
@@ -272,7 +280,7 @@ impl Capture {
     ) -> Result<Option<CaptureStep>, Errno> {
         let helpers = self.helpers;
         self.perform_with(
-            |kill| helpers.prepare_capture(kill),
+            |kill, deadline| helpers.prepare_capture(kill, deadline),
             acknowledge,
             snapshot::capture,
         )
@@ -281,14 +289,17 @@ impl Capture {
     /// The transport is invoked only before the one synchronous snapshot call.
     pub(crate) fn perform_with(
         &mut self,
-        prepare: impl FnOnce(bool) -> Result<(), Errno>,
+        prepare: impl FnOnce(bool, Instant) -> Result<(), Errno>,
         acknowledge: impl FnOnce(u64) -> Result<(), Errno>,
         capture: impl FnOnce(&Devices, Disks, Instant) -> Result<Captured, CaptureFailure>,
     ) -> Result<Option<CaptureStep>, Errno> {
         let Some((request_id, kill, deadline)) = self.pending.take() else {
             return Ok(None);
         };
-        if let Err(error) = prepare(kill) {
+        let prepared = sys::FileLock::check_deadline(Some(deadline))
+            .and_then(|()| prepare(kill, deadline))
+            .and_then(|()| sys::FileLock::check_deadline(Some(deadline)));
+        if let Err(error) = prepared {
             return Ok(Some(CaptureStep::Refused { request_id, error }));
         }
         acknowledge(request_id)?;

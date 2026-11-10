@@ -70,8 +70,9 @@ fn capture_preparation_and_acknowledgement_precede_one_synchronous_call() {
     let deadline = state.pending.unwrap().2;
     let returned = state
         .perform_with(
-            |kill| {
+            |kill, actual_deadline| {
                 assert!(kill);
+                assert_eq!(actual_deadline, deadline);
                 calls.borrow_mut().push("kill-and-sweep");
                 Ok(())
             },
@@ -103,7 +104,7 @@ fn capture_preparation_and_acknowledgement_precede_one_synchronous_call() {
     assert!(
         state
             .perform_with(
-                |_| panic!("no second preparation"),
+                |_, _| panic!("no second preparation"),
                 |_| panic!("no second acknowledgement"),
                 |_, _, _| panic!("no second snapshot call"),
             )
@@ -114,13 +115,13 @@ fn capture_preparation_and_acknowledgement_precede_one_synchronous_call() {
 
 #[test]
 fn refused_preparation_or_failed_acknowledgement_never_calls_snapshot() {
-    for refusal in [Errno::EBUSY, Errno::EIO] {
+    for refusal in [Errno::EBUSY, Errno::EIO, Errno::ETIMEDOUT] {
         let mut state = Capture::fixture(true);
         assert!(state.queue(19, false));
         assert!(matches!(
             state
                 .perform_with(
-                    |kill| {
+                    |kill, _| {
                         assert!(!kill);
                         Err(refusal)
                     },
@@ -136,13 +137,118 @@ fn refused_preparation_or_failed_acknowledgement_never_calls_snapshot() {
     assert_eq!(
         state
             .perform_with(
-                |_| Ok(()),
+                |_, _| Ok(()),
                 |_| Err(Errno::EPIPE),
                 |_, _, _| panic!("a failed acknowledgement does not capture"),
             )
             .err(),
         Some(Errno::EPIPE)
     );
+}
+
+#[test]
+fn surviving_processes_time_out_the_capture_before_acknowledgement() {
+    let mut state = Capture::fixture(true);
+    assert!(state.queue(23, true));
+    let helpers = state.helpers;
+    let deadline = state.pending.unwrap().2;
+    let scans = Cell::new(0);
+    let killed = RefCell::new(Vec::new());
+    let returned = state
+        .perform_with(
+            |kill, actual_deadline| {
+                assert!(kill);
+                assert_eq!(actual_deadline, deadline);
+                helpers.sweep_with(
+                    || {
+                        scans.set(scans.get() + 1);
+                        assert!(scans.get() <= 2, "cleanup retried after expiry");
+                        Ok(vec![pid(1), pid(42), pid(43), pid(51)])
+                    },
+                    |process| {
+                        killed.borrow_mut().push(process.raw());
+                        Ok(())
+                    },
+                    || {
+                        if scans.get() == 2 {
+                            Err(Errno::ETIMEDOUT)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+            },
+            |_| panic!("timed-out cleanup is not acknowledged"),
+            |_, _, _| panic!("timed-out cleanup does not capture"),
+        )
+        .unwrap();
+    assert!(matches!(
+        returned,
+        Some(CaptureStep::Refused {
+            request_id: 23,
+            error: Errno::ETIMEDOUT,
+        })
+    ));
+    assert_eq!(scans.get(), 2);
+    assert_eq!(*killed.borrow(), [51]);
+    assert!(!state.pending());
+    assert_eq!(state.shutdown_status(), None);
+    assert!(state.queue(24, false));
+}
+
+#[test]
+fn a_scan_that_finishes_after_expiry_neither_kills_nor_reports_success() {
+    let helpers = Capture::fixture(true).helpers;
+    for processes in [vec![], vec![pid(51)]] {
+        let scanned = Cell::new(false);
+        assert_eq!(
+            helpers.sweep_with(
+                || {
+                    scanned.set(true);
+                    Ok(processes.clone())
+                },
+                |_| panic!("a late scan must not kill"),
+                || {
+                    if scanned.get() {
+                        Err(Errno::ETIMEDOUT)
+                    } else {
+                        Ok(())
+                    }
+                },
+            ),
+            Err(Errno::ETIMEDOUT)
+        );
+    }
+}
+
+#[test]
+fn an_expired_preparation_deadline_is_refused_before_acknowledgement() {
+    for budget in [Duration::ZERO, Duration::from_millis(5)] {
+        let mut state = Capture::fixture(true);
+        assert!(state.queue(25, true));
+        let deadline = Instant::now() + budget;
+        state.pending.as_mut().unwrap().2 = deadline;
+        let returned = state
+            .perform_with(
+                |_, actual_deadline| {
+                    assert_eq!(actual_deadline, deadline);
+                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    Ok(())
+                },
+                |_| panic!("expired preparation is not acknowledged"),
+                |_, _, _| panic!("expired preparation does not capture"),
+            )
+            .unwrap();
+        assert!(matches!(
+            returned,
+            Some(CaptureStep::Refused {
+                request_id: 25,
+                error: Errno::ETIMEDOUT,
+            })
+        ));
+        assert!(!state.pending());
+        assert_eq!(state.shutdown_status(), None);
+    }
 }
 
 #[test]
@@ -154,7 +260,7 @@ fn an_old_epoch_drops_its_pending_capture_without_restarting_it() {
     assert!(
         state
             .perform_with(
-                |_| {
+                |_, _| {
                     called.set(true);
                     Ok(())
                 },
@@ -226,7 +332,7 @@ fn fatal_capture_status_goes_directly_to_pid1_shutdown_without_starting_work() {
         assert!(capture.queue(22, false));
         let returned = capture
             .perform_with(
-                |_| Ok(()),
+                |_, _| Ok(()),
                 |_| Ok(()),
                 |_, _, _| {
                     Err(CaptureFailure {
