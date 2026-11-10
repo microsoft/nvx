@@ -7,20 +7,22 @@ use super::launch::prepared;
 use super::*;
 use crate::host::cli::store::liveness::hold_endpoint_server;
 use crate::host::config::ConsoleAttachment;
-use crate::host::process::{BootId, Process, ProcessRef};
+use crate::host::process::{BootId, Opened, Process, ProcessRef};
 use crate::host::spawn::{self, VmmCommand};
 
 const HELPER: &str = "host::cli::store::tests::liveness::log_holder_helper";
 
 fn own_process() -> Process {
     let pid = std::process::id();
-    Process::open(&ProcessRef {
+    let Opened::Running(process) = Process::open(&ProcessRef {
         pid,
         start_time: platform::process_start_time(pid).unwrap().unwrap(),
         boot: BootId::current().unwrap(),
     })
-    .unwrap()
-    .unwrap()
+    .unwrap() else {
+        panic!("this process runs");
+    };
+    process
 }
 
 struct Running(Option<spawn::Launched>);
