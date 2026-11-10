@@ -3269,6 +3269,7 @@ method nvx::host::supervisor::Inherited::proc_path
 struct nvx::host::supervisor::Launched
 method nvx::host::supervisor::Launched::detach
 method nvx::host::supervisor::Launched::id
+method nvx::host::supervisor::Launched::kill_and_confirm_exit
 method nvx::host::supervisor::Launched::kill_and_wait
 method nvx::host::supervisor::Launched::process
 method nvx::host::supervisor::Launched::wait_timeout
