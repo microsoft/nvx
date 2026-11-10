@@ -154,11 +154,11 @@ impl Sandbox {
     pub(crate) fn new(name: &str) -> Self {
         let pid = std::process::id();
         let root = (0..)
-            .map(|attempt| env::temp_dir().join(format!("runtime-adapter-{name}-{pid}-{attempt}")))
+            .map(|attempt| env::temp_dir().join(format!("ra-{pid}-{attempt}")))
             .find(|root| match fs::create_dir(root) {
                 Ok(()) => true,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
-                Err(error) => panic!("cannot create {}: {error}", root.display()),
+                Err(error) => panic!("cannot create the {name} sandbox {}: {error}", root.display()),
             })
             .expect("a directory name is free");
         Self {
