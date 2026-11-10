@@ -76,7 +76,10 @@ pub const CONTROL_CONTRACT_REVISION: &str = "nvx-microvm-v2-control-v2";
 pub const SNAPSHOT_FORMAT_VERSION: u64 = 2;
 /// Version of the schema of a snapshot's saved device state that this crate reads. It must match
 /// `SAVED_STATE_SCHEMA_VERSION` in OpenVMM's `openvmm/openvmm_helpers/src/snapshot/format.rs`.
-pub const DEVICE_STATE_SCHEMA_VERSION: u64 = 1;
+///
+/// Version 2 records the contract of every state unit, which OpenVMM checks before it restores
+/// their saved state, instead of version 1's names of the state units.
+pub const DEVICE_STATE_SCHEMA_VERSION: u64 = 2;
 /// Version of the time ABI that this crate speaks: the guest's clocks and timers, and their repair
 /// after a restore. It must match `TIME_ABI_VERSION` in OpenVMM's
 /// `vmm_core/virt/src/time_abi/mod.rs`.

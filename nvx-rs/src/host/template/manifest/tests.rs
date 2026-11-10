@@ -237,7 +237,7 @@ fn the_fields_of_a_manifest_need_not_be_written_in_their_order() {
         .text(14, "clone")
         .text(13, "platform")
         .text(12, "openvmm.SavedState")
-        .varint(11, 1)
+        .varint(11, 2)
         .bytes(10, b"OPENVMM_SNAPSHOT_V2\0");
     spec.tier.clear();
     spec.restore_policy.clear();
@@ -275,11 +275,15 @@ fn other_versions_of_the_format_are_unsupported() {
         unsupported,
         "has another format magic",
     );
-    assert_refused(
-        |spec| spec.schema_version = 2,
-        unsupported,
-        "has saved-state schema version 2",
-    );
+    // A snapshot of the earlier schema, which records only the names of the state units, and one
+    // of a later schema are both refused.
+    for schema_version in [1, 3] {
+        assert_refused(
+            |spec| spec.schema_version = schema_version,
+            unsupported,
+            &format!("has saved-state schema version {schema_version}"),
+        );
+    }
     assert_refused(
         |spec| spec.root_type = "openvmm.OtherState".to_owned(),
         unsupported,

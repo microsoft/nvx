@@ -140,6 +140,8 @@ mod nvx_fixture {
                 "virtio-control-console-{}",
                 defs::MICROVM_VIRTIO_CONTROL_CONSOLE_MMIO_BASE
             ));
+            // OpenVMM records the state units in name order.
+            state_unit_names.sort();
             let contract = microvm_machine_contract(
                 hypervisor,
                 MICROVM_BOOT_LAYOUT_VERSION,

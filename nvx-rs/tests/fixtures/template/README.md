@@ -17,18 +17,20 @@ devices offer no access-platform, whose consoles offer no size, and whose
 virtio devices interrupt on IOAPIC inputs past the ISA IRQs, after the
 invariant configuration alone, with OpenVMM's test records of the time
 contract, of time ABI version 1, and of the CPU profile `intel.icelake-sp.v1`.
+Their saved state is of version 2 of the saved-state schema, and their
+machine contracts list the state units in name order, as OpenVMM records them.
 
 ## How they were made
 
 [`generate.rs`](generate.rs) builds each manifest as a capture does, with
 `microvm_machine_contract` of OpenVMM's `openvmm_helpers`, checks it with
 OpenVMM's own validation, and encodes it with `mesh`. It wrote these files at
-OpenVMM commit `eda13d80a85e49c16ed0500a9d4ae762ca810304`.
+OpenVMM commit `3e7809ba4343ba630f10841052f35f86b521d231`.
 
-To write them again, as when a new version of the snapshot format, the time
-ABI, or the microVM ABI retires these, append `generate.rs` to
-`openvmm/openvmm_helpers/src/snapshot/microvm.rs` in a scratch checkout of the
-pinned OpenVMM, and run, from that checkout's root:
+To write them again, as when a new version of the snapshot format, the
+saved-state schema, the time ABI, or the microVM ABI retires these, append
+`generate.rs` to `openvmm/openvmm_helpers/src/snapshot/microvm.rs` in a scratch
+checkout of the pinned OpenVMM, and run, from that checkout's root:
 
 ```bash
 cargo xflowey restore-packages --no-compat-igvm

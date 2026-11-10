@@ -812,7 +812,7 @@ impl ManifestSpec {
             state_size: 65_536,
             contract: Some(contract),
             magic: b"OPENVMM_SNAPSHOT_V2\0".to_vec(),
-            schema_version: 1,
+            schema_version: 2,
             root_type: "openvmm.SavedState".to_owned(),
             tier: "platform".to_owned(),
             restore_policy: "clone".to_owned(),
