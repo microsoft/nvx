@@ -990,7 +990,9 @@ fn attach_with_output<T: Send>(
                     Ok(true) if Instant::now() < deadline => {}
                     Ok(_) => break,
                     Err(error) => {
-                        if let Err(attach) = attached {
+                        if !platform::interrupted()
+                            && let Err(attach) = attached
+                        {
                             attach.report();
                         }
                         return Err(error);
@@ -1060,6 +1062,23 @@ fn foreground(
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+/// Completes stopped output after the caller has published the requested native report.
+fn finish_foreground(output: &mut ForegroundOutput<'_>, status: Result<i32>) -> Result<i32> {
+    check_interrupt()?;
+    let drained = output.finish();
+    let status = match (status, drained) {
+        (Err(error), Err(drain)) => {
+            check_interrupt()?;
+            drain.report();
+            Err(error)
+        }
+        (status, Ok(())) => status,
+        (Ok(_), Err(error)) => Err(error),
+    };
+    check_interrupt()?;
+    status
 }
 
 fn run_cold(
@@ -1180,17 +1199,7 @@ fn run_cold(
         {
             error.report();
         }
-        let drained = output.finish();
-        let status = match (status, drained) {
-            (Err(error), Err(drain)) => {
-                drain.report();
-                Err(error)
-            }
-            (status, Ok(())) => status,
-            (Ok(_), Err(error)) => Err(error),
-        };
-        check_interrupt()?;
-        let status = status?;
+        let status = finish_foreground(&mut output, status)?;
         if let Err(error) = stopped.report {
             output::print_stderr(&format!(
                 "error[io]: {}",

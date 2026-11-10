@@ -248,12 +248,13 @@ fn windows_console_output_helper() {
     };
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
     use windows_sys::Win32::System::Console::{
-        CONSOLE_TEXTMODE_BUFFER, COORD, CreateConsoleScreenBuffer, GetConsoleOutputCP,
-        GetConsoleProcessList, GetStdHandle, ReadConsoleOutputCharacterW, STD_ERROR_HANDLE,
-        STD_OUTPUT_HANDLE, SetConsoleCursorPosition, SetConsoleOutputCP, SetStdHandle,
+        CONSOLE_TEXTMODE_BUFFER, COORD, CTRL_C_EVENT, CreateConsoleScreenBuffer,
+        GenerateConsoleCtrlEvent, GetConsoleOutputCP, GetConsoleProcessList, GetStdHandle,
+        ReadConsoleOutputCharacterW, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCursorPosition,
+        SetConsoleOutputCP, SetStdHandle,
     };
 
-    /// Restores only the helper's private console and its original redirected stdout.
+    /// Restores the helper's private console and its original redirected standard streams.
     struct RestoreConsole {
         /// The original borrowed standard-output handle.
         stdout: HANDLE,
@@ -440,6 +441,61 @@ fn windows_console_output_helper() {
     );
     assert_eq!(read as usize, expected.len());
     assert_eq!(actual, expected);
+
+    platform::watch_interrupts().unwrap();
+    // SAFETY: verify the event can reach only this helper in its private console.
+    let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
+    assert_eq!(count, 1);
+    assert_eq!(members[0], std::process::id());
+    // SAFETY: this console contains only the helper; no VM or foreign process is signaled.
+    assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !platform::interrupted() {
+        assert!(
+            Instant::now() < deadline,
+            "the private Ctrl-C was not recorded"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let mut log = tempfile::NamedTempFile::new().unwrap();
+    log.write_all(b"pending stopped log").unwrap();
+    log.flush().unwrap();
+    let mut reader = File::open(log.path()).unwrap();
+    let mut output = ForegroundOutput::new(&mut reader);
+    assert!(matches!(
+        finish_foreground(&mut output, Err(Exit::Interrupted)),
+        Err(Exit::Interrupted)
+    ));
+    let mut trailing = [0; 24];
+    let mut read = 0;
+    // SAFETY: inspect the same owned buffer immediately after the prior verified output.
+    assert_ne!(
+        unsafe {
+            ReadConsoleOutputCharacterW(
+                buffer.as_raw_handle().cast(),
+                trailing.as_mut_ptr(),
+                trailing.len() as u32,
+                COORD {
+                    X: expected.len() as i16,
+                    Y: 0,
+                },
+                &mut read,
+            )
+        },
+        0
+    );
+    // SAFETY: restore the helper's borrowed pipes so a failed assertion is visible to its parent.
+    unsafe {
+        assert_ne!(SetStdHandle(STD_OUTPUT_HANDLE, _restore.stdout), 0);
+        assert_ne!(SetStdHandle(STD_ERROR_HANDLE, _restore.stderr), 0);
+    }
+    assert_eq!(read as usize, trailing.len());
+    assert!(
+        trailing
+            .iter()
+            .all(|character| *character == u16::from(b' ')),
+        "interrupted output printed a secondary diagnostic: {trailing:?}"
+    );
 }
 
 proptest! {
