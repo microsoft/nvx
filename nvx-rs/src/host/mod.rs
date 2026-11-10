@@ -105,3 +105,4 @@ pub mod template;
 pub(crate) mod tests;
 pub mod transport;
 pub mod vm;
+mod vm_directory;
