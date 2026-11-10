@@ -22,9 +22,10 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 
 use crate::hypervisor::Hypervisor;
 
+#[cfg(feature = "cli")]
+pub(crate) use self::endpoint::endpoint_server_pid_until;
 pub(crate) use self::endpoint::{
-    ReadyListener, connect_endpoint, control_endpoint, endpoint_server_pid,
-    endpoint_server_pid_until, listen_ready,
+    ReadyListener, connect_endpoint, control_endpoint, endpoint_server_pid, listen_ready,
 };
 pub use self::identity::file_identity;
 pub(crate) use self::identity::{
