@@ -78,6 +78,26 @@ fn run_downloads_the_release_of_a_checkout_without_artifacts() {
 }
 
 #[test]
+fn run_downloads_before_checking_mount_sources_that_installation_can_create() {
+    for source in ["build", "build/vmlinux"] {
+        let root = checkout(&INSTALLED);
+        fs::remove_dir(root.below("build")).unwrap();
+        let mount = format!("/workspace,{},ro", root.below(source).display());
+        let outcome = root.nvx_rs(&["run", "--dry-run", "--mount", &mount]);
+        outcome.assert_error(
+            "unavailable",
+            &["download needs a Git checkout to find its release"],
+        );
+        assert!(
+            outcome.stderr().contains("holds no NVX artifacts"),
+            "{}",
+            outcome.describe()
+        );
+        assert_no_staging(&root);
+    }
+}
+
+#[test]
 fn run_downloads_nothing_over_some_artifacts() {
     let root = checkout(&["build/vmlinux"]);
     let before = root.snapshot();
@@ -120,6 +140,18 @@ fn commands_download_nothing_for_options_that_they_refuse() {
     // root, without the download that would provide it, and leaves the checkout as it is.
     for arguments in [
         vec!["run", "--dry-run", "--mount-owner", "vmm"],
+        vec!["run", "--dry-run", "--cmdline", "nvx_mode=invalid"],
+        vec!["run", "--dry-run", "--mount", "/etc,{root/build},ro"],
+        vec![
+            "run",
+            "--dry-run",
+            "--mount",
+            "/a,{root/build},ro",
+            "--mount",
+            "/b,{root/build},ro",
+            "--mount-deny",
+            "relative",
+        ],
         vec![
             "sandbox",
             "run",

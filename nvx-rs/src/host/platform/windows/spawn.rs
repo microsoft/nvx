@@ -500,8 +500,12 @@ fn spawn_listed(
     drop(lock);
     created?;
     drop(owned(information.hThread));
-    let process = owned(information.hProcess)
-        .ok_or_else(|| io::Error::other("CreateProcessW returned no process handle"))?;
+    let process = owned(information.hProcess).ok_or_else(|| {
+        io::Error::other(crate::Error::new(
+            crate::ErrorKind::StillRunning,
+            "CreateProcessW succeeded but returned no process handle to confirm exit",
+        ))
+    })?;
     Ok(LaunchedProcess {
         process,
         pid: information.dwProcessId,
