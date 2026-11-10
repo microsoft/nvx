@@ -43,9 +43,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::net::{
-    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
-};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -3017,32 +3015,7 @@ fn check_guest_listener(vm: &mut Vm<'_>, address: SocketAddr, reached: bool) {
 /// OpenVMM publishes the listener, which would then take that connection, already closed, for its
 /// one client.
 fn reach_guest(address: SocketAddr, stop: &AtomicBool) -> bool {
-    while !stop.load(Ordering::SeqCst) {
-        if let Ok(mut stream) = TcpStream::connect(address) {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut greeting = Vec::new();
-            let mut byte = [0];
-            while !greeting.ends_with(b"\n") && matches!(stream.read(&mut byte), Ok(1)) {
-                greeting.push(byte[0]);
-            }
-            if greeting == format!("{GREETING}\n").as_bytes() {
-                stream.write_all(format!("{ANSWER}\n").as_bytes()).unwrap();
-                stream.shutdown(Shutdown::Write).unwrap();
-                let mut rest = Vec::new();
-                stream.read_to_end(&mut rest).unwrap();
-                assert!(rest.is_empty(), "the guest's listener then sent {rest:?}");
-                return true;
-            }
-            assert!(
-                greeting.is_empty(),
-                "the guest's listener greeted the host with {greeting:?}"
-            );
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    false
+    common::reach_guest(address, stop, GREETING, ANSWER)
 }
 
 /// Serves the test proxy's `listener` until `stop`: answers each request with [`PROXY_RESPONSE`],

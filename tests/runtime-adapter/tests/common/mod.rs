@@ -20,9 +20,11 @@ use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -466,6 +468,73 @@ impl Drop for Sandbox {
             ),
         }
     }
+}
+
+/// Exchanges a line each way with the guest until it succeeds or `stop` is set.
+/// A connect runs to completion: cancelling a Windows loopback connect can leave a late
+/// connection that consumes the guest's one-shot listener without exchanging its greeting.
+pub(crate) fn reach_guest(
+    address: SocketAddr,
+    stop: &AtomicBool,
+    greeting: &str,
+    answer: &str,
+) -> bool {
+    reach_guest_with(address, stop, greeting, answer, TcpStream::connect)
+}
+
+/// Runs the listener client with a connector that can supply a real socket of a known kind.
+pub(crate) fn reach_guest_with(
+    address: SocketAddr,
+    stop: &AtomicBool,
+    greeting: &str,
+    answer: &str,
+    mut connect: impl FnMut(SocketAddr) -> io::Result<TcpStream>,
+) -> bool {
+    while !stop.load(Ordering::SeqCst) {
+        let connected = connect(address);
+        #[cfg(target_os = "linux")]
+        let connected = connected.and_then(|stream| {
+            if stream.local_addr().unwrap() == stream.peer_addr().unwrap() {
+                // Linux can assign the unpublished destination as this client's source port.
+                // Reset that self-connection so TIME_WAIT cannot block the later publication.
+                nix::sys::socket::setsockopt(
+                    &stream,
+                    nix::sys::socket::sockopt::Linger,
+                    &nix::libc::linger {
+                        l_onoff: 1,
+                        l_linger: 0,
+                    },
+                )
+                .expect("reset the client's self-connection before publishing the guest's port");
+                return Err(io::ErrorKind::ConnectionAborted.into());
+            }
+            Ok(stream)
+        });
+        if let Ok(mut stream) = connected {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut received = Vec::new();
+            let mut byte = [0];
+            while !received.ends_with(b"\n") && matches!(stream.read(&mut byte), Ok(1)) {
+                received.push(byte[0]);
+            }
+            if received == format!("{greeting}\n").as_bytes() {
+                stream.write_all(format!("{answer}\n").as_bytes()).unwrap();
+                stream.shutdown(Shutdown::Write).unwrap();
+                let mut rest = Vec::new();
+                stream.read_to_end(&mut rest).unwrap();
+                assert!(rest.is_empty(), "the guest's listener then sent {rest:?}");
+                return true;
+            }
+            assert!(
+                received.is_empty(),
+                "the guest's listener greeted the host with {received:?}"
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 /// Describes `error`, with its causes.
