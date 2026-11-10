@@ -1909,7 +1909,7 @@ fn nvx::host::supervisor::lock_spawns
 fn nvx::host::supervisor::reattach
 fn nvx::host::supervisor::spawn
 fn nvx::host::supervisor::spawn_command
-fn nvx::host::supervisor::vmm_working_dir
+fn nvx::host::supervisor::spawn_vm
 mod nvx::host::template
 struct nvx::host::template::Acquired
 field nvx::host::template::Acquired::lease

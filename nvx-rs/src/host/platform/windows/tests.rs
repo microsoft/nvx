@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -5,6 +6,7 @@ use std::mem;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsHandle;
 use std::path::Path;
+use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -941,6 +943,81 @@ fn local_link(name: &[u16], target: &[u16]) -> OwnedHandle {
 }
 
 #[test]
+fn vm_spawns_refuse_untrusted_log_job_names_before_creating_a_child() {
+    use crate::host::supervisor::{self, VmmCommand};
+    use crate::protocol::CAPABILITY_LEN;
+
+    let directory = tempfile::tempdir().unwrap();
+    let log = fs::File::create(directory.path().join("vmm.log")).unwrap();
+    let id = log_job_id(&log).unwrap().unwrap();
+    let name = log_job_name(id);
+    let system = std::env::var_os("SystemRoot").unwrap();
+    let command = VmmCommand::new(
+        Path::new(&system).join("System32").join("cmd.exe"),
+        ["/c", "exit", "0"].map(OsString::from).to_vec(),
+        directory.path(),
+    );
+    let refused = || {
+        let entered = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&entered);
+        let result = with_spawn_window(
+            move || observed.set(true),
+            || supervisor::spawn_vm(&command, &[7; CAPABILITY_LEN], log.try_clone().unwrap()),
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(child) => {
+                assert!(child.kill_and_wait(), "the unexpected child did not exit");
+                panic!("an untrusted log-job name started a child");
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+        assert!(
+            !entered.get(),
+            "a refused spawn entered the creation window"
+        );
+    };
+
+    for sddl in ["D:P", "D:P(A;;GA;;;WD)"] {
+        let other = job_with_descriptor(&name, sddl);
+        refused();
+        drop(other);
+    }
+    // SAFETY: the name is NUL-terminated; this event occupies only this test's fresh log name.
+    let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, name.as_ptr()) }).unwrap();
+    refused();
+    drop(event);
+
+    let other_log = fs::File::create(directory.path().join("other.log")).unwrap();
+    let other = create_log_job(&other_log).unwrap().unwrap();
+    let link = local_link(&name, &object_name(raw(&other)).unwrap());
+    refused();
+    drop(link);
+    drop(other);
+    let elsewhere: Vec<u16> = local_directory()
+        .unwrap()
+        .into_iter()
+        .chain(format!(r"\nvx-vm-spawn-{:032x}", id.1).encode_utf16())
+        .collect();
+    let link = local_link(&name, &elsewhere);
+    refused();
+    drop(link);
+
+    let entered = Rc::new(Cell::new(false));
+    let observed = Rc::clone(&entered);
+    let child = with_spawn_window(
+        move || observed.set(true),
+        || supervisor::spawn_vm(&command, &[7; CAPABILITY_LEN], log),
+    )
+    .unwrap();
+    assert!(child.kill_and_wait(), "the trusted child did not exit");
+    assert!(
+        entered.get(),
+        "the successful spawn bypassed the observation"
+    );
+}
+
+#[test]
 fn what_a_link_under_the_name_of_a_logs_job_leads_to_is_not_the_logs() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("vmm.log");
@@ -1033,6 +1110,15 @@ fn a_vmm_whose_log_is_no_file_of_a_disk_volume_starts_without_a_job() {
         std::env::temp_dir(),
     );
     for log in [null, pipe] {
+        let error =
+            match supervisor::spawn_vm(&command, &[7; CAPABILITY_LEN], log.try_clone().unwrap()) {
+                Err(error) => error,
+                Ok(child) => {
+                    assert!(child.kill_and_wait(), "the unexpected child did not exit");
+                    panic!("a strict spawn accepted a log without a job");
+                }
+            };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
         let launched = supervisor::spawn(&command, &[7; CAPABILITY_LEN], log).unwrap();
         assert!(launched.kill_and_wait(), "the stand-in did not exit");
     }

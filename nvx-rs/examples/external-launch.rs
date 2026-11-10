@@ -1,4 +1,4 @@
-//! A caller-owned cold launch, using the existing low-level spawn primitive without a store.
+//! A caller-owned cold launch, using the strict low-level spawn primitive without a store.
 //!
 //! Run the compiled example with a backend, OpenVMM, kernel, initramfs, new VM directory, and
 //! the three artifact SHA-256 digests from their installation metadata, in that order.
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         breakaway_from_job,
         inherit: inherit.iter().map(Inherited::new).collect(),
     };
-    let mut launched = supervisor::spawn(&command, capability.as_bytes(), log)?;
+    let mut launched = supervisor::spawn_vm(&command, capability.as_bytes(), log)?;
     let result = (|| -> Result<(), Box<dyn Error>> {
         let process = launched.process()?;
         let deadline = Instant::now() + Duration::from_secs(60);
