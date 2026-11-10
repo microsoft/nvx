@@ -2,7 +2,7 @@ use super::*;
 
 fn state_dir(directory: &tempfile::TempDir) -> PathBuf {
     let state = directory.path().join("state");
-    SandboxStore::create(&state).unwrap();
+    StateDir::create(&state).unwrap();
     state
 }
 
@@ -63,56 +63,60 @@ fn directories_that_others_may_access_are_refused() {
 }
 
 #[test]
-fn removals_keep_the_messages_of_deprovision() {
+fn removals_refuse_live_records_and_keep_foreign_files() {
     let directory = tempfile::tempdir().unwrap();
     let state = state_dir(&directory);
-    let dir = state.clone();
-    let message = |error| {
-        let exit = removal_error(error, &state, &dir);
-        (exit.code().unwrap(), exit.message().unwrap().to_owned())
-    };
-    assert_eq!(
-        message(RemovalError::Launched),
-        (
-            ErrorCode::SandboxRunning,
-            "sandbox must be stopped before deprovision".to_owned()
-        )
-    );
-    assert_eq!(
-        message(RemovalError::Foreign(vec![
-            "b.txt".to_owned(),
-            "a.txt".to_owned()
-        ])),
-        (
-            ErrorCode::ForeignFiles,
-            "sandbox state directory contains files not owned by NVX: b.txt, a.txt".to_owned()
-        )
-    );
-    assert_eq!(
-        message(RemovalError::ProvisionedAgain),
-        (
-            ErrorCode::SandboxProvisioned,
-            "sandbox was provisioned again while deprovision removed it".to_owned()
-        )
-    );
-    let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
-    let config = state.join(CONFIG_NAME);
-    for (path, shown) in [
-        (dir.clone(), state.as_path()),
-        (dir.join(CONFIG_NAME), config.as_path()),
-    ] {
-        let expected = format!("{shown:?}: {}", denied());
+    std::fs::write(state.join(CONFIG_NAME), "{}").unwrap();
+    for record in [StateFile::Journal, StateFile::Runtime] {
+        let lock = LifecycleLock::acquire(&state, 10.0, false).unwrap();
+        let path = state.join(record.name());
+        std::fs::write(&path, "{}").unwrap();
+        let error = lock.remove(10.0).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::SandboxRunning));
         assert_eq!(
-            message(RemovalError::Io {
-                path,
-                error: denied()
-            }),
-            (ErrorCode::Io, expected)
+            error.message(),
+            Some("sandbox must be stopped before deprovision")
         );
+        assert!(path.exists());
+        assert!(state.join(CONFIG_NAME).exists());
+        std::fs::remove_file(path).unwrap();
     }
+    std::fs::write(state.join("foreign.txt"), "keep").unwrap();
+    let lock = LifecycleLock::acquire(&state, 10.0, false).unwrap();
+    let error = lock.remove(10.0).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::ForeignFiles));
     assert_eq!(
-        message(RemovalError::TimedOut(denied())),
-        (ErrorCode::TimedOut, format!("{state:?}: {}", denied()))
+        std::fs::read_to_string(state.join("foreign.txt")).unwrap(),
+        "keep"
+    );
+    assert!(!state.join(CONFIG_NAME).exists());
+    assert!(!state.join(StateFile::Lock.name()).exists());
+}
+
+#[test]
+fn removal_cleans_owned_temporaries_without_touching_a_neighbour() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = state_dir(&directory);
+    let neighbour = directory.path().join("neighbour");
+    StateDir::create(&neighbour).unwrap();
+    std::fs::write(neighbour.join(CONFIG_NAME), "neighbour").unwrap();
+    std::fs::write(state.join(CONFIG_NAME), "{}").unwrap();
+    for name in [
+        ".runtime.json.42.tmp",
+        ".config.json.0123456789abcdef0123456789abcdef.tmp",
+        ".tmpAb12Cd",
+        "openvmm.log",
+        "outcome.json",
+        "control.capability",
+    ] {
+        std::fs::write(state.join(name), "owned").unwrap();
+    }
+    let lock = LifecycleLock::acquire(&state, 10.0, false).unwrap();
+    lock.remove(10.0).unwrap();
+    assert!(!state.exists());
+    assert_eq!(
+        std::fs::read_to_string(neighbour.join(CONFIG_NAME)).unwrap(),
+        "neighbour"
     );
 }
 

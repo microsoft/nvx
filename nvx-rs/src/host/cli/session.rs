@@ -40,6 +40,7 @@ use crate::host::platform::{self, Transport};
 use crate::host::sandbox::options::validate_exec_environment;
 use crate::host::session::{ControlSession, SessionError};
 use crate::host::supervisor::Launched;
+use crate::host::transport::HostConnection;
 use crate::protocol::{
     APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAPS, APP_PING, APP_READY,
     APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN, GuestFeatures, HostMap,
@@ -282,6 +283,14 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    /// Keeps the authenticated connection and its framing state; this sends no second attach.
+    pub(crate) fn from_connection(connection: HostConnection) -> Self {
+        Self {
+            inner: Some(ControlSession { connection }),
+            probe: Arc::new(Probe::default()),
+        }
+    }
+
     /// Connects to `endpoint`, which OpenVMM process `pid` serves, and attaches with
     /// `capability`, as `ControlSession.connect(endpoint, capability, timeout)` does: the endpoint
     /// gets `timeout` seconds to appear, and the attachment `timeout` seconds more.
@@ -450,8 +459,14 @@ impl Session {
     /// Reads the next response and closes the session if the transfer fails.
     fn receive(&mut self, deadline: Deadline) -> Result<(u8, u64, i32, Vec<u8>)> {
         self.probe.direction.store(RECEIVING, Ordering::SeqCst);
-        let received = self.session()?.read_response(Some(deadline.instant()));
-        received.map_err(|error| self.fail(error))
+        loop {
+            check_interrupt()?;
+            let until = (std::time::Instant::now() + POLL_SLICE).min(deadline.instant());
+            match self.session()?.read_response(Some(until)) {
+                Err(SessionError::TimedOut) if !deadline.passed() => {}
+                received => return received.map_err(|error| self.fail(error)),
+            }
+        }
     }
 
     /// Reads the next response, which must answer `request_id`, and returns its kind, status,

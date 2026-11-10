@@ -168,6 +168,34 @@ fn session_with(
     (session, worker)
 }
 
+#[test]
+fn an_owned_connection_keeps_its_authenticated_framing_without_another_attach() {
+    let (host, guest) = stream_pair(64);
+    let worker = thread::spawn(move || {
+        let mut guest = Guest::new(guest);
+        guest.accept();
+        for expected in [17, 0] {
+            let (kind, request_id, payload) = guest.request();
+            assert_eq!(kind, APP_PING);
+            assert!(payload.is_empty());
+            if expected != 0 {
+                assert_eq!(request_id, expected);
+            }
+            guest.send(APP_READY, request_id, 0, &[]);
+        }
+    });
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut connection = HostConnection::attach(Box::new(host), &CAPABILITY, until).unwrap();
+    connection
+        .send(&encode_app(APP_PING, 17, 0, &[]), Some(until))
+        .unwrap();
+    let reply = connection.receive(Some(until)).unwrap();
+    assert_eq!(decode_app(&reply).unwrap().request_id, 17);
+    let mut session = Session::from_connection(connection);
+    session.ping(5.0).unwrap();
+    worker.join().unwrap();
+}
+
 fn request(arguments: &[&str]) -> ExecRequest {
     ExecRequest {
         arguments: arguments

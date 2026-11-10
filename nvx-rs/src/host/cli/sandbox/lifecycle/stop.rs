@@ -9,100 +9,132 @@ use crate::ErrorCode;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
+use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result, check_interrupt, output};
-use crate::host::store::{IdentityPart, LockedStore, OUTCOME_NAME};
-use crate::host::supervisor::{StopOutcome, Vmm};
+use crate::host::process::Process;
+use crate::host::runtime::IdentityPart;
+use crate::host::supervisor::StopOutcome;
+use crate::host::vm::{self, SavedVm, VmOutputs};
 
 /// Stops a running sandbox, and checks the outcome report that its OpenVMM wrote, unless another
 /// runtime identity than the artifacts' started the VM.
 ///
-/// The supervisor's stop runs one graceful step, which asks the guest to shut the VM down and
-/// waits up to `timeout` seconds for OpenVMM to exit, so that Ctrl-C ends the wait. A VM whose
-/// OpenVMM is still running then is reported, and keeps its runtime record: the stop never takes
-/// the forced step.
+/// A STOP acknowledgement is not exit proof. After its grace period the stop forces only the
+/// verified process; an indeterminate exit retains the runtime record.
 ///
 /// A VM of another runtime identity may speak other contracts, so the stop asks it nothing: it
 /// ends the VM as [`terminate_mismatched`] does.
 pub(crate) fn stop(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
     let state_dir = prepare_state_directory(state_path, false)?;
     let mut lock = LifecycleLock::acquire(&state_dir, timeout, false)?;
-    let locked = lock.locked();
-    let Running { vmm, capability } = match found_vm(locked, artifacts)? {
-        Found::Mismatched(vmm, differences) => {
-            return terminate_mismatched(locked, &vmm, &differences, timeout);
+    let Running { saved, process } = match found_vm(&mut lock, artifacts)? {
+        Found::Mismatched(saved, process, differences) => {
+            return terminate_mismatched(&mut lock, &saved, &process, &differences, timeout);
         }
-        found => running(&state_dir, locked, found)?,
+        found => running(&state_dir, found)?,
     };
-    // The graceful step waits for the exit itself, so the stop's own wait, until a deadline that
-    // has passed by then, only checks whether OpenVMM has exited.
-    let stopped = vmm
-        .stop(locked, Instant::now(), None, |vmm, _| {
-            {
-                let mut session = connect(vmm, &capability, timeout)?;
-                session.stop(timeout)?;
-            }
-            wait_for_exit(vmm, Deadline::after(timeout)).map(drop)
-        })
-        .map_err(error_with_cause)?;
-    if let Some(error) = stopped.graceful_error {
-        return Err(error);
+    let grace = Deadline::after(timeout);
+    let requested = connect(&saved, artifacts, timeout).and_then(|mut session| {
+        session.stop(grace.remaining().map_or(0.0, |left| left.as_secs_f64()))
+    });
+    if matches!(requested, Err(Exit::Interrupted)) {
+        return requested;
     }
-    if stopped.outcome == StopOutcome::TimedOut {
-        return Err(Exit::error(
-            ErrorCode::TimedOut,
-            "OpenVMM did not terminate after managed stop",
+    wait_for_exit(&process, grace)?;
+    let (outcome, stopped) = stop_verified(&saved, &process, timeout)?;
+    lock.clear_runtime()?;
+    if let Err(error) = requested {
+        output::print_stderr(&format!(
+            "warning: managed guest shutdown failed: {error:?}"
         ));
     }
-    read_openvmm_outcome(&state_dir.join(OUTCOME_NAME)).map(drop)
+    if outcome == StopOutcome::Forced {
+        output::print_stderr("warning: OpenVMM was forcibly terminated after managed stop");
+    }
+    let report = stopped.report.map_err(error_with_cause)?;
+    if report.is_none() && outcome == StopOutcome::Forced {
+        output::print_stderr("warning: the forced stop produced no outcome report");
+        return Ok(());
+    }
+    read_openvmm_outcome(&state_dir.join(StateFile::Outcome.name())).map(drop)
 }
 
-/// Ends the VM `vmm`, which another runtime identity than the artifacts' started, and which
-/// differs from them in `differences`, by identity-verified forced termination, and warns on
-/// standard error that it did.
-///
-/// Its guest is not asked to shut down, and no control session is opened to it: its OpenVMM is
-/// terminated through its verified process identity, as [`Vmm::terminate`] does, and the stop
-/// waits up to `timeout` seconds for it to exit, as [`terminate_within`] does, so that Ctrl-C ends
-/// the wait. One that does not exit then, whose exit cannot be determined, or whose wait Ctrl-C
-/// ends, keeps its runtime record, so that a later stop retries.
+fn stop_verified(
+    saved: &SavedVm,
+    process: &Process,
+    timeout: f64,
+) -> Result<(StopOutcome, vm::Stopped)> {
+    let outputs = VmOutputs {
+        log: saved.vm_dir.path().join(StateFile::Log.name()),
+        outcome: saved.vm_dir.path().join(StateFile::Outcome.name()),
+        endpoint: saved.endpoint.clone(),
+        console: None,
+    };
+    let (mut stopped, mut failure) = (None, None);
+    let outcome = terminate_within(
+        Deadline::after(timeout),
+        |bound| {
+            let now = Instant::now();
+            match vm::stop(process, &outputs, |_| false, now, now + bound) {
+                Ok(result) => {
+                    let outcome = if result.forced {
+                        StopOutcome::Forced
+                    } else {
+                        StopOutcome::Graceful
+                    };
+                    stopped = Some(result);
+                    Ok(outcome)
+                }
+                Err(error) if error.kind() == crate::ErrorKind::StillRunning => {
+                    failure = Some(error);
+                    Ok(StopOutcome::TimedOut)
+                }
+                Err(error) => Err(error_with_cause(error)),
+            }
+        },
+        |deadline| wait_for_exit(process, deadline),
+    )?;
+    if outcome == StopOutcome::TimedOut {
+        return Err(error_with_cause(
+            failure.expect("an unconfirmed stop retained its failure"),
+        ));
+    }
+    Ok((
+        outcome,
+        stopped.expect("a confirmed stop returned its report result"),
+    ))
+}
+
 fn terminate_mismatched(
-    locked: &mut LockedStore,
-    vmm: &Vmm,
+    lock: &mut LifecycleLock,
+    saved: &SavedVm,
+    process: &Process,
     differences: &[IdentityPart],
     timeout: f64,
 ) -> Result {
-    let pid = vmm.record().process().pid;
-    let parts = differing_parts(differences);
-    let outcome = terminate_within(
-        Deadline::after(timeout),
-        |bound| vmm.terminate(locked, bound).map_err(error_with_cause),
-        |deadline| wait_for_exit(vmm, deadline),
-    )?;
+    let (outcome, stopped) = stop_verified(saved, process, timeout)?;
+    lock.clear_runtime()?;
+    if let Err(error) = stopped.report {
+        output::print_stderr(&format!(
+            "warning: stopped VM outcome could not be read: {error}"
+        ));
+    }
     let ended = match outcome {
         StopOutcome::Forced => "was terminated without a guest shutdown",
         StopOutcome::Graceful => "had exited",
-        StopOutcome::TimedOut => {
-            return Err(Exit::error(
-                ErrorCode::TimedOut,
-                format!(
-                    "OpenVMM process {pid} of the sandbox, which runs under another runtime \
-                     identity than these artifacts, did not exit after it was terminated"
-                ),
-            ));
-        }
+        StopOutcome::TimedOut => unreachable!("an unconfirmed stop returns an error"),
     };
     output::print_stderr(&format!(
         "warning: sandbox ran under another runtime identity than these artifacts, which differ \
-         in {parts}: its OpenVMM process {pid} {ended}"
+         in {}: its OpenVMM process {} {ended}",
+        differing_parts(differences),
+        saved.process.pid
     ));
     Ok(())
 }
 
 /// Ends an OpenVMM by identity-verified forced termination, and waits until `deadline` for it to
-/// exit: `terminate` terminates it unless it has exited, waits up to the bound that it takes for
-/// it to exit, and clears its runtime record once it has, as [`Vmm::terminate`] does, and `wait`
-/// waits for its exit until a deadline, fails if Ctrl-C arrives first, and returns whether it
-/// exited, as [`wait_for_exit`] does.
+/// exit: `terminate` calls [`vm::stop`] in a short slice, and `wait` polls for exit with Ctrl-C.
 ///
 /// The termination waits for one retry interval at most, and `wait` for the rest, so that Ctrl-C
 /// ends the wait for an OpenVMM that does not exit at once, as one in uninterruptible I/O. Once
@@ -131,15 +163,16 @@ pub(super) fn terminate_within(
 
 /// Waits until the OpenVMM of `vmm` exits or `deadline` passes, and returns whether it exited,
 /// failing if Ctrl-C arrives first.
-fn wait_for_exit(vmm: &Vmm, deadline: Deadline) -> Result<bool> {
+fn wait_for_exit(process: &Process, deadline: Deadline) -> Result<bool> {
     loop {
         check_interrupt()?;
         let slice = deadline
             .remaining()
             .map_or(RETRY_INTERVAL, |left| left.min(RETRY_INTERVAL));
-        if vmm
+        if process
             .wait(Instant::now() + slice)
             .map_err(Exit::from_os_error)?
+            .is_some()
         {
             return Ok(true);
         }
@@ -153,9 +186,9 @@ fn wait_for_exit(vmm: &Vmm, deadline: Deadline) -> Result<bool> {
 pub(crate) fn deprovision(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
     let state_dir = prepare_state_directory(state_path, false)?;
     let mut lock = LifecycleLock::acquire(&state_dir, timeout, false)?;
-    match found_vm(lock.locked(), artifacts)? {
+    match found_vm(&mut lock, artifacts)? {
         Found::Nothing | Found::Exited => {}
-        Found::Live(_) | Found::Mismatched(..) => {
+        Found::Live(..) | Found::Mismatched(..) => {
             return Err(Exit::error(
                 ErrorCode::SandboxRunning,
                 "sandbox must be stopped before deprovision",
