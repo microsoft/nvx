@@ -304,6 +304,9 @@ impl CloneState {
         // the completion fails the activation, whatever the application's result.
         let deadline = self.activation.deadline();
         let result = operations.apply(record, &self.template, deadline);
+        // The application completed: before the worker takes what the session received while it
+        // ran, such as the host's `Await`, which therefore comes after it.
+        self.timeline.applied = Some(Instant::now());
         let configuration = record.configuration();
         // A record announces at most `nvx::activation::MAX_MAPPINGS` mappings, which fit a `u32`.
         let mappings = configuration.mappings as u32;
@@ -342,10 +345,8 @@ impl CloneState {
         let result = applied.result.map_err(Into::into);
         Some(match self.activation.complete(Instant::now(), result) {
             Ok(activation) => {
-                let now = Instant::now();
-                self.timeline.applied = Some(now);
                 if self.activation.established().is_some() {
-                    self.timeline.ready = Some(now);
+                    self.timeline.ready = Some(Instant::now());
                 }
                 // A clone has no workload identity of the whole sandbox: each execution names
                 // its own.

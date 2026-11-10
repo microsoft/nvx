@@ -5105,6 +5105,34 @@ mod clones {
     }
 
     #[test]
+    fn a_clone_reports_its_application_before_an_await_that_came_during_it() {
+        // The host's `Await` came while the record applied, which runs until the test opens the
+        // gate: the application completed before the worker took the `Await`, which made the
+        // clone ready once the worker took what came meanwhile, so the clone reports its reset,
+        // its application, the host's first message, and its Ready in that order.
+        let record = record(1, Some(WORKLOAD));
+        let (root, gate) = FakeRoot::booting(&layout()).gated();
+        let (mut broker, working) = start_clone(root, &record, ACTIVATION_TIMEOUT);
+        broker.reset(RESTORED);
+        broker.send_data(&encode(&[Message::Await]), OUTER_MAX_PAYLOAD);
+        gate.send(()).unwrap();
+        let mut replies = Vec::new();
+        while replies.is_empty() {
+            replies.extend(broker.take());
+        }
+        assert_eq!(replies, [activated(&record)]);
+        let probe = Message::Probe(ACTIVATION_PROBE.as_bytes().to_vec());
+        let replies = broker.exchange(&[probe, Message::Stop], OUTER_MAX_PAYLOAD, 2);
+        let facts = reported(&replies[0]);
+        let events = ["reset", "applied", "message", "ready"].map(|name| after(&facts, name));
+        assert!(events.is_sorted(), "{facts:?}");
+        assert_eq!(replies[1], Message::Stopped);
+        let (root, worked) = joined(working);
+        assert_eq!(worked.unwrap(), Worked::Stopped);
+        assert_eq!(root.calls, [applied(&record), Call::Teardown]);
+    }
+
+    #[test]
     fn a_clone_maps_its_record_s_table_from_its_export_and_leaves_the_proxy_to_the_host() {
         // The application mounted the record's export, and wrote the resolver file of its
         // network's DNS server, before Ready. The host then sends the mapping table that the
