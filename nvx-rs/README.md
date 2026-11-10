@@ -581,8 +581,8 @@ responsive shell input, and a verified clean exit; it downloads no artifact.
 ### `nvx::host::snapshot`
 
 `SnapshotKey` and `SnapshotManifest` own the compatibility key and strict
-OpenVMM manifest reader. `SnapshotManifest::time` exposes the capture's
-`TimeContract`, whose `eligibility` checks its restore window at a `HostTime`;
+OpenVMM manifest reader. `SnapshotManifest::time` and `SnapshotKey::time` expose
+the capture's `TimeContract`, whose `eligibility` checks its restore window at a `HostTime`;
 `HostTime::now` samples the host's clock and identities. The existing
 `host::template` names remain aliases of these same types.
 
@@ -590,6 +590,12 @@ The key's canonical encoding and identity use the snapshot names and omit
 `guest_build`. Version 1 changes in place: no snapshot outlives a deployment,
 and no reader or migration of the prior encoding is supported. `CaptureClass`
 still records the legacy capture inputs, including its guest build.
+
+The persisted key includes the complete per-snapshot time contract and must
+agree with the manifest's time. Its compatibility identity excludes capture
+anchors, host and boot identities, lineage and cut-to-anchor time: captures
+at different times can have different key bytes and the same `KeyIdentity`.
+The declared rates and time ABI remain compatibility inputs.
 
 `Snapshot::open` checks exactly `key.bin`, `snapshot.json` and
 `openvmm/{manifest.bin,memory.bin,state.bin}`. Directories are private, files
