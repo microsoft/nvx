@@ -16,7 +16,7 @@ use crate::host::snapshot::{MANIFEST_NAME, Snapshot};
 use crate::host::spawn::{self, VmmCommand};
 use crate::protocol::{
     APP_CAPTURE, APP_READY, CAPABILITY_LEN, OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH,
-    OUTER_READY, decode_app, decode_capture_payload, decode_outer_header, encode_app, encode_outer,
+    OUTER_READY, decode_app, decode_outer_header, encode_app, encode_outer,
 };
 
 const HELPER: &str = "host::cli::snapshots::capture::tests::capture_helper";
@@ -502,8 +502,8 @@ fn respond(stream: &mut (impl Read + Write), capability: &[u8]) {
     assert_eq!(kind, OUTER_DATA);
     let request = decode_app(&payload).unwrap();
     assert_eq!(request.kind, APP_CAPTURE);
-    assert!(!decode_capture_payload(request.payload).unwrap());
-    let reply = encode_app(APP_READY, request.request_id, 0, &[]).unwrap();
+    assert_eq!(request.payload, [0]);
+    let reply = encode_app(APP_READY, request.request_id, 0, &[]);
     stream
         .write_all(&encode_outer(OUTER_DATA, &[7; 16], 1, 1, &reply).unwrap())
         .unwrap();
