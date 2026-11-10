@@ -47,15 +47,54 @@ mod run;
 mod sandbox;
 mod session;
 mod shell;
+mod snapshots;
 mod store;
 
 use std::borrow::Cow;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use self::args::{Parser, Receiver, Spec, Stop, Syntax};
 use crate::ErrorCode;
 use crate::host::platform;
+
+/// Returns the name of a temporary file next to `path`: `.NAME.UUID.tmp`, with a fresh UUID4 in
+/// hexadecimal.
+pub(crate) fn temporary_path(path: &Path) -> Result<PathBuf> {
+    let Some(name) = path.file_name() else {
+        return Err(Exit::error(
+            ErrorCode::Other,
+            format!("{} has an empty name", path.display()),
+        ));
+    };
+    let mut temporary = OsString::from(".");
+    temporary.push(name);
+    temporary.push(format!(".{}.tmp", uuid4_hex()?));
+    Ok(path.with_file_name(temporary))
+}
+
+/// Returns 32 lowercase hexadecimal digits of 122 random bits, with the version and variant bits
+/// of a version-4 UUID.
+fn uuid4_hex() -> Result<String> {
+    let mut bytes = random_bytes::<16>()?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(hex(&bytes))
+}
+
+/// Returns `N` random bytes from the operating system.
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        Exit::error(ErrorCode::Io, format!("cannot read random bytes: {error}"))
+    })?;
+    Ok(bytes)
+}
+
+/// Returns `bytes` in lowercase hexadecimal.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 /// The commands, in the order in which usage messages list them.
 const COMMANDS: [&str; 5] = ["artifacts", "download", "egress", "run", "sandbox"];
