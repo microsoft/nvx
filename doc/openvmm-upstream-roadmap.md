@@ -8,10 +8,11 @@
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131.
-- NVX's pinned OpenVMM revision: `ac3dc27a738808d38e1148d3caefc5e89111ee32`, position 236, the
-  head of microsoft/openvmm#5003, whose commit follows position 235, `b4028c1aa`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5001 merged after position 234, `f41a1ecfc`,
-  which microsoft/openvmm#4997 merged after position 233, `d501e5066`, which
+- NVX's pinned OpenVMM revision: `cba21d109eeb99fbc573c79b2ed9f4754f734b25`, position 237, the
+  head of microsoft/openvmm#5004, whose commit follows position 236, `ac3dc27a7`, the head of
+  microsoft/openvmm#5003, on which it stacks, whose commit follows position 235, `b4028c1aa`, the
+  head of `feature/microvm/dev`, which microsoft/openvmm#5001 merged after position 234,
+  `f41a1ecfc`, which microsoft/openvmm#4997 merged after position 233, `d501e5066`, which
   microsoft/openvmm#4996 merged after position 232, `6cb6ba87c`, which
   microsoft/openvmm#4995 merged after position 231, `98e5b3ca5`, which
   microsoft/openvmm#4994 merged with position 230 after position 229, `ed8fc0713`, which
@@ -29,8 +30,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 105 commits past
-  the mapped tip on the same first-parent chain. Positions 132-236 are not yet assigned to PRs; see
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 106 commits past
+  the mapped tip on the same first-parent chain. Positions 132-237 are not yet assigned to PRs; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -994,7 +995,8 @@ ba105dd7f
   -> no-replace snapshot publication on every target [234]
   -> kernel tuning admitted on platform command lines [235]
   -> memory-expansion ranges placed without overflow [236]
-  -> ac3dc27a7 (NVX pin)
+  -> FIFO artifacts refused without waiting for a writer [237]
+  -> cba21d109 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1010,13 +1012,13 @@ reorganization folded the PR20 and PR12 fixups into the commits that they fix; s
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. None of the 105 later commits is a
+The NVX pin extends the chain past position 131 without merges. None of the 106 later commits is a
 fixup of a mapped PR, and none is yet classified or assigned to PRs. Each of positions 132-186
 combines the v2.4 commits that the table lists, as v3.0 positions 145-160 and 162-200 did, which
 developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 187-191
 followed the v3.0 reorganization, positions 192-205 are the ABI restart of the v4.0
 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-236 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-237 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1130,6 +1132,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 234 | `f41a1ecfc` | - | - | - | - | openvmm_helpers: don't publish a snapshot over an empty directory (microsoft/openvmm#4997) |
 | 235 | `b4028c1aa` | - | - | - | - | openvmm_helpers: admit kernel tuning on platform command lines (microsoft/openvmm#5001) |
 | 236 | `ac3dc27a7` | - | - | - | - | openvmm_helpers: compute memory-expansion ranges without overflow (microsoft/openvmm#5003) |
+| 237 | `cba21d109` | - | - | - | - | openvmm_helpers: refuse a FIFO artifact without waiting for a writer (microsoft/openvmm#5004) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1256,7 +1259,14 @@ boot-online processor count. It also extends the `--snapshot-tier` entry that po
 the CLI reference. Position 236 changes how the canonical memory-expansion ranges that PR20's
 position 099 adds to the machine contract of PR17's position 074 compute their start, which
 overflowed for a base RAM of at least 2^64 - 4 GiB, and adds a test beside position 099's tests
-of the memory capacity.
+of the memory capacity. Position 237 changes the artifact openers of the snapshot file system
+module that PR11's position 032 adds, with the path-based opener and the type check, and its
+position 033 extends with the directory-relative opener, through which PR12's position 035
+restores: on Unix both now open with `O_NONBLOCK`, so that position 032's type check refuses a
+FIFO without waiting for a writer, and then make a regular file's descriptor blocking again. It
+also adds tests beside position 032's tests of the module and position 035's tests of a restore's
+artifacts, and extends the restore paragraph that PR12's position 036 adds to the snapshot format
+guide.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1502,6 +1512,15 @@ ranges, and adds a test to that module, which uses the expandable-memory manifes
 Replaying it on upstream main conflicts in its only file: upstream main lacks the microVM snapshot
 module of position 074 and the memory expansion of position 099, so it follows PR17 and PR20
 upstream.
+
+Position 237 changes only the artifact openers of the snapshot file system module of
+`openvmm_helpers`, which PR11's positions 032 and 033 add and PR12's position 035, PR19's
+positions 092 and 093, and positions 166, 215, and 234 also change, and adds tests to that module
+and to the snapshot restore, the latter on the paired-scratch manifest of PR19's position 092 and
+the resume claim of position 093. It also extends the restore paragraph that PR12's position 036
+adds to the snapshot format guide. Replaying it on upstream main conflicts in all three of its
+files: upstream main lacks the file system module of position 032, the directory-relative restore
+of position 035, and that paragraph, so it follows PR11, PR12, and PR19 upstream.
 
 ## PR summary
 
