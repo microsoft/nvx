@@ -6,6 +6,7 @@
 //! nvx-rs [-h] [--root PATH] egress compile PATH
 //! nvx-rs [-h] [--root PATH] run [OPTIONS]
 //! nvx-rs [-h] [--root PATH] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
+//! nvx-rs [-h] [--root PATH] snapshot capture NAME [OPTIONS]
 //! ```
 //!
 //! - `artifacts` prints the paths of the artifacts of the artifact root as JSON.
@@ -18,6 +19,7 @@
 //!   exit statuses of the `nvx.py run` that it replaced.
 //! - `sandbox` runs or manages a sandbox, with the options, outputs, exit statuses, outcome
 //!   reports, and state directories of the `nvx.py sandbox` that it replaced.
+//! - `snapshot capture` captures a blockless VM into an immutable named snapshot.
 //!
 //! The artifact root is `--root`, or else the release or repository checkout that holds the
 //! executable, and the `NVX_OPENVMM` environment variable names another OpenVMM executable.
@@ -97,25 +99,33 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 /// The commands, in the order in which usage messages list them.
-const COMMANDS: [&str; 5] = ["artifacts", "download", "egress", "run", "sandbox"];
+const COMMANDS: [&str; 6] = [
+    "artifacts",
+    "download",
+    "egress",
+    "run",
+    "sandbox",
+    "snapshot",
+];
 /// The options of the top-level parser.
 const OPTIONS: [Spec; 1] = [Spec::one("--root")];
 /// The usage and help of the top-level parser.
 const SYNTAX: Syntax = Syntax {
     command: "",
-    arguments: "[-h] [--root PATH] {artifacts,download,egress,run,sandbox} ...",
+    arguments: "[-h] [--root PATH] {artifacts,download,egress,run,sandbox,snapshot} ...",
     help: "\
 Run NVX microVMs and sandboxes, download and look up NVX artifacts, and compile
 egress policies.
 
 positional arguments:
-  {artifacts,download,egress,run,sandbox}
+  {artifacts,download,egress,run,sandbox,snapshot}
     artifacts           print the paths of the NVX artifacts as JSON
     download            download and install the NVX release of the checkout
     egress              compile egress policy files
     run                 run an OpenVMM microVM
     sandbox             run or manage workloads over EROFS layers and private
                         ext4 scratch
+    snapshot            capture an immutable named snapshot
 
 options:
   -h, --help            show this help message and exit
@@ -334,6 +344,8 @@ enum Command {
     Run(Box<run::Options>),
     /// `sandbox ...`.
     Sandbox(Box<sandbox::Options>),
+    /// `snapshot capture ...`.
+    Snapshot(snapshots::capture::Options),
 }
 
 /// The top-level options.
@@ -389,6 +401,10 @@ fn run(arguments: &[OsString]) -> Result {
             let (options, unrecognized) = sandbox::parse(rest)?;
             (Command::Sandbox(Box::new(options)), unrecognized)
         }
+        "snapshot" => {
+            let (options, unrecognized) = snapshots::capture::parse(rest)?;
+            (Command::Snapshot(options), unrecognized)
+        }
         other => {
             return Err(usage(
                 ErrorCode::ArgumentInvalid,
@@ -413,6 +429,7 @@ fn run(arguments: &[OsString]) -> Result {
         Command::EgressCompile(path) => egress::run(&path),
         Command::Run(options) => run::run(root, *options),
         Command::Sandbox(options) => sandbox::run(root, *options),
+        Command::Snapshot(options) => snapshots::capture::run(root, options),
     }
 }
 
