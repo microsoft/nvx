@@ -3115,6 +3115,7 @@ method nvx::host::snapshot::SnapshotKey::processors
 method nvx::host::snapshot::SnapshotKey::runtime
 method nvx::host::snapshot::SnapshotKey::scratch
 method nvx::host::snapshot::SnapshotKey::speaks_current_contracts
+method nvx::host::snapshot::SnapshotKey::time
 method nvx::host::snapshot::SnapshotKey::to_bytes
 struct nvx::host::snapshot::SnapshotManifest
 method nvx::host::snapshot::SnapshotManifest::created_at
@@ -3693,6 +3694,7 @@ method nvx::host::template::TemplateKey::processors
 method nvx::host::template::TemplateKey::runtime
 method nvx::host::template::TemplateKey::scratch
 method nvx::host::template::TemplateKey::speaks_current_contracts
+method nvx::host::template::TemplateKey::time
 method nvx::host::template::TemplateKey::to_bytes
 struct nvx::host::template::TemplateManifest
 method nvx::host::template::TemplateManifest::created_at

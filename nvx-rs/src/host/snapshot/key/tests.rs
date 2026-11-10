@@ -13,6 +13,21 @@ fn manifest(spec: &ManifestSpec) -> SnapshotManifest {
     SnapshotManifest::parse(&spec.encode()).unwrap()
 }
 
+/// The specified suffix length, independently of the key writer, for locating the identity prefix.
+fn capture_time_len(time: &TimeContract) -> usize {
+    3 * 8
+        + 4
+        + time.host_clock.as_str().len()
+        + 2 * 16
+        + 4
+        + 1
+        + if time.cut_to_anchor_ns.is_some() {
+            8
+        } else {
+            0
+        }
+}
+
 /// Returns the key of the template that a capture of `class` made, whose manifest `spec`
 /// encodes.
 fn key(class: &CaptureClass, spec: &ManifestSpec) -> SnapshotKey {
@@ -350,6 +365,50 @@ fn the_guest_build_is_not_part_of_a_snapshot_key() {
 }
 
 #[test]
+fn complete_capture_time_round_trips_without_changing_compatibility_identity() {
+    let base = network_key();
+    for cut in [None, Some(0), Some(u64::MAX)] {
+        let mut spec = ManifestSpec::with_network();
+        let time = spec.time();
+        time.capture_tsc = u64::MAX;
+        time.capture_utc_ns = u64::MAX - 1;
+        time.capture_monotonic_ns = u64::MAX - 2;
+        time.host_clock = "windows-interrupt-time".to_owned();
+        time.host_id = vec![0x31; 16];
+        time.boot_id = vec![0x72; 16];
+        time.lineage = u32::MAX;
+        time.cut_to_anchor_ns = cut;
+        let manifest = manifest(&spec);
+        let key = SnapshotKey::new(&network_class(), &manifest).unwrap();
+        assert_eq!(key.time(), manifest.time());
+        assert_ne!(key.to_bytes(), base.to_bytes());
+        assert_eq!(key.identity(), base.identity());
+        let decoded = SnapshotKey::from_bytes(&key.to_bytes()).unwrap();
+        assert_eq!(decoded, key);
+        assert_eq!(decoded.time(), manifest.time());
+    }
+}
+
+#[test]
+fn canonical_keys_require_capture_time_and_a_known_host_clock() {
+    let key = network_key();
+    let mut prefix = Writer::default();
+    key.write_compatibility(&mut prefix);
+    let prefix = prefix.finish();
+    assert_eq!(
+        SnapshotKey::from_bytes(&prefix).unwrap_err().kind(),
+        crate::ErrorKind::Io
+    );
+    let mut bytes = key.to_bytes();
+    // Three anchors and the clock text's length precede its bytes.
+    bytes[prefix.len() + 3 * 8 + 4] = b'?';
+    let error = SnapshotKey::from_bytes(&bytes).unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::Io);
+    assert!(error.message().contains("host clock"), "{error}");
+    assert!(error.message().contains("unknown"), "{error}");
+}
+
+#[test]
 fn a_key_holds_what_its_capture_made() {
     let made = network_key();
     let class = network_class();
@@ -670,7 +729,7 @@ fn keys_read_back_from_their_canonical_encoding() {
         assert_eq!(read.to_bytes(), bytes);
         let mut digest = Sha256::new();
         digest.update(b"nvx snapshot key\0");
-        digest.update(&bytes);
+        digest.update(&bytes[..bytes.len() - capture_time_len(made.time())]);
         assert_eq!(
             made.identity().as_bytes(),
             &<[u8; 32]>::from(digest.finalize())
@@ -849,12 +908,13 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         .unwrap()
         .with("b", "2")
         .unwrap();
-    let mut bytes = key(&class, &ManifestSpec::with_network()).to_bytes();
-    let len = bytes.len();
+    let made = key(&class, &ManifestSpec::with_network());
+    let mut bytes = made.to_bytes();
+    let end = bytes.len() - capture_time_len(made.time());
     let tail = [
         1, 0, 0, 0, b'b', 1, 0, 0, 0, b'2', 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'1',
     ];
-    bytes[len - tail.len()..].copy_from_slice(&tail);
+    bytes[end - tail.len()..end].copy_from_slice(&tail);
     assert_eq!(
         key_refusal(&bytes, ErrorCode::Io),
         "the snapshot key is malformed: the invariant settings are not in the strict order of \
