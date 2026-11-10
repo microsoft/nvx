@@ -9,6 +9,7 @@ use crate::host::cli::deadline::Deadline;
 use crate::host::store::{JOURNAL_NAME, RUNTIME_NAME, SandboxStore};
 
 mod launch;
+mod liveness;
 
 /// How long a test waits for a lock that it released to be free.
 ///

@@ -11,7 +11,10 @@ use crate::host::vm::{self, Prepared, SavedVm, VmDir};
 use crate::hypervisor::Hypervisor;
 use crate::protocol::CAPABILITY_LEN;
 
-fn prepared(state: &StateDir, console: ConsoleAttachment) -> (Prepared, RuntimeIdentity) {
+pub(super) fn prepared(
+    state: &StateDir,
+    console: ConsoleAttachment,
+) -> (Prepared, RuntimeIdentity) {
     let identity = |text| ArtifactIdentity::new(text).unwrap();
     let runtime = Runtime {
         openvmm: "missing-openvmm".into(),
