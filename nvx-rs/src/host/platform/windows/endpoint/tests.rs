@@ -36,6 +36,19 @@ pub(crate) fn accept_control(server: &File) -> i32 {
     connected
 }
 
+#[cfg(feature = "cli")]
+pub(crate) fn disconnect_control(server: &File) {
+    use std::os::windows::io::{AsHandle, AsRawHandle};
+
+    use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
+
+    // SAFETY: the owned synchronous pipe finished its previous client.
+    assert_ne!(
+        unsafe { DisconnectNamedPipe(server.as_handle().as_raw_handle()) },
+        0
+    );
+}
+
 #[test]
 fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     let endpoint = format!(

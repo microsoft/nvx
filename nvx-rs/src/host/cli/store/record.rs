@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::StateFile;
 use super::files;
 use super::locked::LockedState;
+use crate::host::platform;
 use crate::host::process::ProcessRef;
 use crate::host::runtime::RuntimeIdentity;
 use crate::host::vm::{Prepared, SavedVm, VmDir, VmOutputs};
@@ -21,6 +22,7 @@ pub(crate) struct LaunchJournal {
     pub(super) vm_dir: PathBuf,
     pub(super) capability: [u8; CAPABILITY_LEN],
     pub(super) log: PathBuf,
+    pub(super) log_identity: (u64, u64),
     pub(super) outcome: PathBuf,
     pub(super) endpoint: String,
     pub(super) console: Option<String>,
@@ -34,6 +36,7 @@ impl fmt::Debug for LaunchJournal {
             .debug_struct("LaunchJournal")
             .field("vm_dir", &self.vm_dir)
             .field("log", &self.log)
+            .field("log_identity", &self.log_identity)
             .field("outcome", &self.outcome)
             .field("endpoint", &self.endpoint)
             .field("console", &self.console)
@@ -64,10 +67,15 @@ impl LaunchJournal {
                 "the prepared launch belongs to another sandbox directory",
             ));
         }
+        platform::claim_log(prepared.log())
+            .map_err(|error| Error::io("cannot claim the prepared VM log").with_source(error))?;
+        let log_identity = platform::opened_file_identity(prepared.log())
+            .map_err(|error| Error::io("cannot identify the prepared VM log").with_source(error))?;
         Ok(Self {
             vm_dir: vm_dir.path().to_path_buf(),
             capability: *prepared.capability().as_bytes(),
             log: log.clone(),
+            log_identity,
             outcome: outcome.clone(),
             endpoint: endpoint.clone(),
             console: console.clone(),
