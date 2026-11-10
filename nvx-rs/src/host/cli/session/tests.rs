@@ -164,7 +164,7 @@ fn session_with(
         guest.accept();
         serve(&mut guest);
     });
-    let session = Session::attach(Box::new(host), &CAPABILITY, 5.0).unwrap();
+    let session = Session::attach(Box::new(host), &CAPABILITY, 5.0, None).unwrap();
     (session, worker)
 }
 
@@ -611,7 +611,7 @@ fn operations_bound_their_requests_by_their_deadlines() {
     // response, so attach, ping, exec, and stop each write within the time in which they then
     // read: no transfer gets more than what is left of its operation's timeout.
     let (transport, transfers) = Recording::new(None);
-    let mut session = Session::attach(Box::new(transport), &CAPABILITY, 7.0).unwrap();
+    let mut session = Session::attach(Box::new(transport), &CAPABILITY, 7.0, None).unwrap();
     let mut operations = vec![(7.0, transfers.lock().unwrap().split_off(0))];
     session.ping(5.0).unwrap();
     operations.push((5.0, transfers.lock().unwrap().split_off(0)));
@@ -646,7 +646,7 @@ fn failed_transfer_closes_the_session() {
     ] {
         // The attachment's write and read succeed.
         let (transport, transfers) = Recording::new(Some((failure, 2)));
-        let mut session = Session::attach(Box::new(transport), &CAPABILITY, 5.0).unwrap();
+        let mut session = Session::attach(Box::new(transport), &CAPABILITY, 5.0, None).unwrap();
         assert_eq!(
             self::failure(session.ping(5.0)),
             (ErrorCode::TimedOut, expected.to_owned())
@@ -679,7 +679,7 @@ fn request_to_a_stalled_endpoint_times_out_and_closes_the_session() {
         // The endpoint reads nothing more until the client gives up.
         let _ = released.recv_timeout(Duration::from_secs(10));
     });
-    let mut session = Session::attach(Box::new(host), &CAPABILITY, 5.0).unwrap();
+    let mut session = Session::attach(Box::new(host), &CAPABILITY, 5.0, None).unwrap();
     let started = Instant::now();
     assert_eq!(
         message(session.exec(&request(&["/bin/true"]), 0.25)),
@@ -737,10 +737,17 @@ fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     let mut checks = 0;
     let started = Instant::now();
     let failure =
-        Session::connect_unless_exited(endpoint, std::process::id(), &CAPABILITY, 60.0, || {
-            checks += 1;
-            checks == 3
-        })
+        Session::connect_unless_exited(
+            endpoint,
+            std::process::id(),
+            &CAPABILITY,
+            60.0,
+            || {
+                checks += 1;
+                checks == 3
+            },
+            None,
+        )
         .err()
         .unwrap();
     assert!(
@@ -753,10 +760,17 @@ fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     let mut checks = 0;
     let started = Instant::now();
     let failure =
-        Session::connect_unless_exited(endpoint, std::process::id(), &CAPABILITY, 0.2, || {
-            checks += 1;
-            false
-        })
+        Session::connect_unless_exited(
+            endpoint,
+            std::process::id(),
+            &CAPABILITY,
+            0.2,
+            || {
+                checks += 1;
+                false
+            },
+            None,
+        )
         .err()
         .unwrap();
     assert!(started.elapsed() >= Duration::from_millis(200));
@@ -765,6 +779,73 @@ fn check_waits_for_openvmm_that_exits(endpoint: &str) {
         format!("managed control endpoint did not become available: {endpoint}")
     );
     assert_ne!(checks, 0);
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn check_forward_failure_during_connect(endpoint: &str) {
+    let (attempted, attempt) = mpsc::sync_channel(1);
+    let started = Instant::now();
+    let result = super::super::run::attach_with_output(
+        |cancellation| {
+            Session::connect_unless_exited(
+                endpoint,
+                std::process::id(),
+                &CAPABILITY,
+                60.0,
+                || {
+                    let _ = attempted.try_send(());
+                    false
+                },
+                Some(cancellation),
+            )
+        },
+        || {
+            attempt.recv_timeout(Duration::from_secs(5)).unwrap();
+            Err(Exit::error(ErrorCode::Io, "original forwarding failure"))
+        },
+    );
+    assert_eq!(
+        result.err().unwrap().message(),
+        Some("original forwarding failure")
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn check_forward_failure_during_handshake(
+    client: Box<dyn Transport>,
+    mut server: impl io::Read + Send + 'static,
+) {
+    let (waiting, wait) = mpsc::sync_channel(0);
+    let (release, released) = mpsc::channel();
+    let peer = thread::spawn(move || {
+        let mut request = vec![0; OUTER_HEADER_LEN + CAPABILITY_LEN];
+        server.read_exact(&mut request).unwrap();
+        assert_eq!(
+            decode_outer_header(request[..OUTER_HEADER_LEN].try_into().unwrap())
+                .unwrap()
+                .record_type,
+            OUTER_HOST_ATTACH
+        );
+        waiting.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let started = Instant::now();
+    let result = super::super::run::attach_with_output(
+        move |cancellation| Session::attach(client, &CAPABILITY, 60.0, Some(cancellation)),
+        || {
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            Err(Exit::error(ErrorCode::Io, "original forwarding failure"))
+        },
+    );
+    let elapsed = started.elapsed();
+    release.send(()).unwrap();
+    peer.join().unwrap();
+    assert_eq!(
+        result.err().unwrap().message(),
+        Some("original forwarding failure")
+    );
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
 }
 
 #[test]
@@ -1041,6 +1122,7 @@ mod endpoints {
                 checks += 1;
                 checks == 2
             },
+            None,
         )
         .err()
         .expect("unsupported peer verification must fail before authentication");
@@ -1055,6 +1137,52 @@ mod endpoints {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("control.sock");
         check_waits_for_openvmm_that_exits(path.to_str().unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn forward_failure_cancels_the_connection_before_its_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        check_forward_failure_during_connect(
+            directory.path().join("control.sock").to_str().unwrap(),
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn forward_failure_cancels_a_handshake_while_the_peer_remains_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = platform::connect_endpoint(
+            path.to_str().unwrap(),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        check_forward_failure_during_handshake(client, server);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn zero_console_polls_do_not_install_a_blocking_socket_timeout() {
+        let (stream, mut server) = UnixStream::pair().unwrap();
+        let inspect = stream.try_clone().unwrap();
+        let mut client = platform::transport_from_handle(stream.into()).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                client.read(&mut [0], Some(Duration::ZERO)).unwrap_err().kind(),
+                io::ErrorKind::TimedOut
+            );
+            assert_eq!(inspect.read_timeout().unwrap(), None);
+        }
+        server.write_all(b"c").unwrap();
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 1);
+        assert_eq!(&byte, b"c");
+        drop(server);
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 0);
     }
 
     #[test]
@@ -1225,6 +1353,55 @@ mod endpoints {
     #[test]
     fn waits_for_an_endpoint_end_once_openvmm_exits() {
         check_waits_for_openvmm_that_exits(r"\\.\pipe\nvx-cli-session-test-exited");
+    }
+
+    #[test]
+    fn forward_failure_cancels_the_connection_before_its_timeout() {
+        check_forward_failure_during_connect(r"\\.\pipe\nvx-cli-session-test-cancelled");
+    }
+
+    #[test]
+    fn forward_failure_cancels_a_handshake_while_the_peer_remains_open() {
+        let (name, server) = create_pipe();
+        let accepted = thread::spawn(move || {
+            accept(&server);
+            server
+        });
+        let client = platform::connect_endpoint(
+            &name.replace('\\', "/"),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        check_forward_failure_during_handshake(client, accepted.join().unwrap());
+    }
+
+    #[test]
+    fn zero_console_polls_preserve_ready_bytes_and_peer_exit() {
+        let (name, server) = create_pipe();
+        let accepted = thread::spawn(move || {
+            accept(&server);
+            server
+        });
+        let mut client = platform::connect_endpoint(
+            &name.replace('\\', "/"),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut server = accepted.join().unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                client.read(&mut [0], Some(Duration::ZERO)).unwrap_err().kind(),
+                io::ErrorKind::TimedOut
+            );
+        }
+        server.write_all(b"c").unwrap();
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 1);
+        assert_eq!(&byte, b"c");
+        drop(server);
+        assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 0);
     }
 
     #[test]

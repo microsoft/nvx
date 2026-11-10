@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-use nix::sys::socket::{getsockopt, sockopt::PeerPidfd};
+use nix::sys::socket::{MsgFlags, getsockopt, recv, sockopt::PeerPidfd};
 
 use crate::host::platform::{Transport, TransportHandle, time_left};
 use crate::host::sys;
@@ -339,6 +339,12 @@ impl Transport for UnixTransport {
     }
 
     fn read(&mut self, buffer: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
+        if timeout == Some(Duration::ZERO) {
+            return match recv(self.stream.as_raw_fd(), buffer, MsgFlags::MSG_DONTWAIT) {
+                Err(nix::errno::Errno::EINTR) => Err(io::ErrorKind::TimedOut.into()),
+                result => result.map_err(io::Error::from).map_err(map_timeout),
+            };
+        }
         self.stream.set_read_timeout(socket_timeout(timeout))?;
         loop {
             match self.stream.read(buffer) {
