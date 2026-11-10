@@ -40,10 +40,14 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
+use crate::host::config::{CaptureConfig, ConsoleAttachment, NicConfig};
 use crate::host::paths::{absolute, normalized};
+use crate::host::runtime::RuntimeIdentity;
 use crate::host::store::regular;
 use crate::host::{filesystem, platform};
-use crate::{Error, Result};
+use crate::{Error, Hypervisor, Result};
 
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, SnapshotKey};
@@ -57,6 +61,28 @@ pub const KEY_FILE: &str = "key.bin";
 pub const DESCRIPTION_FILE: &str = "snapshot.json";
 /// The directory of OpenVMM's manifest, RAM and saved state.
 pub const OPENVMM_DIR: &str = "openvmm";
+
+/// The checked configuration and effective devices of a blockless platform capture.
+///
+/// [`crate::host::vm::Prepared::capture_context`] returns it after verifying the actual sparse
+/// disk geometries. Callers choose whether and how to persist it; creation writes no context,
+/// key or snapshot description into the VM directory. Runtime paths and network policy are
+/// not part of the context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureContext {
+    /// Capture resources, invariants and verified image and scratch geometries.
+    pub(crate) capture: CaptureConfig,
+    /// The attached NIC's resolved address, without the capture's deny-all policy.
+    pub(crate) nic: Option<NicConfig>,
+    /// The boot console's effective attachment.
+    pub(crate) console: ConsoleAttachment,
+    /// The identities of the runtime artifacts and their contracts.
+    pub(crate) runtime: RuntimeIdentity,
+    /// The backend selected for the capture.
+    pub(crate) hypervisor: Hypervisor,
+    /// The requested CPU profile, or OpenVMM's default.
+    pub(crate) cpu_profile: Option<String>,
+}
 
 /// A checked snapshot directory and its verified metadata, for a future VM restore.
 ///

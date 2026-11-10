@@ -129,7 +129,7 @@ impl UpperConfig {
 }
 
 /// Where the output of a VM's boot console goes. The console's device exists either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ConsoleAttachment {
     /// OpenVMM listens for a client of the console.
     Listener,
@@ -148,7 +148,7 @@ pub struct NetworkConfig {
 }
 
 /// The NIC that a VM has, with the static address that it settled on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NicConfig {
     /// The NIC's static address.
     pub guest_network: Ipv4Cidr,
@@ -160,6 +160,8 @@ pub struct Boot {
     /// The caller's own kernel command-line tokens, to which NVX adds those of what it lowers.
     /// The root's tokens, `nvx_hostname`, `nvx_machine_id`, `nvx_maps` and `virtfs_*` are reserved;
     /// every other token, including `nvx_entrypoint`, `nvx_arg` and `nvx_share`, is caller-owned.
+    /// A capture permits only OpenVMM's platform allowlist and refuses caller tokens whose
+    /// tier, processor, console, device or network settings the builder supplies.
     pub command_line: String,
     /// What a capture of the VM adds, if the VM may be captured.
     pub capture: Option<CaptureConfig>,
@@ -169,7 +171,7 @@ pub struct Boot {
 /// the disks, the processors and the memory that the VM boots with and that a restore may grow
 /// it to, and the caller's invariant settings. The capture VM's own configuration gives the
 /// rest, such as its NIC, its console, and its export.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CaptureConfig {
     /// How the snapshot treats the disks.
     pub disks: DiskCapture,
@@ -184,7 +186,7 @@ pub struct CaptureConfig {
 }
 
 /// How a capture's snapshot treats the disks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum DiskCapture {
     /// A fresh capture of a blockless VM, to which the capture attaches a placeholder of the
@@ -198,7 +200,7 @@ pub enum DiskCapture {
 }
 
 /// A resource at boot, and the capacity to which a restore may grow it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Capacity {
     /// The resource at boot.
     pub boot: u64,
@@ -207,7 +209,7 @@ pub struct Capacity {
 }
 
 /// The length and block sizes of a sandbox block device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlockGeometry {
     /// The length that the device presents, in bytes: nonzero, and a multiple of the logical
     /// block size.
@@ -314,6 +316,24 @@ impl Invariants {
     }
 }
 
+impl serde::Serialize for Invariants {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Invariants {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let settings = <BTreeMap<String, String> as serde::Deserialize>::deserialize(deserializer)?;
+        settings
+            .into_iter()
+            .try_fold(Self::new(), |settings, (name, value)| {
+                settings.with(&name, &value)
+            })
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Explains why `name` and `value` are not an invariant setting, if they are not.
 pub(crate) fn check_setting(name: &str, value: &str) -> Result<(), String> {
     let name_valid = (1..=Invariants::MAX_NAME_LEN).contains(&name.len())
@@ -397,12 +417,17 @@ impl VmConfig {
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when
     /// [`check`](Self::check) refuses the configuration or when it has no [`Boot`]. A restore
     /// receives its view through its activation record, not a kernel command line.
+    /// A capture renders only accepted platform tokens and its boot-online processor count;
+    /// OpenVMM adds the single tier token from the capture's `--snapshot-tier platform` option.
     pub fn kernel_command_line(&self) -> Result<String> {
         self.check()?;
         let boot = self
             .boot
             .as_ref()
             .ok_or_else(|| Error::unsupported("a kernel command line needs a cold boot's Boot"))?;
+        if let Some(capture) = &boot.capture {
+            return self.capture_command_line(boot, capture);
+        }
         let mut tokens = Vec::new();
         if let RootConfig::Layered(root) = &self.root {
             let (upper, journal, max_memory_percent) = match &root.upper {
@@ -436,7 +461,58 @@ impl VmConfig {
         Ok(tokens.join(" "))
     }
 
-    /// Renders a non-capture cold boot's complete OpenVMM arguments from this configuration and
+    /// Renders a blockless capture without root, view, mapping or workload tokens.
+    fn capture_command_line(&self, boot: &Boot, capture: &CaptureConfig) -> Result<String> {
+        if self.root != RootConfig::Blockless {
+            return Err(Error::unsupported("a fresh capture needs a blockless root"));
+        }
+        if self.filesystem.is_some() {
+            return Err(Error::unsupported(
+                "a fresh capture refuses any filesystem export",
+            ));
+        }
+        if !capture.memory.boot.is_multiple_of(MEMORY_BLOCK_MIB) {
+            return Err(Error::unsupported(format!(
+                "a fresh capture's boot memory of {} MiB is not a multiple of {MEMORY_BLOCK_MIB} MiB",
+                capture.memory.boot
+            )));
+        }
+        for token in boot.command_line.split_ascii_whitespace() {
+            let name = token.split_once('=').map_or(token, |(name, _)| name);
+            if !platform_command_line_token_is_invariant(token)
+                || [
+                    "earlycon",
+                    "console",
+                    "virtio_mmio.device",
+                    "virtnet_ip",
+                    "virtnet_mask",
+                    "virtnet_gw",
+                    "virtnet_dns",
+                    "virtnet_ip6",
+                    "virtnet_gw6",
+                    "nvx_snapshot_tier",
+                    "nr_cpus",
+                    "maxcpus",
+                    "nvx_control_tty",
+                ]
+                .contains(&name)
+            {
+                return Err(Error::unsupported(format!(
+                    "Boot.command_line uses the forbidden platform capture token {name:?}"
+                )));
+            }
+        }
+        let mut command_line = boot.command_line.clone();
+        if capture.processors.boot < capture.processors.capacity {
+            if !command_line.is_empty() {
+                command_line.push(' ');
+            }
+            command_line.push_str(&format!("maxcpus={}", capture.processors.boot));
+        }
+        Ok(command_line)
+    }
+
+    /// Renders a cold boot's OpenVMM arguments from this configuration and
     /// `runtime`.
     ///
     /// `endpoint`, `report` and `console_endpoint` are already chosen output names, not launch
@@ -451,9 +527,11 @@ impl VmConfig {
     /// [`crate::host::vm::create`] calls this internal whole-config renderer. Neither managed
     /// lifecycle nor workload-identity flags are rendered; the caller owns its guest tokens.
     /// `runtime.windows_breakaway` is process-launch behavior, not an OpenVMM argument.
+    /// A capture's resources and tier are rendered here; creation adds its checked block paths
+    /// and snapshot destination, then rechecks the complete command line.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
-    /// configuration, no [`Boot`], a capture-bearing boot, empty or NUL-containing required names
+    /// configuration, no [`Boot`], empty or NUL-containing required names
     /// or runtime paths, serial-option delimiters in listener names, duplicate listener names,
     /// non-Unicode export child roots, block paths that are not Unicode, hold
     /// disk-option delimiters or
@@ -508,13 +586,17 @@ impl VmConfig {
             }
         };
         let mut arguments = self.device_arguments()?;
+        let capture = self.boot.as_ref().and_then(|boot| boot.capture.as_ref());
         arguments.extend(boot_arguments(
             runtime.hypervisor,
-            self.memory_mib,
+            capture.map_or(self.memory_mib, |capture| capture.memory.boot),
             &runtime.kernel,
             &runtime.initramfs,
             &command_line,
         ));
+        if let Some(capture) = capture {
+            arguments.extend(capture.openvmm_arguments());
+        }
         arguments.extend(console_arguments(&console, endpoint, report));
         if let Some(profile) = &runtime.cpu_profile {
             if profile.is_empty() {
@@ -547,7 +629,7 @@ impl VmConfig {
         Ok(arguments)
     }
 
-    /// Checks the configuration's part of a non-capture cold boot's OpenVMM command line on every
+    /// Checks the configuration's part of a cold boot's OpenVMM command line on every
     /// host, without reading or changing the host, with 2048 UTF-16 code units reserved for the
     /// runtime's files, launch options, and the VM's output paths.
     ///
@@ -558,7 +640,7 @@ impl VmConfig {
     /// A listener's backend prefix is counted here; its endpoint name stays in the reserve.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a refused
-    /// configuration or no [`Boot`], a capture-bearing boot, an unlowerable network policy, a
+    /// configuration or no [`Boot`], an unlowerable non-capture network policy, a
     /// NUL-containing argument, a non-Unicode export child root or block path, one that OpenVMM's
     /// disk syntax cannot hold literally, or one whose
     /// extension selects a non-raw backend, kernel text with double quotes or the standalone `--`
@@ -566,9 +648,14 @@ impl VmConfig {
     pub fn check_command_line(&self) -> Result<()> {
         let command_line = self.control_kernel_command_line()?;
         let mut arguments = self.device_arguments()?;
+        let capture = self.boot.as_ref().and_then(|boot| boot.capture.as_ref());
         arguments.extend([
             "--memory".into(),
-            format!("{}M", self.memory_mib).into(),
+            format!(
+                "{}M",
+                capture.map_or(self.memory_mib, |capture| capture.memory.boot)
+            )
+            .into(),
             "--cmdline".into(),
             command_line.into(),
             "--virtio-console".into(),
@@ -578,22 +665,16 @@ impl VmConfig {
             }
             .into(),
         ]);
+        if let Some(capture) = capture {
+            arguments.extend(capture.openvmm_arguments());
+        }
         check_argument_nuls(&arguments)?;
         fit_arguments(&arguments, OPENVMM_COMMAND_LINE_RESERVE)
     }
 
-    /// Renders a non-capture boot's kernel text that OpenVMM's control console accepts.
+    /// Renders a boot's kernel text that OpenVMM's control console accepts.
     fn control_kernel_command_line(&self) -> Result<String> {
         let command_line = self.kernel_command_line()?;
-        if self
-            .boot
-            .as_ref()
-            .is_some_and(|boot| boot.capture.is_some())
-        {
-            return Err(Error::unsupported(
-                "cold-boot argument rendering does not support capture configurations",
-            ));
-        }
         if command_line.contains('"')
             || command_line
                 .split_ascii_whitespace()
@@ -609,11 +690,17 @@ impl VmConfig {
 
     /// Renders only the configuration's devices; no runtime or output name is needed.
     fn device_arguments(&self) -> Result<Vec<OsString>> {
+        let capture = self.boot.as_ref().and_then(|boot| boot.capture.as_ref());
         let mut arguments = vec![
             "--machine".into(),
             "microvm".into(),
             "--processors".into(),
-            self.processors.to_string().into(),
+            capture
+                .map_or(u64::from(self.processors), |capture| {
+                    capture.processors.capacity
+                })
+                .to_string()
+                .into(),
         ];
         if let RootConfig::Layered(root) = &self.root {
             let scratch = match &root.upper {
@@ -648,7 +735,11 @@ impl VmConfig {
                 || DEFAULT_GUEST_NETWORK.to_owned(),
                 |address| address.to_string(),
             );
-            let mut nic = network::openvmm_arguments(Some(&network.policy), &guest_network)?;
+            let mut nic = if capture.is_some() {
+                network::template_arguments(&guest_network)
+            } else {
+                network::openvmm_arguments(Some(&network.policy), &guest_network)?
+            };
             if nic.is_empty() {
                 // A configured NIC remains present even under the deny-all posture.
                 nic = network::template_arguments(&guest_network);
@@ -747,6 +838,34 @@ impl VmConfig {
     }
 }
 
+/// OpenVMM's named platform snapshot command-line allowlist.
+fn platform_command_line_token_is_invariant(token: &str) -> bool {
+    matches!(
+        token,
+        "earlycon=xe9"
+            | "console=hvc0"
+            | "console=hvc1"
+            | "reboot=t"
+            | "panic=-1"
+            | "nvx_sandbox=1"
+            | "nvx_config=0xd0010000,65536"
+            | "nvx_snapshot_tier=platform"
+            | "nvx_control_tty=hvc2"
+    ) || token.starts_with("nr_cpus=")
+        || token.starts_with("maxcpus=")
+        || [
+            "virtio_mmio.device=",
+            "virtnet_ip=",
+            "virtnet_mask=",
+            "virtnet_gw=",
+            "virtnet_dns=",
+            "virtnet_ip6=",
+            "virtnet_gw6=",
+        ]
+        .iter()
+        .any(|prefix| token.starts_with(prefix))
+}
+
 impl LayeredRoot {
     /// Checks the root's fields, as [`VmConfig::check`] describes.
     fn check(&self) -> Result<()> {
@@ -785,6 +904,16 @@ impl LayeredRoot {
 }
 
 impl CaptureConfig {
+    /// The capacity and platform tier shared by capture argument checks and rendering.
+    fn openvmm_arguments(&self) -> [OsString; 4] {
+        [
+            "--memory-capacity".into(),
+            format!("{}M", self.memory.capacity).into(),
+            "--snapshot-tier".into(),
+            "platform".into(),
+        ]
+    }
+
     /// Checks the capture's settings without reading the host.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for processors online
