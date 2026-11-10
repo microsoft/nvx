@@ -125,7 +125,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, confirmed stop, and caller-saved reattachment |
-| [`nvx::host::snapshot`](#nvxhostsnapshot) | Snapshot compatibility keys, strict manifests, restore-time eligibility, and the opaque input of a future VM restore |
+| [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshot directories, verified keys and manifests, time eligibility, and the input of a future VM restore |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
@@ -586,9 +586,19 @@ The key's canonical encoding and identity use the snapshot names and omit
 and no reader or migration of the prior encoding is supported. `CaptureClass`
 still records the legacy capture inputs, including its guest build.
 
-`Snapshot` is an opaque input of a future restore. `vm::create` currently
-refuses `Some(snapshot)` with `ErrorKind::Unsupported`; only cold boots are
-supported.
+`Snapshot::open` checks exactly `key.bin`, `snapshot.json` and
+`openvmm/{manifest.bin,memory.bin,state.bin}`. Directories are private, files
+are regular and private to their owner, artifact lengths equal the strict
+manifest's, and the canonical key is consistent with that manifest.
+`KEY_FILE`, `DESCRIPTION_FILE` and `OPENVMM_DIR` name the root entries.
+The description must exist, but its contents are never read, parsed or
+trusted. `Snapshot::key` and `manifest` expose the verified metadata.
+
+The caller keeps the directory and every entry private and immutable while
+using the snapshot; opening checks them once and retains no file handles
+or lock. `Snapshot` remains an opaque input of a future restore:
+`vm::create` still refuses `Some(snapshot)` with `ErrorKind::Unsupported`;
+only cold boots are supported.
 
 ### `nvx::host::config`
 
