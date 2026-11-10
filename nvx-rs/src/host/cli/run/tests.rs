@@ -87,6 +87,201 @@ fn cold_share_command_lines_fit_the_kernel_budget_to_the_byte() {
     }
 }
 
+#[test]
+fn a_console_peer_exit_waits_for_the_owned_child_status() {
+    let result = connect_before_exit::<()>(
+        "unused",
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "peer exited",
+            ))
+        },
+        |timeout| Ok((!timeout.is_zero()).then_some(7)),
+    );
+    assert!(matches!(result, Ok(None)), "{result:?}");
+}
+
+#[test]
+fn an_unverified_console_is_refused_while_the_owned_child_runs() {
+    let result = connect_before_exit::<()>(
+        "unused",
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "wrong peer",
+            ))
+        },
+        |_| Ok(None),
+    );
+    assert!(
+        matches!(&result, Err(Exit::Error { code: ErrorCode::Io, message }) if message == "wrong peer"),
+        "{result:?}"
+    );
+}
+
+#[cfg(windows)]
+const REDIRECTED_CONSOLE_BYTES: &[u8] = b"nvx-raw:\xff\x80\xc3";
+
+#[cfg(windows)]
+#[test]
+fn windows_console_output_handles_non_utf8_code_pages() {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "host::cli::run::tests::windows_console_output_helper",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("NVX_TEST_PRIVATE_CONSOLE", "cp437")
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        output
+            .stdout
+            .windows(REDIRECTED_CONSOLE_BYTES.len())
+            .any(|bytes| bytes == REDIRECTED_CONSOLE_BYTES),
+        "{output:?}"
+    );
+}
+
+/// Runs only as the parent's isolated-console helper, never in the shared test process.
+#[cfg(windows)]
+#[test]
+#[ignore]
+#[allow(unsafe_code)]
+fn windows_console_output_helper() {
+    use std::io::{Read, Seek, Write};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_TEXTMODE_BUFFER, COORD, CreateConsoleScreenBuffer, GetConsoleOutputCP,
+        GetConsoleProcessList, GetStdHandle, ReadConsoleOutputCharacterW, STD_OUTPUT_HANDLE,
+        SetConsoleOutputCP, SetStdHandle,
+    };
+
+    /// Restores only the helper's private console and its original redirected stdout.
+    struct RestoreConsole {
+        /// The original borrowed standard-output handle.
+        stdout: HANDLE,
+        /// The private console's original output code page.
+        code_page: u32,
+    }
+    impl Drop for RestoreConsole {
+        fn drop(&mut self) {
+            // SAFETY: both settings belong to this isolated helper, and stdout stays open.
+            unsafe {
+                assert_ne!(SetStdHandle(STD_OUTPUT_HANDLE, self.stdout), 0);
+                assert_ne!(SetConsoleOutputCP(self.code_page), 0);
+            }
+        }
+    }
+
+    assert_eq!(
+        std::env::var("NVX_TEST_PRIVATE_CONSOLE").as_deref(),
+        Ok("cp437")
+    );
+    let mut members = [0; 4];
+    // SAFETY: the array is writable, and only this helper may belong to its new console.
+    let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
+    assert_eq!(count, 1);
+    assert_eq!(members[0], std::process::id());
+    // SAFETY: a private, inactive screen buffer has no inherited security attributes.
+    let raw = unsafe {
+        CreateConsoleScreenBuffer(
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            CONSOLE_TEXTMODE_BUFFER,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(raw, INVALID_HANDLE_VALUE);
+    // SAFETY: CreateConsoleScreenBuffer returned this newly owned handle.
+    let buffer = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let mut file = tempfile::tempfile().unwrap();
+    io::stdout().flush().unwrap();
+    // SAFETY: these getters return the helper's own current console settings.
+    let _restore = RestoreConsole {
+        stdout: unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+        code_page: unsafe { GetConsoleOutputCP() },
+    };
+    assert!(!io::stdout().is_terminal());
+    let mut redirected = ConsoleOutput::new();
+    redirected.write_all(REDIRECTED_CONSOLE_BYTES).unwrap();
+    redirected.finish().unwrap();
+    // SAFETY: the file is owned and remains open until stdout has been restored.
+    unsafe {
+        assert_ne!(
+            SetStdHandle(STD_OUTPUT_HANDLE, file.as_raw_handle().cast()),
+            0
+        );
+    }
+    assert!(!io::stdout().is_terminal());
+    let mut redirected = ConsoleOutput::new();
+    redirected.write_all(REDIRECTED_CONSOLE_BYTES).unwrap();
+    redirected.finish().unwrap();
+    file.rewind().unwrap();
+    let mut redirected_bytes = Vec::new();
+    file.read_to_end(&mut redirected_bytes).unwrap();
+    assert_eq!(redirected_bytes, REDIRECTED_CONSOLE_BYTES);
+    // SAFETY: only this helper is attached, and the owned buffer remains open until restoration.
+    unsafe {
+        assert_ne!(SetConsoleOutputCP(437), 0);
+        assert_ne!(
+            SetStdHandle(STD_OUTPUT_HANDLE, buffer.as_raw_handle().cast()),
+            0
+        );
+    }
+    let mut console = ConsoleOutput::new();
+    for chunk in [
+        b"caf\xc3".as_slice(),
+        b"\xa9 \xe2".as_slice(),
+        b"\x82\xac|A\xff\x80|".as_slice(),
+        b"\xc3".as_slice(),
+        b"A".as_slice(),
+    ] {
+        console.write_all(chunk).unwrap();
+    }
+    console.finish().unwrap();
+    for incomplete in [b"\xc3".as_slice(), b"\xe2\x82", b"\xf0\x9f\x92"] {
+        let mut console = ConsoleOutput::new();
+        console.write_all(b"|").unwrap();
+        console.write_all(incomplete).unwrap();
+        console.finish().unwrap();
+    }
+    let expected: Vec<u16> =
+        "caf\u{e9} \u{20ac}|A\u{fffd}\u{fffd}|\u{fffd}A|\u{fffd}|\u{fffd}|\u{fffd}"
+            .encode_utf16()
+            .collect();
+    let mut actual = vec![0; expected.len()];
+    let mut read = 0;
+    // SAFETY: the buffer is owned, and actual has room for the requested UTF-16 characters.
+    assert_ne!(
+        unsafe {
+            ReadConsoleOutputCharacterW(
+                buffer.as_raw_handle().cast(),
+                actual.as_mut_ptr(),
+                actual.len() as u32,
+                COORD { X: 0, Y: 0 },
+                &mut read,
+            )
+        },
+        0
+    );
+    assert_eq!(read as usize, expected.len());
+    assert_eq!(actual, expected);
+}
+
 proptest! {
     /// A target that `run` accepts stays inside its share's `nvx_share=` token, which the kernel
     /// reads as one parameter. Linux splits a parameter at a byte that it reads as whitespace,

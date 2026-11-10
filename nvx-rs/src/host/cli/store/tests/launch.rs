@@ -49,8 +49,8 @@ pub(super) fn prepared(
         filesystem: None,
         console,
         boot: Some(Boot {
-            memory_capacity_mib: None,
             command_line: "nvx_entrypoint=/bin/sh".to_owned(),
+            memory_capacity_mib: None,
             capture: None,
         }),
     };

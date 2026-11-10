@@ -44,8 +44,6 @@
 mod guest_tokens;
 
 use std::fs::{self, File};
-#[cfg(windows)]
-use std::io::Write;
 use std::io::{self, IsTerminal, Read};
 use std::path::Path;
 use std::sync::mpsc;
@@ -642,31 +640,54 @@ fn connect_running(
     launched: &mut vm::Launched,
     endpoint: &str,
 ) -> Result<Option<Box<dyn Transport>>> {
+    let pid = launched.process.reference().pid;
+    connect_before_exit(
+        endpoint,
+        || platform::connect_endpoint(endpoint, pid, Duration::from_millis(250)),
+        |timeout| launched.wait_status(timeout),
+    )
+}
+
+/// Connects to the verified endpoint, or yields to the owned child's confirmed exit.
+fn connect_before_exit<T>(
+    endpoint: &str,
+    mut connect: impl FnMut() -> io::Result<T>,
+    mut wait_status: impl FnMut(Duration) -> io::Result<Option<i32>>,
+) -> Result<Option<T>> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         check_interrupt()?;
-        match platform::connect_endpoint(
-            endpoint,
-            launched.process.reference().pid,
-            Duration::from_millis(250),
-        ) {
-            Ok(transport) => return Ok(Some(transport)),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound
-                        | io::ErrorKind::ConnectionRefused
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::WouldBlock
-                ) => {}
-            Err(error) => return Err(Exit::from_os_error(error)),
-        }
-        if launched
-            .wait_status(Duration::ZERO)
+        if wait_status(Duration::ZERO)
             .map_err(Exit::from_os_error)?
             .is_some()
         {
             return Ok(None);
+        }
+        let error = match connect() {
+            Ok(transport) => return Ok(Some(transport)),
+            Err(error) => error,
+        };
+        let retry = matches!(
+            error.kind(),
+            io::ErrorKind::NotFound
+                | io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::WouldBlock
+        );
+        // Peer authentication may observe exit just before the child status becomes available.
+        let exit_wait = if retry {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now()))
+        };
+        if wait_status(exit_wait)
+            .map_err(Exit::from_os_error)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        if !retry {
+            return Err(Exit::from_os_error(error));
         }
         if Instant::now() >= deadline {
             return Err(Exit::error(
@@ -764,20 +785,62 @@ fn console_input(console: Box<dyn Transport>) -> Result<(Box<dyn Transport>, Inp
     }
 }
 
-fn write_console(data: &[u8]) -> io::Result<()> {
+struct ConsoleOutput {
     #[cfg(windows)]
-    {
-        use std::os::windows::io::AsHandle;
+    console: bool,
+    #[cfg(windows)]
+    pending: [u8; 3],
+    #[cfg(windows)]
+    pending_len: usize,
+}
 
-        if platform::interrupted() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
+impl ConsoleOutput {
+    fn new() -> Self {
+        Self {
+            #[cfg(windows)]
+            console: io::stdout().is_terminal(),
+            #[cfg(windows)]
+            pending: [0; 3],
+            #[cfg(windows)]
+            pending_len: 0,
         }
-        let mut stdout = io::stdout().lock();
-        stdout.flush()?;
-        File::from(stdout.as_handle().try_clone_to_owned()?).write_all(data)
     }
-    #[cfg(not(windows))]
-    output::write_stdout(data)
+
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        #[cfg(windows)]
+        if self.console {
+            let combined;
+            let bytes = if self.pending_len == 0 {
+                data
+            } else {
+                combined = [&self.pending[..self.pending_len], data].concat();
+                combined.as_slice()
+            };
+            // Only a final incomplete sequence crosses reads; other invalid bytes render now.
+            let incomplete =
+                bytes.utf8_chunks().last().map_or(0, |chunk| {
+                    match std::str::from_utf8(chunk.invalid()) {
+                        Err(error) if error.error_len().is_none() => chunk.invalid().len(),
+                        _ => 0,
+                    }
+                });
+            let ready = bytes.len() - incomplete;
+            output::write_stdout(String::from_utf8_lossy(&bytes[..ready]).as_bytes())?;
+            self.pending[..incomplete].copy_from_slice(&bytes[ready..]);
+            self.pending_len = incomplete;
+            return Ok(());
+        }
+        output::write_stdout(data)
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        if self.pending_len != 0 {
+            output::write_stdout("\u{fffd}".as_bytes())?;
+            self.pending_len = 0;
+        }
+        Ok(())
+    }
 }
 
 fn foreground(
@@ -815,10 +878,12 @@ fn foreground(
             Err(error) => return Err(error),
         }
     }
+    let mut console_output = ConsoleOutput::new();
     let mut buffer = [0; 8192];
     loop {
         check_interrupt()?;
         let count = log.read(&mut buffer).map_err(Exit::from_os_error)?;
+        let mut progressed = count != 0;
         output::write_stderr(&buffer[..count]).map_err(Exit::from_os_error)?;
         let status = launched
             .wait_status(Duration::ZERO)
@@ -831,15 +896,26 @@ fn foreground(
         }
         if let Some(transport) = &mut console {
             match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
-                Ok(0) => console = None,
-                Ok(count) => write_console(&buffer[..count]).map_err(Exit::from_os_error)?,
+                Ok(0) => {
+                    console = None;
+                    console_output.finish().map_err(Exit::from_os_error)?;
+                }
+                Ok(count) => {
+                    console_output
+                        .write_all(&buffer[..count])
+                        .map_err(Exit::from_os_error)?;
+                    progressed = true;
+                }
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
                 Err(error)
                     if matches!(
                         error.kind(),
-                        io::ErrorKind::TimedOut
-                            | io::ErrorKind::BrokenPipe
-                            | io::ErrorKind::ConnectionReset
-                    ) => {}
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    console = None;
+                    console_output.finish().map_err(Exit::from_os_error)?;
+                }
                 Err(error) => return Err(Exit::from_os_error(error)),
             }
         }
@@ -855,9 +931,9 @@ fn foreground(
                 loop {
                     match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
                         Ok(0) => break,
-                        Ok(count) => {
-                            write_console(&buffer[..count]).map_err(Exit::from_os_error)?
-                        }
+                        Ok(count) => console_output
+                            .write_all(&buffer[..count])
+                            .map_err(Exit::from_os_error)?,
                         Err(error)
                             if matches!(
                                 error.kind(),
@@ -872,12 +948,15 @@ fn foreground(
                     }
                 }
             }
+            console_output.finish().map_err(Exit::from_os_error)?;
             return Ok(status);
         }
         if attach_closed.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(Exit::EndpointClosed);
         }
-        thread::sleep(Duration::from_millis(10));
+        if !progressed {
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -990,6 +1069,11 @@ fn run_cold(
         if let Some(error) = graceful_error {
             output::print_stderr(&format!("VM graceful stop failed: {error:?}"));
         }
+        if let Some(report) = &options.outcome_report
+            && let Err(error) = copy_openvmm_outcome(&launched.outputs.outcome, report)
+        {
+            error.report();
+        }
         check_interrupt()?;
         let status = status?;
         if let Err(error) = stopped.report {
@@ -999,11 +1083,6 @@ fn run_cold(
                     .message()
                     .unwrap_or("cannot read VM outcome")
             ));
-        }
-        if let Some(report) = &options.outcome_report
-            && let Err(error) = copy_openvmm_outcome(&launched.outputs.outcome, report)
-        {
-            error.report();
         }
         if status != 0
             && let Some(guidance) = cpu_profile::guidance(
