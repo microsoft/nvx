@@ -495,13 +495,19 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
         format!("wrong restore outcome: {outcome:?}"),
     )?;
     let logs = fs::read_to_string(&console)?;
-    let switches = logs.matches("NVX-INIT-ROOT: switched").count();
+    let cold_switches = logs.matches("NVX-INIT-ROOT: switched").count();
     require(
-        switches == usize::from(case != "deadline"),
-        format!("unexpected root switch count {switches}"),
+        cold_switches == 0,
+        "restored VM unexpectedly entered the cold-boot root path",
     )?;
+    if matches!(case, "published" | "unpublished") {
+        require(
+            !logs.contains("NVX-INIT-ACTIVATION:"),
+            "successful restored activation emitted a failure diagnostic",
+        )?;
+    }
     let text = format!(
-        "RESTORE_OK case={case} pid={pid} status={expected_status} switches={switches} teardown=true\n"
+        "RESTORE_OK case={case} pid={pid} status={expected_status} cold_switches={cold_switches} teardown=true\n"
     );
     fs::write(result, &text)?;
     print!("{text}");
