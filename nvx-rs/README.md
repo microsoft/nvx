@@ -3279,6 +3279,9 @@ starts and retains an announcer only for published listeners, switches once,
 then completes and reports Ready. The host supplies the complete mapping table
 before the first valid EXEC starts the restored workload; later executions and
 byte-identical activation retries reuse the retained state.
+The accepted proxy replaces the four HTTP(S) proxy defaults, or clears them when
+the restore has no proxy. Per-EXEC layered entries still win, and exact
+environments still replace every default.
 
 Guests run them as static `x86_64-unknown-linux-musl` executables. On
 Linux, with the musl target and a C compiler driver, `cc`, `nvx.py` builds them:

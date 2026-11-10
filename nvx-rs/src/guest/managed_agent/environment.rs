@@ -34,6 +34,11 @@ pub(super) fn set(environment: &mut Vec<CString>, name: &[u8], value: &[u8]) -> 
     Ok(())
 }
 
+/// Removes every inherited entry for `name`.
+pub(super) fn remove(environment: &mut Vec<CString>, name: &[u8]) {
+    environment.retain(|entry| !names(entry, name));
+}
+
 /// Returns whether `entry` sets the variable `name`.
 fn names(entry: &CString, name: &[u8]) -> bool {
     entry

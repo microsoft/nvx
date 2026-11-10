@@ -340,6 +340,7 @@ pub(crate) struct RestoreHandoff {
     pub(crate) user: CString,
     pub(crate) home: CString,
     pub(crate) hostname: CString,
+    pub(crate) proxy: Option<String>,
     pub(crate) table: MappingTable,
     pub(crate) mapper: Mapper,
     pub(crate) export: Option<SourceRoot>,
@@ -441,6 +442,7 @@ impl Restored {
                     user,
                     home,
                     hostname: CString::new(applied.hostname()).map_err(activation_error)?,
+                    proxy: applied.proxy().map(str::to_owned),
                     table: u32::try_from(record.configuration().mappings)
                         .ok()
                         .and_then(MappingTable::new)
