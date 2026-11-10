@@ -5370,3 +5370,473 @@ fn a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failu
     another.stop();
     assert_payload(&template, false);
 }
+
+#[cfg(target_os = "linux")]
+mod restore_exclusion {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::process::{Child, Command, ExitStatus, Stdio};
+
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    use nvx::activation::{
+        ExpectedResources, Image as ActivationImage, OverlayMode, RestoreSection, TransactionId,
+        Upper as ActivationUpper, View,
+    };
+
+    const TEST: &str = "restore_exclusion::hard_linked_restore_views_obey_the_callers_exclusion";
+    const ROLE: &str = "RUNTIME_ADAPTER_RESTORE_ROLE";
+    const DIRECTORY: &str = "RUNTIME_ADAPTER_RESTORE_DIRECTORY";
+    const CAPABILITY: [u8; CAPABILITY_LEN] = [0x51; CAPABILITY_LEN];
+    const TIMEOUT: Duration = Duration::from_secs(60);
+
+    fn lock(path: &Path) -> File {
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.lock().unwrap();
+        file
+    }
+
+    struct OwnedChild(Child);
+
+    impl OwnedChild {
+        fn wait(&mut self) -> ExitStatus {
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    eprintln!("SL2.15 reaped pid={} status={status}", self.0.id());
+                    return status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "pid {} did not exit",
+                    self.0.id()
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if self.0.try_wait().unwrap().is_none() {
+                self.0.kill().unwrap();
+                self.wait();
+            }
+        }
+    }
+
+    struct RestoreView {
+        sandbox: Sandbox,
+        lock_path: PathBuf,
+        exclusion: Option<File>,
+        listener: Option<UnixListener>,
+        controller: Option<OwnedChild>,
+        vmm: Option<OwnedChild>,
+        start_time: u64,
+    }
+
+    impl RestoreView {
+        fn start(template: &Template, lock_path: &Path, controller: bool) -> Self {
+            let exclusion = lock(lock_path);
+            let sandbox = Sandbox::new("restore-view");
+            SandboxStore::create(&sandbox.store).unwrap();
+            let mut view = Self {
+                sandbox,
+                lock_path: lock_path.to_owned(),
+                exclusion: Some(exclusion),
+                listener: None,
+                controller: None,
+                vmm: None,
+                start_time: 0,
+            };
+            fs::create_dir(view.snapshot()).unwrap();
+            let source = template.payload().join(SNAPSHOT_NAME);
+            for entry in fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                assert!(entry.file_type().unwrap().is_file());
+                let target = view.snapshot().join(entry.file_name());
+                fs::hard_link(entry.path(), &target).unwrap();
+                let (original, linked) = (
+                    fs::metadata(entry.path()).unwrap(),
+                    fs::metadata(target).unwrap(),
+                );
+                assert_eq!(
+                    (original.dev(), original.ino()),
+                    (linked.dev(), linked.ino())
+                );
+            }
+            if controller {
+                view.controller = Some(view.helper("controller"));
+                view.until(|view| view.sandbox.store.join("controller-bound").exists());
+            } else {
+                let listener = UnixListener::bind(view.ready_path()).unwrap();
+                listener.set_nonblocking(true).unwrap();
+                view.listener = Some(listener);
+            }
+            let artifacts = env::var_os(Artifacts::ENV_DIR).unwrap();
+            let runtime = Runtime::from_dir(artifacts, GUEST_BUILD).unwrap();
+            let store = template.store();
+            let key = store.read_key(&template.generation()).unwrap();
+            let log = File::create(view.log_path()).unwrap();
+            let child = Command::new(runtime.artifacts.openvmm)
+                .args(
+                    in_ram(template)
+                        .plan()
+                        .unwrap()
+                        .openvmm_arguments()
+                        .unwrap(),
+                )
+                .args(["--single-process", "--restore-absent-scratch"])
+                .args(["--hypervisor", key.hypervisor().as_str()])
+                .args(["--cpu-profile", &key.cpu_profile()])
+                .args(["--processors", &key.processors().to_string()])
+                .arg("--restore-snapshot")
+                .arg(view.snapshot())
+                .args(["--restore-processors", &key.boot_processors().to_string()])
+                .args(["--restore-memory", &format!("{}M", key.memory() / MIB)])
+                .arg("--restore-ready-path")
+                .arg(view.ready_path())
+                .args(["--virtio-console", "none", "--microvm-control-console"])
+                .arg(format!("listen={}", view.endpoint().display()))
+                .arg("--microvm-control-auth-stdin")
+                .arg("--microvm-report")
+                .arg(view.sandbox.store.join("outcome.json"))
+                .current_dir(&view.sandbox.store)
+                .env("OPENVMM_STARTUP_PROFILE", "1")
+                .stdin(Stdio::piped())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap();
+            view.vmm = Some(OwnedChild(child));
+            let pid = view.vmm.as_ref().unwrap().0.id();
+            view.start_time = nvx::host::platform::process_start_time(pid)
+                .unwrap()
+                .expect("the owned VMM runs");
+            eprintln!(
+                "SL2.15 spawned pid={pid} start={} vm_dir={}",
+                view.start_time,
+                view.sandbox.store.display()
+            );
+            // OpenVMM reports artifact_open after retaining memory's ctime. Its subsequent
+            // control-capability read cannot finish until this caller closes the stdin pipe.
+            view.until(|view| {
+                view.log()
+                    .contains("OPENVMM_SNAPSHOT_PROFILE_V1 operation=restore phase=artifact_open ")
+            });
+            assert!(!view.log().contains("phase=artifact_prepare "));
+            view
+        }
+
+        fn snapshot(&self) -> PathBuf {
+            self.sandbox.store.join("openvmm")
+        }
+
+        fn ready_path(&self) -> PathBuf {
+            self.sandbox.store.join("ready.sock")
+        }
+
+        fn endpoint(&self) -> PathBuf {
+            self.sandbox.store.join("control.sock")
+        }
+
+        fn log_path(&self) -> PathBuf {
+            self.sandbox.store.join("vmm.log")
+        }
+
+        fn log(&self) -> String {
+            fs::read_to_string(self.log_path()).unwrap()
+        }
+
+        fn until(&mut self, condition: impl Fn(&Self) -> bool) {
+            let deadline = Instant::now() + TIMEOUT;
+            while !condition(self) {
+                if let Some(vmm) = &mut self.vmm {
+                    assert!(
+                        vmm.0.try_wait().unwrap().is_none(),
+                        "VMM exited before the required boundary:\n{}",
+                        self.log()
+                    );
+                }
+                assert!(Instant::now() < deadline, "boundary timed out");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn helper(&self, role: &str) -> OwnedChild {
+            let log = File::create(self.sandbox.store.join(format!("{role}.log"))).unwrap();
+            OwnedChild(
+                Command::new(env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--ignored", "--nocapture"])
+                    .env(ROLE, role)
+                    .env(DIRECTORY, &self.sandbox.store)
+                    .stdin(Stdio::piped())
+                    .stdout(log.try_clone().unwrap())
+                    .stderr(log)
+                    .spawn()
+                    .unwrap(),
+            )
+        }
+
+        fn change_link_without_lock(&self) {
+            let memory = self.snapshot().join("memory.bin");
+            let before = fs::metadata(&memory).unwrap();
+            assert!(self.helper("link").wait().success());
+            let after = fs::metadata(memory).unwrap();
+            assert_eq!(after.nlink(), before.nlink() + 1);
+            assert_eq!(
+                (after.len(), after.mtime(), after.mtime_nsec()),
+                (before.len(), before.mtime(), before.mtime_nsec())
+            );
+            assert_ne!(
+                (after.ctime(), after.ctime_nsec()),
+                (before.ctime(), before.ctime_nsec())
+            );
+        }
+
+        fn proceed(&mut self) {
+            let mut input = self.vmm.as_mut().unwrap().0.stdin.take().unwrap();
+            input.write_all(&CAPABILITY).unwrap();
+        }
+
+        fn connected(&mut self) -> UnixStream {
+            let deadline = Instant::now() + TIMEOUT;
+            let stream = loop {
+                match self.listener.as_ref().unwrap().accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("restore-ready accept: {error}"),
+                }
+                assert!(
+                    self.vmm.as_mut().unwrap().0.try_wait().unwrap().is_none(),
+                    "VMM exited before connecting restore-ready:\n{}",
+                    self.log()
+                );
+                assert!(Instant::now() < deadline, "restore-ready connect timed out");
+                thread::sleep(Duration::from_millis(10));
+            };
+            // This unreaped Child's PID cannot be reused while the peer is checked.
+            let peer = getsockopt(&stream, PeerCredentials).unwrap();
+            assert_eq!(peer.pid() as u32, self.vmm.as_ref().unwrap().0.id());
+            assert!(self.vmm.as_mut().unwrap().0.try_wait().unwrap().is_none());
+            stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+            stream
+        }
+
+        fn ready(&mut self, mut stream: UnixStream) {
+            let mut event = Vec::new();
+            stream.read_to_end(&mut event).unwrap();
+            nvx::protocol::restore_ready::parse_ready_event(&event).unwrap();
+            drop(self.exclusion.take());
+        }
+
+        fn finish(&mut self, template: &Template) {
+            let deadline = Instant::now() + TIMEOUT;
+            let child = &self.vmm.as_ref().unwrap().0;
+            let transport = nvx::host::session::connect(
+                self.endpoint().to_str().unwrap(),
+                child.id(),
+                self.start_time,
+                deadline,
+            )
+            .unwrap();
+            let mut client = Client::attach(transport, &CAPABILITY, deadline).unwrap();
+            let record = ActivationRecord::new(
+                Some(RestoreSection {
+                    transaction: TransactionId::from_bytes([0x15; 16]),
+                }),
+                Configuration {
+                    image: ActivationImage::Erofs {
+                        uuid: Some(Uuid::parse(&template.identity).unwrap()),
+                    },
+                    upper: ActivationUpper::Tmpfs {
+                        max_memory_percent: 50,
+                    },
+                    overlay: OverlayMode::TrustedLowers,
+                    export: None,
+                    mappings: 0,
+                    network: None,
+                    view: View {
+                        hostname: CLONE_HOSTNAME.as_bytes().to_vec(),
+                        machine_id: MachineIdMode::Image,
+                    },
+                    resources: ExpectedResources {
+                        cpus: 1,
+                        memory: TEMPLATE_MEMORY * MIB,
+                    },
+                },
+            )
+            .unwrap();
+            let ready = client.activate(&record.encode(), deadline).unwrap();
+            assert_eq!(ready.build(), GUEST_BUILD);
+            assert_eq!(ready.activation(), Some(ReadyActivation::of(&record)));
+            client.start(deadline).unwrap();
+            client.ping(deadline).unwrap();
+            assert_eq!(client.stop(deadline).unwrap(), None);
+            assert!(
+                self.vmm.as_mut().unwrap().wait().success(),
+                "{}",
+                self.log()
+            );
+        }
+    }
+
+    impl Drop for RestoreView {
+        fn drop(&mut self) {
+            drop(self.controller.take());
+            drop(self.vmm.take());
+            let _exclusion = self
+                .exclusion
+                .take()
+                .unwrap_or_else(|| lock(&self.lock_path));
+            let extra = self.sandbox.store.join("extra-memory-link");
+            if extra.exists() {
+                fs::remove_file(extra).unwrap();
+            }
+            fs::remove_dir_all(self.snapshot()).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "boots VMs; see the module documentation for what they need"]
+    fn hard_linked_restore_views_obey_the_callers_exclusion() {
+        if let Some(role) = env::var_os(ROLE) {
+            let directory = PathBuf::from(env::var_os(DIRECTORY).unwrap());
+            match role.to_str().unwrap() {
+                "controller" => {
+                    let _listener = UnixListener::bind(directory.join("ready.sock")).unwrap();
+                    fs::write(directory.join("controller-bound"), b"bound").unwrap();
+                    io::stdin().read_exact(&mut [0]).unwrap();
+                }
+                "link" => fs::hard_link(
+                    directory.join("openvmm/memory.bin"),
+                    directory.join("extra-memory-link"),
+                )
+                .unwrap(),
+                role => panic!("unknown restore helper role {role}"),
+            }
+            return;
+        }
+
+        let template = Template::create("restore-exclusion");
+        let snapshot = template.payload().join(SNAPSHOT_NAME);
+        let before = files_below(&snapshot);
+        let lock_path = template.root().join("snapshot.lock");
+        let cases: [(&str, fn(&Template, &Path)); 4] = [
+            ("locked-concurrent-restores", |template, lock_path| {
+                let mut restores = thread::scope(|scope| {
+                    let workers = (0..3)
+                        .map(|_| {
+                            scope.spawn(|| {
+                                let mut restore = RestoreView::start(template, lock_path, false);
+                                restore.proceed();
+                                let stream = restore.connected();
+                                restore.ready(stream);
+                                restore
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    workers
+                        .into_iter()
+                        .map(|worker| worker.join().unwrap())
+                        .collect::<Vec<_>>()
+                });
+                for restore in &mut restores {
+                    assert!(
+                        restore
+                            .vmm
+                            .as_mut()
+                            .unwrap()
+                            .0
+                            .try_wait()
+                            .unwrap()
+                            .is_none()
+                    );
+                }
+                let mut first = restores.remove(0);
+                first.finish(template);
+                drop(first);
+                let mut replacement = RestoreView::start(template, lock_path, false);
+                replacement.proceed();
+                let stream = replacement.connected();
+                replacement.ready(stream);
+                restores.push(replacement);
+                for restore in &mut restores {
+                    restore.finish(template);
+                }
+            }),
+            ("unlocked-link-during-start", |template, lock_path| {
+                let mut restore = RestoreView::start(template, lock_path, false);
+                restore.change_link_without_lock();
+                restore.proceed();
+                assert!(!restore.vmm.as_mut().unwrap().wait().success());
+                assert!(
+                    restore
+                        .log()
+                        .contains("snapshot memory generation changed after it was opened"),
+                    "{}",
+                    restore.log()
+                );
+                assert_eq!(
+                    restore
+                        .listener
+                        .as_ref()
+                        .unwrap()
+                        .accept()
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::WouldBlock
+                );
+            }),
+            ("dead-controller-before-connect", |template, lock_path| {
+                use std::os::unix::process::ExitStatusExt as _;
+
+                let mut restore = RestoreView::start(template, lock_path, true);
+                let controller = restore.controller.as_mut().unwrap();
+                controller.0.kill().unwrap();
+                assert_eq!(controller.wait().signal(), Some(9));
+                restore.proceed();
+                assert!(!restore.vmm.as_mut().unwrap().wait().success());
+                assert!(
+                    restore
+                        .log()
+                        .contains("failed to connect restore readiness endpoint"),
+                    "{}",
+                    restore.log()
+                );
+            }),
+            ("link-after-ready-connect", |template, lock_path| {
+                let mut restore = RestoreView::start(template, lock_path, false);
+                restore.proceed();
+                let stream = restore.connected();
+                restore.change_link_without_lock();
+                restore.ready(stream);
+                restore.finish(template);
+            }),
+        ];
+        let mut failures = Vec::new();
+        for (name, case) in cases {
+            let result = std::panic::catch_unwind(|| case(&template, &lock_path));
+            eprintln!(
+                "SL2.15 case={name} result={}",
+                if result.is_ok() { "PASS" } else { "FAIL" }
+            );
+            if result.is_err() {
+                failures.push(name);
+            }
+        }
+        assert_eq!(files_below(&snapshot), before);
+        assert_payload(&template, false);
+        assert!(
+            failures.is_empty(),
+            "blocking restore gate failures: {failures:?}"
+        );
+    }
+}
