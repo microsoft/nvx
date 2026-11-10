@@ -54,6 +54,9 @@ impl StateDir {
     /// access, who could hold its lock. A lock file that another transition removed or replaced
     /// after this opened it locks nothing, so the lock is taken again: at once the first time,
     /// and after a pause, until the deadline, when that happens again right after.
+    ///
+    /// Once held, the lock recovers an interrupted launch before returning. Recovery can end a
+    /// verified VM, but retains indeterminate records and reports the cause of its refusal.
     pub(crate) fn lock(&self, deadline: Deadline) -> Result<LockedState> {
         let path = self.path(StateFile::Lock);
         let mut retried_at_once = false;
@@ -71,10 +74,14 @@ impl StateDir {
                 }
             }
             if names_locked_file(&path, &file)? {
-                return Ok(LockedState {
+                let mut locked = LockedState {
                     state: self.clone(),
                     lock: file,
-                });
+                };
+                locked
+                    .recover(deadline.instant())
+                    .map_err(crate::host::cli::sandbox::error_with_cause)?;
+                return Ok(locked);
             }
             if retried_at_once && !deadline.pause(RETRY_INTERVAL)? {
                 return Err(busy());
