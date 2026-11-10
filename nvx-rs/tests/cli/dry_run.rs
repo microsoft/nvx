@@ -423,6 +423,10 @@ fn run_dry_runs() -> Vec<DryRun> {
     let fits = "x".repeat(crate::openvmm::two_share_command_line_room());
     vec![
         dry_run("run: Alpine default", run(&[]), cold_boot()),
+        dry_run("run: no install metadata", run(&[]), cold_boot())
+            .without("build/openvmm.provenance.json")
+            .without("build/vmlinux.provenance.json")
+            .without("build/initramfs.provenance.json"),
         dry_run(
             "run: Ubuntu default",
             run(&["--guest", "ubuntu"]),

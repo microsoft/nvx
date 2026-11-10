@@ -670,7 +670,10 @@ fn run_launches() -> Vec<Launch> {
             0,
             booted,
         )
-        .with_variable("NVX_OPENVMM", native(OPENVMM)),
+        .with_variable("NVX_OPENVMM", native(OPENVMM))
+        .without("build/openvmm.provenance.json")
+        .without("build/vmlinux.provenance.json")
+        .without("build/initramfs.provenance.json"),
     ]
 }
 

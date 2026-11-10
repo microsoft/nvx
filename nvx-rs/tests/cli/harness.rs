@@ -90,17 +90,9 @@ pub(crate) const PROVENANCE: [(&str, &str, &str); 3] = [
 /// The other files of a root, by their paths below it, and their contents: the guest kernel and
 /// Alpine initramfs of a checkout, the layers of the sandboxes, of which only the distro layer
 /// has a role, their scratch image, and the directories and the file that they share.
-const FILES: [(&str, &str); 14] = [
+const FILES: [(&str, &str); 12] = [
     ("build/vmlinux", "kernel\n"),
     ("build/initramfs.cpio.gz", "initramfs\n"),
-    (
-        "build/initramfs-ubuntu.cpio.gz.packages.json",
-        "{\"artifact_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}\n",
-    ),
-    (
-        "build/initramfs-azurelinux.cpio.gz.packages.json",
-        "{\"artifact_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}\n",
-    ),
     ("distro.erofs", "distro\n"),
     ("runtime.erofs", "runtime\n"),
     ("custom.erofs", "custom\n"),

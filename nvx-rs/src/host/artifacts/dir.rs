@@ -235,13 +235,8 @@ impl ArtifactDir {
     /// unreadable, or names no valid digest of an artifact. A file of metadata that is not a
     /// regular file, such as a FIFO, is refused without being waited on.
     pub fn runtime_identity(&self) -> Result<RuntimeIdentity> {
-        self.runtime_identity_for(Guest::Alpine)
-    }
-
-    /// Identifies the selected guest through its install metadata, without reading its image.
-    pub(crate) fn runtime_identity_for(&self, guest: Guest) -> Result<RuntimeIdentity> {
         let [openvmm, kernel, initramfs] = match self.layout {
-            Layout::Release => self.listed_identities(guest)?,
+            Layout::Release => self.listed_identities()?,
             Layout::Repository => [
                 provenance_identity(
                     &self.artifact(OPENVMM_PROVENANCE_NAME),
@@ -253,33 +248,11 @@ impl ArtifactDir {
                     "kernel",
                     "kernel_sha256",
                 )?,
-                if guest == Guest::Alpine {
-                    provenance_identity(
-                        &self.artifact(INITRAMFS_PROVENANCE_NAME),
-                        "initramfs",
-                        "initramfs_sha256",
-                    )?
-                } else {
-                    let path = self.package_manifest(guest);
-                    let text = read_metadata(
-                        &path,
-                        "guest package manifest",
-                        "build or install the selected guest",
-                    )?;
-                    let invalid = || {
-                        Error::unavailable(format!(
-                            "guest package manifest {} has no valid artifact SHA-256 digest",
-                            path.display()
-                        ))
-                    };
-                    let manifest: serde_json::Value = serde_json::from_str(&text)
-                        .map_err(|error| invalid().with_source(error))?;
-                    manifest
-                        .get("artifact_sha256")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(sha256_identity)
-                        .ok_or_else(invalid)?
-                },
+                provenance_identity(
+                    &self.artifact(INITRAMFS_PROVENANCE_NAME),
+                    "initramfs",
+                    "initramfs_sha256",
+                )?,
             ],
         };
         Ok(RuntimeIdentity::new(openvmm, kernel, initramfs))
@@ -288,7 +261,7 @@ impl ArtifactDir {
     /// Returns the identities of the OpenVMM executable, kernel, and Alpine initramfs of a
     /// release, as its `SHA256SUMS` lists their digests: one line for each file, its 64
     /// lowercase hexadecimal digits, two spaces, and its path in the release.
-    fn listed_identities(&self, guest: Guest) -> Result<[ArtifactIdentity; 3]> {
+    fn listed_identities(&self) -> Result<[ArtifactIdentity; 3]> {
         let path = self.root.join(CHECKSUMS_NAME);
         let description = "release checksum list";
         let text = read_metadata(&path, description, "the release is incomplete")?;
@@ -322,7 +295,10 @@ impl ArtifactDir {
         Ok([
             listed(format!("{RELEASE_BIN_DIR}/{}", openvmm_executable()))?,
             listed(format!("{RELEASE_GUEST_DIR}/{KERNEL_NAME}"))?,
-            listed(format!("{RELEASE_GUEST_DIR}/{}", guest.initramfs_name()))?,
+            listed(format!(
+                "{RELEASE_GUEST_DIR}/{}",
+                Guest::Alpine.initramfs_name()
+            ))?,
         ])
     }
 }

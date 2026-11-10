@@ -52,8 +52,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
-
 use super::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use super::artifacts::{Located, locate};
 use super::cpu_profile::{self, HostCpu};
@@ -74,7 +72,7 @@ use crate::host::filesystem::{
     self, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
 };
 use crate::host::platform::{self, Transport};
-use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime};
+use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::sandbox::mount::{
     AGGREGATE_MOUNT_TARGET, MountAccess, MountKind, MountOwner, POLICY_KINDS, PolicyKind,
     aggregate_child_argument, aggregate_child_name, aggregate_command_line_fragment,
@@ -898,32 +896,6 @@ fn run_cold(
     {
         validate_outcome_destination(report)?;
     }
-    let mut identity = dir
-        .runtime_identity_for(options.guest)
-        .map_err(error_with_cause)?;
-    if openvmm != dir.openvmm() {
-        let mut file = File::open(&openvmm).map_err(Exit::from_os_error)?;
-        let mut digest = Sha256::new();
-        let mut buffer = [0; 8192];
-        loop {
-            let count = file.read(&mut buffer).map_err(Exit::from_os_error)?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&buffer[..count]);
-        }
-        identity.openvmm = ArtifactIdentity::sha256(&format!("{:x}", digest.finalize()))?;
-    }
-    let runtime = Runtime {
-        openvmm,
-        kernel,
-        initramfs,
-        identity,
-        hypervisor: hypervisor(options.hypervisor).parse()?,
-        cpu_profile: options.cpu_profile.clone(),
-        windows_breakaway: false,
-        options: LaunchOptions::default(),
-    };
     let mut random = [0; 16];
     getrandom::fill(&mut random).map_err(|error| {
         Exit::error(
@@ -932,6 +904,18 @@ fn run_cold(
         )
     })?;
     let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    // Cold CLI runs neither capture nor reattach; this per-invocation identity is not persisted.
+    let identity = ArtifactIdentity::new(format!("unrecorded-run:{name}"))?;
+    let runtime = Runtime {
+        openvmm,
+        kernel,
+        initramfs,
+        identity: RuntimeIdentity::new(identity.clone(), identity.clone(), identity),
+        hypervisor: hypervisor(options.hypervisor).parse()?,
+        cpu_profile: options.cpu_profile.clone(),
+        windows_breakaway: false,
+        options: LaunchOptions::default(),
+    };
     let path = std::env::temp_dir().join(format!("nvx-run-{name}"));
     if path.try_exists().map_err(Exit::from_os_error)? {
         return Err(Exit::error(
