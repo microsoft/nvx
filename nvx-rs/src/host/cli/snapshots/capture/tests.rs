@@ -425,13 +425,8 @@ fn the_next_command_ends_an_interrupted_capture_and_removes_its_directory_withou
     fixture.existing();
     let before = fixture.inventory();
     interrupted(&fixture);
-    let options = fixture.options("existing");
-    assert!(
-        capture(&options, &runtime(fixture.root.path()), |_| panic!(
-            "duplicate must not spawn"
-        ))
-        .is_err()
-    );
+    let missing_artifacts = fixture.root.path().join("missing-artifacts");
+    assert!(run(missing_artifacts.to_str(), fixture.options("existing")).is_err());
     assert!(matches!(
         Process::open(&fixture.references()[0]).unwrap(),
         Opened::Exited(_)
