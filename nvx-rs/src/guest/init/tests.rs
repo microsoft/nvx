@@ -7,6 +7,7 @@
 //! PID 1 theirs, and the check of the real priority needs the privileges of a guest's PID 1. No
 //! check stops a VM: each records the status with which PID 1 would.
 
+mod capture;
 mod exec;
 pub(super) use exec::prepare_child;
 
@@ -25,7 +26,7 @@ use crate::guest::sys::{ForkResult, wait};
 /// shutdown; layered boot itself is exercised by the boot tests.
 fn init(system: &mut impl Waiting, arguments: &[CString]) {
     let result = serve(system, arguments);
-    finish(system, result);
+    finish(system, result.map(|()| 0));
 }
 
 fn serve(system: &mut impl Waiting, arguments: &[CString]) -> Result<(), String> {

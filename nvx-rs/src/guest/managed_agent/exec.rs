@@ -8,8 +8,8 @@ use crate::guest::process::Child;
 use crate::guest::spawn::{self as sandbox_spawn, Barrier};
 use crate::guest::sys::{self, Errno, FileDescriptor, ProcessId, c_string};
 use crate::protocol::{
-    self, APP_CANCEL, APP_EXIT, APP_STDERR, APP_STDOUT, BUSY, CWD_FAILED, GuestExecPayload,
-    LAUNCH_FAILED, OUTER_DATA,
+    self, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, BUSY, CWD_FAILED,
+    GuestExecPayload, LAUNCH_FAILED, OUTER_DATA,
 };
 
 use super::AgentConfig;
@@ -96,6 +96,12 @@ pub(crate) fn run(
                     workload.cancel();
                 }
                 Ok(ExecControl::Cancel) => {}
+                Ok(ExecControl::Capture) => {
+                    workload.terminate();
+                    session.sweep_capture().inspect_err(|error| {
+                        super::diagnostics::error(system, "exec-capture-sweep", *error as i32);
+                    })?;
+                }
                 Ok(ExecControl::SessionLost) => {
                     state.session_lost = true;
                     workload.disconnect();
@@ -811,6 +817,8 @@ enum ExecControl {
     Cancel,
     /// A reset detached this workload's session.
     SessionLost,
+    /// Init accepted a capture that requires group termination and the repeated sweep.
+    Capture,
 }
 
 /// Processes one control-console record while a workload runs.
@@ -845,6 +853,15 @@ fn handle_control(
                 ExecControl::None
             },
         );
+    }
+    if request.kind == APP_CAPTURE && session.has_capture() {
+        return session.queue_capture(request, true).map(|accepted| {
+            if accepted {
+                ExecControl::Capture
+            } else {
+                ExecControl::None
+            }
+        });
     }
     session.send_error(request.request_id, Errno::EBUSY as i32, BUSY)?;
     Ok(ExecControl::None)
