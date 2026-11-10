@@ -156,7 +156,7 @@ impl Receiver for Options {
 /// Parses only the capture operation; restore belongs to later slices.
 pub(in crate::host::cli) fn parse(arguments: &[String]) -> Result<(Options, Vec<String>)> {
     let (index, mut extras) = Parser::new(&[], &[Spec::one("snapshot_operation")])
-        .split_command(arguments, &mut |_, _| Ok(()))
+        .split_command(arguments, &mut |_: &'static str, _: Option<&str>| Ok(()))
         .map_err(|stop| Exit::from_stop(stop, &SYNTAX))?;
     choice(&arguments[index], &["capture"])
         .map_err(|message| Exit::usage(&SYNTAX, ErrorCode::ArgumentInvalid, message))?;
@@ -338,7 +338,8 @@ fn capture(
 /// Reads the geometry through the existing block-device helper on this VM's filesystem.
 fn disk_geometry(dir: &VmDir) -> Result<BlockGeometry> {
     let path = dir.path().join("geometry.raw");
-    let file = crate::host::store::files::create_new(&path)?;
+    let file = crate::host::store::files::create_new(&path)
+        .map_err(|error| io_error(ErrorCode::Io, &error, &path))?;
     file.set_len(512)
         .map_err(|error| io_error(ErrorCode::Io, &error, &path))?;
     let geometry = crate::host::sandbox::block_geometry(&file, &path, "capture probe")?;
