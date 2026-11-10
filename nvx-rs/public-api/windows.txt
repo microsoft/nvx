@@ -1623,6 +1623,7 @@ field nvx::host::snapshot::CaptureClass::processors
 field nvx::host::snapshot::CaptureClass::runtime
 field nvx::host::snapshot::CaptureClass::scratch
 method nvx::host::snapshot::CaptureClass::to_bytes
+struct nvx::host::snapshot::CaptureContext
 struct nvx::host::snapshot::ClassIdentity
 method nvx::host::snapshot::ClassIdentity::as_bytes
 method nvx::host::snapshot::ClassIdentity::from_bytes
@@ -2358,6 +2359,7 @@ struct nvx::host::vm::Prepared
 method nvx::host::vm::Prepared::activation_record
 method nvx::host::vm::Prepared::arguments
 method nvx::host::vm::Prepared::capability
+method nvx::host::vm::Prepared::capture_context
 method nvx::host::vm::Prepared::inherit
 method nvx::host::vm::Prepared::log
 method nvx::host::vm::Prepared::nic
