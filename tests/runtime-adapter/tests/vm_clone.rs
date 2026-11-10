@@ -5390,6 +5390,7 @@ mod restore_exclusion {
     const DIRECTORY: &str = "RUNTIME_ADAPTER_RESTORE_DIRECTORY";
     const CAPABILITY: [u8; CAPABILITY_LEN] = [0x51; CAPABILITY_LEN];
     const TIMEOUT: Duration = Duration::from_secs(60);
+    type Case = (&'static str, fn(&Template, &Path));
 
     fn lock(path: &Path) -> File {
         let file = File::options()
@@ -5729,7 +5730,7 @@ mod restore_exclusion {
         let snapshot = template.payload().join(SNAPSHOT_NAME);
         let before = files_below(&snapshot);
         let lock_path = template.root().join("snapshot.lock");
-        let cases: [(&str, fn(&Template, &Path)); 4] = [
+        let cases: [Case; 4] = [
             ("locked-concurrent-restores", |template, lock_path| {
                 let mut restores = thread::scope(|scope| {
                     let workers = (0..3)
