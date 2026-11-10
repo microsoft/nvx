@@ -3087,8 +3087,10 @@ const nvx::host::snapshot::MAX_DOWNTIME_NS
 const nvx::host::snapshot::MAX_MANIFEST_LEN
 const nvx::host::snapshot::OPENVMM_DIR
 struct nvx::host::snapshot::Snapshot
+method nvx::host::snapshot::Snapshot::accepts
 method nvx::host::snapshot::Snapshot::key
 method nvx::host::snapshot::Snapshot::manifest
+method nvx::host::snapshot::Snapshot::nic
 method nvx::host::snapshot::Snapshot::open
 struct nvx::host::snapshot::SnapshotKey
 const nvx::host::snapshot::SnapshotKey::MAX_LEN
