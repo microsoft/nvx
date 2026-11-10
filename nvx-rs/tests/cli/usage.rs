@@ -678,8 +678,10 @@ const HELP: [Help; 6] = [
         arguments: &["sandbox", "-h"],
         usage: "usage: nvx-rs sandbox [{run,provision,start,exec,stop,deprovision}] [OPTIONS]",
         options: &[
-            "--layer ROLE,PATH,EROFS_UUID",
+            "--layer ROLE,PATH,IMAGE_UUID",
+            "--layer-format {erofs,gpt}",
             "--upper {scratch,ram}",
+            "--ram-upper-percent PERCENT",
             "--state-dir STATE_DIR",
             "--dry-run",
         ],

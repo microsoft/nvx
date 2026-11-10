@@ -30,7 +30,7 @@ use super::shell::format_command;
 use super::{Exit, Result, output};
 use crate::ErrorCode;
 use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
-use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
+use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::options::{
     SandboxOperation, SandboxOptions, sandbox_mounts, validate_sandbox_systemd_policy,
@@ -137,6 +137,20 @@ pub(crate) fn error_with_cause(error: crate::Error) -> Exit {
 /// Runs the operation of `options`, as `command_sandbox` did.
 pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     let operation = options.operation;
+    if !matches!(operation, SandboxOperation::Provision)
+        && (options.layer_format.is_some() || options.ram_upper_percent.is_some())
+    {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "--layer-format and --ram-upper-percent are only supported by provision",
+        ));
+    }
+    if options.ram_upper_percent.is_some() && options.upper != Some(RootUpper::Ram) {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "--ram-upper-percent requires --upper ram",
+        ));
+    }
     let checks = SandboxOptions {
         operation,
         dry_run: options.dry_run,
@@ -193,7 +207,21 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             }
             RootUpper::Ram => SandboxUpper::RAM,
         };
-        let launch = SandboxLaunch::new(options.layers.clone(), upper, settings)?;
+        let layers = options
+            .layers
+            .iter()
+            .map(|layer| {
+                Ok(match options.layer_format {
+                    Some(DistroFormat::Gpt) => crate::host::sandbox::SandboxLayer::gpt(
+                        layer.role(),
+                        &path_string(layer.path())?,
+                        layer.uuid(),
+                    ),
+                    _ => layer.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let launch = SandboxLaunch::new(layers, upper, settings)?;
         validate_mounts(&mounts)?;
         launch.validated()?;
         // The shares are planned once, from their resolved host paths, and `provision` records
@@ -230,6 +258,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
                     hypervisor: hypervisor(options.hypervisor),
                     memory_mib: options.memory_mib,
                     cmdline: &options.cmdline,
+                    ram_upper_percent: options.ram_upper_percent,
                 },
                 options.timeout,
             )

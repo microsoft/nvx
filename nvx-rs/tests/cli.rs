@@ -654,7 +654,7 @@ fn provision_binds_a_linked_distro_layer_where_start_checks_it() {
     let output = provision_alias("target");
     assert!(output.status.success(), "{}", text(&output.stderr));
     let config = recorded("target");
-    assert_eq!(config["layers"][0]["path"], distro.to_str().unwrap());
+    assert_eq!(config["image"]["path"], distro.to_str().unwrap());
     assert!(config["distro_binding"]["manifest"].is_object());
     cycle(&root, "target");
 
@@ -675,7 +675,7 @@ fn provision_binds_a_linked_distro_layer_where_start_checks_it() {
     let output = provision_alias("alias");
     assert!(output.status.success(), "{}", text(&output.stderr));
     let config = recorded("alias");
-    assert_eq!(config["layers"][0]["path"], distro.to_str().unwrap());
+    assert_eq!(config["image"]["path"], distro.to_str().unwrap());
     assert!(config["distro_binding"]["manifest"].is_null());
     cycle(&root, "alias");
 

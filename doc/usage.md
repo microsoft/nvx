@@ -247,9 +247,11 @@ never after a dry run, a restore, an option that `nvx-rs` refuses, or Ctrl-C.
 ```text
 nvx-rs/target/release/nvx-rs sandbox
     [{run,provision,start,exec,stop,deprovision}]
-    [--layer ROLE,PATH,EROFS_UUID]...
+    [--layer ROLE,PATH,IMAGE_UUID]
+    [--layer-format {erofs,gpt}]
     [--scratch PATH]
     [--upper {scratch,ram}]
+    [--ram-upper-percent PERCENT]
     [--state-dir PATH]
     [--entrypoint PATH]
     [--arg VALUE]...
@@ -299,9 +301,11 @@ do, and their names cannot be abbreviated either.
 | Option | Default | Description |
 | --- | --- | --- |
 | `{run,provision,start,exec,stop,deprovision}` | `run` | Select a one-shot run or a managed lifecycle operation. |
-| `--layer ROLE,PATH,EROFS_UUID` | required for `run` and `provision` | Attach the `distro` EROFS layer. Only `distro` is accepted. The UUID must be lowercase hexadecimal in canonical hyphenated form; braces, prefixes, uppercase, and unhyphenated forms are refused. |
+| `--layer ROLE,PATH,IMAGE_UUID` | required for `run` and `provision` | Attach exactly one `distro` image by path. `run` takes EROFS; `provision` takes the format of `--layer-format`. The filesystem UUID or GPT disk GUID must be lowercase hexadecimal in canonical hyphenated form; braces, prefixes, uppercase, and unhyphenated forms are refused. |
+| `--layer-format {erofs,gpt}` | `erofs` | Select provision's image format explicitly, without probing the file or inferring its format from its name. Other sandbox commands reject this option. |
 | `--scratch PATH` | required for `run` and `provision` with a scratch upper | Attach a preformatted ext4 scratch image as the overlay's writable upper. `--upper ram` refuses it. |
-| `--upper {scratch,ram}` | `scratch` | Select the overlay's writable upper for `run` or `provision`: `scratch`, the image of `--scratch`, or `ram`, a tmpfs in guest memory with no scratch image, which loses the workload's writes when the VM stops. A RAM upper holds at most half of the guest's RAM; see [Overlay upper](run.md#overlay-upper). |
+| `--upper {scratch,ram}` | `scratch` | Select the overlay's writable upper for `run` or `provision`: `scratch`, the image of `--scratch`, or `ram`, a tmpfs in guest memory with no scratch image, which loses the workload's writes when the VM stops. The default RAM cap is half of guest memory; provision can set it with `--ram-upper-percent`. See [Overlay upper](run.md#overlay-upper). |
+| `--ram-upper-percent PERCENT` | `50` | Set provision's RAM upper cap to an ASCII decimal integer from 1 through 90 percent of VM memory. Requires `--upper ram`; other sandbox commands reject this option. The typed configuration records the cap, image format and path, and upper kind, which each start reads unchanged. Older configuration formats are refused rather than migrated. |
 | `--state-dir PATH` | required for managed operations | Select persistent sandbox state. One-shot `run` rejects this option. |
 | `--entrypoint PATH` | `/bin/sh` | Select an absolute workload entrypoint without whitespace, control characters, double quotes, or any UTF-8 byte that Linux treats as whitespace. |
 | `--arg VALUE` | none | Append one nonempty entrypoint argument without whitespace, control characters, double quotes, or any UTF-8 byte that Linux treats as whitespace. Repeat to pass multiple arguments. |

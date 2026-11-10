@@ -19,6 +19,7 @@ fn restored_sandbox_records_round_trip_only_their_own_snapshot_name() {
         hypervisor: "whp",
         memory_mib: 128,
         cmdline: "",
+        ram_upper_percent: None,
     };
     for source in [None, Some("My.snapshot-1"), Some("other")] {
         let name = source.map(|name| SnapshotName::try_from(name.to_owned()).unwrap());

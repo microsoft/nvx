@@ -11,6 +11,7 @@ use crate::host::network::{
     Access, EgressRule, EgressRules, HostLoopback, LoopbackForward, NetworkPolicy, NetworkProxy,
 };
 use crate::host::paths;
+use crate::host::sandbox::distro::DistroFormat;
 use crate::host::sandbox::mount::{MountOwner, PolicyKind};
 use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
 use crate::host::sandbox::plan::guest_gateway;
@@ -30,12 +31,18 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
-  --layer ROLE,PATH,EROFS_UUID
+  --layer ROLE,PATH,IMAGE_UUID
+  --layer-format {erofs,gpt}
+                        provision's image format (default: erofs); IMAGE_UUID
+                        is the filesystem UUID or GPT disk GUID
   --scratch SCRATCH
   --upper {scratch,ram}
                         where the overlay keeps the sandbox's writes: scratch
                         (default), on the ext4 image of --scratch, or ram, on
                         a tmpfs in guest memory, without a scratch image
+  --ram-upper-percent PERCENT
+                        provision's RAM upper cap, from 1 to 90 percent of
+                        guest memory (default: 50); requires --upper ram
   --state-dir STATE_DIR
   --entrypoint ENTRYPOINT
   --arg SANDBOX_ARG
@@ -117,6 +124,8 @@ options:
 const OPERATIONS: [&str; 6] = ["run", "provision", "start", "exec", "stop", "deprovision"];
 /// The choices of `--upper`, the names of the uppers.
 const UPPERS: [&str; 2] = [RootUpper::Scratch.as_str(), RootUpper::Ram.as_str()];
+/// The image formats that provision accepts.
+const LAYER_FORMATS: [&str; 2] = ["erofs", "gpt"];
 /// The choices of `--hypervisor`.
 pub(in crate::host::cli) const HYPERVISORS: [&str; 4] = ["auto", "whp", "kvm", "mshv"];
 /// The choices of `--mount-owner`.
@@ -137,10 +146,12 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx-rs sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 34] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
     Spec::one("--layer"),
+    Spec::one("--layer-format"),
     Spec::one("--scratch"),
     Spec::one("--upper"),
+    Spec::one("--ram-upper-percent"),
     Spec::one("--state-dir"),
     Spec::one("--entrypoint"),
     Spec::one("--arg"),
@@ -181,10 +192,14 @@ pub(crate) struct Options {
     pub(crate) operation: SandboxOperation,
     /// `--layer`, parsed as `SandboxLayer.parse` parses it.
     pub(crate) layers: Vec<SandboxLayer>,
+    /// `--layer-format`, if given; provision defaults to EROFS.
+    pub(crate) layer_format: Option<DistroFormat>,
     /// `--scratch`, as given.
     pub(crate) scratch: Option<String>,
     /// `--upper`, if given; a launch keeps its upper on scratch without it.
     pub(crate) upper: Option<RootUpper>,
+    /// `--ram-upper-percent`, if given; a RAM upper defaults to 50.
+    pub(crate) ram_upper_percent: Option<u8>,
     /// `--state-dir`, as given.
     pub(crate) state_dir: Option<String>,
     /// `--entrypoint`.
@@ -233,8 +248,10 @@ impl Default for Options {
         Self {
             operation: SandboxOperation::Run,
             layers: Vec::new(),
+            layer_format: None,
             scratch: None,
             upper: None,
+            ram_upper_percent: None,
             state_dir: None,
             entrypoint: DEFAULT_ENTRYPOINT.to_owned(),
             args: Vec::new(),
@@ -277,12 +294,22 @@ impl Receiver for Options {
             "--layer" => self
                 .layers
                 .push(SandboxLayer::parse(&text()).map_err(|error| error.message().to_owned())?),
+            "--layer-format" => {
+                self.layer_format = Some(match choice(&text(), &LAYER_FORMATS)? {
+                    "gpt" => DistroFormat::Gpt,
+                    _ => DistroFormat::Erofs,
+                });
+            }
             "--scratch" => self.scratch = Some(text()),
             "--upper" => {
                 self.upper = Some(match choice(&text(), &UPPERS)? {
                     "ram" => RootUpper::Ram,
                     _ => RootUpper::Scratch,
                 });
+            }
+            "--ram-upper-percent" => {
+                self.ram_upper_percent =
+                    Some(integer(&text(), crate::protocol::root::RAM_UPPER_CAPS)?);
             }
             "--state-dir" => self.state_dir = Some(text()),
             "--entrypoint" => self.entrypoint = text(),

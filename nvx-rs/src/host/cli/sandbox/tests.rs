@@ -23,6 +23,62 @@ fn the_upper_is_scratch_or_ram() {
     for value in ["ramfs", "tmpfs", "RAM", "", "scratch,ram"] {
         assert!(upper(value).is_err(), "{value:?}");
     }
+    for cap in [1, 50, 90] {
+        let (options, _) = parse(&[
+            "--upper".to_owned(),
+            "ram".to_owned(),
+            "--ram-upper-percent".to_owned(),
+            cap.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(options.ram_upper_percent, Some(cap));
+    }
+    for value in ["0", "91", "-1", "+50", "1.5", "x", "\u{ff15}\u{ff10}", ""] {
+        assert!(
+            parse(&["--ram-upper-percent".to_owned(), value.to_owned()]).is_err(),
+            "{value:?}"
+        );
+    }
+}
+
+#[test]
+fn provision_options_do_not_change_other_commands() {
+    for operation in ["run", "start", "exec", "stop", "deprovision"] {
+        for flag in ["--layer-format", "--ram-upper-percent"] {
+            let value = if flag == "--layer-format" {
+                "erofs"
+            } else {
+                "50"
+            };
+            let (options, _) =
+                parse(&[operation.to_owned(), flag.to_owned(), value.to_owned()]).unwrap();
+            let error = run(None, options).unwrap_err();
+            assert!(
+                error
+                    .message()
+                    .unwrap()
+                    .contains("only supported by provision")
+            );
+        }
+    }
+    let (options, _) = parse(&[
+        "provision".to_owned(),
+        "--ram-upper-percent".to_owned(),
+        "50".to_owned(),
+    ])
+    .unwrap();
+    assert!(
+        run(None, options)
+            .unwrap_err()
+            .message()
+            .unwrap()
+            .contains("requires --upper ram")
+    );
+    for (name, format) in [("erofs", DistroFormat::Erofs), ("gpt", DistroFormat::Gpt)] {
+        let (options, _) = parse(&["--layer-format".to_owned(), name.to_owned()]).unwrap();
+        assert_eq!(options.layer_format, Some(format));
+    }
+    assert!(parse(&["--layer-format".to_owned(), "ext4".to_owned()]).is_err());
 }
 
 proptest! {
