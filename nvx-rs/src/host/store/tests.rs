@@ -410,6 +410,40 @@ fn records_and_capabilities_that_are_not_regular_files_fail_at_once() {
     }
 }
 
+// Other hosts open no handle of a directory, through which the store names its entries.
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn entries_that_are_links_or_not_regular_files_are_refused_as_the_platform_refuses_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let opened = platform::Directory::open(directory.path()).unwrap();
+    let target = directory.path().join("record");
+    fs::write(&target, b"data").unwrap();
+    let file = regular::open_regular_in(&opened, "record")
+        .unwrap()
+        .unwrap();
+    assert_eq!(regular::read_at_most(file, 4, "a record").unwrap(), b"data");
+    fs::create_dir(directory.path().join("directory")).unwrap();
+    let mut refused = vec!["directory"];
+    let link = directory.path().join("link");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&target, &link);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&target, &link);
+    // Windows lets only Developer Mode or a privilege create a symbolic link.
+    if linked.is_ok() {
+        refused.push("link");
+    }
+    for name in refused {
+        let error = regular::open_regular_in(&opened, name).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "it is a link, or not a regular file",
+            "{name}"
+        );
+        assert!(platform::is_refused(&error), "{name}: {error}");
+    }
+}
+
 #[test]
 fn failures_to_read_the_records_and_the_capability_name_them() {
     let (_directory, store) = store();
