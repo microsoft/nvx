@@ -756,6 +756,20 @@ pub(crate) fn share_token(index: usize, target: &str, access: &str, file: bool) 
 }
 
 /// Asserts that `blocks`, the `--microvm-sandbox-block` values of a launch, attach the distro
+/// and optional scratch at the stable caller-owned paths, not inherited descriptors.
+pub(crate) fn assert_stable_blocks(root: &Root, blocks: &[String], scratch: bool) {
+    let mut expected = vec![root.expand("distro:file:{root/distro.erofs},ro")];
+    if scratch {
+        expected.push(root.expand("scratch:file:{root/scratch.ext4}"));
+    }
+    let actual: Vec<_> = blocks
+        .iter()
+        .map(|block| block.replace("file:\\\\?\\", "file:"))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+/// Asserts that `blocks`, the `--microvm-sandbox-block` values of a launch, attach the distro
 /// layer of the root read-only and then its scratch image through files that the launch checked:
 /// on Linux, descriptors that OpenVMM inherits, which it names as `/proc/self/fd/N`, and on
 /// Windows, the images' final paths.

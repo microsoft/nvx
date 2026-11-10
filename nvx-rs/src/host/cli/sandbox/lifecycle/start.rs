@@ -93,6 +93,7 @@ fn start_locked(
     lock.clear_outputs()?;
     let mut prepared = vm::create(&runtime, &config, None, &dir).map_err(error_with_cause)?;
     if let Some(scratch) = &scratch {
+        #[cfg(not(windows))]
         prepared.inherit(scratch.file().try_clone().map_err(Exit::from_os_error)?);
         #[cfg(windows)]
         prepared.inherit(scratch.claim().try_clone().map_err(Exit::from_os_error)?);
