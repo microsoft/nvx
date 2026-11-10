@@ -344,7 +344,9 @@ fn run() -> Result<(), AnyError> {
     let expected_status;
     if case == "deadline" {
         require(
-            process.wait(Instant::now() + Duration::from_secs(40))?,
+            process
+                .wait(Instant::now() + Duration::from_secs(40))?
+                .is_some(),
             "activation deadline did not end VM",
         )?;
         require(
@@ -409,7 +411,9 @@ fn run() -> Result<(), AnyError> {
             activation[0] ^= 1;
             connection.send(&encode_app(ACTIVATE, 101, 0, &activation), Some(by))?;
             require(
-                process.wait(Instant::now() + Duration::from_secs(15))?,
+                process
+                    .wait(Instant::now() + Duration::from_secs(15))?
+                    .is_some(),
                 "changed identity replay did not end VM",
             )?;
             expected_status = 125;
@@ -491,14 +495,20 @@ printf 'REAL_READY_MAPS_EXEC_OK\n'
                 by,
             )?;
             print!("{first}");
+            let proxy_script = format!(
+                "test \"$HTTP_PROXY\" = http://exec.example:2; \
+                 test \"${{http_proxy-}}\" = '{}'; printf 'EXEC_PROXY_OVERRIDE_OK\\n'",
+                if published {
+                    "http://10.88.0.1:3128"
+                } else {
+                    ""
+                },
+            );
             let proxy = execute(
                 &mut connection,
                 105,
-                "test \"$HTTP_PROXY\" = http://exec.example:2; printf 'EXEC_PROXY_OVERRIDE_OK\\n'",
-                WorkloadEnvironment::Layered(&[
-                    "HTTP_PROXY=http://first.example:1".to_owned(),
-                    "HTTP_PROXY=http://exec.example:2".to_owned(),
-                ]),
+                &proxy_script,
+                WorkloadEnvironment::Layered(&["HTTP_PROXY=http://exec.example:2".to_owned()]),
                 by,
             )?;
             print!("{proxy}");
@@ -551,7 +561,9 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
                 "STOP not acknowledged",
             )?;
             require(
-                process.wait(Instant::now() + Duration::from_secs(30))?,
+                process
+                    .wait(Instant::now() + Duration::from_secs(30))?
+                    .is_some(),
                 "STOP did not tear down restore",
             )?;
             expected_status = 0;
@@ -559,7 +571,7 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
     }
     drop(connection);
     reader.join().map_err(|_| "console reader panicked")??;
-    let outcome = crate::host::report::read(&report).ok_or("missing native outcome")?;
+    let outcome = crate::host::report::read(&report)?.ok_or("missing native outcome")?;
     require(
         outcome.status_code == Some(expected_status) && outcome.teardown_complete == Some(true),
         format!("wrong restore outcome: {outcome:?}"),
