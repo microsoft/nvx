@@ -48,6 +48,13 @@ case "$cmdline" in
     *" nvx_sandbox=1 "*) sandbox_mode=true ;;
     *) sandbox_mode=false ;;
 esac
+new_init=false
+if [ "$sandbox_mode" = true ]; then
+    case "$cmdline" in
+        *" nvx_lifecycle="*) ;;
+        *) new_init=true ;;
+    esac
+fi
 
 fatal() {
     echo "$*" >&2
@@ -202,7 +209,7 @@ for token in $cmdline; do
     esac
 done
 set +f
-if [ -n "$nvx_exec" ]; then
+if [ -n "$nvx_exec" ] && [ "$new_init" = false ]; then
     case "$nvx_exec" in
         /*) ;;
         *) fatal "nvx_exec must be an absolute initramfs path" ;;
@@ -219,6 +226,7 @@ if [ "$sandbox_mode" = false ]; then
     mount_virtfs
 fi
 # virt-net: if --net attached a NIC, configure the only non-loopback interface.
+announcer_pid=
 nip=$(sed -n 's/.*virtnet_ip=\([^ ]*\).*/\1/p' /proc/cmdline)
 if [ -n "$nip" ]; then
     nmask=$(sed -n 's/.*virtnet_mask=\([^ ]*\).*/\1/p' /proc/cmdline)
@@ -302,6 +310,7 @@ if [ -n "$nip" ]; then
             allow | host-loopback)
                 if [ -n "$ngw" ] && [ -x /sbin/nvx-ingress ]; then
                     /sbin/nvx-ingress "$ngw" </dev/null &
+                    announcer_pid=$!
                 else
                     virtnet_error "$ningress ingress needs /sbin/nvx-ingress and an IPv4 gateway"
                 fi
@@ -321,9 +330,24 @@ if [ -n "$nip" ]; then
     fi
 fi
 if [ "$sandbox_mode" = true ]; then
-    [ -x /sbin/nvx-init-agent ] ||
+    if [ "$new_init" = false ]; then
+        [ -x /sbin/nvx-init-agent ] ||
+            workload_fatal "selected guest cannot act as sandbox control"
+        exec /sbin/nvx-init-agent
+    fi
+    [ -x /sbin/nvx-init ] ||
         workload_fatal "selected guest cannot act as sandbox control"
-    exec /sbin/nvx-init-agent
+    # nvx-time boot returns before its child publishes the daemon PID.
+    tries=0
+    while [ ! -r /run/nvx/time/daemon.pid ] && [ "$tries" -lt 600 ]; do
+        sleep 0.05
+        tries=$((tries + 1))
+    done
+    time_daemon=$(cat /run/nvx/time/daemon.pid) ||
+        workload_fatal "time daemon process ID is unavailable"
+    set -- "$time_daemon"
+    [ -z "$announcer_pid" ] || set -- "$@" "$announcer_pid"
+    exec /sbin/nvx-init "$@"
 fi
 case "$workload_lifecycle" in
     one-shot)

@@ -7,11 +7,11 @@
 //! exec /sbin/nvx-managed-agent /dev/hvc2 - nvx-managed UID GID NAME HOME
 //! ```
 //!
-//! and a VM with a layered root, whose kernel command line has `nvx_sandbox=1`, to NVX's init
-//! agent, which assembles the root, without arguments:
+//! and a VM with a layered root, whose kernel command line has `nvx_sandbox=1` and no old
+//! OpenVMM lifecycle token, to NVX's init, with its helpers' process IDs:
 //!
 //! ```text
-//! exec /sbin/nvx-init-agent
+//! exec /sbin/nvx-init TIME_DAEMON [ANNOUNCER]
 //! ```
 //!
 //! [`write`](fn@write) copies that initramfs, and appends to the copy a second archive, in the
@@ -23,7 +23,7 @@
 //! - a symbolic link from [`MANAGED_AGENT`] to that script;
 //! - a script, at [`LAYERED_LAUNCHER`], that runs the guest agent as
 //!   `runtime-adapter-guest init /dev/hvc2 layered`, PID 1 of a VM with a layered root, which
-//!   names the control tty, [`CONTROL_TTY`], itself, since `/init` passes NVX's init agent none;
+//!   names the control tty, [`CONTROL_TTY`], itself, and ignores the helper arguments;
 //! - and a symbolic link from [`INIT_AGENT`] to that script, so that NVX's init agent never
 //!   assembles the root in the adapter's VMs;
 //! - for the capture of a template whose clones delay their repair, for tests, the delay's file,
@@ -53,7 +53,7 @@ pub const MANAGED_AGENT: &str = "/sbin/nvx-managed-agent";
 /// NVX's init agent.
 pub const LAYERED_LAUNCHER: &str = "/sbin/runtime-adapter-layered";
 /// Path of NVX's init agent, which `/init` runs in a VM with a layered root.
-pub const INIT_AGENT: &str = "/sbin/nvx-init-agent";
+pub const INIT_AGENT: &str = "/sbin/nvx-init";
 /// The VM's control tty, which `/init` requires of both lifecycles that NVX's agents serve.
 pub const CONTROL_TTY: &str = "/dev/hvc2";
 
