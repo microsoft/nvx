@@ -4,9 +4,16 @@
 //! that the tests check, and [`ManifestSpec`] holds each field of a manifest, so that a test
 //! changes one field and encodes the others as they were.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use sha2::{Digest, Sha256};
 
-use super::{BlockGeometry, CaptureClass, Invariants};
+use super::{
+    BlockGeometry, CaptureClass, DESCRIPTION_FILE, Invariants, KEY_FILE, MANIFEST_NAME,
+    OPENVMM_DIR, Snapshot, SnapshotKey, SnapshotManifest,
+};
+use crate::ErrorKind;
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::sandbox::SandboxNetwork;
 use crate::host::store::{ArtifactIdentity, RuntimeIdentity};
@@ -991,4 +998,403 @@ pub(in crate::host) fn network_class() -> CaptureClass {
         ),
         ..class()
     }
+}
+
+pub(in crate::host) struct SnapshotFixture {
+    root: tempfile::TempDir,
+    pub(in crate::host) dir: PathBuf,
+    spec: ManifestSpec,
+    key: SnapshotKey,
+}
+
+impl SnapshotFixture {
+    pub(in crate::host) fn new() -> Self {
+        use crate::host::platform;
+        use crate::host::store::files::{create_new, write_private};
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("snapshot");
+        assert_eq!(platform::create_owner_only_dir(&dir).unwrap(), None);
+        let openvmm = dir.join(OPENVMM_DIR);
+        assert_eq!(platform::create_owner_only_dir(&openvmm).unwrap(), None);
+        let spec = ManifestSpec::template();
+        let manifest = SnapshotManifest::parse(&spec.encode()).unwrap();
+        let key = SnapshotKey::new(&class(), &manifest).unwrap();
+        write_private(&dir.join(KEY_FILE), &key.to_bytes()).unwrap();
+        write_private(&dir.join(DESCRIPTION_FILE), b"not JSON").unwrap();
+        write_private(&openvmm.join(MANIFEST_NAME), &spec.encode()).unwrap();
+        for (name, length) in [
+            ("memory.bin", spec.memory_size),
+            ("state.bin", spec.state_size),
+        ] {
+            let file = create_new(&openvmm.join(name)).unwrap();
+            platform::make_sparse(&file).unwrap();
+            file.set_len(length).unwrap();
+        }
+        Self {
+            root,
+            dir,
+            spec,
+            key,
+        }
+    }
+
+    fn files(&self) -> [PathBuf; 5] {
+        let openvmm = self.dir.join(OPENVMM_DIR);
+        [
+            self.dir.join(KEY_FILE),
+            self.dir.join(DESCRIPTION_FILE),
+            openvmm.join(MANIFEST_NAME),
+            openvmm.join("memory.bin"),
+            openvmm.join("state.bin"),
+        ]
+    }
+}
+
+fn refused(path: &Path) {
+    let error = Snapshot::open(path).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+}
+
+#[test]
+fn snapshot_open_checks_the_complete_directory_and_preserves_its_metadata() {
+    let fixture = SnapshotFixture::new();
+    let snapshot = Snapshot::open(&fixture.dir).unwrap();
+    assert_eq!(snapshot.dir, fixture.dir);
+    assert_eq!(snapshot.key(), &fixture.key);
+    assert_eq!(
+        snapshot.manifest(),
+        &SnapshotManifest::parse(&fixture.spec.encode()).unwrap()
+    );
+    for suffix in ["", std::path::MAIN_SEPARATOR_STR, "."] {
+        let path = if suffix == "." {
+            fixture.dir.join(".")
+        } else {
+            let mut path = fixture.dir.as_os_str().to_os_string();
+            path.push(suffix);
+            PathBuf::from(path)
+        };
+        assert_eq!(Snapshot::open(&path).unwrap().key(), &fixture.key);
+    }
+}
+
+#[test]
+fn snapshot_open_refuses_every_missing_entry() {
+    for index in 0..6 {
+        let fixture = SnapshotFixture::new();
+        let missing = if index == 5 {
+            fixture.dir.join(OPENVMM_DIR)
+        } else {
+            fixture.files()[index].clone()
+        };
+        fs::rename(&missing, fixture.root.path().join("missing")).unwrap();
+        refused(&fixture.dir);
+    }
+    let fixture = SnapshotFixture::new();
+    refused(&fixture.root.path().join("absent"));
+}
+
+#[test]
+fn snapshot_open_refuses_extra_entries_and_alternate_names() {
+    use crate::host::store::files::write_private;
+
+    for nested in [false, true] {
+        let fixture = SnapshotFixture::new();
+        let dir = if nested {
+            fixture.dir.join(OPENVMM_DIR)
+        } else {
+            fixture.dir.clone()
+        };
+        write_private(&dir.join("extra"), b"extra").unwrap();
+        refused(&fixture.dir);
+    }
+    let fixture = SnapshotFixture::new();
+    fs::rename(fixture.dir.join(KEY_FILE), fixture.dir.join("KEY.BIN")).unwrap();
+    refused(&fixture.dir);
+}
+
+#[test]
+fn snapshot_open_refuses_every_directory_in_place_of_a_regular_file() {
+    for index in 0..5 {
+        let fixture = SnapshotFixture::new();
+        let path = &fixture.files()[index];
+        fs::remove_file(path).unwrap();
+        fs::create_dir(path).unwrap();
+        refused(&fixture.dir);
+    }
+}
+
+#[test]
+fn snapshot_open_refuses_files_in_place_of_its_directories() {
+    use crate::host::store::files::write_private;
+
+    let fixture = SnapshotFixture::new();
+    let file = fixture.root.path().join("file");
+    write_private(&file, b"file").unwrap();
+    refused(&file);
+    fs::rename(
+        fixture.dir.join(OPENVMM_DIR),
+        fixture.root.path().join("saved"),
+    )
+    .unwrap();
+    write_private(&fixture.dir.join(OPENVMM_DIR), b"file").unwrap();
+    refused(&fixture.dir);
+}
+
+#[test]
+fn snapshot_open_refuses_both_artifact_length_mismatches() {
+    for name in ["memory.bin", "state.bin"] {
+        for difference in [-1i64, 1] {
+            let fixture = SnapshotFixture::new();
+            let path = fixture.dir.join(OPENVMM_DIR).join(name);
+            let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+            let length = file.metadata().unwrap().len();
+            file.set_len(length.checked_add_signed(difference).unwrap())
+                .unwrap();
+            refused(&fixture.dir);
+        }
+    }
+}
+
+#[test]
+fn snapshot_open_uses_the_strict_manifest_and_bounded_key_decoders() {
+    use crate::host::store::files::write_private;
+
+    for bytes in [vec![0x80], vec![0; super::MAX_MANIFEST_LEN as usize + 1]] {
+        let fixture = SnapshotFixture::new();
+        write_private(&fixture.dir.join(OPENVMM_DIR).join(MANIFEST_NAME), &bytes).unwrap();
+        assert!(Snapshot::open(&fixture.dir).is_err());
+    }
+    let fixture = SnapshotFixture::new();
+    let mut trailing = fixture.key.to_bytes();
+    trailing.push(0);
+    let mut version = fixture.key.to_bytes();
+    version[0] += 1;
+    for bytes in [
+        vec![0],
+        trailing,
+        version,
+        vec![0; SnapshotKey::MAX_LEN + 1],
+    ] {
+        write_private(&fixture.dir.join(KEY_FILE), &bytes).unwrap();
+        assert!(Snapshot::open(&fixture.dir).is_err());
+    }
+}
+
+#[test]
+fn snapshot_open_refuses_a_key_from_another_manifest_machine() {
+    use crate::host::store::files::write_private;
+
+    let mutations: [fn(&mut ManifestSpec); 4] = [
+        |spec| spec.cpu().digest[0] ^= 1,
+        |spec| spec.contract().command_line.push_str(" extra"),
+        |spec| spec.contract().devices[0].state_unit.push_str("-other"),
+        |spec| spec.time().tsc_hz += 1,
+    ];
+    for mutate in mutations {
+        let fixture = SnapshotFixture::new();
+        let mut spec = fixture.spec.clone();
+        mutate(&mut spec);
+        let manifest = SnapshotManifest::parse(&spec.encode()).unwrap();
+        let key = SnapshotKey::new(&class(), &manifest).unwrap();
+        write_private(&fixture.dir.join(KEY_FILE), &key.to_bytes()).unwrap();
+        refused(&fixture.dir);
+    }
+}
+
+#[test]
+fn snapshot_description_contents_do_not_affect_opening() {
+    use crate::host::store::files::write_private;
+
+    let fixture = SnapshotFixture::new();
+    for contents in [b"".as_slice(), b"{broken JSON", &[0xff, 0, 0x80]] {
+        write_private(&fixture.dir.join(DESCRIPTION_FILE), contents).unwrap();
+        assert_eq!(Snapshot::open(&fixture.dir).unwrap().key(), &fixture.key);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshot_open_refuses_every_shared_file_and_both_shared_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for index in 0..5 {
+        for mode in [0o640, 0o602, 0o610] {
+            let fixture = SnapshotFixture::new();
+            let path = &fixture.files()[index];
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            refused(&fixture.dir);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+    for nested in [false, true] {
+        let fixture = SnapshotFixture::new();
+        let path = if nested {
+            fixture.dir.join(OPENVMM_DIR)
+        } else {
+            fixture.dir.clone()
+        };
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+        refused(&fixture.dir);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires root to change only the owned snapshot fixture's entry owners"]
+fn snapshot_open_refuses_entries_owned_by_another_user() {
+    use nix::unistd::{Uid, chown};
+
+    assert!(Uid::effective().is_root());
+    for index in 0..7 {
+        let fixture = SnapshotFixture::new();
+        let path = match index {
+            5 => fixture.dir.clone(),
+            6 => fixture.dir.join(OPENVMM_DIR),
+            _ => fixture.files()[index].clone(),
+        };
+        chown(&path, Some(Uid::from_raw(1)), None).unwrap();
+        refused(&fixture.dir);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshot_open_refuses_file_links_fifos_and_sockets_without_reading_them() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    for index in 0..5 {
+        let fixture = SnapshotFixture::new();
+        let path = &fixture.files()[index];
+        let saved = fixture.root.path().join("saved");
+        fs::rename(path, &saved).unwrap();
+        symlink(&saved, path).unwrap();
+        refused(&fixture.dir);
+        fs::remove_file(path).unwrap();
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        refused(&fixture.dir);
+        fs::remove_file(path).unwrap();
+        let _socket = UnixListener::bind(path).unwrap();
+        refused(&fixture.dir);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshot_open_refuses_directory_links_even_with_trailing_separators() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = SnapshotFixture::new();
+    let link = fixture.root.path().join("link");
+    symlink(&fixture.dir, &link).unwrap();
+    for suffix in ["", "/", "/.", "/./"] {
+        let mut path = link.as_os_str().to_os_string();
+        path.push(suffix);
+        refused(Path::new(&path));
+    }
+    let saved = fixture.root.path().join("saved");
+    let openvmm = fixture.dir.join(OPENVMM_DIR);
+    fs::rename(&openvmm, &saved).unwrap();
+    symlink(&saved, &openvmm).unwrap();
+    refused(&fixture.dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshot_description_needs_no_read_permission() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = SnapshotFixture::new();
+    let path = fixture.dir.join(DESCRIPTION_FILE);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
+    if !nix::unistd::Uid::effective().is_root() {
+        assert_eq!(
+            fs::read(&path).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    assert_eq!(Snapshot::open(&fixture.dir).unwrap().key(), &fixture.key);
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o200
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn snapshot_open_refuses_every_shared_file_and_both_shared_directory_acls() {
+    use crate::host::platform::tests::{access, set_access, user_sid};
+
+    let sid = user_sid();
+    let shared = format!("D:P(A;;FA;;;{sid})(A;;FR;;;WD)");
+    for index in 0..5 {
+        let fixture = SnapshotFixture::new();
+        let path = &fixture.files()[index];
+        set_access(path, &shared).unwrap();
+        let before = access(path).unwrap();
+        refused(&fixture.dir);
+        assert_eq!(access(path).unwrap(), before);
+    }
+    for nested in [false, true] {
+        let fixture = SnapshotFixture::new();
+        let path = if nested {
+            fixture.dir.join(OPENVMM_DIR)
+        } else {
+            fixture.dir.clone()
+        };
+        set_access(&path, &shared).unwrap();
+        let before = access(&path).unwrap();
+        refused(&fixture.dir);
+        assert_eq!(access(&path).unwrap(), before);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn snapshot_open_refuses_directory_junctions_and_every_reparse_file_entry() {
+    use crate::host::tests::junction;
+
+    let fixture = SnapshotFixture::new();
+    let link = fixture.root.path().join("link");
+    junction(&link, &fixture.dir);
+    for path in [link.clone(), link.join("."), link.join("")] {
+        refused(&path);
+    }
+    let saved = fixture.root.path().join("saved");
+    let openvmm = fixture.dir.join(OPENVMM_DIR);
+    fs::rename(&openvmm, &saved).unwrap();
+    junction(&openvmm, &saved);
+    refused(&fixture.dir);
+    for index in 0..5 {
+        let fixture = SnapshotFixture::new();
+        let path = &fixture.files()[index];
+        fs::remove_file(path).unwrap();
+        junction(path, fixture.root.path());
+        refused(&fixture.dir);
+        fs::remove_dir(path).unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn snapshot_description_needs_no_data_read_access() {
+    use crate::host::platform::tests::{set_access, user_sid};
+
+    let fixture = SnapshotFixture::new();
+    let path = fixture.dir.join(DESCRIPTION_FILE);
+    let sid = user_sid();
+    set_access(&path, &format!("D:P(D;;0x1;;;{sid})(A;;FA;;;{sid})")).unwrap();
+    assert_eq!(
+        fs::read(&path).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(Snapshot::open(&fixture.dir).unwrap().key(), &fixture.key);
 }

@@ -709,6 +709,29 @@ fn key_refusal(bytes: &[u8], code: ErrorCode) -> String {
     error.message().to_owned()
 }
 
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn snapshot_open_refuses_other_key_contracts_and_filesystem_tags() {
+    use crate::host::snapshot::{KEY_FILE, Snapshot};
+    use crate::host::store::files::write_private;
+
+    let changes: [fn(&mut SnapshotKey); 2] = [
+        |key| key.contracts.snapshot += 1,
+        |key| key.filesystem_tag.push_str("-other"),
+    ];
+    for change in changes {
+        let fixture = support::SnapshotFixture::new();
+        let mut key = Snapshot::open(&fixture.dir).unwrap().key().clone();
+        change(&mut key);
+        let bytes = key.to_bytes();
+        assert!(SnapshotKey::from_bytes(&bytes).is_ok());
+        write_private(&fixture.dir.join(KEY_FILE), &bytes).unwrap();
+        let error = Snapshot::open(&fixture.dir).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Io, "{error}");
+        assert!(error.message().contains("not consistent"), "{error}");
+    }
+}
+
 #[test]
 fn other_encodings_of_a_key_are_refused() {
     let key = network_key();
