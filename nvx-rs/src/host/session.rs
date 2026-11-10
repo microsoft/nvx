@@ -168,11 +168,8 @@ impl ControlSession {
 
     /// Asks nvx-init to capture the VM, killing its executions first when requested.
     #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "SL3.7b requests capture once nvx-init handles it in SL7.7a"
-        )
+        not(any(test, feature = "cli")),
+        expect(dead_code, reason = "NVX's capture command requires the cli feature")
     )]
     pub(crate) fn capture(
         &mut self,

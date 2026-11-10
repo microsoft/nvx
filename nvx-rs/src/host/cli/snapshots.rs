@@ -3,10 +3,8 @@
 //! Names map to hexadecimal directory names under `snapshots/`. Each published directory
 //! contains only the strict snapshot's three entries; its lock stays under `locks/`.
 //! Completed private directories under `staging/` publish with one non-replacing rename.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL3.7b and SL3.8a use the named snapshot store")
-)]
+
+pub(super) mod capture;
 
 use std::path::{Path, PathBuf};
 
