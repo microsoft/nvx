@@ -149,7 +149,7 @@ pub(crate) use sock_diag::{
 pub(crate) use socket::{UdpSocket, connect_datagram};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use spawn::reset_signals;
-pub(crate) use spawn::{ChildSpec, PreparedChild, REPORT_LENGTH, enter_root};
+pub(crate) use spawn::{ChildSpec, PreparedChild, REPORT_LENGTH, configure_announcer, enter_root};
 pub(crate) use terminal::{configure_raw, drain};
 pub(crate) use timer::Timer;
 
