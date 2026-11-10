@@ -166,13 +166,10 @@ fn another_process_serving_the_endpoint_is_refused() {
             assert!(source.to_string().contains(&std::process::id().to_string()));
             assert!(source.to_string().contains(&process.pid.to_string()));
         }
-        assert!(
-            !Process::open(&process)
-                .unwrap()
-                .unwrap()
-                .has_exited()
-                .unwrap()
-        );
+        let Opened::Running(held) = Process::open(&process).unwrap() else {
+            panic!("the unrelated VM process still runs");
+        };
+        assert!(!held.has_exited().unwrap());
     }
 }
 
