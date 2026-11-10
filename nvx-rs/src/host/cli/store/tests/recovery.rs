@@ -179,6 +179,63 @@ mod process {
         assert!(locked.capability().unwrap().is_none());
     }
 
+    #[test]
+    fn a_busy_endpoint_cannot_extend_recovery_or_signal_its_live_process() {
+        use std::error::Error as _;
+
+        let (_directory, state) = state();
+        let (prepared, runtime) = prepared(&state, ConsoleAttachment::Disconnected);
+        let mut locked = state.lock(Deadline::after(10.0)).unwrap();
+        drop(locked.begin_launch(&prepared, &runtime).unwrap());
+        fs::write(state.dir().join("recovery-small-backlog"), b"").unwrap();
+        let child = running(&state, &prepared);
+        let process = child.process();
+        #[cfg(target_os = "linux")]
+        let _clients = {
+            let mut clients = Vec::new();
+            loop {
+                assert!(clients.len() < 16, "the helper's backlog must fill");
+                match crate::host::sys::connect_nonblocking(&prepared.outputs().endpoint) {
+                    Ok(client) => clients.push(client),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("cannot fill the recovery endpoint: {error}"),
+                }
+            }
+            clients
+        };
+        #[cfg(windows)]
+        let _client = platform::connect_endpoint(
+            &prepared.outputs().endpoint,
+            process.reference().pid,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        drop(prepared);
+        let journal = fs::read(state.path(StateFile::Journal)).unwrap();
+        let capability = fs::read(state.path(StateFile::Capability)).unwrap();
+        for budget in [Duration::ZERO, Duration::from_millis(50)] {
+            let started = Instant::now();
+            let error = locked.recover(started + budget).unwrap_err();
+            let source = error
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(source.kind(), std::io::ErrorKind::TimedOut);
+            assert!(
+                started.elapsed() < Duration::from_millis(250),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(!process.has_exited().unwrap());
+            assert_eq!(fs::read(state.path(StateFile::Journal)).unwrap(), journal);
+            assert_eq!(
+                fs::read(state.path(StateFile::Capability)).unwrap(),
+                capability
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn an_endpoint_owner_without_the_log_is_not_signaled_and_its_journal_stays() {
@@ -338,7 +395,11 @@ mod process {
     fn launch_helper() {
         let endpoint = fs::read_to_string("recovery-endpoint").unwrap();
         #[cfg(target_os = "linux")]
-        let _server = std::os::unix::net::UnixListener::bind(endpoint).unwrap();
+        let server = std::os::unix::net::UnixListener::bind(endpoint).unwrap();
+        #[cfg(target_os = "linux")]
+        if std::path::Path::new("recovery-small-backlog").exists() {
+            nix::sys::socket::listen(&server, nix::sys::socket::Backlog::new(1).unwrap()).unwrap();
+        }
         #[cfg(windows)]
         let server = platform::tests::control_server(&endpoint);
         fs::write("recovery-ready", b"").unwrap();

@@ -14,6 +14,64 @@ use super::*;
 use crate::host::platform::Transport;
 
 #[test]
+fn a_full_control_backlog_never_replaces_the_callers_probe_deadline() {
+    use std::os::unix::net::UnixListener;
+
+    use nix::sys::socket::{Backlog, listen};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("control.sock");
+    let endpoint = path.to_str().unwrap();
+    let listener = UnixListener::bind(&path).unwrap();
+    listen(&listener, Backlog::new(1).unwrap()).unwrap();
+    let mut clients = Vec::new();
+    loop {
+        assert!(clients.len() < 16, "the configured backlog must fill");
+        match crate::host::sys::connect_nonblocking(endpoint) {
+            Ok(client) => clients.push(client),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("cannot fill the control backlog: {error}"),
+        }
+    }
+    let started = Instant::now();
+    let error =
+        endpoint_server_pid_until(endpoint, started + Duration::from_millis(50)).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "{:?}",
+        started.elapsed()
+    );
+    for _ in &clients {
+        drop(listener.accept().unwrap());
+    }
+    drop(clients);
+    assert_eq!(
+        endpoint_server_pid_until(endpoint, started)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        endpoint_server_pid(endpoint).unwrap(),
+        Some(std::process::id())
+    );
+    drop(listener);
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        endpoint_server_pid_until(endpoint, started)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+}
+
+#[test]
 fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     use std::io::Write;
     use std::os::unix::net::UnixListener;

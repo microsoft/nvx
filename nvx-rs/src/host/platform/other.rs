@@ -285,3 +285,14 @@ pub(crate) fn connect_endpoint(
 pub(crate) fn endpoint_server_pid(_endpoint: &str) -> io::Result<Option<u32>> {
     Ok(None)
 }
+
+#[cfg(feature = "cli")]
+pub(crate) fn endpoint_server_pid_until(
+    _endpoint: &str,
+    deadline: Instant,
+) -> io::Result<Option<u32>> {
+    if Instant::now() >= deadline {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    Err(unsupported())
+}
