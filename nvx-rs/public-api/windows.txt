@@ -1861,6 +1861,7 @@ method nvx::host::supervisor::Launched::detach
 method nvx::host::supervisor::Launched::id
 method nvx::host::supervisor::Launched::kill_and_wait
 method nvx::host::supervisor::Launched::process
+method nvx::host::supervisor::Launched::wait_timeout
 enum nvx::host::supervisor::Reattached
 variant nvx::host::supervisor::Reattached::Exited
 field nvx::host::supervisor::Reattached::Exited::record
@@ -2351,6 +2352,7 @@ fn nvx::host::transport::connect_verified
 mod nvx::host::vm
 struct nvx::host::vm::Capability
 method nvx::host::vm::Capability::as_bytes
+struct nvx::host::vm::InheritedHandle
 struct nvx::host::vm::Launched
 field nvx::host::vm::Launched::capability
 field nvx::host::vm::Launched::outputs
@@ -2361,6 +2363,7 @@ method nvx::host::vm::Prepared::arguments
 method nvx::host::vm::Prepared::capability
 method nvx::host::vm::Prepared::capture_context
 method nvx::host::vm::Prepared::inherit
+method nvx::host::vm::Prepared::into_command
 method nvx::host::vm::Prepared::log
 method nvx::host::vm::Prepared::nic
 method nvx::host::vm::Prepared::outputs
@@ -2385,6 +2388,15 @@ field nvx::host::vm::VmOutputs::console
 field nvx::host::vm::VmOutputs::endpoint
 field nvx::host::vm::VmOutputs::log
 field nvx::host::vm::VmOutputs::outcome
+struct nvx::host::vm::VmmCommand
+field nvx::host::vm::VmmCommand::arguments
+field nvx::host::vm::VmmCommand::breakaway_from_job
+field nvx::host::vm::VmmCommand::capability
+field nvx::host::vm::VmmCommand::inherit
+field nvx::host::vm::VmmCommand::log
+field nvx::host::vm::VmmCommand::outputs
+field nvx::host::vm::VmmCommand::program
+field nvx::host::vm::VmmCommand::working_dir
 fn nvx::host::vm::create
 fn nvx::host::vm::create_private_dir
 fn nvx::host::vm::reattach
