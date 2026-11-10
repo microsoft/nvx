@@ -27,6 +27,7 @@
 
 use std::ffi::{CStr, CString};
 use std::os::fd::RawFd;
+use std::os::unix::process::CommandExt;
 
 use nix::fcntl::{FcntlArg, FdFlag};
 use nix::libc::{c_char, c_int, c_uint, c_ulong};
@@ -1007,6 +1008,21 @@ pub(crate) fn reset_signals() -> Result<(), Errno> {
         }
     }
     signal_mask(nix::libc::SIG_SETMASK, 0)
+}
+
+/// Makes `command`, the announcer's that `nvx-ingress start` runs, start its program in a session
+/// of its own, without a controlling terminal, with every signal's default disposition, and none
+/// blocked, as [`reset_signals`] leaves them, whatever the caller ignores or blocks.
+pub(crate) fn configure_announcer(command: &mut std::process::Command) {
+    // SAFETY: the hook runs in the child between fork and exec, where it captures nothing, and
+    // makes only system calls, which neither allocate nor lock.
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid()?;
+            reset_signals()?;
+            Ok(())
+        });
+    }
 }
 
 /// Changes the calling thread's signal mask with `set`, a set of [`SIGNALS`] signals in which

@@ -8,23 +8,26 @@
 //! captured under a policy that publishes nothing, so its init started no
 //! announcer, with a policy of its own, which may publish the clone's
 //! listeners. After the process-free application succeeds, its caller starts
-//! the announcer with [`Announcer::start`]: as root, it binds its UDP socket to a
-//! privileged source port, and runs `nvx-ingress inherit GATEWAY_IPV4`, which
-//! announces from that socket, its standard input, rather than from one of its
-//! own. A failure to bind the socket, or to run the program, is the start's
-//! own, before the clone is ready, and the caller watches the announcer that
-//! started, and must end the clone once it ended: the gateway then keeps
-//! publishing the listeners that it last announced, and learns of no later
-//! change of them.
+//! the announcer: as root, it binds a UDP socket to a privileged source port,
+//! and runs `nvx-ingress inherit GATEWAY_IPV4`, which announces from that
+//! socket, its standard input, rather than from one of its own. A failure to
+//! bind the socket, or to run the program, is the start's own, before the
+//! clone is ready, and the caller watches the announcer that started, and
+//! must end the clone once it ended: the gateway then keeps publishing the
+//! listeners that it last announced, and learns of no later change of them.
 //!
 //! A guest agent that cannot hold the announcer, such as the shell script
 //! that repairs the restore of a snapshot without a tier whose new policy
 //! publishes the guest's listeners, runs `nvx-ingress start GATEWAY_IPV4`
-//! instead. It starts the announcer as [`Announcer::start`] does, and exits
-//! once the announcer's socket is bound and its program runs, which leaves the
-//! announcer to init, or to the nearest subreaper, as at a cold boot; it fails,
-//! with status 1, when the announcer does not start, so that the agent learns
-//! of the failure before the restore is acknowledged.
+//! instead. It binds its socket to the highest free privileged source port,
+//! from 1023 down to 512, and runs `/sbin/nvx-ingress inherit GATEWAY_IPV4`
+//! with that socket as its standard input, the caller's standard output and
+//! error, every signal's default disposition, and none blocked, in a session
+//! of its own, without a controlling terminal. It exits once the program
+//! runs, but waits for neither its first scan nor any announcement, which
+//! leaves the announcer to init, or to the nearest subreaper, as at a cold
+//! boot; it fails, with status 1, when the announcer does not start, so that
+//! the agent learns of the failure before the restore is acknowledged.
 //!
 //! Every 100 ms it reads the kernel's socket tables. A TCP socket in the
 //! LISTEN state is a listener, and so is an unconnected UDP socket that
@@ -58,18 +61,18 @@
 
 use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
+use std::net::Ipv4Addr;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use super::parse;
 use super::status::{CommandError, run_main};
 use super::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
 
-pub use announcer::{Announcer, PROGRAM, StartError};
-
 mod address;
-mod announcer;
 mod collect;
 mod diag;
 mod encode;
@@ -199,12 +202,12 @@ struct UdpSocket {
 /// Runs `nvx-ingress` with the process's arguments: `GATEWAY_IPV4`, the announcer, from a socket
 /// of its own; `inherit GATEWAY_IPV4`, the announcer, from the socket that it inherited as its
 /// standard input, which must be an IPv4 datagram socket bound to a privileged source port from
-/// 512 to 1023; `start GATEWAY_IPV4`, which starts `inherit GATEWAY_IPV4` as
-/// [`Announcer::start`] does and exits once it runs; or `test DIRECTORY`. Test mode exits with 0
-/// after the last snapshot, or with 1 when a snapshot fails. The announcer runs until it fails,
-/// and exits with 1 when it cannot open or bind its socket, or take the one that it inherited, or
-/// with 2 for a usage error. `start` exits with 0 once the announcer runs, or with 1 when it does
-/// not start.
+/// 512 to 1023; `start GATEWAY_IPV4`, which starts `inherit GATEWAY_IPV4` from a socket that it
+/// binds, in a session of its own, and exits once it runs; or `test DIRECTORY`. Test mode exits
+/// with 0 after the last snapshot, or with 1 when a snapshot fails. The announcer runs until it
+/// fails, and exits with 1 when it cannot open or bind its socket, or take the one that it
+/// inherited, or with 2 for a usage error. `start` exits with 0 once the announcer runs, or with
+/// 1 when it does not start.
 #[doc(hidden)]
 pub fn main() -> ExitCode {
     run_main(|args| run(args, &mut sys::Stdout::new(), &mut io::stderr()))
@@ -231,26 +234,63 @@ fn run(args: &[CString], out: &mut dyn Write, err: &mut dyn Write) -> Result<(),
     }
 }
 
-/// Starts the announcer of the guest's listeners to `gateway` as [`Announcer::start`] does, and
-/// returns once its socket is bound and its program runs, leaving it to run on its own: the
-/// process exits then, which passes the announcer to init, or to the nearest subreaper.
+/// Starts the announcer of the guest's listeners to `gateway`, as the [module documentation](self)
+/// describes, and returns once its program runs, leaving it to run on its own: the process exits
+/// then, which passes the announcer to init, or to the nearest subreaper.
 fn start(gateway: &CStr, err: &mut dyn Write) -> Result<(), CommandError> {
     let Some(gateway) = sender::parse_gateway(gateway) else {
         return Err(usage(err));
     };
-    match Announcer::start(gateway) {
-        Ok(announcer) => {
-            // Dropping the announcer would stop it, which only its owner may do.
-            std::mem::forget(announcer);
-            Ok(())
+    let started = bind_announcer_socket()
+        .and_then(|socket| launch(Path::new("/sbin/nvx-ingress"), gateway, socket));
+    started.map_err(|problem| {
+        sys::report(err, &[b"nvx-ingress: ", problem.as_bytes(), b"\n"]);
+        CommandError::Operation
+    })
+}
+
+/// Creates the announcer's socket and binds it to the highest free privileged source port, as
+/// [`start`] does, or fails with a description of the problem.
+fn bind_announcer_socket() -> Result<sys::UdpSocket, String> {
+    let socket = sys::UdpSocket::ipv4().map_err(|errno| {
+        let error = io::Error::from(errno);
+        format!("the announcer's socket cannot be created: {error}")
+    })?;
+    match bind_privileged(|port| socket.bind_any(port)) {
+        Ok(Some(_)) => Ok(socket),
+        Ok(None) => Err(String::from(
+            "no privileged source port, from 1023 down to 512, is free for the announcer's socket",
+        )),
+        Err(errno) => {
+            let error = io::Error::from(errno);
+            Err(format!(
+                "the announcer's socket cannot be bound to a privileged source port: {error}"
+            ))
         }
-        Err(error) => {
-            sys::report(
-                err,
-                &[b"nvx-ingress: ", error.to_string().as_bytes(), b"\n"],
-            );
-            Err(CommandError::Operation)
-        }
+    }
+}
+
+/// Spawns `program` as `nvx-ingress inherit GATEWAY_IPV4`, with `socket` as its standard input,
+/// the caller's standard output and error, every signal's default disposition, and none blocked,
+/// in a session of its own, and returns once the program runs, as [`start`] does once it bound
+/// the socket. It first restores the default disposition of `SIGCHLD`, which the caller may have
+/// inherited ignored. Fails with a description of the problem when the program does not start.
+fn launch(program: &Path, gateway: Ipv4Addr, socket: sys::UdpSocket) -> Result<(), String> {
+    let mut command = Command::new(program);
+    command
+        .arg0("nvx-ingress")
+        .arg("inherit")
+        .arg(gateway.to_string())
+        .stdin(OwnedFd::from(socket));
+    sys::configure_announcer(&mut command);
+    // The spawn collects the status of a child that does not run the program, and panics when
+    // the kernel collected it already, as it collects every child's while `SIGCHLD` is ignored.
+    sys::reset_child_signal();
+    match command.spawn() {
+        // The announcer outlives the caller, which leaves its status to init, or to the nearest
+        // subreaper.
+        Ok(_announcer) => Ok(()),
+        Err(error) => Err(format!("{} did not start: {error}", program.display())),
     }
 }
 
