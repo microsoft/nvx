@@ -346,6 +346,26 @@ fn block_geometries_hold_whole_blocks_of_power_of_two_sizes() {
     }
 }
 
+#[test]
+fn capture_invariants_serde_cannot_bypass_their_checked_form() {
+    let invariants = Invariants::new().with("isolation.mode", "strict").unwrap();
+    assert_eq!(
+        serde_json::from_str::<Invariants>(&serde_json::to_string(&invariants).unwrap()).unwrap(),
+        invariants
+    );
+    for settings in [
+        BTreeMap::from([("Invalid".to_owned(), "value".to_owned())]),
+        BTreeMap::from([("valid".to_owned(), "\n".to_owned())]),
+        (0..=Invariants::MAX_SETTINGS)
+            .map(|index| (format!("setting{index}"), String::new()))
+            .collect(),
+    ] {
+        assert!(
+            serde_json::from_value::<Invariants>(serde_json::to_value(settings).unwrap()).is_err()
+        );
+    }
+}
+
 /// Returns a fresh capture of 1 processor online of 2, and of 256 MiB of memory of 512.
 fn capture() -> CaptureConfig {
     let image = BlockGeometry {
@@ -1120,11 +1140,11 @@ fn values<'a>(arguments: &'a [OsString], option: &str) -> Vec<&'a OsStr> {
 }
 
 #[test]
-fn cold_boot_arguments_refuse_capture_configurations() {
-    let config = captured();
+fn capture_arguments_accept_platform_tokens_and_refuse_nonplatform_tokens() {
+    let mut config = captured();
     config.check().unwrap();
-    config.kernel_command_line().unwrap();
     for result in [
+        config.kernel_command_line().map(|_| ()),
         config.check_command_line(),
         config
             .openvmm_arguments(
@@ -1137,7 +1157,97 @@ fn cold_boot_arguments_refuse_capture_configurations() {
     ] {
         let error = result.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
-        assert!(error.to_string().contains("capture"));
+        assert!(error.to_string().contains("quiet"), "{error}");
+    }
+    config.boot.as_mut().unwrap().command_line = "nvx_sandbox=1".to_owned();
+    config.check_command_line().unwrap();
+    let arguments = config
+        .openvmm_arguments(
+            &runtime(),
+            "/missing/control",
+            Path::new("/missing/report"),
+            Some("/missing/console"),
+        )
+        .unwrap();
+    assert_eq!(
+        values(&arguments, "--cmdline"),
+        [OsStr::new("nvx_sandbox=1 maxcpus=1")]
+    );
+    assert_eq!(values(&arguments, "--processors"), [OsStr::new("2")]);
+    assert_eq!(values(&arguments, "--memory"), [OsStr::new("256M")]);
+    assert_eq!(
+        values(&arguments, "--memory-capacity"),
+        [OsStr::new("512M")]
+    );
+    assert_eq!(
+        values(&arguments, "--snapshot-tier"),
+        [OsStr::new("platform")]
+    );
+}
+
+#[test]
+fn capture_command_lines_keep_only_unowned_platform_tokens() {
+    for token in [
+        "",
+        "reboot=t",
+        "panic=-1",
+        "nvx_sandbox=1",
+        "nvx_config=0xd0010000,65536",
+    ] {
+        let mut config = captured();
+        config.boot.as_mut().unwrap().command_line = token.to_owned();
+        let expected = if token.is_empty() {
+            "maxcpus=1".to_owned()
+        } else {
+            format!("{token} maxcpus=1")
+        };
+        assert_eq!(config.kernel_command_line().unwrap(), expected);
+        config.check_command_line().unwrap();
+    }
+}
+
+#[test]
+#[allow(unreachable_pub, clippy::missing_docs_in_private_items)]
+fn capture_platform_allowlist_matches_openvmms_named_contract() {
+    mod openvmm_defs {
+        pub(super) mod microvm {
+            include!("../../../tests/vectors/openvmm/microvm_control_tty_command_line.rs");
+        }
+    }
+    include!("../../../tests/vectors/openvmm/platform_command_line_token_is_invariant.rs");
+
+    for token in [
+        "earlycon=xe9",
+        "console=hvc0",
+        "console=hvc1",
+        "reboot=t",
+        "panic=-1",
+        "nvx_sandbox=1",
+        "nvx_config=0xd0010000,65536",
+        "nvx_snapshot_tier=platform",
+        "nr_cpus=4",
+        "maxcpus=1",
+        "nvx_control_tty=hvc2",
+        "virtio_mmio.device=0x1000@0xd0000000:1",
+        "virtnet_ip=10.42.0.2",
+        "virtnet_mask=255.255.255.0",
+        "virtnet_gw=10.42.0.1",
+        "virtnet_dns=10.42.0.1",
+        "virtnet_ip6=fd00::2",
+        "virtnet_gw6=fd00::1",
+        "nvx_snapshot_tier=workload",
+        "nvx_entrypoint=/bin/sh",
+        "nvx_hostname=tenant",
+        "virtfs_tag=tenant",
+        "nvx_maps=1",
+        "quiet",
+        "custom=tenant",
+    ] {
+        assert_eq!(
+            super::platform_command_line_token_is_invariant(token),
+            platform_command_line_token_is_invariant(token),
+            "{token}"
+        );
     }
 }
 
