@@ -1395,6 +1395,37 @@ fn a_failure_after_child_creation_terminates_only_that_child_and_confirms_its_ex
 
 #[cfg(any(target_os = "linux", windows))]
 #[test]
+fn a_failed_verification_with_unconfirmed_exit_keeps_its_typed_cleanup_refusal() {
+    let (_directory, vm) = vm_dir();
+    let mut process = None;
+    let error = spawn_verified_with_cleanup(
+        stand_in(&vm),
+        |child| {
+            process = Some(child.process().unwrap());
+            Err(io::Error::other("injected process verification failure"))
+        },
+        |child| {
+            child.kill_and_confirm_exit().unwrap();
+            Err(io::Error::other("injected missing exit confirmation"))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::StillRunning);
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "injected process verification failure"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("injected missing exit confirmation")
+    );
+    assert!(vm.path().join(LOG).exists());
+    assert!(process.unwrap().has_exited().unwrap());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
 fn spawn_failure_keeps_caller_owned_files_and_reports_the_host_error() {
     let (_directory, vm) = vm_dir();
     let mut prepared = stand_in(&vm);

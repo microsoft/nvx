@@ -1085,6 +1085,233 @@ fn cold_console_output_preserves_non_utf8_bytes() {
 }
 
 #[test]
+fn a_cold_spawn_without_a_child_removes_its_private_directory() {
+    let root = Root::new();
+    let temporary = tempfile::tempdir().unwrap();
+    root.write("not-executable{exe}", "not an executable\n");
+    let outcome = root.nvx_rs_with(
+        &["run"],
+        &[
+            ("NVX_OPENVMM", "{root/not-executable{exe}}"),
+            ("TMPDIR", temporary.path().to_str().unwrap()),
+            ("TMP", temporary.path().to_str().unwrap()),
+            ("TEMP", temporary.path().to_str().unwrap()),
+        ],
+    );
+    assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+    assert!(
+        outcome.stderr().contains("error[io]: cannot spawn the VM"),
+        "{}",
+        outcome.describe()
+    );
+    assert_eq!(
+        std::fs::read_dir(temporary.path()).unwrap().count(),
+        0,
+        "{}",
+        outcome.describe()
+    );
+}
+
+#[test]
+fn managed_boot_diagnostics_arrive_before_the_control_endpoint() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+
+    let root = Root::new();
+    let mut process = root
+        .command(&[
+            "run",
+            "--cmdline",
+            "nvx_mode=managed nvx_identity=1001:1001 fake_boot_diagnostics=1 \
+             fake_boot_delay_ms=2000 fake_crash_after_ms=100",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(process.stdout.take().unwrap());
+    let mut command = String::new();
+    stdout.read_line(&mut command).unwrap();
+    assert!(command.starts_with(">> "), "{command}");
+    let mut console = String::new();
+    stdout.read_line(&mut console).unwrap();
+    let mut stderr = process.stderr.take().unwrap();
+    let mut log = [0; 12];
+    stderr.read_exact(&mut log).unwrap();
+    let attached = || {
+        std::fs::read_dir(root.below("build"))
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with("-sessions.log")
+            })
+    };
+    let before_attach = !attached();
+    let output = process.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(console, "boot-console before control\n");
+    assert_eq!(&log, b"boot-log:\xff\x80\xc3");
+    assert!(
+        attached(),
+        "the managed control handshake was never exercised"
+    );
+    assert!(
+        before_attach,
+        "boot diagnostics were withheld until control attachment"
+    );
+}
+
+#[test]
+fn failed_managed_attachment_keeps_boot_diagnostics_before_cleanup() {
+    let root = Root::new();
+    let temporary = tempfile::tempdir().unwrap();
+    let outcome = root.nvx_rs_with(
+        &[
+            "run",
+            "--cmdline",
+            "nvx_mode=managed nvx_identity=1001:1001 fake_boot_diagnostics=1 \
+             fake_refuse_attach=1",
+        ],
+        &[
+            ("TMPDIR", temporary.path().to_str().unwrap()),
+            ("TMP", temporary.path().to_str().unwrap()),
+            ("TEMP", temporary.path().to_str().unwrap()),
+        ],
+    );
+    assert_eq!(outcome.status, Some(1), "{:?}", outcome.status);
+    assert_eq!(outcome.command().1, b"boot-console before control\n");
+    assert!(outcome.stderr.starts_with(b"boot-log:\xff\x80\xc3"));
+    assert!(
+        outcome.stderr[b"boot-log:\xff\x80\xc3".len()..]
+            .windows(b"error[".len())
+            .any(|bytes| bytes == b"error["),
+        "{:?}",
+        outcome.stderr
+    );
+    assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn redirected_boot_logs_preserve_invalid_bytes_and_an_incomplete_eof() {
+    let root = Root::new();
+    let outcome = root.nvx_rs(&["run", "--cmdline", "fake_boot_diagnostics=1"]);
+    assert_eq!(outcome.status, Some(0), "{:?}", outcome.status);
+    assert_eq!(&outcome.stderr, b"boot-log:\xff\x80\xc3");
+    assert_eq!(
+        outcome.command().1,
+        b"boot-console before control\nopenvmm: booted the microVM\n"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn cold_logs_render_invalid_utf8_in_a_real_windows_console() {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "one_shot::windows_cold_log_console_helper",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("NVX_TEST_COLD_LOG_CONSOLE", "cp437")
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+/// Runs only in the parent's new private console, never the shared test process.
+#[cfg(windows)]
+#[test]
+#[ignore]
+#[allow(unsafe_code)]
+fn windows_cold_log_console_helper() {
+    use std::fs::File;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::process::Stdio;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    use windows_sys::Win32::System::Console::{
+        CONSOLE_TEXTMODE_BUFFER, COORD, CreateConsoleScreenBuffer, GetConsoleProcessList,
+        ReadConsoleOutputCharacterW, SetConsoleOutputCP,
+    };
+
+    assert_eq!(
+        std::env::var("NVX_TEST_COLD_LOG_CONSOLE").as_deref(),
+        Ok("cp437")
+    );
+    let mut members = [0; 4];
+    // SAFETY: this helper must be the sole member of its newly created console.
+    let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
+    assert_eq!(count, 1);
+    assert_eq!(members[0], std::process::id());
+    // SAFETY: only this verified helper owns the private console's output code page.
+    assert_ne!(unsafe { SetConsoleOutputCP(437) }, 0);
+    // SAFETY: this creates a new, non-inheritable screen buffer owned by this helper.
+    let raw = unsafe {
+        CreateConsoleScreenBuffer(
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            CONSOLE_TEXTMODE_BUFFER,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(raw, INVALID_HANDLE_VALUE);
+    // SAFETY: the successful call returned this newly owned handle.
+    let screen = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let root = Root::new();
+    let arguments = [
+        "run",
+        "--cmdline",
+        "fake_boot_diagnostics=1 fake_binary_console=1",
+    ];
+    let output = root
+        .command(&arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(File::from(screen.try_clone().unwrap())))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let outcome = crate::harness::Outcome::new(
+        arguments
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect(),
+        output,
+    );
+    assert_eq!(
+        outcome.command().1,
+        b"boot-console before control\nA\xff\x80\n"
+    );
+    let expected: Vec<u16> = "boot-log:\u{fffd}\u{fffd}\u{fffd}".encode_utf16().collect();
+    let mut actual = vec![0; expected.len()];
+    let mut read = 0;
+    // SAFETY: the screen stays open and actual holds the requested UTF-16 characters.
+    assert_ne!(
+        unsafe {
+            ReadConsoleOutputCharacterW(
+                screen.as_raw_handle().cast(),
+                actual.as_mut_ptr(),
+                actual.len() as u32,
+                COORD { X: 0, Y: 0 },
+                &mut read,
+            )
+        },
+        0
+    );
+    assert_eq!(read as usize, expected.len());
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn a_ready_console_stream_is_not_throttled_by_idle_sleeps() {
     use std::time::{Duration, Instant};
 
