@@ -585,7 +585,7 @@ fn check_lifecycle(case: &Configuration) {
             Options::parse(&root.openvmm_arguments(&format!("build/fake-openvmm-{token}.json")));
         assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
         assert_opened_images(&root, token);
-        let mut expected = (case.openvmm)(managed(case.state, &endpoint));
+        let mut expected = (case.openvmm)(managed(case.state, &endpoint)).persistent_expected();
         expected.take("--microvm-sandbox-block");
         expected.assert_matches(&root, &options, &context);
         let maps = root.below(&format!("build/fake-openvmm-{token}-maps.json"));
@@ -679,7 +679,7 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         let mut options = Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
         assert_checked_distro(&root, &options.take("--microvm-sandbox-block"));
         assert_opened_distro(&root, "state");
-        let mut expected = managed("state", &endpoint).in_ram();
+        let mut expected = managed("state", &endpoint).in_ram().persistent_expected();
         expected.take("--microvm-sandbox-block");
         expected.assert_matches(&root, &options, &context);
         let outcome = operate(
