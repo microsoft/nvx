@@ -384,9 +384,9 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
             ]
             .iter()
             .any(|file| name == *file)
-            || name
-                .to_str()
-                .is_some_and(|name| name.starts_with(".openvmm"));
+            || name.to_str().is_some_and(|name| {
+                name.starts_with(".openvmm") || (journaled && capture_temporary(name))
+            });
         let empty_lock = name == StateFile::Lock.name()
             && entry.metadata().map_err(Exit::from_os_error)?.len() == 0;
         if !known || name == StateFile::Config.name() || (!journaled && !empty_lock) {
@@ -408,6 +408,30 @@ fn remove_capture(store: &Store, deadline: Deadline) -> Result {
     }
     drop(locked);
     fs::remove_dir_all(&path).map_err(|error| io_error(ErrorCode::Io, &error, &path))
+}
+
+fn capture_temporary(name: &str) -> bool {
+    if let Some(random) = name.strip_prefix(".tmp") {
+        return random.len() == 6 && random.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    }
+    let Some((file, suffix)) = name
+        .strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .and_then(|name| name.rsplit_once('.'))
+    else {
+        return false;
+    };
+    [
+        StateFile::Journal.name(),
+        StateFile::Capability.name(),
+        StateFile::Outcome.name(),
+        KEY_FILE,
+        DESCRIPTION_FILE,
+    ]
+    .contains(&file)
+        && suffix
+            .parse::<u64>()
+            .is_ok_and(|value| value.to_string() == suffix)
 }
 
 /// Uses authentication and the actual held process, never the capture acknowledgement as exit.
