@@ -979,13 +979,15 @@ compatibility wrapper.
 Verified process references. A `ProcessRef` names one process by its ID, its
 start time, and the `BootId` of the host boot during which it started.
 
-`Process::open` checks a reference and holds its process through a pidfd on
-Linux or a process handle on Windows, whether or not the caller started it, so
-that waits sleep until the process exits and termination never reaches a process
-that reuses its ID. A reference from an earlier boot names an exited process,
-and a process whose identity this user cannot check, such as another user's,
-makes `Process::open` fail rather than report an exit. Linux hosts without
-pidfds poll the reference instead, and cannot terminate the process.
+`Process::open` returns `Opened::Running(Process)` only after checking the
+recorded boot, ID, and start time. It holds the process through a pidfd on
+Linux or a process handle on Windows, whether or not the caller started it,
+so that waits and termination never reach a process that reuses its ID.
+`Opened::Exited(Exited)` proves that the recorded boot ended or no running
+process matches both its ID and start time. A process whose identity this
+user cannot check makes `Process::open` fail rather than report an exit.
+Linux hosts without pidfds poll the reference instead, and cannot terminate
+the process.
 
 On Linux and Windows, `Process::exit_handle()` returns
 `Result<Option<ExitHandle>>`: an independently owned duplicate of the pidfd
@@ -997,8 +999,8 @@ Duplication failures have kind `Io` and retain their original I/O source.
 No watcher thread, future or callback is created by the library.
 
 `Process::wait(deadline)` returns `Some(Exited)` only after verified exit, or
-`None` when the deadline passes without confirmation. `Exited` cannot be made
-by a caller.
+`None` when the deadline passes without confirmation. `Exited` proves exit,
+not an exit status, and cannot be made by a caller.
 
 `Process::bytes_read` reports how many bytes the process has read through the
 operating system's read calls, whether the host's cache served them or not:

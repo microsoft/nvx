@@ -20,7 +20,7 @@ use super::{CLAIM_RELEASE_WAIT, LOCK_RETRY_INTERVAL, SandboxStore, record, store
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::filesystem::FileIdentity;
 use crate::host::platform;
-use crate::host::process::{BootId, Process, ProcessRef};
+use crate::host::process::{BootId, Opened, Process, ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
 
 /// The store of a sandbox whose lock this holds, through which its lifecycle transitions change
@@ -357,7 +357,12 @@ impl LockedStore {
     /// Ends the launch that `journal` records, and removes its files once nothing of it runs.
     pub(super) fn end_launch(&self, journal: &LaunchJournal) -> Result<Recovery> {
         let recovery = match journal.process() {
-            Some(process) => self.end_identified(journal, process, Process::open),
+            Some(process) => self.end_identified(journal, process, |reference| {
+                Ok(match Process::open(reference)? {
+                    Opened::Running(process) => Some(process),
+                    Opened::Exited(_) => None,
+                })
+            }),
             None => self.end_unidentified(journal),
         };
         if !matches!(recovery, Recovery::Indeterminate(_)) {

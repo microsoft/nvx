@@ -11,6 +11,8 @@ use crate::host::config::{
     Boot, LayeredRoot, PROCESS_COMMAND_LINE_LIMIT, RootConfig, UpperConfig,
     process_command_line_units,
 };
+#[cfg(any(target_os = "linux", windows))]
+use crate::host::process::Opened;
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
 use crate::protocol::root::RootImage;
@@ -901,7 +903,9 @@ fn spawn_returns_the_same_outputs_and_capability_with_a_verified_process() {
     assert_eq!(launched.0.capability.as_bytes(), &capability);
     let reference = launched.0.process.reference();
     assert_ne!(reference.pid, std::process::id());
-    let reopened = Process::open(reference).unwrap().unwrap();
+    let Opened::Running(reopened) = Process::open(reference).unwrap() else {
+        panic!("the recorded VMM runs");
+    };
     assert_eq!(reopened.reference(), reference);
     assert!(!reopened.has_exited().unwrap());
     assert!(!format!("{:?}", launched.0).contains(&format!("{capability:?}")));
@@ -1073,7 +1077,9 @@ fn a_library_vm_outlives_the_caller_that_spawned_it_without_retaining_its_output
     );
     let reference =
         serde_json::from_slice(&fs::read(vm.join("caller-process.json")).unwrap()).unwrap();
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the caller's recorded VMM runs");
+    };
     let launched = RunningVm(Launched {
         process,
         outputs: VmDir::open(&vm).unwrap().outputs(false).unwrap(),
@@ -1233,7 +1239,9 @@ fn current_cold_spawn_boots_a_guest_accepts_shell_input_and_exits_cleanly() {
     let launched = RunningVm(spawn(prepared).unwrap());
     assert_eq!(launched.0.capability.as_bytes(), &capability);
     let reference = launched.0.process.reference();
-    let reopened = Process::open(reference).unwrap().unwrap();
+    let Opened::Running(reopened) = Process::open(reference).unwrap() else {
+        panic!("the recorded VMM runs");
+    };
     assert_eq!(reopened.reference(), reference);
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut console = loop {
@@ -1334,7 +1342,9 @@ impl StopChild {
             start_time: platform::process_start_time(child.id()).unwrap().unwrap(),
             boot: crate::host::process::BootId::current().unwrap(),
         };
-        let process = Process::open(&reference).unwrap().unwrap();
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the owned child runs");
+        };
         Self { child, process }
     }
 }

@@ -23,7 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nvx::host::platform;
-use nvx::host::process::{BootId, Process, ProcessRef};
+use nvx::host::process::{BootId, Opened, Process, ProcessRef};
 use nvx::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, PolicyVerdict};
 use nvx::host::sandbox::{LayerRole, SandboxDistro, SandboxLayer, SandboxPlan, SandboxUpper};
 #[cfg(target_os = "linux")]
@@ -528,7 +528,7 @@ impl Orphan {
 
 impl Drop for Orphan {
     fn drop(&mut self) {
-        if let Ok(Some(process)) = Process::open(&self.0) {
+        if let Ok(Opened::Running(process)) = Process::open(&self.0) {
             let _ = process.kill();
             let _ = process.wait(Instant::now() + TIMEOUT);
         }

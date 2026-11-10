@@ -31,7 +31,10 @@ use crate::host::runtime::{Runtime, RuntimeIdentity};
 use crate::host::snapshot::Snapshot;
 use crate::host::spawn::{self, VmmCommand};
 use crate::host::transport::{self, HostConnection};
-use crate::host::{platform::inherit::Inherited, process::Process, process::ProcessRef};
+use crate::host::{
+    platform::inherit::Inherited,
+    process::{Opened, Process, ProcessRef},
+};
 use crate::protocol::CAPABILITY_LEN;
 use crate::{Error, Result};
 
@@ -252,12 +255,16 @@ pub fn verify(saved: &SavedVm, runtime: &RuntimeIdentity) -> Result<Process> {
             ),
         ));
     }
-    Process::open(&saved.process)
+    match Process::open(&saved.process)
         .map_err(|error| Error::io("cannot verify the saved VM process").with_source(error))?
-        .ok_or_else(|| {
+    {
+        Opened::Running(process) => Ok(process),
+        Opened::Exited(_) => {
             let message = "the saved VM process exited";
-            Error::exited(message).with_source(io::Error::new(io::ErrorKind::NotFound, message))
-        })
+            Err(Error::exited(message)
+                .with_source(io::Error::new(io::ErrorKind::NotFound, message)))
+        }
+    }
 }
 
 /// A verified held VM process and its authenticated control connection.

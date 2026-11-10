@@ -1035,6 +1035,11 @@ method nvx::host::process::BootId::current
 method nvx::host::process::BootId::from_bytes
 type nvx::host::process::ExitHandle
 struct nvx::host::process::Exited
+enum nvx::host::process::Opened
+variant nvx::host::process::Opened::Exited
+field nvx::host::process::Opened::Exited::0
+variant nvx::host::process::Opened::Running
+field nvx::host::process::Opened::Running::0
 struct nvx::host::process::Process
 method nvx::host::process::Process::bytes_read
 method nvx::host::process::Process::exit_handle

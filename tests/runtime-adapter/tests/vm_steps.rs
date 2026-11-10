@@ -20,7 +20,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use nvx::ErrorCode;
-use nvx::host::process::Process;
+use nvx::host::process::{Opened, Process};
 use nvx::host::store::{LaunchState, SandboxStore};
 use runtime_adapter::hook::{Action, HOOK_EXIT, STEP_HOOK, Step, StepHook};
 use runtime_adapter::staged::Staged;
@@ -205,9 +205,9 @@ fn the_hook_pauses_a_launch_at_each_of_its_steps() {
                 .unwrap()
                 .expect("the launch has its journal");
             assert_eq!(journal.state(), LaunchState::Spawned, "at {step}");
-            let vmm = Process::open(journal.process().unwrap())
-                .unwrap()
-                .expect("the VMM runs");
+            let Opened::Running(vmm) = Process::open(journal.process().unwrap()).unwrap() else {
+                panic!("the VMM runs");
+            };
             assert!(!vmm.has_exited().unwrap(), "at {step}");
             assert_eq!(store.runtime().unwrap(), None, "at {step}");
         }

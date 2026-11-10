@@ -228,7 +228,7 @@ use nvx::exec::{Key, Limits, Timers, Window};
 use nvx::host::artifacts::Artifacts;
 use nvx::host::filesystem::GUEST_EXPORT;
 use nvx::host::platform::Transport;
-use nvx::host::process::{BootId, Process};
+use nvx::host::process::{BootId, Opened, Process};
 use nvx::host::sandbox::SandboxNetwork;
 use nvx::host::store::{CallerFiles, LOG_NAME, SandboxStore};
 use nvx::host::template::{
@@ -2379,9 +2379,10 @@ fn refuses_early(template: &Template, early: Message) {
     let restoring = planned
         .launch(&mut acquired, &runtime.artifacts.openvmm, &runtime.identity)
         .unwrap();
-    let vmm = Process::open(restoring.starting().process().reference())
-        .unwrap()
-        .expect("the clone's VMM runs");
+    let Opened::Running(vmm) = Process::open(restoring.starting().process().reference()).unwrap()
+    else {
+        panic!("the clone's VMM runs");
+    };
     let mut control = Early {
         early: early.clone(),
         vmm,

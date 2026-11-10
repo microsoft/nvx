@@ -47,7 +47,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::platform;
-use super::process::{Process, ProcessRef};
+use super::process::{Opened, Process, ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
 use crate::protocol::nvxs::{
     ErrorCode, HostEvent, HostSession, Identity, RecordType, SessionError,
@@ -76,9 +76,12 @@ pub fn connect_verified(
     reference: &ProcessRef,
     deadline: Instant,
 ) -> Result<Box<dyn Transport>> {
-    let process = Process::open(reference)
+    let process = match Process::open(reference)
         .map_err(|error| Error::io("cannot verify the endpoint's VM process").with_source(error))?
-        .ok_or_else(exited)?;
+    {
+        Opened::Running(process) => process,
+        Opened::Exited(_) => return Err(exited()),
+    };
     let mut unavailable = None;
     loop {
         check_running(&process)?;

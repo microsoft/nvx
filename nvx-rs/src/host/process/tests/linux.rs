@@ -144,13 +144,14 @@ fn a_process_runs_until_its_last_thread_exits() {
         thread::sleep(POLL_INTERVAL);
     }
     assert_eq!(platform::process_start_time(pid).unwrap(), Some(start_time));
-    let process = Process::open(&ProcessRef {
+    let Opened::Running(process) = Process::open(&ProcessRef {
         pid,
         start_time,
         boot: BootId::current().unwrap(),
     })
-    .unwrap()
-    .expect("a process whose main thread exited still runs");
+    .unwrap() else {
+        panic!("a process whose main thread exited still runs");
+    };
     assert!(
         process
             .wait(Instant::now() + Duration::from_millis(100))
@@ -197,13 +198,16 @@ fn a_process_whose_command_name_is_not_utf8_can_be_examined() {
         start_time: platform::process_start_time(pid).unwrap().unwrap(),
         boot: BootId::current().unwrap(),
     };
-    assert!(Process::open(&reference).unwrap().is_some());
+    assert!(matches!(
+        Process::open(&reference).unwrap(),
+        Opened::Running(_)
+    ));
     // A reference to a process that exited and whose ID this one reused names no process.
     let stale = ProcessRef {
         start_time: reference.start_time + 1,
         ..reference
     };
-    assert!(Process::open(&stale).unwrap().is_none());
+    assert!(matches!(Process::open(&stale).unwrap(), Opened::Exited(_)));
     child.0.kill().unwrap();
     child.0.wait().unwrap();
 }
