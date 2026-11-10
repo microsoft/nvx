@@ -154,6 +154,18 @@ pub struct NicConfig {
     pub guest_network: Ipv4Cidr,
 }
 
+impl NetworkConfig {
+    /// Resolves the address that a cold launch attaches, shared by preparation and rendering.
+    pub(crate) fn cold_nic(&self) -> Result<NicConfig> {
+        Ok(NicConfig {
+            guest_network: match self.guest_network {
+                Some(address) => address,
+                None => Ipv4Cidr::parse(DEFAULT_GUEST_NETWORK).map_err(Error::unsupported)?,
+            },
+        })
+    }
+}
+
 /// What only a VM's cold boot takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boot {
@@ -644,10 +656,7 @@ impl VmConfig {
             }
         }
         if let Some(network) = &self.network {
-            let guest_network = network.guest_network.map_or_else(
-                || DEFAULT_GUEST_NETWORK.to_owned(),
-                |address| address.to_string(),
-            );
+            let guest_network = network.cold_nic()?.guest_network.to_string();
             let mut nic = network::openvmm_arguments(Some(&network.policy), &guest_network)?;
             if nic.is_empty() {
                 // A configured NIC remains present even under the deny-all posture.
