@@ -88,7 +88,10 @@ impl AttachmentCancellation {
         #[cfg(any(target_os = "linux", windows))]
         {
             let handle = transport.try_clone_handle()?.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Unsupported, "attachment I/O cannot be cancelled")
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "attachment I/O cannot be cancelled",
+                )
             })?;
             *self.transport.lock().expect("attachment lock poisoned") = Some(handle);
         }
@@ -105,8 +108,8 @@ impl AttachmentCancellation {
         if let Some(handle) = &*self.transport.lock().expect("attachment lock poisoned") {
             #[cfg(target_os = "linux")]
             {
-                use std::os::fd::AsRawFd;
                 use nix::sys::socket::{Shutdown, shutdown};
+                use std::os::fd::AsRawFd;
 
                 match shutdown(handle.as_raw_fd(), Shutdown::Both) {
                     Ok(()) | Err(nix::errno::Errno::ENOTCONN) => {}
@@ -303,7 +306,11 @@ impl Session {
             pid,
             capability,
             timeout,
-            || launched.wait_timeout(Duration::ZERO).is_ok_and(|status| status.is_some()),
+            || {
+                launched
+                    .wait_timeout(Duration::ZERO)
+                    .is_ok_and(|status| status.is_some())
+            },
             None,
         )
     }
@@ -322,7 +329,11 @@ impl Session {
             pid,
             capability,
             timeout,
-            || launched.wait_timeout(Duration::ZERO).is_ok_and(|status| status.is_some()),
+            || {
+                launched
+                    .wait_timeout(Duration::ZERO)
+                    .is_ok_and(|status| status.is_some())
+            },
             Some(cancellation),
         )
     }
@@ -387,9 +398,14 @@ impl Session {
         cancellation: Option<AttachmentCancellation>,
     ) -> Result<Self> {
         if let Some(cancellation) = &cancellation {
-            cancellation.register(transport.as_ref()).map_err(Exit::from_os_error)?;
+            cancellation
+                .register(transport.as_ref())
+                .map_err(Exit::from_os_error)?;
         }
-        let probe = Arc::new(Probe { cancellation, ..Probe::default() });
+        let probe = Arc::new(Probe {
+            cancellation,
+            ..Probe::default()
+        });
         let transport = Box::new(ProbedTransport {
             inner: transport,
             probe: Arc::clone(&probe),

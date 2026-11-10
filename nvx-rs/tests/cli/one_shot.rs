@@ -927,13 +927,16 @@ fn gated_native(
     process: &mut std::process::Child,
     directory: &std::path::Path,
 ) -> nvx::host::process::Process {
-    use std::time::{Duration, Instant};
     use nvx::host::process::{BootId, Opened, Process, ProcessRef};
+    use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let marker = directory.join("phase.json");
     while !marker.is_file() {
-        assert!(process.try_wait().unwrap().is_none(), "the CLI exited before its gate");
+        assert!(
+            process.try_wait().unwrap().is_none(),
+            "the CLI exited before its gate"
+        );
         if Instant::now() >= deadline {
             process.kill().unwrap();
             process.wait().unwrap();
@@ -965,14 +968,24 @@ fn foreground_exits_promptly(
     while process.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             native.kill().unwrap();
-            assert!(native.wait(Instant::now() + Duration::from_secs(2)).unwrap().is_some());
+            assert!(
+                native
+                    .wait(Instant::now() + Duration::from_secs(2))
+                    .unwrap()
+                    .is_some()
+            );
             process.kill().unwrap();
             process.wait().unwrap();
             panic!("foreground cancellation waited for an attachment timeout");
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(native.wait(Instant::now() + Duration::from_secs(1)).unwrap().is_some());
+    assert!(
+        native
+            .wait(Instant::now() + Duration::from_secs(1))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -985,10 +998,12 @@ fn forwarding_failure_stops_the_verified_vm_during_connect_and_handshake() {
         let gate = root.below("build/foreground-gate");
         std::fs::create_dir(&gate).unwrap();
         let temporary = tempfile::Builder::new().prefix("nf3-").tempdir().unwrap();
-        let mut process = root.command(&[
-            "run", "--cmdline",
-            &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
-        ])
+        let mut process = root
+            .command(&[
+                "run",
+                "--cmdline",
+                &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
+            ])
             .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
             .env("TMPDIR", temporary.path())
             .env("TMP", temporary.path())
@@ -996,7 +1011,8 @@ fn forwarding_failure_stops_the_verified_vm_during_connect_and_handshake() {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
         let mut stdout = BufReader::new(process.stdout.take().unwrap());
         let mut command = String::new();
         stdout.read_line(&mut command).unwrap();
@@ -1011,6 +1027,11 @@ fn forwarding_failure_stops_the_verified_vm_during_connect_and_handshake() {
         assert!(stderr.contains("error[io]:"), "{stderr}");
         assert!(!stderr.contains("timed out"), "{stderr}");
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+        println!("NVX-FORWARD-FAILURE {}", serde_json::json!({
+            "phase":phase, "native":native.reference(), "held_native_exited":true,
+            "status":1, "original_io_error":true, "private_directory_removed":true,
+            "completion_bound_seconds":3,
+        }));
     }
 }
 
@@ -1018,13 +1039,13 @@ fn forwarding_failure_stops_the_verified_vm_during_connect_and_handshake() {
 #[test]
 #[allow(unsafe_code)]
 fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
+    use nix::pty::openpty;
+    use nix::sys::termios::{LocalFlags, tcgetattr};
     use std::fs::File;
     use std::io::Write;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
-    use nix::pty::openpty;
-    use nix::sys::termios::{LocalFlags, tcgetattr};
 
     for phase in ["console", "handshake"] {
         let root = Root::new();
@@ -1034,10 +1055,12 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
         let terminal = openpty(None, None).unwrap();
         let original = tcgetattr(&terminal.slave).unwrap();
         let mut command = root.command(&[
-            "run", "--cmdline",
+            "run",
+            "--cmdline",
             &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
         ]);
-        command.env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
+        command
+            .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
             .env("TMPDIR", temporary.path())
             .stdin(Stdio::from(terminal.slave.try_clone().unwrap()))
             .stdout(Stdio::from(terminal.slave.try_clone().unwrap()))
@@ -1057,7 +1080,10 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
         let deadline = Instant::now() + Duration::from_secs(2);
         let raw = loop {
             let mode = tcgetattr(&terminal.slave).unwrap();
-            if !mode.local_flags.intersects(LocalFlags::ICANON | LocalFlags::ECHO) {
+            if !mode
+                .local_flags
+                .intersects(LocalFlags::ICANON | LocalFlags::ECHO)
+            {
                 break mode;
             }
             assert!(Instant::now() < deadline, "the terminal never became raw");
@@ -1077,6 +1103,11 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
         assert_eq!(restored.control_flags, original.control_flags);
         assert_eq!(restored.control_chars, original.control_chars);
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+        println!("NVX-TERMINAL-CTRL-C {}", serde_json::json!({
+            "phase":phase, "native":native.reference(), "terminal_keyboard_byte":3,
+            "raw_isig":true, "terminal_restored":true, "status":130,
+            "held_native_exited":true, "private_directory_removed":true,
+        }));
     }
 }
 
@@ -1086,14 +1117,236 @@ fn a_ctrl_c_byte_in_redirected_stdin_is_not_terminal_cancellation() {
     use std::process::Stdio;
 
     let root = Root::new();
-    let mut process = root.command(&[
-        "run", "--cmdline", "fake_boot_delay_ms=100 fake_exit_status=7",
-    ])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
+    let mut process = root
+        .command(&[
+            "run",
+            "--cmdline",
+            "fake_boot_delay_ms=100 fake_exit_status=7",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     process.stdin.take().unwrap().write_all(b"\x03").unwrap();
     let output = process.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(7), "{output:?}");
+}
+
+#[cfg(windows)]
+#[test]
+#[allow(unsafe_code)]
+fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Console::{
+        COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, InitializeProcThreadAttributeList,
+        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTUPINFOEXW,
+        UpdateProcThreadAttribute, WaitForSingleObject,
+    };
+
+    struct Console(HPCON);
+    impl Drop for Console {
+        fn drop(&mut self) {
+            // SAFETY: this test owns the pseudoconsole and continuously drains its output.
+            unsafe { ClosePseudoConsole(self.0) };
+        }
+    }
+
+    fn pipe() -> (OwnedHandle, OwnedHandle) {
+        let (mut read, mut write): (HANDLE, HANDLE) =
+            (std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: the writable outputs receive two new, non-inheritable handles.
+        assert_ne!(unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 0) }, 0);
+        // SAFETY: only these wrappers own the handles returned by CreatePipe.
+        unsafe {
+            (OwnedHandle::from_raw_handle(read.cast()), OwnedHandle::from_raw_handle(write.cast()))
+        }
+    }
+
+    use std::os::windows::io::AsRawHandle;
+    let directory = tempfile::tempdir().unwrap();
+    let (input, keyboard) = pipe();
+    let (screen, output) = pipe();
+    let mut console = 0;
+    // SAFETY: the pipe ends remain open throughout pseudoconsole creation.
+    assert_eq!(unsafe {
+        CreatePseudoConsole(
+            COORD { X: 100, Y: 40 },
+            input.as_raw_handle().cast(),
+            output.as_raw_handle().cast(),
+            0,
+            &mut console,
+        )
+    }, 0);
+    let console = Console(console);
+    drop(input);
+    drop(output);
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        File::from(screen).read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let mut bytes = 0;
+    // SAFETY: the first call obtains the allocation size for one process attribute.
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut bytes) };
+    let mut attributes = vec![0usize; bytes.div_ceil(std::mem::size_of::<usize>())];
+    let attributes = attributes.as_mut_ptr().cast();
+    // SAFETY: the aligned allocation has the requested size and remains live through creation.
+    assert_ne!(unsafe { InitializeProcThreadAttributeList(attributes, 1, 0, &mut bytes) }, 0);
+    // SAFETY: the pseudoconsole remains owned until its child and all of its output end.
+    assert_ne!(unsafe {
+        UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+            console.0 as *const std::ffi::c_void,
+            std::mem::size_of::<HPCON>(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    }, 0);
+    let mut environment: Vec<_> = std::env::vars_os().collect();
+    environment.push(("NVX_TEST_RAW_TERMINAL_DIR".into(), directory.path().as_os_str().to_owned()));
+    environment.sort_by_key(|(name, _)| name.to_string_lossy().to_ascii_uppercase());
+    let mut block = Vec::new();
+    for (name, value) in environment {
+        block.extend(name.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    let executable = std::env::current_exe().unwrap();
+    let mut command: Vec<u16> = format!(
+        "\"{}\" --exact one_shot::windows_terminal_ctrl_c_helper --ignored --nocapture --test-threads=1",
+        executable.display()
+    ).encode_utf16().chain([0]).collect();
+    // SAFETY: both Win32 structs are plain data with valid all-zero initial states.
+    let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    let mut child: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup.lpAttributeList = attributes;
+    // SAFETY: every buffer and attribute remains valid until CreateProcessW returns.
+    let created = unsafe {
+        CreateProcessW(
+            std::ptr::null(), command.as_mut_ptr(), std::ptr::null(), std::ptr::null(),
+            0, EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            block.as_ptr().cast(), std::ptr::null(), &startup.StartupInfo, &mut child,
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    // SAFETY: initialization succeeded and process creation has finished using the list.
+    unsafe { DeleteProcThreadAttributeList(attributes) };
+    assert_ne!(created, 0, "{error}");
+    // SAFETY: the successful call returned these two newly owned handles.
+    let process = unsafe { OwnedHandle::from_raw_handle(child.hProcess.cast()) };
+    drop(unsafe { OwnedHandle::from_raw_handle(child.hThread.cast()) });
+    let mut keyboard = File::from(keyboard);
+    for phase in ["console", "handshake"] {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !directory.path().join(format!("{phase}.ready")).is_file() {
+            // SAFETY: the handle still owns exactly the helper that this test created.
+            assert_ne!(unsafe { WaitForSingleObject(child.hProcess, 0) }, WAIT_OBJECT_0,
+                "the private terminal helper exited before {phase}");
+            assert!(Instant::now() < deadline, "the terminal helper never reached {phase}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        keyboard.write_all(b"\x03").unwrap();
+    }
+    // SAFETY: the helper itself bounds each CLI cancellation and confirms its owned fake's exit.
+    assert_eq!(unsafe { WaitForSingleObject(child.hProcess, 10_000) }, WAIT_OBJECT_0);
+    let mut status = 0;
+    // SAFETY: the process handle and writable exit-code output remain valid.
+    assert_ne!(unsafe { GetExitCodeProcess(child.hProcess, &mut status) }, 0);
+    drop(keyboard);
+    drop(console);
+    let transcript = reader.join().unwrap();
+    assert_eq!(status, 0, "{}", String::from_utf8_lossy(&transcript));
+    for phase in ["console", "handshake"] {
+        let receipt = std::fs::read_to_string(directory.path().join(format!("{phase}.json"))).unwrap();
+        println!("NVX-TERMINAL-CTRL-C {receipt}");
+    }
+    drop(process);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore]
+#[allow(unsafe_code)]
+fn windows_terminal_ctrl_c_helper() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::System::Console::{
+        CTRL_C_EVENT, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE, SetConsoleCtrlHandler,
+    };
+
+    unsafe extern "system" fn keep_helper(control: u32) -> windows_sys::core::BOOL {
+        i32::from(control == CTRL_C_EVENT)
+    }
+
+    let directory = std::path::PathBuf::from(
+        std::env::var_os("NVX_TEST_RAW_TERMINAL_DIR").expect("private pseudoconsole required")
+    );
+    // SAFETY: this callback affects only this helper, not its children or any other console.
+    assert_ne!(unsafe { SetConsoleCtrlHandler(Some(keep_helper), 1) }, 0);
+    for phase in ["console", "handshake"] {
+        let root = Root::new();
+        let gate = root.below("build/foreground-gate");
+        std::fs::create_dir(&gate).unwrap();
+        let temporary = tempfile::Builder::new().prefix("nf3-").tempdir().unwrap();
+        let mut original = 0;
+        // SAFETY: this helper's stdin belongs to the parent's private pseudoconsole.
+        let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        assert_ne!(unsafe { GetConsoleMode(input, &mut original) }, 0);
+        let mut process = root.command(&[
+            "run", "--cmdline",
+            &format!("nvx_mode=managed nvx_identity=1001:1001 fake_foreground_gate={phase}"),
+        ])
+            .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
+            .env("TMP", temporary.path()).env("TEMP", temporary.path())
+            .stdin(Stdio::inherit()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap();
+        let native = gated_native(&mut process, &gate);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let raw = loop {
+            let mut mode = 0;
+            // SAFETY: the helper retains its own console input handle while the CLI runs.
+            assert_ne!(unsafe { GetConsoleMode(input, &mut mode) }, 0);
+            if mode & (ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT) == 0 {
+                break mode;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        std::fs::write(directory.join(format!("{phase}.ready")), b"raw").unwrap();
+        foreground_exits_promptly(&mut process, &native);
+        let output = process.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(130), "{output:?}");
+        assert_ne!(raw & ENABLE_PROCESSED_INPUT, 0);
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("error[io]:"));
+        let mut restored = 0;
+        // SAFETY: the helper survives Ctrl-C and reads the same pseudoconsole after CLI exit.
+        assert_ne!(unsafe { GetConsoleMode(input, &mut restored) }, 0);
+        assert_eq!(restored, original);
+        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+        let receipt = serde_json::json!({
+            "phase":phase, "terminal_keyboard_byte":3, "raw_mode":raw,
+            "original_mode":original, "restored_mode":restored, "status":130,
+            "held_native_exited":native.has_exited().unwrap(), "private_directory_removed":true,
+        });
+        std::fs::write(directory.join(format!("{phase}.json")), receipt.to_string()).unwrap();
+    }
 }
 
 #[test]
