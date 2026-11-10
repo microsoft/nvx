@@ -33,8 +33,6 @@ use windows_sys::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
-#[cfg(feature = "cli")]
-use super::process::refused_termination;
 use super::process::{ProcessHandle, creation_time};
 use super::{owned, raw, wide};
 use crate::host::platform::check_working_dir;
@@ -114,21 +112,6 @@ impl LaunchedProcess {
             return Err(io::Error::last_os_error());
         }
         Ok(Some(status))
-    }
-
-    /// Asks the process to end with status 1 without waiting for it, as `Popen.terminate` and
-    /// `Popen.kill` do on Windows.
-    #[cfg(feature = "cli")]
-    pub(crate) fn request_termination(&self) -> io::Result<()> {
-        // SAFETY: CreateProcessW returned the handle with full access.
-        if unsafe { TerminateProcess(raw(&self.process), 1) } == 0 {
-            // A process that is exiting or exited cannot be terminated; Python ignores that too.
-            let refused = refused_termination(io::Error::last_os_error());
-            if refused.is_err() && self.wait_timeout(Duration::ZERO)?.is_none() {
-                return refused;
-            }
-        }
-        Ok(())
     }
 }
 

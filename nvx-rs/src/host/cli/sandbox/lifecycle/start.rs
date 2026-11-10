@@ -10,6 +10,7 @@ use super::{
     CONFIG_NAME, Found, REQUIRED_FEATURES, connect, find_vm, mismatched, require_config,
     running_vm, runtime_for,
 };
+use crate::ErrorCode;
 use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::cli::deadline::Deadline;
 use crate::host::cli::sandbox::lock::LifecycleLock;
@@ -27,7 +28,6 @@ use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
 use crate::host::sandbox::{SandboxLaunch, SandboxPlan};
 use crate::host::vm::{self, SavedVm, VmDir};
 use crate::net::Ipv4Cidr;
-use crate::{ErrorCode, ErrorKind};
 
 /// Starts a provisioned sandbox, as `start` does.
 pub(crate) fn start(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
@@ -131,22 +131,28 @@ fn start_locked(
                 }
             })
         });
-    let Err(error) = ready else {
+    let Err(mut error) = ready else {
         return starting.commit(&saved).map_err(error_with_cause);
     };
     drop(starting);
-    let now = Instant::now();
     let grace = if stopping || matches!(error, Exit::EndpointClosed) {
-        Deadline::after(timeout).instant()
+        Deadline::after(timeout)
     } else {
-        now
+        Deadline::after(0.0)
     };
+    if let Err(wait) = super::stop::wait_for_exit(&launched.process, grace) {
+        if !matches!(wait, Exit::Interrupted) {
+            return Err(wait);
+        }
+        error = wait;
+    }
+    let now = Instant::now();
     let stopped = vm::stop(
         &launched.process,
         &launched.outputs,
         |_| false,
-        grace,
-        grace + KILL_TIMEOUT,
+        now,
+        now + KILL_TIMEOUT,
     )
     .map_err(error_with_cause)?;
     lock.locked()
@@ -245,14 +251,7 @@ fn binding_error(error: crate::Error) -> Exit {
 /// features of [`REQUIRED_FEATURES`], and returns the session, on which the caller sends the
 /// guest what it needs before the launch commits.
 fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Session> {
-    let attached =
-        vm::reattach(saved, runtime, Deadline::after(timeout).instant()).map_err(|error| {
-            match error.kind() {
-                ErrorKind::Exited => Exit::EndpointClosed,
-                _ => error_with_cause(error),
-            }
-        })?;
-    let mut session = Session::from_connection(attached.connection);
+    let mut session = Session::reattach(saved, runtime, timeout)?;
     session.ping(timeout)?;
     let features = session.features(timeout)?;
     let missing = features.missing(REQUIRED_FEATURES);
