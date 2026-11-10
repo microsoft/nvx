@@ -67,7 +67,7 @@ use crate::activation::{MachineIdMode, View};
 use crate::host::artifacts::{ArtifactDir, Guest, require_artifact};
 use crate::host::config::{Boot, ConsoleAttachment, NetworkConfig, RootConfig, VmConfig};
 use crate::host::filesystem::{
-    self, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
+    self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
 };
 use crate::host::platform::{self, Transport};
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
@@ -432,7 +432,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         terminal_console.as_ref().is_some_and(Result::is_err)
             || extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err()
     } else {
-        cold_config(&options, &rules).is_err()
+        cold_preflight(&options, &rules).is_err()
     };
     let located = locate(root)?;
     // A restore boots no kernel or initramfs: the snapshot holds the guest.
@@ -488,7 +488,34 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     Err(Exit::Status(status))
 }
 
-fn cold_config(options: &Options, rules: &NativeRules) -> Result<VmConfig> {
+/// Checks only options, not paths that artifact installation may create or replace.
+fn cold_preflight(options: &Options, rules: &NativeRules) -> Result {
+    let shares = cold_shares(options)?;
+    for (target, _, _) in &shares {
+        if let Some(reserved) = ReservedTargets::BLOCKLESS_ROOT.reservation(target) {
+            return Err(Exit::error(
+                ErrorCode::Unsupported,
+                format!("--mount target {target} overlaps reserved guest path {reserved}"),
+            ));
+        }
+    }
+    if shares.len() > 1 {
+        for (kind, given) in &options.policy_paths {
+            if !Path::new(&path_text(given)).is_absolute() {
+                return Err(Exit::error(
+                    ErrorCode::Unsupported,
+                    format!(
+                        "with several --mount shares, {} must be an absolute host path",
+                        kind.option()
+                    ),
+                ));
+            }
+        }
+    }
+    cold_vm_config(options, rules, None).map(|_| ())
+}
+
+fn cold_shares(options: &Options) -> Result<Vec<(String, String, MountAccess)>> {
     let shares = options
         .mounts
         .iter()
@@ -510,6 +537,14 @@ fn cold_config(options: &Options, rules: &NativeRules) -> Result<VmConfig> {
             },
         ));
     }
+    if let Some(owner) = options.mount_owner {
+        require_mount_owner_supported(owner)?;
+    }
+    Ok(shares)
+}
+
+fn cold_config(options: &Options, rules: &NativeRules) -> Result<VmConfig> {
+    let shares = cold_shares(options)?;
     let hosts: Vec<_> = shares
         .iter()
         .map(|(_, host, _)| Path::new(host).to_owned())
@@ -575,6 +610,14 @@ fn cold_config(options: &Options, rules: &NativeRules) -> Result<VmConfig> {
         reserved: ReservedTargets::BLOCKLESS_ROOT,
     })
     .map_err(error_with_cause)?;
+    cold_vm_config(options, rules, filesystem)
+}
+
+fn cold_vm_config(
+    options: &Options,
+    rules: &NativeRules,
+    filesystem: Option<ExportPlan>,
+) -> Result<VmConfig> {
     let network = sandbox_network(&options.network, rules)?
         .map(|network| -> Result<NetworkConfig> {
             Ok(NetworkConfig {
@@ -786,6 +829,7 @@ fn console_input(console: Box<dyn Transport>) -> Result<(Box<dyn Transport>, Inp
 }
 
 struct ConsoleOutput {
+    write: fn(&[u8]) -> io::Result<()>,
     #[cfg(windows)]
     console: bool,
     #[cfg(windows)]
@@ -797,12 +841,22 @@ struct ConsoleOutput {
 impl ConsoleOutput {
     fn new() -> Self {
         Self {
+            write: output::write_stdout,
             #[cfg(windows)]
             console: io::stdout().is_terminal(),
             #[cfg(windows)]
             pending: [0; 3],
             #[cfg(windows)]
             pending_len: 0,
+        }
+    }
+
+    fn stderr() -> Self {
+        Self {
+            write: output::write_stderr,
+            #[cfg(windows)]
+            console: io::stderr().is_terminal(),
+            ..Self::new()
         }
     }
 
@@ -825,83 +879,56 @@ impl ConsoleOutput {
                     }
                 });
             let ready = bytes.len() - incomplete;
-            output::write_stdout(String::from_utf8_lossy(&bytes[..ready]).as_bytes())?;
+            (self.write)(String::from_utf8_lossy(&bytes[..ready]).as_bytes())?;
             self.pending[..incomplete].copy_from_slice(&bytes[ready..]);
             self.pending_len = incomplete;
             return Ok(());
         }
-        output::write_stdout(data)
+        (self.write)(data)
     }
 
     fn finish(&mut self) -> io::Result<()> {
         #[cfg(windows)]
         if self.pending_len != 0 {
-            output::write_stdout("\u{fffd}".as_bytes())?;
+            (self.write)("\u{fffd}".as_bytes())?;
             self.pending_len = 0;
         }
         Ok(())
     }
 }
 
-fn foreground(
-    launched: &mut vm::Launched,
-    log: &mut File,
-    managed: bool,
-    control: &mut Option<Session>,
-) -> Result<i32> {
-    let _terminal = TerminalGuard::new()?;
-    let endpoint = launched
-        .outputs
-        .console
-        .clone()
-        .expect("a cold run requests a console listener");
-    let (mut console, input) = if let Some(console) = connect_running(launched, &endpoint)? {
-        let (console, input) = console_input(console)?;
-        (Some(console), Some(input))
-    } else {
-        (None, None)
-    };
-    let mut attach_closed = None;
-    if managed && console.is_some() {
-        let endpoint = launched.outputs.endpoint.clone();
-        let capability = *launched.capability.as_bytes();
-        match Session::connect_launched(
-            &endpoint,
-            launched.child_mut().map_err(Exit::from_os_error)?,
-            &capability,
-            60.0,
-        ) {
-            Ok(session) => *control = Some(session),
-            Err(Exit::EndpointClosed) => {
-                attach_closed = Some(Instant::now() + Duration::from_secs(60));
-            }
-            Err(error) => return Err(error),
+struct ForegroundOutput<'a> {
+    log: &'a mut File,
+    console: Option<Box<dyn Transport>>,
+    stdout: ConsoleOutput,
+    stderr: ConsoleOutput,
+}
+
+impl<'a> ForegroundOutput<'a> {
+    fn new(log: &'a mut File) -> Self {
+        Self {
+            log,
+            console: None,
+            stdout: ConsoleOutput::new(),
+            stderr: ConsoleOutput::stderr(),
         }
     }
-    let mut console_output = ConsoleOutput::new();
-    let mut buffer = [0; 8192];
-    loop {
-        check_interrupt()?;
-        let count = log.read(&mut buffer).map_err(Exit::from_os_error)?;
+
+    fn forward(&mut self) -> Result<bool> {
+        let mut buffer = [0; 8192];
+        let count = self.log.read(&mut buffer).map_err(Exit::from_os_error)?;
         let mut progressed = count != 0;
-        output::write_stderr(&buffer[..count]).map_err(Exit::from_os_error)?;
-        let status = launched
-            .wait_status(Duration::ZERO)
+        self.stderr
+            .write_all(&buffer[..count])
             .map_err(Exit::from_os_error)?;
-        if let Some(input) = &input
-            && status.is_none()
-            && let Ok(result) = input.try_recv()
-        {
-            result.map_err(Exit::from_os_error)?;
-        }
-        if let Some(transport) = &mut console {
+        if let Some(transport) = &mut self.console {
             match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
                 Ok(0) => {
-                    console = None;
-                    console_output.finish().map_err(Exit::from_os_error)?;
+                    self.console = None;
+                    self.stdout.finish().map_err(Exit::from_os_error)?;
                 }
                 Ok(count) => {
-                    console_output
+                    self.stdout
                         .write_all(&buffer[..count])
                         .map_err(Exit::from_os_error)?;
                     progressed = true;
@@ -913,42 +940,114 @@ fn foreground(
                         io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
                     ) =>
                 {
-                    console = None;
-                    console_output.finish().map_err(Exit::from_os_error)?;
+                    self.console = None;
+                    self.stdout.finish().map_err(Exit::from_os_error)?;
                 }
                 Err(error) => return Err(Exit::from_os_error(error)),
             }
         }
-        if let Some(status) = status {
-            loop {
-                let count = log.read(&mut buffer).map_err(Exit::from_os_error)?;
-                if count == 0 {
-                    break;
-                }
-                output::write_stderr(&buffer[..count]).map_err(Exit::from_os_error)?;
+        Ok(progressed)
+    }
+
+    fn drain(&mut self) -> Result {
+        while self.forward()? {}
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result {
+        self.drain()?;
+        self.stdout.finish().map_err(Exit::from_os_error)?;
+        self.stderr.finish().map_err(Exit::from_os_error)
+    }
+}
+
+/// Keeps both boot streams moving during the synchronous control handshake.
+fn attach_with_output<T: Send>(
+    attach: impl FnOnce() -> Result<T> + Send,
+    mut forward: impl FnMut() -> Result<bool>,
+) -> Result<T> {
+    thread::scope(|scope| {
+        let attaching = thread::Builder::new()
+            .name("nvx-run-attach".to_owned())
+            .spawn_scoped(scope, attach)
+            .map_err(Exit::from_os_error)?;
+        while !attaching.is_finished() {
+            check_interrupt()?;
+            if !forward()? {
+                thread::sleep(Duration::from_millis(10));
             }
-            if let Some(transport) = &mut console {
-                loop {
-                    match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
-                        Ok(0) => break,
-                        Ok(count) => console_output
-                            .write_all(&buffer[..count])
-                            .map_err(Exit::from_os_error)?,
-                        Err(error)
-                            if matches!(
-                                error.kind(),
-                                io::ErrorKind::TimedOut
-                                    | io::ErrorKind::BrokenPipe
-                                    | io::ErrorKind::ConnectionReset
-                            ) =>
-                        {
-                            break;
+        }
+        let attached = attaching
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        if attached.is_err() {
+            let deadline = Instant::now() + Duration::from_millis(250);
+            loop {
+                match forward() {
+                    Ok(true) if Instant::now() < deadline => {}
+                    Ok(_) => break,
+                    Err(error) => {
+                        if let Err(attach) = attached {
+                            attach.report();
                         }
-                        Err(error) => return Err(Exit::from_os_error(error)),
+                        return Err(error);
                     }
                 }
             }
-            console_output.finish().map_err(Exit::from_os_error)?;
+        }
+        attached
+    })
+}
+
+fn foreground(
+    launched: &mut vm::Launched,
+    output: &mut ForegroundOutput<'_>,
+    managed: bool,
+    control: &mut Option<Session>,
+) -> Result<i32> {
+    let _terminal = TerminalGuard::new()?;
+    let endpoint = launched
+        .outputs
+        .console
+        .clone()
+        .expect("a cold run requests a console listener");
+    let input = if let Some(console) = connect_running(launched, &endpoint)? {
+        let (console, input) = console_input(console)?;
+        output.console = Some(console);
+        Some(input)
+    } else {
+        None
+    };
+    let mut attach_closed = None;
+    if managed && output.console.is_some() {
+        let endpoint = launched.outputs.endpoint.clone();
+        let capability = *launched.capability.as_bytes();
+        let child = launched.child_mut().map_err(Exit::from_os_error)?;
+        match attach_with_output(
+            || Session::connect_launched(&endpoint, child, &capability, 60.0),
+            || output.forward(),
+        ) {
+            Ok(session) => *control = Some(session),
+            Err(Exit::EndpointClosed) => {
+                attach_closed = Some(Instant::now() + Duration::from_secs(60));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    loop {
+        check_interrupt()?;
+        let progressed = output.forward()?;
+        let status = launched
+            .wait_status(Duration::ZERO)
+            .map_err(Exit::from_os_error)?;
+        if let Some(input) = &input
+            && status.is_none()
+            && let Ok(result) = input.try_recv()
+        {
+            result.map_err(Exit::from_os_error)?;
+        }
+        if let Some(status) = status {
+            output.finish()?;
             return Ok(status);
         }
         if attach_closed.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -1031,8 +1130,11 @@ fn run_cold(
                 "the VM log was replaced before its reader opened",
             ));
         }
+        let mut launched = vm::spawn(prepared).map_err(|error| {
+            cleanup = error.kind() != crate::ErrorKind::StillRunning;
+            error_with_cause(error)
+        })?;
         cleanup = false;
-        let mut launched = vm::spawn(prepared).map_err(error_with_cause)?;
         drop(hold);
         let mut control = None;
         let managed = config.boot.as_ref().is_some_and(|boot| {
@@ -1040,7 +1142,8 @@ fn run_cold(
                 .split_ascii_whitespace()
                 .any(|token| token == "nvx_mode=managed")
         });
-        let status = foreground(&mut launched, &mut log, managed, &mut control);
+        let mut output = ForegroundOutput::new(&mut log);
+        let status = foreground(&mut launched, &mut output, managed, &mut control);
         let now = Instant::now();
         let mut graceful_error = None;
         let stopped = vm::stop(
@@ -1074,6 +1177,15 @@ fn run_cold(
         {
             error.report();
         }
+        let drained = output.finish();
+        let status = match (status, drained) {
+            (Err(error), Err(drain)) => {
+                drain.report();
+                Err(error)
+            }
+            (status, Ok(())) => status,
+            (Ok(_), Err(error)) => Err(error),
+        };
         check_interrupt()?;
         let status = status?;
         if let Err(error) = stopped.report {
