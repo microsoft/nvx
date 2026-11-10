@@ -846,6 +846,32 @@ fn check_forward_failure_during_handshake(
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
 }
 
+#[cfg(any(target_os = "linux", windows))]
+fn check_cancellable_session_closes_failed_io(
+    client: Box<dyn Transport>,
+    server: impl Transport + 'static,
+) {
+    let (closed, closure) = mpsc::channel();
+    let peer = thread::spawn(move || {
+        let mut guest = Guest::new(server);
+        guest.accept();
+        let _ = guest.request();
+        closed.send(guest.record().is_none()).unwrap();
+    });
+    let cancellation = AttachmentCancellation::default();
+    let mut session =
+        Session::attach(client, &CAPABILITY, 5.0, Some(cancellation.clone())).unwrap();
+    assert_eq!(
+        message(session.ping(0.05)),
+        "managed control response timed out"
+    );
+    let observed = closure.recv_timeout(Duration::from_secs(1));
+    drop(session);
+    drop(cancellation);
+    peer.join().unwrap();
+    assert_eq!(observed, Ok(true));
+}
+
 #[test]
 fn response_that_does_not_arrive_times_out() {
     let (mut session, worker) = session_with(|guest| {
@@ -1188,6 +1214,22 @@ mod endpoints {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn successful_attachment_does_not_keep_failed_session_io_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = platform::connect_endpoint(
+            path.to_str().unwrap(),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        check_cancellable_session_closes_failed_io(client, Server(server));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn writes_to_a_slow_endpoint_end_by_their_deadline() {
         // A blocking send restarts its timeout whenever the endpoint makes room.
         let directory = tempfile::tempdir().unwrap();
@@ -1406,6 +1448,22 @@ mod endpoints {
         assert_eq!(&byte, b"c");
         drop(server);
         assert_eq!(client.read(&mut byte, Some(Duration::ZERO)).unwrap(), 0);
+    }
+
+    #[test]
+    fn successful_attachment_does_not_keep_failed_session_io_open() {
+        let (name, server) = create_pipe();
+        let accepted = thread::spawn(move || {
+            accept(&server);
+            server
+        });
+        let client = platform::connect_endpoint(
+            &name.replace('\\', "/"),
+            std::process::id(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        check_cancellable_session_closes_failed_io(client, Server(accepted.join().unwrap()));
     }
 
     #[test]
