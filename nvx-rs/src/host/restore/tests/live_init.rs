@@ -1,0 +1,516 @@
+use std::error::Error;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::net::{SocketAddr, TcpListener};
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::Hypervisor;
+use crate::activation::{
+    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, MachineIdMode,
+    Network, OverlayMode, Publication, ReadyActivation, RestoreSection, TransactionId, Upper, View,
+};
+use crate::host::instance::generate_capability;
+use crate::host::nvxs::HostConnection;
+use crate::host::session;
+use crate::host::supervisor::{Launched, VmmCommand, spawn};
+use crate::host::template::TemplateManifest;
+use crate::protocol::{
+    APP_ERROR, APP_EXEC, APP_EXIT, APP_MAPS, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP,
+    APP_STOPPED, HostMap, Workload, WorkloadEnvironment, decode_app, encode_app,
+    encode_exec_payload, encode_maps_payloads,
+};
+
+type AnyError = Box<dyn Error>;
+const ACTIVATE: u8 = 8;
+const CAPTURE: u8 = 7;
+
+struct OwnedVm(Option<Launched>);
+impl Drop for OwnedVm {
+    fn drop(&mut self) {
+        if let Some(vm) = self.0.take() {
+            if vm
+                .process()
+                .and_then(|process| process.has_exited())
+                .is_ok_and(|done| done)
+            {
+                vm.detach();
+            } else if !vm.kill_and_wait() {
+                eprintln!("OWNED_RESTORE_TEARDOWN_FAILED");
+            }
+        }
+    }
+}
+
+fn require(ok: bool, message: impl Into<String>) -> Result<(), AnyError> {
+    if ok {
+        Ok(())
+    } else {
+        Err(message.into().into())
+    }
+}
+
+fn backend() -> Hypervisor {
+    if cfg!(windows) {
+        Hypervisor::Whp
+    } else {
+        Hypervisor::Mshv
+    }
+}
+
+fn private_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(windows)]
+    {
+        fs::create_dir(path)
+    }
+}
+
+fn ready(
+    connection: &mut HostConnection,
+    id: u64,
+    expected: &[u8],
+    by: Instant,
+) -> Result<(), AnyError> {
+    let bytes = connection.receive(Some(by))?;
+    let frame = decode_app(&bytes)?;
+    require(
+        (frame.kind, frame.request_id, frame.status, frame.payload) == (APP_READY, id, 0, expected),
+        format!("unexpected Ready: {frame:?}"),
+    )
+}
+
+fn workload(script: &str) -> Result<Vec<u8>, AnyError> {
+    Ok(encode_exec_payload(&Workload {
+        argv: vec!["/bin/sh".into(), "-eu".into(), "-c".into(), script.into()],
+        timeout_ms: 10_000,
+        cwd: Some("/"),
+        environment: WorkloadEnvironment::Default,
+    })?)
+}
+
+fn execute(
+    connection: &mut HostConnection,
+    id: u64,
+    script: &str,
+    by: Instant,
+) -> Result<String, AnyError> {
+    connection.send(&encode_app(APP_EXEC, id, 0, &workload(script)?), Some(by))?;
+    let mut output = Vec::new();
+    loop {
+        let bytes = connection.receive(Some(by))?;
+        let frame = decode_app(&bytes)?;
+        require(
+            frame.request_id == id,
+            format!("wrong execution response: {frame:?}"),
+        )?;
+        match frame.kind {
+            APP_STDOUT => output.extend_from_slice(frame.payload),
+            APP_STDERR => eprint!("{}", String::from_utf8_lossy(frame.payload)),
+            APP_EXIT => {
+                require(
+                    frame.status == 0 && frame.payload == b"exit",
+                    format!("execution failed: {frame:?}"),
+                )?;
+                return Ok(String::from_utf8(output)?);
+            }
+            _ => return Err(format!("unexpected execution frame: {frame:?}").into()),
+        }
+    }
+}
+
+fn run() -> Result<(), AnyError> {
+    let grant = std::env::var("NVX_SL77B_LIVE_GRANT")?;
+    require(
+        !grant.is_empty(),
+        "live fixture requires explicit named host admission",
+    )?;
+    let mut args = vec![OsString::from("nvx-live-restored-init")];
+    for key in [
+        "NVX_SL77B_LIVE_NATIVE",
+        "NVX_SL77B_LIVE_SNAPSHOT",
+        "NVX_SL77B_LIVE_DISTRO",
+        "NVX_SL77B_LIVE_CONSOLE",
+        "NVX_SL77B_LIVE_ROOT",
+        "NVX_SL77B_LIVE_RESULT",
+        "NVX_SL77B_LIVE_CASE",
+    ] {
+        args.push(
+            std::env::var_os(key).ok_or_else(|| format!("missing live fixture input {key}"))?,
+        );
+    }
+    require(
+        args.len() == 8,
+        "usage: restore VMM SNAPSHOT DISTRO ORIGINAL_CONSOLE ROOT RESULT CASE",
+    )?;
+    let vmm = PathBuf::from(&args[1]);
+    let snapshot = PathBuf::from(&args[2]);
+    let distro = PathBuf::from(&args[3]);
+    let original_console = PathBuf::from(&args[4]);
+    let root = PathBuf::from(&args[5]);
+    let result = PathBuf::from(&args[6]);
+    let case = args[7].to_str().ok_or("non-Unicode case")?;
+    require(
+        matches!(case, "published" | "unpublished" | "changed" | "deadline"),
+        "invalid fixture case",
+    )?;
+    for path in [&vmm, &snapshot, &distro, &original_console, &root, &result] {
+        require(path.is_absolute(), "all fixture paths must be absolute")?;
+    }
+    let manifest = TemplateManifest::read(&snapshot)?;
+    require(
+        manifest.hypervisor() == backend() && manifest.memory_len() == 128 << 20,
+        "wrong backend/memory snapshot",
+    )?;
+    require(
+        !root.exists() && !result.exists(),
+        "preserve existing fixture effects",
+    )?;
+    private_directory(&root)?;
+    let export = root.join("export");
+    fs::create_dir(&export)?;
+    fs::write(export.join("proof"), b"CURRENT_573F_HOST_MAP\n")?;
+    let endpoint = if cfg!(windows) {
+        format!(
+            "//./pipe/openvmm-microvm-sl77b-live-{}-{case}",
+            std::process::id()
+        )
+    } else {
+        snapshot
+            .parent()
+            .ok_or("snapshot has no private namespace parent")?
+            .join(format!("nvxs-{case}"))
+            .to_str()
+            .ok_or("non-Unicode endpoint")?
+            .to_owned()
+    };
+    let address: SocketAddr = fs::read_to_string(&original_console)?.trim().parse()?;
+    require(address.ip().is_loopback(), "console must remain loopback")?;
+    let listener = TcpListener::bind(address)?;
+    listener.set_nonblocking(true)?;
+    let console = root.join("restored-console.log");
+    let console_output = console.clone();
+    let reader = thread::spawn(move || -> io::Result<()> {
+        let by = Instant::now() + Duration::from_secs(30);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < by => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        stream.set_nonblocking(false)?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(console_output)?;
+        io::copy(&mut stream, &mut output)?;
+        Ok(())
+    });
+    let report = root.join("outcome.json");
+    let (_temporary, directory) = super::vm_directory();
+    let mut listener = super::ReadyListener::bind(&directory)?;
+    let acknowledgement = listener.endpoint().to_owned();
+    let log_file = root.join("openvmm.log");
+    let log = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&log_file)?;
+    let options: Vec<OsString> = vec![
+        "--machine".into(),
+        "microvm".into(),
+        "--microvm-sandbox-block".into(),
+        format!("distro:file:{},ro", distro.display()).into(),
+        "--restore-absent-scratch".into(),
+        "--single-process".into(),
+        "--hypervisor".into(),
+        if cfg!(windows) { "whp" } else { "mshv" }.into(),
+        "--cpu-profile".into(),
+        "auto".into(),
+        "--processors".into(),
+        "1".into(),
+        "--restore-snapshot".into(),
+        snapshot.as_os_str().to_owned(),
+        "--restore-memory".into(),
+        "128M".into(),
+        "--restore-ready-path".into(),
+        acknowledgement.into(),
+        "--restore-network-policy".into(),
+        "--network-profile".into(),
+        "portable".into(),
+        "--network-egress".into(),
+        "deny".into(),
+        "--network-ingress".into(),
+        "deny".into(),
+        "--host-loopback".into(),
+        "deny".into(),
+        "--mount-aggregate".into(),
+        "/run/nvx/hostfs/root".into(),
+        "--mount-child".into(),
+        format!("0,{},ro", export.display()).into(),
+        "--virtio-console".into(),
+        format!("connect=tcp:{address}").into(),
+        "--microvm-control-console".into(),
+        format!("listen={endpoint}").into(),
+        "--microvm-control-auth-stdin".into(),
+        "--microvm-report".into(),
+        report.as_os_str().to_owned(),
+    ];
+    let capability = generate_capability()?;
+    let command = VmmCommand::new(vmm, options, &root);
+    let mut owned = OwnedVm(Some(spawn(&command, &capability, log)?));
+    let running = owned.0.as_ref().ok_or("missing owned VM")?;
+    let process = running.process()?;
+    let pid = running.id();
+    fs::write(
+        root.join("process.txt"),
+        format!(
+            "pid={pid}\nreference={:?}\ncase={case}\n",
+            process.reference()
+        ),
+    )?;
+    println!(
+        "OWNED_RESTORE_PID={pid} REFERENCE={:?} CASE={case}",
+        process.reference()
+    );
+    let by = Instant::now() + Duration::from_secs(90);
+    let expected_event = b"OPENVMM_RESTORE_READY_V1\n";
+    let mut event = Vec::new();
+    while event.len() < expected_event.len() {
+        require(Instant::now() < by, "native readiness deadline expired")?;
+        let open = listener.receive(&process, &mut event, 64, Duration::from_millis(50))?;
+        require(
+            open || event.len() == expected_event.len(),
+            "native readiness closed before its event",
+        )?;
+    }
+    require(
+        event == expected_event,
+        "native restore-ready event differs",
+    )?;
+    super::parse_ready_event(&event)?;
+    fs::write(root.join("native-ready.receipt"), &event)?;
+    println!("NATIVE_READY_AUTHENTICATED_PID={pid}");
+    let native_ready = Instant::now();
+    if case == "deadline" {
+        thread::sleep(Duration::from_secs(8));
+    }
+    let transport = session::connect(&endpoint, pid, process.reference().start_time, by)?;
+    let mut connection = HostConnection::attach(transport, &capability, by)?;
+    println!(
+        "RESTORED_HOST_SESSION_EPOCH={}",
+        connection.identity().epoch
+    );
+    let attached = Instant::now();
+    let expected_status;
+    if case == "deadline" {
+        require(
+            process.wait(Instant::now() + Duration::from_secs(40))?,
+            "activation deadline did not end VM",
+        )?;
+        require(
+            native_ready.elapsed() >= Duration::from_secs(27)
+                && native_ready.elapsed() < Duration::from_secs(38)
+                && attached.elapsed() < Duration::from_secs(27),
+            "activation deadline renewed at the deliberately delayed host attachment",
+        )?;
+        println!(
+            "ORIGINAL_ACK_DEADLINE_ELAPSED_MS={}",
+            native_ready.elapsed().as_millis()
+        );
+        expected_status = 125;
+    } else {
+        let published = case != "unpublished";
+        let transaction = TransactionId::from_bytes([0x77; 16]);
+        let record = ActivationRecord::new(
+            Some(RestoreSection { transaction }),
+            Configuration {
+                image: Image::Erofs { uuid: None },
+                upper: Upper::Tmpfs {
+                    max_memory_percent: 50,
+                },
+                overlay: OverlayMode::UntrustedLowers,
+                export: Some(Export {
+                    kind: ExportKind::Aggregate,
+                }),
+                mappings: 1,
+                network: Some(Network {
+                    dns: Some("10.88.0.53".parse()?),
+                    publication: if published {
+                        Publication::Published
+                    } else {
+                        Publication::Unpublished
+                    },
+                    proxy: None,
+                }),
+                view: View {
+                    hostname: b"restored-573f".to_vec(),
+                    machine_id: MachineIdMode::Generated,
+                },
+                resources: ExpectedResources {
+                    cpus: 1,
+                    memory: 128 << 20,
+                },
+            },
+        )?;
+        let mut activation = Vec::new();
+        activation.extend_from_slice(&1000u32.to_le_bytes());
+        activation.extend_from_slice(&1001u32.to_le_bytes());
+        activation.push(1);
+        activation.extend(record.encode());
+        fs::write(root.join("activate.bin"), &activation)?;
+        let expected_ready = ReadyActivation {
+            transaction: Some(transaction),
+        }
+        .encode();
+        connection.send(&encode_app(ACTIVATE, 100, 0, &activation), Some(by))?;
+        ready(&mut connection, 100, &expected_ready, by)?;
+        println!("ACTIVATION_READY_PUBLICATION={published} OWN_DNS=10.88.0.53");
+        if case == "changed" {
+            activation[0] ^= 1;
+            connection.send(&encode_app(ACTIVATE, 101, 0, &activation), Some(by))?;
+            require(
+                process.wait(Instant::now() + Duration::from_secs(15))?,
+                "changed identity replay did not end VM",
+            )?;
+            expected_status = 125;
+            println!("CHANGED_IDENTITY_REPLAY_FATAL");
+        } else {
+            connection.send(&encode_app(APP_EXEC, 102, 0, &workload("true")?), Some(by))?;
+            let bytes = connection.receive(Some(by))?;
+            let frame = decode_app(&bytes)?;
+            require(
+                frame.kind == APP_ERROR
+                    && frame.status == 11
+                    && frame.payload == b"mappings-incomplete",
+                format!("EXEC bypassed MAPS gate: {frame:?}"),
+            )?;
+            let maps = [HostMap {
+                source: "0".into(),
+                target: "/mnt/restore-map".into(),
+                read_only: true,
+            }];
+            for payload in encode_maps_payloads(&maps, 32768)? {
+                connection.send(&encode_app(APP_MAPS, 103, 0, &payload), Some(by))?;
+                ready(&mut connection, 103, &[], by)?;
+            }
+            let script = format!(
+                r#"
+test "$(id -u)" = 1000
+test "$(id -g)" = 1001
+test "$(hostname)" = restored-573f
+grep -q 'nameserver 10.88.0.53' /etc/resolv.conf
+test "$(cat /mnt/restore-map/proof)" = CURRENT_573F_HOST_MAP
+test ! -e /sbin/nvx-ingress
+count=0
+for p in /proc/[0-9]*; do
+    test "$(cat "$p/comm" 2>/dev/null || true)" = nvx-ingress || continue
+    count=$((count + 1))
+    grep -q '^PPid:[[:space:]]*1$' "$p/status"
+    test "$(cat "$p/oom_score_adj")" = -1000
+    test "$(tr '\000' ' ' <"$p/cmdline")" = 'nvx-ingress 10.88.0.1 '
+    test "$(awk '{{print $19}}' "$p/stat")" = -10
+    printf 'REAL_RESTORED_ANNOUNCER pid=%s argv=' "${{p##*/}}"
+    tr '\000' ' ' <"$p/cmdline"
+    printf '\n'
+done
+test "$count" = {}
+printf 'PRESERVED_573F_UPPER\n' >/tmp/restore-sentinel
+printf 'MACHINE_ID='
+cat /etc/machine-id
+printf '\n'
+printf 'REAL_READY_MAPS_EXEC_OK\n'
+"#,
+                u8::from(published)
+            );
+            let first = execute(&mut connection, 104, &script, by)?;
+            print!("{first}");
+            let machine = first
+                .lines()
+                .find(|line| line.starts_with("MACHINE_ID="))
+                .ok_or("missing generated machine ID")?
+                .to_owned();
+            for kill in [0, 1] {
+                connection.send(
+                    &encode_app(CAPTURE, 105 + u64::from(kill), 0, &[kill]),
+                    Some(by),
+                )?;
+                let bytes = connection.receive(Some(by))?;
+                let frame = decode_app(&bytes)?;
+                require(
+                    frame.kind == APP_ERROR && frame.status == 95,
+                    "activated restore accepted capture",
+                )?;
+            }
+            drop(connection);
+            let transport = session::connect(&endpoint, pid, process.reference().start_time, by)?;
+            connection = HostConnection::attach(transport, &capability, by)?;
+            connection.send(&encode_app(ACTIVATE, 107, 0, &activation), Some(by))?;
+            ready(&mut connection, 107, &expected_ready, by)?;
+            let replay = execute(
+                &mut connection,
+                108,
+                r#"
+test "$(cat /tmp/restore-sentinel)" = PRESERVED_573F_UPPER
+test "$(cat /mnt/restore-map/proof)" = CURRENT_573F_HOST_MAP
+printf 'MACHINE_ID='
+cat /etc/machine-id
+printf '\n'
+printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
+"#,
+                by,
+            )?;
+            require(
+                replay.lines().any(|line| line == machine),
+                "retry regenerated the machine ID",
+            )?;
+            print!("{replay}");
+            connection.send(&encode_app(APP_STOP, 109, 0, &[]), Some(by))?;
+            let bytes = connection.receive(Some(by))?;
+            let frame = decode_app(&bytes)?;
+            require(
+                frame.kind == APP_STOPPED && frame.status == 0,
+                "STOP not acknowledged",
+            )?;
+            require(
+                process.wait(Instant::now() + Duration::from_secs(30))?,
+                "STOP did not tear down restore",
+            )?;
+            expected_status = 0;
+        }
+    }
+    drop(connection);
+    reader.join().map_err(|_| "console reader panicked")??;
+    let outcome = crate::host::report::read(&report).ok_or("missing native outcome")?;
+    require(
+        outcome.status_code == Some(expected_status) && outcome.teardown_complete == Some(true),
+        format!("wrong restore outcome: {outcome:?}"),
+    )?;
+    let logs = fs::read_to_string(&console)?;
+    let switches = logs.matches("NVX-INIT-ROOT: switched").count();
+    require(
+        switches == usize::from(case != "deadline"),
+        format!("unexpected root switch count {switches}"),
+    )?;
+    let text = format!(
+        "RESTORE_OK case={case} pid={pid} status={expected_status} switches={switches} teardown=true\n"
+    );
+    fs::write(result, &text)?;
+    print!("{text}");
+    owned.0.take().ok_or("missing owned restore")?.detach();
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires explicit named host admission and current-source live restore fixture inputs"]
+fn live_restored_init_activation() -> Result<(), AnyError> {
+    run()
+}
