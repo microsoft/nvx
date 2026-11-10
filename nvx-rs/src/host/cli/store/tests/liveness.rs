@@ -95,7 +95,11 @@ fn replacing_the_log_or_sandbox_never_proves_the_launch_exited() {
             .to_string()
             .contains("cannot check the launch log claim")
     );
-    assert!(locked.endpoint_owner(&journal).is_err());
+    assert!(
+        locked
+            .endpoint_owner(&journal, Instant::now() + Duration::from_secs(5))
+            .is_err()
+    );
     assert!(locked.journal().unwrap().is_some());
 }
 
@@ -126,7 +130,9 @@ fn the_spawned_process_inherits_the_preparations_claim() {
     assert!(locked.claim_held(&journal).unwrap());
     #[cfg(target_os = "linux")]
     {
-        let owner = locked.endpoint_owner(&journal).unwrap();
+        let owner = locked
+            .endpoint_owner(&journal, Instant::now() + Duration::from_secs(5))
+            .unwrap();
         assert_eq!(owner.reference().pid, child.0.as_ref().unwrap().id());
         assert!(!owner.has_exited().unwrap());
     }
@@ -165,12 +171,19 @@ fn an_endpoint_owner_without_the_claimed_log_is_rejected_without_signaling_it() 
     );
     assert!(released(|| state.dir().join("holder-ready").exists()));
     assert!(locked.claim_held(&journal).unwrap());
-    let error = locked.endpoint_owner(&journal).err().unwrap();
+    let error = locked
+        .endpoint_owner(&journal, Instant::now() + Duration::from_secs(5))
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("does not hold the launch log"));
     assert!(other.0.try_wait().unwrap().is_none());
     drop(prepared);
     assert!(released(|| !locked.claim_held(&journal).unwrap()));
-    assert!(locked.endpoint_owner(&journal).is_err());
+    assert!(
+        locked
+            .endpoint_owner(&journal, Instant::now() + Duration::from_secs(5))
+            .is_err()
+    );
     assert!(other.0.try_wait().unwrap().is_none());
 }
 
@@ -198,10 +211,13 @@ fn without_a_log_job_inherited_handles_remain_the_claim() {
 #[test]
 fn endpoint_ownership_is_rechecked_only_after_the_server_is_held() {
     let pid = std::process::id();
+    let deadline = Instant::now() + Duration::from_secs(5);
     let held = std::cell::Cell::new(false);
     let mut lookups = 0;
     let owner = hold_endpoint_server(
-        || {
+        deadline,
+        |budget| {
+            assert_eq!(budget, deadline);
             lookups += 1;
             assert_eq!(held.get(), lookups == 2);
             Ok(Some(pid))
@@ -218,7 +234,8 @@ fn endpoint_ownership_is_rechecked_only_after_the_server_is_held() {
     for replacement in [None, Some(pid.wrapping_add(1))] {
         let mut lookups = 0;
         let error = hold_endpoint_server(
-            || {
+            deadline,
+            |_| {
                 lookups += 1;
                 Ok(if lookups == 1 { Some(pid) } else { replacement })
             },
@@ -233,12 +250,16 @@ fn endpoint_ownership_is_rechecked_only_after_the_server_is_held() {
 
 #[test]
 fn missing_owners_and_lookup_or_hold_errors_are_not_exit_proofs() {
-    assert!(hold_endpoint_server(|| Ok(None), |_| panic!("no owner was found")).is_err());
-    assert!(hold_endpoint_server(|| Ok(Some(1)), |_| Ok(None)).is_err());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    assert!(
+        hold_endpoint_server(deadline, |_| Ok(None), |_| panic!("no owner was found")).is_err()
+    );
+    assert!(hold_endpoint_server(deadline, |_| Ok(Some(1)), |_| Ok(None)).is_err());
     for phase in 0..3 {
         let mut lookups = 0;
         let error = hold_endpoint_server(
-            || {
+            deadline,
+            |_| {
                 lookups += 1;
                 if (phase == 0 && lookups == 1) || (phase == 2 && lookups == 2) {
                     Err(io::Error::from(io::ErrorKind::PermissionDenied))
@@ -258,6 +279,38 @@ fn missing_owners_and_lookup_or_hold_errors_are_not_exit_proofs() {
         .unwrap();
         let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
         assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
+    }
+}
+
+#[test]
+fn an_exhausted_budget_prevents_the_first_probe_and_the_held_owners_recheck() {
+    for after_hold in [false, true] {
+        let deadline = Instant::now()
+            + if after_hold {
+                Duration::from_secs(1)
+            } else {
+                Duration::ZERO
+            };
+        let mut probes = 0;
+        let error = hold_endpoint_server(
+            deadline,
+            |budget| {
+                assert_eq!(budget, deadline);
+                probes += 1;
+                Ok(Some(std::process::id()))
+            },
+            |_| {
+                let process = own_process();
+                thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                Ok(Some(process))
+            },
+        )
+        .err()
+        .unwrap();
+        let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
+        assert_eq!(source.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(probes, usize::from(after_hold));
+        assert!(!own_process().has_exited().unwrap());
     }
 }
 
