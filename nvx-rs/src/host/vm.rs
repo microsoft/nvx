@@ -45,7 +45,7 @@ use crate::{Error, Result};
 /// OpenVMM's log of a launch.
 const LOG: &str = "openvmm.log";
 /// OpenVMM's outcome report of a launch.
-const OUTCOME: &str = "outcome.json";
+pub(super) const OUTCOME: &str = "outcome.json";
 /// The control socket on Linux.
 const CONTROL: &str = "control.sock";
 /// The guest's boot-console socket on Linux.
