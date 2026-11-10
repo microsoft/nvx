@@ -149,9 +149,9 @@ impl HostClock {
     }
 }
 
-/// The time contract of a capture: the rates that it declares, which its template's key holds,
-/// and the anchor at which it was captured, with the identities of the host and the boot that
-/// captured it, which the generations of one key differ in.
+/// The complete time contract of a capture, retained by its manifest and snapshot key. Its
+/// rates contribute to the key's compatibility identity; its capture anchor, host, boot and
+/// lineage do not, so captures with different anchors can share that identity.
 ///
 /// A restore uses the anchor to measure how long the capture has been down: on the same host
 /// boot, by the host's monotonic clock, and otherwise by UTC.

@@ -10,16 +10,17 @@ use super::CaptureContext;
 use super::canonical::{CanonicalError, Reader, Writer};
 use super::manifest::{
     AddressSpace, BlockGeometry, CPUID_ENTRY_LEN, CpuProfile, Device, DeviceRange,
-    FILESYSTEM_SLOT_VERSION, Interrupts, Ipv6Identity, MAX_COMMAND_LINE_LEN, MAX_CPUID_ENTRIES,
-    MAX_DEVICE_RANGES, MAX_DEVICE_WORDS, MAX_DEVICES, MAX_MEMORY_RANGES, MAX_PROCESSORS,
-    MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic, PROCESSOR_COUNTS, PolicyIdentity, Rates,
-    SnapshotManifest, Topology, parse_profile_id,
+    FILESYSTEM_SLOT_VERSION, HostClock, Interrupts, Ipv6Identity, MAX_COMMAND_LINE_LEN,
+    MAX_CPUID_ENTRIES, MAX_DEVICE_RANGES, MAX_DEVICE_WORDS, MAX_DEVICES, MAX_MEMORY_RANGES,
+    MAX_PROCESSORS, MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic, PROCESSOR_COUNTS,
+    PolicyIdentity, Rates, SnapshotManifest, TimeContract, Topology, parse_profile_id,
 };
 use crate::activation;
 use crate::contract;
 use crate::error::{Error, Result};
 use crate::host::config::{DiskCapture, check_setting};
 use crate::host::platform::parse_hex32;
+use crate::host::process::BootId;
 use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::mount::MOUNT_TAG;
 use crate::host::store::{ArtifactIdentity, MAX_IDENTITY_LEN, RuntimeIdentity};
@@ -204,8 +205,9 @@ macro_rules! identity {
 }
 
 identity!(
-    /// The identity of a [`SnapshotKey`]: the SHA-256 digest of its canonical encoding, after the
-    /// domain `nvx snapshot key` and a NUL, so that it names a key of one encoding version alone.
+    /// The compatibility identity of a [`SnapshotKey`]: the SHA-256 digest of its canonical
+    /// compatibility prefix, after the domain `nvx snapshot key` and a NUL. The persisted
+    /// capture-time anchors do not contribute to it.
     ///
     /// Its text form, which `Display` writes and `FromStr` parses, is 64 lowercase hexadecimal
     /// digits; parsing also accepts uppercase ones. It converts to and from the
@@ -302,9 +304,9 @@ fn guest_network_of(nic: &Nic) -> String {
 ///
 /// A capture whose manifest matches its class makes a template whose [`SnapshotKey`] combines
 /// them: [`SnapshotKey::new`] checks that the machine of the manifest is the class's, and takes
-/// the rest of the key from it. Captures of one class make templates of one key, unless something
-/// that the class does not fix changed between them, such as the host's CPU, which its effective
-/// CPUID and its rates follow.
+/// the rest of the key from it. Captures of one class have one compatibility identity unless
+/// something that the class does not fix changes, such as the host's CPU, which its effective
+/// CPUID and its rates follow. Each key also retains its own capture's time contract.
 ///
 /// Its [`identity`](Self::identity) names the class: the SHA-256 digest of its canonical encoding,
 /// which holds every field, and the versions of the contracts that the key holds.
@@ -473,12 +475,12 @@ impl CaptureClass {
 ///   the template replaces with its clone's own; and the template's [`Invariants`], its other
 ///   invariant isolation and resource settings.
 ///
-/// A capture's own metadata is not part of it, so the generations of one key differ in it: when
-/// the capture was taken, its time contract's anchor, host, boot, and lineage counter, and the
-/// lengths of its artifacts. [`SnapshotManifest`] keeps them. Nothing of a clone is part of it
-/// either: its image, upper, export, network policy and settings, identity, and activation
-/// targets. So a template with a NIC serves the clones of every network policy at its guest's
-/// address.
+/// The complete capture [`TimeContract`] is retained and encoded with the key, including its
+/// anchor, host, boot and lineage counter, but those per-capture fields are not part of the
+/// compatibility identity. The capture's creation time and artifact lengths remain in
+/// [`SnapshotManifest`]. Nothing of a clone is part of the key: its image, upper, export, network
+/// policy and settings, identity, or activation targets. So a template with a NIC serves the
+/// clones of every network policy at its guest's address.
 ///
 /// The key comes from metadata alone: the artifacts' identities that their install metadata
 /// records, the class's inputs, and the capture's manifest. It never reads or digests a binary,
@@ -486,7 +488,8 @@ impl CaptureClass {
 /// makes templates of a new key: the templates of the old one are not recertified.
 ///
 /// Its [`identity`](Self::identity) is the SHA-256 digest of its
-/// [canonical encoding](Self::to_bytes), after a domain that no other digest of this crate shares.
+/// canonical compatibility prefix, after a domain that no other digest of this crate shares.
+/// [`to_bytes`](Self::to_bytes) appends the per-capture time fields to that prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotKey {
     /// The runtime: OpenVMM, the guest kernel and initramfs, and the boot and control contracts.
@@ -499,6 +502,8 @@ pub struct SnapshotKey {
     filesystem_tag: String,
     /// The invariant settings beyond the machine.
     invariants: Invariants,
+    /// The complete time contract of this particular capture.
+    time: TimeContract,
 }
 
 pub(in crate::host) use SnapshotKey as TemplateKey;
@@ -532,8 +537,8 @@ struct CaptureInputs<'a> {
 impl SnapshotKey {
     /// Version of the canonical encoding of a key, its first two bytes.
     ///
-    /// Version 1 omits the guest build and holds the snapshot's NIC, if it has one, with the
-    /// identity of the complete
+    /// Version 1 omits the guest build, appends the complete capture-time contract, and holds
+    /// the snapshot's NIC, if it has one, with the identity of the complete
     /// deny-all policy under which the capture attached it, but no network policy of its clones.
     /// It has not been released, so a template store that an earlier build created is not
     /// supported: delete it and create a new one. There is no migration.
@@ -705,12 +710,18 @@ impl SnapshotKey {
             machine: machine.clone(),
             filesystem_tag: MOUNT_TAG.to_owned(),
             invariants: class.invariants.clone(),
+            time: manifest.time().clone(),
         })
     }
 
-    /// Returns the identity of the key.
+    /// Returns the compatibility identity, excluding this capture's time anchors and identities.
+    ///
+    /// The rates and time ABI remain compatibility inputs. Different capture times may have
+    /// different [`to_bytes`](Self::to_bytes) with the same identity.
     pub fn identity(&self) -> KeyIdentity {
-        KeyIdentity(digest(KEY_DOMAIN, &self.to_bytes()))
+        let mut writer = Writer::default();
+        self.write_compatibility(&mut writer);
+        KeyIdentity(digest(KEY_DOMAIN, &writer.finish()))
     }
 
     /// Returns the runtime: the identities of OpenVMM, the guest kernel, and the guest initramfs,
@@ -728,6 +739,7 @@ impl SnapshotKey {
     /// Checks the manifest's complete machine, the current key contracts and the filesystem tag.
     pub(super) fn check_manifest(&self, manifest: &SnapshotManifest) -> Result<()> {
         if self.machine != manifest.machine
+            || &self.time != manifest.time()
             || !self.speaks_current_contracts()
             || self.filesystem_tag != MOUNT_TAG
         {
@@ -741,6 +753,14 @@ impl SnapshotKey {
     /// Returns the backend.
     pub fn hypervisor(&self) -> Hypervisor {
         self.machine.hypervisor
+    }
+
+    /// Returns this snapshot's complete capture-time contract, as recorded by its manifest.
+    ///
+    /// Its capture anchors, host, boot and lineage are persisted, but do not change the
+    /// compatibility [`identity`](Self::identity).
+    pub fn time(&self) -> &TimeContract {
+        &self.time
     }
 
     /// Returns the ID of the CPU profile, `VENDOR.GENERATION.vREVISION`.
@@ -823,8 +843,10 @@ impl SnapshotKey {
         &self.invariants
     }
 
-    /// Returns the canonical encoding of the key, which its [`identity`](Self::identity) digests,
-    /// and [`from_bytes`](Self::from_bytes) reads back.
+    /// Returns the canonical persisted encoding, which [`from_bytes`](Self::from_bytes) reads.
+    ///
+    /// [`identity`](Self::identity) digests the compatibility prefix, items 1 through 8 below,
+    /// excluding item 9's per-capture time fields.
     ///
     /// Version 1 holds, in order, each value encoded as the [module](super) describes:
     ///
@@ -856,16 +878,26 @@ impl SnapshotKey {
     ///    the gateway's IPv4 address, 4 bytes, the optional IPv6 identity, with the guest's
     ///    address, 16 bytes, its prefix length, a `u8`, and the gateway's address, 16 bytes, and
     ///    the network policy's mode, a text, digest, 32 bytes, whether it is required, a boolean,
-    ///    and encoding version, a `u32`; and the invariant settings, a list of names and values,
-    ///    each a text, in the order of their names.
+    ///    and encoding version, a `u32`.
+    /// 8. The invariant settings, a list of names and values, each a text, in name order.
+    /// 9. The capture-specific time contract: the capture TSC, UTC and monotonic anchors,
+    ///    `u64`s; the host clock, a text; the host and boot identities, 16 bytes each; the lineage,
+    ///    a `u32`; and the optional cut-to-anchor interval, a `u64`. The complete contract's rates
+    ///    are already encoded in item 3.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut writer = Writer::default();
-        writer.u16(Self::VERSION);
-        write_runtime(&mut writer, &self.runtime);
-        self.contracts.write(&mut writer);
-        write_machine(&mut writer, &self.machine, &self.filesystem_tag);
-        self.invariants.write(&mut writer);
+        self.write_compatibility(&mut writer);
+        write_time(&mut writer, &self.time);
         writer.finish()
+    }
+
+    /// Writes exactly the compatibility prefix that the key's identity digests.
+    fn write_compatibility(&self, writer: &mut Writer) {
+        writer.u16(Self::VERSION);
+        write_runtime(writer, &self.runtime);
+        self.contracts.write(writer);
+        write_machine(writer, &self.machine, &self.filesystem_tag);
+        self.invariants.write(writer);
     }
 
     /// Reads a key from its canonical encoding, as [`to_bytes`](Self::to_bytes) writes it.
@@ -903,18 +935,60 @@ impl SnapshotKey {
             let contracts = Contracts::read(reader)?;
             let (machine, filesystem_tag) = read_machine(reader)?;
             let invariants = Invariants::read(reader)?;
+            let time = read_time(reader, machine.rates)?;
             Ok(Self {
                 runtime,
                 contracts,
                 machine,
                 filesystem_tag,
                 invariants,
+                time,
             })
         };
         let key = read(&mut reader).map_err(malformed)?;
         reader.finish().map_err(malformed)?;
         Ok(key)
     }
+}
+
+/// Appends the capture-specific fields; the complete contract's rates are in the machine prefix.
+fn write_time(writer: &mut Writer, time: &TimeContract) {
+    writer.u64(time.capture_tsc);
+    writer.u64(time.capture_utc_ns);
+    writer.u64(time.capture_monotonic_ns);
+    writer.text(time.host_clock.as_str());
+    writer.fixed(&time.host_id);
+    writer.fixed(time.boot_id.as_bytes());
+    writer.u32(time.lineage);
+    writer.option(time.cut_to_anchor_ns.as_ref(), |writer, nanos| {
+        writer.u64(*nanos)
+    });
+}
+
+/// Reads the full capture contract using the compatibility prefix's already-checked rates.
+fn read_time(reader: &mut Reader<'_>, rates: Rates) -> Result<TimeContract, CanonicalError> {
+    let capture_tsc = reader.u64("the capture TSC")?;
+    let capture_utc_ns = reader.u64("the capture UTC anchor")?;
+    let capture_monotonic_ns = reader.u64("the capture monotonic anchor")?;
+    let clock = reader.text(MAX_TEXT_LEN, "the capture host clock")?;
+    let host_clock = HostClock::parse(clock).ok_or_else(|| {
+        CanonicalError::new(format!("the capture host clock {clock:?} is unknown"))
+    })?;
+    Ok(TimeContract {
+        tsc_frequency_hz: rates.tsc_hz,
+        tsc_tolerance_ppm: rates.tolerance_ppm,
+        apic_frequency_hz: rates.apic_hz,
+        capture_tsc,
+        capture_utc_ns,
+        capture_monotonic_ns,
+        host_clock,
+        host_id: reader.fixed("the capturing host identity")?,
+        boot_id: BootId::from_bytes(reader.fixed("the capture boot identity")?),
+        lineage: reader.u32("the capture lineage")?,
+        cut_to_anchor_ns: reader.option("the cut-to-anchor interval", |reader| {
+            reader.u64("the cut-to-anchor interval")
+        })?,
+    })
 }
 
 /// Writes the machine `machine`, whose filesystem slot has the tag `tag`, as
