@@ -1623,6 +1623,9 @@ field nvx::host::snapshot::CaptureClass::processors
 field nvx::host::snapshot::CaptureClass::runtime
 field nvx::host::snapshot::CaptureClass::scratch
 method nvx::host::snapshot::CaptureClass::to_bytes
+struct nvx::host::snapshot::CaptureContext
+struct nvx::host::snapshot::CapturedSnapshot
+field nvx::host::snapshot::CapturedSnapshot::key
 struct nvx::host::snapshot::ClassIdentity
 method nvx::host::snapshot::ClassIdentity::as_bytes
 method nvx::host::snapshot::ClassIdentity::from_bytes
@@ -1700,6 +1703,7 @@ method nvx::host::snapshot::SnapshotKey::processors
 method nvx::host::snapshot::SnapshotKey::runtime
 method nvx::host::snapshot::SnapshotKey::scratch
 method nvx::host::snapshot::SnapshotKey::speaks_current_contracts
+method nvx::host::snapshot::SnapshotKey::time
 method nvx::host::snapshot::SnapshotKey::to_bytes
 struct nvx::host::snapshot::SnapshotManifest
 method nvx::host::snapshot::SnapshotManifest::created_at
@@ -1723,6 +1727,7 @@ field nvx::host::snapshot::TimeContract::host_id
 field nvx::host::snapshot::TimeContract::lineage
 field nvx::host::snapshot::TimeContract::tsc_frequency_hz
 field nvx::host::snapshot::TimeContract::tsc_tolerance_ppm
+fn nvx::host::snapshot::finish_capture
 mod nvx::host::store
 struct nvx::host::store::ArtifactIdentity
 method nvx::host::store::ArtifactIdentity::as_str
@@ -2279,6 +2284,7 @@ method nvx::host::template::TemplateKey::processors
 method nvx::host::template::TemplateKey::runtime
 method nvx::host::template::TemplateKey::scratch
 method nvx::host::template::TemplateKey::speaks_current_contracts
+method nvx::host::template::TemplateKey::time
 method nvx::host::template::TemplateKey::to_bytes
 struct nvx::host::template::TemplateManifest
 method nvx::host::template::TemplateManifest::created_at
@@ -2362,6 +2368,7 @@ struct nvx::host::vm::Prepared
 method nvx::host::vm::Prepared::activation_record
 method nvx::host::vm::Prepared::arguments
 method nvx::host::vm::Prepared::capability
+method nvx::host::vm::Prepared::capture_context
 method nvx::host::vm::Prepared::inherit
 method nvx::host::vm::Prepared::into_command
 method nvx::host::vm::Prepared::log

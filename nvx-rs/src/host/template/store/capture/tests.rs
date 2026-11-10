@@ -15,6 +15,7 @@ use super::*;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, PolicyVerdict};
 use crate::host::sandbox::{SandboxDistro, SandboxUpper};
 use crate::host::snapshot::tests::{MIB, ManifestSpec, class, network_class};
+use crate::host::snapshot::{MANIFEST_NAME, SNAPSHOT_ARTIFACTS};
 use crate::host::store::{CallerFiles, JOURNAL_NAME, LaunchId};
 use crate::host::template::eligibility::MAX_DOWNTIME_NS;
 use crate::host::template::store::Lease;
@@ -29,6 +30,11 @@ const GIB: u64 = 1024 * MIB;
 
 /// Nanoseconds in a second.
 const SECOND: u64 = 1_000_000_000;
+
+/// Name of the saved state in the emulated snapshot.
+const STATE_NAME: &str = "state.bin";
+/// Name of the RAM in the emulated snapshot.
+const MEMORY_NAME: &str = "memory.bin";
 
 /// The identity of the placeholder.
 const IDENTITY: &str = "11111111-1111-1111-1111-111111111111";

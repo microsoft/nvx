@@ -23,7 +23,8 @@ use crate::activation::{
     TransactionId, Upper,
 };
 use crate::host::config::{
-    ConsoleAttachment, NetworkConfig, NicConfig, RootConfig, UpperConfig, VmConfig,
+    BlockGeometry, CaptureConfig, ConsoleAttachment, DEFAULT_GUEST_NETWORK, DiskCapture, NetworkConfig,
+    NicConfig, RootConfig, UpperConfig, VmConfig, fit_process_command_line, reject_disk_path,
 };
 use crate::host::filesystem;
 use crate::host::network;
@@ -35,20 +36,21 @@ use crate::host::platform::{check_store_dir as check_dir, create_store_dir as cr
 use crate::host::platform::{check_vm_dir as check_dir, create_vm_dir as create_dir};
 use crate::host::report::{self, Report};
 use crate::host::runtime::{Runtime, RuntimeIdentity};
-use crate::host::snapshot::Snapshot;
+use crate::host::snapshot::{CaptureContext, Snapshot};
 use crate::host::spawn;
 use crate::host::transport::{self, HostConnection};
 use crate::host::{
     platform::inherit::Inherited,
     process::{Opened, Process, ProcessRef},
 };
+use crate::net::Ipv4Cidr;
 use crate::protocol::CAPABILITY_LEN;
 use crate::{Error, Result};
 
 /// OpenVMM's log of a launch.
 const LOG: &str = "openvmm.log";
 /// OpenVMM's outcome report of a launch.
-const OUTCOME: &str = "outcome.json";
+pub(super) const OUTCOME: &str = "outcome.json";
 /// The control socket on Linux.
 const CONTROL: &str = "control.sock";
 /// The guest's boot-console socket on Linux.
@@ -56,10 +58,6 @@ const CONSOLE: &str = "console.sock";
 /// The restore-ready socket on Linux.
 const RESTORE_READY: &str = "restore-ready.sock";
 /// OpenVMM's snapshot files: a capture's destination and a restore's snapshot view.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL2.12b and SL2.13 use it (#1102)")
-)]
 const OPENVMM: &str = "openvmm";
 /// A finished capture's key.
 #[cfg_attr(
@@ -74,16 +72,8 @@ const KEY: &str = "key.bin";
 )]
 const DESCRIPTION: &str = "snapshot.json";
 /// The sparse placeholder image that a capture VM attaches.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL2.13's capture creates it (#1102)")
-)]
 const CAPTURE_IMAGE: &str = "capture-image.raw";
 /// The dormant scratch that a capture VM attaches.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL2.13's capture creates it (#1102)")
-)]
 const CAPTURE_SCRATCH: &str = "capture-scratch.raw";
 /// The prefix OpenVMM requires of its Windows console pipes.
 const OPENVMM_PIPE: &str = "openvmm-microvm";
@@ -432,6 +422,8 @@ pub struct Prepared {
     nic: Option<NicConfig>,
     /// Already opened resources added by the caller, retained until the preparation is dropped.
     inherit: Vec<InheritedHandle>,
+    /// The checked context of a capture, absent for an ordinary cold launch.
+    capture_context: Option<CaptureContext>,
 }
 
 impl Prepared {
@@ -561,8 +553,8 @@ impl Prepared {
     /// Moves the same opened log and inherited resources, without cloning, reopening, rendering
     /// arguments again or rediscovering paths. Starts no process or listener. The caller follows
     /// [`VmmCommand`]'s launch contract and may retain its capability and outputs for recovery.
-    /// Read [`nic`](Self::nic) or build an [`activation_record`](Self::activation_record) before
-    /// consuming the preparation.
+    /// Read [`nic`](Self::nic), build an [`activation_record`](Self::activation_record), or clone
+    /// [`capture_context`](Self::capture_context) before consuming the preparation.
     pub fn into_command(self) -> VmmCommand {
         VmmCommand {
             program: self.program,
@@ -575,6 +567,13 @@ impl Prepared {
             breakaway_from_job: self.windows_breakaway,
         }
     }
+
+    /// Returns the checked capture context, if this launch prepares a blockless capture.
+    ///
+    /// The caller chooses whether and how to persist it; creation writes no context file.
+    pub fn capture_context(&self) -> Option<&CaptureContext> {
+        self.capture_context.as_ref()
+    }
 }
 
 /// Creates an inspectable cold launch in `dir`, without starting a process or binding endpoints.
@@ -586,8 +585,12 @@ impl Prepared {
 ///
 /// The log is created anew, privately, and kept open in [`Prepared`]. Other outputs are reserved
 /// names that OpenVMM creates when it runs: existing entries at those names are refused, not
-/// replaced. A failure closes and removes only the log that this invocation created, preserving
+/// replaced. A failure closes and removes only files that this invocation created, preserving
 /// every pre-existing entry and the caller's inputs. The capability is never written to disk.
+/// With `boot.capture`, the root must be blockless and no export is accepted. Creation also
+/// prepares sparse image and scratch files, verifies their actual geometry, and retains the
+/// checked capture context. OpenVMM captures to `openvmm/` under this VM directory, with a
+/// configured NIC under deny-all. No key, description or context file is written.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a restore, a missing
 /// boot, a refused configuration, unrepresentable Linux socket names, or a complete Windows
@@ -608,6 +611,11 @@ pub fn create(
     }
     if config.boot.is_none() {
         return Err(Error::unsupported("creating a cold VM needs Boot"));
+    }
+    let capture = config.boot.as_ref().and_then(|boot| boot.capture.as_ref());
+    if capture.is_some() {
+        config.kernel_command_line()?;
+        runtime.identity.check()?;
     }
     VmDir::open(dir.path())?;
     platform::check_working_dir(dir.path())?;
@@ -665,6 +673,7 @@ pub fn create(
         ))
         .with_source(error)
     })?;
+    let mut created = Vec::new();
     let checked = (|| {
         #[cfg(unix)]
         {
@@ -687,7 +696,7 @@ pub fn create(
             }
         }
         let capability = Capability(crate::host::instance::generate_capability()?);
-        let arguments = config.openvmm_arguments(
+        let mut arguments = config.openvmm_arguments(
             &runtime,
             &outputs.endpoint,
             &outputs.outcome,
@@ -698,10 +707,62 @@ pub fn create(
             .as_ref()
             .map(NetworkConfig::cold_nic)
             .transpose()?;
-        Ok((capability, arguments, nic))
+        let capture_context = if let Some(capture) = capture {
+            let image_path = dir.path.join(CAPTURE_IMAGE);
+            let scratch_path = dir.path.join(CAPTURE_SCRATCH);
+            let destination = dir.path.join(OPENVMM);
+            for path in [&image_path, &scratch_path, &destination] {
+                unused_output(path)?;
+            }
+            for path in [&image_path, &scratch_path] {
+                if path.to_str().is_none() {
+                    return Err(Error::unsupported(
+                        "capture block paths must be Unicode for OpenVMM",
+                    ));
+                }
+                reject_disk_path(path, &path.display().to_string())?;
+            }
+            arguments.extend([
+                "--microvm-sandbox-block".into(),
+                format!("distro:file:{},ro", image_path.display()).into(),
+                "--microvm-sandbox-block".into(),
+                format!("scratch:file:{}", scratch_path.display()).into(),
+                "--snapshot-destination".into(),
+                destination.into_os_string(),
+            ]);
+            fit_process_command_line(runtime.openvmm.as_os_str(), &arguments, 0)?;
+            let DiskCapture::Fresh { image, scratch } = capture.disks;
+            let image = capture_disk(&image_path, image, &mut created)?;
+            let scratch = capture_disk(&scratch_path, scratch, &mut created)?;
+            let nic = config
+                .network
+                .as_ref()
+                .map(|network| {
+                    network.guest_network.map_or_else(
+                        || Ipv4Cidr::parse(DEFAULT_GUEST_NETWORK).map_err(Error::unsupported),
+                        Ok,
+                    )
+                })
+                .transpose()?
+                .map(|guest_network| NicConfig { guest_network });
+            Some(CaptureContext {
+                capture: CaptureConfig {
+                    disks: DiskCapture::Fresh { image, scratch },
+                    ..capture.clone()
+                },
+                nic,
+                console: config.console,
+                runtime: runtime.identity.clone(),
+                hypervisor: runtime.hypervisor,
+                cpu_profile: runtime.cpu_profile.clone(),
+            })
+        } else {
+            None
+        };
+        Ok((capability, arguments, nic, capture_context))
     })();
     match checked {
-        Ok((capability, arguments, nic)) => Ok(Prepared {
+        Ok((capability, arguments, nic, capture_context)) => Ok(Prepared {
             program: runtime.openvmm.clone(),
             working_dir: dir.path().to_owned(),
             windows_breakaway: runtime.windows_breakaway,
@@ -712,9 +773,24 @@ pub fn create(
             configuration: config,
             nic,
             inherit: Vec::new(),
+            capture_context,
         }),
-        Err(error) => {
+        Err(mut error) => {
             drop(log);
+            for path in created.iter().rev() {
+                if let Err(cleanup) = fs::remove_file(path)
+                    && cleanup.kind() != io::ErrorKind::NotFound
+                {
+                    error = Error::new(
+                        error.kind(),
+                        format!(
+                            "{error}; cannot remove created capture file {}: {cleanup}",
+                            path.display()
+                        ),
+                    )
+                    .with_source(error);
+                }
+            }
             match fs::remove_file(&outputs.log) {
                 Ok(()) => Err(error),
                 Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => Err(error),
@@ -883,6 +959,46 @@ fn spawn_verified(
         outputs,
         capability,
     })
+}
+
+/// Creates one private sparse capture disk and verifies the geometry OpenVMM presents.
+fn capture_disk(
+    path: &Path,
+    expected: BlockGeometry,
+    created: &mut Vec<PathBuf>,
+) -> Result<BlockGeometry> {
+    let failed = |error| {
+        Error::io(format!("cannot create capture disk {}", path.display())).with_source(error)
+    };
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path).map_err(failed)?;
+    created.push(path.to_owned());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(failed)?;
+    }
+    if let Some(problem) = platform::private_file_problem(&file).map_err(failed)? {
+        return Err(Error::io(format!(
+            "the capture disk {} {problem}",
+            path.display()
+        )));
+    }
+    platform::make_sparse(&file).map_err(failed)?;
+    file.set_len(expected.length).map_err(failed)?;
+    let actual = crate::host::sandbox::block_geometry(&file, path, "capture disk")?;
+    if actual != expected {
+        return Err(Error::unsupported(format!(
+            "capture disk {} has actual geometry {actual:?}, not requested {expected:?}",
+            path.display()
+        )));
+    }
+    Ok(actual)
 }
 
 /// Refuses an existing output entry without opening, replacing, or removing it.

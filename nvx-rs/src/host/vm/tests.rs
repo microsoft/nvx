@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 #[cfg(any(target_os = "linux", windows))]
 use std::process::{Command, Stdio};
@@ -8,12 +9,12 @@ use super::*;
 use crate::ErrorKind;
 use crate::activation::{Journal, MachineIdMode, Network, OverlayMode, Publication, View};
 use crate::host::config::{
-    Boot, LayeredRoot, PROCESS_COMMAND_LINE_LIMIT, RootConfig, UpperConfig,
-    process_command_line_units,
+    Boot, Capacity, Invariants, LayeredRoot, NetworkConfig, PROCESS_COMMAND_LINE_LIMIT, RootConfig,
+    UpperConfig, process_command_line_units,
 };
 use crate::host::filesystem::{Bind, ExportChild, ExportPlan, Owner};
 use crate::host::network::{
-    Access, EgressRule, NetworkPolicy, NetworkProxy, Protocol, ProxyScheme,
+    Access, EgressRule, HostLoopback, NetworkPolicy, NetworkProxy, Protocol, ProxyScheme,
 };
 #[cfg(any(target_os = "linux", windows))]
 use crate::host::process::Opened;
@@ -737,6 +738,424 @@ fn prepared_record_refuses_roots_or_memory_that_the_schema_cannot_represent() {
     }
 }
 
+fn capture_config(_vm: &VmDir) -> VmConfig {
+    #[cfg(target_os = "linux")]
+    let physical_block_size = {
+        use std::os::unix::fs::MetadataExt;
+
+        u32::try_from(fs::metadata(_vm.path()).unwrap().blksize()).unwrap()
+    };
+    #[cfg(windows)]
+    let physical_block_size = 4096;
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let physical_block_size = 512;
+    let image = BlockGeometry {
+        length: 16 << 20,
+        logical_block_size: 512,
+        physical_block_size,
+    };
+    VmConfig {
+        processors: 2,
+        boot: Some(Boot {
+            command_line: "nvx_sandbox=1".to_owned(),
+            capture: Some(CaptureConfig {
+                disks: DiskCapture::Fresh {
+                    image,
+                    scratch: BlockGeometry {
+                        length: 8 << 20,
+                        ..image
+                    },
+                },
+                processors: Capacity {
+                    boot: 2,
+                    capacity: 2,
+                },
+                memory: Capacity {
+                    boot: 256,
+                    capacity: 512,
+                },
+                invariants: Invariants::new().with("isolation.mode", "strict").unwrap(),
+            }),
+        }),
+        ..cold_config()
+    }
+}
+
+fn argument_values<'a>(arguments: &'a [OsString], option: &str) -> Vec<&'a OsStr> {
+    arguments
+        .windows(2)
+        .filter(|pair| pair[0] == option)
+        .map(|pair| pair[1].as_os_str())
+        .collect()
+}
+
+#[test]
+fn capture_creation_records_sparse_disks_devices_and_a_complete_serde_context() {
+    for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
+        for nic in [
+            None,
+            Some(None),
+            Some(Some(Ipv4Cidr::parse("10.42.0.2/24").unwrap())),
+        ] {
+            let (_directory, vm) = vm_dir();
+            let mut runtime = cold_runtime();
+            runtime.identity = RuntimeIdentity::new(
+                ArtifactIdentity::new("capture-openvmm").unwrap(),
+                ArtifactIdentity::new("capture-kernel").unwrap(),
+                ArtifactIdentity::new("capture-initramfs").unwrap(),
+            );
+            runtime.cpu_profile = nic.map(|_| "amd.genoa.v1".to_owned());
+            let mut policy = NetworkPolicy::new(Access::Allow);
+            policy.ingress = Access::Allow;
+            policy.host_loopback = HostLoopback::Allow;
+            let config = VmConfig {
+                console,
+                network: nic.map(|guest_network| NetworkConfig {
+                    guest_network,
+                    policy,
+                }),
+                ..capture_config(&vm)
+            };
+            let prepared = create(&runtime, &config, None, &vm).unwrap();
+            let context = prepared.capture_context().unwrap();
+            assert_eq!(
+                context.capture,
+                *config.boot.as_ref().unwrap().capture.as_ref().unwrap()
+            );
+            assert_eq!(context.console, console);
+            assert_eq!(context.runtime, runtime.identity);
+            assert_eq!(context.hypervisor, runtime.hypervisor);
+            assert_eq!(context.cpu_profile, runtime.cpu_profile);
+            assert_eq!(
+                context.nic,
+                nic.map(|address| NicConfig {
+                    guest_network: address
+                        .unwrap_or_else(|| Ipv4Cidr::parse(DEFAULT_GUEST_NETWORK).unwrap()),
+                })
+            );
+            let serialized = serde_json::to_string(context).unwrap();
+            assert_eq!(
+                serde_json::from_str::<CaptureContext>(&serialized).unwrap(),
+                context.clone()
+            );
+            assert!(!serialized.contains("policy"));
+            let DiskCapture::Fresh { image, scratch } = context.capture.disks;
+            for (name, geometry) in [(CAPTURE_IMAGE, image), (CAPTURE_SCRATCH, scratch)] {
+                let path = vm.path().join(name);
+                let file = File::open(&path).unwrap();
+                let metadata = file.metadata().unwrap();
+                assert_eq!(metadata.len(), geometry.length);
+                assert_eq!(platform::private_file_problem(&file).unwrap(), None);
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::fs::MetadataExt;
+
+                    assert!(metadata.blocks() * 512 < metadata.len());
+                    assert_eq!(metadata.mode() & 0o777, 0o600);
+                    assert_eq!(u64::from(geometry.physical_block_size), metadata.blksize());
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+
+                    assert_ne!(metadata.file_attributes() & 0x200, 0, "not a sparse file");
+                }
+            }
+            let arguments = prepared.arguments();
+            assert_eq!(
+                argument_values(arguments, "--snapshot-tier"),
+                [OsStr::new("platform")]
+            );
+            assert_eq!(
+                argument_values(arguments, "--snapshot-destination"),
+                [vm.path().join(OPENVMM).as_os_str()]
+            );
+            assert_eq!(
+                argument_values(arguments, "--memory-capacity"),
+                [OsStr::new("512M")]
+            );
+            assert_eq!(
+                argument_values(arguments, "--microvm-sandbox-block"),
+                [
+                    OsStr::new(&format!(
+                        "distro:file:{},ro",
+                        vm.path().join(CAPTURE_IMAGE).display()
+                    )),
+                    OsStr::new(&format!(
+                        "scratch:file:{}",
+                        vm.path().join(CAPTURE_SCRATCH).display()
+                    )),
+                ]
+            );
+            assert_eq!(
+                argument_values(arguments, "--cmdline"),
+                [OsStr::new("nvx_sandbox=1")]
+            );
+            if let Some(nic) = context.nic {
+                assert_eq!(
+                    argument_values(arguments, "--net"),
+                    [OsStr::new(&nic.guest_network.to_string())]
+                );
+                for option in ["--network-egress", "--network-ingress", "--host-loopback"] {
+                    assert_eq!(argument_values(arguments, option), [OsStr::new("deny")]);
+                }
+            } else {
+                assert!(argument_values(arguments, "--net").is_empty());
+            }
+            for option in [
+                "--network-egress-allow",
+                "--network-egress-deny",
+                "--host-loopback-forward",
+                "--proxy",
+            ] {
+                assert!(argument_values(arguments, option).is_empty(), "{option}");
+            }
+            assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 3);
+            for name in [OPENVMM, KEY, DESCRIPTION] {
+                assert!(!vm.path().join(name).exists(), "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn capture_creation_refuses_nonplatform_tokens_by_name_without_leaving_outputs() {
+    for token in [
+        "quiet",
+        "loglevel=0",
+        "nvx_entrypoint=/bin/sh",
+        "nvx_arg=tenant",
+        "nvx_share=/tenant",
+        "nvx_workload_account=create",
+        "nvx_layer=erofs",
+        "nvx_hostname=tenant",
+        "nvx_maps=1",
+        "virtfs_tag=tenant",
+        "custom=tenant",
+        "earlycon=xe9",
+        "console=hvc1",
+        "virtio_mmio.device=0x1000@0xd0000000:1",
+        "virtnet_ip=10.42.0.2",
+        "virtnet_mask=255.255.255.0",
+        "virtnet_gw=10.42.0.1",
+        "virtnet_dns=10.42.0.1",
+        "virtnet_ip6=fd00::2",
+        "virtnet_gw6=fd00::1",
+        "nvx_snapshot_tier=platform",
+        "nvx_snapshot_tier=platform nvx_snapshot_tier=platform",
+        "nr_cpus=2",
+        "maxcpus=2",
+        "nvx_control_tty=hvc2",
+    ] {
+        let (_directory, vm) = vm_dir();
+        let mut config = capture_config(&vm);
+        config.boot.as_mut().unwrap().command_line = token.to_owned();
+        let error = create(&cold_runtime(), &config, None, &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert!(
+            error.to_string().contains(token.split('=').next().unwrap()),
+            "{error}"
+        );
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn capture_resources_not_the_vms_cold_resources_determine_the_launch() {
+    for (boot, capacity) in [(1, 4), (2, 2)] {
+        let (_directory, vm) = vm_dir();
+        let mut config = capture_config(&vm);
+        config.processors = 3;
+        config.memory_mib = 17;
+        let capture = config.boot.as_mut().unwrap().capture.as_mut().unwrap();
+        capture.processors = Capacity { boot, capacity };
+        capture.memory.boot = 128;
+        let expected = capture.clone();
+        let prepared = create(&cold_runtime(), &config, None, &vm).unwrap();
+        assert_eq!(prepared.capture_context().unwrap().capture, expected);
+        assert_eq!(
+            argument_values(prepared.arguments(), "--processors"),
+            [OsStr::new(&capacity.to_string())]
+        );
+        assert_eq!(
+            argument_values(prepared.arguments(), "--memory"),
+            [OsStr::new("128M")]
+        );
+        assert_eq!(
+            argument_values(prepared.arguments(), "--memory-capacity"),
+            [OsStr::new("512M")]
+        );
+        assert_eq!(
+            argument_values(prepared.arguments(), "--cmdline"),
+            [OsStr::new(if boot < capacity {
+                "nvx_sandbox=1 maxcpus=1"
+            } else {
+                "nvx_sandbox=1"
+            })]
+        );
+    }
+}
+
+#[test]
+fn capture_creation_refuses_unaligned_boot_memory_before_creating_outputs() {
+    let (_directory, vm) = vm_dir();
+    let mut config = capture_config(&vm);
+    config
+        .boot
+        .as_mut()
+        .unwrap()
+        .capture
+        .as_mut()
+        .unwrap()
+        .memory
+        .boot = 129;
+    config.check().unwrap();
+    let error = create(&cold_runtime(), &config, None, &vm).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    assert!(
+        error.to_string().contains("boot memory of 129 MiB"),
+        "{error}"
+    );
+    assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn capture_creation_refuses_layered_roots_and_exports_without_creating_outputs() {
+    use crate::host::filesystem::{Bind, ExportChild, ExportPlan, Owner};
+
+    let (_directory, vm) = vm_dir();
+    let base = capture_config(&vm);
+    let layered = VmConfig {
+        root: RootConfig::Layered(LayeredRoot {
+            image: vm.path().join("caller-image.erofs"),
+            format: RootImage::erofs(None),
+            gpt_first_partition_bound: None,
+            upper: UpperConfig::Ram {
+                max_memory_percent: 50,
+            },
+            overlay: OverlayMode::TrustedLowers,
+        }),
+        ..base.clone()
+    };
+    let exported = VmConfig {
+        filesystem: Some(ExportPlan {
+            children: vec![ExportChild {
+                root: vm.path().to_owned(),
+                file: false,
+                writable: false,
+                denied: Vec::new(),
+                denied_identities: Vec::new(),
+                allowed: Vec::new(),
+                write: Vec::new(),
+            }],
+            binds: vec![Bind {
+                child: 0,
+                source: String::new(),
+                target: "/mnt/shared".to_owned(),
+                read_only: true,
+                identity: None,
+            }],
+            owner: Owner::Vmm,
+        }),
+        ..base
+    };
+    for (config, refusal) in [(layered, "blockless"), (exported, "export")] {
+        config.check().unwrap();
+        let error = create(&cold_runtime(), &config, None, &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+        assert!(error.to_string().contains(refusal), "{error}");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn capture_geometry_mismatches_roll_back_only_the_new_files() {
+    for scratch_disk in [false, true] {
+        for logical in [false, true] {
+            let (_directory, vm) = vm_dir();
+            let input = vm.path().join("caller-input");
+            fs::write(&input, b"preserved").unwrap();
+            let mut config = capture_config(&vm);
+            let capture = config.boot.as_mut().unwrap().capture.as_mut().unwrap();
+            let DiskCapture::Fresh { image, scratch } = &mut capture.disks;
+            let geometry = if scratch_disk { scratch } else { image };
+            if logical {
+                geometry.logical_block_size = 1024;
+                geometry.physical_block_size = geometry.physical_block_size.max(1024);
+            } else {
+                geometry.physical_block_size *= 2;
+            }
+            let error = create(&cold_runtime(), &config, None, &vm).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+            assert!(error.to_string().contains("actual geometry"), "{error}");
+            assert!(
+                error.to_string().contains(if scratch_disk {
+                    CAPTURE_SCRATCH
+                } else {
+                    CAPTURE_IMAGE
+                }),
+                "{error}"
+            );
+            assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+            assert_eq!(fs::read(input).unwrap(), b"preserved");
+        }
+    }
+}
+
+#[test]
+fn capture_creation_never_replaces_existing_disks_or_snapshot_destinations() {
+    for name in [CAPTURE_IMAGE, CAPTURE_SCRATCH, OPENVMM] {
+        let (_directory, vm) = vm_dir();
+        let existing = vm.path().join(name);
+        fs::write(&existing, b"preserved").unwrap();
+        let error = create(&cold_runtime(), &capture_config(&vm), None, &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+        assert!(error.to_string().contains(name), "{error}");
+        assert_eq!(fs::read(&existing).unwrap(), b"preserved");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn capture_creation_checks_the_complete_command_line_including_disk_and_destination_paths() {
+    let (_directory, vm) = vm_dir();
+    let config = capture_config(&vm);
+    let runtime = cold_runtime();
+    let prepared = create(&runtime, &config, None, &vm).unwrap();
+    let length = process_command_line_units(runtime.openvmm.as_os_str(), prepared.arguments());
+    drop(prepared);
+    for name in [LOG, CAPTURE_IMAGE, CAPTURE_SCRATCH] {
+        fs::remove_file(vm.path().join(name)).unwrap();
+    }
+    for extra in [0, 1] {
+        let mut runtime = runtime.clone();
+        runtime
+            .openvmm
+            .as_mut_os_string()
+            .push("x".repeat(PROCESS_COMMAND_LINE_LIMIT - length + extra));
+        let result = create(&runtime, &config, None, &vm);
+        if extra == 0 {
+            let prepared = result.unwrap();
+            assert_eq!(
+                process_command_line_units(runtime.openvmm.as_os_str(), prepared.arguments()),
+                PROCESS_COMMAND_LINE_LIMIT
+            );
+            drop(prepared);
+            for name in [LOG, CAPTURE_IMAGE, CAPTURE_SCRATCH] {
+                fs::remove_file(vm.path().join(name)).unwrap();
+            }
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+            assert!(
+                error.to_string().contains("Windows process command line"),
+                "{error}"
+            );
+        }
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
+    }
+}
+
 #[test]
 fn cold_creation_is_inspectable_without_a_process_listener_or_capability_file() {
     for console in [ConsoleAttachment::Listener, ConsoleAttachment::Disconnected] {
@@ -747,6 +1166,7 @@ fn cold_creation_is_inspectable_without_a_process_listener_or_capability_file() 
             ..cold_config()
         };
         let prepared = create(&runtime, &config, None, &vm).unwrap();
+        assert!(prepared.capture_context().is_none());
         let outputs = prepared.outputs();
         assert_eq!(outputs.log, vm.path().join("openvmm.log"));
         assert_eq!(

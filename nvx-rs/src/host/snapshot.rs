@@ -4,6 +4,9 @@
 //! description. The caller keeps the directory and its entries private and immutable while
 //! using the opened snapshot.
 //!
+//! [`finish_capture`] validates an exited capture and writes its key and informational
+//! description without publishing or removing any VM-directory entry.
+//!
 //! [`SnapshotKey`] derives a compatibility key from a capture's class and manifest.
 //! [`SnapshotManifest::read`] reads the manifest that OpenVMM wrote, and
 //! [`TimeContract::eligibility`] checks its restore window at a [`HostTime`].
@@ -12,9 +15,10 @@
 //! # Canonical encoding
 //!
 //! A key and a class each have one canonical encoding, which [`SnapshotKey::to_bytes`] and
-//! [`CaptureClass::to_bytes`] write, and whose SHA-256 digest, after a domain of its own, is its
-//! identity, a [`KeyIdentity`] or a [`ClassIdentity`]. The encoding starts with its version, and
-//! each value in it has exactly one encoding:
+//! [`CaptureClass::to_bytes`] write. A key's [`KeyIdentity`] digests its compatibility prefix,
+//! excluding the appended capture-time anchors and identities; a [`ClassIdentity`] digests the
+//! complete class encoding. Both use SHA-256 after a domain of their own. Each encoding starts
+//! with its version, and each value in it has exactly one encoding:
 //!
 //! - An integer is its fixed number of little-endian bytes: one for a `u8`, two for a `u16`, four
 //!   for a `u32`, and eight for a `u64`.
@@ -29,6 +33,7 @@
 //! in `tests/vectors/snapshot-key-v1.txt` fix version 1 of a key's encoding and of a class's.
 
 mod canonical;
+mod capture;
 pub(super) mod eligibility;
 pub(super) mod key;
 pub(super) mod manifest;
@@ -41,16 +46,21 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::host::config::{
-    ConsoleAttachment, NicConfig, PROCESSOR_COUNTS, RootConfig, UpperConfig, VmConfig,
+    CaptureConfig, ConsoleAttachment, NicConfig, PROCESSOR_COUNTS, RootConfig, UpperConfig,
+    VmConfig,
 };
 use crate::host::paths::{absolute, normalized};
-use crate::host::runtime::Runtime;
+use crate::host::runtime::{Runtime, RuntimeIdentity};
 use crate::host::store::regular;
 use crate::host::{filesystem, platform, sandbox, seal};
 use crate::net::Ipv4Cidr;
-use crate::{Error, Result};
+use crate::{Error, Hypervisor, Result};
 
+pub use self::capture::{CapturedSnapshot, finish_capture};
+pub(super) use self::capture::{check_exit, check_snapshot};
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, SnapshotKey};
 pub use self::manifest::{
@@ -63,6 +73,31 @@ pub const KEY_FILE: &str = "key.bin";
 pub const DESCRIPTION_FILE: &str = "snapshot.json";
 /// The directory of OpenVMM's manifest, RAM and saved state.
 pub const OPENVMM_DIR: &str = "openvmm";
+
+/// OpenVMM's exact platform-snapshot inventory, in name order.
+pub(super) const SNAPSHOT_ARTIFACTS: [&str; 3] = [MANIFEST_NAME, "memory.bin", "state.bin"];
+
+/// The checked configuration and effective devices of a blockless platform capture.
+///
+/// [`crate::host::vm::Prepared::capture_context`] returns it after verifying the actual sparse
+/// disk geometries. Callers choose whether and how to persist it; creation writes no context,
+/// key or snapshot description into the VM directory. Runtime paths and network policy are
+/// not part of the context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureContext {
+    /// Capture resources, invariants and verified image and scratch geometries.
+    pub(crate) capture: CaptureConfig,
+    /// The attached NIC's resolved address, without the capture's deny-all policy.
+    pub(crate) nic: Option<NicConfig>,
+    /// The boot console's effective attachment.
+    pub(crate) console: ConsoleAttachment,
+    /// The identities of the runtime artifacts and their contracts.
+    pub(crate) runtime: RuntimeIdentity,
+    /// The backend selected for the capture.
+    pub(crate) hypervisor: Hypervisor,
+    /// The requested CPU profile, or OpenVMM's default.
+    pub(crate) cpu_profile: Option<String>,
+}
 
 /// A checked snapshot directory and its verified metadata, for a future VM restore.
 ///
@@ -104,30 +139,10 @@ impl Snapshot {
     pub fn open(dir: &Path) -> Result<Self> {
         let dir = absolute(&normalized(dir)).map_err(|error| entry_error(dir, error))?;
         check_directory(&dir, &[KEY_FILE, DESCRIPTION_FILE, OPENVMM_DIR])?;
-        let openvmm = dir.join(OPENVMM_DIR);
-        check_directory(&openvmm, &[MANIFEST_NAME, "memory.bin", "state.bin"])?;
-        for path in [
-            dir.join(KEY_FILE),
-            dir.join(DESCRIPTION_FILE),
-            openvmm.join(MANIFEST_NAME),
-        ] {
+        for path in [dir.join(KEY_FILE), dir.join(DESCRIPTION_FILE)] {
             check_file(&path)?;
         }
-        let manifest = SnapshotManifest::read(&openvmm)?;
-        for (name, expected) in [
-            ("memory.bin", manifest.memory_len()),
-            ("state.bin", manifest.state_len()),
-        ] {
-            let path = openvmm.join(name);
-            let found = check_file(&path)?.len();
-            if found != expected {
-                return Err(Error::io(format!(
-                    "the snapshot artifact {} is {found} bytes long, not the {expected} bytes \
-                     that its manifest records",
-                    path.display()
-                )));
-            }
-        }
+        let manifest = check_openvmm(&dir.join(OPENVMM_DIR))?;
         let path = dir.join(KEY_FILE);
         let bytes = regular::open_regular(&path)
             .and_then(|file| {
@@ -345,6 +360,15 @@ fn restore_geometry(path: &Path, description: &str) -> Result<BlockGeometry> {
         )));
     }
     sandbox::block_geometry(&file, path, description)
+}
+
+/// Adds the snapshot format's per-file owner-only checks to the legacy capture checks.
+fn check_openvmm(path: &Path) -> Result<SnapshotManifest> {
+    let manifest = check_snapshot(path)?;
+    for name in SNAPSHOT_ARTIFACTS {
+        check_file(&path.join(name))?;
+    }
+    Ok(manifest)
 }
 
 /// Names the failing snapshot entry while retaining its I/O error.

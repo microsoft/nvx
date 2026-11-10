@@ -1215,6 +1215,33 @@ fn snapshot_description_contents_do_not_affect_opening() {
     }
 }
 
+#[test]
+fn snapshot_open_refuses_a_compatible_key_with_another_capture_time() {
+    use crate::host::store::files::write_private;
+
+    let mutations: &[fn(&mut ManifestSpec)] = &[
+        |spec| spec.time().capture_tsc += 1,
+        |spec| spec.time().capture_utc_ns += 1,
+        |spec| spec.time().capture_monotonic_ns += 1,
+        |spec| spec.time().host_clock = "windows-interrupt-time".to_owned(),
+        |spec| spec.time().host_id[0] ^= 1,
+        |spec| spec.time().boot_id[0] ^= 1,
+        |spec| spec.time().lineage += 1,
+        |spec| spec.time().cut_to_anchor_ns = None,
+        |spec| spec.time().cut_to_anchor_ns = Some(0),
+    ];
+    for mutate in mutations {
+        let fixture = SnapshotFixture::new();
+        let mut spec = fixture.spec.clone();
+        mutate(&mut spec);
+        let manifest = SnapshotManifest::parse(&spec.encode()).unwrap();
+        let key = SnapshotKey::new(&class(), &manifest).unwrap();
+        assert_eq!(key.identity(), fixture.key.identity());
+        write_private(&fixture.dir.join(KEY_FILE), &key.to_bytes()).unwrap();
+        refused(&fixture.dir);
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn snapshot_open_refuses_every_shared_file_and_both_shared_directories() {
