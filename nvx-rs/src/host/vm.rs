@@ -170,8 +170,18 @@ pub fn reattach(
     runtime: &Runtime,
     deadline: std::time::Instant,
 ) -> Result<Reattached> {
+    reattach_with_transport(saved, runtime, deadline, transport::connect_verified)
+}
+
+/// Lets the CLI observe its verified transport before the single authenticated attachment.
+pub(crate) fn reattach_with_transport(
+    saved: &SavedVm,
+    runtime: &Runtime,
+    deadline: std::time::Instant,
+    connect: impl FnOnce(&str, &ProcessRef, std::time::Instant) -> Result<Box<dyn transport::Transport>>,
+) -> Result<Reattached> {
     let process = verify(saved, &runtime.identity)?;
-    let transport = transport::connect_verified(&saved.endpoint, &saved.process, deadline)?;
+    let transport = connect(&saved.endpoint, &saved.process, deadline)?;
     let connection = HostConnection::attach(transport, &saved.capability, deadline)?;
     Ok(Reattached {
         process,
