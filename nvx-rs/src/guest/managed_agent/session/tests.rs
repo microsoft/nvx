@@ -12,6 +12,16 @@ use crate::protocol::{
 
 const INSTANCE: [u8; 16] = [7; 16];
 
+impl Session<'_> {
+    pub(crate) fn activation_state_for_test(&self) -> Option<ActivationState> {
+        self.capture
+            .as_ref()?
+            .restored
+            .as_ref()
+            .map(|state| state.activation.state())
+    }
+}
+
 struct Peer {
     stream: UnixStream,
     epoch: u64,
@@ -20,6 +30,15 @@ struct Peer {
 }
 
 impl Peer {
+    fn reset(&mut self, epoch: u64, sequence: u64) {
+        self.stream
+            .write_all(&encode_outer(OUTER_RESET, &INSTANCE, epoch, sequence, &[]).unwrap())
+            .unwrap();
+        self.epoch = epoch;
+        self.host_sequence = sequence + 1;
+        self.guest_sequence = 0;
+    }
+
     fn read(&mut self) -> (OuterHeader, Vec<u8>) {
         let mut bytes = [0; OUTER_HEADER_LEN];
         self.stream.read_exact(&mut bytes).unwrap();
@@ -93,6 +112,219 @@ fn connected(fresh: bool) -> (Session<'static>, Peer) {
     let (header, _) = peer.read();
     assert_eq!(header.record_type, OUTER_ACK);
     (session, peer)
+}
+
+fn restored() -> (Session<'static>, Peer, Vec<u8>) {
+    let (mut session, peer) = connected(true);
+    let (capture, payload) = Capture::activation_fixture();
+    let deadline = capture.restored.as_ref().unwrap().activation.deadline();
+    session.capture = Some(capture);
+    session.descriptor().set_nonblocking().unwrap();
+    session.connection.get_ref().deadline.set(deadline);
+    (session, peer, payload)
+}
+
+fn activate_bytes(session: &mut Session<'_>, peer: &mut Peer, id: u64, payload: &[u8]) -> Vec<u8> {
+    peer.send(protocol::APP_ACTIVATE, id, payload);
+    let Event::Data(bytes) = session
+        .next_event()
+        .unwrap_or_else(|_| panic!("activate DATA"))
+    else {
+        panic!("the activate is DATA");
+    };
+    bytes
+}
+
+#[test]
+fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplying() {
+    let (mut session, mut peer, payload) = restored();
+    let deadline = session.connection.get_ref().deadline.get();
+    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+    let ready = crate::activation::ReadyActivation::of(&record).encode();
+    let bytes = activate_bytes(&mut session, &mut peer, 61, &payload);
+    let request = session
+        .accept_request(&bytes)
+        .unwrap_or_else(|_| panic!("valid activate"));
+    peer.credit();
+    let retained = session
+        .activate_with(request, |restored, _, accepted, workload| {
+            assert_eq!(restored.activation.state(), ActivationState::Activating);
+            assert_eq!(restored.activation.deadline(), deadline);
+            assert_eq!(accepted, &record);
+            assert_eq!(
+                (workload.uid, workload.gid, workload.create_account),
+                (1000, 1001, true)
+            );
+            peer.reset(2, 4);
+            peer.send(protocol::APP_ACTIVATE, 62, &payload);
+            Ok("one applied space")
+        })
+        .unwrap();
+    assert_eq!(retained, Some("one applied space"));
+    assert_eq!(peer.read().0.record_type, OUTER_ACK);
+    peer.credit();
+    peer.app(APP_READY, 62, 0, &ready);
+    assert!(!session.rootless());
+    assert_eq!(session.connection.get_ref().deadline.get(), None);
+    let bytes = activate_bytes(&mut session, &mut peer, 63, &payload);
+    let request = session
+        .accept_request(&bytes)
+        .unwrap_or_else(|_| panic!("valid retry"));
+    peer.credit();
+    assert!(
+        session
+            .activate_with::<()>(request, |_, _, _, _| panic!(
+                "must not apply or switch twice"
+            ))
+            .unwrap()
+            .is_none()
+    );
+    peer.app(APP_READY, 63, 0, &ready);
+    session.start_activation().unwrap();
+    session.start_activation().unwrap();
+    assert_eq!(
+        session.activation_state_for_test(),
+        Some(ActivationState::Started)
+    );
+}
+
+#[test]
+fn postactivation_capture_stays_refused_without_pending_cleanup() {
+    let (mut session, mut peer, payload) = restored();
+    let state = session.capture.as_mut().unwrap().restored.as_mut().unwrap();
+    assert!(matches!(
+        state.accept(&payload, Instant::now()).unwrap().0,
+        ActivationAction::Apply(_)
+    ));
+    state.activation.complete(Instant::now(), Ok(())).unwrap();
+    session.start_activation().unwrap();
+    for kill in [0, 1] {
+        assert!(!queue(&mut session, &mut peer, 71, &[kill], false));
+        assert!(!session.capture_pending());
+        assert!(session.finish_capture().unwrap().is_none());
+        peer.app(
+            APP_ERROR,
+            71,
+            Errno::ENOTSUP as i32,
+            b"unsupported-operation",
+        );
+    }
+}
+
+#[test]
+fn changed_record_or_workload_bytes_during_application_fail_without_ready() {
+    for changed_identity in [false, true] {
+        let (mut session, mut peer, payload) = restored();
+        let mut changed = payload.clone();
+        if changed_identity {
+            changed[0] ^= 1;
+        } else {
+            let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+            let mut configuration = record.configuration().clone();
+            configuration.view.hostname = b"changed".to_vec();
+            let record =
+                crate::activation::ActivationRecord::new(record.restore().copied(), configuration)
+                    .unwrap();
+            changed.truncate(9);
+            changed.extend(record.encode());
+        }
+        let bytes = activate_bytes(&mut session, &mut peer, 64, &payload);
+        let request = session
+            .accept_request(&bytes)
+            .unwrap_or_else(|_| panic!("valid activate"));
+        peer.credit();
+        let result = session.activate_with(request, |_, _, _, _| {
+            peer.send(protocol::APP_ACTIVATE, 65, &changed);
+            Ok(())
+        });
+        assert_eq!(result.err(), Some(Errno::EPROTO));
+        peer.credit();
+        peer.stream.set_nonblocking(true).unwrap();
+        assert_eq!(
+            peer.stream.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(session.rootless());
+    }
+}
+
+#[test]
+fn failed_application_never_reports_ready_or_admits_root_dependent_work() {
+    let (mut session, mut peer, payload) = restored();
+    let bytes = activate_bytes(&mut session, &mut peer, 66, &payload);
+    let request = session
+        .accept_request(&bytes)
+        .unwrap_or_else(|_| panic!("valid activate"));
+    peer.credit();
+    assert_eq!(
+        session
+            .activate_with::<()>(request, |_, _, _, _| Err(crate::Error::io(
+                "runtime mounts failed"
+            )))
+            .err(),
+        Some(Errno::EPROTO)
+    );
+    assert!(session.rootless());
+    assert_eq!(
+        session.activation_state_for_test(),
+        Some(ActivationState::Failed)
+    );
+    peer.stream.set_nonblocking(true).unwrap();
+    assert_eq!(
+        peer.stream.read(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+fn short_deadline(session: &mut Session<'_>) -> Instant {
+    let now = Instant::now();
+    let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
+    let state = session.capture.as_mut().unwrap().restored.as_mut().unwrap();
+    state.activation = crate::guest::activation::Activation::with_resources(
+        crate::activation::ExpectedResources {
+            cpus: repaired.cpus(),
+            memory: repaired.memory(),
+        },
+        Some(now - Duration::from_millis(100)),
+        Duration::from_millis(300),
+        now,
+    );
+    state.reset(now).unwrap();
+    let deadline = state.activation.deadline().unwrap();
+    session.connection.get_ref().deadline.set(Some(deadline));
+    deadline
+}
+
+#[test]
+fn reconnect_and_partial_input_wait_only_until_the_original_activation_deadline() {
+    let (mut session, mut peer, _) = restored();
+    let deadline = short_deadline(&mut session);
+    peer.reset(2, 4);
+    assert!(matches!(session.next_event(), Ok(Event::Reset)));
+    session.acknowledge().unwrap();
+    assert_eq!(peer.read().0.record_type, OUTER_ACK);
+    assert_eq!(session.connection.get_ref().deadline.get(), Some(deadline));
+    let partial = encode_outer(OUTER_DATA, &INSTANCE, 2, 5, &[0; 24]).unwrap();
+    peer.stream.write_all(&partial[..11]).unwrap();
+    assert!(matches!(
+        session.next_event(),
+        Err(ReceiveFailure::Read(Errno::ETIMEDOUT))
+    ));
+    assert!(Instant::now() >= deadline);
+}
+
+#[test]
+fn an_unread_output_stream_cannot_extend_the_activation_deadline() {
+    let (mut session, _peer, _) = restored();
+    let deadline = short_deadline(&mut session);
+    let payload = vec![0; OUTER_MAX_PAYLOAD - protocol::APP_HEADER_LEN];
+    let error = loop {
+        if let Err(error) = session.send_app(APP_READY, 67, 0, &payload) {
+            break error;
+        }
+    };
+    assert_eq!(error, Errno::ETIMEDOUT);
+    assert!(Instant::now() >= deadline);
 }
 
 fn queue(

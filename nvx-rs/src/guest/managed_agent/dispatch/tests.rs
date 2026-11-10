@@ -441,6 +441,141 @@ fn mappings_mount_in_order_and_unblock_workloads_through_dispatch() {
 }
 
 #[test]
+fn init_refuses_activation_without_a_restore_and_keeps_serving() {
+    for fresh in [true, false] {
+        let config = AgentConfig::for_test(None);
+        let mut mappings = HostMappings::announced_for(&config, 0);
+        let mut system = TestSystem::new(Paths::default());
+        let (host, guest) = UnixStream::pair().unwrap();
+        let thread = thread::spawn(move || {
+            let mut session = Session::new(FileDescriptor::from_owned(guest.into()))
+                .with_capture(crate::guest::init::Capture::fixture(fresh));
+            let outcome = run(&mut system, &mut session, &config, &mut mappings);
+            (outcome, system)
+        });
+        let mut harness = Harness {
+            host,
+            thread,
+            epoch: 0,
+            host_sequence: 0,
+            guest_sequence: 0,
+        };
+        assert_eq!(harness.read_outer().0.record_type, OUTER_GUEST_ATTACH);
+        for epoch in [1, 2] {
+            harness.reset(epoch, 7);
+            assert_eq!(
+                harness.request(APP_ACTIVATE, b"misrouted"),
+                response(
+                    APP_ERROR,
+                    42,
+                    Errno::ENOTSUP as i32,
+                    b"unsupported-operation"
+                )
+            );
+        }
+        if !fresh {
+            assert_eq!(
+                harness.request(APP_PING, &[]),
+                response(APP_READY, 42, 0, b"")
+            );
+        }
+        let system = harness.stop();
+        assert!(system.diagnostics.is_empty());
+        assert_eq!(system.spawn_calls, 0);
+    }
+}
+
+#[test]
+fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> TestResult {
+    use crate::guest::activation::{ActivationAction, ActivationState};
+    use crate::guest::init::Capture;
+    if super::super::tests::isolate_process_test(
+        "NVX_RESTORED_DISPATCH_TEST",
+        "guest::managed_agent::dispatch::tests::restored_ready_maps_and_first_exec_share_the_existing_start_transition",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (temporary, mut system) = TestSystem::with_host_export();
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
+    let target = temporary.path().canonicalize()?.join("guest");
+    let first = maps_payload(
+        0,
+        &[(b"0/src", target.join("src").as_os_str().as_bytes(), 0)],
+        None,
+    );
+    let second = maps_payload(
+        1,
+        &[(b"1", target.join("out").as_os_str().as_bytes(), 0)],
+        None,
+    );
+    let config = AgentConfig::for_test(None);
+    let mut mappings = HostMappings::announced_for(&config, 2);
+    let (mut capture, payload) = Capture::activation_fixture();
+    let activation = capture.restored.as_mut().unwrap();
+    assert!(matches!(
+        activation.accept(&payload, std::time::Instant::now())?.0,
+        ActivationAction::Apply(_)
+    ));
+    let ready = activation
+        .activation
+        .complete(std::time::Instant::now(), Ok(()))?
+        .encode();
+    let (host, guest) = UnixStream::pair()?;
+    let thread = thread::spawn(move || {
+        let mut session =
+            Session::new(FileDescriptor::from_owned(guest.into())).with_capture(capture);
+        let outcome = run(&mut system, &mut session, &config, &mut mappings);
+        assert_eq!(
+            session.activation_state_for_test(),
+            Some(ActivationState::Started)
+        );
+        (outcome, system)
+    });
+    let mut harness = Harness {
+        host,
+        thread,
+        epoch: 0,
+        host_sequence: 0,
+        guest_sequence: 0,
+    };
+    assert_eq!(harness.read_outer().0.record_type, OUTER_GUEST_ATTACH);
+    harness.reset(1, 7);
+    assert_eq!(
+        harness.request(APP_ACTIVATE, &payload),
+        response(APP_READY, 42, 0, &ready)
+    );
+    let execution = workload_payload(&["/bin/sh", "-c", "printf restored"], None)?;
+    for maps in [&first, &second] {
+        assert_eq!(
+            harness.request(APP_EXEC, &execution),
+            response(APP_ERROR, 42, Errno::EAGAIN as i32, b"mappings-incomplete"),
+        );
+        assert_eq!(
+            harness.request(APP_MAPS, maps),
+            response(APP_READY, 42, 0, b"")
+        );
+    }
+    assert_eq!(
+        stdout_from(harness.request_all(43, APP_EXEC, &execution), 43, 0),
+        b"restored"
+    );
+    harness.reset(2, 4);
+    assert_eq!(
+        harness.request(APP_ACTIVATE, &payload),
+        response(APP_READY, 42, 0, &ready)
+    );
+    assert_eq!(
+        stdout_from(harness.request_all(44, APP_EXEC, &execution), 44, 0),
+        b"restored"
+    );
+    let system = harness.stop();
+    assert!(system.diagnostics.is_empty());
+    assert_eq!(system.kernel.moves().len(), 2);
+    Ok(())
+}
+
+#[test]
 fn mapping_sequence_errors_are_reported_through_dispatch() {
     let (temporary, system) = TestSystem::with_host_export();
     let target = temporary.path().canonicalize().unwrap().join("guest/src");

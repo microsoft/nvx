@@ -4,8 +4,9 @@ use crate::guest::init::Runtime;
 use crate::guest::mappings::{Mapper, MappingTable, SourceRoot};
 use crate::guest::sys::{self, Errno, FileDescriptor};
 use crate::protocol::{
-    self, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_FEATURES, APP_MAPS, APP_PING, APP_READY, APP_STOP,
-    APP_STOPPED, GuestFeatures, INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
+    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_FEATURES, APP_MAPS, APP_PING,
+    APP_READY, APP_STOP, APP_STOPPED, GuestFeatures, INVALID_REQUEST, MAPPINGS_INCOMPLETE,
+    UNSUPPORTED_OPERATION,
 };
 
 use super::diagnostics;
@@ -126,6 +127,7 @@ pub(crate) fn run(
             Err(error)
         };
     }
+    let mut restored = None;
     loop {
         let payload = match session.next_event() {
             Ok(Event::Reset) => {
@@ -146,7 +148,7 @@ pub(crate) fn run(
         // more specific stage. Its status is the error that ends the session, which
         // `control-session` reports too: `EPROTO` where C's `errno` was incidental, as after a
         // validation failure.
-        match handle_data(system, session, config, mappings, &payload) {
+        match handle_data(system, session, config, &mut restored, mappings, &payload) {
             Ok(Some(outcome)) => return Ok(outcome),
             Ok(None) => {}
             Err(_) if session.stopping() => return Ok(Outcome::Stopped),
@@ -189,6 +191,7 @@ fn handle_data(
     system: &mut impl System,
     session: &mut Session,
     config: &AgentConfig,
+    restored: &mut Option<AgentConfig>,
     mappings: &mut HostMappings,
     payload: &[u8],
 ) -> Result<Option<Outcome>, Errno> {
@@ -199,7 +202,7 @@ fn handle_data(
             return Err(failure.into_error());
         }
     };
-    if session.rootless() && !matches!(request.kind, APP_CAPTURE | APP_STOP) {
+    if session.rootless() && !matches!(request.kind, APP_ACTIVATE | APP_CAPTURE | APP_STOP) {
         session.send_error(
             request.request_id,
             Errno::ENOTSUP as i32,
@@ -207,7 +210,23 @@ fn handle_data(
         )?;
         return Ok(None);
     }
+    let config = restored.as_ref().unwrap_or(config);
     match request.kind {
+        APP_ACTIVATE if session.has_restored() => {
+            if let Some(handoff) = session.activate(request)? {
+                *mappings = HostMappings::layered(handoff.table, handoff.mapper, handoff.export)?;
+                *restored = Some(AgentConfig {
+                    rootfs: c"-".to_owned(),
+                    hostname: handoff.hostname,
+                    uid: CString::new(handoff.workload.uid.to_string()).expect("decimal UID"),
+                    gid: CString::new(handoff.workload.gid.to_string()).expect("decimal GID"),
+                    user: handoff.user,
+                    home: handoff.home,
+                    direct: true,
+                    entry: None,
+                });
+            }
+        }
         APP_CAPTURE => {
             if session.queue_capture(request, false)? {
                 return session.finish_capture();
@@ -245,6 +264,7 @@ fn handle_data(
                     return Ok(None);
                 }
             };
+            session.start_activation()?;
             exec::run(system, session, config, request.request_id, &execution)?;
             if session.capture_pending() {
                 return session.finish_capture();

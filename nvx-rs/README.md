@@ -3272,7 +3272,15 @@ disk's block device.
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
-program. Guests run them as static `x86_64-unknown-linux-musl` executables. On
+program. After a restored platform capture, `nvx-init` keeps one activation
+across control-session replacements, with its deadline anchored to the repair
+acknowledgement. It applies the restore's root and network, mounts the runtime,
+starts and retains an announcer only for published listeners, switches once,
+then completes and reports Ready. The host supplies the complete mapping table
+before the first valid EXEC starts the restored workload; later executions and
+byte-identical activation retries reuse the retained state.
+
+Guests run them as static `x86_64-unknown-linux-musl` executables. On
 Linux, with the musl target and a C compiler driver, `cc`, `nvx.py` builds them:
 
 ```bash
