@@ -26,6 +26,10 @@
 //! and the Administrators group, as one under the user's profile does. An existing directory that
 //! others may access is refused rather than restricted, since they could have placed files in it,
 //! or still hold them open. The store creates its files readable only by the current user.
+//!
+//! A locked launch writes its prepared capability and outputs before spawn, records the spawned
+//! process durably, and publishes the caller's exact saved VM only at commit. Dropping an
+//! uncommitted launch keeps its journal; these transitions do not recover or signal a process.
 #![cfg_attr(
     not(test),
     expect(
@@ -34,8 +38,11 @@
     )
 )]
 
+mod files;
+mod launch;
 mod locked;
 mod names;
+mod record;
 
 use std::io;
 use std::path::{Path, PathBuf};
