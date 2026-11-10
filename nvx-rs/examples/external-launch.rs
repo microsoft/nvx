@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(deadline.saturating_duration_since(Instant::now())),
         )?;
         read_until(console.as_mut(), b"\nNVX-EXTERNAL-LAUNCH-OK", deadline)?;
-        if !process.wait(deadline)? {
+        if process.wait(deadline)?.is_none() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "VM did not exit").into());
         }
         match launched.wait_timeout(Duration::ZERO)? {
@@ -116,7 +116,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             None => return Err(io::Error::other("VMM exit status is unavailable").into()),
         }
-        let outcome = report::read(&outputs.outcome)
+        let outcome = report::read(&outputs.outcome)?
             .ok_or_else(|| io::Error::other("missing or invalid VM outcome"))?;
         if outcome.category.as_deref() != Some("success")
             || outcome.status_code != Some(0)
