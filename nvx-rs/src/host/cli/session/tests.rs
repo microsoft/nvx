@@ -17,6 +17,17 @@ use crate::protocol::{
 const CAPABILITY: [u8; CAPABILITY_LEN] = [7; CAPABILITY_LEN];
 const INSTANCE: [u8; 16] = [0x11; 16];
 
+impl Session {
+    fn connect(
+        endpoint: &str,
+        pid: u32,
+        capability: &[u8; CAPABILITY_LEN],
+        timeout: f64,
+    ) -> Result<Self> {
+        Self::connect_unless_exited(endpoint, pid, capability, timeout, || false, None)
+    }
+}
+
 /// What a [`Recording`] transport records: the direction and timeout of each transfer.
 type Transfers = Arc<Mutex<Vec<(&'static str, Option<Duration>)>>>;
 
@@ -756,10 +767,11 @@ fn check_writes_to_a_slow_endpoint(
     assert!(reader.join().unwrap() > 0, "the endpoint read nothing");
 }
 
-/// Checks the wait for `endpoint`, which never appears, of a start that checks after each
-/// attempt whether the OpenVMM that it launched has exited, as [`Session::connect_launched`]
-/// checks it: an OpenVMM that exits ends the wait at once, as a closed endpoint, rather than at
-/// the timeout, and one that runs on keeps it going until the timeout.
+/// Checks the wait for `endpoint`, which never appears, of a cold run that checks after each
+/// attempt whether the OpenVMM that it launched has exited, as
+/// [`Session::connect_launched_cancellable`] checks it: an OpenVMM that exits ends the wait at
+/// once, as a closed endpoint, rather than at the timeout, and one that runs on keeps it going
+/// until the timeout.
 #[cfg(any(unix, windows))]
 fn check_waits_for_openvmm_that_exits(endpoint: &str) {
     let mut checks = 0;
