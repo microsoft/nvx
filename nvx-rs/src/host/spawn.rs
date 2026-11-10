@@ -21,9 +21,9 @@ use crate::host::process::POLL_INTERVAL;
 use crate::host::process::{BootId, KILL_TIMEOUT, Process, ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
 
-/// How [`spawn`] starts a VMM: its executable, arguments, and working directory, whether it
-/// leaves the caller's job object on Windows, and the descriptors or handles of the caller that it
-/// inherits besides its standard streams.
+/// How [`spawn`] or [`spawn_vm`] starts a VMM: its executable, arguments, and working directory,
+/// whether it leaves the caller's job object on Windows, and the descriptors or handles of the
+/// caller that it inherits besides its standard streams.
 #[derive(Debug, Clone)]
 pub struct VmmCommand<'a> {
     /// The VMM's executable.
@@ -109,8 +109,18 @@ pub fn spawn(
     spawn_inner(command, capability, log, false)
 }
 
-/// Starts a library VM only with a trusted log-named job on Windows.
-pub(crate) fn spawn_vm(
+/// Starts a VMM with the strict launch contract of [`crate::host::vm::VmmCommand`].
+///
+/// Uses [`spawn`]'s standard streams, inheritance allowlist, detachment, and process lifetime.
+/// Unlike [`spawn`], on Windows this requires a trusted log-named job: a log that is not a file
+/// of a disk volume, or an untrusted object or object-manager link under its job name, fails with
+/// [`io::ErrorKind::PermissionDenied`] before any child is created. A job of the user already
+/// holding that name fails with [`io::ErrorKind::AlreadyExists`], as in [`spawn`].
+///
+/// On other hosts this has the same behavior and errors as [`spawn`]. The caller retains its
+/// owned inherited resources until the spawn returns, and keeps or ends the returned child as
+/// [`Launched`] describes.
+pub fn spawn_vm(
     command: &VmmCommand<'_>,
     capability: &[u8; CAPABILITY_LEN],
     log: File,
