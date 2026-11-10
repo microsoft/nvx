@@ -121,6 +121,9 @@ fn an_unverified_console_is_refused_while_the_owned_child_runs() {
 }
 
 #[cfg(windows)]
+const REDIRECTED_CONSOLE_BYTES: &[u8] = b"nvx-raw:\xff\x80\xc3";
+
+#[cfg(windows)]
 #[test]
 fn windows_console_output_handles_non_utf8_code_pages() {
     use std::os::windows::process::CommandExt;
@@ -139,6 +142,13 @@ fn windows_console_output_handles_non_utf8_code_pages() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+    assert!(
+        output
+            .stdout
+            .windows(REDIRECTED_CONSOLE_BYTES.len())
+            .any(|bytes| bytes == REDIRECTED_CONSOLE_BYTES),
+        "{output:?}"
+    );
 }
 
 /// Runs only as the parent's isolated-console helper, never in the shared test process.
@@ -146,7 +156,7 @@ fn windows_console_output_handles_non_utf8_code_pages() {
 #[test]
 #[ignore]
 fn windows_console_output_helper() {
-    use std::io::Write;
+    use std::io::{Read, Seek, Write};
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::Foundation::{
         GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
@@ -197,12 +207,32 @@ fn windows_console_output_helper() {
     assert_ne!(raw, INVALID_HANDLE_VALUE);
     // SAFETY: CreateConsoleScreenBuffer returned this newly owned handle.
     let buffer = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let mut file = tempfile::tempfile().unwrap();
     io::stdout().flush().unwrap();
     // SAFETY: these getters return the helper's own current console settings.
     let _restore = RestoreConsole {
         stdout: unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
         code_page: unsafe { GetConsoleOutputCP() },
     };
+    assert!(!io::stdout().is_terminal());
+    let mut redirected = ConsoleOutput::new();
+    redirected.write_all(REDIRECTED_CONSOLE_BYTES).unwrap();
+    redirected.finish().unwrap();
+    // SAFETY: the file is owned and remains open until stdout has been restored.
+    unsafe {
+        assert_ne!(
+            SetStdHandle(STD_OUTPUT_HANDLE, file.as_raw_handle().cast()),
+            0
+        );
+    }
+    assert!(!io::stdout().is_terminal());
+    let mut redirected = ConsoleOutput::new();
+    redirected.write_all(REDIRECTED_CONSOLE_BYTES).unwrap();
+    redirected.finish().unwrap();
+    file.rewind().unwrap();
+    let mut redirected_bytes = Vec::new();
+    file.read_to_end(&mut redirected_bytes).unwrap();
+    assert_eq!(redirected_bytes, REDIRECTED_CONSOLE_BYTES);
     // SAFETY: only this helper is attached, and the owned buffer remains open until restoration.
     unsafe {
         assert_ne!(SetConsoleOutputCP(437), 0);
@@ -211,14 +241,27 @@ fn windows_console_output_helper() {
             0
         );
     }
+    let mut console = ConsoleOutput::new();
     for chunk in [
         b"caf\xc3".as_slice(),
         b"\xa9 \xe2".as_slice(),
-        b"\x82\xac".as_slice(),
+        b"\x82\xac|A\xff\x80|".as_slice(),
+        b"\xc3".as_slice(),
+        b"A".as_slice(),
     ] {
-        write_console(chunk).unwrap();
+        console.write_all(chunk).unwrap();
     }
-    let expected: Vec<u16> = "caf\u{e9} \u{20ac}".encode_utf16().collect();
+    console.finish().unwrap();
+    for incomplete in [b"\xc3".as_slice(), b"\xe2\x82", b"\xf0\x9f\x92"] {
+        let mut console = ConsoleOutput::new();
+        console.write_all(b"|").unwrap();
+        console.write_all(incomplete).unwrap();
+        console.finish().unwrap();
+    }
+    let expected: Vec<u16> =
+        "caf\u{e9} \u{20ac}|A\u{fffd}\u{fffd}|\u{fffd}A|\u{fffd}|\u{fffd}|\u{fffd}"
+            .encode_utf16()
+            .collect();
     let mut actual = vec![0; expected.len()];
     let mut read = 0;
     // SAFETY: the buffer is owned, and actual has room for the requested UTF-16 characters.
