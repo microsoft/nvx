@@ -5,7 +5,7 @@ use std::io;
 
 use super::vmm::Vmm;
 use crate::error::Result;
-use crate::host::process::{Process, ProcessRef};
+use crate::host::process::{Opened, Process, ProcessRef};
 use crate::host::store::{
     IdentityCheck, IdentityPart, LockedStore, Recovery, RuntimeIdentity, RuntimeRecord,
     SandboxStore,
@@ -65,7 +65,7 @@ pub enum Reattached {
 /// can. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for an invalid
 /// `runtime`, and as [`LockedStore::recover`] does for inconsistent records.
 pub fn reattach(locked: &mut LockedStore, runtime: &RuntimeIdentity) -> Result<Reattached> {
-    reattach_with(locked, runtime, Process::open, |_| Ok(()))
+    reattach_reporting(locked, runtime, |_| Ok(()))
 }
 
 /// Reattaches as [`reattach`] does, and calls `exited` with the runtime record of a VMM that it
@@ -77,7 +77,17 @@ pub(crate) fn reattach_reporting(
     runtime: &RuntimeIdentity,
     exited: impl FnOnce(&RuntimeRecord) -> Result<()>,
 ) -> Result<Reattached> {
-    reattach_with(locked, runtime, Process::open, exited)
+    reattach_with(
+        locked,
+        runtime,
+        |reference| {
+            Ok(match Process::open(reference)? {
+                Opened::Running(process) => Some(process),
+                Opened::Exited(_) => None,
+            })
+        },
+        exited,
+    )
 }
 
 /// Reattaches as [`reattach_reporting`] does, holding the recorded VMM with `open`, which is

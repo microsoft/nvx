@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use nvx::ErrorKind;
 use nvx::host::launch::MAX_TIMEOUT;
-use nvx::host::process::{BootId, Process, ProcessRef, WaitMethod};
+use nvx::host::process::{BootId, Opened, Process, ProcessRef, WaitMethod};
 #[cfg(windows)]
 use nvx::host::store::FORMAT;
 use nvx::host::store::{
@@ -449,7 +449,7 @@ impl Drop for VmmDirectory {
     fn drop(&mut self) {
         let _ = File::create(self.path().join(EXIT_MARKER));
         if let Some(reference) = &self.reference
-            && let Ok(Some(process)) = Process::open(reference)
+            && let Ok(Opened::Running(process)) = Process::open(reference)
             && !process
                 .wait(Instant::now() + TIMEOUT)
                 .is_ok_and(|exited| exited.is_some())
@@ -572,16 +572,20 @@ impl Drop for Launcher {
 
 /// Opens the process that `reference` names, which must still run.
 fn open_running(reference: &ProcessRef) -> Process {
-    Process::open(reference)
-        .unwrap()
-        .unwrap_or_else(|| panic!("{reference:?} does not run"))
+    let Opened::Running(process) = Process::open(reference).unwrap() else {
+        panic!("{reference:?} does not run");
+    };
+    process
 }
 
 /// Checks that the process that `process` holds has exited, and that no process matches its
 /// reference.
 fn assert_ended(process: &Process) {
     assert!(process.has_exited().unwrap());
-    assert!(Process::open(process.reference()).unwrap().is_none());
+    assert!(matches!(
+        Process::open(process.reference()).unwrap(),
+        Opened::Exited(_)
+    ));
 }
 
 #[test]
@@ -782,7 +786,7 @@ fn a_reused_process_id_is_never_signaled() {
         },
     ] {
         assert!(
-            Process::open(&impostor).unwrap().is_none(),
+            matches!(Process::open(&impostor).unwrap(), Opened::Exited(_)),
             "{impostor:?} names a running process"
         );
     }
@@ -824,7 +828,10 @@ fn references_that_name_no_process_are_never_opened() {
     vmm.end();
     assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     assert!(launched.kill_and_wait());
-    assert!(Process::open(process.reference()).unwrap().is_none());
+    assert!(matches!(
+        Process::open(process.reference()).unwrap(),
+        Opened::Exited(_)
+    ));
     assert!(process.has_exited().unwrap());
 }
 
