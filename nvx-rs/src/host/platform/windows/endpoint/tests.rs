@@ -27,27 +27,19 @@ pub(crate) fn control_server(endpoint: &str) -> File {
 pub(crate) fn accept_control(server: &File) -> i32 {
     use std::os::windows::io::{AsHandle, AsRawHandle};
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut stale = 0;
-    loop {
+    let connect = || {
         // SAFETY: the synchronous server and its handle remain valid while it accepts.
-        let connected =
-            unsafe { ConnectNamedPipe(server.as_handle().as_raw_handle(), ptr::null_mut()) };
-        if connected != 0 {
-            return connected;
-        }
-        let error = last_error();
-        if error == ERROR_PIPE_CONNECTED {
-            return connected;
-        }
-        assert_eq!(error, ERROR_NO_DATA, "unexpected control-pipe accept error");
-        stale += 1;
-        assert!(
-            stale <= 16 && Instant::now() < deadline,
-            "stale control-pipe connections exhausted the accept budget"
-        );
+        unsafe { ConnectNamedPipe(server.as_handle().as_raw_handle(), ptr::null_mut()) }
+    };
+    let mut connected = connect();
+    if connected == 0 && last_error() == ERROR_NO_DATA {
         disconnect_control(server);
+        connected = connect();
     }
+    if connected == 0 {
+        assert_eq!(last_error(), ERROR_PIPE_CONNECTED);
+    }
+    connected
 }
 
 pub(crate) fn disconnect_control(server: &File) {
@@ -71,43 +63,41 @@ fn a_stale_control_probe_is_disconnected_before_the_actual_client_is_accepted() 
     );
     let server = control_server(&endpoint);
     drop(connect_endpoint(&endpoint, std::process::id(), Duration::from_secs(2)).unwrap());
-    std::thread::scope(|scope| {
-        let (ready, accepting) = std::sync::mpsc::channel();
-        let accepted = scope.spawn(move || {
-            ready.send(()).unwrap();
-            accept_control(&server);
-            let mut request = [0];
-            (&server).read_exact(&mut request).unwrap();
-            assert_eq!(request, [7]);
-            (&server).write_all(&[9]).unwrap();
-        });
-        accepting.recv_timeout(Duration::from_secs(2)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut client = loop {
-            let left = time_left(Some(deadline)).unwrap().unwrap();
-            match connect_endpoint(
-                &endpoint,
-                std::process::id(),
-                left.min(Duration::from_millis(25)),
-            ) {
-                Ok(client) => break client,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => panic!("the actual control client failed: {error}"),
-            }
-        };
-        client
-            .write_all(&[7], Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut response = [0];
-        assert_eq!(
-            client
-                .read(&mut response, Some(Duration::from_secs(2)))
-                .unwrap(),
-            1
-        );
-        assert_eq!(response, [9]);
-        accepted.join().unwrap();
+    let (ready, accepting) = std::sync::mpsc::channel();
+    let accepted = std::thread::spawn(move || {
+        ready.send(()).unwrap();
+        accept_control(&server);
+        let mut request = [0];
+        (&server).read_exact(&mut request).unwrap();
+        assert_eq!(request, [7]);
+        (&server).write_all(&[9]).unwrap();
     });
+    accepting.recv_timeout(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut client = loop {
+        let left = time_left(Some(deadline)).unwrap().unwrap();
+        match connect_endpoint(
+            &endpoint,
+            std::process::id(),
+            left.min(Duration::from_millis(25)),
+        ) {
+            Ok(client) => break client,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("the actual control client failed: {error}"),
+        }
+    };
+    client
+        .write_all(&[7], Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut response = [0];
+    assert_eq!(
+        client
+            .read(&mut response, Some(Duration::from_secs(2)))
+            .unwrap(),
+        1
+    );
+    assert_eq!(response, [9]);
+    accepted.join().unwrap();
 }
 
 #[test]
@@ -153,6 +143,8 @@ fn a_busy_control_pipe_never_replaces_the_callers_probe_deadline() {
 
 #[test]
 fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
+    use std::os::windows::io::{AsHandle, AsRawHandle};
+
     let endpoint = format!(
         r"\\.\pipe\nvx-transport-{}-{}",
         std::process::id(),
@@ -164,7 +156,13 @@ fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     drop(transport.try_clone_handle().unwrap().unwrap());
     let pipe = transport.try_clone_handle().unwrap().unwrap();
     drop(transport);
-    assert_eq!(accept_control(&server), 0);
+    // A replacement connection would hide a lost duplicate, so this check stays strict.
+    // SAFETY: the owned synchronous server remains valid while it accepts.
+    assert_eq!(
+        unsafe { ConnectNamedPipe(server.as_handle().as_raw_handle(), ptr::null_mut()) },
+        0
+    );
+    assert_eq!(last_error(), ERROR_PIPE_CONNECTED);
     // SAFETY: this creates a fresh unnamed manual-reset event.
     let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) }).unwrap();
     let mut duplicate = PipeTransport { pipe, event };
