@@ -7,13 +7,14 @@
   `61994293a9e5e3bcc1d685d708cf462920eed030`, and the `feature/microvm/release/v6.0`
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
-  summary, and commit mapping below cover positions 001-131 and the PR09 fixups at positions
-  241-243.
-- NVX's pinned OpenVMM revision: `cd5cd38149419c99a31564631ce6cb6e149a2a7a`, position 246, the
-  head of microsoft/openvmm#5016, whose commit follows position 245, `a8a0e3517`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5013 merged with positions 243 and 244 after
-  position 242, `6ddd6ca50`, which microsoft/openvmm#5012 merged with position 241 after position
-  240, `4c2697aef`, which microsoft/openvmm#5010 merged with
+  summary, and commit mapping below cover positions 001-131, the PR09 fixups at positions
+  241-243, and the PR13 fixup at position 247.
+- NVX's pinned OpenVMM revision: `61cdd63978ea58ce045d159208ed4ca22f30cbb8`, position 247, the
+  head of microsoft/openvmm#5022, whose commit follows position 246, `cd5cd3814`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5016 merged after position 245, `a8a0e3517`, which
+  microsoft/openvmm#5013 merged with positions 243 and 244 after position 242, `6ddd6ca50`, which
+  microsoft/openvmm#5012 merged with position 241 after position 240, `4c2697aef`, which
+  microsoft/openvmm#5010 merged with
   position 239 after position 238, `46bfe02ed`, which microsoft/openvmm#5005 merged after
   position 237, `cba21d109`, which microsoft/openvmm#5004 merged after position 236,
   `ac3dc27a7`, which microsoft/openvmm#5003 merged after position 235, `b4028c1aa`, which
@@ -35,9 +36,9 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 115 commits past
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 116 commits past
   the mapped tip on the same first-parent chain. Positions 132-240 and 244-246 are not yet
-  assigned to PRs, and positions 241-243 are PR09 fixups; see
+  assigned to PRs, positions 241-243 are PR09 fixups, and position 247 is a PR13 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -874,7 +875,7 @@ flowchart TB
         P10["PR10<br/>CPU/clock state<br/>U - 11 commits"]
         P11["PR11<br/>Snapshot publication<br/>U - 4 commits"]
         P12["PR12<br/>Private-CoW restore<br/>U - 5 commits"]
-        P13["PR13<br/>Virtio persistence<br/>U - 12 commits"]
+        P13["PR13<br/>Virtio persistence<br/>U - 12 commits + 1 fixup"]
     end
 
     subgraph Product["Ordered microVM product stack"]
@@ -1009,7 +1010,8 @@ ba105dd7f
   -> PR09 fixups [241-243]
   -> state changes failed rather than panicking on a lost unit [244-245]
   -> PCI restore tests before the first start [246]
-  -> cd5cd3814 (NVX pin)
+  -> PR13 fixup [247]
+  -> 61cdd6397 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1026,17 +1028,24 @@ before submission, which adds the terminal state that position 241 handles, the 
 of a failed start that position 242 changes, and the rollback whose stop position 243 orders;
 position 241's check of a time advance, with its test, folds into PR10's position 019, which adds
 the time advance, and position 243's description of the snapshot rollback's start into PR17's
-position 072, which adds that rollback.
+position 072, which adds that rollback. Fold position 247 into PR13's positions 043 and 048 before
+submission, which add the console's and virtio-net's input gates and the resets that cleared them;
+its documentation of `VirtioDevice`'s gate folds into PR13's position 040, which adds that gate,
+its virtio-fs change, with its tests, into PR18's position 088, which adds virtio-fs's request
+admission and its reset, its broker test into PR23's position 113, its virtio-fs queue test into
+position 172, its documentation of `ChangeDeviceState`'s gate into PR09's position 018, and its
+sentence of the snapshot guide into PR20's position 095, which adds the post-restore gate.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 115 later commits,
-positions 241-243 are PR09 fixups, and the others are not yet classified or assigned to PRs.
+The NVX pin extends the chain past position 131 without merges. Of the 116 later commits,
+positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, and the others are not yet
+classified or assigned to PRs.
 Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-246 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-247 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1160,6 +1169,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 244 | `5a750a862` | - | - | - | - | state_unit: fail a stop instead of panicking when a unit is lost (microsoft/openvmm#5013) |
 | 245 | `a8a0e3517` | - | - | - | - | state_unit: fail a reset, save, restore, or time advance on a lost unit (microsoft/openvmm#5013) |
 | 246 | `cd5cd3814` | - | - | - | - | virtio: test PCI re-save before start and missing queue progress (microsoft/openvmm#5016) |
+| 247 | `61cdd6397` | - | - | - | - | virtio: keep a held input gate across a device reset (microsoft/openvmm#5022); fold into 043 and 048, its virtio-fs change into 088 |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1338,7 +1348,15 @@ check of terminal units then refuses, and adds tests in a new file. Position 246
 counterparts of two MMIO tests to the virtio saved-state tests of PR13's position 039, which
 positions 213 and 218 also extend, and corrects the module documentation of the virtio-net
 saved-state tests that PR13's position 048 adds, which still described the deferred restore of
-device-private state that position 039's rewrite for microsoft/nvx#1232 retired.
+device-private state that position 039's rewrite for microsoft/nvx#1232 retired. Position 247
+changes what PR13's positions 043 and 048 and PR18's position 088 add with the saved state of the
+console, virtio-net, and virtio-fs: the reset of each device, which those positions add or extend,
+cleared the device's input gate, and now keeps it, so that only resuming input releases it. It
+states that rule on the gate's methods of `VirtioDevice`, which PR13's position 040 adds, and of
+`ChangeDeviceState`, which PR09's position 018 adds and position 238 changes, extends the snapshot
+guide's paragraph on the post-restore gate that PR20's position 095 adds, and adds tests beside
+those of PR13's positions 043 and 048, PR18's positions 088 and 090, PR23's position 113, and
+position 172, and a new module of console tests.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1655,6 +1673,20 @@ positions 213 and 218 also change, and the module documentation of the virtio-ne
 that PR13's position 048 adds. Replaying it on upstream main conflicts in both of its files:
 upstream main lacks both test modules, so it follows PR13 upstream.
 
+Position 247 changes only the input gates that PR13's positions 043 and 048 and PR18's position 088
+give the console, virtio-net, and virtio-fs with their saved state, the documentation of the gate's
+methods of `VirtioDevice` and `ChangeDeviceState`, which PR13's position 040 and PR09's position
+018 add, and the snapshot guide's paragraph on the post-restore gate of PR20's position 095. It
+adds tests beside those of the same positions, of PR18's position 090, of PR23's position 113, and
+of position 172, and a new module of console tests, which drives the console through the
+virtio-mmio transport. Replaying it on upstream main conflicts in 13 of its 15 files, all but that
+new module and the development dependency that virtio-fs takes for its transport tests, which
+apply cleanly: upstream main lacks the input gate of position 018, its forwarding by position 040,
+the devices' gates, and the test harnesses that its tests extend, those of the console's broker of
+PR23's position 113 and of virtio-fs's gated queues of position 172 among them. So it follows PR13
+upstream, folded into positions 043 and 048, and its parts into PR09's position 018, PR13's
+position 040, PR18's position 088, PR20's position 095, PR23's position 113, and position 172.
+
 ## PR summary
 
 Each count is of v6.0 commits, which include the fixups that the v3.0, v4.0, v5.0, and v6.0
@@ -1677,7 +1709,7 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 | PR10 | U | Portable CPU and clock state | 019-029 | `a1e113d12..ab67f39e2` | 11 | PR09 |
 | PR11 | U | Snapshot publication protocol | 030-033 | `23e759e74..112512c35` | 4 | PR10 |
 | PR12 | U | Immutable private-CoW restore | 034-038 | `6c89f4c94..3da713626` | 5 | PR10 |
-| PR13 | U | Generic virtio persistence | 039-050 | `1f94f48f1..35a362441` | 12 | PR11 + PR12 |
+| PR13 | U | Generic virtio persistence | 039-050; 247 (fixup) | `1f94f48f1..35a362441`; `61cdd6397` | 13 | PR11 + PR12 |
 | PR14 | U | Firmware-less direct boot, loader half | 051-054 | `6cea1ae18..235bf44a0` | 4 | Current upstream |
 | PR15 | P | microVM machine profile and minimal chipset | 055-065 | `d814dc8b1..ada37b9d4` | 11 | Foundation fan-in |
 | PR16 | P | Fixed virtio-MMIO ABI and shared interrupt status | 066-069 | `1d0ded1ec..62a1fdcba` | 4 | PR15 |
@@ -1698,8 +1730,8 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 
 Each entry, at the position that the commit had in v5.0 and v5.1 too, names the v4.0 position of the
 commit, the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4 and v5.1 fixups that it folds;
-"(part)" marks a fixup that split across commits. Positions 241-243, which followed the v6.0
-reorganization, name their OpenVMM pull request instead. A
+"(part)" marks a fixup that split across commits. Positions 241-243 and 247, which followed the
+v6.0 reorganization, name their OpenVMM pull request instead. A
 v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are those of
 `feature/microvm/release/v4.0`. Landed entries name the commits and positions of the branch that
 the rebase started from, `microvm/v2.1`, `feature/microvm/release/v2.2`,
@@ -1922,7 +1954,7 @@ Retired by the v4.0 and v5.0 reorganizations:
 </details>
 
 <details>
-<summary><strong>PR13 - Generic virtio persistence (U)</strong> - 12 commits</summary>
+<summary><strong>PR13 - Generic virtio persistence (U)</strong> - 13 commits</summary>
 
 - 039 `1f94f48f1` - virtio: add device-private saved state and restore it while the device is stopped (v4.0 044, v3.0 053, v2.4 053; folds v2.4 372; rewritten by the v4.0 reorganization to restore device-private state into the stopped device, for microsoft/nvx#1232)
 - 040 `c09560974` - virtio: forward input quiesce and resume through transports (v4.0 045, v3.0 054, v2.4 054)
@@ -1936,6 +1968,7 @@ Retired by the v4.0 and v5.0 reorganizations:
 - 048 `8f3d55b15` - virtio_net: persist drained queue state for static-identity NICs (v4.0 052, v3.0 061, v2.4 061)
 - 049 `9a21e594f` - fuse: save and restore negotiated session state (v4.0 053, v3.0 062, v2.4 062)
 - 050 `35a362441` - virtiofs: track inode aliases through link, rename, and unlink (v4.0 054, v3.0 063, v2.4 063)
+- 247 `61cdd6397` - virtio: keep a held input gate across a device reset (microsoft/openvmm#5022; **fold into 043 and 048**, its documentation of `VirtioDevice`'s gate into 040, its virtio-fs change and tests into PR18's 088, its broker test into PR23's 113, its virtio-fs queue test into 172, its documentation of `ChangeDeviceState`'s gate into PR09's 018, and its sentence of the snapshot guide into PR20's 095)
 
 </details>
 
