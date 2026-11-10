@@ -13,7 +13,7 @@ use crate::host::template::key::CaptureClass;
 use crate::host::template::manifest::TemplateManifest;
 
 #[cfg(any(target_os = "linux", windows))]
-pub(in crate::host::template) use super::capture::SNAPSHOT_ARTIFACTS;
+pub(in crate::host::template) use crate::host::snapshot::SNAPSHOT_ARTIFACTS;
 
 impl Store {
     /// Publishes a generation of a template, whose fixed time contract names a host and boot of

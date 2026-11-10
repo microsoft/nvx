@@ -125,7 +125,7 @@ changes only when the module's purpose does.
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold and capture preparation, owned cold-launch command, verified detached launch, confirmed stop, and caller-saved reattachment |
-| [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshot directories, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
+| [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshots, post-exit capture finishing, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
@@ -675,6 +675,15 @@ only cold boots are supported.
 effective devices independently of runtime paths or network policy.
 `vm::Prepared::capture_context` returns it for the caller to clone and
 serialize; NVX owns no capture-context store or persistence format.
+
+`finish_capture(&VmDir, &CaptureContext, &Exited)` requires the capture VM's
+proved exit and successful outcome, checks the OpenVMM snapshot against the
+context, and atomically writes `key.bin` and informational `snapshot.json`
+beside `openvmm/`. It returns `CapturedSnapshot { key }`. The caller moves
+only those three entries into its own private, immutable snapshot directory;
+logs, outcomes and other VM files remain where they are. A failure can be
+corrected and retried while the VM directory and capture context stay intact,
+including when one metadata file was already written.
 
 ### `nvx::host::config`
 
