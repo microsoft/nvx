@@ -1,6 +1,6 @@
 //! Persistent sandboxes on the CLI's store and caller-owned [`crate::host::vm`] interface.
 //!
-//! Provision keeps today's configuration, image bindings, network and export. Start journals the
+//! Provision records the typed image and upper, image bindings, network and export. Start journals the
 //! prepared capability and outputs before spawn, records the verified process, and commits the
 //! matching saved VM only after authenticated readiness and mappings. Every lifecycle command
 //! takes the CLI store's recoverable lock; indeterminate launches retain their evidence.
@@ -58,6 +58,8 @@ pub(crate) struct ProvisionConfig<'a> {
     pub(crate) memory_mib: u64,
     /// `--cmdline`.
     pub(crate) cmdline: &'a str,
+    /// The RAM upper's cap, or the default when omitted.
+    pub(crate) ram_upper_percent: Option<u8>,
 }
 
 /// The control features that the layered sandbox root must provide for the requests of
