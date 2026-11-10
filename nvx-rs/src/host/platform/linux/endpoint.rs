@@ -273,8 +273,16 @@ pub(crate) fn connect_endpoint(
 
 /// Returns the process that listens on a control endpoint, or `None` if nothing listens.
 pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    endpoint_server_pid_until(endpoint, Instant::now() + Duration::from_secs(5))
+}
+
+/// Looks up the endpoint owner within the caller's absolute deadline.
+pub(crate) fn endpoint_server_pid_until(
+    endpoint: &str,
+    deadline: Instant,
+) -> io::Result<Option<u32>> {
     loop {
+        time_left(Some(deadline))?;
         match sys::connect_nonblocking(endpoint) {
             Ok(stream) => return sys::peer_pid(&stream).map(Some),
             Err(error)
@@ -286,10 +294,9 @@ pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
                 return Ok(None);
             }
             // A full listen backlog drains as OpenVMM accepts clients.
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(25));
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let left = time_left(Some(deadline))?.expect("the probe has a deadline");
+                thread::sleep(left.min(Duration::from_millis(25)));
             }
             Err(error) => return Err(error),
         }
