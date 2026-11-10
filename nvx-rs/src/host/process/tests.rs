@@ -275,7 +275,7 @@ fn hosts_without_pidfds_poll_and_never_signal() {
     let still_running = process.has_exited();
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(!running.unwrap());
+    assert!(running.unwrap().is_none());
     assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::Unsupported);
     assert!(!still_running.unwrap());
     // Once the child is reaped, its ID names no process, or another one.
@@ -283,6 +283,7 @@ fn hosts_without_pidfds_poll_and_never_signal() {
         process
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
 }
 

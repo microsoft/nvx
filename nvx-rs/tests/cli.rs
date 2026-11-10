@@ -1007,9 +1007,10 @@ fn a_stop_under_another_identity_never_ends_a_process_that_its_record_does_not_n
         );
         assert_eq!(runtime_record(&root, "state"), None);
         assert!(
-            !process
+            process
                 .wait(Instant::now() + Duration::from_millis(200))
-                .unwrap(),
+                .unwrap()
+                .is_none(),
             "{field}"
         );
         process.kill().unwrap();
@@ -1017,6 +1018,7 @@ fn a_stop_under_another_identity_never_ends_a_process_that_its_record_does_not_n
             process
                 .wait(Instant::now() + Duration::from_secs(10))
                 .unwrap()
+                .is_some()
         );
     }
     assert_eq!(transition(&root, "deprovision", "state", &[]), succeeded());
@@ -1153,6 +1155,7 @@ fn stop_reports_its_timeout_and_leaves_the_vm_running() {
         process
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
     assert_eq!(
         transition(&root, "deprovision", "unanswered", &[]),
@@ -1173,6 +1176,7 @@ fn stop_reports_its_timeout_and_leaves_the_vm_running() {
         process
             .wait(Instant::now() + Duration::from_secs(30))
             .unwrap()
+            .is_some()
     );
     assert_eq!(
         transition(&root, "stop", "slow", &[]),
@@ -1194,6 +1198,7 @@ fn a_sandbox_whose_openvmm_exited_reports_it_once_and_starts_again() {
             process
                 .wait(Instant::now() + Duration::from_secs(10))
                 .unwrap()
+                .is_some()
         );
     };
     crash();
