@@ -158,7 +158,10 @@ impl Sandbox {
             .find(|root| match fs::create_dir(root) {
                 Ok(()) => true,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
-                Err(error) => panic!("cannot create the {name} sandbox {}: {error}", root.display()),
+                Err(error) => panic!(
+                    "cannot create the {name} sandbox {}: {error}",
+                    root.display()
+                ),
             })
             .expect("a directory name is free");
         Self {
