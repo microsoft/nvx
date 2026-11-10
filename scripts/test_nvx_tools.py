@@ -18440,6 +18440,168 @@ def _shell_function(source: str, name: str) -> str:
     return source[start : source.index("\n}\n", start) + 3]
 
 
+class GuestInitRoutingTests(unittest.TestCase):
+    INIT = Path(__file__).parents[1] / "guest" / "common" / "init"
+
+    def setUp(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        self.shell = shell
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.pid = self.root / "daemon.pid"
+        self.announcer = self.root / "announcer.pid"
+        (self.root / "net" / "eth0").mkdir(parents=True)
+        (self.root / "os-release").write_text("ID=alpine\n", encoding="utf-8")
+        (self.root / "alpine-release").write_text("test\n", encoding="utf-8")
+        self.helpers: dict[str, Path] = {}
+        for name, script in {
+            "nvx-time": f"printf '4242\\n' >{shlex.quote(self.pid.as_posix())}\n",
+            "nvx-init": 'printf "new-init"; printf " <%s>" "$@"; echo\n',
+            "nvx-init-agent": 'printf "old-init"; printf " <%s>" "$@"; echo\n',
+            "nvx-ingress": (
+                f'printf "%s\\n" "$$" >{shlex.quote(self.announcer.as_posix())}\n'
+            ),
+            "nvx-hostmount": "echo hostmount\n",
+            "shell": "echo blockless-shell\n",
+        }.items():
+            path = self.root / name
+            path.write_text(f"#!/bin/sh\n{script}", encoding="utf-8")
+            path.chmod(0o755)
+            self.helpers[name] = path
+
+    def _run(self, cmdline: str) -> subprocess.CompletedProcess[str]:
+        command_line = self.root / "cmdline"
+        command_line.write_text(cmdline, encoding="utf-8")
+        source = self.INIT.read_text(encoding="utf-8")
+        replacements = {
+            "/sbin/nvx-init-agent": self.helpers["nvx-init-agent"],
+            "/sbin/nvx-init": self.helpers["nvx-init"],
+            "/sbin/nvx-time": self.helpers["nvx-time"],
+            "/sbin/nvx-ingress": self.helpers["nvx-ingress"],
+            "/sbin/nvx-hostmount": self.helpers["nvx-hostmount"],
+            "/proc/cmdline": command_line,
+            "/proc/sys/kernel/modules_disabled": self.root / "modules_disabled",
+            "/sys/class/net": self.root / "net",
+            "/run/nvx/time/daemon.pid": self.pid,
+            "/etc/os-release": self.root / "os-release",
+            "/etc/alpine-release": self.root / "alpine-release",
+            "exec /bin/sh": self.helpers["shell"],
+        }
+        for original, replacement in replacements.items():
+            target = shlex.quote(replacement.as_posix())
+            if original == "exec /bin/sh":
+                target = f"exec {target}"
+            source = source.replace(original, target)
+        source = source.replace("/sbin/nvx-exit", "nvx_exit")
+        source = source.replace("/sbin/nvx-snapshot", "nvx_snapshot")
+        return subprocess.run(
+            [self.shell, "-s"],
+            input=(
+                "mount() { :; }\nifconfig() { :; }\nroute() { :; }\n"
+                'nvx_exit() { exit "$1"; }\n'
+                "nvx_snapshot() { echo blockless-snapshot; }\n"
+                f"{source}"
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=40,
+        )
+
+    def test_tokenless_layered_and_fresh_sandboxes_use_new_init(self):
+        for tokens in (
+            "nvx_layer=distro,0xd0003000,erofs nvx_overlay_upper=ramfs",
+            "nvx_snapshot_tier=platform",
+            "nvx_snapshot_tier=platform nvx_mode=managed",
+        ):
+            with self.subTest(tokens=tokens):
+                result = self._run(f"console=hvc0 nvx_sandbox=1 {tokens}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "new-init <4242>\n")
+
+    def test_old_lifecycle_tokens_keep_the_old_layered_init(self):
+        for lifecycle in ("managed", "one-shot", ""):
+            with self.subTest(lifecycle=lifecycle):
+                result = self._run(
+                    "nvx_sandbox=1 nvx_layer=distro,0xd0003000,erofs "
+                    f"nvx_overlay_upper=ramfs nvx_lifecycle={lifecycle}"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(result.stdout.startswith("old-init"), result.stdout)
+                self.assertNotIn("new-init", result.stdout)
+
+    def test_exec_override_cannot_bypass_the_new_sandbox_init(self):
+        result = self._run(
+            "nvx_sandbox=1 nvx_snapshot_tier=platform nvx_exec=/bin/true"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "new-init <4242>\n")
+        for tokens in ("", "nvx_sandbox=1 nvx_lifecycle=managed"):
+            with self.subTest(tokens=tokens):
+                result = self._run(f"{tokens} nvx_exec=/bin/true")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_blockless_platform_and_snapshot_vms_keep_their_routes(self):
+        for tokens in ("", "nvx_snapshot_tier=platform", "shellsnap snap"):
+            with self.subTest(tokens=tokens):
+                result = self._run(f"console=hvc0 {tokens}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("hostmount\n", result.stdout)
+                self.assertIn("blockless-shell\n", result.stdout)
+                self.assertNotIn("new-init", result.stdout)
+                self.assertNotIn("old-init", result.stdout)
+                if tokens == "shellsnap snap":
+                    self.assertEqual(result.stdout.count("blockless-snapshot\n"), 2)
+                    self.assertIn("SNAP-RESTORE-OK\n", result.stdout)
+
+    def test_new_init_receives_the_announcers_process_id_when_present(self):
+        for ingress in ("allow", "host-loopback"):
+            with self.subTest(ingress=ingress):
+                result = self._run(
+                    "nvx_sandbox=1 nvx_snapshot_tier=platform "
+                    "virtnet_ip=172.16.0.2 virtnet_gw=172.16.0.1 "
+                    f"virtnet_ingress={ingress}"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                pid = self.announcer.read_text(encoding="utf-8").strip()
+                self.assertGreater(int(pid), 1)
+                self.assertIn(f"new-init <4242> <{pid}>\n", result.stdout)
+
+    def test_new_init_waits_for_the_time_daemons_deferred_publication(self):
+        temporary = self.pid.with_name("daemon.pid.tmp")
+        self.helpers["nvx-time"].write_text(
+            "#!/bin/sh\n"
+            f"(sleep 0.1; printf '4242\\n' >{shlex.quote(temporary.as_posix())}; "
+            f"mv {shlex.quote(temporary.as_posix())} "
+            f"{shlex.quote(self.pid.as_posix())}) &\n",
+            encoding="utf-8",
+        )
+        result = self._run("nvx_sandbox=1 nvx_snapshot_tier=platform")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "new-init <4242>\n")
+
+    def test_missing_helpers_or_selected_init_fail_without_fallback(self):
+        self.helpers["nvx-time"].write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.pid.mkdir()
+        result = self._run("nvx_sandbox=1 nvx_snapshot_tier=platform")
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("time daemon process ID is unavailable", result.stderr)
+        self.assertNotIn("new-init", result.stdout)
+
+        self.helpers["nvx-init"].unlink()
+        result = self._run("nvx_sandbox=1 nvx_snapshot_tier=platform")
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("selected guest cannot act as sandbox control", result.stderr)
+        self.assertNotIn("old-init", result.stdout)
+        result = self._run("nvx_sandbox=1 nvx_lifecycle=managed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith("old-init"), result.stdout)
+
+
 class GuestInitWorkloadIdentityTests(unittest.TestCase):
     """The shell /init's workload account and identity checks, as a one-shot
     launch that asks for an account with nvx_workload_account=create runs
