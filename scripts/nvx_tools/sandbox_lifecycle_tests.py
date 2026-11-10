@@ -113,7 +113,7 @@ SOCKET = "control.sock"
 OUTCOME = "outcome.json"
 LOCK = "sandbox.lock"
 # The fields of the store's runtime record.
-RUNTIME_FIELDS = frozenset({"format", "launch", "process", "endpoint", "runtime"})
+RUNTIME_FIELDS = frozenset({"capability", "endpoint", "process", "runtime", "vmDir"})
 PROVISIONED_ENTRIES = frozenset({CONFIG, LOCK})
 # Windows hosts serve the control endpoint as a named pipe outside the state.
 RUNNING_ENTRIES = frozenset(
@@ -384,6 +384,32 @@ def read_runtime(state: Path) -> dict[str, Any]:
     runtime = cast(dict[str, Any], value)
     if frozenset(runtime) != RUNTIME_FIELDS:
         raise RuntimeError(f"sandbox runtime record has unexpected fields: {path}")
+    vm_dir = runtime["vmDir"]
+    capability = runtime["capability"]
+    if (
+        not isinstance(capability, list)
+        or len(capability) != 32
+        or any(type(byte) is not int or not 0 <= byte <= 255 for byte in capability)
+    ):
+        raise RuntimeError(f"sandbox runtime record has an invalid capability: {path}")
+    try:
+        if (
+            not isinstance(vm_dir, str)
+            or not Path(vm_dir).is_absolute()
+            or not Path(vm_dir).samefile(state)
+        ):
+            raise RuntimeError(
+                f"sandbox runtime record names another VM directory: {path}"
+            )
+        installed = (state / CAPABILITY).read_bytes()
+    except OSError as error:
+        raise RuntimeError(
+            f"sandbox runtime record ownership cannot be checked: {path}"
+        ) from error
+    if bytes(capability) != installed:
+        raise RuntimeError(
+            f"sandbox runtime record capability differs from its owned file: {path}"
+        )
     return runtime
 
 
@@ -730,8 +756,14 @@ class LifecycleAcceptance:
     def require_started(self, description: str) -> dict[str, Any]:
         self.require_entries(self.state, RUNNING_ENTRIES, f"after the {description}")
         runtime = read_runtime(self.state)
+        evidence = {
+            name: value for name, value in runtime.items() if name != "capability"
+        }
+        evidence["capabilitySha256"] = hashlib.sha256(
+            bytes(runtime["capability"])
+        ).hexdigest()
         self.save_evidence(
-            "runtime.json", (json.dumps(runtime, indent=2) + "\n").encode()
+            "runtime.json", (json.dumps(evidence, indent=2) + "\n").encode()
         )
         if not openvmm_running(runtime, self.root.name):
             raise RuntimeError(f"OpenVMM is not running after the {description}")
