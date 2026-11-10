@@ -7,6 +7,7 @@
 //! [`SnapshotKey`] derives a compatibility key from a capture's class and manifest.
 //! [`SnapshotManifest::read`] reads the manifest that OpenVMM wrote, and
 //! [`TimeContract::eligibility`] checks its restore window at a [`HostTime`].
+//! [`Snapshot::accepts`] checks a requested VM against that verified metadata.
 //!
 //! # Canonical encoding
 //!
@@ -42,11 +43,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::host::config::{CaptureConfig, ConsoleAttachment, NicConfig};
+use crate::host::config::{
+    CaptureConfig, ConsoleAttachment, NicConfig, PROCESSOR_COUNTS, RootConfig, UpperConfig, VmConfig,
+};
 use crate::host::paths::{absolute, normalized};
-use crate::host::runtime::RuntimeIdentity;
+use crate::host::runtime::{Runtime, RuntimeIdentity};
 use crate::host::store::regular;
-use crate::host::{filesystem, platform};
+use crate::host::{filesystem, platform, sandbox, seal};
+use crate::net::Ipv4Cidr;
 use crate::{Error, Hypervisor, Result};
 
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
@@ -100,6 +104,8 @@ pub struct Snapshot {
     key: SnapshotKey,
     /// The strictly parsed metadata of OpenVMM's snapshot.
     manifest: SnapshotManifest,
+    /// The captured NIC's checked address, without a network policy.
+    nic: Option<NicConfig>,
 }
 
 impl Snapshot {
@@ -117,8 +123,8 @@ impl Snapshot {
     /// the returned snapshot. This check retains no open file handles or lock.
     ///
     /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) for an unreadable or invalid directory,
-    /// entry, length or key relationship, and otherwise as [`SnapshotManifest::read`] and
-    /// [`SnapshotKey::from_bytes`] do.
+    /// entry, length, key relationship or captured NIC address, and otherwise as
+    /// [`SnapshotManifest::read`] and [`SnapshotKey::from_bytes`] do.
     pub fn open(dir: &Path) -> Result<Self> {
         let dir = absolute(&normalized(dir)).map_err(|error| entry_error(dir, error))?;
         check_directory(&dir, &[KEY_FILE, DESCRIPTION_FILE, OPENVMM_DIR])?;
@@ -154,7 +160,26 @@ impl Snapshot {
             .map_err(|error| entry_error(&path, error))?;
         let key = SnapshotKey::from_bytes(&bytes)?;
         key.check_manifest(&manifest)?;
-        Ok(Self { dir, key, manifest })
+        let nic = manifest
+            .machine
+            .nic
+            .as_ref()
+            .map(|nic| {
+                Ipv4Cidr::new(nic.ipv4, nic.prefix_length)
+                    .map(|guest_network| NicConfig { guest_network })
+                    .map_err(|problem| {
+                        Error::io(format!(
+                            "the snapshot's captured NIC address is invalid: {problem}"
+                        ))
+                    })
+            })
+            .transpose()?;
+        Ok(Self {
+            dir,
+            key,
+            manifest,
+            nic,
+        })
     }
 
     /// Returns the verified snapshot key.
@@ -166,6 +191,184 @@ impl Snapshot {
     pub fn manifest(&self) -> &SnapshotManifest {
         &self.manifest
     }
+
+    /// Returns the captured NIC's presence and checked address, without a network policy.
+    ///
+    /// An unnamed restore address inherits this value. This accessor reads no snapshot entry.
+    pub fn nic(&self) -> Option<NicConfig> {
+        self.nic
+    }
+
+    /// Checks whether this snapshot can restore `config` under `runtime` at `now`.
+    ///
+    /// Requires a layered root, processors from the effective boot count to capacity in
+    /// counts of 1, 2, 4 or 8, and memory from boot to capacity in multiples of 128 MiB.
+    /// An encoded boot processor count of zero means the entire capacity is already online.
+    /// The image must fit the placeholder with the same logical and physical block sizes;
+    /// a scratch upper must have the dormant scratch's complete geometry.
+    ///
+    /// NIC presence must match. A named address must equal the captured address; an unnamed
+    /// one inherits it. Network policies are not compared. The boot console must keep its
+    /// captured attachment policy: `recreate-listener` for a listener, or
+    /// `discard-while-disconnected` for a disconnected console. Neither its device nor the
+    /// control console proves this attachment. The runtime must use the captured backend and
+    /// CPU profile, and have the same runtime identity. An omitted profile or `auto` names
+    /// the captured profile; `host` also names it when that profile is host-derived.
+    ///
+    /// Reads only the requested image and scratch metadata, never the snapshot entries again.
+    /// The caller keeps the snapshot private and immutable, as [`open`](Self::open) requires.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a compatibility
+    /// refusal, with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for an ineligible
+    /// time contract, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for disk I/O failures.
+    pub fn accepts(&self, config: &VmConfig, runtime: &Runtime, now: &HostTime) -> Result<()> {
+        config.check()?;
+        let RootConfig::Layered(root) = &config.root else {
+            return Err(Error::unsupported(
+                "a snapshot restore requires a layered root",
+            ));
+        };
+        let capacity = self.key.processors();
+        let boot = match self.key.boot_processors() {
+            0 => capacity,
+            boot => boot,
+        };
+        if !PROCESSOR_COUNTS.contains(&config.processors)
+            || config.processors < boot
+            || config.processors > capacity
+        {
+            return Err(Error::unsupported(format!(
+                "snapshot processors must be 1, 2, 4 or 8, from boot {boot} to capacity \
+                 {capacity}, not {}",
+                config.processors
+            )));
+        }
+        let memory = config.memory_mib.checked_mul(1024 * 1024).ok_or_else(|| {
+            Error::unsupported("snapshot memory in MiB overflows its byte length")
+        })?;
+        if memory < self.key.memory() || memory > self.key.memory_capacity() {
+            return Err(Error::unsupported(format!(
+                "snapshot memory must be from boot {} to capacity {} bytes, not {memory}",
+                self.key.memory(),
+                self.key.memory_capacity()
+            )));
+        }
+        if !config.memory_mib.is_multiple_of(128) {
+            return Err(Error::unsupported(
+                "snapshot memory must be aligned to 128 MiB",
+            ));
+        }
+        let image = restore_geometry(&root.image, "image")?;
+        let placeholder = self.key.distro();
+        if image.length > placeholder.length {
+            return Err(Error::unsupported(format!(
+                "snapshot image length {} exceeds the placeholder's {} bytes",
+                image.length, placeholder.length
+            )));
+        }
+        if image.logical_block_size != placeholder.logical_block_size
+            || image.physical_block_size != placeholder.physical_block_size
+        {
+            return Err(Error::unsupported(format!(
+                "snapshot image block sizes {image:?} differ from the placeholder's \
+                 {placeholder:?}"
+            )));
+        }
+        if let UpperConfig::Scratch { path, .. } = &root.upper {
+            let scratch = restore_geometry(path, "scratch")?;
+            if scratch != self.key.scratch() {
+                return Err(Error::unsupported(format!(
+                    "snapshot scratch geometry {scratch:?} differs from the dormant scratch's {:?}",
+                    self.key.scratch()
+                )));
+            }
+        }
+        match (&config.network, self.nic()) {
+            (None, Some(_)) | (Some(_), None) => {
+                return Err(Error::unsupported(
+                    "snapshot NIC presence differs from the requested VM's",
+                ));
+            }
+            (Some(network), Some(captured)) => {
+                if network
+                    .guest_network
+                    .is_some_and(|address| address != captured.guest_network)
+                {
+                    return Err(Error::unsupported(format!(
+                        "snapshot NIC address must remain {}",
+                        captured.guest_network
+                    )));
+                }
+            }
+            (None, None) => {}
+        }
+        let console = self
+            .manifest
+            .attachments
+            .iter()
+            .find(|attachment| attachment.stable_id == "console:microvm-virtio0");
+        let policy = match config.console {
+            ConsoleAttachment::Listener => "recreate-listener",
+            ConsoleAttachment::Disconnected => "discard-while-disconnected",
+        };
+        if console.is_none_or(|attachment| attachment.reconnect_policy != policy) {
+            return Err(Error::unsupported(
+                "snapshot boot console attachment policy does not match the requested console",
+            ));
+        }
+        if runtime.hypervisor != self.key.hypervisor() {
+            return Err(Error::unsupported(
+                "snapshot backend differs from the runtime's hypervisor",
+            ));
+        }
+        let profile = self.key.cpu_profile();
+        if !key::cpu_profile_matches(
+            &self.manifest.machine.cpu,
+            runtime.cpu_profile.as_deref().unwrap_or("auto"),
+        ) {
+            return Err(Error::unsupported(format!(
+                "snapshot CPU profile must remain {profile}"
+            )));
+        }
+        if &runtime.identity != self.key.runtime() {
+            return Err(Error::unsupported(format!(
+                "snapshot runtime identity differs in {:?}",
+                self.key.runtime().differences(&runtime.identity)
+            )));
+        }
+        let eligibility = self.manifest.time().eligibility(now);
+        if !eligibility.is_eligible() {
+            return Err(Error::unavailable(format!(
+                "snapshot time contract is {eligibility}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Reads a requested regular disk's geometry without waiting for a Linux FIFO writer.
+fn restore_geometry(path: &Path, description: &str) -> Result<BlockGeometry> {
+    let file = seal::open_read(path).map_err(|error| {
+        Error::io(format!(
+            "cannot open snapshot restore {description} {}",
+            path.display()
+        ))
+        .with_source(error)
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        Error::io(format!(
+            "cannot examine snapshot restore {description} {}",
+            path.display()
+        ))
+        .with_source(error)
+    })?;
+    if !metadata.is_file() {
+        return Err(Error::unsupported(format!(
+            "the snapshot restore {description} {} is not a regular file",
+            path.display()
+        )));
+    }
+    sandbox::block_geometry(&file, path, description)
 }
 
 /// Names the failing snapshot entry while retaining its I/O error.
