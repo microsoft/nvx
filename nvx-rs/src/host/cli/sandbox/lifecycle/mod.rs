@@ -20,7 +20,6 @@ use std::time::Duration;
 use crate::ErrorCode;
 use crate::host::artifacts::{Guest, KERNEL_NAME};
 use crate::host::cli::artifacts::{Located, locate};
-use crate::host::cli::deadline::Deadline;
 use crate::host::cli::deadline::RETRY_INTERVAL;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
@@ -33,7 +32,7 @@ use crate::host::cli::{Exit, Result};
 use crate::host::process::{Opened, Process};
 use crate::host::runtime::{IdentityPart, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::sandbox::{SandboxLaunch, require_file};
-use crate::host::vm::{self, SavedVm};
+use crate::host::vm::SavedVm;
 use crate::protocol::GuestFeatures;
 
 pub(crate) use self::directory::{create_state_directory, prepare_state_directory};
@@ -229,9 +228,7 @@ fn connect(saved: &SavedVm, artifacts: &Artifacts<'_>, timeout: f64) -> Result<S
     let _hold = artifacts.hold()?;
     let config = Config::new(read_config(&saved.vm_dir.path().join(CONFIG_NAME))?)?;
     let runtime = runtime_for(artifacts, &config, artifacts.runtime_identity()?)?;
-    let attached = vm::reattach(saved, &runtime, Deadline::after(timeout).instant())
-        .map_err(error_with_cause)?;
-    Ok(Session::from_connection(attached.connection))
+    Session::reattach(saved, &runtime, timeout)
 }
 
 /// Checks that `state_dir` holds the configuration of a provisioned sandbox: a directory without

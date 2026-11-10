@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Instant;
 
 use super::*;
+use crate::host::transport::HostConnection;
 use crate::protocol::{
     EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
     OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_RESET, decode_app,
@@ -18,6 +19,13 @@ const CAPABILITY: [u8; CAPABILITY_LEN] = [7; CAPABILITY_LEN];
 const INSTANCE: [u8; 16] = [0x11; 16];
 
 impl Session {
+    fn from_connection(connection: HostConnection) -> Self {
+        Self {
+            inner: Some(ControlSession { connection }),
+            probe: Arc::new(Probe::default()),
+        }
+    }
+
     fn connect(
         endpoint: &str,
         pid: u32,

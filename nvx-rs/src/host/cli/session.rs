@@ -20,10 +20,11 @@
 //! - A session whose transfer failed is closed, and refuses further requests.
 //!
 //! Unlike the Python session, it also hands the guest agent a host mapping table, as `start`
-//! does for the shares of a sandbox: in order, and in as many requests as it takes. And
+//! does for the shares of a sandbox: in order, and in as many requests as it takes.
+//! [`Session::reattach`] verifies a saved VM and observes its transport before authentication;
 //! [`Session::connect_launched_cancellable`], with which a cold run waits for the endpoint of the
-//! OpenVMM that it launched, stops waiting once that OpenVMM exits, as
-//! `nvx::host::session::connect` does, where Python waited until its timeout.
+//! OpenVMM that it launched, also stops waiting once that OpenVMM exits, where Python waited until
+//! its timeout.
 //!
 //! The transports also wait in slices of at most 250 ms, as Python's do, so that Ctrl-C ends a
 //! wait within that time, except while a request is being sent, which its timeout bounds.
@@ -35,18 +36,20 @@ use std::time::Duration;
 
 use super::deadline::{Deadline, RETRY_INTERVAL, sleep};
 use super::{Exit, Result, check_interrupt};
-use crate::ErrorCode;
 use crate::host::platform::{self, Transport};
+use crate::host::runtime::Runtime;
 use crate::host::sandbox::options::validate_exec_environment;
 use crate::host::session::{ControlSession, SessionError};
 use crate::host::supervisor::Launched;
-use crate::host::transport::HostConnection;
+use crate::host::transport;
+use crate::host::vm::{self, SavedVm};
 use crate::protocol::{
     APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAPS, APP_PING, APP_READY,
     APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, CAPABILITY_LEN, GuestFeatures, HostMap,
     MAPPING_FAILED, MAX_OUTPUT_BYTES, OUTER_MAX_PAYLOAD, UNSUPPORTED_OPERATION, Workload,
     WorkloadEnvironment, encode_exec_payload, encode_maps_payloads,
 };
+use crate::{ErrorCode, ErrorKind};
 
 /// The exit categories that `exec` accepts, `MANAGED_EXIT_CATEGORIES`. A cancellation, which this
 /// session never requests, is not among them.
@@ -283,12 +286,53 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// Keeps the authenticated connection and its framing state; this sends no second attach.
-    pub(crate) fn from_connection(connection: HostConnection) -> Self {
-        Self {
-            inner: Some(ControlSession { connection }),
-            probe: Arc::new(Probe::default()),
-        }
+    /// Observes the same verified transport through attachment and later control operations.
+    pub(crate) fn reattach(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Self> {
+        let probe = Arc::new(Probe::default());
+        let attached = vm::reattach_with_transport(
+            saved,
+            runtime,
+            Deadline::after(timeout).instant(),
+            |endpoint, reference, deadline| loop {
+                if platform::interrupted() {
+                    probe.interrupted.store(true, Ordering::SeqCst);
+                    return Err(crate::Error::io("control connection interrupted"));
+                }
+                let until = (std::time::Instant::now() + POLL_SLICE).min(deadline);
+                match transport::connect_verified(endpoint, reference, until) {
+                    Ok(inner) => {
+                        return Ok(Box::new(ProbedTransport {
+                            inner,
+                            probe: Arc::clone(&probe),
+                        }));
+                    }
+                    Err(error)
+                        if error.kind() == ErrorKind::TimedOut
+                            && std::time::Instant::now() < deadline => {}
+                    Err(error) => return Err(error),
+                }
+            },
+        )
+        .map_err(|error| {
+            if probe.interrupted.load(Ordering::SeqCst) {
+                Exit::Interrupted
+            } else if probe.closed.load(Ordering::SeqCst)
+                || error.kind() == ErrorKind::Exited
+                || std::error::Error::source(&error)
+                    .and_then(|source| source.downcast_ref::<io::Error>())
+                    .is_some_and(closes)
+            {
+                Exit::EndpointClosed
+            } else {
+                super::sandbox::error_with_cause(error)
+            }
+        })?;
+        Ok(Self {
+            inner: Some(ControlSession {
+                connection: attached.connection,
+            }),
+            probe,
+        })
     }
 
     /// Connects to `endpoint`, which `launched`, the OpenVMM process that a cold run launched,
@@ -423,14 +467,8 @@ impl Session {
     /// Reads the next response and closes the session if the transfer fails.
     fn receive(&mut self, deadline: Deadline) -> Result<(u8, u64, i32, Vec<u8>)> {
         self.probe.direction.store(RECEIVING, Ordering::SeqCst);
-        loop {
-            check_interrupt()?;
-            let until = (std::time::Instant::now() + POLL_SLICE).min(deadline.instant());
-            match self.session()?.read_response(Some(until)) {
-                Err(SessionError::TimedOut) if !deadline.passed() => {}
-                received => return received.map_err(|error| self.fail(error)),
-            }
-        }
+        let received = self.session()?.read_response(Some(deadline.instant()));
+        received.map_err(|error| self.fail(error))
     }
 
     /// Reads the next response, which must answer `request_id`, and returns its kind, status,

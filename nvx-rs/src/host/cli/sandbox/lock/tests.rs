@@ -62,6 +62,33 @@ fn directories_that_others_may_access_are_refused() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn provision_refuses_an_inherited_vm_directory_without_changing_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("inherited");
+    std::fs::create_dir(&state).unwrap();
+    StateDir::open(&state).unwrap();
+    let refusal = VmDir::open(&state).unwrap_err().to_string();
+    let identity = platform::file_id(&state).unwrap();
+    std::fs::write(state.join("foreign.txt"), "keep").unwrap();
+    let error = LifecycleLock::acquire(&state, 1.0, true).err().unwrap();
+    assert_eq!(error.code(), Some(ErrorCode::Io));
+    assert!(
+        error
+            .message()
+            .unwrap()
+            .contains("sandbox state directory must be a private VM directory")
+    );
+    assert_eq!(platform::file_id(&state).unwrap(), identity);
+    assert_eq!(VmDir::open(&state).unwrap_err().to_string(), refusal);
+    assert_eq!(
+        std::fs::read_to_string(state.join("foreign.txt")).unwrap(),
+        "keep"
+    );
+    assert!(!state.join(CONFIG_NAME).exists());
+}
+
 #[test]
 fn removals_refuse_live_records_and_keep_foreign_files() {
     let directory = tempfile::tempdir().unwrap();

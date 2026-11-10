@@ -2722,6 +2722,37 @@ fn run_shares_relative_roots_with_absolute_policy_paths() {
     );
 }
 
+#[test]
+fn an_endpoint_closed_during_start_keeps_the_vms_own_failure_report() {
+    let root = Root::new();
+    let output = run(
+        &root,
+        &provision(
+            &root,
+            "state",
+            "fake_exit_during_attach=5 fake_exit_delay_ms=200",
+        ),
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let output = run(&root, &lifecycle("start", &root, "state"));
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        text(&output.stderr),
+        error_line(
+            "exited",
+            "OpenVMM exited during startup: guest-exit status 5"
+        )
+    );
+    let state = root.path.join("state");
+    let report: Value =
+        serde_json::from_slice(&fs::read(state.join("outcome.json")).unwrap()).unwrap();
+    assert_eq!(report["outcome"]["status_code"], 5);
+    assert!(!state.join("runtime.json").exists());
+    assert!(!state.join("launch.json").exists());
+    let output = run(&root, &lifecycle("deprovision", &root, "state"));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+}
+
 #[cfg(unix)]
 mod interrupts {
     use std::time::Instant;
@@ -2805,6 +2836,75 @@ mod interrupts {
         assert_eq!(text(&output.stderr), "Interrupted\n");
         assert!(text(&output.stdout).starts_with(">> "));
         assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    }
+
+    #[test]
+    fn interrupting_start_bounds_connect_attach_and_failure_grace() {
+        for cmdline in [
+            "fake_boot_delay_ms=60000",
+            "fake_guest_delay_ms=60000",
+            "fake_exit_during_attach=5 fake_exit_delay_ms=60000",
+        ] {
+            let root = Root::new();
+            let output = run(&root, &provision(&root, "state", cmdline));
+            assert!(output.status.success(), "{}", text(&output.stderr));
+            let mut arguments = lifecycle("start", &root, "state");
+            arguments.extend(["--timeout".to_owned(), "60".to_owned()]);
+            let child = Command::new(NVX_RS)
+                .arg("--root")
+                .arg(&root.path)
+                .args(arguments)
+                .current_dir(&root.path)
+                .env_remove("NVX_OPENVMM")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let state = root.path.join("state");
+            let until = Instant::now() + Duration::from_secs(30);
+            let reference: nvx::host::process::ProcessRef = loop {
+                if let Ok(bytes) = fs::read(state.join("launch.json")) {
+                    let journal: Value = serde_json::from_slice(&bytes).unwrap();
+                    if !journal["process"].is_null() {
+                        break serde_json::from_value(journal["process"].clone()).unwrap();
+                    }
+                }
+                assert!(Instant::now() < until, "{cmdline}");
+                thread::sleep(Duration::from_millis(10));
+            };
+            let nvx::host::process::Opened::Running(process) =
+                nvx::host::process::Process::open(&reference).unwrap()
+            else {
+                panic!("the journal's VM already exited: {cmdline}");
+            };
+            thread::sleep(Duration::from_millis(200));
+            let started = Instant::now();
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap()),
+                nix::sys::signal::Signal::SIGINT,
+            )
+            .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(130),
+                "{cmdline}: {}",
+                text(&output.stderr)
+            );
+            assert_eq!(text(&output.stderr), "Interrupted\n", "{cmdline}");
+            assert!(started.elapsed() < Duration::from_secs(3), "{cmdline}");
+            assert!(
+                process
+                    .wait(Instant::now() + Duration::from_secs(2))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(!state.join("runtime.json").exists());
+            assert!(!state.join("launch.json").exists());
+            let output = run(&root, &lifecycle("deprovision", &root, "state"));
+            assert!(output.status.success(), "{}", text(&output.stderr));
+        }
     }
 
     #[test]

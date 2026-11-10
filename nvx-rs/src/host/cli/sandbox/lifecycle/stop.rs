@@ -163,7 +163,7 @@ pub(super) fn terminate_within(
 
 /// Waits until the OpenVMM of `vmm` exits or `deadline` passes, and returns whether it exited,
 /// failing if Ctrl-C arrives first.
-fn wait_for_exit(process: &Process, deadline: Deadline) -> Result<bool> {
+pub(super) fn wait_for_exit(process: &Process, deadline: Deadline) -> Result<bool> {
     loop {
         check_interrupt()?;
         let slice = deadline
