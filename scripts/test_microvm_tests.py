@@ -1254,8 +1254,8 @@ class _FakeSandboxCli:
         (state / "runtime.json").write_text(
             json.dumps(
                 {
-                    "format": 4,
-                    "launch": f"{pid:032x}",
+                    "capability": list(capability),
+                    "vmDir": str(state.resolve()),
                     "process": {"pid": pid, "startTime": pid * 7, "boot": "b" * 32},
                     "endpoint": endpoint,
                     "runtime": {
@@ -1477,6 +1477,40 @@ class _FakeSandboxCli:
 
 
 class PublicSandboxLifecycleTests(unittest.TestCase):
+    def test_runtime_reader_checks_the_exact_saved_vm_and_its_owned_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            state.mkdir()
+            (state / "config.json").write_text(
+                json.dumps({"user": "65534:65534", "hypervisor": "whp"}),
+                encoding="utf-8",
+            )
+            fake = _FakeSandboxCli()
+            fake._launch(state)
+            path = state / "runtime.json"
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(sandbox_lifecycle_tests.read_runtime(state), saved)
+            other = root / "other"
+            other.mkdir()
+            old = {
+                name: value
+                for name, value in saved.items()
+                if name not in ("capability", "vmDir")
+            } | {"format": 4, "launch": "1" * 32}
+            mismatched = saved["capability"].copy()
+            mismatched[0] ^= 1
+            for record, message in (
+                (old, "unexpected fields"),
+                (saved | {"vmDir": str(other)}, "another VM directory"),
+                (saved | {"capability": [0] * 31}, "invalid capability"),
+                (saved | {"capability": mismatched}, "differs from its owned file"),
+            ):
+                with self.subTest(message=message):
+                    path.write_text(json.dumps(record), encoding="utf-8")
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        sandbox_lifecycle_tests.read_runtime(state)
+
     EXPECTED_OPERATIONS = [
         # Identity admission.
         "provision",
@@ -1663,6 +1697,15 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             for content in evidence.values():
                 self.assertNotIn(capability, content)
                 self.assertNotIn(capability.hex().encode(), content)
+        saved_evidence = json.loads(evidence["sandbox-lifecycle-runtime.json"])
+        self.assertNotIn("capability", saved_evidence)
+        self.assertIn(
+            saved_evidence["capabilitySha256"],
+            [
+                hashlib.sha256(capability).hexdigest()
+                for capability in fake.capabilities
+            ],
+        )
         self.assertIn(
             b"NVX-UBUNTU-SANDBOX-ENTRY-OK", evidence["sandbox-lifecycle-probe.log"]
         )
