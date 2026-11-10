@@ -120,6 +120,83 @@ fn an_unverified_console_is_refused_while_the_owned_child_runs() {
     );
 }
 
+#[test]
+fn cold_preflight_defers_installable_sources_but_the_launch_checks_them() {
+    let directory = tempfile::tempdir().unwrap();
+    for (name, file) in [("build", false), ("vmlinux", true)] {
+        let source = directory.path().join(name);
+        let options = Options {
+            mounts: vec![format!("/workspace,{},ro", source.display())],
+            ..Options::default()
+        };
+        let rules = options.network.egress_rules().unwrap();
+        cold_preflight(&options, &rules).unwrap();
+        assert!(cold_config(&options, &rules).is_err());
+        if file {
+            fs::write(&source, b"installed kernel").unwrap();
+        } else {
+            fs::create_dir(&source).unwrap();
+        }
+        let config = cold_config(&options, &rules).unwrap();
+        let export = config.filesystem.unwrap();
+        assert_eq!(export.children[0].file, file);
+        assert_eq!(
+            export.children[0].root,
+            filesystem::canonicalize(&source).unwrap()
+        );
+    }
+}
+
+#[test]
+fn attachment_keeps_forwarding_until_the_handshake_completes() {
+    let (observed, progress) = mpsc::sync_channel(0);
+    let mut sent = false;
+    let result = attach_with_output(
+        || {
+            progress.recv_timeout(Duration::from_secs(2)).unwrap();
+            Ok(7)
+        },
+        || {
+            if !sent {
+                observed.send(()).unwrap();
+                sent = true;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        },
+    );
+    assert!(matches!(result, Ok(7)));
+    assert!(sent);
+}
+
+#[test]
+fn failed_attachment_drains_output_that_arrived_with_its_failure() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let complete = AtomicBool::new(false);
+    let mut drained = 0;
+    let result = attach_with_output::<()>(
+        || {
+            complete.store(true, Ordering::SeqCst);
+            Err(Exit::error(ErrorCode::Protocol, "attachment refused"))
+        },
+        || {
+            if complete.load(Ordering::SeqCst) && drained < 3 {
+                drained += 1;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        },
+    );
+    assert!(
+        matches!(&result, Err(Exit::Error { code: ErrorCode::Protocol, message }) if message == "attachment refused"),
+        "{result:?}"
+    );
+    assert_eq!(drained, 3);
+}
+
 #[cfg(windows)]
 const REDIRECTED_CONSOLE_BYTES: &[u8] = b"nvx-raw:\xff\x80\xc3";
 
@@ -149,6 +226,13 @@ fn windows_console_output_handles_non_utf8_code_pages() {
             .any(|bytes| bytes == REDIRECTED_CONSOLE_BYTES),
         "{output:?}"
     );
+    assert!(
+        output
+            .stderr
+            .windows(REDIRECTED_CONSOLE_BYTES.len())
+            .any(|bytes| bytes == REDIRECTED_CONSOLE_BYTES),
+        "{output:?}"
+    );
 }
 
 /// Runs only as the parent's isolated-console helper, never in the shared test process.
@@ -165,14 +249,16 @@ fn windows_console_output_helper() {
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
     use windows_sys::Win32::System::Console::{
         CONSOLE_TEXTMODE_BUFFER, COORD, CreateConsoleScreenBuffer, GetConsoleOutputCP,
-        GetConsoleProcessList, GetStdHandle, ReadConsoleOutputCharacterW, STD_OUTPUT_HANDLE,
-        SetConsoleOutputCP, SetStdHandle,
+        GetConsoleProcessList, GetStdHandle, ReadConsoleOutputCharacterW, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE, SetConsoleCursorPosition, SetConsoleOutputCP, SetStdHandle,
     };
 
     /// Restores only the helper's private console and its original redirected stdout.
     struct RestoreConsole {
         /// The original borrowed standard-output handle.
         stdout: HANDLE,
+        /// The original borrowed standard-error handle.
+        stderr: HANDLE,
         /// The private console's original output code page.
         code_page: u32,
     }
@@ -181,6 +267,7 @@ fn windows_console_output_helper() {
             // SAFETY: both settings belong to this isolated helper, and stdout stays open.
             unsafe {
                 assert_ne!(SetStdHandle(STD_OUTPUT_HANDLE, self.stdout), 0);
+                assert_ne!(SetStdHandle(STD_ERROR_HANDLE, self.stderr), 0);
                 assert_ne!(SetConsoleOutputCP(self.code_page), 0);
             }
         }
@@ -213,10 +300,14 @@ fn windows_console_output_helper() {
     // SAFETY: these getters return the helper's own current console settings.
     let _restore = RestoreConsole {
         stdout: unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+        stderr: unsafe { GetStdHandle(STD_ERROR_HANDLE) },
         code_page: unsafe { GetConsoleOutputCP() },
     };
     assert!(!io::stdout().is_terminal());
     let mut redirected = ConsoleOutput::new();
+    redirected.write_all(REDIRECTED_CONSOLE_BYTES).unwrap();
+    redirected.finish().unwrap();
+    let mut redirected = ConsoleOutput::stderr();
     redirected.write_all(REDIRECTED_CONSOLE_BYTES).unwrap();
     redirected.finish().unwrap();
     // SAFETY: the file is owned and remains open until stdout has been restored.
@@ -266,6 +357,75 @@ fn windows_console_output_helper() {
     let mut actual = vec![0; expected.len()];
     let mut read = 0;
     // SAFETY: the buffer is owned, and actual has room for the requested UTF-16 characters.
+    assert_ne!(
+        unsafe {
+            ReadConsoleOutputCharacterW(
+                buffer.as_raw_handle().cast(),
+                actual.as_mut_ptr(),
+                actual.len() as u32,
+                COORD { X: 0, Y: 0 },
+                &mut read,
+            )
+        },
+        0
+    );
+    assert_eq!(read as usize, expected.len());
+    assert_eq!(actual, expected);
+
+    let mut raw = tempfile::tempfile().unwrap();
+    // SAFETY: this helper owns every changed handle, and restores them before closing files.
+    unsafe {
+        assert_ne!(
+            SetStdHandle(STD_ERROR_HANDLE, raw.as_raw_handle().cast()),
+            0
+        );
+    }
+    let mut log = tempfile::NamedTempFile::new().unwrap();
+    let mut reader = File::open(log.path()).unwrap();
+    let mut output = ForegroundOutput::new(&mut reader);
+    log.write_all(REDIRECTED_CONSOLE_BYTES).unwrap();
+    log.flush().unwrap();
+    output.finish().unwrap();
+    raw.rewind().unwrap();
+    let mut bytes = Vec::new();
+    raw.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, REDIRECTED_CONSOLE_BYTES);
+
+    // SAFETY: the screen buffer belongs only to this helper's verified private console.
+    unsafe {
+        assert_ne!(
+            SetStdHandle(STD_ERROR_HANDLE, buffer.as_raw_handle().cast()),
+            0
+        );
+        assert_ne!(
+            SetConsoleCursorPosition(buffer.as_raw_handle().cast(), COORD { X: 0, Y: 0 }),
+            0
+        );
+    }
+    let mut log = tempfile::NamedTempFile::new().unwrap();
+    let mut reader = File::open(log.path()).unwrap();
+    let mut output = ForegroundOutput::new(&mut reader);
+    for chunk in [
+        b"caf\xc3".as_slice(),
+        b"\xa9 \xe2".as_slice(),
+        b"\x82\xac|A\xff\x80|".as_slice(),
+        b"\xc3".as_slice(),
+        b"A".as_slice(),
+    ] {
+        log.write_all(chunk).unwrap();
+        log.flush().unwrap();
+        assert!(output.forward().unwrap());
+    }
+    output.finish().unwrap();
+    for incomplete in [b"\xc3".as_slice(), b"\xe2\x82", b"\xf0\x9f\x92"] {
+        log.write_all(b"|").unwrap();
+        log.write_all(incomplete).unwrap();
+        log.flush().unwrap();
+        output.finish().unwrap();
+    }
+    let mut actual = vec![0; expected.len()];
+    let mut read = 0;
+    // SAFETY: the owned buffer and writable output have the same valid bounds as above.
     assert_ne!(
         unsafe {
             ReadConsoleOutputCharacterW(

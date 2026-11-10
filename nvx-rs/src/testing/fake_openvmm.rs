@@ -52,6 +52,8 @@
 //! an acknowledged stop, `fake_ignore_cancel=1` ignores cancellation,
 //! `fake_console_bytes=N` emits up to 16 MiB of `x` bytes on a run's console, and
 //! `fake_report_before_console=1` writes a run's report before console output or its boot delay.
+//! `fake_boot_diagnostics=1` emits console output and a binary log before control attachment.
+//! `fake_refuse_attach=1` refuses attachment after the endpoint has accepted its client.
 //! `fake_guest_features=MASK` advertises the decimal feature mask `MASK` instead of the current
 //! guest's, `fake_legacy_guest=1` refuses the features request like a guest agent that
 //! predates it, and `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot
@@ -410,6 +412,10 @@ struct Options {
     console_bytes: usize,
     /// Whether a run publishes its regression report before console output or boot delay.
     report_before_console: bool,
+    /// Whether boot emits the early-console and binary-log regression fixtures.
+    boot_diagnostics: bool,
+    /// Whether the control handshake refuses even the correct credential.
+    refuse_attach: bool,
     /// Artificial delay before the fake OpenVMM crashes, when requested.
     crash_after: Option<Duration>,
     /// Whether stop requests are deliberately left unanswered.
@@ -545,6 +551,17 @@ pub fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if options.boot_diagnostics {
+        let written = console
+            .write_all(b"boot-console before control\n")
+            .and_then(|()| console.flush())
+            .and_then(|()| io::stderr().write_all(b"boot-log:\xff\x80\xc3"))
+            .and_then(|()| io::stderr().flush());
+        if let Err(error) = written {
+            eprintln!("{program}: {error}");
+            return ExitCode::from(1);
+        }
+    }
     if options.report_before_console
         && matches!(options.lifecycle, Lifecycle::OneShot | Lifecycle::Run)
     {
@@ -1785,6 +1802,8 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
                 })?,
         },
         report_before_console: knob("fake_report_before_console") == Some("1"),
+        boot_diagnostics: knob("fake_boot_diagnostics") == Some("1"),
+        refuse_attach: knob("fake_refuse_attach") == Some("1"),
         crash_after: millis("fake_crash_after_ms"),
         ignore_stop: knob("fake_ignore_stop") == Some("1"),
         exit_delay: millis("fake_exit_delay_ms").unwrap_or_default(),
@@ -2881,7 +2900,7 @@ fn serve_client<S: Read + Write + Pending>(
     let Ok(Some((header, payload))) = read_record(stream) else {
         return Flow::Continue;
     };
-    if header.record_type != OUTER_HOST_ATTACH || payload != capability {
+    if options.refuse_attach || header.record_type != OUTER_HOST_ATTACH || payload != capability {
         let code = ErrorCode::Authentication.code().to_le_bytes();
         let _ = stream.write_all(&control_record(OUTER_ERROR, &[0; 16], 0, &code));
         return Flow::Continue;

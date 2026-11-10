@@ -759,7 +759,8 @@ impl Launched {
 /// The caller keeps the directory and runtime inputs stable through creation and spawn.
 /// A failure after child creation terminates only that child and waits for its confirmed exit.
 /// Output paths are not removed. Host failures have kind [`ErrorKind::Io`](crate::ErrorKind::Io),
-/// retaining their source; an exit-confirmation failure is reported with the original error.
+/// retaining their source. An unconfirmed exit has kind
+/// [`ErrorKind::StillRunning`](crate::ErrorKind::StillRunning), with the original error.
 pub fn spawn(prepared: Prepared) -> Result<Launched> {
     spawn_verified(prepared, spawn::Launched::process)
 }
@@ -841,6 +842,15 @@ fn spawn_verified(
     prepared: Prepared,
     verify: impl FnOnce(&spawn::Launched) -> io::Result<Process>,
 ) -> Result<Launched> {
+    spawn_verified_with_cleanup(prepared, verify, spawn::Launched::kill_and_confirm_exit)
+}
+
+/// Keeps cleanup proof distinct from a request to terminate the owned child.
+fn spawn_verified_with_cleanup(
+    prepared: Prepared,
+    verify: impl FnOnce(&spawn::Launched) -> io::Result<Process>,
+    cleanup: impl FnOnce(spawn::Launched) -> io::Result<()>,
+) -> Result<Launched> {
     let Prepared {
         program,
         working_dir,
@@ -860,19 +870,36 @@ fn spawn_verified(
         breakaway_from_job: windows_breakaway,
         inherit: inherit.iter().map(Inherited::new).collect(),
     };
-    let child = spawn::spawn_vm(&command, capability.as_bytes(), log, foreground)
-        .map_err(|error| Error::io("cannot spawn the VM").with_source(error))?;
+    let child =
+        spawn::spawn_vm(&command, capability.as_bytes(), log, foreground).map_err(|error| {
+            let unconfirmed = error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<Error>())
+                .is_some_and(|source| source.kind() == crate::ErrorKind::StillRunning);
+            Error::new(
+                if unconfirmed {
+                    crate::ErrorKind::StillRunning
+                } else {
+                    crate::ErrorKind::Io
+                },
+                "cannot spawn the VM",
+            )
+            .with_source(error)
+        })?;
     let process = match verify(&child) {
         Ok(process) => process,
         Err(error) => {
-            let cleanup = child.kill_and_confirm_exit();
-            let message = match cleanup {
-                Ok(()) => "cannot verify the spawned VM".to_owned(),
-                Err(cleanup) => {
-                    format!("cannot verify the spawned VM; cannot confirm its exit: {cleanup}")
-                }
+            let (kind, message) = match cleanup(child) {
+                Ok(()) => (
+                    crate::ErrorKind::Io,
+                    "cannot verify the spawned VM".to_owned(),
+                ),
+                Err(cleanup) => (
+                    crate::ErrorKind::StillRunning,
+                    format!("cannot verify the spawned VM; cannot confirm its exit: {cleanup}"),
+                ),
             };
-            return Err(Error::io(message).with_source(error));
+            return Err(Error::new(kind, message).with_source(error));
         }
     };
     #[cfg(feature = "cli")]
