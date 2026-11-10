@@ -949,7 +949,9 @@ fn gated_native(
     let pid = record["pid"].as_u64().unwrap().try_into().unwrap();
     let reference = ProcessRef {
         pid,
-        start_time: nvx::host::platform::process_start_time(pid).unwrap(),
+        start_time: nvx::host::platform::process_start_time(pid)
+            .unwrap()
+            .expect("the gated fake must still be running"),
         boot: BootId::current().unwrap(),
     };
     match Process::open(&reference).unwrap() {
