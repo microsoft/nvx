@@ -43,16 +43,17 @@
 //!   or one at another guest address than the template's, before any VMM starts.
 //! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves, once the
 //!   objects of its export are still those that its plan found: OpenVMM restores the generation's
-//!   snapshot in place with the clone's devices and export, and the clone's activation record
-//!   waits in its sandbox, as a [`Restoring`] describes.
+//!   snapshot in place with the clone's devices and export, and hands the clone's activation
+//!   record, which the launch wrote in its sandbox, to the clone's guest in its restore packet, as
+//!   a [`Restoring`] describes.
 //! - [`Restoring::activate`] runs the clone's restore sequence through the adapter's framing of
 //!   the clone's control session, a [`CloneControl`]: it waits for OpenVMM's restore-ready event,
-//!   then connects, sends the clone's activation record in the adapter's Activate, and checks the
-//!   activation that the clone's Ready reports, by a deadline that starts with the launch, and
-//!   resends the same record in a new session once the adapter lost one. [`Activated::start`]
-//!   then sends the clone's mapping table, if it has an export, and starts the clone's sandbox
-//!   once the guest applied every mapping, by a deadline that starts at its Ready, and
-//!   [`Started::commit`] commits the launch.
+//!   then connects, asks for the clone's Ready, which the clone answers once it activated with the
+//!   record of its restore packet, and checks the activation that the Ready reports, by a deadline
+//!   that starts with the launch, and asks again in a new session once the adapter lost one.
+//!   [`Activated::start`] then sends the clone's mapping table, if it has an export, and starts
+//!   the clone's sandbox once the guest applied every mapping, by a deadline that starts at its
+//!   Ready, and [`Started::commit`] commits the launch.
 //! - The plan, the launch, and the restore sequence fail with a [`CloneFailure`], whose
 //!   [`Evidence`] attributes it to an [`Outcome`], at a [`Stage`], once the clone got as far as
 //!   its [`Progress`], with the [`Teardown`] that followed: a failure from the launch on ends the

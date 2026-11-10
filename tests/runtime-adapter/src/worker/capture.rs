@@ -45,9 +45,9 @@
 //! [`work_clone`]: through the clone's activation, `nvx::guest::clone::Activation` of the repaired
 //! clone and of the fence, whose deadline ends [`ACTIVATION_TIMEOUT`] after the repair's
 //! acknowledgement, it answers the reset that the restore queued for the session that the snapshot
-//! holds, takes the host's `Activate`, and applies its record with [`root_template`] of the
-//! template's configuration and its NIC's gateway, then serves the host's order as after a cold
-//! boot, as the
+//! holds, applies the activation record of the clone's restore packet with [`root_template`] of
+//! the template's configuration and its NIC's gateway, answers the host's `Await` with `Ready`,
+//! then serves the host's order as after a cold boot, as the
 //! [worker's documentation](super#clones) describes. The clone ends as that session does. Once its
 //! activation failed, or the broker closed the stream before the clone was ready, the worker waits
 //! for the tty to send what it wrote for at most [`UNACTIVATED_DRAIN`], so that a tty that sends
@@ -98,8 +98,8 @@ pub fn template_config() -> RootConfig {
 /// root, with the sizes that the configuration names, if any; how long the assembly waits for
 /// each; the host filesystem device, by [`FILESYSTEM_TAG`], through which the host attaches the
 /// export of a clone's record; and the gateway, to which the announcer of the listeners of a
-/// clone whose record publishes them announces them. The record of the clone's `Activate` holds
-/// the rest.
+/// clone whose record publishes them announces them. The activation record of the clone's restore
+/// packet holds the rest.
 pub fn root_template(config: &RootConfig, gateway: Option<Ipv4Addr>) -> RootTemplate {
     RootTemplate {
         runtime: PathBuf::from(&config.runtime),

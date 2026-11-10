@@ -27,7 +27,7 @@ use crate::protocol::status;
 ///
 /// | Evidence | Outcome | Quarantine |
 /// | --- | --- | --- |
-/// | An authorization that the image's binding denies; a stale image binding; invalid targets, format, settings, Activate, or mappings; an image that the template can't serve; a scratch that isn't ext4 or isn't fresh; a root that does not assemble from them | [`Request`](Outcome::Request) | No |
+/// | An authorization that the image's binding denies; a stale image binding; invalid targets, format, settings, activation record, or mappings; an image that the template can't serve; a scratch that isn't ext4 or isn't fresh; a root that does not assemble from them | [`Request`](Outcome::Request) | No |
 /// | A supplied file with the wrong identity, length, or geometry | [`Request`](Outcome::Request), or the host's [`Staging`](Outcome::Staging) once the caller proves it | No |
 /// | An endpoint or forward that cannot be bound; resource exhaustion; a destination that cannot restore the template, such as an incompatible CPU or TSC; another runtime; another failure of the host's own operations | [`Host`](Outcome::Host) | No |
 /// | A lost status; a timeout; a reset; a forced kill; a broken protocol | [`Unknown`](Outcome::Unknown): the host, the protocol, or neither | No |
@@ -95,9 +95,10 @@ pub enum Evidence {
     /// apply, as its [`ACTIVATION_WORKLOAD`](crate::protocol::status::ACTIVATION_WORKLOAD) and
     /// [`ACTIVATION_NETWORK`](crate::protocol::status::ACTIVATION_NETWORK) tell.
     InvalidSettings,
-    /// The request's Activate is invalid: settings that no activation record holds, or a record
-    /// that the guest refused, as its
-    /// [`ACTIVATION_RECORD`](crate::protocol::status::ACTIVATION_RECORD) tells.
+    /// The request's activation record is invalid: settings that no activation record holds, or
+    /// a record that the guest refused, as its
+    /// [`ACTIVATION_RECORD`](crate::protocol::status::ACTIVATION_RECORD) tells. Its name, which
+    /// records spell `invalid-activate`, predates the record's delivery in the restore packet.
     InvalidActivate,
     /// The request's mappings are invalid: an export that no clone takes, such as one that
     /// overlaps the template store; an export whose read-only mappings the host cannot keep
@@ -381,7 +382,8 @@ pub enum Progress {
     /// A session of the adapter's framing attached: the guest's repair acknowledged the restore,
     /// before which OpenVMM reads none of the host's input.
     Acknowledged,
-    /// The Activate of the clone's record was sent.
+    /// The host asked for the clone's Ready, with which the clone answers once it activated with
+    /// the record of its restore packet.
     Activating,
     /// The clone's Ready was checked: the clone is activated, with the record's transaction. A
     /// clone with an export gets its mapping table at this step, before the start.

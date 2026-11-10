@@ -305,6 +305,13 @@ more for a cold boot, in a canonical encoding of `COLD_LEN` or `CLONE_LEN`
 bytes, 1 or 17, that `ReadyActivation::encode` writes and
 `ReadyActivation::decode` reads.
 
+`CONTRACT_VERSION`, 2, which a template's compatibility key holds, versions the
+activation contract: the record's schema, at `VERSION`, and how a clone receives
+its record, at the end of its restore packet, which OpenVMM seals before the
+first restored vCPU runs, rather than in the adapter's Activate of version 1, so
+that no build restores a clone of a template whose guest takes its record
+otherwise.
+
 The records and both encodings need no features.
 
 ### `nvx::contract`
@@ -853,24 +860,27 @@ lease, that the sandbox records no failure of the clone, which fails once under
 its lease, and, with `ExportPlan::verify`, that the objects of its export, if it
 has one, are still those that its plan found, and returns a `Restoring`: it
 writes the clone's activation record in its canonical encoding,
-`clone-activation.bin`, from which a caller resends it unchanged; it listens for
-the VMM's restore-ready event, at the socket `restore.sock` on Linux, and at a
-named pipe of a random name on Windows; and it runs `supervisor::launch` with
-OpenVMM's restore of the clone's devices, with `--restore-absent-scratch` for a
-clone in RAM, and of its network, whose policy `--restore-network-policy`
-installs on the template's NIC in place of the complete deny-all policy, its
-export bound to the dormant slot as a cold launch attaches it,
-`--mount-aggregate` with a `--mount-child` of each of its directories and files,
-their hidden, re-exposed, and writable paths, and its owner,
-`--restore-snapshot` with the generation's snapshot in place, which no clone
-copies or changes, so that clones of one generation restore it at once,
+`clone-activation.bin`, which OpenVMM hands the clone's guest at the end of its
+restore packet, and from which a caller that takes the clone over checks its
+Ready; it listens for the VMM's restore-ready event, at the socket
+`restore.sock` on Linux, and at a named pipe of a random name on Windows; and it
+runs `supervisor::launch` with OpenVMM's restore of the clone's devices, with
+`--restore-absent-scratch` for a clone in RAM, and of its network, whose policy
+`--restore-network-policy` installs on the template's NIC in place of the
+complete deny-all policy, its export bound to the dormant slot as a cold launch
+attaches it, `--mount-aggregate` with a `--mount-child` of each of its
+directories and files, their hidden, re-exposed, and writable paths, and its
+owner, `--restore-snapshot` with the generation's snapshot in place, which no
+clone copies or changes, so that clones of one generation restore it at once,
 `--restore-memory` with the memory target, `--restore-processors` with the
 processor target, for a template whose processors were not all online at boot,
-and `--restore-ready-path`, under the
-template's backend, CPU profile, and processors, with a boot console that
-discards its output, as cold boots have, unless the plan asks for one that the
-caller reads, and the control console, but no kernel, initramfs, command line,
-or guest address, which the snapshot fixes.
+`--restore-activation-record` with `clone-activation.bin`, which OpenVMM reads
+before any restored vCPU runs, and seals in the restore packet, gating the
+host's input until the guest acknowledged the restore, and
+`--restore-ready-path`, under the template's backend, CPU profile, and
+processors, with a boot console that discards its output, as cold boots have,
+unless the plan asks for one that the caller reads, and the control console, but
+no kernel, initramfs, command line, or guest address, which the snapshot fixes.
 
 On Linux, where OpenVMM requires a restore's control socket in the snapshot's
 parent, the clone's VMM listens in the generation's payload, at `<launch>.sock`,
@@ -911,13 +921,15 @@ refusing another process's connection and bytes that differ from the event, and
 reading nothing past it, since OpenVMM on Windows waits until the host has read
 it, and then closes its end; only then connects to the clone's control endpoint,
 whose console bounds the host's authentication from the connection on; attaches
-with the launch's capability; sends the record, read again from
-`clone-activation.bin`, which must still be byte for byte the launch's, in the
-adapter's Activate, as the session's first request; and checks that Ready
-reports the record's transaction ID. It replaces a session that the adapter
-lost, as `CloneControl::lost` tells, with a new one that sends the same record,
-in at most `MAX_ACTIVATION_SESSIONS` sessions by the same deadline, and retries
-nothing else.
+with the launch's capability; asks for the clone's Ready, as the session's first
+request, `CloneControl::ready`, which the clone answers once it activated with
+the record of its restore packet, whatever the host did meanwhile; and checks
+that Ready reports the record's transaction ID. The host asks, rather than the
+clone sending Ready unasked, since OpenVMM's broker refuses the guest's records
+while no host is attached, which the guest cannot tell. It replaces a session
+that the adapter lost, as `CloneControl::lost` tells, with a new one that asks
+again, in at most `MAX_ACTIVATION_SESSIONS` sessions by the same deadline, and
+retries nothing else.
 
 `Activated::start` then sends the clone's mapping table, if it has an export,
 through `CloneControl::map`, in order, as a cold launch's guest receives it,
@@ -934,15 +946,15 @@ runs.
 A failure of a clone is a `CloneFailure`, whose `Evidence` attributes it to an
 `Outcome`, at a `Stage`, once the clone got as far as its `Progress`: the
 request, for a denied authorization, a stale binding, invalid targets, format,
-settings, Activate, or mappings, such as an export that no clone takes, or whose
-objects changed since its plan, or a mapping table that the guest refused, as
-`CloneControl::refused` tells, or an image, a scratch, or a root that the
-template cannot serve, and for a supplied file of the wrong identity, length, or
-geometry, which the host's staging takes instead once the caller proves it,
-`CloneFailure::with_staging_proven`; the host, for an endpoint that cannot be
-bound, resource exhaustion, a host that cannot restore the template, another
-runtime, or a failure of its own operations; unknown, for a lost status, a
-timeout, a reset, a forced kill, or a broken protocol; the template, for a
+settings, activation record, or mappings, such as an export that no clone takes,
+or whose objects changed since its plan, or a mapping table that the guest
+refused, as `CloneControl::refused` tells, or an image, a scratch, or a root
+that the template cannot serve, and for a supplied file of the wrong identity,
+length, or geometry, which the host's staging takes instead once the caller
+proves it, `CloneFailure::with_staging_proven`; the host, for an endpoint that
+cannot be bound, resource exhaustion, a host that cannot restore the template,
+another runtime, or a failure of its own operations; unknown, for a lost status,
+a timeout, a reset, a forced kill, or a broken protocol; the template, for a
 malformed generation, or a defect of its capture or repair that a diagnosis
 attributes to it, the only outcome that quarantines the generation, through its
 tombstone, `CloneFailure::quarantine`; and the repair stage, for a status of the
@@ -986,22 +998,23 @@ failure as the sequence's own failures do.
 
 `reattach_clone` takes a clone over after the caller of its launch restarted: it
 reattaches by the identity of its VMM's process, checks a committed clone in a
-new session, in which the clone answers the byte-equal Activate of
-`clone-activation.bin` with the Ready that it answered once, and ends a clone
-that another runtime identity launched, or that fails the check, through its
-verified identity; it records the failure of a launch that a crash interrupted,
-but not the journal that a commit may leave beside its runtime record,
-classifies a VM that exited by its outcome report, which is the clone's VM's
-once its launch began, whether or not a crash left a record of its spawn,
-records a failure before it ends a VMM or clears the runtime record of one that
-exited, and fails, leaving them as they were, if it cannot, finishes a failure
-that a crash left pending as its teardown would have recorded it, keeping its
-transaction, resolves the teardown of an earlier failure with what the VMM left
-as it ended, its outcome report and OpenVMM's fatal error, attributes a status
-of the guest's as one that a workload may have given once the clone's progress
-log is lost, damaged, or was written during another boot of the host, whose
-crash may have lost its last lines, and reads nothing of the template store, so
-that a tombstone or a retirement of the generation leaves the clone its lease.
+new session, in which the clone answers the request for its Ready with the Ready
+of the transaction of `clone-activation.bin`, which it answers in every session,
+and ends a clone that another runtime identity launched, or that fails the
+check, through its verified identity; it records the failure of a launch that a
+crash interrupted, but not the journal that a commit may leave beside its
+runtime record, classifies a VM that exited by its outcome report, which is the
+clone's VM's once its launch began, whether or not a crash left a record of its
+spawn, records a failure before it ends a VMM or clears the runtime record of
+one that exited, and fails, leaving them as they were, if it cannot, finishes a
+failure that a crash left pending as its teardown would have recorded it,
+keeping its transaction, resolves the teardown of an earlier failure with what
+the VMM left as it ended, its outcome report and OpenVMM's fatal error,
+attributes a status of the guest's as one that a workload may have given once
+the clone's progress log is lost, damaged, or was written during another boot of
+the host, whose crash may have lost its last lines, and reads nothing of the
+template store, so that a tombstone or a retirement of the generation leaves the
+clone its lease.
 
 `CloneRecords::read` reads what the sandbox keeps of a clone, for the operations
 that list, inspect, or remove clones.
@@ -1429,9 +1442,10 @@ until then, which hands the deferred time work to the time daemon that the
 caller supervises.
 
 It returns the `Repaired` clone, with its generation ID, its online CPUs and
-memory, and when it acknowledged the restore, and never touches the fence. It
-adds no memory block twice, and reseeds and finishes at most once, so a failure
-at or after the reseed is final.
+memory, when it acknowledged the restore, and the activation record that the
+restore packet carried, and never touches the fence. It adds no memory block
+twice, and reseeds and finishes at most once, so a failure at or after the
+reseed is final.
 
 Each failure is a `RepairError`, with its `RepairStage`, its `RepairCause`, and
 the repair's `RepairProgress`, and `RepairError::status` selects the status, of
@@ -1442,22 +1456,20 @@ of it fails them, with its status, rather than stopping the VM, and only the
 capture's preparation and the time daemon enforce it.
 
 An `Activation` of the `Repaired` clone, or, with `Activation::with_resources`,
-of the resources and the instant of the acknowledgement that a repair reports,
-as in an adapter's tests, and of the caller's closed `AdmissionFence` then takes
-the clone's own configuration from the host, in one Activate, on a restricted
-control session: a state machine without I/O, independent of any framing, to
-which the adapter passes what its session receives, as an `ActivationInput`, and
-which returns the `ActivationAction` that the adapter takes.
+of the resources, the record, and the instant of the acknowledgement that a
+repair reports, as in an adapter's tests, and of the caller's closed
+`AdmissionFence` then takes the clone's own configuration from the activation
+record that its restore packet carried, which the host supplied at the launch,
+and OpenVMM sealed before the first restored vCPU ran: a state machine without
+I/O, independent of any framing, to which the adapter passes what its session
+receives, as an `ActivationInput`, and which returns the `ActivationAction` that
+the adapter takes.
 
-From its transport bootstrap, which takes the reset that the restore queued for
-the NVXS session, the restricted session takes only flow control and one
-Activate, and anything else, a request or another reset, fails it; the
-activation decodes the Activate's record with `ActivationRecord::decode`, and
+`Activation::accept` decodes the record with `ActivationRecord::decode`, and
 accepts only a clone's, with a restore section, that expects the CPU count and
-the memory size that the repair reports, before any side effect, while an
-Activate whose record the adapter's framing refused unread, as longer than a
-record can be, fails as a record that long does; the adapter applies the record
-with `apply`, as at a cold boot: it assembles the root as `root::assemble` does,
+the memory size that the repair reports, before any side effect, while a packet
+without a record fails the activation; the adapter applies the record with
+`apply`, as at a cold boot: it assembles the root as `root::assemble` does,
 with the record's image, an EROFS image whose UUID it checks if the record
 expects one, or a GPT disk whose GUID it checks if the record expects one, its
 upper, a tmpfs or the scratch with the record's journal policy, and its overlay
@@ -1506,20 +1518,29 @@ mounted or bound stays mounted unless the error reports the unmounts that
 failed, and no announcer that it started runs.
 
 Once the adapter passed the activation what the session received while the
-application ran, which came before Ready, `Activation::complete` opens the fence
-and returns the `ReadyActivation` that Ready reports beside the adapter's own
-identities, that the activation applied, with the record's transaction ID, after
-which the host's mapping table and start follow in the adapter's order, as after
-a cold boot, and `Activation::start` records the start.
+application ran, which came before Ready, `Activation::complete` returns the
+`ReadyActivation` that Ready reports beside the adapter's own identities, that
+the activation applied, with the record's transaction ID. The activation is
+ready, which opens the fence, once the record applied and the host asked for
+Ready: at the completion if a request for Ready joined the application, and
+otherwise at the host's next request, until which the activation is `Applied`,
+its fence closed and its deadline holding, so that a clone whose host never asks
+ends. The host's mapping table and start then follow in the adapter's order, as
+after a cold boot, and `Activation::start` records the start.
 
-A retry with the same transaction ID and a byte-equal record joins the running
-activation, or gets its cached result, also in a later session once the clone is
-ready; a changed record, another transaction, another reset before Ready, or a
-failed activation is final.
+The clone's session runs beside the activation: the adapter acknowledges each
+reset, the one that the restore queued for the NVXS session and any later one,
+and answers the host's request for Ready, the first request of each of its
+sessions, with Ready, since OpenVMM's broker refuses the guest's records while
+no host is attached, which the guest cannot tell. A request for Ready while the
+record applies joins the activation, and gets what its completion returns unless
+a reset abandoned it, one once the record applied makes the activation ready,
+and one once the clone is ready gets the cached result, also in a later session;
+any other request before Ready, or a failed activation, is final.
 
-Its deadline, which the caller chooses, and which neither input nor retries
-extend, starts at the restore's acknowledgement, and the adapter ticks it
-however its input trickles and its output blocks. Each failure is an
+Its deadline, which the caller chooses, and which nothing extends, starts at the
+restore's acknowledgement, and the adapter ticks it however its input trickles
+and its output blocks. Each failure is an
 `ActivationFailure`, with its `ActivationState` and `ActivationCause`, and never
 powers the VM off: the adapter ends it.
 

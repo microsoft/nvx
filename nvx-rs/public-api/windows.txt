@@ -126,6 +126,7 @@ method nvx::activation::ActivationRecord::encode
 method nvx::activation::ActivationRecord::new
 method nvx::activation::ActivationRecord::restore
 method nvx::activation::ActivationRecord::version
+const nvx::activation::CONTRACT_VERSION
 struct nvx::activation::Configuration
 method nvx::activation::Configuration::check
 field nvx::activation::Configuration::export
@@ -1631,10 +1632,10 @@ method nvx::host::template::ClassIdentity::from_bytes
 trait nvx::host::template::CloneControl
 type nvx::host::template::CloneControl::Error
 type nvx::host::template::CloneControl::Session
-method nvx::host::template::CloneControl::activate
 method nvx::host::template::CloneControl::attach
 method nvx::host::template::CloneControl::lost
 method nvx::host::template::CloneControl::map
+method nvx::host::template::CloneControl::ready
 method nvx::host::template::CloneControl::refused
 method nvx::host::template::CloneControl::start
 struct nvx::host::template::CloneFailure

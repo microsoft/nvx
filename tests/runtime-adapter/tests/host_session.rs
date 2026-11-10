@@ -11,10 +11,10 @@
 //! teardown failed, and the host's order of a layered root: the guest agent's readiness and build,
 //! the mapping table in parts, and `Start`, and each failure of the order, after which the host
 //! sends nothing more, or stops the guest. They also cover a clone's order, the framing of the
-//! restore sequence of `nvx::host::template`: the bootstrap of its session, its record as the
+//! restore sequence of `nvx::host::template`: the bootstrap of its session, its `Await` as the
 //! first request, the `Ready` that reports its activation, the sessions that it takes for lost,
-//! after a later reset, the end of the stream, or a failure of the transport, whose successor sends
-//! the same record, and the failures that are final. The broker's guest also runs the runners of
+//! after a later reset, the end of the stream, or a failure of the transport, whose successor gets
+//! the same `Ready`, and the failures that are final. The broker's guest also runs the runners of
 //! NVX's execution engine for the executions that the host program's driver runs, so that the tests
 //! cover the driver's output, credit, outcomes, and timers, the refusals that end its run, a guest
 //! that stops reading, and a stop that skips the guest's late messages about the executions that
@@ -44,9 +44,7 @@ use nvx::protocol::{
 };
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::exec::{GuestMessage, HostMessage, MAX_EXECUTIONS, Start};
-use runtime_adapter::frame::{
-    Decoder, FrameError, HEADER_LEN, MAX_ACTIVATE_BODY, MAX_BODY, MAX_TEXT_BODY, Message,
-};
+use runtime_adapter::frame::{Decoder, FrameError, HEADER_LEN, MAX_BODY, MAX_TEXT_BODY, Message};
 use runtime_adapter::host::{
     self, Client, ClientError, CloneOrder, Executions, ExecutionsError, MAX_OUTPUT_FRAMES,
     MapReply, OrderError,
@@ -1153,7 +1151,8 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
     let too_long_text = u32::try_from(MAX_TEXT_BODY + 1).unwrap().to_le_bytes();
     let cases = [
         (header([0; 4], 0), FrameError::Kind(0)),
-        (header([0; 4], 28), FrameError::Kind(28)),
+        (header([0; 4], 27), FrameError::Kind(27)),
+        (header([0; 4], 29), FrameError::Kind(29)),
         (
             header(too_long, 3),
             FrameError::Length {
@@ -1224,7 +1223,7 @@ fn the_client_refuses_messages_that_its_framing_does_not_allow() {
         HostMessage::Input(key, b"input").encode(),
         HostMessage::InputEnd(key).encode(),
         HostMessage::Cancel(key, Cause::Cancelled).encode(),
-        Message::Activate(activation_record()),
+        Message::Await,
     ];
     for message in host_messages {
         let (mut broker, mut client) = attached(FIRST, usize::MAX);
@@ -1280,7 +1279,7 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
     let stop: Request = |client| client.stop(deadline()).map(drop);
     let map: Request = |client| client.map(&maps_part(), deadline()).map(drop);
     let start: Request = |client| client.start(deadline());
-    let activate: Request = |client| client.activate(&activation_record(), deadline()).map(drop);
+    let await_ready: Request = |client| client.await_ready(deadline()).map(drop);
     let teardown = RootFailure::new(RootStage::Teardown, "busy").encode();
     // Each request, and answers that don't answer it.
     let cases: [(&str, Request, Vec<Message>, Kinds); 18] = [
@@ -1384,18 +1383,18 @@ fn requests_check_their_answers_and_end_the_client_when_they_fail() {
             Some((25, 24)),
         ),
         (
-            "an Activate answered with Started",
-            activate,
+            "an Await answered with Started",
+            await_ready,
             vec![Message::Started],
-            Some((27, 26)),
+            Some((28, 26)),
         ),
         (
-            "an Activate answered with a root's failure",
-            activate,
+            "an Await answered with a root's failure",
+            await_ready,
             vec![Message::RootFailed(
                 RootFailure::new(RootStage::Layout, "late").encode(),
             )],
-            Some((27, 8)),
+            Some((28, 8)),
         ),
     ];
     for (name, request, replies, kinds) in cases {
@@ -1522,7 +1521,7 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
     };
     let stop: Request = |client| client.stop(deadline()).map(drop);
     let map: Request = |client| client.map(&maps_part(), deadline()).map(drop);
-    let activate: Request = |client| client.activate(&activation_record(), deadline()).map(drop);
+    let await_ready: Request = |client| client.await_ready(deadline()).map(drop);
     let mut partial_activation = ready().encode();
     partial_activation.extend([0; 4]);
     let cases: [(&str, Request, Message, &str); 12] = [
@@ -1594,7 +1593,7 @@ fn answers_whose_bodies_do_not_decode_end_the_client() {
         ),
         (
             "a clone's readiness with bytes after its build that are not an activation",
-            activate,
+            await_ready,
             Message::Ready(partial_activation),
             "has 4 bytes after its build, which are not an activation",
         ),
@@ -1855,12 +1854,6 @@ fn a_mapping_that_the_guest_fails_ends_the_table_and_the_host_stops_the_guest() 
     );
 }
 
-/// Returns the bytes that stand for a clone's activation record in its canonical encoding, which
-/// the host's client carries in an `Activate` without decoding them.
-fn activation_record() -> Vec<u8> {
-    b"\x01the clone's activation record".to_vec()
-}
-
 /// Returns the activation that the guest of a clone reports in its `Ready`.
 fn clone_activation() -> ReadyActivation {
     ReadyActivation {
@@ -1879,17 +1872,14 @@ fn clone_order() -> CloneOrder<'static> {
     CloneOrder { build: GUEST_BUILD }
 }
 
-/// Runs the first step of a clone's order with `client` in a thread: sends [`activation_record`] in an
-/// `Activate`. The thread returns the client with the activation that `Ready` reports, or how the
-/// step failed.
-fn activating(client: Client) -> JoinHandle<(Client, Result<Option<ReadyActivation>, OrderError>)> {
-    spawn(client, |client| {
-        clone_order().activate(client, &activation_record(), deadline())
-    })
+/// Runs the first step of a clone's order with `client` in a thread: sends `Await`. The thread
+/// returns the client with the activation that `Ready` reports, or how the step failed.
+fn awaiting(client: Client) -> JoinHandle<(Client, Result<Option<ReadyActivation>, OrderError>)> {
+    spawn(client, |client| clone_order().ready(client, deadline()))
 }
 
 #[test]
-fn a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_cold_boot() {
+fn a_clone_s_order_awaits_its_ready_first_then_starts_its_sandbox_as_after_a_cold_boot() {
     // The broker waits for the guest's acknowledgement of the restore's reset, the session's
     // bootstrap, before it attaches the host, which waits for it.
     let (mut broker, transport) = connect(FIRST, usize::MAX);
@@ -1904,10 +1894,11 @@ fn a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_col
     let client = joined(attaching).unwrap();
     assert_eq!(client.identity(), FIRST);
 
-    // The record is the session's first request, after which the host waits for `Ready`, which
-    // arrives in records of 7 bytes.
-    let activation = activating(client);
-    assert_eq!(broker.messages(1), [Message::Activate(activation_record())]);
+    // `Await`, which carries nothing, since the clone took its record from its restore packet, is
+    // the session's first request, after which the host waits for `Ready`, which arrives in
+    // records of 7 bytes.
+    let activation = awaiting(client);
+    assert_eq!(broker.messages(1), [Message::Await]);
     broker.assert_quiet();
     broker.send_data(&clone_ready().encode().unwrap(), 7);
     let (client, activated) = joined(activation);
@@ -1934,16 +1925,16 @@ fn a_clone_s_order_sends_its_record_first_then_starts_its_sandbox_as_after_a_col
     assert!(broker.read().is_none(), "the host sent more");
 
     // A `Ready` that reports no activation, as a cold boot's does, is returned as none, for the
-    // restore sequence to refuse; `host::activate` returns the readiness with its build.
+    // restore sequence to refuse; `host::await_ready` returns the readiness with its build.
     let (mut broker, client) = attached(FIRST, usize::MAX);
-    let activation = activating(client);
-    broker.expect(Message::Activate(activation_record()), &ready_message());
+    let activation = awaiting(client);
+    broker.expect(Message::Await, &ready_message());
     let (client, activated) = joined(activation);
     assert_eq!(activated.unwrap(), None);
     let activation = spawn(client, |client| {
-        host::activate(client, &activation_record(), GUEST_BUILD, deadline())
+        host::await_ready(client, GUEST_BUILD, deadline())
     });
-    broker.expect(Message::Activate(activation_record()), &clone_ready());
+    broker.expect(Message::Await, &clone_ready());
     let readiness = joined(activation).1.unwrap();
     assert_eq!(readiness.build(), GUEST_BUILD);
     assert_eq!(readiness.activation(), Some(clone_activation()));
@@ -1958,9 +1949,9 @@ fn a_clone_s_order_ends_its_table_at_a_mapping_that_the_guest_fails_and_stops_th
     let parts = encode_maps(&table).unwrap();
     assert!(parts.len() > 2);
     let (mut broker, client) = attached(FIRST, usize::MAX);
-    // The table follows the clone's `Ready`, which answers its record.
-    let activation = activating(client);
-    broker.expect(Message::Activate(activation_record()), &clone_ready());
+    // The table follows the clone's `Ready`, which answers its `Await`.
+    let activation = awaiting(client);
+    broker.expect(Message::Await, &clone_ready());
     let (client, activated) = joined(activation);
     assert_eq!(activated.unwrap(), Some(clone_activation()));
     let mapping = spawn(client, move |client| {
@@ -2021,9 +2012,9 @@ fn a_clone_s_order_maps_its_export_s_children_by_their_indices() {
         ]
     );
     let (mut broker, client) = attached(FIRST, usize::MAX);
-    // The table follows the clone's `Ready`, which answers its record.
-    let activation = activating(client);
-    broker.expect(Message::Activate(activation_record()), &clone_ready());
+    // The table follows the clone's `Ready`, which answers its `Await`.
+    let activation = awaiting(client);
+    broker.expect(Message::Await, &clone_ready());
     let (client, activated) = joined(activation);
     assert_eq!(activated.unwrap(), Some(clone_activation()));
     let mapping = spawn(client, move |client| {
@@ -2037,25 +2028,25 @@ fn a_clone_s_order_maps_its_export_s_children_by_their_indices() {
 }
 
 #[test]
-fn a_clone_s_session_that_ends_after_its_bootstrap_is_lost_and_the_next_takes_the_same_record() {
+fn a_clone_s_session_that_ends_after_its_bootstrap_is_lost_and_the_next_gets_the_same_ready() {
     let next = Identity { epoch: 2, ..FIRST };
     // The broker resets the session, which a broker announces, or ends its stream, as OpenVMM's
     // broker ends an attachment, while the host awaits `Ready`; or the transport fails as the
-    // host sends the record.
+    // host sends its `Await`.
     for ending in ["reset", "end of stream", "transport"] {
         let (mut broker, client) = attached(FIRST, usize::MAX);
         if ending == "transport" {
             broker.from_host.close();
         }
-        let activation = activating(client);
+        let activation = awaiting(client);
         match ending {
             "reset" => {
-                assert_eq!(broker.messages(1), [Message::Activate(activation_record())]);
+                assert_eq!(broker.messages(1), [Message::Await]);
                 broker.identity = next;
                 broker.send(RecordType::Reset, &[]);
             }
             "end of stream" => {
-                assert_eq!(broker.messages(1), [Message::Activate(activation_record())]);
+                assert_eq!(broker.messages(1), [Message::Await]);
                 broker.close();
             }
             _ => {}
@@ -2065,11 +2056,11 @@ fn a_clone_s_session_that_ends_after_its_bootstrap_is_lost_and_the_next_takes_th
         assert!(clone_order().lost(&error), "{ending}: {error:?}");
         assert_ended(&mut client);
 
-        // The order's next session sends the same record, byte for byte, as its first request,
-        // and the clone, which was ready, answers it with the same `Ready`.
+        // The order's next session sends its `Await` as its first request, and the clone, which
+        // was ready, answers it with the same `Ready`.
         let (mut broker, client) = attached(next, usize::MAX);
-        let activation = activating(client);
-        broker.expect(Message::Activate(activation_record()), &clone_ready());
+        let activation = awaiting(client);
+        broker.expect(Message::Await, &clone_ready());
         let (_, activated) = joined(activation);
         assert_eq!(activated.unwrap(), Some(clone_activation()), "{ending}");
     }
@@ -2111,14 +2102,11 @@ fn only_a_session_that_ended_is_lost_to_a_clone_s_order() {
     // The guest agent that activated the clone is of another build: the host sends it nothing
     // more.
     let (mut broker, client) = attached(FIRST, usize::MAX);
-    let activation = activating(client);
+    let activation = awaiting(client);
     let another = Ready::new("another-build")
         .unwrap()
         .with_activation(clone_activation());
-    broker.expect(
-        Message::Activate(activation_record()),
-        &Message::Ready(another.encode()),
-    );
+    broker.expect(Message::Await, &Message::Ready(another.encode()));
     let (client, activated) = joined(activation);
     drop(client);
     assert!(broker.read().is_none(), "the host sent more");
@@ -2133,9 +2121,9 @@ fn only_a_session_that_ended_is_lost_to_a_clone_s_order() {
     // `Ready` does not arrive in time.
     let (mut broker, client) = attached(FIRST, usize::MAX);
     let activation = spawn(client, |client| {
-        clone_order().activate(client, &activation_record(), Instant::now() + SHORT)
+        clone_order().ready(client, Instant::now() + SHORT)
     });
-    assert_eq!(broker.messages(1), [Message::Activate(activation_record())]);
+    assert_eq!(broker.messages(1), [Message::Await]);
     let (mut client, activated) = joined(activation);
     let error = activated.unwrap_err();
     let late = matches!(
@@ -2145,45 +2133,26 @@ fn only_a_session_that_ended_is_lost_to_a_clone_s_order() {
     assert!(late && not_lost(&error), "{error:?}");
     assert_ended(&mut client);
 
-    // The guest answers the record with another kind, or with a `Ready` whose activation does not
-    // decode.
+    // The guest answers the `Await` with another kind, or with a `Ready` whose activation does
+    // not decode.
     let mut partial = ready().encode();
     partial.push(1);
     for reply in [Message::Pong, Message::Ready(partial)] {
         let (mut broker, client) = attached(FIRST, usize::MAX);
-        let activation = activating(client);
-        broker.expect(Message::Activate(activation_record()), &reply);
+        let activation = awaiting(client);
+        broker.expect(Message::Await, &reply);
         let (mut client, activated) = joined(activation);
         let error = activated.unwrap_err();
         let failed = matches!(
             &error,
             OrderError::Client(ClientError::Reply {
-                request: 27,
+                request: 28,
                 reply: 2
             }) | OrderError::Client(ClientError::Body(_))
         );
         assert!(failed && not_lost(&error), "{reply:?}: {error:?}");
         assert_ended(&mut client);
     }
-
-    // A record that the framing refuses fails before it is sent, and the client stays usable.
-    let (mut broker, client) = attached(FIRST, usize::MAX);
-    let activation = spawn(client, |client| {
-        let too_long = vec![0; MAX_ACTIVATE_BODY + 1];
-        clone_order().activate(client, &too_long, deadline())
-    });
-    let (client, activated) = joined(activation);
-    let error = activated.unwrap_err();
-    let expected = FrameError::Length {
-        kind: 27,
-        length: MAX_ACTIVATE_BODY + 1,
-    };
-    let refused =
-        matches!(&error, OrderError::Client(ClientError::Frame(found)) if *found == expected);
-    assert!(refused && not_lost(&error), "{error:?}");
-    let pinging = spawn(client, |client| client.ping(deadline()));
-    assert_eq!(broker.answer(OUTER_MAX_PAYLOAD), Message::Ping);
-    joined(pinging).1.unwrap();
 }
 
 /// The chunk of the executions of the tests of the host's driver.

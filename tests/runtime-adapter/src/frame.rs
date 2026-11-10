@@ -14,13 +14,12 @@
 //! The framing carries the body of each kind as bytes, within the kind's limit. The bodies of the
 //! messages of a layered root, of its probes, and of executions have encodings of their own, which
 //! the [`root`](crate::root), [`probe`](crate::probe), and [`exec`](crate::exec) modules write and
-//! read, and that of a clone's activation is the canonical encoding of an activation record, which
-//! `nvx::activation` writes and reads: a body that does not decode is a [`BodyError`], which the
-//! receiver answers or refuses, while the stream goes on.
+//! read: a body that does not decode is a [`BodyError`], which the receiver answers or refuses,
+//! while the stream goes on. A clone's activation record takes no message: OpenVMM hands it to the
+//! clone in its restore packet.
 
 use std::fmt;
 
-use nvx::activation::MAX_RECORD_BYTES;
 use nvx::protocol::OUTER_MAX_PAYLOAD;
 
 /// Bytes of a message's header: the body's length, then the message's kind.
@@ -38,10 +37,6 @@ pub const MAX_TEXT_BODY: usize = 4096;
 /// Most bytes of the body of an execution's control message: its execution's key, and a few
 /// fields; see [`exec`](crate::exec).
 pub const MAX_CONTROL_BODY: usize = 64;
-
-/// Most bytes of the body of an `Activate`: the canonical encoding of an activation record, which
-/// holds at most `nvx::activation::MAX_RECORD_BYTES`.
-pub const MAX_ACTIVATE_BODY: usize = MAX_RECORD_BYTES;
 
 /// A message of the adapter's framing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,8 +56,8 @@ pub enum Message {
     /// itself, so that it answers one that it refuses with [`Message::RootFailed`].
     RootConfig(Vec<u8>),
     /// The guest's answer to [`Message::RootConfig`] once it has assembled the root, or to
-    /// [`Message::Activate`] once it activated a clone, with the guest agent's build, and what it
-    /// reports about a clone's activation, encoded as a [`Ready`](crate::root::Ready).
+    /// [`Message::Await`] once a clone is ready, with the guest agent's build, and what it reports
+    /// about a clone's activation, encoded as a [`Ready`](crate::root::Ready).
     Ready(Vec<u8>),
     /// A stage of the guest's layered root failed, encoded as a
     /// [`RootFailure`](crate::root::RootFailure): the guest's answer to [`Message::RootConfig`],
@@ -114,11 +109,13 @@ pub enum Message {
     Start,
     /// The guest's confirmation of [`Message::Start`].
     Started,
-    /// The host's activation of a clone, which a restore of a template's snapshot started: the
-    /// clone's activation record, in its canonical encoding, which
-    /// `nvx::activation::ActivationRecord::encode` writes, and which the guest decodes and checks
-    /// itself. The guest answers it with [`Message::Ready`] once it activated the clone.
-    Activate(Vec<u8>),
+    /// The host's request for the Ready of a clone, which a restore of a template's snapshot
+    /// started, the first message of each of the host's sessions with the clone: the clone takes
+    /// its activation record from its restore packet, and the guest answers with
+    /// [`Message::Ready`] once the clone is ready, as often as the host asks. OpenVMM's broker
+    /// refuses the guest's records while no host is attached, which the guest cannot tell, so the
+    /// host asks.
+    Await,
 }
 
 impl Message {
@@ -131,8 +128,8 @@ impl Message {
     /// its kind allows: [`MAX_BODY`] for an `Echo`, a `Report`, an execution's start, or its input
     /// or output, or a part of the mapping table, [`MAX_TEXT_BODY`] for a root configuration, the
     /// guest's readiness, a root's failure, a failure of the mapping table, a probe, or a probe's
-    /// failure, [`MAX_CONTROL_BODY`] for an execution's other messages, [`MAX_ACTIVATE_BODY`] for
-    /// an `Activate`, and none for the others.
+    /// failure, [`MAX_CONTROL_BODY`] for an execution's other messages, and none for the
+    /// others.
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         let (kind, body) = self.parts();
         if body.len() > kind.max_body() {
@@ -179,7 +176,7 @@ impl Message {
             Self::MapFailed(body) => (Kind::MapFailed, body),
             Self::Start => (Kind::Start, &[]),
             Self::Started => (Kind::Started, &[]),
-            Self::Activate(body) => (Kind::Activate, body),
+            Self::Await => (Kind::Await, &[]),
         }
     }
 }
@@ -236,8 +233,10 @@ const KIND_MAP_FAILED: u8 = 24;
 const KIND_START: u8 = 25;
 /// Kind of a [`Message::Started`].
 const KIND_STARTED: u8 = 26;
-/// Kind of a [`Message::Activate`].
-const KIND_ACTIVATE: u8 = 27;
+/// Kind of a [`Message::Await`]. Kind 27 was the `Activate` that carried a clone's activation
+/// record, which its restore packet carries since: the framing defines it no more, so that a host
+/// or a guest of either framing refuses the other's at once.
+const KIND_AWAIT: u8 = 28;
 
 /// Kind of a [`Message`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,8 +294,8 @@ enum Kind {
     Start = KIND_START,
     /// [`Message::Started`].
     Started = KIND_STARTED,
-    /// [`Message::Activate`].
-    Activate = KIND_ACTIVATE,
+    /// [`Message::Await`].
+    Await = KIND_AWAIT,
 }
 
 impl Kind {
@@ -329,7 +328,7 @@ impl Kind {
             KIND_MAP_FAILED => Some(Self::MapFailed),
             KIND_START => Some(Self::Start),
             KIND_STARTED => Some(Self::Started),
-            KIND_ACTIVATE => Some(Self::Activate),
+            KIND_AWAIT => Some(Self::Await),
             _ => None,
         }
     }
@@ -361,14 +360,14 @@ impl Kind {
             | Self::ExecEnd
             | Self::ExecInputClosed
             | Self::ExecTerminal => MAX_CONTROL_BODY,
-            Self::Activate => MAX_ACTIVATE_BODY,
             Self::Ping
             | Self::Pong
             | Self::Stop
             | Self::Stopped
             | Self::Mapped
             | Self::Start
-            | Self::Started => 0,
+            | Self::Started
+            | Self::Await => 0,
         }
     }
 
@@ -402,7 +401,7 @@ impl Kind {
             Self::MapFailed => Message::MapFailed(body),
             Self::Start => Message::Start,
             Self::Started => Message::Started,
-            Self::Activate => Message::Activate(body),
+            Self::Await => Message::Await,
         }
     }
 }
@@ -414,7 +413,7 @@ pub enum FrameError {
     /// A kind that the framing does not define.
     Kind(u8),
     /// A body longer than its kind allows: [`MAX_BODY`] bytes, [`MAX_TEXT_BODY`],
-    /// [`MAX_CONTROL_BODY`], [`MAX_ACTIVATE_BODY`], or none.
+    /// [`MAX_CONTROL_BODY`], or none.
     Length {
         /// Kind of the message.
         kind: u8,

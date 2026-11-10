@@ -81,15 +81,16 @@
 //!    reports them as violations of the time ABI, which stop the VM, with the time ABI's status,
 //!    unless the ABI is report-only, since the daemon enforces it.
 //!
-//! It returns the [`Repaired`] clone: its new VM generation ID, its number of online CPUs, the
-//! size of its online memory blocks, and when it acknowledged the restore, which an activation
-//! checks against the resources that it expects. The repair records how far it got, so that it
-//! never brings a CPU online twice nor adds a memory block twice, and runs the reseed and the
-//! finish at most once, whoever retries it: a failure at or after the reseed is final. It never
-//! touches the fence. A failure is a [`RepairError`], which names the [`RepairStage`] that
-//! failed, its [`RepairCause`], and the repair's [`RepairProgress`], and selects the status with
-//! which the caller ends the VM, [`RepairError::status`], which `nvx::protocol::status`
-//! documents.
+//! It returns the [`Repaired`] clone: its new VM generation ID, its number of online CPUs and the
+//! size of its online memory blocks, which an activation checks against the resources that it
+//! expects, when it acknowledged the restore, and the activation record that its restore packet
+//! carried, from which the activation takes the clone's configuration. The repair records how far
+//! it got, so that it never brings a CPU online twice nor adds a memory block twice, and runs the
+//! reseed and the finish at most once, whoever retries it: a failure at or after the reseed is
+//! final. It never touches the fence. A failure is a [`RepairError`], which names the
+//! [`RepairStage`] that failed, its [`RepairCause`], and the repair's [`RepairProgress`], and
+//! selects the status with which the caller ends the VM, [`RepairError::status`], which
+//! `nvx::protocol::status` documents.
 //!
 //! # Strict mode
 //!
@@ -106,44 +107,54 @@
 //!
 //! # Activation
 //!
-//! A repaired clone then takes its own configuration from the host, in one Activate, on a
-//! restricted control session, through an [`Activation`] of the [`Repaired`] clone and of the
-//! caller's fence, which stays closed until the activation is ready, so that no execution starts
-//! before. The activation is a state machine without I/O, independent of any framing: the adapter
-//! passes it what it receives on the clone's NVXS session, each an [`ActivationInput`], and does
-//! what each [`ActivationAction`] that it returns says. Its [`ActivationState`]s, in order, are:
+//! A repaired clone then takes its own configuration from the activation record that its restore
+//! packet carried, [`Repaired::activation_record`], through an [`Activation`] of the
+//! [`Repaired`] clone and of the caller's fence, which stays closed until the activation is
+//! ready, so that no execution starts before. The host supplied the record at the clone's launch,
+//! and OpenVMM sealed it in the packet before the first restored vCPU ran, so the clone takes
+//! nothing of the host to activate. The activation is a state machine without I/O, independent of
+//! any framing: the adapter applies the record that the activation accepts, passes the activation
+//! what it receives on the clone's NVXS session, each an [`ActivationInput`], and does what each
+//! [`ActivationAction`] that it returns says. Its [`ActivationState`]s, in order, are:
 //!
-//! 1. the transport bootstrap: the clone awaits the reset that the restore queued for the session
-//!    that the guest attached before the capture, which the adapter acknowledges;
-//! 2. restricted: the session takes only flow control and one Activate, and anything else, a
-//!    request or another reset, fails the activation. The activation decodes the Activate's
-//!    record with [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode), and
-//!    accepts it only as a clone's, with a restore section, that expects the CPU count and the
-//!    memory size that the repair reports, before anything has a side effect. An Activate whose
-//!    record the adapter's framing refused unread, as longer than a record can be, fails as a
-//!    record that long does;
-//! 3. activating: the adapter applies the accepted record with `apply`, which
+//! 1. pending: [`Activation::accept`] decodes the record with
+//!    [`ActivationRecord::decode`](crate::activation::ActivationRecord::decode), and accepts it
+//!    only as a clone's, with a restore section, that expects the CPU count and the memory size
+//!    that the repair reports, before anything has a side effect. A packet without a record fails
+//!    the activation. The adapter accepts the record as soon as the clone runs, without waiting
+//!    for the host;
+//! 2. activating: the adapter applies the accepted record with `apply`, which
 //!    activates the root and the workload with its settings, as below, passes the activation
 //!    what the session received meanwhile, which came before Ready, then reports the result to
 //!    [`Activation::complete`];
-//! 4. ready, with the mappings pending: the activation completed, opened the fence, and returned
-//!    what Ready reports beside the adapter's own identities, such as its build, a
-//!    [`ReadyActivation`](crate::activation::ReadyActivation): that the activation applied, with
-//!    the record's transaction ID. The host's mapping table, which the record announced, and the
-//!    start of the sandbox follow in the adapter's order, as after a cold boot;
+//! 3. applied, if the application completed before the host asked for Ready in its current
+//!    session: the activation awaits the host's request, which makes it ready;
+//! 4. ready, with the mappings pending: the application completed, and the host asked for Ready,
+//!    which opened the fence, and got what Ready reports beside the adapter's own identities, such
+//!    as its build, a [`ReadyActivation`](crate::activation::ReadyActivation): that the activation
+//!    applied, with the record's transaction ID. The host's mapping table, which the record
+//!    announced, and the start of the sandbox follow in the adapter's order, as after a cold boot;
 //! 5. started: the adapter's order started the sandbox, which [`Activation::start`] records.
 //!
-//! The host retries an Activate with the same transaction ID and a byte-equal record, and such a
-//! retry joins the activation while it runs, or gets its cached result afterwards, without
-//! activating again, also in a later session, such as once the host's attachment ended, whose
-//! reset a ready clone takes. A changed record, another transaction, another reset before the
+//! The clone's control session runs beside the activation. The clone takes the reset that the
+//! restore queued for the session that the guest attached before the capture, which the adapter
+//! acknowledges, and the host then asks for the clone's Ready, first in each of its sessions:
+//! OpenVMM's broker refuses the guest's records while no host is attached, which the guest cannot
+//! tell, so the guest answers the host's request rather than sending Ready unasked. A request for
+//! Ready that comes while the record applies joins the activation, whose completion answers it,
+//! one that comes once the record applied makes the activation ready, and gets its Ready, and one
+//! that comes once it is ready gets the established Ready, without activating again: the clone is
+//! ready only once a Ready answers the host, so that its deadline ends a clone whose host never
+//! asks. A reset of the session, such as once the host's attachment ended, changes nothing of the
+//! activation, whose record came with the restore, so that a later session gets the same Ready:
+//! it abandons only the requests for Ready of the earlier session. Any other request before the
 //! clone is ready, and an activation that failed, wholly or partway, are final. The activation's
 //! deadline, which the caller chooses, starts at the restore's acknowledgement, or, for a restore
-//! that the host did not gate until one, when the caller makes the activation, and neither input
-//! nor retries extend it: the adapter wakes by it, and [ticks](Activation::tick) the activation
-//! then, however slowly its input trickles in, and whether or not its output drains. A failure
-//! is an [`ActivationFailure`], which names the [`ActivationState`] in which the activation failed
-//! and its [`ActivationCause`], and which every later call returns again. The activation never
+//! that the host did not gate until one, when the caller makes the activation, and nothing
+//! extends it: the adapter wakes by it, and [ticks](Activation::tick) the activation then,
+//! however slowly its input trickles in, and whether or not its output drains. A failure is an
+//! [`ActivationFailure`], which names the [`ActivationState`] in which the activation failed and
+//! its [`ActivationCause`], and which every later call returns again. The activation never
 //! powers the VM off: the adapter reports the failure, and ends the VM.
 //!
 //! The activation's application, `apply` and its types, is NVX's internal reference code of the
@@ -253,11 +264,14 @@
 //!             }
 //!         };
 //!         println!("{} CPUs, {} bytes of memory", repaired.cpus(), repaired.memory());
-//!         // Its activation takes the host's Activate, and opens the fence once the clone is
-//!         // ready: the agent drives it with what its control session receives.
+//!         // Its activation takes the activation record of the restore packet, and opens the
+//!         // fence once the clone is ready: the agent applies the record, and serves the clone's
+//!         // control session.
 //!         let timeout = Duration::from_secs(30);
-//!         let activation = Activation::new(&repaired, fence, timeout, Instant::now());
-//!         println!("activate by {:?}", activation.deadline());
+//!         let mut activation = Activation::new(&repaired, fence, timeout, Instant::now());
+//!         let record = activation.accept(Instant::now())?;
+//!         let mappings = record.configuration().mappings;
+//!         println!("activate {mappings} mappings by {:?}", activation.deadline());
 //!     }
 //! }
 //! # Ok(())

@@ -61,6 +61,10 @@ const EXIT_MARKER: &str = "exit";
 /// File in which [`fake_vmm`] writes the arguments that a launch gave its VMM, as JSON, for the
 /// [`restore_vmm_role`] that runs instead.
 const ARGUMENTS: &str = "arguments.json";
+/// File in which [`fake_vmm`] keeps the activation record that a launch hands its VMM with
+/// `--restore-activation-record`, as OpenVMM reads it before the restored VM runs: the record of
+/// the clone's restore packet, with which the clone activates.
+const PACKET: &str = "packet";
 /// File in which a [`restore_vmm_role`] writes, once it has tried to send its restore-ready
 /// event, the capability that it read, in hexadecimal, and whether it sent the event.
 const STARTED: &str = "started";
@@ -278,8 +282,8 @@ pub(super) struct Made {
 
 /// Returns the seam of the command of a launch whose VMM is a [`restore_vmm_role`] in `vmm`: it
 /// keeps the command that the launch made in `made`, writes its arguments in [`ARGUMENTS`] in
-/// `vmm`, and runs the role there instead, with the descriptors or handles that the command
-/// passes.
+/// `vmm`, and the activation record that they hand the VMM in [`PACKET`] there, as OpenVMM reads
+/// it, and runs the role there instead, with the descriptors or handles that the command passes.
 pub(super) fn fake_vmm<'a>(
     vmm: &'a Path,
     made: &'a RefCell<Option<Made>>,
@@ -291,6 +295,9 @@ pub(super) fn fake_vmm<'a>(
             .map(|argument| argument.to_str().unwrap().to_owned())
             .collect();
         fs::write(vmm.join(ARGUMENTS), serde_json::to_vec(&arguments).unwrap()).unwrap();
+        // OpenVMM reads the record before the restored VM runs, and seals it in the packet.
+        let record = argument(&arguments, "--restore-activation-record").unwrap();
+        fs::write(vmm.join(PACKET), fs::read(record).unwrap()).unwrap();
         // The VMM reports its outcome in the sandbox, wherever the VMM runs.
         let report = argument(&arguments, "--microvm-report").unwrap();
         let sandbox = Path::new(&report).parent().unwrap();
@@ -335,6 +342,12 @@ impl VmmDir {
     /// Returns the path of the directory.
     pub(super) fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// Returns the path of the file that holds the record of the clone's restore packet, which
+    /// [`fake_vmm`] wrote at the launch.
+    pub(super) fn packet(&self) -> PathBuf {
+        self.path().join(PACKET)
     }
 
     /// Waits until the VMM has tried to send its restore-ready event, and returns what it wrote
@@ -854,6 +867,7 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     let (profile, processors) = (key.cpu_profile(), key.processors().to_string());
     let listen = format!("listen={endpoint}");
     let report = sandbox.join(OUTCOME_NAME);
+    let record = sandbox.join(CLONE_ACTIVATION_NAME);
     let expected = [
         "--machine",
         "microvm",
@@ -871,6 +885,8 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
         snapshot.to_str().unwrap(),
         "--restore-memory",
         "512M",
+        "--restore-activation-record",
+        record.to_str().unwrap(),
         "--restore-ready-path",
         &ready,
         "--virtio-console",
@@ -883,9 +899,11 @@ fn a_clone_restores_its_leased_snapshot_with_its_devices_and_activation_record()
     ];
     assert_eq!(made.arguments, expected);
     // The sandbox holds the clone's activation record, in its canonical encoding, which the
-    // launch keeps.
-    let recorded = fs::read(sandbox.join(CLONE_ACTIVATION_NAME)).unwrap();
+    // launch keeps, and which the VMM reads, at the path that the arguments name, to hand it to
+    // the clone's guest in its restore packet.
+    let recorded = fs::read(&record).unwrap();
     assert_eq!(recorded, activation.encode());
+    assert_eq!(fs::read(vmm.packet()).unwrap(), recorded);
     assert_eq!(ActivationRecord::decode(&recorded).unwrap(), activation);
     assert_eq!(restoring.activation(), &activation);
     assert_eq!(restoring.capability(), &capability);
@@ -2082,8 +2100,12 @@ fn launch_role() {
     if step == "launched" {
         crash(&step);
     }
-    // The restore sequence, through a framing that crashes within the Activate or the start.
-    let mut control = RoleControl { step: &step };
+    // The restore sequence, through a framing that crashes as it awaits the clone's Ready or
+    // within the start.
+    let mut control = RoleControl {
+        step: &step,
+        packet: vmm.join(PACKET),
+    };
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -2111,12 +2133,14 @@ fn launch_role() {
     panic!("the clone's launch did not crash at {step}");
 }
 
-/// The adapter's framing of a [`launch_role`], whose clone answers as the record asks, and which
-/// crashes as it awaits the clone's Ready, at the step `activating`, or the start of its sandbox,
-/// at the step `starting`.
+/// The adapter's framing of a [`launch_role`], whose clone answers with the activation of the
+/// record of its restore packet, and which crashes as it awaits the clone's Ready, at the step
+/// `activating`, or the start of its sandbox, at the step `starting`.
 struct RoleControl<'a> {
     /// The step at which the role crashes.
     step: &'a str,
+    /// The file that holds the record of the clone's restore packet.
+    packet: PathBuf,
 }
 
 impl CloneControl for RoleControl<'_> {
@@ -2132,16 +2156,15 @@ impl CloneControl for RoleControl<'_> {
         Ok(transport)
     }
 
-    fn activate(
+    fn ready(
         &mut self,
         _session: &mut Box<dyn Transport>,
-        record: &[u8],
         _deadline: Instant,
     ) -> io::Result<Option<ReadyActivation>> {
         if self.step == "activating" {
             crash(self.step);
         }
-        let record = ActivationRecord::decode(record).unwrap();
+        let record = ActivationRecord::decode(&fs::read(&self.packet)?).unwrap();
         Ok(Some(ReadyActivation::of(&record)))
     }
 
@@ -2303,15 +2326,17 @@ impl Crashed {
         }
     }
 
-    /// Takes the clone of the sandbox of `locked` over, under `runtime`, through `control`, with
+    /// Takes the clone of the sandbox of `locked` over, under `runtime`, through `control`, whose
+    /// clone answers with the record of the restore packet that its VMM kept, with
     /// [`reattach_clone`], until the result is determinate, as a caller retries an indeterminate
     /// reattach, and returns it.
-    fn take_over<C: CloneControl>(
+    fn take_over(
         &self,
         locked: &mut LockedStore,
         runtime: &RuntimeIdentity,
-        control: &mut C,
-    ) -> ReattachedClone<C::Session> {
+        control: &mut ReattachControl,
+    ) -> ReattachedClone<Box<dyn Transport>> {
+        control.packet = Some(self.vmm.packet());
         let deadline = Instant::now() + TIMEOUT;
         loop {
             let session = Instant::now() + TIMEOUT;
@@ -2588,28 +2613,32 @@ fn a_restore_whose_caller_crashes_once_it_committed_keeps_its_lease_while_its_vm
     crashed.releases(&mut locked);
 }
 
-/// The Ready of a clone that a [`ReattachControl`] answers, from the activation of the record that
-/// the clone's Activate carries.
+/// The Ready of a clone that a [`ReattachControl`] answers, from the activation of the record of
+/// the clone's restore packet.
 type Answered = fn(ReadyActivation) -> Option<ReadyActivation>;
 
 /// The adapter's framing of the sessions of a reattach: it attaches a session to each connection
-/// to the clone's control endpoint, keeps the capability of each, and the record of each Activate,
-/// which it answers as its `answer` says.
+/// to the clone's control endpoint, keeps the capability of each, and counts the requests for
+/// Ready, which it answers as its `answer` says, from the record of the clone's restore packet,
+/// which the clone's VMM keeps in its `packet`.
 struct ReattachControl {
     /// The capabilities of the sessions, in order.
     capabilities: Vec<[u8; CAPABILITY_LEN]>,
-    /// The records of the Activates, in order.
-    records: Vec<Vec<u8>>,
-    /// How the clone answers an Activate.
+    /// The number of requests for Ready.
+    asked: usize,
+    /// The file that holds the record of the clone's restore packet, once the test names it.
+    packet: Option<PathBuf>,
+    /// How the clone answers a request for Ready.
     answer: Answered,
 }
 
 impl ReattachControl {
-    /// Returns a framing whose clone answers each Activate as `answer` says.
+    /// Returns a framing whose clone answers each request for Ready as `answer` says.
     fn answering(answer: Answered) -> Self {
         Self {
             capabilities: Vec::new(),
-            records: Vec::new(),
+            asked: 0,
+            packet: None,
             answer,
         }
     }
@@ -2629,14 +2658,17 @@ impl CloneControl for ReattachControl {
         Ok(transport)
     }
 
-    fn activate(
+    fn ready(
         &mut self,
         _session: &mut Box<dyn Transport>,
-        record: &[u8],
         _deadline: Instant,
     ) -> io::Result<Option<ReadyActivation>> {
-        self.records.push(record.to_vec());
-        let record = ActivationRecord::decode(record).unwrap();
+        self.asked += 1;
+        let packet = self
+            .packet
+            .as_ref()
+            .expect("the test names the clone's restore packet");
+        let record = ActivationRecord::decode(&fs::read(packet)?).unwrap();
         Ok((self.answer)(ReadyActivation::of(&record)))
     }
 
@@ -2680,11 +2712,12 @@ fn a_clone_whose_caller_crashed_once_it_committed_is_taken_over_in_a_new_session
         ReattachedClone::Live { vmm, session } => (vmm, session),
         other => panic!("the reattach found {}", describe(&other)),
     };
-    // The VM is the one that the launch committed, whose clone answered the Activate of the
-    // sandbox's record, byte for byte, in a session that the launch's capability authenticated,
-    // and runs on, with its lease.
+    // The VM is the one that the launch committed, whose clone answered the request for its Ready
+    // with the activation of the sandbox's record, the record of its restore packet, in a session
+    // that the launch's capability authenticated, and runs on, with its lease.
     assert_eq!(vmm.process().reference(), &reference);
-    assert_eq!(control.records, [recorded]);
+    assert_eq!(control.asked, 1);
+    assert_eq!(fs::read(crashed.vmm.packet()).unwrap(), recorded);
     let attached: Vec<String> = control.capabilities.iter().map(|key| hex(key)).collect();
     assert_eq!(attached, [capability]);
     drop(session);
@@ -2738,7 +2771,7 @@ fn a_journal_that_a_clone_s_commit_left_is_no_failure_of_the_clone() {
         );
         live = Some(vmm);
     }
-    assert_eq!(control.records.len(), 2);
+    assert_eq!(control.asked, 2);
     crashed.refuses_release(&mut locked);
     let vmm = live.unwrap();
     assert_eq!(
@@ -2781,7 +2814,7 @@ fn a_reattach_ends_a_clone_that_it_may_not_keep_through_its_verified_identity() 
         Evidence::Protocol,
         terminated,
     );
-    assert_eq!(control.records.len(), 1);
+    assert_eq!(control.asked, 1);
     assert!(locked.runtime().unwrap().is_none());
     crashed.releases(&mut locked);
 }
@@ -3908,6 +3941,7 @@ fn a_reattach_that_cannot_record_a_failure_ends_and_forgets_nothing_of_the_clone
             Some(other) => (other, &mut control),
             None => (&crashed.runtime, &mut refusing),
         };
+        control.packet = Some(crashed.vmm.packet());
         unrecorded(&unrecorded_take_over(&mut locked, runtime, control));
         let record = locked
             .runtime()

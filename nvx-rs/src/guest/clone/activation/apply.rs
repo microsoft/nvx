@@ -1,4 +1,4 @@
-//! The application of the record of the Activate that a clone's [`Activation`] accepted:
+//! The application of the activation record that a clone's [`Activation`] accepted:
 //! [`apply`](fn@apply), which activates the clone's root and workload with the record's settings,
 //! as at a cold boot, as the [module](super::super#activation) describes.
 //!
@@ -291,7 +291,7 @@ impl fmt::Display for AppliedTeardownError {
 
 impl std::error::Error for AppliedTeardownError {}
 
-/// Applies `record`, the record of the Activate that a clone's [`Activation`] accepted, to the
+/// Applies `record`, the activation record that a clone's [`Activation`] accepted, to the
 /// clone, as at a cold boot, by `deadline`, the activation's [deadline](Activation::deadline), if
 /// any, and returns the root and the workload that it activated, which the adapter keeps once it
 /// reported the result to [`Activation::complete`].
@@ -364,10 +364,10 @@ impl std::error::Error for AppliedTeardownError {}
 ///    [`ApplyError::View`], once the binds that it made were removed, the application stopped
 ///    the announcer that it started, and tore the root down.
 ///
-/// The activation answers a retry of the Activate without applying the record again, so every
-/// execution, and every retry, sees the same machine ID and resolver file. A failure after the
-/// generation, or after the resolver file's write, leaves that file, since the activation fails
-/// finally, and the adapter ends the VM.
+/// The activation applies its record once, and answers every request for Ready without applying
+/// it again, so every execution, and every session, sees the same machine ID and resolver file. A
+/// failure after the generation, or after the resolver file's write, leaves that file, since the
+/// activation fails finally, and the adapter ends the VM.
 ///
 /// It returns the root of the host export, the [`SourceRoot`] from which the adapter maps the
 /// host's mapping table once the clone is ready, as at a cold boot, the endpoint of the network's

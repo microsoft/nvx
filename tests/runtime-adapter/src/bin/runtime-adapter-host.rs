@@ -306,21 +306,20 @@
 //! mismatched, and then signals nothing: the VM keeps running.
 //!
 //! The sandbox of a clone holds the clone's lease, through whose path the commands that reattach
-//! take the sandbox's lock. They reattach to a clone with `nvx::host::template::reattach_clone`,
-//! in a new session of the adapter's clone order, in which the clone answers the Activate of its
-//! record again, with the Ready that it answered once, and which they then use as `reattach`
-//! attaches one. The reattach ends a clone that runs under another runtime identity, without a
-//! word to its guest, or that fails the check of its Ready, through its verified identity, and
-//! finishes the record of an earlier failure of the clone, whose teardown it resolves if it can.
-//! The command then releases the lease of a clone whose VM ended without a failure, and fails;
-//! ends as `start` does for a clone that failed; and keeps the lease and the records, and fails,
-//! for a clone whose state cannot be determined. It releases a lease through the template store
-//! that the clone's record names, once the lease is of it. A sandbox whose start ended before it
-//! recorded the clone holds a lease of a template store that no record names: it records no
-//! clone, or an earlier clone's, which a release leaves, of another template store perhaps.
-//! `reattach STORE --template TEMPLATES` and `stop STORE --template TEMPLATES` release such a
-//! lease through the template store TEMPLATES, in place of the record's, which the release refuses
-//! unless the lease is of it.
+//! take the sandbox's lock. They reattach to a clone with `nvx::host::template::reattach_clone`, in
+//! a new session of the adapter's clone order, in which the clone answers the host's `Await` with
+//! the Ready that it answered once, and which they then use as `reattach` attaches one. The
+//! reattach ends a clone that runs under another runtime identity, without a word to its guest, or
+//! that fails the check of its Ready, through its verified identity, and finishes the record of an
+//! earlier failure of the clone, whose teardown it resolves if it can. The command then releases
+//! the lease of a clone whose VM ended without a failure, and fails; ends as `start` does for a
+//! clone that failed; and keeps the lease and the records, and fails, for a clone whose state
+//! cannot be determined. It releases a lease through the template store that the clone's record
+//! names, once the lease is of it. A sandbox whose start ended before it recorded the clone holds a
+//! lease of a template store that no record names: it records no clone, or an earlier clone's,
+//! which a release leaves, of another template store perhaps. `reattach STORE --template TEMPLATES`
+//! and `stop STORE --template TEMPLATES` release such a lease through the template store TEMPLATES,
+//! in place of the record's, which the release refuses unless the lease is of it.
 //!
 //! The commands print what they find as `KEY=VALUE` lines:
 //!
@@ -3135,8 +3134,8 @@ enum Session {
     /// None yet, of a VM that booted cold, to which the command attaches one once it needs it, as
     /// [`Found::attach`] does.
     Cold,
-    /// The one in which a clone answered the Activate of its record again, with the Ready that it
-    /// answered once, as `reattach_clone` checks it.
+    /// The one in which a clone answered the host's `Await` with the Ready that it answered once,
+    /// as `reattach_clone` checks it.
     Clone(Box<Client>),
 }
 
@@ -3167,12 +3166,12 @@ impl Found {
 /// booted cold: it holds the VM again, as `supervisor::reattach` does, and returns a mismatched
 /// VM's status, which it leaves running. A sandbox with a lease holds a clone, which it reattaches
 /// to with `reattach_clone`, in a new session of the adapter's clone order, in which the clone
-/// answers the Activate of its record again, with its Ready, and which ends a clone that it may
-/// not keep: one that runs under another runtime identity, without a word to its guest, or that
-/// fails the check of its Ready. A clone that ended releases its lease, and one that failed, or
-/// whose earlier failure the reattach finishes, ends the command as [`clone_failed`] does, through
-/// the template store that [`clone_templates`] opens with `templates`. A clone whose state cannot
-/// be determined keeps its lease and its records, and fails the command; see [`conclude`].
+/// answers the host's `Await` with its Ready, and which ends a clone that it may not keep: one that
+/// runs under another runtime identity, without a word to its guest, or that fails the check of its
+/// Ready. A clone that ended releases its lease, and one that failed, or whose earlier failure the
+/// reattach finishes, ends the command as [`clone_failed`] does, through the template store that
+/// [`clone_templates`] opens with `templates`. A clone whose state cannot be determined keeps its
+/// lease and its records, and fails the command; see [`conclude`].
 fn find(
     path: &Path,
     runtime: &Runtime,

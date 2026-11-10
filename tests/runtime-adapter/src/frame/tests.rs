@@ -1,6 +1,5 @@
 use super::{
-    Decoder, FrameError, HEADER_LEN, Kind, MAX_ACTIVATE_BODY, MAX_BODY, MAX_CONTROL_BODY,
-    MAX_TEXT_BODY, Message,
+    Decoder, FrameError, HEADER_LEN, Kind, MAX_BODY, MAX_CONTROL_BODY, MAX_TEXT_BODY, Message,
 };
 
 /// Returns one message of each kind, with bodies of no, few, and the most bytes.
@@ -41,9 +40,7 @@ fn messages() -> Vec<Message> {
         Message::MapFailed(vec![b'm'; MAX_TEXT_BODY]),
         Message::Start,
         Message::Started,
-        Message::Activate(Vec::new()),
-        Message::Activate(b"\x01\x00record".to_vec()),
-        Message::Activate(vec![b'a'; MAX_ACTIVATE_BODY]),
+        Message::Await,
         Message::Stop,
         Message::Stopped,
     ]
@@ -80,7 +77,7 @@ fn one_of_each() -> Vec<Message> {
         Message::MapFailed(body(24)),
         Message::Start,
         Message::Started,
-        Message::Activate(body(27)),
+        Message::Await,
     ]
 }
 
@@ -167,23 +164,28 @@ fn the_header_holds_the_body_length_then_the_kind() {
     );
     assert_eq!(Message::Start.encode().unwrap(), [0, 0, 0, 0, 25]);
     assert_eq!(Message::Started.encode().unwrap(), [0, 0, 0, 0, 26]);
-    assert_eq!(
-        Message::Activate(b"x".to_vec()).encode().unwrap(),
-        [1, 0, 0, 0, 27, b'x']
-    );
-    // The kinds are numbered from 1, without gaps.
-    for (kind, message) in (1..).zip(one_of_each()) {
+    assert_eq!(Message::Await.encode().unwrap(), [0, 0, 0, 0, 28]);
+    // The kinds are numbered from 1, without gaps but 27, the retired Activate.
+    for (kind, message) in DEFINED.into_iter().zip(one_of_each()) {
         assert_eq!(message.kind(), kind, "{message:?}");
     }
+    assert_eq!(one_of_each().len(), DEFINED.len());
     for message in messages().into_iter().chain(one_of_each()) {
         assert_eq!(message.encode().unwrap()[HEADER_LEN - 1], message.kind());
     }
 }
 
+/// The codes of the kinds that the framing defines, in order: every code from 1 to 28 but 27,
+/// which the retired Activate had.
+const DEFINED: [u8; 27] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    28,
+];
+
 #[test]
 fn each_kind_decodes_from_its_code_alone() {
     for code in 0..=u8::MAX {
-        let defined = (1..=27).contains(&code).then_some(code);
+        let defined = DEFINED.contains(&code).then_some(code);
         assert_eq!(Kind::from_code(code).map(Kind::code), defined, "{code}");
     }
 }
@@ -238,12 +240,13 @@ fn malformed_headers_fail_before_their_body_is_taken() {
     let too_long = u32::try_from(MAX_BODY + 1).unwrap().to_le_bytes();
     let too_long_text = u32::try_from(MAX_TEXT_BODY + 1).unwrap().to_le_bytes();
     let too_long_control = u32::try_from(MAX_CONTROL_BODY + 1).unwrap().to_le_bytes();
-    let too_long_record = u32::try_from(MAX_ACTIVATE_BODY + 1).unwrap().to_le_bytes();
     let header = |length: [u8; 4], kind: u8| [length[0], length[1], length[2], length[3], kind];
     let text = |kind: u8| header(too_long_text, kind);
     let mut cases = vec![
         ([0, 0, 0, 0, 0], FrameError::Kind(0)),
-        ([0, 0, 0, 0, 28], FrameError::Kind(28)),
+        // The retired Activate, whose record the restore packet carries since.
+        ([4, 0, 0, 0, 27], FrameError::Kind(27)),
+        ([0, 0, 0, 0, 29], FrameError::Kind(29)),
         ([9, 0, 0, 0, 0xff], FrameError::Kind(0xff)),
         (
             [0xff, 0xff, 0xff, 0xff, 3],
@@ -252,16 +255,9 @@ fn malformed_headers_fail_before_their_body_is_taken() {
                 length: u32::MAX as usize,
             },
         ),
-        (
-            header(too_long_record, 27),
-            FrameError::Length {
-                kind: 27,
-                length: MAX_ACTIVATE_BODY + 1,
-            },
-        ),
     ];
     // The kinds without a body.
-    for kind in [1, 2, 4, 5, 23, 25, 26] {
+    for kind in [1, 2, 4, 5, 23, 25, 26, 28] {
         let error = FrameError::Length { kind, length: 1 };
         cases.push(([1, 0, 0, 0, kind], error));
     }
@@ -312,12 +308,6 @@ fn encoding_refuses_a_body_beyond_the_limit() {
     assert_eq!(maps.len(), HEADER_LEN + MAX_BODY);
     let ready = Message::Ready(vec![0; MAX_TEXT_BODY]).encode().unwrap();
     assert_eq!(ready.len(), HEADER_LEN + MAX_TEXT_BODY);
-    // An Activate carries the largest record, whose limit is the activation record's own.
-    assert_eq!(MAX_ACTIVATE_BODY, nvx::activation::MAX_RECORD_BYTES);
-    let activate = Message::Activate(vec![0; MAX_ACTIVATE_BODY])
-        .encode()
-        .unwrap();
-    assert_eq!(activate.len(), HEADER_LEN + MAX_ACTIVATE_BODY);
     let cases = [
         (Message::Echo(vec![0; MAX_BODY + 1]), 3, MAX_BODY + 1),
         (Message::Report(vec![0; MAX_BODY + 1]), 10, MAX_BODY + 1),
@@ -364,11 +354,6 @@ fn encoding_refuses_a_body_beyond_the_limit() {
             Message::MapFailed(vec![0; MAX_TEXT_BODY + 1]),
             24,
             MAX_TEXT_BODY + 1,
-        ),
-        (
-            Message::Activate(vec![0; MAX_ACTIVATE_BODY + 1]),
-            27,
-            MAX_ACTIVATE_BODY + 1,
         ),
     ];
     for (message, kind, length) in cases {

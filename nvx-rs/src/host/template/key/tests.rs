@@ -286,6 +286,22 @@ fn each_contract_version_changes_the_key() {
 }
 
 #[test]
+fn a_template_whose_clones_take_their_record_in_an_activate_speaks_no_current_contract() {
+    // A template that a build of activation contract 1 captured holds a guest that takes its
+    // clone's activation record in the adapter's Activate, which no host of this build sends, or
+    // that refuses the restore packet's record, so its key speaks no current contract, and no
+    // clone of this build restores it. The record's own schema keeps its version.
+    assert_eq!(activation::CONTRACT_VERSION, 2);
+    assert_eq!(activation::VERSION, 1);
+    let base = network_key();
+    assert_eq!(base.contracts.activation, activation::CONTRACT_VERSION);
+    let mut earlier = base.clone();
+    earlier.contracts.activation = 1;
+    assert!(!earlier.speaks_current_contracts());
+    assert_ne!(earlier.identity(), base.identity());
+}
+
+#[test]
 fn a_generations_own_metadata_leaves_the_key_as_it_is() {
     let changes: &[(&str, Change)] = &[
         ("capture time", |_, spec| spec.created_at.0 += 3600),

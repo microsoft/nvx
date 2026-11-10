@@ -1,13 +1,14 @@
 //! Tests of the restore sequence of clones, [`Restoring::activate`], [`Activated::start`], and
 //! [`Started::commit`], with a [`restore_vmm_role`](super::launch) as the clone's VMM, which
 //! sends its restore-ready event as its plan says, and a [`FakeControl`] in place of the adapter's
-//! framing: the wait for the event, and the connection only once it came; the Activate of the
-//! sandbox's record, byte for byte, as the first request of each session; the check of the
-//! activation that Ready reports; the mapping table of a clone with an export, and the end of the
-//! launch at a partial or failed table; the start; the sessions that replace those that the
-//! adapter lost, after a reset of the session, say, and the clone that ended once it took that
-//! reset before it was ready; and the deadlines. The crashes of the sequence's caller are among
-//! the launch's tests.
+//! framing, whose clone reports the activation of the record that its VMM read with
+//! `--restore-activation-record` at the launch, the record of its restore packet: the wait for the
+//! event, and the connection only once it came; the request for Ready as the first request of
+//! each session; the check of the activation that Ready reports; the mapping table of a clone with
+//! an export, and the end of the launch at a partial or failed table; the start; the sessions that
+//! replace those that the adapter lost, after a reset of the session, say, and the clone whose VMM
+//! ended meanwhile; and the deadlines. The crashes of the sequence's caller are among the launch's
+//! tests.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -35,8 +36,8 @@ const DELAY: Duration = Duration::from_millis(300);
 /// A short deadline, which a test expects to pass.
 const SHORT: Duration = Duration::from_secs(2);
 
-/// The restore-to-Ready deadline of a clone that never answers its Activate, which leaves its VMM
-/// time to start on a busy host.
+/// The restore-to-Ready deadline of a clone that never answers the request for its Ready, which
+/// leaves its VMM time to start on a busy host.
 const SILENT: Duration = Duration::from_secs(10);
 
 /// A call that the restore sequence made to a [`FakeControl`].
@@ -50,12 +51,8 @@ enum Call {
         at: Instant,
         deadline: Instant,
     },
-    /// An Activate of the record in a session, by the deadline.
-    Activate {
-        session: usize,
-        record: Vec<u8>,
-        deadline: Instant,
-    },
+    /// A request for the clone's Ready in a session, by the deadline.
+    Ready { session: usize, deadline: Instant },
     /// A mapping table in a session, by the deadline, as the guest decodes the `MAPS` payloads in
     /// which the framing encodes it.
     Map {
@@ -67,10 +64,10 @@ enum Call {
     Start { session: usize, deadline: Instant },
 }
 
-/// How a [`FakeControl`] answers an Activate or a start.
+/// How a [`FakeControl`] answers a request for Ready or a start.
 enum Answer {
-    /// With the clone's Ready, which reports the activation of the record that the Activate
-    /// carries, or with the start's confirmation.
+    /// With the clone's Ready, which reports the activation of the record of its restore packet,
+    /// or with the start's confirmation.
     Done,
     /// With a Ready that reports this activation, or none.
     Report(Option<ReadyActivation>),
@@ -132,19 +129,22 @@ struct FakeSession {
 }
 
 /// The adapter's framing of the tests: it attaches a session to each connection that the sequence
-/// makes, numbered from 1, answers each Activate as the next of its `activates` says, each mapping
-/// table, which it encodes in `MAPS` payloads that its guest decodes, as the next of its `maps`
-/// says, and each start as the next of its `starts` says, as [`Answer::Done`] does once they run
-/// out, and records each call. Its `on_activate` runs at each Activate, with the session's number,
-/// before the answer.
+/// makes, numbered from 1, answers each request for Ready as the next of its `readies` says, with
+/// the activation of the record that the clone's VMM read at the launch, its `packet`, each
+/// mapping table, which it encodes in `MAPS` payloads that its guest decodes, as the next of its
+/// `maps` says, and each start as the next of its `starts` says, as [`Answer::Done`] does once
+/// they run out, and records each call. Its `on_ready` runs at each request for Ready, with the
+/// session's number, before the answer.
 #[derive(Default)]
 struct FakeControl<'a> {
     /// The calls, in order.
     calls: Vec<Call>,
     /// The sessions that it attached.
     sessions: usize,
-    /// How it answers the next Activates.
-    activates: VecDeque<Answer>,
+    /// The file in which the clone's VMM keeps the record of the clone's restore packet.
+    packet: PathBuf,
+    /// How it answers the next requests for Ready.
+    readies: VecDeque<Answer>,
     /// How its guest answers the next mapping tables: how many of a table's mappings it applies,
     /// in order, at most all, and its answer.
     maps: VecDeque<(usize, Answer)>,
@@ -152,44 +152,43 @@ struct FakeControl<'a> {
     applied: Vec<HostMap>,
     /// How it answers the next starts.
     starts: VecDeque<Answer>,
-    /// What runs at each Activate.
-    on_activate: Option<Box<dyn FnMut(usize) + 'a>>,
+    /// What runs at each request for Ready.
+    on_ready: Option<Box<dyn FnMut(usize) + 'a>>,
 }
 
 impl<'a> FakeControl<'a> {
-    /// Returns a framing that answers the Activates as `activates` say.
-    fn activating(activates: impl IntoIterator<Item = Answer>) -> Self {
+    /// Returns a framing of the clone whose VMM runs in `vmm`, which answers every request as
+    /// [`Answer::Done`] does.
+    fn new(vmm: &VmmDir) -> Self {
         Self {
-            activates: activates.into_iter().collect(),
+            packet: vmm.packet(),
             ..Self::default()
         }
     }
 
-    /// Returns the records of the Activates, in order.
-    fn records(&self) -> Vec<&[u8]> {
-        self.calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::Activate { record, .. } => Some(record.as_slice()),
-                _ => None,
-            })
-            .collect()
+    /// Returns a framing of the clone whose VMM runs in `vmm`, which answers the requests for
+    /// Ready as `readies` say.
+    fn answering(vmm: &VmmDir, readies: impl IntoIterator<Item = Answer>) -> Self {
+        Self {
+            readies: readies.into_iter().collect(),
+            ..Self::new(vmm)
+        }
     }
 
-    /// Returns the deadlines of the attachments and Activates, in order.
+    /// Returns the deadlines of the attachments and the requests for Ready, in order.
     fn ready_deadlines(&self) -> Vec<Instant> {
         self.calls
             .iter()
             .filter_map(|call| match call {
-                Call::Attach { deadline, .. } | Call::Activate { deadline, .. } => Some(*deadline),
+                Call::Attach { deadline, .. } | Call::Ready { deadline, .. } => Some(*deadline),
                 Call::Map { .. } | Call::Start { .. } => None,
             })
             .collect()
     }
 
-    /// Checks that each session of the framing attached, then sent an Activate first, in its
+    /// Checks that each session of the framing attached, then asked for Ready first, in its
     /// order, and that the mapping tables and the starts came last, in the last session.
-    fn assert_activates_first(&self) {
+    fn assert_ready_first(&self) {
         let mut session = 0;
         let mut pending = false;
         for call in &self.calls {
@@ -202,7 +201,7 @@ impl<'a> FakeControl<'a> {
                     assert_eq!(*number, session, "{:?}", self.calls);
                     pending = true;
                 }
-                Call::Activate {
+                Call::Ready {
                     session: number, ..
                 } => {
                     assert!(pending && *number == session, "{:?}", self.calls);
@@ -260,22 +259,23 @@ impl CloneControl for FakeControl<'_> {
         })
     }
 
-    fn activate(
+    fn ready(
         &mut self,
         session: &mut FakeSession,
-        record: &[u8],
         deadline: Instant,
     ) -> Result<Option<ReadyActivation>, Failure> {
-        self.calls.push(Call::Activate {
+        self.calls.push(Call::Ready {
             session: session.number,
-            record: record.to_vec(),
             deadline,
         });
-        if let Some(on_activate) = &mut self.on_activate {
-            on_activate(session.number);
+        if let Some(on_ready) = &mut self.on_ready {
+            on_ready(session.number);
         }
-        let ready = ReadyActivation::of(&ActivationRecord::decode(record).unwrap());
-        let answer = self.activates.pop_front().unwrap_or(Answer::Done);
+        // The clone activated with the record of its restore packet, which its VMM read at the
+        // launch, whatever the sandbox holds since.
+        let packet = fs::read(&self.packet).unwrap();
+        let ready = ReadyActivation::of(&ActivationRecord::decode(&packet).unwrap());
+        let answer = self.readies.pop_front().unwrap_or(Answer::Done);
         answered(answer, Some(ready), deadline)
     }
 
@@ -471,7 +471,7 @@ fn a_clone_is_activated_once_its_restore_is_ready_then_started_and_committed() {
     let activation = restoring.activation().clone();
     let capability = *restoring.capability();
     let endpoint = restoring.starting().endpoint().to_owned();
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let deadlines = RestoreDeadlines::default();
     assert_eq!(deadlines.ready, RESTORE_TO_READY_TIMEOUT);
     assert_eq!(deadlines.start, READY_TO_START_TIMEOUT);
@@ -479,11 +479,12 @@ fn a_clone_is_activated_once_its_restore_is_ready_then_started_and_committed() {
     let mut activated = restoring.activate(&mut control, deadlines).unwrap();
     let ready = Instant::now();
     // The host read the event, and only then connected, and attached one session with the
-    // launch's capability, whose first request was the Activate of the sandbox's record, byte for
-    // byte the launch's, by the restore-to-Ready deadline, which started with the launch.
+    // launch's capability, whose first request asked for the clone's Ready, by the
+    // restore-to-Ready deadline, which started with the launch. The clone's VMM got the sandbox's
+    // record, byte for byte the launch's, which it hands the clone in its restore packet.
     assert!(vmm.started().ends_with(" true"));
     assert!(vmm.flushed());
-    control.assert_activates_first();
+    control.assert_ready_first();
     let [
         Call::Attach {
             session: 1,
@@ -491,10 +492,9 @@ fn a_clone_is_activated_once_its_restore_is_ready_then_started_and_committed() {
             at,
             deadline,
         },
-        Call::Activate {
+        Call::Ready {
             session: 1,
-            record: sent,
-            deadline: activated_by,
+            deadline: asked_by,
         },
     ] = control.calls.as_slice()
     else {
@@ -506,9 +506,9 @@ fn a_clone_is_activated_once_its_restore_is_ready_then_started_and_committed() {
         "the host connected before the event"
     );
     launched.assert_deadline(*deadline, RESTORE_TO_READY_TIMEOUT);
-    assert_eq!(activated_by, deadline);
-    assert_eq!(sent, &activation.encode());
-    assert_eq!(&fs::read(&record).unwrap(), sent);
+    assert_eq!(asked_by, deadline);
+    assert_eq!(fs::read(&record).unwrap(), activation.encode());
+    assert_eq!(fs::read(vmm.packet()).unwrap(), activation.encode());
     // The Ready-to-Start deadline started at the check of the clone's Ready.
     let start = activated.deadline();
     assert!(
@@ -594,7 +594,7 @@ fn a_ready_that_does_not_report_the_record_s_activation_ends_the_launch() {
         let mut vmm = vmm_with("flush");
         let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
         let reported = reported(other_transaction);
-        let mut control = FakeControl::activating([Answer::Report(reported)]);
+        let mut control = FakeControl::answering(&vmm, [Answer::Report(reported)]);
         let error = restoring
             .activate(&mut control, RestoreDeadlines::default())
             .unwrap_err();
@@ -613,25 +613,23 @@ fn a_ready_that_does_not_report_the_record_s_activation_ends_the_launch() {
 }
 
 #[test]
-fn a_session_that_the_adapter_lost_is_replaced_by_one_that_resends_the_same_record_first() {
+fn a_session_that_the_adapter_lost_is_replaced_by_one_that_asks_for_ready_first() {
     let (fixture, image) = fixture();
     let mut acquired = fixture.acquire("sandbox");
-    let record = acquired.locked.clone_activation_path();
     let mut vmm = vmm_with("flush");
     let (restoring, launched) = launch(&fixture, &mut acquired, &image, &mut vmm);
     // The adapter loses its first session as it awaits the clone's Ready, as a reset of the
-    // session does: the clone, which was ready, answers the Activate of a new session.
-    let mut control = FakeControl::activating([Answer::Fail(Failure::LOST), Answer::Done]);
+    // session does: the clone, which activated with the record of its restore packet, answers the
+    // request for Ready of a new session.
+    let mut control = FakeControl::answering(&vmm, [Answer::Fail(Failure::LOST), Answer::Done]);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
-    control.assert_activates_first();
+    control.assert_ready_first();
     assert_eq!(control.sessions, 2);
-    // Both Activates carry the sandbox's record, byte for byte, by the same deadline, which the
-    // retry did not extend.
-    let recorded = fs::read(&record).unwrap();
-    assert_eq!(control.records(), [&recorded[..], &recorded[..]]);
+    // Both requests for Ready have the same deadline, which the retry did not extend.
     let deadlines = control.ready_deadlines();
+    assert_eq!(deadlines.len(), 4);
     assert!(deadlines.iter().all(|deadline| *deadline == deadlines[0]));
     launched.assert_deadline(deadlines[0], RESTORE_TO_READY_TIMEOUT);
     // The sandbox starts in the new session.
@@ -648,11 +646,12 @@ fn a_session_that_the_adapter_lost_is_replaced_by_one_that_resends_the_same_reco
 }
 
 #[test]
-fn a_retry_never_sends_another_record_nor_takes_another_activation() {
+fn a_retry_takes_the_activation_of_the_restore_packet_s_record_alone() {
     let (fixture, image) = fixture();
 
-    // The sandbox's record changed once the first session was lost: the retry sends nothing, and
-    // connects no more.
+    // The sandbox's record changed once the first session was lost: the clone activated with the
+    // record that its VMM read at the launch, and its Ready, in the next session, reports the
+    // launch's transaction, which the host checks against the record of the launch.
     let mut acquired = fixture.acquire("changed");
     let record = acquired.locked.clone_activation_path();
     let mut vmm = vmm_with("flush");
@@ -668,24 +667,17 @@ fn a_retry_never_sends_another_record_nor_takes_another_activation() {
     )
     .unwrap();
     let path = record.clone();
-    let mut control = FakeControl::activating([Answer::Fail(Failure::LOST)]);
-    control.on_activate = Some(Box::new(move |_| {
+    let mut control = FakeControl::answering(&vmm, [Answer::Fail(Failure::LOST)]);
+    control.on_ready = Some(Box::new(move |_| {
         fs::write(&path, other.encode()).unwrap();
     }));
-    let error = restoring
+    let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
-    assert!(error.message().contains("no longer holds"), "{error}");
-    assert_eq!(control.sessions, 1);
-    assert_eq!(control.records(), [&original.encode()[..]]);
-    // The host's own record changed: the record of the failure names the launch's transaction.
-    let record = error.record();
-    assert_eq!(
-        (record.evidence, record.outcome, record.stage),
-        (Evidence::HostFailure, Outcome::Host, Stage::Activation)
-    );
-    assert_eq!(record.transaction, Some(restore.transaction));
+        .unwrap();
+    assert_eq!(control.sessions, 2);
+    assert_eq!(activated.activation(), &original);
+    assert_eq!(fs::read(vmm.packet()).unwrap(), original.encode());
+    drop(activated);
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 
     // The Ready of the retry reports another transaction.
@@ -695,8 +687,10 @@ fn a_retry_never_sends_another_record_nor_takes_another_activation() {
     let diverged = ReadyActivation {
         transaction: Some(TransactionId::from_bytes([0x78; TransactionId::LEN])),
     };
-    let mut control =
-        FakeControl::activating([Answer::Fail(Failure::LOST), Answer::Report(Some(diverged))]);
+    let mut control = FakeControl::answering(
+        &vmm,
+        [Answer::Fail(Failure::LOST), Answer::Report(Some(diverged))],
+    );
     let error = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap_err();
@@ -721,12 +715,12 @@ fn only_lost_sessions_are_replaced_and_only_so_many_times() {
     let mut acquired = fixture.acquire("refused");
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::activating([Answer::Fail(Failure::REFUSED)]);
+    let mut control = FakeControl::answering(&vmm, [Answer::Fail(Failure::REFUSED)]);
     let error = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Protocol, "{error}");
-    assert_eq!(error.message(), "cannot activate it");
+    assert_eq!(error.message(), "cannot get its Ready");
     assert_eq!(control.sessions, 1);
     let ready = (Stage::Activation, Progress::Activating);
     assert_failed(
@@ -743,13 +737,13 @@ fn only_lost_sessions_are_replaced_and_only_so_many_times() {
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
     let lost = (0..MAX_ACTIVATION_SESSIONS).map(|_| Answer::Fail(Failure::LOST));
-    let mut control = FakeControl::activating(lost);
+    let mut control = FakeControl::answering(&vmm, lost);
     let error = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Protocol, "{error}");
     assert!(error.message().contains("was lost"), "{error}");
-    control.assert_activates_first();
+    control.assert_ready_first();
     assert_eq!(control.sessions, MAX_ACTIVATION_SESSIONS);
     assert_failed(
         &error,
@@ -762,16 +756,16 @@ fn only_lost_sessions_are_replaced_and_only_so_many_times() {
 }
 
 #[test]
-fn a_clone_that_took_the_reset_of_a_lost_session_before_its_ready_ends_the_retries() {
+fn a_clone_whose_vmm_ended_with_a_lost_session_ends_the_retries() {
     let (fixture, image) = fixture();
     let mut acquired = fixture.acquire("sandbox");
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    // The reset of the lost session ends a clone that was not ready yet, and with it its VMM: the
+    // The clone's VMM ends with the lost session, as once its guest's activation failed: the
     // retry cannot connect any more.
     let ending = &vmm;
-    let mut control = FakeControl::activating([Answer::Fail(Failure::LOST)]);
-    control.on_activate = Some(Box::new(move |_| ending.end_and_wait()));
+    let mut control = FakeControl::answering(&vmm, [Answer::Fail(Failure::LOST)]);
+    control.on_ready = Some(Box::new(move |_| ending.end_and_wait()));
     let error = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap_err();
@@ -802,7 +796,7 @@ fn the_restore_to_ready_deadline_runs_from_the_launch_through_every_step() {
     let mut acquired = fixture.acquire("no-event");
     let mut vmm = vmm_with("none");
     let (restoring, launched) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let error = restoring.activate(&mut control, deadlines).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::TimedOut, "{error}");
     assert!(launched.before.elapsed() >= SHORT);
@@ -817,12 +811,12 @@ fn the_restore_to_ready_deadline_runs_from_the_launch_through_every_step() {
     );
     assert_launch_ended(&fixture, &mut acquired, &vmm);
 
-    // A clone that never answers its Activate, after a late event: the attachment and the
-    // Activate have the deadline that started with the launch.
+    // A clone that never answers the request for its Ready, after a late event: the attachment
+    // and the request have the deadline that started with the launch.
     let mut acquired = fixture.acquire("no-ready");
     let mut vmm = vmm_with(&format!("delay:{} flush", DELAY.as_millis()));
     let (restoring, launched) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::activating([Answer::Silent]);
+    let mut control = FakeControl::answering(&vmm, [Answer::Silent]);
     let deadlines = RestoreDeadlines {
         ready: SILENT,
         ..RestoreDeadlines::default()
@@ -857,7 +851,7 @@ fn the_ready_to_start_deadline_runs_from_the_ready_and_a_start_is_never_resent()
     let mut acquired = fixture.acquire("silent");
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     control.starts.push_back(Answer::Silent);
     let ready = Instant::now();
     let activated = restoring.activate(&mut control, deadlines).unwrap();
@@ -887,7 +881,7 @@ fn the_ready_to_start_deadline_runs_from_the_ready_and_a_start_is_never_resent()
     let mut acquired = fixture.acquire("lost");
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     control.starts.push_back(Answer::Fail(Failure::LOST));
     let activated = restoring.activate(&mut control, deadlines).unwrap();
     let error = activated.start(&mut control).unwrap_err();
@@ -977,7 +971,7 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
         let mut acquired = fixture.acquire(name);
         let mut vmm = vmm_with(plan);
         let (restoring, launched) = launch(&fixture, &mut acquired, &image, &mut vmm);
-        let mut control = FakeControl::default();
+        let mut control = FakeControl::new(&vmm);
         let error = restoring
             .activate(&mut control, RestoreDeadlines::default())
             .unwrap_err();
@@ -1017,7 +1011,7 @@ fn a_vmm_that_exits_or_sends_anything_but_its_event_ends_the_launch() {
     let _intruder = std::os::unix::net::UnixStream::connect(&ready).unwrap();
     #[cfg(windows)]
     let _intruder = fs::OpenOptions::new().write(true).open(&ready).unwrap();
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let error = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap_err();
@@ -1085,7 +1079,7 @@ fn a_status_with_which_the_guest_ended_the_clone_s_vm_attributes_its_failure() {
         let mut vmm = vmm_with(&format!("flush report:{report}"));
         let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
         let error = if at == starting {
-            let mut control = FakeControl::default();
+            let mut control = FakeControl::new(&vmm);
             control.starts.push_back(Answer::Fail(Failure::LOST));
             let activated = restoring
                 .activate(&mut control, RestoreDeadlines::default())
@@ -1094,8 +1088,8 @@ fn a_status_with_which_the_guest_ended_the_clone_s_vm_attributes_its_failure() {
             activated.start(&mut control).unwrap_err()
         } else {
             let ending = &vmm;
-            let mut control = FakeControl::activating([Answer::Fail(Failure::LOST)]);
-            control.on_activate = Some(Box::new(move |_| ending.end_and_wait()));
+            let mut control = FakeControl::answering(&vmm, [Answer::Fail(Failure::LOST)]);
+            control.on_ready = Some(Box::new(move |_| ending.end_and_wait()));
             restoring
                 .activate(&mut control, RestoreDeadlines::default())
                 .unwrap_err()
@@ -1136,7 +1130,7 @@ fn a_failure_is_recorded_before_its_teardown_and_again_once_the_teardown_ended()
         &mut vmm,
         ended_once_recorded,
     );
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let error = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap_err();
@@ -1178,7 +1172,7 @@ fn a_launch_that_cannot_be_ended_keeps_its_records_and_its_lease_until_a_reattac
     let mut acquired = fixture.acquire("sandbox");
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch_ending(&fixture, &mut acquired, &image, &mut vmm, kept);
-    let mut control = FakeControl::activating([Answer::Fail(Failure::REFUSED)]);
+    let mut control = FakeControl::answering(&vmm, [Answer::Fail(Failure::REFUSED)]);
     let error = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap_err();
@@ -1197,7 +1191,7 @@ fn a_launch_that_cannot_be_ended_keeps_its_records_and_its_lease_until_a_reattac
     assert!(Process::open(&reference).unwrap().is_some());
     // A reattach ends the launch through its VMM's verified identity: the record keeps the
     // failure's stage, evidence, and original outcome, with the teardown that resolved it.
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let reattached = reattach_clone(
         locked,
         &runtime_of(&fixture),
@@ -1231,7 +1225,7 @@ fn a_caller_fails_a_ready_or_started_clone_with_its_own_evidence_as_the_sequence
     let mut acquired = fixture.acquire("ready");
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1247,7 +1241,7 @@ fn a_caller_fails_a_ready_or_started_clone_with_its_own_evidence_as_the_sequence
     let mut acquired = fixture.acquire("started");
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1263,7 +1257,7 @@ fn a_caller_fails_a_ready_or_started_clone_with_its_own_evidence_as_the_sequence
     let mut acquired = fixture.acquire("repair");
     let mut vmm = vmm_with("flush report:guest-exit:195");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1280,7 +1274,7 @@ fn a_caller_fails_a_ready_or_started_clone_with_its_own_evidence_as_the_sequence
     let mut acquired = fixture.acquire("defect");
     let mut vmm = vmm_with("flush report:guest-exit:195");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1309,7 +1303,7 @@ fn a_failure_that_cannot_be_recorded_before_its_teardown_keeps_its_launch_for_a_
     let path = acquired.locked.clone_failure_path();
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1345,7 +1339,7 @@ fn a_failure_that_cannot_be_recorded_before_its_teardown_keeps_its_launch_for_a_
     // Once the record can be written, a reattach, as after a crash of the caller, finds that the
     // clone failed, though not how, rather than a clone that ended.
     fs::remove_dir(&path).unwrap();
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let reattached = reattach_clone(
         &mut acquired.locked,
         &runtime_of(&fixture),
@@ -1367,7 +1361,7 @@ fn a_diagnosis_too_long_for_a_record_keeps_its_ends_and_its_evidence_through_a_r
     let mut acquired = fixture.acquire("diagnosis");
     let mut vmm = vmm_with("flush report:guest-exit:195");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1399,7 +1393,7 @@ fn a_diagnosis_too_long_for_a_record_keeps_its_ends_and_its_evidence_through_a_r
     assert_eq!(records.failure.as_ref(), Some(record));
     // A reattach finds the failure as it was recorded, with the template's evidence, which
     // quarantines the generation once the sandbox's lock is released.
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let reattached = reattach_clone(
         &mut acquired.locked,
         &runtime_of(&fixture),
@@ -1433,7 +1427,7 @@ fn a_clone_with_an_export_gets_its_mapping_table_once_ready_and_its_start_once_i
         &mut vmm,
         Hooks::LAUNCH.end,
     );
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1443,7 +1437,7 @@ fn a_clone_with_an_export_gets_its_mapping_table_once_ready_and_its_start_once_i
     // start follows once the guest applied every mapping, both by the Ready-to-Start deadline.
     // The table names each path by its child's index, as a cold launch's does, through the
     // `MAPS` payloads that carry it.
-    control.assert_activates_first();
+    control.assert_ready_first();
     assert_eq!(data_table().to_vec(), export.guest_table());
     assert_eq!(
         control.calls[2..],
@@ -1476,7 +1470,7 @@ fn a_clone_with_an_export_gets_its_mapping_table_once_ready_and_its_start_once_i
     let mut vmm = vmm_with("flush");
     let (restoring, _) = launch(&fixture, &mut acquired, &image, &mut vmm);
     assert!(restoring.table.is_empty());
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())
         .unwrap();
@@ -1560,7 +1554,7 @@ fn a_partial_or_failed_mapping_table_ends_the_launch_and_its_sandbox_never_start
             &mut vmm,
             Hooks::LAUNCH.end,
         );
-        let mut control = FakeControl::default();
+        let mut control = FakeControl::new(&vmm);
         let source = match &answer {
             Answer::Fail(failure) => failure.to_string(),
             _ => Failure::REFUSED.to_string(),
@@ -1606,7 +1600,7 @@ fn a_partial_or_failed_mapping_table_ends_the_launch_and_its_sandbox_never_start
         &mut vmm,
         Hooks::LAUNCH.end,
     );
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     control.maps.push_back((0, Answer::Fail(Failure::TABLE)));
     let passed = RestoreDeadlines {
         start: Duration::ZERO,
@@ -1639,7 +1633,7 @@ fn a_partial_or_failed_mapping_table_ends_the_launch_and_its_sandbox_never_start
         &mut vmm,
         Hooks::LAUNCH.end,
     );
-    let mut control = FakeControl::default();
+    let mut control = FakeControl::new(&vmm);
     control.maps.push_back((0, Answer::Fail(Failure::LOST)));
     let activated = restoring
         .activate(&mut control, RestoreDeadlines::default())

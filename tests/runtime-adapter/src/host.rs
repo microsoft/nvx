@@ -25,19 +25,21 @@
 //!
 //! # A clone's order
 //!
-//! A clone, which a restore of a template's snapshot started, takes the host's activation of its
-//! record instead of a root configuration: the guest assembles the clone's root from the record,
-//! with the inputs that the template's capture kept, as it activates the clone. Its first step is
-//! [`activate`], which sends the clone's activation record in an `Activate`, the first request of
-//! the session, and waits for the guest agent's `Ready`, whose build it checks as [`ready`] does,
-//! and which reports the clone's activation, for the host to check against the record. Then the
-//! restore sequence sends the clone's mapping table, which [`map_table`] sends as [`start_sandbox`]
-//! does after a cold boot, and `Start`. [`CloneOrder`] runs these steps as the adapter's framing of
-//! `nvx::host::template`'s restore sequence, which checks the activation, orders the steps, and
-//! which replaces a session that the order lost, as [`CloneOrder`] tells, while the clone was not
-//! ready or its `Ready` had not arrived: the clone answers the same record, byte for byte, with the
-//! same `Ready` in a new session, and has ended once the reset of a session that it took before it
-//! was ready failed its activation.
+//! A clone, which a restore of a template's snapshot started, takes no root configuration: the
+//! guest assembles the clone's root from the activation record that OpenVMM handed it in its
+//! restore packet, with the inputs that the template's capture kept, as it activates the clone,
+//! before the host attaches, or while it does. Its first step is [`await_ready`], which asks for
+//! the clone's Ready in an `Await`, the first request of the session, and waits for the guest
+//! agent's `Ready`, whose build it checks as [`ready`] does, and which reports the clone's
+//! activation, for the host to check against the record. The host asks, rather than the guest
+//! sending `Ready` unasked, since OpenVMM's broker refuses the guest's records while no host is
+//! attached, which the guest cannot tell. Then the restore sequence sends the clone's mapping
+//! table, which [`map_table`] sends as [`start_sandbox`] does after a cold boot, and `Start`.
+//! [`CloneOrder`] runs these steps as the adapter's framing of `nvx::host::template`'s restore
+//! sequence, which checks the activation, orders the steps, and which replaces a session that the
+//! order lost, as [`CloneOrder`] tells, while the clone was not ready or its `Ready` had not
+//! arrived: the clone answers the `Await` of a new session with the same `Ready`, since no session
+//! changes the record of its restore packet.
 
 mod executions;
 mod map_reply;
@@ -137,7 +139,7 @@ impl From<FrameError> for ClientError {
 /// message in as many of the session's records as it takes, and [`receive`](Self::receive)
 /// returns the guest agent's next message, whether it spans records or shares one with the next
 /// message. [`ping`](Self::ping), [`echo`](Self::echo), [`configure_root`](Self::configure_root),
-/// [`activate`](Self::activate), [`map`](Self::map), [`start`](Self::start),
+/// [`await_ready`](Self::await_ready), [`map`](Self::map), [`start`](Self::start),
 /// [`probe`](Self::probe), and [`stop`](Self::stop) each send a request and wait for its answer,
 /// and [`Executions`] runs executions over the client.
 ///
@@ -235,7 +237,7 @@ impl Client {
                         | Message::ExecInput(_)
                         | Message::ExecInputEnd(_)
                         | Message::ExecCancel(_)
-                        | Message::Activate(_)),
+                        | Message::Await),
                     ) => {
                         return Err(self.fail(ClientError::Unexpected(message.kind())));
                     }
@@ -299,16 +301,13 @@ impl Client {
         }
     }
 
-    /// Sends `record`, the activation record of a clone, which a restore of a template's snapshot
-    /// started, in its canonical encoding, in an `Activate`, and waits until `deadline` for the
-    /// guest agent's answer: `Ready`, with the guest agent's build and the activation that it
-    /// reports, once it activated the clone. A clone whose activation failed answers nothing, but
-    /// ends, and its session with it.
-    ///
-    /// A record of more than [`MAX_ACTIVATE_BODY`](crate::frame::MAX_ACTIVATE_BODY) bytes fails
-    /// before anything is sent, and the client stays usable.
-    pub fn activate(&mut self, record: &[u8], deadline: Instant) -> Result<Ready, ClientError> {
-        let request = Message::Activate(record.to_vec());
+    /// Sends `Await`, which asks for the Ready of a clone, which a restore of a template's
+    /// snapshot started, and waits until `deadline` for the guest agent's answer: `Ready`, with the
+    /// guest agent's build and the activation that it reports, once the clone activated with the
+    /// record of its restore packet. A clone whose activation failed answers nothing, but ends, and
+    /// its session with it.
+    pub fn await_ready(&mut self, deadline: Instant) -> Result<Ready, ClientError> {
+        let request = Message::Await;
         match self.request(&request, deadline)? {
             Message::Ready(body) => self.decoded(Ready::decode(&body)),
             reply => Err(self.mismatched(&request, &reply)),
@@ -516,24 +515,20 @@ pub fn map_table(
 }
 
 /// Runs the first step of [a clone's order](self#a-clones-order) over `client`, in place of
-/// [`ready`]: sends `record`, the clone's activation record in its canonical encoding, in an
-/// `Activate`, which must be the first request of the client's attachment, and waits until
-/// `deadline` for the guest agent's `Ready`, which it returns once it names `build`, the guest
-/// agent's build that the host ships, with the activation that it reports, which the caller checks
-/// against the record.
+/// [`ready`]: asks for the clone's Ready in an `Await`, which must be the first request of the
+/// client's attachment, and waits until `deadline` for the guest agent's `Ready`, which it returns
+/// once it names `build`, the guest agent's build that the host ships, with the activation that it
+/// reports, which the caller checks against the record of the clone's restore packet.
 ///
 /// Fails with [`OrderError::Build`] for a guest agent of another build, to which it sends nothing
 /// more, and with [`OrderError::Client`] once the client fails: as the session ends once the
 /// clone's activation failed, or a reset ended the attachment.
-pub fn activate(
+pub fn await_ready(
     client: &mut Client,
-    record: &[u8],
     build: &str,
     deadline: Instant,
 ) -> Result<Ready, OrderError> {
-    let ready = client
-        .activate(record, deadline)
-        .map_err(OrderError::Client)?;
+    let ready = client.await_ready(deadline).map_err(OrderError::Client)?;
     if ready.build() != build {
         return Err(OrderError::Build {
             reported: ready.build().to_owned(),
@@ -544,20 +539,20 @@ pub fn activate(
 }
 
 /// [A clone's order](self#a-clones-order), as the adapter's framing of the clone's control
-/// session, through which `nvx::host::template`'s restore sequence activates the clone and starts
-/// its sandbox: it attaches a [`Client`] over each connection to the clone's control endpoint,
-/// runs [`activate`] with the guest agent's build that the host ships, then [`map_table`] with the
-/// mapping table that the restore sequence gives it, which the clone's record announces, and
-/// `Start`.
+/// session, through which `nvx::host::template`'s restore sequence awaits the clone's activation
+/// and starts its sandbox: it attaches a [`Client`] over each connection to the clone's control
+/// endpoint, runs [`await_ready`] with the guest agent's build that the host ships, then
+/// [`map_table`] with the mapping table that the restore sequence gives it, which the clone's
+/// record announces, and `Start`.
 ///
 /// It takes a session for lost once a reset of the broker, the end of the broker's stream, or a
-/// failure of the transport ended it, while the client attached or awaited the clone's `Ready`:
-/// the clone may answer the same record in a new session. OpenVMM's broker ends the stream both to
-/// end an attachment and to refuse one, as it refuses a host whose authentication outlasts the
-/// broker's deadline, so the order takes such a refusal for a lost session too, whose retries the
-/// restore sequence's limit of sessions bounds. Any other failure is final: a refusal that the
-/// broker sends, a deadline that passed, a guest agent of another build, and a message that breaks
-/// the framing.
+/// failure of the transport ended it, while the client attached or awaited the clone's `Ready`: the
+/// clone answers the `Await` of a new session with the same `Ready`. OpenVMM's broker ends the
+/// stream both to end an attachment and to refuse one, as it refuses a host whose authentication
+/// outlasts the broker's deadline, so the order takes such a refusal for a lost session too, whose
+/// retries the restore sequence's limit of sessions bounds. Any other failure is final: a refusal
+/// that the broker sends, a deadline that passed, a guest agent of another build, and a message
+/// that breaks the framing.
 ///
 /// It takes no failure for the guest's refusal of the request's mapping table, which
 /// [`CloneControl::refused`] tells: the guest's `MapFailed` does not tell whether the request's
@@ -583,13 +578,12 @@ impl CloneControl for CloneOrder<'_> {
         Client::attach(transport, capability, deadline).map_err(OrderError::Client)
     }
 
-    fn activate(
+    fn ready(
         &mut self,
         session: &mut Client,
-        record: &[u8],
         deadline: Instant,
     ) -> Result<Option<ReadyActivation>, OrderError> {
-        activate(session, record, self.build, deadline).map(|ready| ready.activation())
+        await_ready(session, self.build, deadline).map(|ready| ready.activation())
     }
 
     fn map(

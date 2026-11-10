@@ -16,9 +16,9 @@
 //! written during another boot, as by one that is damaged or missing: a workload may have run in
 //! the clone. The launch appends the spawn before it returns, although the launch's journal
 //! records it too, since a teardown of the launch removes the journal. A step that the next step
-//! follows at once, the acknowledgment, which the Activate follows, is appended with that next
-//! step, in its one write, so that the log takes a write for the spawn and for each step from the
-//! restore-ready event on. A reader ignores a last line that a crash cut short. A sandbox
+//! follows at once, the acknowledgment, which the request for Ready follows, is appended with that
+//! next step, in its one write, so that the log takes a write for the spawn and for each step from
+//! the restore-ready event on. A reader ignores a last line that a crash cut short. A sandbox
 //! that boots cold writes no log.
 //!
 //! # The failure record
