@@ -103,7 +103,10 @@ impl AttachmentCancellation {
     /// Releases the cancellation duplicate once attachment no longer has pending I/O.
     fn attached(&self) {
         #[cfg(any(target_os = "linux", windows))]
-        self.transport.lock().expect("attachment lock poisoned").take();
+        self.transport
+            .lock()
+            .expect("attachment lock poisoned")
+            .take();
     }
 
     /// Ends pending I/O; repeated calls also cover cancellation racing with an I/O submission.
