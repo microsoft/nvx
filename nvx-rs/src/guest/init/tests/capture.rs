@@ -14,6 +14,51 @@ impl Capture {
             fresh,
         )
     }
+
+    pub(crate) fn activation_fixture() -> (Self, Vec<u8>) {
+        use crate::activation::{
+            ActivationRecord, Configuration, ExpectedResources, Image, MachineIdMode, OverlayMode,
+            RestoreSection, TransactionId, Upper, View,
+        };
+        let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
+        let record = ActivationRecord::new(
+            Some(RestoreSection {
+                transaction: TransactionId::from_bytes([0x22; TransactionId::LEN]),
+            }),
+            Configuration {
+                image: Image::Erofs { uuid: None },
+                upper: Upper::Tmpfs {
+                    max_memory_percent: 63,
+                },
+                overlay: OverlayMode::UntrustedLowers,
+                export: None,
+                mappings: 0,
+                network: None,
+                view: View {
+                    hostname: b"restored".to_vec(),
+                    machine_id: MachineIdMode::Image,
+                },
+                resources: ExpectedResources {
+                    cpus: repaired.cpus(),
+                    memory: repaired.memory(),
+                },
+            },
+        )
+        .unwrap();
+        let mut capture = Self::fixture(true);
+        capture.restored(repaired);
+        capture
+            .restored
+            .as_mut()
+            .unwrap()
+            .reset(Instant::now())
+            .unwrap();
+        let mut payload = 1000u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&1001u32.to_le_bytes());
+        payload.push(1);
+        payload.extend(record.encode());
+        (capture, payload)
+    }
 }
 
 #[test]
