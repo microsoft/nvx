@@ -1536,9 +1536,9 @@ the chipset device unit, the erased chipset devices, and the remote device proxy
 PR10's position 019 and position 218 also change, and the gate's forwarding through the virtio
 transports, which PR13's positions 039 and 040 add and PR16's positions 066 and 068 and positions
 183 and 218 also change. It adds tests of the unit, the transports, and the proxy, those of the
-transports in a new file. Replaying it on upstream main conflicts in all eight of the files that it
-changes: upstream main lacks the input gate of position 018 and its forwarding by position 040, so
-it follows PR09 and PR13 upstream.
+transports in a new file. Replaying it on upstream main conflicts in eight of its nine files, all
+but that new one, which applies cleanly: upstream main lacks the input gate of position 018 and its
+forwarding by position 040, so it follows PR09 and PR13 upstream.
 
 ## PR summary
 
