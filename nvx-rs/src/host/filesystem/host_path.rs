@@ -6,19 +6,7 @@ use std::path::{Path, PathBuf};
 use super::FileIdentity;
 use crate::error::{Error, Result};
 use crate::host::platform;
-
-#[cfg(windows)]
-/// Returns whether Windows marks `metadata` as a reparse point.
-pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.file_attributes() & 0x400 != 0
-}
-
-#[cfg(not(windows))]
-/// Reports no reparse points on hosts whose metadata has no such Windows attribute.
-pub(crate) fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
-    false
-}
+pub(crate) use crate::host::platform::is_reparse_point;
 
 /// Returns the stable device-and-file identity of `path` for rename detection.
 pub(super) fn identity(path: &Path) -> Result<FileIdentity> {

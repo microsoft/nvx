@@ -14,6 +14,46 @@ pub(crate) use super::windows::tests::{
 };
 use super::*;
 
+#[test]
+fn a_bounded_read_refuses_a_regular_file_that_holds_more_than_its_bound() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("record.bin");
+    std::fs::write(&path, b"data").unwrap();
+    assert_eq!(
+        read_at_most(open_regular(&path).unwrap(), 4, "a record").unwrap(),
+        b"data"
+    );
+    let error = read_at_most(open_regular(&path).unwrap(), 3, "a record").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "it holds more than the 3 bytes that a record may hold"
+    );
+    assert!(is_refused(&error), "{error}");
+    // A file that is missing is a failure of the host's, not a refusal of what a file is.
+    let error = open_regular(&directory.path().join("missing")).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    assert!(!is_refused(&error), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_open_of_a_regular_file_refuses_a_link_and_a_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target.bin");
+    std::fs::write(&target, b"data").unwrap();
+    std::os::unix::fs::symlink(&target, directory.path().join("link")).unwrap();
+    std::fs::create_dir(directory.path().join("directory")).unwrap();
+    for name in ["link", "directory"] {
+        let error = open_regular(&directory.path().join(name)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "it is a link, or not a regular file",
+            "{name}"
+        );
+        assert!(is_refused(&error), "{name}: {error}");
+    }
+}
+
 #[cfg(any(target_os = "linux", windows))]
 #[test]
 fn a_transport_without_a_native_handle_needs_no_clone_implementation() {
