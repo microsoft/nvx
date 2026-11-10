@@ -1209,12 +1209,18 @@ fn capture_command_lines_keep_only_unowned_platform_tokens() {
 #[test]
 #[allow(unreachable_pub, clippy::missing_docs_in_private_items)]
 fn capture_platform_allowlist_matches_openvmms_named_contract() {
-    mod openvmm_defs {
-        pub(super) mod microvm {
-            include!("../../../tests/vectors/openvmm/microvm_control_tty_command_line.rs");
+    mod openvmm {
+        mod openvmm_defs {
+            pub(super) mod microvm {
+                include!("../../../tests/vectors/openvmm/microvm_control_tty_command_line.rs");
+            }
+        }
+        include!("../../../tests/vectors/openvmm/platform_command_line_token_is_invariant.rs");
+
+        pub(super) fn admits(token: &str) -> bool {
+            platform_command_line_token_is_invariant(token)
         }
     }
-    include!("../../../tests/vectors/openvmm/platform_command_line_token_is_invariant.rs");
 
     for token in [
         "earlycon=xe9",
@@ -1245,7 +1251,7 @@ fn capture_platform_allowlist_matches_openvmms_named_contract() {
     ] {
         assert_eq!(
             super::platform_command_line_token_is_invariant(token),
-            platform_command_line_token_is_invariant(token),
+            openvmm::admits(token),
             "{token}"
         );
     }
