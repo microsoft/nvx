@@ -1279,24 +1279,7 @@ field nvx::guest::gpt::DeviceError::Size::0 (hidden)
 variant nvx::guest::gpt::DeviceError::Table (hidden)
 field nvx::guest::gpt::DeviceError::Table::0 (hidden)
 fn nvx::guest::gpt::read_disk (hidden)
-mod nvx::guest::ingress
-struct nvx::guest::ingress::Announcer
-method nvx::guest::ingress::Announcer::id
-method nvx::guest::ingress::Announcer::pidfd
-method nvx::guest::ingress::Announcer::start
-method nvx::guest::ingress::Announcer::stop
-method nvx::guest::ingress::Announcer::try_wait
-const nvx::guest::ingress::PROGRAM
-enum nvx::guest::ingress::StartError
-variant nvx::guest::ingress::StartError::Bind
-field nvx::guest::ingress::StartError::Bind::0
-variant nvx::guest::ingress::StartError::Launch
-field nvx::guest::ingress::StartError::Launch::0
-variant nvx::guest::ingress::StartError::NoPrivilegedPort
-variant nvx::guest::ingress::StartError::Socket
-field nvx::guest::ingress::StartError::Socket::0
-variant nvx::guest::ingress::StartError::Spawn
-field nvx::guest::ingress::StartError::Spawn::0
+mod nvx::guest::ingress (hidden)
 fn nvx::guest::ingress::main (hidden)
 mod nvx::guest::init (hidden)
 fn nvx::guest::init::main (hidden)
