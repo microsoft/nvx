@@ -2,7 +2,7 @@
 //! process: [`Repair`], and [`repair`], which runs one once, as the [module](super) describes.
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::BTreeMap;
 use std::fmt;

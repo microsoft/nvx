@@ -56,6 +56,13 @@ pub mod status;
 mod tests;
 pub mod view;
 
+#[cfg(any(
+    feature = "host",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::APP_CAPTURE;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::decode_capture_payload;
 pub use app::{
     APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAGIC, APP_MAPS,
     APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, APP_VERSION, AppFrame,
@@ -63,7 +70,7 @@ pub use app::{
     MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION, decode_app, encode_app,
 };
 #[cfg(feature = "host")]
-pub(crate) use app::{APP_CAPTURE, encode_capture_payload, workload};
+pub(crate) use app::{encode_capture_payload, workload};
 pub use boot::{MAPS_TOKEN, WORKLOAD_ACCOUNT_TOKEN, parse_host_mapping_count};
 pub use exec::{
     EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,

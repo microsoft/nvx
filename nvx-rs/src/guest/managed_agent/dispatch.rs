@@ -4,8 +4,8 @@ use crate::guest::init::Runtime;
 use crate::guest::mappings::{Mapper, MappingTable, SourceRoot};
 use crate::guest::sys::{self, Errno, FileDescriptor};
 use crate::protocol::{
-    self, APP_CANCEL, APP_EXEC, APP_FEATURES, APP_MAPS, APP_PING, APP_READY, APP_STOP, APP_STOPPED,
-    GuestFeatures, INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
+    self, APP_CANCEL, APP_CAPTURE, APP_EXEC, APP_FEATURES, APP_MAPS, APP_PING, APP_READY, APP_STOP,
+    APP_STOPPED, GuestFeatures, INVALID_REQUEST, MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION,
 };
 
 use super::diagnostics;
@@ -52,19 +52,54 @@ impl AgentConfig {
         runtime: &mut Runtime,
         control: FileDescriptor,
         (table, mapper, export): (MappingTable, Mapper, Option<SourceRoot>),
-    ) -> Result<(), String> {
-        let mut system = RealSystem::new(Paths::default());
-        let mut session = Session::with_runtime(control, runtime)?;
-        let mut mappings = HostMappings::layered(table, mapper, export)
+    ) -> Result<u8, String> {
+        let mappings = HostMappings::layered(table, mapper, export)
             .map_err(|error| format!("invalid layered mappings: {}", error.desc()))?;
+        self.serve_init(runtime, control, mappings, false)
+    }
+
+    /// The Fresh loop has no root, mapper, account resolution or workload admission.
+    pub(crate) fn serve_capture(
+        runtime: &mut Runtime,
+        control: FileDescriptor,
+    ) -> Result<u8, String> {
+        let config = Self {
+            rootfs: c"-".to_owned(),
+            hostname: c"".to_owned(),
+            uid: c"0".to_owned(),
+            gid: c"0".to_owned(),
+            user: c"".to_owned(),
+            home: c"".to_owned(),
+            direct: true,
+            entry: None,
+        };
+        config.serve_init(runtime, control, HostMappings::default(), true)
+    }
+
+    /// Borrows the one init runtime for either boot entry and returns its actual exit status.
+    fn serve_init(
+        &self,
+        runtime: &mut Runtime,
+        control: FileDescriptor,
+        mut mappings: HostMappings,
+        fresh: bool,
+    ) -> Result<u8, String> {
+        let capture = runtime.capture(fresh);
+        let mut system = RealSystem::new(Paths::default());
+        let mut session = Session::with_runtime(control, runtime)?.with_capture(capture);
         run(&mut system, &mut session, self, &mut mappings)
-            .map(|Outcome::Stopped| ())
+            .map(|Outcome::Stopped| session.capture_status().unwrap_or_default())
             .map_err(|error| {
                 session
                     .runtime_failure()
                     .unwrap_or_else(|| format!("control session failed: {}", error.desc()))
             })
     }
+}
+
+/// Preserves the existing receive-stage diagnostic for a restored capture's RESET.
+pub(crate) fn report_failure_for_capture(failure: ReceiveFailure) -> Errno {
+    report_failure(&mut RealSystem::new(Paths::default()), failure)
 }
 
 /// Terminal outcome of the long-lived dispatch loop.
@@ -164,7 +199,20 @@ fn handle_data(
             return Err(failure.into_error());
         }
     };
+    if session.rootless() && !matches!(request.kind, APP_CAPTURE | APP_STOP) {
+        session.send_error(
+            request.request_id,
+            Errno::ENOTSUP as i32,
+            "unsupported-operation",
+        )?;
+        return Ok(None);
+    }
     match request.kind {
+        APP_CAPTURE => {
+            if session.queue_capture(request, false)? {
+                return session.finish_capture();
+            }
+        }
         APP_PING => {
             if request.payload.is_empty() {
                 session
@@ -198,6 +246,9 @@ fn handle_data(
                 }
             };
             exec::run(system, session, config, request.request_id, &execution)?;
+            if session.capture_pending() {
+                return session.finish_capture();
+            }
         }
         APP_CANCEL => {
             // The targeted workload has already reported its outcome.

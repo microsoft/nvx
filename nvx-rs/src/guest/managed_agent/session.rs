@@ -2,8 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::io::{self, Read, Write};
 use std::process::ExitStatus;
 
-use crate::guest::init::Runtime;
+use crate::guest::init::{self, Capture, CaptureStep, Runtime};
 use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
+use crate::guest::snapshot::{Captured, Disposition};
 use crate::guest::sys::{self, Errno, FileDescriptor, Pollable};
 use crate::protocol::nvxs::{GuestEvent, RecordError, RecordType, SessionError};
 use crate::protocol::{self, APP_ERROR, OUTER_MAX_PAYLOAD, OUTER_RECEIVE_WINDOW};
@@ -13,6 +14,8 @@ use crate::protocol::{self, APP_ERROR, OUTER_MAX_PAYLOAD, OUTER_RECEIVE_WINDOW};
 pub(crate) struct Session<'r> {
     /// The guest's NVXS connection on the owned control-console descriptor.
     connection: GuestConnection<Control<'r>>,
+    /// Present only for nvx-init, never the old managed agent.
+    capture: Option<Capture>,
     /// Error of the connection's latest failure, which a connection that a failure ended reports
     /// again.
     last_error: Option<Errno>,
@@ -204,8 +207,139 @@ impl<'r> Session<'r> {
                 status: Cell::new(None),
                 outcome: RefCell::new(Ok(false)),
             }),
+            capture: None,
             last_error: None,
         }
+    }
+
+    /// Enables only init's capture path on this existing session.
+    pub(crate) fn with_capture(mut self, capture: Capture) -> Self {
+        self.capture = Some(capture);
+        self
+    }
+
+    /// Whether the serving caller is init rather than the old agent.
+    pub(crate) fn has_capture(&self) -> bool {
+        self.capture.is_some()
+    }
+
+    /// Whether root-dependent requests must remain refused.
+    pub(crate) fn rootless(&self) -> bool {
+        self.capture.as_ref().is_some_and(Capture::rootless)
+    }
+
+    /// Whether execution cleanup must return the accepted capture request.
+    pub(crate) fn capture_pending(&self) -> bool {
+        self.capture.as_ref().is_some_and(Capture::pending)
+    }
+
+    /// The fatal capture status that the PID-1 caller must use.
+    pub(crate) fn capture_status(&self) -> Option<u8> {
+        self.capture.as_ref().and_then(Capture::shutdown_status)
+    }
+
+    /// Refuses rooted callers before validating the flag or reserving workload cleanup.
+    pub(crate) fn queue_capture(
+        &mut self,
+        request: protocol::AppFrame<'_>,
+        active: bool,
+    ) -> Result<bool, Errno> {
+        if !self.rootless() {
+            self.send_error(
+                request.request_id,
+                Errno::ENOTSUP as i32,
+                "unsupported-operation",
+            )?;
+            return Ok(false);
+        }
+        let kill = match protocol::decode_capture_payload(request.payload) {
+            Ok(kill) => kill,
+            Err(_) => {
+                self.send_error(
+                    request.request_id,
+                    Errno::EINVAL as i32,
+                    protocol::INVALID_REQUEST,
+                )?;
+                return Ok(false);
+            }
+        };
+        if (active && !kill)
+            || !self
+                .capture
+                .as_mut()
+                .expect("init owns capture")
+                .queue(request.request_id, kill)
+        {
+            self.send_error(request.request_id, Errno::EBUSY as i32, protocol::BUSY)?;
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Calls init's existing repeated sweep, never a host-side process sweep.
+    pub(crate) fn sweep_capture(&self) -> Result<(), Errno> {
+        self.capture.as_ref().ok_or(Errno::EPERM)?.sweep()
+    }
+
+    /// Acknowledges, captures synchronously, and handles the result on this connection.
+    pub(crate) fn finish_capture(&mut self) -> Result<Option<super::dispatch::Outcome>, Errno> {
+        self.finish_capture_with(|capture, session| {
+            capture.perform(|request_id| session.send_app(protocol::APP_READY, request_id, 0, &[]))
+        })
+    }
+
+    /// Keeps capture state across the operation and the existing session's RESET.
+    fn finish_capture_with(
+        &mut self,
+        operation: impl FnOnce(&mut Capture, &mut Self) -> Result<Option<CaptureStep>, Errno>,
+    ) -> Result<Option<super::dispatch::Outcome>, Errno> {
+        let Some(mut capture) = self.capture.take() else {
+            return Ok(None);
+        };
+        let result = (|| {
+            match operation(&mut capture, self)? {
+                None => {}
+                Some(CaptureStep::Refused { request_id, error }) => {
+                    init::report_capture(error);
+                    let category = if error == Errno::EBUSY {
+                        protocol::BUSY
+                    } else {
+                        "capture-failed"
+                    };
+                    self.send_error(request_id, error as i32, category)?;
+                }
+                Some(CaptureStep::Returned { request_id, result }) => match result {
+                    Ok(Captured::Continued) => {
+                        self.send_error(request_id, Errno::EAGAIN as i32, "capture-continued")?;
+                    }
+                    Ok(Captured::Restored(repaired)) => {
+                        capture.restored(repaired);
+                        match self.next_event() {
+                            Ok(Event::Reset) => self.acknowledge()?,
+                            Ok(Event::Data(_)) => return Err(Errno::EPROTO),
+                            Err(failure) => {
+                                return Err(super::dispatch::report_failure_for_capture(failure));
+                            }
+                        }
+                    }
+                    Err(failure) => {
+                        init::report_capture(&failure);
+                        match failure.disposition {
+                            Disposition::Resumed => {
+                                self.send_error(request_id, Errno::EIO as i32, "capture-failed")?;
+                            }
+                            Disposition::MustEnd { status } => {
+                                capture.must_end(status);
+                                return Ok(Some(super::dispatch::Outcome::Stopped));
+                            }
+                        }
+                    }
+                },
+            }
+            Ok(None)
+        })();
+        self.capture = Some(capture);
+        result
     }
 
     /// Borrows init's sole collector for the lifetime of this control session.
@@ -282,7 +416,12 @@ impl<'r> Session<'r> {
     /// Blocks until the broker's next record completes, and returns what the session accepted.
     pub(crate) fn next_event(&mut self) -> Result<Event, ReceiveFailure> {
         match self.connection.next_event() {
-            Ok(GuestEvent::Reset(_)) => Ok(Event::Reset),
+            Ok(GuestEvent::Reset(_)) => {
+                if let Some(capture) = &mut self.capture {
+                    capture.reset();
+                }
+                Ok(Event::Reset)
+            }
             Ok(GuestEvent::Data(payload)) => Ok(Event::Data(payload)),
             Err(error) => Err(self.receive_failure(error)),
         }
@@ -449,3 +588,6 @@ fn data_failure(kind: DataFailureKind, status: i32) -> DataFailure {
         error: Errno::EPROTO,
     }
 }
+
+#[cfg(test)]
+mod tests;

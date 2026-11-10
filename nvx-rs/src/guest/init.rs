@@ -35,14 +35,20 @@
 //!
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::io::{self, Read};
 use std::os::fd::BorrowedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus as ProcessStatus};
 use std::time::{Duration, Instant};
 
+use crate::protocol::cmdline;
+use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
+
 use super::parse::parse_decimal;
+use super::snapshot::{self, CaptureFailure, Captured, Devices, Disks, Repaired};
 use super::status::ExitStatus;
 use super::sys::{
     self, ChildStatus, Errno, FileDescriptor, Mode, OpenFlags, Pollable, ProcessId, Signal,
@@ -113,15 +119,28 @@ impl Helpers {
 
     /// Kills every remaining userspace process but PID 1 and the registered helpers, repeating
     /// until none remains, including descendants that left their execution's process group.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "SL7.7a calls the capture sweep")
-    )]
     pub(crate) fn sweep(self) -> Result<(), Errno> {
         if sys::current_process().raw() != INIT_PROCESS {
             return Err(Errno::EPERM);
         }
         self.sweep_with(ProcessId::live_userspace, sys::kill_process)
+    }
+
+    /// A capture without permission to kill must leave no unregistered process running.
+    fn prepare_capture(self, kill: bool) -> Result<(), Errno> {
+        if kill {
+            return self.sweep();
+        }
+        if sys::current_process().raw() != INIT_PROCESS {
+            return Err(Errno::EPERM);
+        }
+        if ProcessId::live_userspace()?
+            .into_iter()
+            .any(|process| process.raw() != INIT_PROCESS && self.name(process).is_none())
+        {
+            return Err(Errno::EBUSY);
+        }
+        Ok(())
     }
 
     /// Runs the narrow process-table sweep with the supplied walk and kill operations.
@@ -148,6 +167,144 @@ impl Helpers {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+}
+
+/// The capture request's one pre-request deadline, including workload cleanup.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Init's capture inputs and outcome, retained across the existing control session's reset.
+pub(crate) struct Capture {
+    /// The only processes that capture cleanup spares besides PID 1.
+    helpers: Helpers,
+    /// This boot has not assembled a root.
+    fresh: bool,
+    /// Request ID, kill flag and the original pre-request deadline.
+    pending: Option<(u64, bool, Instant)>,
+    /// The repair whose RESET must be acknowledged before later activation.
+    repaired: Option<Repaired>,
+    /// A fatal capture disposition, whose status PID 1 must preserve.
+    shutdown: Option<u8>,
+}
+
+/// Preparation refused the request, or the acknowledged snapshot call returned.
+pub(crate) enum CaptureStep {
+    /// Workload preparation failed before the request was acknowledged.
+    Refused {
+        /// The original capture request.
+        request_id: u64,
+        /// The preparation failure.
+        error: Errno,
+    },
+    /// The acknowledged, synchronous snapshot call returned.
+    Returned {
+        /// The original capture request, still on the same session.
+        request_id: u64,
+        /// The snapshot library's unchanged outcome and disposition.
+        result: Result<Captured, CaptureFailure>,
+    },
+}
+
+impl Capture {
+    /// Retains init's helpers, without constructing any space.
+    fn new(helpers: Helpers, fresh: bool) -> Self {
+        Self {
+            helpers,
+            fresh,
+            pending: None,
+            repaired: None,
+            shutdown: None,
+        }
+    }
+
+    /// Keeps one pending request and anchors its deadline before cleanup.
+    pub(crate) fn queue(&mut self, request_id: u64, kill: bool) -> bool {
+        if self.pending.is_some() || self.repaired.is_some() || self.shutdown.is_some() {
+            return false;
+        }
+        self.pending = Some((request_id, kill, Instant::now() + CAPTURE_TIMEOUT));
+        true
+    }
+
+    /// Whether the active execution must hand back a capture request.
+    pub(crate) fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Drops an old epoch's request, not the repaired state.
+    pub(crate) fn reset(&mut self) {
+        self.pending = None;
+    }
+
+    /// Whether this session must admit no root-dependent operation.
+    pub(crate) fn rootless(&self) -> bool {
+        self.fresh || self.repaired.is_some()
+    }
+
+    /// Keeps the original repair for later activation, which this slice does not perform.
+    pub(crate) fn restored(&mut self, repaired: Repaired) {
+        self.repaired = Some(repaired);
+    }
+
+    /// Records the fatal status before the loop returns directly to PID 1.
+    pub(crate) fn must_end(&mut self, status: u8) {
+        self.shutdown = Some(status);
+    }
+
+    /// The snapshot library's fatal status, if capture ended the loop.
+    pub(crate) fn shutdown_status(&self) -> Option<u8> {
+        self.shutdown
+    }
+
+    /// Performs the existing repeated sweep after group termination.
+    pub(crate) fn sweep(&self) -> Result<(), Errno> {
+        self.helpers.sweep()
+    }
+
+    /// Prepares workloads, acknowledges the request, then calls the snapshot library once.
+    pub(crate) fn perform(
+        &mut self,
+        acknowledge: impl FnOnce(u64) -> Result<(), Errno>,
+    ) -> Result<Option<CaptureStep>, Errno> {
+        let helpers = self.helpers;
+        self.perform_with(
+            |kill| helpers.prepare_capture(kill),
+            acknowledge,
+            snapshot::capture,
+        )
+    }
+
+    /// The transport is invoked only before the one synchronous snapshot call.
+    pub(crate) fn perform_with(
+        &mut self,
+        prepare: impl FnOnce(bool) -> Result<(), Errno>,
+        acknowledge: impl FnOnce(u64) -> Result<(), Errno>,
+        capture: impl FnOnce(&Devices, Disks, Instant) -> Result<Captured, CaptureFailure>,
+    ) -> Result<Option<CaptureStep>, Errno> {
+        let Some((request_id, kill, deadline)) = self.pending.take() else {
+            return Ok(None);
+        };
+        if let Err(error) = prepare(kill) {
+            return Ok(Some(CaptureStep::Refused { request_id, error }));
+        }
+        acknowledge(request_id)?;
+        let devices = Devices {
+            distro: DISTRO_MMIO_BASE,
+            scratch: SCRATCH_MMIO_BASE,
+            filesystem_tag: "microvm".to_owned(),
+        };
+        Ok(Some(CaptureStep::Returned {
+            request_id,
+            result: capture(&devices, Disks::Fresh, deadline),
+        }))
+    }
+}
+
+/// Reports capture detail without driving the control transport or starting a helper.
+pub(crate) fn report_capture(failure: impl std::fmt::Display) {
+    write_console(
+        kernel::CONSOLE_DEVICE,
+        format!("NVX-INIT-CAPTURE: {failure}\n").as_bytes(),
+    );
 }
 
 /// Whether execution requires an account in the shared root's databases.
@@ -840,6 +997,11 @@ impl Runtime {
         Pollable::Signals(self.system.signals.as_ref().expect("listening"))
     }
 
+    /// Hands the same helper registry to the shared loop's capture caller.
+    pub(crate) fn capture(&self, fresh: bool) -> Capture {
+        Capture::new(self.helpers, fresh)
+    }
+
     /// Hands terminal statuses to the active execution; a helper failure wins over shutdown.
     pub(crate) fn service(
         &mut self,
@@ -867,7 +1029,7 @@ pub fn main() -> ExitCode {
     let arguments = sys::args();
     match Runtime::new(arguments.get(1..).unwrap_or_default()) {
         Ok(mut runtime) => {
-            let result = serve_layered(&mut runtime);
+            let result = serve_boot(&mut runtime);
             finish(&mut runtime.system, result);
         }
         Err(failure) => finish(&mut RealSystem { signals: None }, Err(failure)),
@@ -875,9 +1037,21 @@ pub fn main() -> ExitCode {
     ExitStatus::Failure.into()
 }
 
-fn serve_layered(runtime: &mut Runtime) -> Result<(), String> {
+fn serve_boot(runtime: &mut Runtime) -> Result<u8, String> {
     let command_line = std::fs::read("/proc/cmdline")
         .map_err(|error| format!("cannot read the boot command line: {error}"))?;
+    if let Some(control) = fresh_capture_control(&command_line)? {
+        let control = super::terminal::Terminal::open(&control)
+            .map_err(|error| format!("cannot open capture control: {error}"))?;
+        control
+            .configure_raw()
+            .map_err(|error| format!("cannot configure capture control: {error}"))?;
+        runtime.system.report(b"NVX-INIT-CAPTURE: waiting\n");
+        return super::managed_agent::AgentConfig::serve_capture(
+            runtime,
+            control.into_descriptor(),
+        );
+    }
     let boot = boot::cold_boot(&command_line).map_err(|error| error.to_string())?;
     runtime.system.report(
         format!(
@@ -895,10 +1069,71 @@ fn serve_layered(runtime: &mut Runtime) -> Result<(), String> {
         )
 }
 
+/// Selects only the fixed rootless Fresh entry; malformed capture tokens never fall back.
+fn fresh_capture_control(command_line: &[u8]) -> Result<Option<PathBuf>, String> {
+    let tokens: Vec<_> = cmdline::init_tokens(command_line).collect();
+    let parameter = |name: &[u8]| {
+        let mut matching = tokens.iter().filter(|token| token.name == name);
+        let Some(token) = matching.next() else {
+            return Ok(None);
+        };
+        if matching.next().is_some() || token.value.is_none() {
+            return Err(format!(
+                "{} is repeated or has no value",
+                name.escape_ascii()
+            ));
+        }
+        Ok(token.value)
+    };
+    match parameter(b"nvx_snapshot_tier")? {
+        None => return Ok(None),
+        Some(b"platform") => {}
+        Some(_) => return Err("nvx_snapshot_tier must be platform".to_owned()),
+    }
+    if parameter(b"nvx_sandbox")? != Some(b"1") {
+        return Err("a Fresh capture needs nvx_sandbox=1".to_owned());
+    }
+    for token in &tokens {
+        if matches!(
+            token.name,
+            b"nvx_layer"
+                | b"nvx_scratch"
+                | b"nvx_overlay_upper"
+                | b"nvx_overlay_mode"
+                | b"nvx_scratch_journal"
+                | b"nvx_first_partition_bound"
+                | b"nvx_ram_upper_percent"
+                | b"nvx_hostname"
+                | b"nvx_machine_id"
+                | b"nvx_maps"
+                | b"nvx_share"
+                | b"nvx_identity"
+                | b"nvx_workload_account"
+                | b"nvx_entrypoint"
+                | b"nvx_arg"
+                | b"nvx_env"
+                | b"nvx_cwd"
+                | b"nvx_lifecycle"
+                | b"nvx_workload_uid"
+                | b"nvx_workload_gid"
+        ) || token.name.starts_with(b"virtfs_")
+        {
+            return Err(format!(
+                "a Fresh capture cannot carry {}",
+                token.name.escape_ascii()
+            ));
+        }
+    }
+    let control = parameter(b"nvx_control_tty")?
+        .filter(|value| !value.is_empty() && value.iter().all(u8::is_ascii_alphanumeric))
+        .ok_or("a Fresh capture needs nvx_control_tty naming a device in /dev")?;
+    Ok(Some(Path::new("/dev").join(OsStr::from_bytes(control))))
+}
+
 /// Keeps diagnostics, sync and direct power-off with the original PID-1 owner.
-fn finish(system: &mut impl System, result: Result<(), String>) {
+fn finish(system: &mut impl System, result: Result<u8, String>) {
     let status = match result {
-        Ok(()) => 0,
+        Ok(status) => status,
         Err(failure) => {
             system.report(format!("NVX-INIT-ERROR: {failure}\n").as_bytes());
             FAILURE
