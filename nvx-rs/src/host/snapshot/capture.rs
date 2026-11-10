@@ -15,7 +15,7 @@ use crate::host::platform;
 use crate::host::process::Exited;
 use crate::host::store::files::{sync_dir, write_private};
 use crate::host::store::regular::{open_regular, read_at_most};
-use crate::host::vm::{OUTCOME, VmDir};
+use crate::host::vm_directory::{OUTCOME, VmDir};
 use crate::{Error, ErrorKind, Result};
 
 /// Longest outcome report of a capture's VM that the capture reads, in bytes.
