@@ -21038,30 +21038,86 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
     def test_scenarios_refuse_other_lines(self):
         for text, problem in (
             ("vm_a\n", r":1: expected a target and a test, not 'vm_a'"),
-            ("unit x\nvm_a a b\n", r":2: expected a target and a test"),
+            ("unit x\nvm_a a linux extra\n", r":2: expected a target and a test"),
+            ("unit x\nvm_a a b\n", r":2: unknown scenario platform 'b'"),
+            ("vm_a a Linux\n", r":1: unknown scenario platform 'Linux'"),
             ("vm_a a\nvm_a a\n", r":2: vm_a a is named twice"),
+            ("vm_a a linux\nvm_a a windows\n", r":2: vm_a a is named twice"),
+            ("vm_a a linux\nvm_a a\n", r":2: vm_a a is named twice"),
+            ("vm_a a windows\nvm_a a windows\n", r":2: vm_a a is named twice"),
             ("# Nothing yet.\n", r"names no scenario"),
         ):
+            for platform in ("linux", "win32"):
+                with (
+                    self.subTest(text=text, platform=platform),
+                    patch.object(sys, "platform", platform),
+                    self.assertRaisesRegex(common.ScriptError, problem),
+                ):
+                    runtime_adapter_tests.read_scenarios(self._scenarios(text))
+
+    def test_scenarios_select_the_host_platform_in_line_order(self):
+        path = self._scenarios(
+            "vm_a a windows\nunit x\nvm_a b linux # Linux only\nvm_a common\n"
+        )
+        for platform, expected in (
+            (
+                "linux",
+                [
+                    runtime_adapter_tests.Target("unit", ("x",)),
+                    runtime_adapter_tests.Target("vm_a", ("b", "common")),
+                ],
+            ),
+            (
+                "win32",
+                [
+                    runtime_adapter_tests.Target("vm_a", ("a", "common")),
+                    runtime_adapter_tests.Target("unit", ("x",)),
+                ],
+            ),
+        ):
             with (
-                self.subTest(text=text),
-                self.assertRaisesRegex(common.ScriptError, problem),
+                self.subTest(platform=platform),
+                patch.object(sys, "platform", platform),
             ):
-                runtime_adapter_tests.read_scenarios(self._scenarios(text))
+                self.assertEqual(runtime_adapter_tests.read_scenarios(path), expected)
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            self.assertRaisesRegex(common.ScriptError, "names no scenario"),
+        ):
+            runtime_adapter_tests.read_scenarios(self._scenarios("vm_a a linux\n"))
 
     def test_the_adapter_s_readme_lists_its_scenarios(self):
-        targets = runtime_adapter_tests.read_scenarios()
-        named = [(target.name, test) for target in targets for test in target.tests]
-        self.assertLessEqual(
-            {"vm_clone", "vm_template", "vm_layered", "template_operations"},
-            {target.name for target in targets},
-        )
         readme = (runtime_adapter_tests.ADAPTER_DIRECTORY / "README.md").read_text(
             encoding="utf-8"
         )
         section = re.split(r"\n#+ ", readme.split("\n### Stage scenarios\n", 1)[1])[0]
-        rows = re.findall(r"^\| `(\w+)` \| `(\w+)` \|", section, re.MULTILINE)
-
-        self.assertEqual(rows, named)
+        rows = re.findall(
+            r"^\| `(\w+)` \| `([^`]+)`(?: \((linux|windows)\))? \|",
+            section,
+            re.MULTILINE,
+        )
+        for platform, host in (("linux", "linux"), ("win32", "windows")):
+            with (
+                self.subTest(platform=platform),
+                patch.object(sys, "platform", platform),
+            ):
+                targets = runtime_adapter_tests.read_scenarios()
+                named = [
+                    (target.name, test) for target in targets for test in target.tests
+                ]
+                self.assertLessEqual(
+                    {"vm_clone", "vm_template", "vm_layered", "template_operations"},
+                    {target.name for target in targets},
+                )
+                self.assertEqual(
+                    [
+                        (target, test)
+                        for target, test, on in rows
+                        if not on or on == host
+                    ],
+                    named,
+                )
 
     def test_libtest_s_terse_list_names_the_tests(self):
         self.assertEqual(
@@ -21188,6 +21244,68 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
                 status, runs, _, stderr = self._run(path, listings, artifacts=artifacts)
                 self.assertEqual(status, 0, stderr)
                 self.assertEqual(Path(runs[0][1]["NVX_ARTIFACTS_DIR"]), expected)
+
+    def test_the_handler_checks_and_runs_the_same_platform_scenarios(self):
+        path = self._scenarios(
+            "vm_a common\nvm_a linux_case linux\nunit windows_case windows\n"
+        )
+        for platform, selected in (
+            ("linux", [("vm_a", ("common", "linux_case"))]),
+            ("win32", [("vm_a", ("common",)), ("unit", ("windows_case",))]),
+        ):
+            listings = {
+                (target, "--list"): "".join(f"{test}: test\n" for test in tests)
+                for target, tests in selected
+            }
+            listings.update(
+                ((target, "--ignored"), "") for target in ("lib", "unit", "other")
+            )
+            for check_only in (False, True):
+                with (
+                    self.subTest(platform=platform, check_only=check_only),
+                    patch.object(sys, "platform", platform),
+                ):
+                    status, runs, stdout, stderr = self._run(
+                        path, listings, check_only=check_only
+                    )
+                self.assertEqual(status, 0, stderr)
+                expected = [
+                    runtime_adapter_tests.cargo_test(
+                        "cargo", target, "--include-ignored", "--exact", *tests
+                    )
+                    for target, tests in selected
+                ]
+                self.assertEqual(
+                    [command for command, _ in runs], [] if check_only else expected
+                )
+                if check_only:
+                    self.assertIn(
+                        f"2 scenarios name exactly the tests of {len(selected)} targets",
+                        stdout,
+                    )
+                else:
+                    self.assertIn(
+                        f"the 2 scenarios of {len(selected)} targets passed", stdout
+                    )
+
+    def test_platform_selection_keeps_unlisted_and_ignored_test_errors(self):
+        path = self._scenarios(
+            "vm_a common\nvm_a linux_case linux\nother hidden linux\n"
+        )
+        listings = {
+            ("vm_a", "--list"): "common: test\nlinux_case: test\n",
+            ("lib", "--ignored"): "",
+            ("unit", "--ignored"): "",
+            ("other", "--ignored"): "hidden: test\n",
+        }
+        with patch.object(sys, "platform", "win32"):
+            status, runs, _, stderr = self._run(path, listings)
+
+        self.assertEqual((status, runs), (1, []))
+        self.assertIn("vm_a has the test linux_case, which no scenario names", stderr)
+        self.assertIn(
+            "other has the ignored test hidden, which no scenario names", stderr
+        )
 
     def test_the_handler_runs_nothing_once_the_names_are_not_the_tests(self):
         path = self._scenarios("vm_a a\nvm_a gone\ngone x\n")

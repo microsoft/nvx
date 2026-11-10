@@ -1,9 +1,10 @@
 """The runtime adapter's consolidated suite, run by name on a real hypervisor.
 
 `tests/runtime-adapter/scenarios.txt` names the suite's scenarios, each a test of one of
-the adapter's test targets. The command checks that the scenarios name exactly the tests
-of their targets, and that neither the library nor another target has an ignored test,
-as the scenarios that boot VMs are, so that a scenario that is renamed, added, or gone
+the adapter's test targets, optionally limited to Linux or Windows. The command checks
+that the host's scenarios name exactly the tests of their targets, and that neither the
+library nor another target has an ignored test, as the scenarios that boot VMs are, so
+that a scenario that is renamed, added, or gone
 fails the command rather than drop out of it. It then runs each target's scenarios by
 name, the ignored ones with the others, and checks that each of them ran and passed.
 """
@@ -77,25 +78,32 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def read_scenarios(path: Path = SCENARIOS) -> list[Target]:
-    """Returns the targets that the scenarios of `path` name, in the order of their
-    first lines, each with its tests in the order of their lines.
+    """Returns the host's scenarios of `path`, grouped by target in the order of their
+    first selected lines, each with its tests in the order of their lines.
 
-    A line names a target, then one of its tests; `#` starts a comment. Raises
-    `ScriptError` for another line, and a scenario that two lines name.
+    A line names a target, then one of its tests, optionally followed by `linux` or
+    `windows`; `#` starts a comment. Raises `ScriptError` for another line, an unknown
+    platform, and a scenario that two lines name, even on different platforms.
     """
+    host_platform = "windows" if sys.platform == "win32" else sys.platform
     tests: dict[str, list[str]] = {}
+    seen: set[tuple[str, str]] = set()
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         fields = line.split("#", 1)[0].split()
         if not fields:
             continue
         where = f"{path}:{number}"
-        if len(fields) != 2:
+        if len(fields) not in (2, 3):
             raise ScriptError(f"{where}: expected a target and a test, not {line!r}")
-        target, test = fields
-        named = tests.setdefault(target, [])
-        if test in named:
+        target, test = fields[:2]
+        platform = fields[2] if len(fields) == 3 else None
+        if platform not in (None, "linux", "windows"):
+            raise ScriptError(f"{where}: unknown scenario platform {platform!r}")
+        if (target, test) in seen:
             raise ScriptError(f"{where}: {target} {test} is named twice")
-        named.append(test)
+        seen.add((target, test))
+        if platform is None or platform == host_platform:
+            tests.setdefault(target, []).append(test)
     if not tests:
         raise ScriptError(f"{path} names no scenario")
     return [Target(name, tuple(named)) for name, named in tests.items()]
