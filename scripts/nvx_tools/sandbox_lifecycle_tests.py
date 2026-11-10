@@ -386,10 +386,11 @@ def read_runtime(state: Path) -> dict[str, Any]:
         raise RuntimeError(f"sandbox runtime record has unexpected fields: {path}")
     vm_dir = runtime["vmDir"]
     capability = runtime["capability"]
-    if (
-        not isinstance(capability, list)
-        or len(capability) != 32
-        or any(type(byte) is not int or not 0 <= byte <= 255 for byte in capability)
+    if not isinstance(capability, list):
+        raise RuntimeError(f"sandbox runtime record has an invalid capability: {path}")
+    values = cast(list[object], capability)
+    if len(values) != 32 or any(
+        type(byte) is not int or not 0 <= byte <= 255 for byte in values
     ):
         raise RuntimeError(f"sandbox runtime record has an invalid capability: {path}")
     try:
@@ -406,7 +407,7 @@ def read_runtime(state: Path) -> dict[str, Any]:
         raise RuntimeError(
             f"sandbox runtime record ownership cannot be checked: {path}"
         ) from error
-    if bytes(capability) != installed:
+    if bytes(cast(list[int], values)) != installed:
         raise RuntimeError(
             f"sandbox runtime record capability differs from its owned file: {path}"
         )
