@@ -1,11 +1,13 @@
 //! The CLI store's recoverable lifecycle lock and removal of its owned files.
 
+use super::error_with_cause;
 use super::lifecycle::{CONFIG_NAME, LOCK_RETRY_INTERVAL, create_state_directory};
 use crate::ErrorCode;
 use crate::host::cli::deadline::Deadline;
 use crate::host::cli::store::{LockedState, StateDir, StateFile};
 use crate::host::cli::{Exit, Result, io_error};
 use crate::host::platform;
+use crate::host::vm::VmDir;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -50,6 +52,16 @@ impl LifecycleLock {
             .and_then(|state| state.lock(deadline));
             let error = match taken {
                 Ok(locked) => {
+                    if provision {
+                        VmDir::open(state_dir).map_err(|error| {
+                            error_with_cause(
+                                crate::Error::io(
+                                    "sandbox state directory must be a private VM directory",
+                                )
+                                .with_source(error),
+                            )
+                        })?;
+                    }
                     return Ok(Self {
                         state_dir: state_dir.to_path_buf(),
                         locked,
