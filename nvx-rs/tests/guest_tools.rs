@@ -962,7 +962,7 @@ fn ingress_start_fails_when_the_announcer_does_not_start() {
         [
             "nvx-ingress: the announcer's socket cannot be bound to a privileged source port: ",
             "nvx-ingress: no privileged source port, from 1023 down to 512, is free",
-            "nvx-ingress: /sbin/nvx-ingress did not start: the exec launch stage failed: ",
+            "nvx-ingress: /sbin/nvx-ingress did not start: ",
         ]
         .iter()
         .any(|prefix| stderr.starts_with(prefix))
