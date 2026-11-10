@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0,
+    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ALL_ACCESS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
@@ -246,9 +246,17 @@ pub(crate) fn connect_endpoint(
 /// serves the endpoint. The instance is busy while a client is attached and briefly between
 /// clients, which is waited out for up to five seconds.
 pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
+    endpoint_server_pid_until(endpoint, Instant::now() + Duration::from_secs(5))
+}
+
+/// Looks up the endpoint owner within the caller's absolute deadline.
+pub(crate) fn endpoint_server_pid_until(
+    endpoint: &str,
+    deadline: Instant,
+) -> io::Result<Option<u32>> {
     let name = wide(endpoint.replace('/', "\\"));
-    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
+        time_left(Some(deadline))?;
         // SAFETY: the name is NUL-terminated; SQOS identification prevents impersonation.
         let handle = unsafe {
             CreateFileW(
@@ -271,9 +279,20 @@ pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
         }
         match last_error() {
             ERROR_FILE_NOT_FOUND => return Ok(None),
-            ERROR_PIPE_BUSY if Instant::now() < deadline => {
+            ERROR_PIPE_BUSY => {
+                let left = time_left(Some(deadline))?.expect("the probe has a deadline");
+                let wait = left.as_millis().min(100) as u32;
+                // Zero selects the server's default timeout, not a nonblocking wait.
+                if wait == 0 {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
                 // SAFETY: the name is NUL-terminated.
-                unsafe { WaitNamedPipeW(name.as_ptr(), 100) };
+                if unsafe { WaitNamedPipeW(name.as_ptr(), wait) } == 0 {
+                    let error = last_error();
+                    if error != ERROR_SEM_TIMEOUT {
+                        return Err(io::Error::from_raw_os_error(error as i32));
+                    }
+                }
             }
             error => return Err(io::Error::from_raw_os_error(error as i32)),
         }
