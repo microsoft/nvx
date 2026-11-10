@@ -281,6 +281,15 @@ fn cpu_profile_problem(profile: &str) -> Option<String> {
     })
 }
 
+/// Returns whether a CPU-profile request names the captured effective profile.
+pub(super) fn cpu_profile_matches(profile: &CpuProfile, requested: &str) -> bool {
+    match requested {
+        "auto" => true,
+        "host" => profile.generation == HOST_GENERATION,
+        requested => profile.id() == requested,
+    }
+}
+
 /// Returns the guest's network on `nic`, its IPv4 address and prefix length, in the canonical form
 /// of a [`SandboxNetwork`].
 fn guest_network_of(nic: &Nic) -> String {
@@ -548,11 +557,7 @@ impl SnapshotKey {
         let profile = machine.cpu.id();
         // `auto` selects the built-in profile of the host's CPU, or falls back to a profile that
         // the host derives, whose generation is `host`, when no built-in profile serves it.
-        let selected = match class.cpu_profile.as_str() {
-            "auto" => true,
-            "host" => machine.cpu.generation == HOST_GENERATION,
-            requested => profile == requested,
-        };
+        let selected = cpu_profile_matches(&machine.cpu, &class.cpu_profile);
         if !selected {
             return mismatch(
                 format!("its CPU profile is {profile}"),
