@@ -23,6 +23,29 @@ fn missing(name: &str) -> PathBuf {
     std::env::temp_dir().join("nvx-config-missing").join(name)
 }
 
+#[test]
+fn cold_memory_capacity_is_checked_and_lowered_without_a_capture() {
+    let mut config = cold(blockless());
+    config.boot.as_mut().unwrap().memory_capacity_mib = Some(1024);
+    let arguments = config
+        .openvmm_arguments(
+            &runtime(),
+            "/control",
+            Path::new("/report"),
+            Some("/console"),
+        )
+        .unwrap();
+    assert_eq!(values(&arguments, "--memory"), [OsStr::new("512M")]);
+    assert_eq!(
+        values(&arguments, "--memory-capacity"),
+        [OsStr::new("1024M")]
+    );
+    for capacity in [511, u64::MAX] {
+        config.boot.as_mut().unwrap().memory_capacity_mib = Some(capacity);
+        assert_eq!(config.check().unwrap_err().kind(), ErrorKind::Unsupported);
+    }
+}
+
 /// Returns a blockless configuration of one processor and 512 MiB.
 fn blockless() -> VmConfig {
     VmConfig {
@@ -132,10 +155,12 @@ fn configurations_pass_with_or_without_a_nic_address_and_a_boot() {
     let boots = [
         None,
         Some(Boot {
+            memory_capacity_mib: None,
             command_line: String::new(),
             capture: None,
         }),
         Some(Boot {
+            memory_capacity_mib: None,
             command_line: "quiet loglevel=0".to_owned(),
             capture: None,
         }),
@@ -570,6 +595,7 @@ fn cold_command_lines_keep_the_old_root_view_and_mapping_values() {
                 let mut config = VmConfig {
                     filesystem: filesystem.clone(),
                     boot: Some(Boot {
+                        memory_capacity_mib: None,
                         command_line: String::new(),
                         capture: None,
                     }),
@@ -634,6 +660,7 @@ fn cold_command_lines_keep_the_old_root_view_and_mapping_values() {
 fn the_check_of_a_configuration_checks_its_boots_capture() {
     let booting = |capture: Option<CaptureConfig>| VmConfig {
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: String::new(),
             capture,
         }),
@@ -682,6 +709,7 @@ fn captured() -> VmConfig {
             policy: NetworkPolicy::new(Access::Deny),
         }),
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: "quiet".to_owned(),
             capture: Some(capture()),
         }),
@@ -916,6 +944,7 @@ fn caller_tokens_follow_rendered_tokens_without_any_rewriting() {
     let caller = " \tquiet nvx_entrypoint=/bin/work nvx_arg=\"x y\" nvx_share=0,/work\r\n ";
     let mut config = VmConfig {
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: String::new(),
             capture: None,
         }),
@@ -939,6 +968,7 @@ fn only_a_checked_cold_boot_has_a_kernel_command_line() {
     let config = VmConfig {
         processors: 0,
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: String::new(),
             capture: None,
         }),
@@ -995,6 +1025,7 @@ fn caller_tokens_cannot_replace_rendered_tokens_under_kernel_name_matching() {
                 for config in [blockless(), layered(erofs())] {
                     let config = VmConfig {
                         boot: Some(Boot {
+                            memory_capacity_mib: None,
                             command_line: command_line.clone(),
                             capture: None,
                         }),
@@ -1028,6 +1059,7 @@ fn caller_owned_guest_tokens_and_noncolliding_names_stay_unchanged() {
     ] {
         let mut config = VmConfig {
             boot: Some(Boot {
+                memory_capacity_mib: None,
                 command_line: String::new(),
                 capture: None,
             }),
@@ -1066,6 +1098,7 @@ fn mapping_table_is_the_exact_export_projection_counted_by_the_boot_token() {
     let mut config = VmConfig {
         filesystem: Some(plan.clone()),
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: String::new(),
             capture: None,
         }),
@@ -1124,6 +1157,7 @@ fn public_maps_codec_keeps_the_protocol_root_reexports_usable() {
 fn cold(config: VmConfig) -> VmConfig {
     VmConfig {
         boot: Some(Boot {
+            memory_capacity_mib: None,
             command_line: "quiet nvx_entrypoint=/bin/work nvx_arg=ab".to_owned(),
             capture: None,
         }),
@@ -1310,6 +1344,7 @@ fn cold_boot_command_lines_refuse_native_control_console_syntax() {
         ] {
             let config = VmConfig {
                 boot: Some(Boot {
+                    memory_capacity_mib: None,
                     command_line: caller.to_owned(),
                     capture: None,
                 }),
