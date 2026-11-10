@@ -785,8 +785,62 @@ fn console_input(console: Box<dyn Transport>) -> Result<(Box<dyn Transport>, Inp
     }
 }
 
-fn write_console(data: &[u8]) -> io::Result<()> {
-    output::write_stdout(data)
+struct ConsoleOutput {
+    #[cfg(windows)]
+    console: bool,
+    #[cfg(windows)]
+    pending: [u8; 3],
+    #[cfg(windows)]
+    pending_len: usize,
+}
+
+impl ConsoleOutput {
+    fn new() -> Self {
+        Self {
+            #[cfg(windows)]
+            console: io::stdout().is_terminal(),
+            #[cfg(windows)]
+            pending: [0; 3],
+            #[cfg(windows)]
+            pending_len: 0,
+        }
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        #[cfg(windows)]
+        if self.console {
+            let combined;
+            let bytes = if self.pending_len == 0 {
+                data
+            } else {
+                combined = [&self.pending[..self.pending_len], data].concat();
+                combined.as_slice()
+            };
+            // Only a final incomplete sequence crosses reads; other invalid bytes render now.
+            let incomplete =
+                bytes.utf8_chunks().last().map_or(0, |chunk| {
+                    match std::str::from_utf8(chunk.invalid()) {
+                        Err(error) if error.error_len().is_none() => chunk.invalid().len(),
+                        _ => 0,
+                    }
+                });
+            let ready = bytes.len() - incomplete;
+            output::write_stdout(String::from_utf8_lossy(&bytes[..ready]).as_bytes())?;
+            self.pending[..incomplete].copy_from_slice(&bytes[ready..]);
+            self.pending_len = incomplete;
+            return Ok(());
+        }
+        output::write_stdout(data)
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        if self.pending_len != 0 {
+            output::write_stdout("\u{fffd}".as_bytes())?;
+            self.pending_len = 0;
+        }
+        Ok(())
+    }
 }
 
 fn foreground(
@@ -824,6 +878,7 @@ fn foreground(
             Err(error) => return Err(error),
         }
     }
+    let mut console_output = ConsoleOutput::new();
     let mut buffer = [0; 8192];
     loop {
         check_interrupt()?;
@@ -841,18 +896,26 @@ fn foreground(
         }
         if let Some(transport) = &mut console {
             match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
-                Ok(0) => console = None,
+                Ok(0) => {
+                    console = None;
+                    console_output.finish().map_err(Exit::from_os_error)?;
+                }
                 Ok(count) => {
-                    write_console(&buffer[..count]).map_err(Exit::from_os_error)?;
+                    console_output
+                        .write_all(&buffer[..count])
+                        .map_err(Exit::from_os_error)?;
                     progressed = true;
                 }
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
                 Err(error)
                     if matches!(
                         error.kind(),
-                        io::ErrorKind::TimedOut
-                            | io::ErrorKind::BrokenPipe
-                            | io::ErrorKind::ConnectionReset
-                    ) => {}
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    console = None;
+                    console_output.finish().map_err(Exit::from_os_error)?;
+                }
                 Err(error) => return Err(Exit::from_os_error(error)),
             }
         }
@@ -868,9 +931,9 @@ fn foreground(
                 loop {
                     match transport.read(&mut buffer, Some(Duration::from_millis(10))) {
                         Ok(0) => break,
-                        Ok(count) => {
-                            write_console(&buffer[..count]).map_err(Exit::from_os_error)?
-                        }
+                        Ok(count) => console_output
+                            .write_all(&buffer[..count])
+                            .map_err(Exit::from_os_error)?,
                         Err(error)
                             if matches!(
                                 error.kind(),
@@ -885,6 +948,7 @@ fn foreground(
                     }
                 }
             }
+            console_output.finish().map_err(Exit::from_os_error)?;
             return Ok(status);
         }
         if attach_closed.is_some_and(|deadline| Instant::now() >= deadline) {
