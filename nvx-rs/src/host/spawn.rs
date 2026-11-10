@@ -204,14 +204,15 @@ fn spawn_inner(
     }
 }
 
-/// A VMM that [`spawn`] started, which the caller has not released yet: on Unix, its child
-/// process; on Windows, its process handle. On Unix the child's ID names no other process until
-/// [`wait_timeout`](Self::wait_timeout) reaps it; hold it with [`process`](Self::process) before
-/// waiting to keep a verified handle after it exits.
+/// A VMM that [`spawn`] or [`spawn_vm`] started, which the caller has not released yet: on Unix,
+/// its child process; on Windows, its process handle. On Unix the child's ID names no other
+/// process until [`wait_timeout`](Self::wait_timeout) reaps it; hold it with
+/// [`process`](Self::process) before waiting to keep a verified handle after it exits.
 ///
 /// Record it with [`Launch::record_process`](crate::host::store::Launch::record_process), or hold
 /// it with [`process`](Self::process). Then release it with [`detach`](Self::detach), or end it
-/// with [`kill_and_wait`](Self::kill_and_wait); the [`Process`] stays valid either way.
+/// with [`kill_and_confirm_exit`](Self::kill_and_confirm_exit); the [`Process`] stays valid
+/// either way. [`kill_and_wait`](Self::kill_and_wait) provides legacy, time-bounded cleanup.
 pub struct Launched {
     #[cfg(not(windows))]
     /// Child process retained until it is detached or terminated.
@@ -247,9 +248,9 @@ impl Launched {
     /// The caller has not reaped the process, so its ID and start time still identify it, and
     /// the reference of the `Process` is the one to record: a successor of the caller can find
     /// the process again with [`Process::open`]. The `Process` stays valid after
-    /// [`detach`](Self::detach) or [`kill_and_wait`](Self::kill_and_wait) releases this
-    /// `Launched`. A process that exited already keeps its identity, and the `Process` reports
-    /// that it exited.
+    /// [`detach`](Self::detach), [`kill_and_confirm_exit`](Self::kill_and_confirm_exit), or
+    /// [`kill_and_wait`](Self::kill_and_wait) releases this `Launched`. A process that exited
+    /// already keeps its identity, and the `Process` reports that it exited.
     ///
     /// Fails if the identity of the process or of the current boot cannot be read, and with
     /// [`io::ErrorKind::Unsupported`] on hosts other than Linux and Windows.
@@ -323,8 +324,14 @@ impl Launched {
 
     /// Terminates this owned child and waits without a deadline for proof of its exit.
     ///
-    /// Unlike legacy cleanup's timeout, this never detaches a child after a failed verification.
-    pub(crate) fn kill_and_confirm_exit(self) -> io::Result<()> {
+    /// Unlike [`kill_and_wait`](Self::kill_and_wait), this has no timeout and never hands off a
+    /// child to a background reaper. On Unix a successful call reaps the child. Even if
+    /// termination fails, it waits for the child's exit; a child that exited already succeeds.
+    /// Use this when setup fails after [`spawn_vm`] created a child, including when
+    /// [`process`](Self::process) cannot verify its identity.
+    ///
+    /// Fails if waiting cannot confirm exit, retaining both failures if termination also failed.
+    pub fn kill_and_confirm_exit(self) -> io::Result<()> {
         #[cfg(windows)]
         return self.process.terminate_and_wait();
         #[cfg(not(windows))]
