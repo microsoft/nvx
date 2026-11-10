@@ -6,7 +6,7 @@ use super::StateFile;
 use super::locked::LockedState;
 use super::record::LaunchJournal;
 use crate::host::platform;
-use crate::host::process::{BootId, Process, ProcessRef};
+use crate::host::process::{BootId, Opened, Process, ProcessRef};
 use crate::{Error, Result};
 
 impl LockedState {
@@ -51,11 +51,16 @@ fn find(pid: u32) -> io::Result<Option<Process>> {
     let Some(start_time) = platform::process_start_time(pid)? else {
         return Ok(None);
     };
-    Process::open(&ProcessRef {
-        pid,
-        start_time,
-        boot: BootId::current()?,
-    })
+    Ok(
+        match Process::open(&ProcessRef {
+            pid,
+            start_time,
+            boot: BootId::current()?,
+        })? {
+            Opened::Running(process) => Some(process),
+            Opened::Exited(_) => None,
+        },
+    )
 }
 
 /// Adapted from the old store's owner check: the second endpoint lookup happens only after
