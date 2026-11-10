@@ -26,6 +26,10 @@
 //! A launch that fails at any step ends as [`Launch::abandon`] ends it, and never leaves an
 //! unrecorded VMM running: a VMM whose identity is not recorded is ended through its handle first.
 //!
+//! A caller launching an owned [`crate::host::vm::VmmCommand`] without a store uses [`spawn_vm`],
+//! which refuses an untrusted Windows log-job name rather than taking [`spawn`]'s fallback
+//! without a job.
+//!
 //! ```no_run
 //! use std::time::{Duration, Instant};
 //!
@@ -234,4 +238,4 @@ pub(crate) use self::reattach::reattach_reporting;
 pub use self::reattach::{Reattached, reattach};
 pub use self::vmm::{StopOutcome, Stopped, Vmm};
 pub use super::platform::inherit::{Inherited, SpawnLock, lock_spawns, spawn_command};
-pub use super::spawn::{Launched, VmmCommand, spawn};
+pub use super::spawn::{Launched, VmmCommand, spawn, spawn_vm};
