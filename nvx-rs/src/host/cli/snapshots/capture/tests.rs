@@ -468,11 +468,12 @@ fn the_next_command_ends_an_interrupted_capture_and_removes_its_directory_withou
     let before = fixture.inventory();
     interrupted(&fixture);
     let missing_artifacts = fixture.root.path().join("missing-artifacts");
-    assert!(run(missing_artifacts.to_str(), fixture.options("existing")).is_err());
-    assert!(matches!(
-        Process::open(&fixture.references()[0]).unwrap(),
-        Opened::Exited(_)
-    ));
+    let error = run(missing_artifacts.to_str(), fixture.options("existing")).unwrap_err();
+    let opened = Process::open(&fixture.references()[0]).unwrap();
+    assert!(
+        matches!(&opened, Opened::Exited(_)),
+        "next-command recovery returned {error:?}; process is {opened:?}"
+    );
     assert!(!fixture.vm_dir().exists());
     assert_eq!(fixture.inventory(), before);
     assert_eq!(
