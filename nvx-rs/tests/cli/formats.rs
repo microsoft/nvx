@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::harness::{HYPERVISOR, Root, UUID, entries, in_parallel, json};
 use crate::lifecycle::{PROVISIONED, provision, sandbox};
-use crate::openvmm::{Options, WORKLOAD, assert_checked_blocks, assert_opened_images, managed};
+use crate::openvmm::{Options, WORKLOAD, assert_opened_images, assert_stable_blocks, managed};
 
 /// What a start does with a configuration of a format.
 enum Start {
@@ -209,7 +209,7 @@ fn configurations_of_every_format_start_and_exec() {
                     .to_owned();
                 let mut options =
                     Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
-                assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
+                assert_stable_blocks(&root, &options.take("--microvm-sandbox-block"), true);
                 assert_opened_images(&root, "state");
                 let mut expected = openvmm(managed("state", &endpoint)).persistent_expected();
                 expected.take("--microvm-sandbox-block");

@@ -198,10 +198,9 @@ impl Drop for LifecycleLock {
                 matches!(std::fs::symlink_metadata(self.state_dir.join(name.name())),
                 Err(error) if error.kind() == io::ErrorKind::NotFound)
             })
+            && let Ok(directory) = self.locked.directory()
         {
-            if let Ok(directory) = self.locked.directory() {
-                let _ = directory.remove_file(StateFile::Lock.name());
-            }
+            let _ = directory.remove_file(StateFile::Lock.name());
         }
     }
 }
