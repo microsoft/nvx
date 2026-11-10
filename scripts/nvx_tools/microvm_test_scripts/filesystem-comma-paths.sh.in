@@ -16,14 +16,10 @@ expect_read_only() {
     esac
 }
 
-# A lone share is the root of the virtio-fs device, and several are the
-# children of an aggregate, which the guest binds at their targets.
-aggregate=@AGGREGATE@
-if [ "$aggregate" = 1 ]; then
-    grep -q 'virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=rw virtfs_aggregate=1' /proc/cmdline || fail 10
-elif grep -q 'virtfs_aggregate=' /proc/cmdline; then
-    fail 11
-fi
+# The checked export plan always uses an aggregate, even for one bind.
+aggregate=/run/nvx/hostfs/root
+export_mode=@EXPORT_MODE@
+grep -q "virtfs_dir=$aggregate virtfs_tag=microvm virtfs_mode=$export_mode virtfs_aggregate=1" /proc/cmdline || fail 10
 
 # Each TARGET:MODE:SEED names a share's guest target, its mode, and the
 # contents of its seed file.
@@ -51,11 +47,10 @@ for share in @SHARES@; do
         expect_read_only "$error" $((code + 6))
         # OpenVMM enforces the mode on the host, so the share refuses writes
         # even after guest root makes its mount read-write.
-        if [ "$aggregate" = 1 ]; then
-            mount -o remount,bind,rw "$target" || fail $((code + 7))
-        else
-            mount -o remount,rw "$target" || fail $((code + 7))
+        if [ "$export_mode" = ro ]; then
+            mount -o remount,rw "$aggregate" || fail $((code + 7))
         fi
+        mount -o remount,bind,rw "$target" || fail $((code + 7))
         grep -q "^microvm $target virtiofs rw," /proc/mounts || fail $((code + 8))
         if error=$(touch "$target/from-guest" 2>&1); then
             fail $((code + 9))
