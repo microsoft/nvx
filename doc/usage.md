@@ -343,6 +343,35 @@ boot of `nvx-rs run` does.
 See [Run](run.md) for artifact preparation, the security boundary, and current
 snapshot/configuration limitations.
 
+### `snapshot capture`
+
+```sh
+nvx-rs/target/release/nvx-rs snapshot capture baseline \
+    --store-dir /private/snapshots --hypervisor kvm
+```
+
+Use `mshv` on Linux/MSHV or `whp` on Windows. The store's parent must exist;
+the store and its capture VM are private to the current user. Capture uses the
+identified OpenVMM, kernel and Alpine initramfs already installed in the artifact
+root, without downloading substitutes or accepting `NVX_OPENVMM` overrides.
+
+The VM boots with `nvx_sandbox=1` and no workload or layered root. Its sparse
+placeholder image is at most `--image-capacity-mib` (1024 by default), and its
+dormant scratch is `--scratch-mib` (64 by default). `--processors` (1) and
+`--memory-mib` (256) select boot resources; `--processor-capacity` and
+`--memory-capacity-mib` may reserve larger capacities. RAM capacity must be a
+multiple of 128 MiB. `--cpu-profile` selects the OpenVMM profile.
+
+Only a successful capture whose own VMM exits within `--timeout` (60 whole
+seconds by default) can publish. The immutable named directory contains exactly
+`key.bin`, `snapshot.json` and `openvmm/`; an existing name is never replaced.
+Capture's own VM directory is then removed. A timed-out VM is stopped but its
+capture is never finished. The next capture command using this store ends and
+removes an interrupted attempt through ordinary launch recovery, without
+resuming or publishing it. Indeterminate recovery retains its evidence and
+reports an error. Captures in one store serialize; snapshot locks remain
+separate from their immutable directories. Restore commands are not added here.
+
 ### `download`
 
 ```text
