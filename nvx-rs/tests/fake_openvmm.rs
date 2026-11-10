@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use nvx::host::instance::{Found, Instance, Running, Started, Stopped, WorkloadOutcome};
 use nvx::host::launch::{LaunchSpec, PROCESS_COMMAND_LINE_LIMIT};
-use nvx::host::process::{Process, ProcessRef};
+use nvx::host::process::{Opened, Process, ProcessRef};
 use nvx::host::store::{ArtifactIdentity, CallerFiles, IdentityPart, RuntimeIdentity};
 use nvx::host::supervisor::spawn_command;
 use nvx::protocol::{Workload, WorkloadEnvironment};
@@ -425,9 +425,10 @@ fn a_restarted_orchestrator_reattaches_to_its_vm() {
     let Found::Mismatched(mismatched) = locked.find(|| Ok(runtime_with('9'))).unwrap() else {
         panic!("a VM of another runtime identity was not reported");
     };
-    let process = Process::open(mismatched.vmm().record().process())
-        .unwrap()
-        .expect("the VM runs");
+    let Opened::Running(process) = Process::open(mismatched.vmm().record().process()).unwrap()
+    else {
+        panic!("the VM runs");
+    };
     for timeout in [Duration::ZERO, Duration::MAX] {
         let Found::Mismatched(mismatched) = locked.find(|| Ok(runtime_with('9'))).unwrap() else {
             panic!("a VM of another runtime identity was not reported");
@@ -467,9 +468,10 @@ fn outcome_reports_of_another_runtime_are_never_read() {
         let Found::Mismatched(mismatched) = locked.find(|| Ok(runtime_with('9'))).unwrap() else {
             panic!("a VM of another runtime identity was not reported");
         };
-        let process = Process::open(mismatched.vmm().record().process())
-            .unwrap()
-            .expect("the VM runs");
+        let Opened::Running(process) = Process::open(mismatched.vmm().record().process()).unwrap()
+        else {
+            panic!("the VM runs");
+        };
         fs::write(
             instance.report_path(),
             r#"{"schema_version":1,"outcome":{"operation":"managed","category":"success",
@@ -478,7 +480,7 @@ fn outcome_reports_of_another_runtime_are_never_read() {
         .unwrap();
         if exits_first {
             process.kill().unwrap();
-            assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+            assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
         }
         let stopped = locked.terminate(mismatched, TIMEOUT).unwrap();
         assert_eq!(
@@ -517,7 +519,9 @@ fn records_that_name_another_process_never_end_it() {
         let mut record: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
-        let process = Process::open(&reference).unwrap().expect("the VM runs");
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the VM runs");
+        };
         tamper(&mut record);
         fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         // Under another runtime identity too, the VM is found stopped, and its record is cleared,
@@ -528,11 +532,12 @@ fn records_that_name_another_process_never_end_it() {
         drop(locked);
         assert!(records_nothing(&instance));
         assert!(
-            !process
+            process
                 .wait(Instant::now() + Duration::from_millis(200))
                 .unwrap()
+                .is_none()
         );
         process.kill().unwrap();
-        assert!(process.wait(Instant::now() + TIMEOUT).unwrap());
+        assert!(process.wait(Instant::now() + TIMEOUT).unwrap().is_some());
     }
 }

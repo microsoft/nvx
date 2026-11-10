@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use nvx::contract::{
     BOOT_CONTRACT_VERSION, CONTROL_CONTRACT_REVISION, CONTROL_SESSION_PROTOCOL_VERSION,
 };
-use nvx::host::process::{Process, ProcessRef};
+use nvx::host::process::{Opened, Process, ProcessRef};
 use nvx::host::sandbox::distro::DistroBinding;
 use nvx::host::sandbox::scratch::ScratchBinding;
 use nvx::host::sandbox::{LayerRole, SandboxLayer};
@@ -153,9 +153,9 @@ fn assert_runtime_record(root: &Root, state: &str, record: &Value) -> (String, P
         "{record}"
     );
     let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
-    let process = Process::open(&reference)
-        .unwrap()
-        .unwrap_or_else(|| panic!("the OpenVMM of the record does not run: {record}"));
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the OpenVMM of the record does not run: {record}");
+    };
     let endpoint = record["endpoint"].as_str().unwrap().to_owned();
     assert_endpoint(root, state, &endpoint);
     let digest = |index: usize| format!("sha256:{}", PROVENANCE[index].2);
@@ -604,7 +604,8 @@ fn check_lifecycle(case: &Configuration) {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
         assert_eq!(entries(&state), STOPPED, "{context}");
@@ -694,7 +695,8 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
         assert_eq!(entries(&state), STOPPED, "{context}");
@@ -737,7 +739,8 @@ fn stops_keep_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
         assert!(
             process
                 .wait(Instant::now() + Duration::from_secs(10))
-                .unwrap(),
+                .unwrap()
+                .is_some(),
             "{context}: OpenVMM runs on"
         );
         assert_eq!(entries(&state), STOPPED, "{context}");
@@ -1429,7 +1432,10 @@ fn recycled_process_id(root: &Root) {
     let path = root.below("state/runtime.json");
     let mut record = json(&path);
     let reference: ProcessRef = serde_json::from_value(record["process"].clone()).unwrap();
-    let openvmm = Unrecorded(Process::open(&reference).unwrap().expect("OpenVMM runs"));
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("OpenVMM runs");
+    };
+    let openvmm = Unrecorded(process);
     let start_time = record["process"]["startTime"].as_u64().unwrap();
     record["process"]["startTime"] = json!(start_time + 1);
     fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
@@ -1437,9 +1443,10 @@ fn recycled_process_id(root: &Root) {
     assert_refused(root, &outcome, "sandbox-exited", &["stale", "not running"]);
     assert!(!path.exists());
     assert!(
-        !openvmm
+        openvmm
             .wait(Instant::now() + Duration::from_millis(200))
-            .unwrap(),
+            .unwrap()
+            .is_none(),
         "the stale record's process was signaled"
     );
     openvmm.kill().unwrap();
@@ -1447,6 +1454,7 @@ fn recycled_process_id(root: &Root) {
         openvmm
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
     let outcome = operate(root, "stop", "state", &[]);
     assert_refused(root, &outcome, "sandbox-not-running", &["not running"]);

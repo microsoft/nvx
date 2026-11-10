@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use nvx::Hypervisor;
 use nvx::host::artifacts::{ArtifactDir, Artifacts, Guest};
-use nvx::host::process::Process;
+use nvx::host::process::{Opened, Process};
 use nvx::host::store::{LOG_NAME, RuntimeRecord, SandboxStore};
 use nvx::host::supervisor::{self, Reattached, StopOutcome};
 use nvx::host::template::{CAPTURES_NAME, Store, TRANSACTION_NAME};
@@ -154,11 +154,14 @@ impl Sandbox {
     pub(crate) fn new(name: &str) -> Self {
         let pid = std::process::id();
         let root = (0..)
-            .map(|attempt| env::temp_dir().join(format!("runtime-adapter-{name}-{pid}-{attempt}")))
+            .map(|attempt| env::temp_dir().join(format!("ra-{pid}-{attempt}")))
             .find(|root| match fs::create_dir(root) {
                 Ok(()) => true,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
-                Err(error) => panic!("cannot create {}: {error}", root.display()),
+                Err(error) => panic!(
+                    "cannot create the {name} sandbox {}: {error}",
+                    root.display()
+                ),
             })
             .expect("a directory name is free");
         Self {
@@ -404,7 +407,10 @@ impl Sandbox {
 
     /// Returns the VMM of the sandbox's runtime record, if the record names one that runs.
     pub(crate) fn vmm(&self) -> Option<Process> {
-        Process::open(self.record()?.process()).unwrap()
+        match Process::open(self.record()?.process()).unwrap() {
+            Opened::Running(process) => Some(process),
+            Opened::Exited(_) => None,
+        }
     }
 
     /// Ends the VM that the sandbox's store records, whatever its runtime identity: reattach ends

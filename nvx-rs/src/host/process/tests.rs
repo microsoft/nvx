@@ -183,6 +183,21 @@ fn sleeper() -> std::process::Command {
 struct ExitChild(std::process::Child);
 
 #[cfg(any(target_os = "linux", windows))]
+impl ExitChild {
+    fn spawn() -> Self {
+        Self(crate::host::tests::spawn_locked(&mut sleeper()).unwrap())
+    }
+
+    fn reference(&self) -> ProcessRef {
+        ProcessRef {
+            pid: self.0.id(),
+            start_time: platform::process_start_time(self.0.id()).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
 impl Drop for ExitChild {
     fn drop(&mut self) {
         if self.0.try_wait().unwrap().is_none() {
@@ -224,7 +239,9 @@ fn exit_handles_are_independently_owned_and_exist_only_for_exit_events() {
         start_time: platform::process_start_time(child.0.id()).unwrap().unwrap(),
         boot: BootId::current().unwrap(),
     };
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the child runs");
+    };
     let handle = process.exit_handle().unwrap();
     assert_eq!(handle.is_some(), process.wait_method() == WaitMethod::Event);
     if handle.is_some() {
@@ -237,6 +254,47 @@ fn exit_handles_are_independently_owned_and_exist_only_for_exit_events() {
     if let Some(handle) = handle {
         assert!(wait_exit_handle(handle, Duration::from_secs(10)).unwrap());
     }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn opening_a_recorded_child_returns_running_only_for_its_identity() {
+    let mut child = ExitChild::spawn();
+    let reference = child.reference();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the recorded child runs");
+    };
+    assert_eq!(process.reference(), &reference);
+    assert!(!process.has_exited().unwrap());
+    let mut other_boot = *reference.boot.as_bytes();
+    other_boot[0] ^= 1;
+    for exited in [
+        ProcessRef {
+            boot: BootId::from_bytes(other_boot),
+            ..reference.clone()
+        },
+        ProcessRef {
+            start_time: reference.start_time + 1,
+            ..reference.clone()
+        },
+    ] {
+        assert!(matches!(Process::open(&exited).unwrap(), Opened::Exited(_)));
+    }
+    assert!(child.0.try_wait().unwrap().is_none());
+    assert!(!process.has_exited().unwrap());
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn opening_a_reaped_recorded_child_proves_exit() {
+    let mut child = ExitChild::spawn();
+    let reference = child.reference();
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    assert!(matches!(
+        Process::open(&reference).unwrap(),
+        Opened::Exited(_)
+    ));
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -275,7 +333,7 @@ fn hosts_without_pidfds_poll_and_never_signal() {
     let still_running = process.has_exited();
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(!running.unwrap());
+    assert!(running.unwrap().is_none());
     assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::Unsupported);
     assert!(!still_running.unwrap());
     // Once the child is reaped, its ID names no process, or another one.
@@ -283,6 +341,7 @@ fn hosts_without_pidfds_poll_and_never_signal() {
         process
             .wait(Instant::now() + Duration::from_secs(10))
             .unwrap()
+            .is_some()
     );
 }
 
@@ -346,7 +405,9 @@ fn processes_count_the_bytes_that_their_read_calls_read() {
         start_time: platform::process_start_time(child.id()).unwrap().unwrap(),
         boot: BootId::current().unwrap(),
     };
-    let process = Process::open(&reference).unwrap().unwrap();
+    let Opened::Running(process) = Process::open(&reference).unwrap() else {
+        panic!("the reader runs");
+    };
     let counted = process.bytes_read();
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"x\n").unwrap();

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use nvx::ErrorKind;
 use nvx::host::platform;
-use nvx::host::process::{BootId, Process, ProcessRef};
+use nvx::host::process::{BootId, Opened, Process, ProcessRef};
 use nvx::host::store::{
     ArtifactIdentity, IdentityCheck, IdentityPart, JOURNAL_NAME, Launch, LaunchId, LaunchState,
     LockedStore, RUNTIME_NAME, Recovery, RuntimeIdentity, SandboxStore,
@@ -179,11 +179,13 @@ fn kill(pid: u32, start_time: u64) -> io::Result<bool> {
         start_time,
         boot: BootId::current()?,
     };
-    let Some(process) = Process::open(&reference)? else {
+    let Opened::Running(process) = Process::open(&reference)? else {
         return Ok(true);
     };
     process.kill()?;
-    process.wait(Instant::now() + RECOVERY_TIMEOUT)
+    process
+        .wait(Instant::now() + RECOVERY_TIMEOUT)
+        .map(|exited| exited.is_some())
 }
 
 /// A VMM that a crashed orchestrator left behind, which is killed when the test ends if it still
@@ -528,12 +530,17 @@ fn a_committed_launch_names_its_vm_for_another_build() {
         IdentityCheck::Mismatched(vec![IdentityPart::Initramfs])
     );
     // The record's verified reference holds the VMM, whichever process started it.
-    let reattached = Process::open(found.process())
-        .unwrap()
-        .expect("the recorded VMM runs");
+    let Opened::Running(reattached) = Process::open(found.process()).unwrap() else {
+        panic!("the recorded VMM runs");
+    };
     assert!(!reattached.has_exited().unwrap());
     drop(vmm);
-    assert!(reattached.wait(Instant::now() + RECOVERY_TIMEOUT).unwrap());
+    assert!(
+        reattached
+            .wait(Instant::now() + RECOVERY_TIMEOUT)
+            .unwrap()
+            .is_some()
+    );
     other.lock(None).unwrap().clear_runtime().unwrap();
     assert!(other.runtime().unwrap().is_none());
 }
