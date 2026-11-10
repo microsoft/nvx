@@ -3050,8 +3050,11 @@ the template, whose VM might still run.
 
 The template and clone stage's scenarios run as one suite, which
 [`scenarios.txt`](scenarios.txt) names: each line names a test target of
-`tests/`, then one of its tests. CI's runtime adapter step runs the suite on
-each backend, KVM, MSHV, and WHP, with
+`tests/`, then one of its tests, optionally followed by `linux` or `windows`.
+Unqualified entries run on both platforms; qualified entries run only on the
+named host platform. Duplicate target/test pairs, even with different
+qualifiers, and unknown qualifiers are errors. CI's runtime adapter step runs
+the suite on each backend, KVM, MSHV, and WHP, with
 `python3 scripts/nvx.py test-runtime-adapter --backend BACKEND`, in the
 host-only configuration: it runs each target's scenarios by name, the VM
 scenarios, which are ignored, with the others, and checks that each of them ran
@@ -3059,7 +3062,9 @@ and passed. It fails once a line names a test that its target does not have, a
 target that a line names has a test that no line names, the library or another
 target has an ignored test, or a named test does not run and pass, so that a
 scenario that is renamed, added, or gone fails it rather than drop out of the
-suite. With `--check-only`, it checks the names alone, and runs nothing.
+suite. Inventory checks, execution and scenario counts all use the same
+platform-selected entries. With `--check-only`, it compiles and lists the
+tests to check the names, but runs no scenarios and needs no guest artifacts.
 
 The suite holds each operation's outcomes, from `create` to `run`, without a
 hypervisor and in VMs, and every scenario of the stage's VMs: launches of
@@ -3222,6 +3227,7 @@ layered roots, captures of templates, and the starts and runs of their clones.
 | `vm_clone` | `one_generation_serves_clones_of_either_format_over_either_upper` | A template of a GPT placeholder serves EROFS and GPT clones of other layouts, shorter than the placeholder, at its length, over either upper, those in RAM with no scratch file, and a first partition over its bound ends a clone with status 54 |
 | `vm_clone` | `one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address` | One template with a NIC serves the clones of every network policy at its guest's address, whose restores install their own policies on its NIC, which lets through what each allows, publishes the guest's listeners, through the clone's announcer, and forwards ports where it says, and NVX's plan refuses another address, or no NIC, with status 8 before any VMM starts |
 | `vm_clone` | `openvmm_reads_none_of_the_host_s_input_until_the_repair_acknowledges_the_restore` | OpenVMM reads none of the host's attachment until the repair of a clone, whose template delays it, acknowledges the restore: the broker answers it only after the delay, and on Linux, where the host writes it a byte at a time, `SIOCOUTQ` rises with each byte and stays as the write left it until then, while a reattach's is answered at once |
+| `vm_clone` | `restore_exclusion::hard_linked_restore_views_obey_the_callers_exclusion` (linux) | Caller-locked concurrent hard-linked restores succeed, an unlocked link change during startup fails the restore, a controller killed before ready prevents completion, and link changes after the peer-verified ready connection do not fail it |
 | `vm_clone` | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | The lease of a start that ended before it recorded its clone is released only through its own template store, which `--template` names |
 
 ### Running the VM tests
