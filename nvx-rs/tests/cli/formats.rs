@@ -211,7 +211,7 @@ fn configurations_of_every_format_start_and_exec() {
                     Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
                 assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
                 assert_opened_images(&root, "state");
-                let mut expected = openvmm(managed("state", &endpoint));
+                let mut expected = openvmm(managed("state", &endpoint)).persistent_expected();
                 expected.take("--microvm-sandbox-block");
                 expected.assert_matches(&root, &options, name);
                 let mapped = root.below("build/fake-openvmm-state-maps.json");
