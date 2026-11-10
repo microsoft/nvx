@@ -44,7 +44,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::host::config::{
-    CaptureConfig, ConsoleAttachment, NicConfig, PROCESSOR_COUNTS, RootConfig, UpperConfig, VmConfig,
+    CaptureConfig, ConsoleAttachment, NicConfig, PROCESSOR_COUNTS, RootConfig, UpperConfig,
+    VmConfig,
 };
 use crate::host::paths::{absolute, normalized};
 use crate::host::runtime::{Runtime, RuntimeIdentity};
