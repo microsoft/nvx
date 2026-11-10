@@ -1437,9 +1437,106 @@ fn the_log_and_inherited_resources_stay_open_without_reopening_their_paths() {
     prepared.inherit(file);
     fs::rename(&input, &moved_input).unwrap();
     fs::write(&input, b"replacement input").unwrap();
-    prepared.inherit[0].write_all(b"original input").unwrap();
+    inherited_file(prepared.inherit.pop().unwrap())
+        .write_all(b"original input")
+        .unwrap();
     assert_eq!(fs::read(&moved_input).unwrap(), b"original input");
     assert_eq!(fs::read(&input).unwrap(), b"replacement input");
+}
+
+fn inherited_file(resource: InheritedHandle) -> File {
+    #[cfg(any(unix, windows))]
+    return File::from(Owned::from(resource));
+    #[cfg(not(any(unix, windows)))]
+    resource.handle
+}
+
+#[test]
+fn a_command_moves_the_checked_launch_and_the_same_opened_resources() {
+    use std::io::Write;
+
+    let (_directory, vm) = vm_dir();
+    let mut runtime = cold_runtime();
+    runtime.windows_breakaway = true;
+    let mut prepared = create(&runtime, &cold_config(), None, &vm).unwrap();
+    let program = absolute(&runtime.openvmm).unwrap();
+    let arguments = prepared.arguments().as_ptr();
+    let capability = *prepared.capability().as_bytes();
+    let outputs = prepared.outputs().clone();
+    let original_log = vm.path().join("original-log");
+    fs::rename(&outputs.log, &original_log).unwrap();
+    fs::write(&outputs.log, b"replacement log").unwrap();
+    let input = vm.path().join("input");
+    let original_input = vm.path().join("original-input");
+    prepared.inherit(File::create(&input).unwrap());
+    let resources = prepared.inherit.as_ptr();
+    fs::rename(&input, &original_input).unwrap();
+    fs::write(&input, b"replacement input").unwrap();
+    #[cfg(unix)]
+    let log_handle = std::os::fd::AsRawFd::as_raw_fd(prepared.log());
+    #[cfg(windows)]
+    let log_handle = std::os::windows::io::AsRawHandle::as_raw_handle(prepared.log());
+    runtime.openvmm = "different-program".into();
+    runtime.windows_breakaway = false;
+
+    let mut command = prepared.into_command();
+    assert_eq!(command.program, program);
+    assert_eq!(command.working_dir, vm.path());
+    assert!(command.breakaway_from_job);
+    assert_eq!(command.arguments.as_ptr(), arguments);
+    assert_eq!(command.inherit.as_ptr(), resources);
+    assert_eq!(command.capability.as_bytes(), &capability);
+    assert_eq!(command.outputs, outputs);
+    #[cfg(unix)]
+    assert_eq!(std::os::fd::AsRawFd::as_raw_fd(&command.log), log_handle);
+    #[cfg(windows)]
+    assert_eq!(
+        std::os::windows::io::AsRawHandle::as_raw_handle(&command.log),
+        log_handle
+    );
+    command.log.write_all(b"original log").unwrap();
+    inherited_file(command.inherit.pop().unwrap())
+        .write_all(b"original input")
+        .unwrap();
+    assert_eq!(fs::read(original_log).unwrap(), b"original log");
+    assert_eq!(fs::read(original_input).unwrap(), b"original input");
+    assert_eq!(fs::read(&outputs.log).unwrap(), b"replacement log");
+    assert_eq!(fs::read(input).unwrap(), b"replacement input");
+    drop(command);
+    assert!(outputs.log.exists());
+    assert!(!outputs.outcome.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_owned_descriptor_moves_into_and_out_of_an_inherited_handle() {
+    use std::io::Write;
+    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+
+    let file = tempfile::tempfile().unwrap();
+    let number = file.as_raw_fd();
+    let descriptor: OwnedFd = file.into();
+    let resource: InheritedHandle = descriptor.into();
+    assert_eq!(resource.as_fd().as_raw_fd(), number);
+    let descriptor: OwnedFd = resource.into();
+    assert_eq!(descriptor.as_raw_fd(), number);
+    File::from(descriptor).write_all(b"still open").unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn an_owned_windows_handle_moves_into_and_out_of_an_inherited_handle() {
+    use std::io::Write;
+    use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle};
+
+    let file = tempfile::tempfile().unwrap();
+    let number = file.as_raw_handle();
+    let handle: OwnedHandle = file.into();
+    let resource: InheritedHandle = handle.into();
+    assert_eq!(resource.as_handle().as_raw_handle(), number);
+    let handle: OwnedHandle = resource.into();
+    assert_eq!(handle.as_raw_handle(), number);
+    File::from(handle).write_all(b"still open").unwrap();
 }
 
 #[test]

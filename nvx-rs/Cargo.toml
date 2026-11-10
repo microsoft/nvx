@@ -133,6 +133,11 @@ path = "src/bin/nvx-rs.rs"
 required-features = ["cli"]
 doc = false
 
+[[example]]
+name = "external-launch"
+path = "examples/external-launch.rs"
+required-features = ["host"]
+
 # The guest binaries. Their unit tests live in the library, so the binaries have no test harness.
 [[bin]]
 name = "nvx-console-pending"
