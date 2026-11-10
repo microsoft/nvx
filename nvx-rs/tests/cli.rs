@@ -1906,11 +1906,9 @@ fn wait_for_json(path: &Path) -> Value {
 }
 
 #[test]
-fn start_hands_openvmm_the_images_that_it_checked() {
-    // Images that something replaces after the start checked them and before OpenVMM opens them:
-    // on Linux, OpenVMM opens the checked files through the descriptors that it inherits, whatever
-    // has their paths now; on Windows, the checked files keep anything from replacing the images
-    // until the guest is ready.
+fn start_opens_the_stable_caller_paths_that_provision_checked() {
+    // The caller keeps its image paths stable through start and the VM's lifetime. This no
+    // longer promises descriptor transfer or a Windows Ready-time guard-release boundary.
     let root = Root::new();
     let output = run(
         &root,
@@ -1923,8 +1921,6 @@ fn start_hands_openvmm_the_images_that_it_checked() {
     assert!(output.status.success(), "{}", text(&output.stderr));
     let distro = root.path.join("distro.erofs");
     let scratch = root.path.join("scratch.ext4");
-    #[cfg(windows)]
-    let moved = |path: &Path| path.with_extension("moved");
     let start = Command::new(NVX_RS)
         .arg("--root")
         .arg(&root.path)
@@ -1944,38 +1940,32 @@ fn start_hands_openvmm_the_images_that_it_checked() {
         .join("build")
         .join("fake-openvmm-state-blocks.json");
     assert!(!blocks.exists());
-    for (path, replacement) in [
-        (&distro, "replaced distro\n"),
-        (&scratch, "replaced scratch\n"),
-    ] {
-        let new = path.with_extension("new");
-        fs::write(&new, replacement).unwrap();
-        let replaced = fs::rename(&new, path);
-        assert_eq!(
-            replaced.is_ok(),
-            cfg!(unix),
-            "{}: {replaced:?}",
-            path.display()
-        );
-    }
-    // On Windows, while the start holds the checked files, nothing writes the distro layer, and
-    // nothing removes or renames either image, even once OpenVMM reads and writes the scratch
-    // image.
-    #[cfg(windows)]
-    for opened in [false, true] {
-        if opened {
-            wait_for(&blocks);
-        }
-        assert!(fs::OpenOptions::new().append(true).open(&distro).is_err());
-        for path in [&distro, &scratch] {
-            assert!(fs::rename(path, moved(path)).is_err());
-            assert!(fs::remove_file(path).is_err());
-        }
-    }
+    let arguments = root.openvmm_arguments("build/fake-openvmm-state.json");
+    let mut options = openvmm::Options::parse(&arguments);
+    openvmm::assert_stable_blocks(&root, &options.take("--microvm-sandbox-block"), true);
+    let journal = wait_for_json(&root.below("state/launch.json"));
+    assert_eq!(
+        Path::new(journal["vmDir"].as_str().unwrap()),
+        root.below("state")
+    );
+    assert_eq!(
+        Path::new(journal["log"].as_str().unwrap()),
+        root.below("state/openvmm.log")
+    );
+    assert_eq!(
+        Path::new(journal["outcome"].as_str().unwrap()),
+        root.below("state/outcome.json")
+    );
+    assert_eq!(
+        journal["capability"],
+        json!(fs::read(root.below("state/control.capability")).unwrap())
+    );
+    assert_eq!(fs::read(&distro).unwrap(), b"distro\n");
+    assert_eq!(fs::read(&scratch).unwrap(), b"scratch\n");
 
     let output = start.wait_with_output().unwrap();
     assert!(output.status.success(), "{}", text(&output.stderr));
-    // OpenVMM opened the objects that the start checked.
+    // OpenVMM opened the caller-owned images at those unchanged paths.
     let opened: Value = serde_json::from_str(&fs::read_to_string(&blocks).unwrap()).unwrap();
     let opened: Vec<(&str, &str)> = opened
         .as_array()
@@ -1989,13 +1979,6 @@ fn start_hands_openvmm_the_images_that_it_checked() {
         })
         .collect();
     assert_eq!(opened, [("distro", "distro\n"), ("scratch", "scratch\n")]);
-    // Once the guest is ready, the start releases the checked files: on Windows, the images can be
-    // renamed again, as OpenVMM's own opens share it.
-    #[cfg(windows)]
-    for path in [&distro, &scratch] {
-        fs::rename(path, moved(path)).unwrap();
-        fs::rename(moved(path), path).unwrap();
-    }
     for operation in ["stop", "deprovision"] {
         let output = run(&root, &lifecycle(operation, &root, "state"));
         assert!(
@@ -2004,15 +1987,14 @@ fn start_hands_openvmm_the_images_that_it_checked() {
             text(&output.stderr)
         );
     }
+    assert_eq!(fs::read(&distro).unwrap(), b"distro\n");
+    assert_eq!(fs::read(&scratch).unwrap(), b"scratch\n");
 }
 
 #[test]
-fn a_start_that_ends_before_openvmm_opens_the_images_leaves_it_the_checked_ones() {
-    // A start that ends after it spawned OpenVMM and before OpenVMM opened its images, as when the
-    // CLI crashes, closes its checked files early: on Windows, the copies of them that OpenVMM
-    // inherited keep anything from replacing the images at their final paths until OpenVMM exits;
-    // on Linux, OpenVMM opens the checked files through the descriptors that it inherited,
-    // whatever has their paths. The sandbox's next transition ends that OpenVMM.
+fn an_interrupted_start_keeps_its_claim_until_recovery_confirms_exit() {
+    // Image paths remain caller-owned and stable even after the CLI dies. The inherited scratch
+    // claim, unlike a path guard, must survive that death until verified recovery ends the VM.
     let root = Root::new();
     // OpenVMM opens its images seconds after it starts, and a guest that answers after a minute
     // keeps the start waiting.
@@ -2059,23 +2041,16 @@ fn a_start_that_ends_before_openvmm_opens_the_images_leaves_it_the_checked_ones(
         .join("build")
         .join("fake-openvmm-state-blocks.json");
     assert!(!blocks.exists());
-    for (path, replacement) in [
-        (&distro, "replaced distro\n"),
-        (&scratch, "replaced scratch\n"),
-    ] {
-        let new = path.with_extension("new");
-        fs::write(&new, replacement).unwrap();
-        let replaced = fs::rename(&new, path);
-        assert_eq!(
-            replaced.is_ok(),
-            cfg!(unix),
-            "{}: {replaced:?}",
-            path.display()
-        );
-    }
+    let scratch_binding: nvx::host::sandbox::scratch::ScratchBinding =
+        serde_json::from_value(root.json("state/config.json")["scratch_binding"].clone()).unwrap();
+    let error = scratch_binding
+        .check(&scratch, Instant::now() + Duration::from_millis(100))
+        .unwrap_err();
+    assert_eq!(error.code(), nvx::ErrorCode::ScratchClaimed);
+    assert_eq!(fs::read(&distro).unwrap(), b"distro\n");
+    assert_eq!(fs::read(&scratch).unwrap(), b"scratch\n");
 
-    // OpenVMM opens the objects that the start checked, and dumps what they held while the start's
-    // OpenVMM still runs: the dump is whole once it parses, which no prefix of it does.
+    // The surviving VM opens the same stable caller paths.
     let opened = wait_for_json(&blocks);
     let opened: Vec<(&str, &str)> = opened
         .as_array()
@@ -2090,20 +2065,22 @@ fn a_start_that_ends_before_openvmm_opens_the_images_leaves_it_the_checked_ones(
         .collect();
     assert_eq!(opened, [("distro", "distro\n"), ("scratch", "scratch\n")]);
 
-    // The next transition ends the start, whose OpenVMM it verifies through the journal, and the
-    // copies of the checked files go with OpenVMM: on Windows, the images can be renamed again.
+    // The next transition verifies the journal's process and proves exit before clearing it.
     assert_eq!(
         transition(&root, "stop", "state", &[]),
         failed("sandbox-not-running", "sandbox is not running")
     );
     assert!(process.has_exited().unwrap());
-    #[cfg(windows)]
-    for path in [&distro, &scratch] {
-        let moved = path.with_extension("moved");
-        fs::rename(path, &moved).unwrap();
-        fs::rename(&moved, path).unwrap();
-    }
+    assert!(!journal.exists());
+    assert!(!root.below("state/control.capability").exists());
+    assert!(
+        scratch_binding
+            .check(&scratch, Instant::now() + Duration::from_secs(2))
+            .is_ok()
+    );
     assert_eq!(transition(&root, "deprovision", "state", &[]), succeeded());
+    assert_eq!(fs::read(&distro).unwrap(), b"distro\n");
+    assert_eq!(fs::read(&scratch).unwrap(), b"scratch\n");
 }
 
 /// Makes `handle` inheritable, or not, as code that spawns without a handle list does around its

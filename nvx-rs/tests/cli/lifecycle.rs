@@ -24,8 +24,8 @@ use crate::harness::{
     in_parallel, is_hex, json,
 };
 use crate::openvmm::{
-    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_checked_blocks, assert_checked_distro,
-    assert_endpoint, assert_opened_distro, assert_opened_images, assert_outcome_report, managed,
+    NO_NETWORK, NetworkPolicy, Options, WORKLOAD, assert_endpoint, assert_opened_distro,
+    assert_opened_images, assert_outcome_report, assert_stable_blocks, managed,
 };
 
 /// The entries of the state directory of a sandbox that never started: its configuration and
@@ -583,7 +583,7 @@ fn check_lifecycle(case: &Configuration) {
         assert_capability(&state);
         let mut options =
             Options::parse(&root.openvmm_arguments(&format!("build/fake-openvmm-{token}.json")));
-        assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
+        assert_stable_blocks(&root, &options.take("--microvm-sandbox-block"), true);
         assert_opened_images(&root, token);
         let mut expected = (case.openvmm)(managed(case.state, &endpoint)).persistent_expected();
         expected.take("--microvm-sandbox-block");
@@ -677,7 +677,7 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         let (endpoint, process) =
             assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
         let mut options = Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
-        assert_checked_distro(&root, &options.take("--microvm-sandbox-block"));
+        assert_stable_blocks(&root, &options.take("--microvm-sandbox-block"), false);
         assert_opened_distro(&root, "state");
         let mut expected = managed("state", &endpoint).in_ram().persistent_expected();
         expected.take("--microvm-sandbox-block");
