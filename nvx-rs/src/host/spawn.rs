@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 #[cfg(not(windows))]
 use std::thread;
-#[cfg(feature = "cli")]
 use std::time::Duration;
 #[cfg(not(windows))]
 use std::time::Instant;
@@ -173,8 +172,9 @@ fn spawn_inner(
 }
 
 /// A VMM that [`spawn`] started, which the caller has not released yet: on Unix, its child
-/// process, which the caller has not reaped, so that its ID names no other process; on Windows,
-/// its process handle.
+/// process; on Windows, its process handle. On Unix the child's ID names no other process until
+/// [`wait_timeout`](Self::wait_timeout) reaps it; hold it with [`process`](Self::process) before
+/// waiting to keep a verified handle after it exits.
 ///
 /// Record it with [`Launch::record_process`](crate::host::store::Launch::record_process), or hold
 /// it with [`process`](Self::process). Then release it with [`detach`](Self::detach), or end it
@@ -311,8 +311,10 @@ impl Launched {
     /// Waits up to `timeout` for the process to exit, and returns its status if it has, as
     /// `Popen.wait` and `Popen.poll` report it: the exit code, or on Unix the negated number of
     /// the signal that ended the process.
-    #[cfg(feature = "cli")]
-    pub(crate) fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<i64>> {
+    ///
+    /// On Unix a successful wait reaps the child; call [`process`](Self::process) before it to
+    /// retain a verified process handle. Later waits return the same status.
+    pub fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<i64>> {
         #[cfg(windows)]
         return Ok(self.process.wait_timeout(timeout)?.map(i64::from));
         #[cfg(not(windows))]
@@ -333,7 +335,7 @@ impl Launched {
     }
 
     /// Reaps the child if it has exited, and returns its status if it has.
-    #[cfg(all(feature = "cli", not(windows)))]
+    #[cfg(not(windows))]
     fn try_reap(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
         let status = self.child.try_wait()?;
         self.reaped |= status.is_some();
@@ -376,11 +378,17 @@ impl Launched {
 }
 
 /// Returns `Popen.returncode` for `status`: the exit code, or the negated signal number.
-#[cfg(all(feature = "cli", not(windows)))]
+#[cfg(not(windows))]
 fn status_value(status: std::process::ExitStatus) -> i64 {
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
 
-    match (status.code(), status.signal()) {
+    #[cfg(unix)]
+    let signal = status.signal();
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+
+    match (status.code(), signal) {
         (Some(code), _) => i64::from(code),
         (None, Some(signal)) => -i64::from(signal),
         (None, None) => 0,

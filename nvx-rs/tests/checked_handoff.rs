@@ -179,6 +179,55 @@ fn fixture_arguments(name: &str) -> Vec<OsString> {
     .to_vec()
 }
 
+/// A VMM fixture that exits with the requested status once the caller lets it go.
+#[test]
+#[ignore = "fixture that the exit-status test runs as a VMM"]
+fn exit_status_fixture() {
+    let directory = env::current_dir().unwrap();
+    if !directory.join(VMM_MARKER).exists() {
+        return;
+    }
+    let mut capability = [0; CAPABILITY_LEN];
+    io::stdin().read_exact(&mut capability).unwrap();
+    assert_eq!(capability, CAPABILITY);
+    let deadline = Instant::now() + VMM_LIFETIME;
+    while !directory.join(GO_MARKER).exists() {
+        if directory.join(EXIT_MARKER).exists() || Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let status = fs::read_to_string(directory.join("exit-status")).unwrap();
+    std::process::exit(status.parse().unwrap());
+}
+
+#[test]
+fn launched_waits_return_and_retain_the_actual_exit_status() {
+    for status in [0, 17] {
+        let mut vmm = VmmDirectory::new();
+        fs::write(vmm.path().join("exit-status"), status.to_string()).unwrap();
+        let command = VmmCommand::new(
+            env::current_exe().unwrap(),
+            fixture_arguments("exit_status_fixture"),
+            vmm.path(),
+        );
+        let log = File::create(vmm.path().join("vmm.log")).unwrap();
+        vmm.launched = Some(supervisor::spawn(&command, &CAPABILITY, log).unwrap());
+        assert_eq!(
+            vmm.launched
+                .as_mut()
+                .unwrap()
+                .wait_timeout(Duration::ZERO)
+                .unwrap(),
+            None
+        );
+        File::create(vmm.path().join(GO_MARKER)).unwrap();
+        let launched = vmm.launched.as_mut().unwrap();
+        assert_eq!(launched.wait_timeout(TIMEOUT).unwrap(), Some(status));
+        assert_eq!(launched.wait_timeout(Duration::ZERO).unwrap(), Some(status));
+    }
+}
+
 /// Returns the arguments that pass a VMM fixture the `--microvm-sandbox-block` values of
 /// `prepared`.
 fn block_arguments(prepared: &PreparedLaunch) -> Vec<OsString> {

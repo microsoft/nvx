@@ -27,7 +27,7 @@ use crate::host::platform::{check_store_dir as check_dir, create_store_dir as cr
 use crate::host::platform::{check_vm_dir as check_dir, create_vm_dir as create_dir};
 use crate::host::runtime::{Runtime, RuntimeIdentity};
 use crate::host::snapshot::Snapshot;
-use crate::host::spawn::{self, VmmCommand};
+use crate::host::spawn;
 use crate::host::transport::{self, HostConnection};
 use crate::host::{platform::inherit::Inherited, process::Process, process::ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
@@ -285,6 +285,110 @@ pub fn reattach(
     })
 }
 
+/// An owned descriptor on Unix.
+#[cfg(unix)]
+type Owned = std::os::fd::OwnedFd;
+/// An owned handle on Windows.
+#[cfg(windows)]
+type Owned = std::os::windows::io::OwnedHandle;
+/// An owned file on hosts without descriptors or handles.
+#[cfg(not(any(unix, windows)))]
+type Owned = File;
+
+/// An already opened resource that a VMM inherits, owned until dropped or transferred.
+///
+/// Conversions move the same descriptor or handle; they neither duplicate nor reopen it.
+/// Borrowed raw descriptors and handles cannot transfer ownership into this type.
+#[derive(Debug)]
+pub struct InheritedHandle {
+    /// The owned platform resource.
+    handle: Owned,
+}
+
+impl From<File> for InheritedHandle {
+    fn from(file: File) -> Self {
+        Self {
+            handle: file.into(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl From<std::os::fd::OwnedFd> for InheritedHandle {
+    fn from(handle: std::os::fd::OwnedFd) -> Self {
+        Self { handle }
+    }
+}
+
+#[cfg(unix)]
+impl From<InheritedHandle> for std::os::fd::OwnedFd {
+    fn from(resource: InheritedHandle) -> Self {
+        resource.handle
+    }
+}
+
+#[cfg(unix)]
+impl std::os::fd::AsFd for InheritedHandle {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.handle)
+    }
+}
+
+#[cfg(windows)]
+impl From<std::os::windows::io::OwnedHandle> for InheritedHandle {
+    fn from(handle: std::os::windows::io::OwnedHandle) -> Self {
+        Self { handle }
+    }
+}
+
+#[cfg(windows)]
+impl From<InheritedHandle> for std::os::windows::io::OwnedHandle {
+    fn from(resource: InheritedHandle) -> Self {
+        resource.handle
+    }
+}
+
+#[cfg(windows)]
+impl std::os::windows::io::AsHandle for InheritedHandle {
+    fn as_handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        std::os::windows::io::AsHandle::as_handle(&self.handle)
+    }
+}
+
+/// A complete cold launch handed to the caller's launcher, with all its resources owned.
+///
+/// The launcher supplies the capability on stdin through a pipe closed to writers before
+/// spawning, and uses the opened log for stdout and stderr. It allows only the standard streams
+/// and `inherit`, under their original descriptor or handle numbers, into the child.
+///
+/// Follow [`spawn`]'s launch contract: detach on Linux, clear only the child's owner umask bits,
+/// and keep allowed descriptors close-on-exec in the caller; on Windows, use an explicit handle
+/// list, restore temporary inheritability, start without a console in the log-named job,
+/// refuse a taken or untrusted job name, and honor `breakaway_from_job`. Windows callers
+/// coordinate their other spawns with the inheritance window. If setup fails after spawning,
+/// terminate and reap only that child before returning an error. The caller journals recovery
+/// data and keeps the VM directory and runtime inputs stable; this value starts no process or
+/// listener.
+#[derive(Debug)]
+pub struct VmmCommand {
+    /// The checked OpenVMM executable.
+    pub program: PathBuf,
+    /// The complete, checked arguments, without the executable.
+    pub arguments: Vec<OsString>,
+    /// The VM directory in which OpenVMM runs.
+    pub working_dir: PathBuf,
+    /// The control credential, never written to disk by the library.
+    pub capability: Capability,
+    /// The already chosen output files and endpoints.
+    pub outputs: VmOutputs,
+    /// Owned resources allowed into the child besides its standard streams.
+    pub inherit: Vec<InheritedHandle>,
+    /// The same private log that preparation opened.
+    pub log: File,
+    /// Whether Windows leaves the caller's job, which must permit breakaway.
+    pub breakaway_from_job: bool,
+}
+
 /// A checked cold launch, with its capability, chosen outputs, and already opened log.
 ///
 /// Creation starts no process and binds no listener. The caller keeps the VM directory and
@@ -307,7 +411,7 @@ pub struct Prepared {
     /// The complete arguments, checked against the actual runtime and output paths.
     arguments: Vec<OsString>,
     /// Already opened resources added by the caller, retained until the preparation is dropped.
-    inherit: Vec<File>,
+    inherit: Vec<InheritedHandle>,
 }
 
 impl Prepared {
@@ -324,8 +428,8 @@ impl Prepared {
     /// Adds an already opened resource to the inheritance allowlist, transferring ownership.
     ///
     /// The resource is not reopened, and remains open for the lifetime of this preparation.
-    pub fn inherit(&mut self, file: File) {
-        self.inherit.push(file);
+    pub fn inherit(&mut self, resource: impl Into<InheritedHandle>) {
+        self.inherit.push(resource.into());
     }
 
     /// Returns the same opened log that creation made, for example to take a liveness claim.
@@ -336,6 +440,24 @@ impl Prepared {
     /// Returns the complete, checked OpenVMM arguments without starting a process.
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
+    }
+
+    /// Transfers the complete checked launch to the caller's launcher.
+    ///
+    /// Moves the same opened log and inherited resources, without cloning, reopening, rendering
+    /// arguments again or rediscovering paths. Starts no process or listener. The caller follows
+    /// [`VmmCommand`]'s launch contract and may retain its capability and outputs for recovery.
+    pub fn into_command(self) -> VmmCommand {
+        VmmCommand {
+            program: self.program,
+            arguments: self.arguments,
+            working_dir: self.working_dir,
+            capability: self.capability,
+            outputs: self.outputs,
+            inherit: self.inherit,
+            log: self.log,
+            breakaway_from_job: self.windows_breakaway,
+        }
     }
 }
 
@@ -537,7 +659,7 @@ fn spawn_verified(
         arguments,
         inherit,
     } = prepared;
-    let command = VmmCommand {
+    let command = spawn::VmmCommand {
         program,
         arguments,
         working_dir,
