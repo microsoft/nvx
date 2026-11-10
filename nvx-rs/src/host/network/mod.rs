@@ -40,6 +40,10 @@ pub mod policy;
 mod proxy;
 mod rule;
 
+use std::net::{IpAddr, Ipv4Addr};
+
+use crate::activation::{Network, Publication};
+
 pub use self::arguments::openvmm_arguments;
 pub(crate) use self::arguments::{dns_server, template_arguments};
 pub use self::loopback::{ForwardProtocol, HostLoopback, LoopbackForward};
@@ -121,6 +125,19 @@ impl NetworkPolicy {
             host_loopback: HostLoopback::Deny,
             host_loopback_forwards: Vec::new(),
             proxy: None,
+        }
+    }
+
+    /// Combines this launch's policy with the fixed NIC gateway and its resolved DNS service.
+    pub(crate) fn activation_network(&self, gateway: Ipv4Addr, dns: Option<IpAddr>) -> Network {
+        Network {
+            dns,
+            publication: if self.publishes_listeners() {
+                Publication::Published
+            } else {
+                Publication::Unpublished
+            },
+            proxy: self.proxy.map(|proxy| proxy.url(gateway)),
         }
     }
 

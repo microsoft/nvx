@@ -547,6 +547,23 @@ directory and runtime inputs stable through creation and a later spawn.
 Dropping a successful preparation closes its resources but leaves its output
 paths owned by the caller.
 
+`Prepared::nic()` returns the effective NIC, including NVX's default cold
+address when the caller leaves it unset, or none when no NIC is attached.
+The preparation owns its checked configuration and NIC; later changes to the
+caller's configuration do not affect them. A restore's resolved NIC retains
+its captured presence and address, independently of its new network policy.
+
+`Prepared::activation_record(tx)` builds record v2 from the owned, resolved
+settings and preserves the supplied transaction. It carries the layered root,
+image UUID or disk GUID and bound, upper and RAM cap or journal policy, view,
+export mapping count and expected CPU and memory resources. The effective NIC
+selects the network's presence and IPv4 and derived IPv6 gateways, while the
+launch's policy supplies DNS, publication and proxy. An omitted limit takes the
+record's maximum bound. It reads no host path and opens no snapshot. A
+blockless root or memory that cannot fit the record's byte count fails with
+`ErrorKind::Unsupported`. These projections do not enable the restore caller;
+`create` still accepts cold launches only.
+
 `vm::spawn(prepared)` consumes that preparation and returns `Launched` with
 its verified `process`, the same `outputs`, and the same `capability`. The log
 and inherited resources are passed as already opened objects, never reopened

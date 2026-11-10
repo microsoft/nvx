@@ -18,8 +18,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::host::config::{ConsoleAttachment, RootConfig, UpperConfig, VmConfig};
+use crate::activation::{
+    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, RestoreSection,
+    TransactionId, Upper,
+};
+use crate::host::config::{
+    ConsoleAttachment, NetworkConfig, NicConfig, RootConfig, UpperConfig, VmConfig,
+};
 use crate::host::filesystem;
+use crate::host::network;
 use crate::host::paths::{absolute, normalized};
 use crate::host::platform;
 #[cfg(not(windows))]
@@ -315,11 +322,109 @@ pub struct Prepared {
     log: File,
     /// The complete arguments, checked against the actual runtime and output paths.
     arguments: Vec<OsString>,
+    /// The checked launch configuration, including this launch's network policy.
+    configuration: VmConfig,
+    /// The effective NIC, whose presence and address a snapshot fixes for a restore.
+    nic: Option<NicConfig>,
     /// Already opened resources added by the caller, retained until the preparation is dropped.
     inherit: Vec<File>,
 }
 
 impl Prepared {
+    /// Returns the effective NIC, or none when the launch attaches no NIC.
+    ///
+    /// A cold launch resolves an omitted address to
+    /// [`DEFAULT_GUEST_NETWORK`](crate::host::config::DEFAULT_GUEST_NETWORK). A restore's
+    /// resolved NIC retains its captured presence and address, independently of its policy.
+    pub fn nic(&self) -> Option<NicConfig> {
+        self.nic
+    }
+
+    /// Builds a layered root's activation record from this launch's checked, owned settings,
+    /// preserving `tx` as its transaction. Reads no host path and opens no snapshot.
+    ///
+    /// The effective NIC supplies the network's presence and IPv4 and derived IPv6 gateways;
+    /// this launch's policy supplies its DNS, publication and proxy, rather than a capture's.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a blockless
+    /// root, which activation records do not represent, memory that cannot fit in the record's
+    /// byte count, or settings that [`Configuration::check`] refuses.
+    pub fn activation_record(&self, tx: TransactionId) -> Result<ActivationRecord> {
+        let RootConfig::Layered(root) = &self.configuration.root else {
+            return Err(Error::unsupported(
+                "an activation record needs a layered root",
+            ));
+        };
+        let image = match root.format.format {
+            crate::protocol::root::ImageFormat::Erofs => Image::Erofs {
+                uuid: root.format.identity,
+            },
+            crate::protocol::root::ImageFormat::Gpt => Image::Gpt {
+                disk_guid: root.format.identity,
+                first_partition_bound: root.gpt_first_partition_bound.unwrap_or(u64::MAX),
+            },
+        };
+        let upper = match root.upper {
+            UpperConfig::Ram { max_memory_percent } => Upper::Tmpfs { max_memory_percent },
+            UpperConfig::Scratch { journal, .. } => Upper::Scratch { journal },
+        };
+        let network = match self.nic {
+            None => None,
+            Some(nic) => {
+                let policy =
+                    self.configuration.network.as_ref().ok_or_else(|| {
+                        Error::unsupported("a prepared NIC needs a network policy")
+                    })?;
+                let gateway = crate::net::guest_gateway(&nic.guest_network.to_string())
+                    .ok_or_else(|| Error::unsupported("the prepared NIC has no gateway"))?;
+                // OpenVMM embeds every microVM NIC's IPv4 identity in fd00::/96.
+                let ipv6_gateway =
+                    std::net::Ipv6Addr::from((0xfd00_u128 << 112) | u128::from(u32::from(gateway)));
+                let dns = network::dns_server(&policy.policy, gateway, Some(ipv6_gateway))?;
+                Some(policy.policy.activation_network(gateway, dns))
+            }
+        };
+        let (export, mappings) = self
+            .configuration
+            .filesystem
+            .as_ref()
+            .map_or((None, 0), |plan| {
+                (
+                    Some(Export {
+                        kind: ExportKind::Aggregate,
+                    }),
+                    plan.binds.len(),
+                )
+            });
+        let memory = self
+            .configuration
+            .memory_mib
+            .checked_mul(1 << 20)
+            .ok_or_else(|| Error::unsupported("VM memory does not fit the record's byte count"))?;
+        ActivationRecord::new(
+            Some(RestoreSection { transaction: tx }),
+            Configuration {
+                image,
+                upper,
+                overlay: root.overlay,
+                export,
+                mappings,
+                network,
+                view: self.configuration.view.clone(),
+                resources: ExpectedResources {
+                    cpus: self.configuration.processors,
+                    memory,
+                },
+            },
+        )
+        .map_err(|error| {
+            Error::unsupported(format!(
+                "no activation record holds the prepared settings: {error}"
+            ))
+            .with_source(error)
+        })
+    }
+
     /// Returns the credential to journal before a spawn or use when attaching a session.
     pub fn capability(&self) -> &Capability {
         &self.capability
@@ -464,10 +569,15 @@ pub fn create(
             &outputs.outcome,
             outputs.console.as_deref(),
         )?;
-        Ok((capability, arguments))
+        let nic = config
+            .network
+            .as_ref()
+            .map(NetworkConfig::cold_nic)
+            .transpose()?;
+        Ok((capability, arguments, nic))
     })();
     match checked {
-        Ok((capability, arguments)) => Ok(Prepared {
+        Ok((capability, arguments, nic)) => Ok(Prepared {
             program: runtime.openvmm.clone(),
             working_dir: dir.path().to_owned(),
             windows_breakaway: runtime.windows_breakaway,
@@ -475,6 +585,8 @@ pub fn create(
             outputs,
             log,
             arguments,
+            configuration: config,
+            nic,
             inherit: Vec::new(),
         }),
         Err(error) => {
@@ -617,6 +729,7 @@ fn spawn_verified(
         log,
         arguments,
         inherit,
+        ..
     } = prepared;
     let command = VmmCommand {
         program,

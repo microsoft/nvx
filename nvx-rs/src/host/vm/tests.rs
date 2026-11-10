@@ -6,16 +6,22 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::ErrorKind;
-use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
+use crate::activation::{Journal, MachineIdMode, Network, OverlayMode, Publication, View};
 use crate::host::config::{
     Boot, LayeredRoot, PROCESS_COMMAND_LINE_LIMIT, RootConfig, UpperConfig,
     process_command_line_units,
+};
+use crate::host::filesystem::{Bind, ExportChild, ExportPlan, Owner};
+use crate::host::network::{
+    Access, EgressRule, NetworkPolicy, NetworkProxy, Protocol, ProxyScheme,
 };
 #[cfg(any(target_os = "linux", windows))]
 use crate::host::process::Opened;
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, RuntimeIdentity};
 use crate::hypervisor::Hypervisor;
+use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootImage;
+use crate::uuid::Uuid;
 
 #[cfg(any(target_os = "linux", windows))]
 mod reattach;
@@ -451,6 +457,283 @@ fn cold_runtime() -> Runtime {
         cpu_profile: None,
         windows_breakaway: false,
         options: LaunchOptions::default(),
+    }
+}
+
+fn layered_config() -> VmConfig {
+    VmConfig {
+        root: RootConfig::Layered(LayeredRoot {
+            image: PathBuf::from("missing-image.erofs"),
+            format: RootImage::erofs(Some(Uuid::from_bytes([0x11; 16]))),
+            gpt_first_partition_bound: None,
+            upper: UpperConfig::Ram {
+                max_memory_percent: 33,
+            },
+            overlay: OverlayMode::UntrustedLowers,
+        }),
+        ..cold_config()
+    }
+}
+
+#[test]
+fn prepared_nic_is_the_effective_cold_device_not_the_callers_later_configuration() {
+    let explicit = Ipv4Cidr::parse("192.0.2.9/24").unwrap();
+    let default = Ipv4Cidr::parse(crate::host::config::DEFAULT_GUEST_NETWORK).unwrap();
+    for (network, expected) in [
+        (None, None),
+        (
+            Some(NetworkConfig {
+                guest_network: Some(explicit),
+                policy: NetworkPolicy::new(Access::Allow),
+            }),
+            Some(NicConfig {
+                guest_network: explicit,
+            }),
+        ),
+        (
+            Some(NetworkConfig {
+                guest_network: None,
+                policy: NetworkPolicy::new(Access::Deny),
+            }),
+            Some(NicConfig {
+                guest_network: default,
+            }),
+        ),
+    ] {
+        let (_directory, vm) = vm_dir();
+        let mut config = cold_config();
+        config.network = network;
+        let prepared = create(&cold_runtime(), &config, None, &vm).unwrap();
+        config.network = None;
+        assert_eq!(prepared.nic(), expected);
+    }
+}
+
+#[test]
+fn prepared_record_keeps_checked_root_view_export_resources_and_transaction() {
+    let erofs = layered_config();
+    let gpt_root = LayeredRoot {
+        image: PathBuf::from("missing-image.gpt"),
+        format: RootImage::gpt(Some(Uuid::from_bytes([0x22; 16]))),
+        gpt_first_partition_bound: Some(64 * 1024),
+        upper: UpperConfig::Scratch {
+            path: PathBuf::from("missing-scratch.raw"),
+            journal: Journal::Forbidden,
+        },
+        overlay: OverlayMode::TrustedLowers,
+    };
+    let gpt = VmConfig {
+        root: RootConfig::Layered(gpt_root.clone()),
+        ..erofs.clone()
+    };
+    let unbounded = VmConfig {
+        root: RootConfig::Layered(LayeredRoot {
+            gpt_first_partition_bound: None,
+            ..gpt_root
+        }),
+        ..gpt.clone()
+    };
+    for (mut config, image, upper, overlay) in [
+        (
+            erofs,
+            Image::Erofs {
+                uuid: Some(Uuid::from_bytes([0x11; 16])),
+            },
+            Upper::Tmpfs {
+                max_memory_percent: 33,
+            },
+            OverlayMode::UntrustedLowers,
+        ),
+        (
+            gpt,
+            Image::Gpt {
+                disk_guid: Some(Uuid::from_bytes([0x22; 16])),
+                first_partition_bound: 64 * 1024,
+            },
+            Upper::Scratch {
+                journal: Journal::Forbidden,
+            },
+            OverlayMode::TrustedLowers,
+        ),
+        (
+            unbounded,
+            Image::Gpt {
+                disk_guid: Some(Uuid::from_bytes([0x22; 16])),
+                first_partition_bound: u64::MAX,
+            },
+            Upper::Scratch {
+                journal: Journal::Forbidden,
+            },
+            OverlayMode::TrustedLowers,
+        ),
+    ] {
+        config.processors = 2;
+        config.filesystem = Some(ExportPlan {
+            children: vec![ExportChild {
+                root: std::env::temp_dir().join("nvx-prepared-missing-export"),
+                file: false,
+                writable: false,
+                denied: Vec::new(),
+                denied_identities: Vec::new(),
+                allowed: Vec::new(),
+                write: Vec::new(),
+            }],
+            binds: vec![Bind {
+                child: 0,
+                source: String::new(),
+                target: "/work".to_owned(),
+                read_only: true,
+                identity: None,
+            }],
+            owner: Owner::Vmm,
+        });
+        let expected_view = config.view.clone();
+        let (_directory, vm) = vm_dir();
+        let prepared = create(&cold_runtime(), &config, None, &vm).unwrap();
+        config.processors = 8;
+        config.view.hostname = b"changed".to_vec();
+        config.filesystem = None;
+        for bytes in [[0x35; 16], [0x71; 16]] {
+            let tx = TransactionId::from_bytes(bytes);
+            let record = prepared.activation_record(tx).unwrap();
+            assert_eq!(record.restore().unwrap().transaction, tx);
+            let configuration = record.configuration();
+            assert_eq!(configuration.image, image);
+            assert_eq!(configuration.upper, upper);
+            assert_eq!(configuration.overlay, overlay);
+            assert_eq!(configuration.view, expected_view);
+            assert_eq!(
+                configuration.export,
+                Some(Export {
+                    kind: ExportKind::Aggregate,
+                })
+            );
+            assert_eq!(configuration.mappings, 1);
+            assert_eq!(configuration.network, None);
+            assert_eq!(
+                configuration.resources,
+                ExpectedResources {
+                    cpus: 2,
+                    memory: 256 << 20,
+                }
+            );
+            assert_eq!(ActivationRecord::decode(&record.encode()).unwrap(), record);
+        }
+    }
+}
+
+#[test]
+fn resolved_restore_record_uses_captured_presence_address_and_its_own_policy() {
+    let captured = NicConfig {
+        guest_network: Ipv4Cidr::parse("198.51.100.9/24").unwrap(),
+    };
+    let mut published = NetworkPolicy::new(Access::Allow);
+    published.ingress = Access::Allow;
+    for (policy, expected) in [
+        (
+            published,
+            Network {
+                dns: Some("198.51.100.1".parse().unwrap()),
+                publication: Publication::Published,
+                proxy: None,
+            },
+        ),
+        (
+            NetworkPolicy::new(Access::Deny),
+            Network {
+                dns: None,
+                publication: Publication::Unpublished,
+                proxy: None,
+            },
+        ),
+        (
+            NetworkPolicy::proxy_only(NetworkProxy::new(3128).with_scheme(ProxyScheme::Http)),
+            Network {
+                dns: None,
+                publication: Publication::Unpublished,
+                proxy: Some("http://198.51.100.1:3128".to_owned()),
+            },
+        ),
+    ] {
+        let mut config = layered_config();
+        config.network = Some(NetworkConfig {
+            guest_network: None,
+            policy,
+        });
+        let (_directory, vm) = vm_dir();
+        let mut prepared = create(&cold_runtime(), &config, None, &vm).unwrap();
+        prepared.configuration.boot = None;
+        prepared.nic = Some(captured);
+        let tx = TransactionId::from_bytes([0x55; 16]);
+        let record = prepared.activation_record(tx).unwrap();
+        assert_eq!(prepared.nic(), Some(captured));
+        assert_eq!(record.restore().unwrap().transaction, tx);
+        assert_eq!(record.configuration().network, Some(expected));
+        prepared.nic = None;
+        assert_eq!(prepared.nic(), None);
+        assert_eq!(
+            prepared
+                .activation_record(tx)
+                .unwrap()
+                .configuration()
+                .network,
+            None
+        );
+    }
+}
+
+#[test]
+fn prepared_record_dns_uses_the_effective_nics_ipv6_gateway() {
+    let explicit = Ipv4Cidr::parse("192.0.2.9/24").unwrap();
+    let captured = NicConfig {
+        guest_network: Ipv4Cidr::parse("198.51.100.9/24").unwrap(),
+    };
+    for (guest_network, restore_nic, expected) in [
+        (None, None, "fd00::a00:1"),
+        (Some(explicit), None, "fd00::c000:201"),
+        (None, Some(captured), "fd00::c633:6401"),
+    ] {
+        let mut config = layered_config();
+        config.network = Some(NetworkConfig {
+            guest_network,
+            policy: NetworkPolicy::new(Access::Deny)
+                .with_allow(EgressRule::to(format!("{expected}/128")).on_port(Protocol::Udp, 53)),
+        });
+        let (_directory, vm) = vm_dir();
+        let mut prepared = create(&cold_runtime(), &config, None, &vm).unwrap();
+        if let Some(nic) = restore_nic {
+            prepared.configuration.boot = None;
+            prepared.nic = Some(nic);
+        }
+        let record = prepared
+            .activation_record(TransactionId::from_bytes([0x77; 16]))
+            .unwrap();
+        assert_eq!(
+            record.configuration().network.as_ref().unwrap().dns,
+            Some(expected.parse().unwrap())
+        );
+    }
+}
+
+#[test]
+fn prepared_record_refuses_roots_or_memory_that_the_schema_cannot_represent() {
+    for (config, message) in [
+        (cold_config(), "a layered root"),
+        (
+            VmConfig {
+                memory_mib: u64::MAX,
+                ..layered_config()
+            },
+            "byte count",
+        ),
+    ] {
+        let (_directory, vm) = vm_dir();
+        let prepared = create(&cold_runtime(), &config, None, &vm).unwrap();
+        let error = prepared
+            .activation_record(TransactionId::from_bytes([0x66; 16]))
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert!(error.to_string().contains(message), "{error}");
     }
 }
 
