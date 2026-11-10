@@ -985,7 +985,7 @@ struct KernelSigaction {
 ///
 /// The dispositions come first, so that a signal that arrived while blocked takes its default
 /// action once unblocked, and never runs a handler of the caller's.
-fn reset_signals() -> Result<(), Errno> {
+pub(crate) fn reset_signals() -> Result<(), Errno> {
     let default = KernelSigaction::default();
     for signal in 1..=SIGNALS {
         if signal == nix::libc::SIGKILL || signal == nix::libc::SIGSTOP {
