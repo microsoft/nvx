@@ -10515,7 +10515,9 @@ def run_filesystem_comma_paths(
                 _render_script(
                     "filesystem-comma-paths.sh.in",
                     EXPORT_MODE=(
-                        "rw" if any(shares[share][1] == "rw" for share in attached) else "ro"
+                        "rw"
+                        if any(shares[share][1] == "rw" for share in attached)
+                        else "ro"
                     ),
                     SHARES=" ".join(":".join(shares[share]) for share in attached),
                 ),
