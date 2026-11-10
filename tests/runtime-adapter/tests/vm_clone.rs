@@ -5486,7 +5486,8 @@ mod restore_exclusion {
             let store = template.store();
             let key = store.read_key(&template.generation()).unwrap();
             let log = File::create(view.log_path()).unwrap();
-            let child = Command::new(runtime.artifacts.openvmm)
+            let mut command = Command::new(runtime.artifacts.openvmm);
+            command
                 .args(
                     in_ram(template)
                         .plan()
@@ -5499,8 +5500,11 @@ mod restore_exclusion {
                 .args(["--cpu-profile", &key.cpu_profile()])
                 .args(["--processors", &key.processors().to_string()])
                 .arg("--restore-snapshot")
-                .arg(view.snapshot())
-                .args(["--restore-processors", &key.boot_processors().to_string()])
+                .arg(view.snapshot());
+            if key.boot_processors() != 0 {
+                command.args(["--restore-processors", &key.boot_processors().to_string()]);
+            }
+            let child = command
                 .args(["--restore-memory", &format!("{}M", key.memory() / MIB)])
                 .arg("--restore-ready-path")
                 .arg(view.ready_path())
