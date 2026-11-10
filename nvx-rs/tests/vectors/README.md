@@ -73,8 +73,10 @@ the key that the vector's bytes decode to.
   of a class have not been released, so a template store that an earlier build
   created is not supported, and is deleted and created again, since nothing
   migrates it. The snapshot key also drops the obsolete guest-build field and
-  uses the `nvx snapshot key` hash domain in place: no snapshot outlives a
-  deployment, and the prior key encoding is not supported.
+  uses the `nvx snapshot key` hash domain in place, and now appends the full
+  capture-time contract while its compatibility identity still digests only
+  the preceding compatibility fields: no snapshot outlives a deployment,
+  and the prior key encoding is not supported.
 - The bytes come from the protocol's definition, never from the code that they
   check, and so do the values of each vector.
 

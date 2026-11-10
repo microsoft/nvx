@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::{
     CaptureContext, DESCRIPTION_FILE, KEY_FILE, MANIFEST_NAME, OPENVMM_DIR, SNAPSHOT_ARTIFACTS,
-    SnapshotKey, SnapshotManifest,
+    SnapshotKey, SnapshotManifest, check_openvmm,
 };
 use crate::host::platform;
 use crate::host::process::Exited;
@@ -61,7 +61,7 @@ pub fn finish_capture(
 ) -> Result<CapturedSnapshot> {
     VmDir::open(dir.path())?;
     check_exit(&dir.path().join(OUTCOME))?;
-    let manifest = check_snapshot(&dir.path().join(OPENVMM_DIR))?;
+    let manifest = check_openvmm(&dir.path().join(OPENVMM_DIR))?;
     let key = SnapshotKey::from_capture(context, &manifest)?;
     let time = manifest.time();
     let description = json!({
@@ -149,7 +149,7 @@ pub(in crate::host) fn check_exit(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Checks the private OpenVMM directory, strict manifest and exact regular private artifacts.
+/// Preserves the legacy capture's directory, strict manifest, regular artifact and length checks.
 pub(in crate::host) fn check_snapshot(snapshot: &Path) -> Result<SnapshotManifest> {
     let what = "the snapshot of the capture";
     let problem = platform::check_snapshot_dir(snapshot).map_err(|error| {
