@@ -7,10 +7,12 @@
   `61994293a9e5e3bcc1d685d708cf462920eed030`, and the `feature/microvm/release/v6.0`
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
-  summary, and commit mapping below cover positions 001-131.
-- NVX's pinned OpenVMM revision: `4c2697aef28d7fa69f788ce4e65b6554c1cfb935`, position 240, the
-  head of microsoft/openvmm#5010, whose two commits, positions 239 and 240, follow position 238,
-  `46bfe02ed`, the head of `feature/microvm/dev`, which microsoft/openvmm#5005 merged after
+  summary, and commit mapping below cover positions 001-131 and the PR09 fixups at positions 241
+  and 242.
+- NVX's pinned OpenVMM revision: `6ddd6ca505a7212d92e2a8e561a19635f7185d4a`, position 242, the
+  head of microsoft/openvmm#5012, whose two commits, positions 241 and 242, follow position 240,
+  `4c2697aef`, the head of `feature/microvm/dev`, which microsoft/openvmm#5010 merged with
+  position 239 after position 238, `46bfe02ed`, which microsoft/openvmm#5005 merged after
   position 237, `cba21d109`, which microsoft/openvmm#5004 merged after position 236,
   `ac3dc27a7`, which microsoft/openvmm#5003 merged after position 235, `b4028c1aa`, which
   microsoft/openvmm#5001 merged after position 234, `f41a1ecfc`, which microsoft/openvmm#4997
@@ -31,8 +33,9 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 109 commits past
-  the mapped tip on the same first-parent chain. Positions 132-240 are not yet assigned to PRs; see
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 111 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240 are not yet assigned to PRs, and
+  positions 241 and 242 are PR09 fixups; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
@@ -241,9 +244,11 @@ snapshot quiesce added no safety: microsoft/openvmm#4625, which proposed its bou
 transactions, was closed, and the v5.0 reorganization retired the commit and folded the quiesce
 without a deadline into the commits that it changes; see
 [The v5.0 reorganization](#the-v50-reorganization). microsoft/openvmm#4872, opened on 2026-11-03,
-proposes position 015's rollback of a partial start, with review changes that the chain lacks, and
-microsoft/openvmm#4626, which proposes position 018's input gate without a deadline, as the chain
-now has it, builds on it. So does microsoft/openvmm#4937, which proposes no chain commit: it makes
+proposes position 015's rollback of a partial start, with review changes that the chain lacks,
+apart from its handling of a unit in a terminal state and its teardown after a failed restart,
+which the PR09 fixups at positions 241 and 242 carry. microsoft/openvmm#4626, which proposes
+position 018's input gate without a deadline, as the chain now has it, builds on it. So does
+microsoft/openvmm#4937, which proposes no chain commit: it makes
 `StateUnits::stop` fail instead of panicking when a unit's task has ended, so a rebase onto it
 adapts the chain's own callers of `StateUnits::stop`, in the microVM worker's
 `dispatch/microvm.rs` and `dispatch/restore.rs`.
@@ -863,7 +868,7 @@ flowchart TB
 
     subgraph Generic["Generic snapshot and persistence chain"]
         direction LR
-        P09["PR09<br/>Fallible VM lifecycle<br/>U - 4 commits, 3 in review"]
+        P09["PR09<br/>Fallible VM lifecycle<br/>U - 4 commits + 2 fixups, 3 in review"]
         P10["PR10<br/>CPU/clock state<br/>U - 11 commits"]
         P11["PR11<br/>Snapshot publication<br/>U - 4 commits"]
         P12["PR12<br/>Private-CoW restore<br/>U - 5 commits"]
@@ -999,7 +1004,8 @@ ba105dd7f
   -> FIFO artifacts refused without waiting for a writer [237]
   -> device input gated without closing devices to the vCPUs [238]
   -> quiesced microVM run again only through its rollback [239-240]
-  -> 4c2697aef (NVX pin)
+  -> PR09 fixups [241-242]
+  -> 6ddd6ca50 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1011,17 +1017,20 @@ prepared after PR13; PR23's protocol and broker commits can be prepared after PR
 The fork tail, positions 127-129, remains outside the upstream queue. PR27 can be prepared once
 PR22 lands; its generic confinement commit can be submitted independently if preferred. The v6.0
 reorganization folded the PR20 and PR12 fixups into the commits that they fix; see
-[The v6.0 reorganization](#the-v60-reorganization).
+[The v6.0 reorganization](#the-v60-reorganization). Fold positions 241 and 242 into PR09's position
+015 before submission, which adds the terminal state that position 241 handles and the restart's
+handling of a failed start that position 242 changes; position 241's check of a time advance, with
+its test, folds into PR10's position 019, which adds the time advance.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. None of the 109 later commits is a
-fixup of a mapped PR, and none is yet classified or assigned to PRs. Each of positions 132-186
-combines the v2.4 commits that the table lists, as v3.0 positions 145-160 and 162-200 did, which
-developed one concept; "(part)" marks a v2.4 fixup that split across commits. Positions 187-191
-followed the v3.0 reorganization, positions 192-205 are the ABI restart of the v4.0
-reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-240 followed the
+The NVX pin extends the chain past position 131 without merges. Of the 111 later commits,
+positions 241 and 242 are PR09 fixups, and the others are not yet classified or assigned to PRs.
+Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
+and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
+commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
+of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-242 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1139,6 +1148,8 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 238 | `46bfe02ed` | - | - | - | - | vmotherboard: gate a device's input without closing it to the vCPUs (microsoft/openvmm#5005) |
 | 239 | `b5d20bf84` | - | - | - | - | petri: let a microVM test be its snapshot controller (microsoft/openvmm#5010) |
 | 240 | `4c2697aef` | - | - | - | - | openvmm_core: run a quiesced microVM again only through its rollback (microsoft/openvmm#5010) |
+| 241 | `78e752de1` | - | - | - | - | state_unit: handle a unit in a terminal state instead of panicking (microsoft/openvmm#5012); fold into 015, its time advance check into 019 |
+| 242 | `6ddd6ca50` | - | - | - | - | openvmm_core: tear the VM down when a restart cannot resume it (microsoft/openvmm#5012); fold into 015 |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1287,7 +1298,15 @@ a test beside position 065's cold-boot test. Position 240 has the snapshot quies
 boundary's release, which position 072 adds to the VM worker, refuse a VM outside a boundary and
 the boundary of a quiesced VM, so that only position 072's rollback runs a quiesced VM again. It
 extends the snapshot guide's paragraph on the RPCs that a boundary refuses, which position 076
-adds, and adds tests beside position 239's.
+adds, and adds tests beside position 239's. Positions 241 and 242 change what PR09's position 015
+adds, the terminal state in which its start leaves a unit whose task does not answer, which only a
+later start refused, and the restart's start again after a failed save. Position 241 has a stop of
+the state units also stop such a unit, which may be running, and keep it in that state, and has a
+reset, save, or restore, and the time advance that PR10's position 019 adds, fail while a unit is
+in it. It rewrites position 015's description of that state and adds tests in a new file. Position
+242 has the VM worker tear the VM down when that restart's start fails, rather than keep serving a
+VM that it marks running over stopped units, and has the worker's teardown stop the state units
+when they run, where upstream's microsoft/openvmm#4863 stops them when the VM runs.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1574,6 +1593,16 @@ Replaying it on upstream main conflicts in all three of its files: upstream main
 module of position 056, the boundary of position 072, that paragraph, and the tests of positions
 065 and 239, so it follows PR15, PR17, and position 239 upstream.
 
+Positions 241 and 242 build on the chain too. Replaying them on upstream main conflicts in four of
+their five files, all but position 241's new test file: upstream main lacks the start rollback of
+position 015, whose module and `state_unit`'s `lib.rs` position 241 changes, the time advance of
+PR10's position 019, and the restart's start again of position 015, which position 242 changes in
+the VM worker. microsoft/openvmm#4872's head makes the same changes in its form of position 015,
+apart from the time advance, which upstream lacks, with a check for the terminal state that follows
+its check that the units are stopped, and with a teardown stop that also tolerates a unit in the
+terminal state whose task has ended. So they follow PR09 upstream, folded into position 015, and
+position 241's time advance check into PR10's position 019.
+
 ## PR summary
 
 Each count is of v6.0 commits, which include the fixups that the v3.0, v4.0, v5.0, and v6.0
@@ -1592,7 +1621,7 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 | PR06 | U | Device fixes and hardening | 013-014 | `6ee09d624..5ed5f7a22` | 2 | Current upstream |
 | PR07 | U | Consomme resource bounding | - | all landed upstream | 0 | Current upstream |
 | PR08 | U | Preparatory refactors | - | all landed upstream | 0 | Current upstream |
-| PR09 | U | Fallible VM lifecycle | 015-018 | `179106cd9..07a98b977` | 4 | Current upstream |
+| PR09 | U | Fallible VM lifecycle | 015-018; 241-242 (fixups) | `179106cd9..07a98b977`; `78e752de1..6ddd6ca50` | 6 | Current upstream |
 | PR10 | U | Portable CPU and clock state | 019-029 | `a1e113d12..ab67f39e2` | 11 | PR09 |
 | PR11 | U | Snapshot publication protocol | 030-033 | `23e759e74..112512c35` | 4 | PR10 |
 | PR12 | U | Immutable private-CoW restore | 034-038 | `6c89f4c94..3da713626` | 5 | PR10 |
@@ -1617,7 +1646,8 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 
 Each entry, at the position that the commit had in v5.0 and v5.1 too, names the v4.0 position of the
 commit, the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4 and v5.1 fixups that it folds;
-"(part)" marks a fixup that split across commits. A
+"(part)" marks a fixup that split across commits. Positions 241 and 242, which followed the v6.0
+reorganization, name their OpenVMM pull request instead. A
 v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are those of
 `feature/microvm/release/v4.0`. Landed entries name the commits and positions of the branch that
 the rebase started from, `microvm/v2.1`, `feature/microvm/release/v2.2`,
@@ -1777,12 +1807,14 @@ Landed upstream and dropped from the chain:
 </details>
 
 <details>
-<summary><strong>PR09 - Fallible VM lifecycle (U)</strong> - 4 commits + 1 landed upstream + 2 retired</summary>
+<summary><strong>PR09 - Fallible VM lifecycle (U)</strong> - 6 commits + 1 landed upstream + 2 retired</summary>
 
-- 015 `179106cd9` - state_unit: roll back a partial start instead of panicking (v4.0 018, v3.0 026, v2.4 027; **open upstream**: microsoft/openvmm#4872, with review changes that the chain lacks; microsoft/openvmm#4619 proposed the fallible unit start that the v4.0 reorganization retired, in favor of microsoft/nvx#1232; see [The v4.0 reorganization](#the-v40-reorganization))
+- 015 `179106cd9` - state_unit: roll back a partial start instead of panicking (v4.0 018, v3.0 026, v2.4 027; **open upstream**: microsoft/openvmm#4872, with review changes that the chain lacks, apart from those of positions 241 and 242; microsoft/openvmm#4619 proposed the fallible unit start that the v4.0 reorganization retired, in favor of microsoft/nvx#1232; see [The v4.0 reorganization](#the-v40-reorganization))
 - 016 `1ab89b3fe` - openvmm: make VM resume fallible (v4.0 019, v3.0 028, v2.4 029; **closed upstream**: microsoft/openvmm#4623 was closed in favor of microsoft/nvx#1232, but the resume stays fallible: the post-restore input gate, the restore readiness event, and the time ABI's TSC offset measurement fail it)
 - 017 `d51a1e8ef` - state_unit: record the exact unit inventory in saved state (v4.0 020, v3.0 029, v2.4 030; **open upstream**: microsoft/openvmm#4624)
 - 018 `07a98b977` - vmcore: add device input quiesce and resume (v4.0 022, v3.0 031, v2.4 032; **open upstream**: microsoft/openvmm#4626, stacked on microsoft/openvmm#4872, without the input gate's deadline, which the v5.0 reorganization removed here too, by folding v4.0 position 216)
+- 241 `78e752de1` - state_unit: handle a unit in a terminal state instead of panicking (microsoft/openvmm#5012; **fold into 015**, its check and test of a time advance into PR10's 019; microsoft/openvmm#4872's head makes the same change)
+- 242 `6ddd6ca50` - openvmm_core: tear the VM down when a restart cannot resume it (microsoft/openvmm#5012; **fold into 015**; microsoft/openvmm#4872's head makes the same change)
 
 Landed upstream and dropped from the chain:
 
