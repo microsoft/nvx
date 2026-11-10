@@ -1033,7 +1033,7 @@ impl Runtime {
         }
         let gateway = gateway
             .ok_or_else(|| crate::Error::unsupported("published listeners require a gateway"))?;
-        let program = super::ingress::PROGRAM.to_owned();
+        let program = c"/sbin/nvx-ingress".to_owned();
         #[cfg(test)]
         let program = tests::restore::announcer_program(program);
         let arguments = [
