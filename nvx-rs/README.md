@@ -124,7 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold preparation, verified detached launch, confirmed stop, and caller-saved reattachment |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold and capture preparation, verified detached launch, confirmed stop, and caller-saved reattachment |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshot directories, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
@@ -522,10 +522,22 @@ failure never hides confirmed exit.
 `Prepared` launch without starting a process or binding a listener. It requires
 `config.boot`, refuses a snapshot input, rechecks the directory's privacy, and
 creates a new private log. Existing log, outcome and Linux endpoint entries
-are refused rather than replaced. Only the log is created before a spawn;
-OpenVMM creates the remaining outputs when it runs. A failed preparation
-closes and removes only its new log, preserving all pre-existing entries and
+are refused rather than replaced. An ordinary cold boot creates only the log
+before a spawn; OpenVMM creates its remaining outputs when it runs. A failed preparation
+closes and removes only its new files, preserving all pre-existing entries and
 caller-owned inputs, and reports a cleanup failure with the original error.
+
+With `boot.capture`, creation requires a blockless root and refuses every
+filesystem export. It creates private sparse `capture-image.raw` and
+`capture-scratch.raw` files, verifies their actual complete geometries, and
+targets `<vm_dir>/openvmm`. A configured NIC keeps its resolved address but
+uses the complete deny-all policy, whatever its configured policy.
+`Prepared::capture_context()` exposes a cloneable, serializable
+`snapshot::CaptureContext` with the checked capture configuration and disk
+geometries, NIC and console devices, runtime identity, hypervisor and CPU
+profile. The caller chooses whether and how to persist it. Creation writes
+no context file, `key.bin` or `snapshot.json`, and does not finish or publish
+a capture.
 
 On Linux, the generated control and boot-console socket names must be valid
 Unicode and shorter than 108 bytes both as supplied and with the directory's
@@ -645,6 +657,11 @@ or lock. `Snapshot` remains an opaque input of a future restore:
 `vm::create` still refuses `Some(snapshot)` with `ErrorKind::Unsupported`;
 only cold boots are supported.
 
+`CaptureContext` records a prepared capture's checked configuration and
+effective devices independently of runtime paths or network policy.
+`vm::Prepared::capture_context` returns it for the caller to clone and
+serialize; NVX owns no capture-context store or persistence format.
+
 ### `nvx::host::config`
 
 `VmConfig`: the configuration of a VM as one value, its processors, its memory
@@ -722,12 +739,15 @@ The renderer emits neither `--microvm-lifecycle` nor
 `--microvm-workload-identity`. Callers inspect the complete arguments through
 `Prepared::arguments()`.
 
-Both argument entry points refuse a `Boot` with a capture as `Unsupported`
-rather than silently omit its devices and resource capacities.
-They also refuse non-Unicode export child roots instead of lossily rendering
-a different host path.
-`VmConfig::check` and `kernel_command_line` retain their existing behavior for
-valid capture configurations.
+For a capture, `CaptureConfig` supplies the processor capacity, the boot-online
+processor limit, and the boot memory and its capacity; the ordinary VM's cold
+resource counts need not match. Boot memory must be aligned to 128 MiB.
+The kernel text omits root, view, mapping and workload tokens and admits only
+OpenVMM's named platform allowlist. Caller-supplied tier, processor, console,
+device and network tokens are refused by name even when allowlisted: the
+builder owns them. OpenVMM adds exactly one `nvx_snapshot_tier=platform` from
+`--snapshot-tier platform`; callers may not supply or duplicate it.
+Non-Unicode export child roots are still refused rather than lossily rendered.
 
 `VmConfig::check_command_line()` checks the configuration's known arguments on
 every host, before any host change, with 2048 UTF-16 code units reserved for the
