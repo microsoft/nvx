@@ -2581,6 +2581,7 @@ nvx-rs [-h] [--root PATH] download [--repository OWNER/REPOSITORY] [--hypervisor
 nvx-rs [-h] [--root PATH] egress compile PATH
 nvx-rs [-h] [--root PATH] run [OPTIONS]
 nvx-rs [-h] [--root PATH] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
+nvx-rs [-h] [--root PATH] snapshot capture NAME [OPTIONS]
 ```
 
 ```bash
@@ -2630,6 +2631,15 @@ Usage errors and help start with the usage of the parser, on one line, such as
 which take many options, name them `[OPTIONS]`, as in
 `usage: nvx-rs run [OPTIONS]`, and their help lists every option. A usage error
 names the parser after the usage, as in `nvx-rs run: error[CODE]: MESSAGE`.
+
+`snapshot capture NAME --store-dir PATH` captures a blockless VM before any
+layered root or workload exists. It journals the launch before spawning,
+requests capture through authenticated NVXC, and requires that VM's timely
+exit before finishing and publishing exactly the strict snapshot's three
+entries. The next capture using that store ends an interrupted attempt through
+ordinary launch recovery, never resuming it. See
+[`snapshot capture`](../doc/usage.md#snapshot-capture) for its resource options
+and recovery behavior. Restore commands are separate follow-ups.
 
 ### Artifact root
 

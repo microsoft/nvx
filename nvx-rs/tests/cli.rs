@@ -2382,7 +2382,8 @@ fn a_relative_openvmm_override_is_relative_to_the_working_directory() {
 
 #[test]
 fn top_level_usage_errors_exit_with_status_2() {
-    let usage = "usage: nvx-rs [-h] [--root PATH] {artifacts,download,egress,run,sandbox} ...\n";
+    let usage =
+        "usage: nvx-rs [-h] [--root PATH] {artifacts,download,egress,run,sandbox,snapshot} ...\n";
     for (arguments, message) in [
         (
             &[][..],
@@ -2395,7 +2396,7 @@ fn top_level_usage_errors_exit_with_status_2() {
         (
             &["build"][..],
             "nvx-rs: error[argument-invalid]: argument command: invalid choice: \"build\" (choose \
-             from \"artifacts\", \"download\", \"egress\", \"run\", \"sandbox\")\n",
+             from \"artifacts\", \"download\", \"egress\", \"run\", \"sandbox\", \"snapshot\")\n",
         ),
         (
             &["artifacts", "--bogus"][..],
@@ -2405,7 +2406,7 @@ fn top_level_usage_errors_exit_with_status_2() {
         (
             &["--prog", "nvx.py", "sandbox"][..],
             "nvx-rs: error[argument-invalid]: argument command: invalid choice: \"nvx.py\" \
-             (choose from \"artifacts\", \"download\", \"egress\", \"run\", \"sandbox\")\n",
+             (choose from \"artifacts\", \"download\", \"egress\", \"run\", \"sandbox\", \"snapshot\")\n",
         ),
         (
             &["--prog=nvx.py", "artifacts"][..],
