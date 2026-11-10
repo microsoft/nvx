@@ -7,7 +7,6 @@ use nvx::activation::{
 };
 use nvx::guest::clone::NetworkError;
 use nvx::guest::entry;
-use nvx::guest::ingress::StartError;
 use nvx::guest::mappings::MappingError;
 use nvx::guest::root::{self, Assembly, Device, Error as RootError, Role};
 use nvx::protocol::root::DISTRO_MMIO_BASE;
@@ -194,7 +193,10 @@ fn each_class_of_failure_ends_the_clone_with_its_own_status() {
     let network = activating().complete(now(), Err(gateway.into()));
     cases.push((failed(network), status::ACTIVATION_NETWORK));
     let unannounced = super::super::AnnounceFailure {
-        error: StartError::NoPrivilegedPort,
+        error: io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "no privileged source port is free",
+        ),
         teardown: None,
     };
     let network = activating().complete(now(), Err(unannounced.into()));

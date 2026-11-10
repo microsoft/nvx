@@ -1406,8 +1406,7 @@ impl RootOperations for FakeRoot {
     /// device, if any, the gateway refusal before view effects, the view's hostname, generation of
     /// the machine ID, and write of the resolver file when requested. After application
     /// succeeds, it stands for this caller's announcer start when listeners are published, and
-    /// fails with that start's bare `StartError`: unlike the worker, which wraps it with its
-    /// teardown of the applied root, the fake holds no root to tear down.
+    /// fails with an adapter-owned `AnnounceFailure`: the fake holds no root to tear down.
     /// These fail if the test fails
     /// [`Operation::MachineId`], [`Operation::MountExport`], [`Operation::Resolver`],
     /// [`Operation::View`], and [`Operation::Announce`].
@@ -1420,7 +1419,6 @@ impl RootOperations for FakeRoot {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use nvx::activation::{self, MachineIdMode};
         use nvx::guest::clone::{ApplyError, NetworkError};
-        use nvx::guest::ingress::StartError;
         use nvx::guest::root::{DeviceStep, Error, Mount, Role};
 
         let applied = (record.clone(), template.clone());
@@ -1490,8 +1488,12 @@ impl RootOperations for FakeRoot {
                 })?;
         }
         if published {
-            self.result(Operation::Announce)
-                .map_err(|problem| StartError::Spawn(io::Error::other(problem)))?;
+            self.result(Operation::Announce).map_err(|problem| {
+                runtime_adapter::worker::AnnounceFailure {
+                    error: io::Error::other(problem),
+                    teardown: None,
+                }
+            })?;
             self.announcer = Some(match self.ending.take() {
                 Some(read) => (read, None),
                 None => {

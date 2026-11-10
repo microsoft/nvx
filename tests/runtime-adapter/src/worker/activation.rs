@@ -88,7 +88,7 @@ pub const ACTIVATION_PROBE: &str = "activation";
 ///   publishes the workload's listeners but the template names no gateway, as
 ///   [`ApplyError::Network`] tells, or the announcer of those listeners, which the worker starts
 ///   once the application succeeded, cannot start, as its
-///   [`StartError`](nvx::guest::ingress::StartError) tells. The worker also ends a clone whose
+///   [`AnnounceFailure`](super::AnnounceFailure) tells. The worker also ends a clone whose
 ///   announcer ended with it, whether the clone was ready or not, outside the activation;
 /// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): the worker's own order completed an
 ///   activation that did not run, or started the sandbox before the clone was ready, or again.
@@ -103,10 +103,7 @@ pub fn failure_status(failure: &ActivationFailure) -> u8 {
         | ActivationCause::Changed => status::ACTIVATION_PROTOCOL,
         ActivationCause::Record(_) | ActivationCause::Cold => status::ACTIVATION_RECORD,
         ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
-        ActivationCause::Failed(error)
-            if error.is::<super::AnnounceFailure>()
-                || error.is::<nvx::guest::ingress::StartError>() =>
-        {
+        ActivationCause::Failed(error) if error.is::<super::AnnounceFailure>() => {
             status::ACTIVATION_NETWORK
         }
         ActivationCause::Failed(error) => match error.downcast_ref::<ApplyError>() {

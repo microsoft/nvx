@@ -1,5 +1,5 @@
-//! Unit tests of PID 1's collection, which waits for any child. Each test runs alone, in a run of
-//! this test binary of its own, among no other test's children.
+//! Checks of announcer ownership and PID 1's collection. Tests that wait for any child run
+//! alone in a test process of their own.
 
 use std::env;
 use std::fs;
@@ -21,6 +21,112 @@ const ROLE: &str = "RUNTIME_ADAPTER_COLLECTION_ROLE";
 const UNTRACEABLE: i32 = 99;
 /// Longest wait for a process to reach a state.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A shell command that stands for the adapter's announcer program.
+#[cfg(target_arch = "x86_64")]
+fn announcement_command(script: &str) -> nvx::guest::spawn::Command {
+    nvx::guest::spawn::Command::new(
+        c"/bin/sh".to_owned(),
+        vec![
+            c"sh".to_owned(),
+            c"-c".to_owned(),
+            std::ffi::CString::new(script).unwrap(),
+            c"nvx-ingress".to_owned(),
+            c"inherit".to_owned(),
+            c"10.0.0.1".to_owned(),
+        ],
+    )
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn announcer_launch_keeps_the_socket_and_monitors_its_owned_child() {
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::ExitStatusExt;
+
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let inherited = fs::read_link(format!("/proc/self/fd/{}", socket.as_raw_fd())).unwrap();
+    let (read, write) = UnixStream::pair().unwrap();
+    read.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let command = announcement_command(
+        "read -r id comm state ppid pgrp session tty rest </proc/self/stat; \
+         printf '%s %s %s %s\\n' \"$id\" \"$pgrp\" \"$session\" \"$tty\"; \
+         readlink /proc/self/fd/0; printf '%s\\n' \"$@\"; exec sleep 60",
+    )
+    .stdout(write);
+    let mut announcement = super::Announcement::launch(command, socket).unwrap();
+    let mut read = BufReader::new(read);
+    let mut report = String::new();
+    for _ in 0..4 {
+        assert_ne!(read.read_line(&mut report).unwrap(), 0, "{report}");
+    }
+    let lines: Vec<_> = report.lines().collect();
+    let ids: Vec<_> = lines[0].split_whitespace().collect();
+    assert_eq!(ids.len(), 4, "{report}");
+    assert_eq!(ids[1], ids[0], "{report}");
+    assert_eq!(ids[2], ids[0], "{report}");
+    assert_eq!(ids[3], "0", "{report}");
+    assert_eq!(lines[1], inherited.to_str().unwrap(), "{report}");
+    assert_eq!(lines[2..], ["inherit", "10.0.0.1"], "{report}");
+    assert!(announcement.0.try_wait().unwrap().is_none());
+    assert_eq!(
+        announcement.stop().unwrap().signal(),
+        Some(Signal::SIGKILL as i32)
+    );
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn announcer_drop_stops_and_reaps_the_child_that_it_owns() {
+    use std::os::fd::AsFd;
+
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let announcement =
+        super::Announcement::launch(announcement_command("exec sleep 60"), socket).unwrap();
+    let pidfd = announcement
+        .0
+        .pidfd()
+        .unwrap()
+        .try_clone_to_owned()
+        .unwrap();
+    drop(announcement);
+    assert_eq!(
+        wait::waitid(
+            Id::PIDFd(pidfd.as_fd()),
+            WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG,
+        ),
+        Err(nix::errno::Errno::ECHILD),
+    );
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn announcer_failed_exec_reports_the_cause_and_leaves_no_child() {
+    const TEST: &str = "worker::tests::announcer_failed_exec_reports_the_cause_and_leaves_no_child";
+    if env::var(ROLE).as_deref() != Ok("pid-1") {
+        isolated(TEST);
+        return;
+    }
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let command = nvx::guest::spawn::Command::new(
+        c"/proc/self/fd/announcer-missing".to_owned(),
+        vec![c"nvx-ingress".to_owned()],
+    );
+    let error = super::Announcement::launch(command, socket).unwrap_err();
+    let failure = error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<nvx::guest::spawn::LaunchFailure>()
+        .unwrap();
+    assert_eq!(failure.stage(), nvx::guest::spawn::LaunchStage::Exec);
+    assert_eq!(failure.raw_os_error(), nix::libc::ENOENT);
+    assert_eq!(
+        wait::waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)),
+        Err(nix::errno::Errno::ECHILD),
+    );
+}
 
 #[test]
 fn pid_1_goes_on_past_the_stops_of_the_threads_that_it_traces() {
