@@ -855,8 +855,8 @@ after the repair's acknowledgement of the restore:
    file, with every bind owned by the root. The library starts no process.
    After successful application this temporary adapter uses the returned
    publication and gateway to start its announcer,
-   `/sbin/nvx-ingress inherit GATEWAY_IPV4`, with
-   `nvx::guest::ingress::Announcer::start`: it binds a UDP socket to a
+   `/sbin/nvx-ingress inherit GATEWAY_IPV4`, with its own launcher, through
+   `nvx::guest::spawn::Command`: it binds a UDP socket to a
    privileged source port, from which alone OpenVMM's gateway takes
    announcements, and runs the program with that socket as its standard input,
    to the template's gateway, waiting until the program runs, but for no
@@ -2178,7 +2178,11 @@ arguments that the worker refuses. Those of
 fake root does, hand an execution the host's cancellation once its
 timeout's instant passed, after its program ended before it, as a worker that
 did not run meanwhile would, and check that the program's end stays its own.
-Those of `worker` run PID 1's collection alone, in a run of the test binary of
+Those of `worker` check, on x86-64, the adapter's own launcher of a clone's
+announcer, which runs its program with its socket as its standard input, in a
+session of its own, stops it and collects its status when stopped or dropped,
+and reports a failed exec, after which no child remains; and they run PID 1's
+collection alone, in a run of the test binary of
 its own, with a thread of each of two children that it traces, which stop
 before the worker ends, one with a signal whose report `nix` decodes and one
 with a real-time signal, and check that PID 1 takes both stops and goes on
