@@ -3762,10 +3762,12 @@ field nvx::host::vm::Launched::capability
 field nvx::host::vm::Launched::outputs
 field nvx::host::vm::Launched::process
 struct nvx::host::vm::Prepared
+method nvx::host::vm::Prepared::activation_record
 method nvx::host::vm::Prepared::arguments
 method nvx::host::vm::Prepared::capability
 method nvx::host::vm::Prepared::inherit
 method nvx::host::vm::Prepared::log
+method nvx::host::vm::Prepared::nic
 method nvx::host::vm::Prepared::outputs
 struct nvx::host::vm::Reattached
 field nvx::host::vm::Reattached::connection

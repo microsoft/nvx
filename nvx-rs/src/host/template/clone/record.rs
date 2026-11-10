@@ -6,8 +6,8 @@
 use super::CloneRequest;
 use super::failure::{Attribute, Evidence, Fault};
 use crate::activation::{
-    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, Network,
-    Publication, RestoreSection, TransactionId, Upper,
+    ActivationRecord, Configuration, ExpectedResources, Export, ExportKind, Image, RestoreSection,
+    TransactionId, Upper,
 };
 use crate::error::{Error, Result};
 use crate::host::config::UpperConfig;
@@ -74,17 +74,14 @@ pub(super) fn build(
     // The plan's check found that the network attaches a NIC if and only if the template has one.
     let network = match request.adapter.network().filter(|_| key.has_network()) {
         None => None,
-        Some(network) => Some(Network {
-            dns: network
-                .dns_server(key.ipv6_gateway())
-                .attribute(Evidence::InvalidSettings)?,
-            publication: if network.policy().publishes_listeners() {
-                Publication::Published
-            } else {
-                Publication::Unpublished
-            },
-            proxy: network.proxy_url(),
-        }),
+        Some(network) => Some(
+            network.policy().activation_network(
+                network.gateway(),
+                network
+                    .dns_server(key.ipv6_gateway())
+                    .attribute(Evidence::InvalidSettings)?,
+            ),
+        ),
     };
     let (export, mappings) = match &request.export {
         None => (None, 0),
