@@ -130,12 +130,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     })();
     if let Err(error) = result {
         if let Err(cleanup) = launched.kill_and_confirm_exit() {
-            return Err(
-                io::Error::other(format!(
-                    "{error}; could not confirm exit of the launched VM: {cleanup}"
-                ))
-                .into(),
-            );
+            return Err(io::Error::other(format!(
+                "{error}; could not confirm exit of the launched VM: {cleanup}"
+            ))
+            .into());
         }
         return Err(error);
     }
