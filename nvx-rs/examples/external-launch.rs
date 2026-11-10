@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         console: ConsoleAttachment::Listener,
         boot: Some(Boot {
             command_line: "quiet loglevel=0".to_owned(),
+            memory_capacity_mib: None,
             capture: None,
         }),
     };
