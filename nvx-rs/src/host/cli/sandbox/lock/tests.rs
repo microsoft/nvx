@@ -66,7 +66,9 @@ fn directories_that_others_may_access_are_refused() {
 #[test]
 fn provision_refuses_an_inherited_vm_directory_without_changing_it() {
     let directory = tempfile::tempdir().unwrap();
-    let state = directory.path().join("inherited");
+    let parent = directory.path().join("private-parent");
+    StateDir::create(&parent).unwrap();
+    let state = parent.join("inherited");
     std::fs::create_dir(&state).unwrap();
     StateDir::open(&state).unwrap();
     let refusal = VmDir::open(&state).unwrap_err().to_string();
@@ -87,6 +89,11 @@ fn provision_refuses_an_inherited_vm_directory_without_changing_it() {
         "keep"
     );
     assert!(!state.join(CONFIG_NAME).exists());
+    let entries: Vec<_> = std::fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, [std::ffi::OsString::from("foreign.txt")]);
 }
 
 #[test]

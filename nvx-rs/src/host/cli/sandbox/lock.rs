@@ -52,6 +52,10 @@ impl LifecycleLock {
             .and_then(|state| state.lock(deadline));
             let error = match taken {
                 Ok(locked) => {
+                    let lock = Self {
+                        state_dir: state_dir.to_path_buf(),
+                        locked,
+                    };
                     if provision {
                         VmDir::open(state_dir).map_err(|error| {
                             error_with_cause(
@@ -62,10 +66,7 @@ impl LifecycleLock {
                             )
                         })?;
                     }
-                    return Ok(Self {
-                        state_dir: state_dir.to_path_buf(),
-                        locked,
-                    });
+                    return Ok(lock);
                 }
                 Err(error) => error,
             };
