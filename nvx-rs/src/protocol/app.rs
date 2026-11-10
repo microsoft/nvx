@@ -52,7 +52,11 @@ pub const APP_FEATURES: u8 = 5;
 pub const APP_MAPS: u8 = 6;
 /// Request that nvx-init capture the VM after optionally killing its executions.
 #[cfg_attr(
-    not(any(test, feature = "host")),
+    not(any(
+        test,
+        feature = "host",
+        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    )),
     expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
 )]
 pub(crate) const APP_CAPTURE: u8 = 7;
@@ -160,7 +164,10 @@ pub(crate) fn encode_capture_payload(kill_executions: bool) -> [u8; 1] {
 
 /// Decodes the capture request's sole kill-executions flag.
 #[cfg_attr(
-    not(test),
+    not(any(
+        test,
+        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    )),
     expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
 )]
 pub(crate) fn decode_capture_payload(payload: &[u8]) -> Result<bool, ProtocolError> {
