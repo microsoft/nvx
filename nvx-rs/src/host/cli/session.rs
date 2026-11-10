@@ -100,6 +100,12 @@ impl AttachmentCancellation {
         self.check()
     }
 
+    /// Releases the cancellation duplicate once attachment no longer has pending I/O.
+    fn attached(&self) {
+        #[cfg(any(target_os = "linux", windows))]
+        self.transport.lock().expect("attachment lock poisoned").take();
+    }
+
     /// Ends pending I/O; repeated calls also cover cancellation racing with an I/O submission.
     #[allow(unsafe_code)]
     pub(super) fn cancel(&self) -> io::Result<()> {
@@ -416,6 +422,9 @@ impl Session {
         let attached = ControlSession::attach(transport, capability, deadline.instant())
             .map_err(|error| session.failure(error))?;
         session.inner = Some(attached);
+        if let Some(cancellation) = &session.probe.cancellation {
+            cancellation.attached();
+        }
         Ok(session)
     }
 
