@@ -372,8 +372,9 @@ this store ends and removes an interrupted attempt through ordinary launch
 recovery, without resuming or publishing it. Indeterminate recovery retains its
 evidence and reports an error. Unknown files or nonempty unjournaled capture-slot
 contents are kept for inspection, not deleted; an empty launch lock alone is
-harmless. Captures in one store serialize; snapshot locks remain separate from
-their immutable directories. Restore commands are not added here.
+harmless. Known host and OpenVMM atomic staging files are recovered only with
+a valid launch journal. Captures in one store serialize; snapshot locks remain
+separate from their immutable directories. Restore commands are not added here.
 
 ### `download`
 
