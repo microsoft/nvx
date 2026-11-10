@@ -5,7 +5,7 @@ use std::io;
 use std::time::Instant;
 
 use crate::host::platform;
-use crate::host::process::{BootId, KILL_TIMEOUT, Process, ProcessRef};
+use crate::host::process::{BootId, KILL_TIMEOUT, Opened, Process, ProcessRef};
 
 /// Finds the live process `pid` of the current boot and holds it, or returns `None` if it has
 /// exited.
@@ -16,10 +16,14 @@ pub(super) fn find(pid: u32) -> io::Result<Option<Process>> {
     let Some(start_time) = platform::process_start_time(pid)? else {
         return Ok(None);
     };
-    Process::open(&ProcessRef {
+    let opened = Process::open(&ProcessRef {
         pid,
         start_time,
         boot: BootId::current()?,
+    })?;
+    Ok(match opened {
+        Opened::Running(process) => Some(process),
+        Opened::Exited(_) => None,
     })
 }
 
