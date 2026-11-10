@@ -252,19 +252,27 @@ impl Drop for InheritableForSpawn {
 /// [`SpawnLock`]: crate::host::platform::inherit::SpawnLock
 /// [`spawn_command`]: crate::host::platform::inherit::spawn_command
 /// [`log_claim_held`]: crate::host::platform::windows::log_claim_held
-pub(crate) fn spawn_detached(
+pub(crate) fn spawn_with_stdio(
     program: &Path,
     arguments: &[OsString],
     working_dir: &Path,
     stdio: [OwnedHandle; 3],
     inherit: &[Inherited<'_>],
-    breakaway_from_job: bool,
+    mode: SpawnMode,
     job: Option<OwnedHandle>,
 ) -> io::Result<LaunchedProcess> {
-    let mut flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
-    if breakaway_from_job {
-        flags |= CREATE_BREAKAWAY_FROM_JOB;
-    }
+    let flags = match mode {
+        SpawnMode::Foreground => 0,
+        SpawnMode::Detached { breakaway_from_job } => {
+            CREATE_NEW_PROCESS_GROUP
+                | CREATE_NO_WINDOW
+                | if breakaway_from_job {
+                    CREATE_BREAKAWAY_FROM_JOB
+                } else {
+                    0
+                }
+        }
+    };
     spawn_listed(
         program,
         arguments,
@@ -276,12 +284,23 @@ pub(crate) fn spawn_detached(
     )
 }
 
+/// Whether the child stays in the caller's console and job.
+pub(crate) enum SpawnMode {
+    /// Keeps the caller's console, process group, and job membership.
+    Foreground,
+    /// Starts without a console, in a new process group.
+    Detached {
+        /// Leaves the caller's job when that job permits breakaway.
+        breakaway_from_job: bool,
+    },
+}
+
 /// Starts OpenVMM in the caller's console, process group, and working directory, as
 /// `subprocess.run` starts a child, with copies of the caller's standard handles as its own.
 ///
 /// Unlike `std::process::Command`, which lets the child inherit every inheritable handle of the
 /// caller, it passes the child no other handle of the caller than the handles `inherit`, which
-/// keep their values in the child, through the handle list of [`spawn_detached`], with the same
+/// keep their values in the child, through the handle list of [`spawn_with_stdio`], with the same
 /// window, under the same lock, for processes that the caller spawns concurrently without one.
 /// Unlike `std::process::Command` too, which escapes the arguments of a batch file for `cmd.exe`,
 /// it fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
@@ -331,7 +350,7 @@ fn standard_handle(which: STD_HANDLE) -> io::Result<Option<OwnedHandle>> {
 /// Starts `program` with `arguments` in `working_dir`, or in the caller's working directory, with
 /// the creation flags `flags`, the handles `stdio` as its standard handles, a missing one null,
 /// and the caller's handles `inherit`, and no other handle of the caller, in the job object
-/// `job`, if any, as [`spawn_detached`] describes. Fails with [`io::ErrorKind::InvalidInput`] for
+/// `job`, if any, as [`spawn_with_stdio`] describes. Fails with [`io::ErrorKind::InvalidInput`] for
 /// a working directory beyond Windows' limit or for a batch file, as [`refuse_batch_file`] says.
 fn spawn_listed(
     program: &Path,

@@ -43,7 +43,7 @@ bundled = ["host", "dep:sha2"]
 testing = ["dep:getrandom", "dep:serde", "dep:serde_json", "dep:nix", "dep:windows-sys"]
 # NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and sandboxes,
 # compiles egress policies, looks up artifacts, and downloads releases. It adds no API.
-cli = ["host"]
+cli = ["host", "dep:crossterm"]
 # The serde forms of `Hypervisor` and `net::Ipv4Cidr`. The `host` feature enables it.
 serde = ["dep:serde"]
 # The programs that run in Linux guests: the `guest` module and the `nvx-*` guest binaries. Build
@@ -51,6 +51,7 @@ serde = ["dep:serde"]
 guest = ["dep:nix", "dep:getrandom"]
 
 [dependencies]
+crossterm = { version = "0.29", default-features = false, features = ["windows"], optional = true }
 getrandom = { version = "0.4", optional = true }
 serde = { version = "1.0.200", features = ["derive"], optional = true }
 serde_json = { version = "1.0.120", optional = true }

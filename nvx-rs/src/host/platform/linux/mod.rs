@@ -14,11 +14,11 @@ use crate::hypervisor::Hypervisor;
 #[cfg(feature = "cli")]
 pub(crate) use crate::host::sys::{interrupted, watch_interrupts, write_interruptibly};
 
-#[cfg(feature = "cli")]
-pub(crate) use self::endpoint::endpoint_server_pid_until;
 pub(crate) use self::endpoint::{
     ReadyListener, connect_endpoint, control_endpoint, endpoint_server_pid, listen_ready,
 };
+#[cfg(feature = "cli")]
+pub(crate) use self::endpoint::{endpoint_server_pid_until, transport_from_handle};
 pub use self::identity::file_identity;
 pub(crate) use self::identity::{
     Directory, file_id, is_deleted, link_count, opened_file_id, opened_file_identity,

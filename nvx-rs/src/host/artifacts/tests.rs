@@ -575,6 +575,31 @@ fn a_checkout_identifies_its_runtime_by_the_build_provenance_of_its_artifacts() 
 }
 
 #[test]
+fn selected_guests_take_their_own_initramfs_digest_from_install_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = ArtifactDir::repository(directory.path()).unwrap();
+    let digests = ["a", "b", "c"].map(|digit| digit.repeat(64));
+    record_provenance(directory.path(), &digests);
+    for guest in [Guest::Ubuntu, Guest::AzureLinux] {
+        let selected = "d".repeat(64);
+        let manifest = dir.package_manifest(guest);
+        fs::write(&manifest, format!("{{\"artifact_sha256\":\"{selected}\"}}")).unwrap();
+        let identity = dir.runtime_identity_for(guest).unwrap();
+        assert_eq!(
+            identity.initramfs,
+            ArtifactIdentity::sha256(&selected).unwrap()
+        );
+        assert_eq!(identity.openvmm, identity_of(&digests).openvmm);
+        fs::write(&manifest, "{\"artifact_sha256\":\"invalid\"}").unwrap();
+        assert_eq!(
+            dir.runtime_identity_for(guest).unwrap_err().kind(),
+            ErrorKind::Unavailable
+        );
+    }
+    assert_eq!(dir.runtime_identity().unwrap(), identity_of(&digests));
+}
+
+#[test]
 fn a_release_identifies_its_runtime_by_its_checksum_list() {
     let directory = tempfile::tempdir().unwrap();
     release(directory.path());

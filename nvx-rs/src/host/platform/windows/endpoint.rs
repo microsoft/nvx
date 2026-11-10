@@ -234,6 +234,11 @@ pub(crate) fn connect_endpoint(
             ),
         ));
     }
+    transport_from_handle(pipe)
+}
+
+/// Gives an already verified pipe duplicate its own overlapped-operation event.
+pub(crate) fn transport_from_handle(pipe: TransportHandle) -> io::Result<Box<dyn Transport>> {
     // SAFETY: creates an unnamed manual-reset event with default security.
     let event = owned(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) })
         .ok_or_else(io::Error::last_os_error)?;

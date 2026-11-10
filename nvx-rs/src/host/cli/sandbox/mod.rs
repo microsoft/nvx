@@ -43,8 +43,9 @@ use crate::host::store::RuntimeIdentity;
 use crate::protocol::root::RootUpper;
 
 pub(crate) use self::lifecycle::ProvisionConfig;
+pub(super) use self::lifecycle::{copy_openvmm_outcome, validate_outcome_destination};
 pub(super) use self::one_shot::run_openvmm;
-use self::options::sandbox_network;
+pub(super) use self::options::sandbox_network;
 pub(super) use self::options::{
     HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, hypervisor, parse, path_text,
 };
@@ -202,7 +203,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
         // `provision` records its binding, which `start` checks without reading the layer again.
         let binding = validate_sandbox_systemd_policy(&launch)?;
         // The network's policy is checked before anything launches or is recorded.
-        let launch = launch.with_network(sandbox_network(&options, &rules)?);
+        let launch = launch.with_network(sandbox_network(&options.network, &rules)?);
         Some((launch, binding))
     } else {
         None

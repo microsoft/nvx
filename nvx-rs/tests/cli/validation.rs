@@ -729,6 +729,7 @@ fn sandbox_refusals() -> Vec<Refusal> {
 fn run_refusals() -> Vec<Refusal> {
     let targets = "with several shares, or a shared file";
     let budget = &["--mount", "--cmdline", "1024"][..];
+    let overflow = crate::openvmm::two_share_command_line_room() + 1;
     let two_shares = |cmdline: &str| {
         run_dry(&[
             "--mount",
@@ -740,7 +741,7 @@ fn run_refusals() -> Vec<Refusal> {
         ])
     };
     let mut many = vec!["run".to_owned()];
-    many.extend(shares(20));
+    many.extend(shares(42));
     many.push("--dry-run".to_owned());
     vec![
         refusal(
@@ -1230,13 +1231,12 @@ fn run_refusals() -> Vec<Refusal> {
             ]),
             &["--mount target", "\"/voil\u{e0}\"", targets],
         ),
-        // The target of one directory share reaches the kernel command line in OpenVMM's
-        // virtfs_dir= token.
+        // A single directory is now checked for the same planned nvx_share= row as an aggregate.
         refusal(
             "run: quoted target of one share",
             "unsupported",
             run_dry(&["--mount", "/a\"b,{root/share}"]),
-            &["--mount target", "\"/a\\\"b\"", "one kernel token"],
+            &["--mount target", "\"/a\\\"b\"", "quotes"],
         ),
         refusal(
             "run: target with a dot component",
@@ -1331,14 +1331,27 @@ fn run_refusals() -> Vec<Refusal> {
         refusal(
             "run: budget exceeded by a byte",
             "unsupported",
-            two_shares(&"x".repeat(842)),
+            two_shares(&"x".repeat(overflow)),
             budget,
         ),
         // The budget is of bytes: each of these characters takes two.
         refusal(
             "run: budget in UTF-8 bytes",
             "unsupported",
-            two_shares(&"\u{e9}".repeat(421)),
+            two_shares(&("\u{e9}".repeat(overflow / 2) + &"x".repeat(overflow % 2))),
+            budget,
+        ),
+        // A single directory also has a planned boot bind now; keep the former unbounded
+        // positive case as a checked refusal rather than dropping its input.
+        refusal(
+            "run: long command line of one directory share",
+            "unsupported",
+            run_dry(&[
+                "--mount",
+                "/data,{root/share}",
+                "--cmdline",
+                &"x".repeat(1100),
+            ]),
             budget,
         ),
         refusal(
@@ -1352,7 +1365,7 @@ fn run_refusals() -> Vec<Refusal> {
             "run: caller owner on Windows",
             "unsupported",
             run_dry(&["--mount", "/data,{root/share}", "--mount-owner", "caller"]),
-            &["--mount-owner caller", "Linux"],
+            &["caller owner", "Linux"],
         )
         .on(Hosts::Windows),
         refusal(

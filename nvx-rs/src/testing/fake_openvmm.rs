@@ -83,7 +83,9 @@
 //! or with `STATUS` if the kernel command line has `fake_exit_status=STATUS`.
 //!
 //! The fake also runs the microVMs of `nvx-rs run`, whose command lines have
-//! neither a `--microvm-lifecycle` nor a sandbox block device, on the terminal. Such a command
+//! neither a `--microvm-lifecycle` nor a sandbox block device, on the terminal or a boot-console
+//! listener. A cold library launch also supplies the authenticated control endpoint and
+//! `--guest-shutdown-action exit`, without selecting a lifecycle through an OpenVMM flag. Such a command
 //! line takes `--processors` and at most one `--cpu-profile`, shares through one `--mount` or the
 //! children of an aggregate at `/run/nvx/shares`, whose relative policy paths name paths in the
 //! only share, as OpenVMM resolves them, and either boots a guest, with `--memory`, an optional
@@ -374,6 +376,8 @@ struct Options {
     restore: Option<PathBuf>,
     /// The `--virtio-console` of a run's restore, which the restore checks against its snapshot.
     restore_console: Option<String>,
+    /// The listener attachment of a cold library launch's boot console.
+    boot_console: Option<String>,
     /// Control endpoint at which the fake accepts host sessions; empty for a one-shot run.
     endpoint: String,
     /// Path to the synthetic OpenVMM outcome report, which a one-shot run may omit.
@@ -398,6 +402,8 @@ struct Options {
     exit_status: Option<i32>,
     /// Artificial delay before the fake guest becomes ready.
     boot_delay: Duration,
+    /// Whether the boot console emits the binary-output regression fixture.
+    binary_console: bool,
     /// Artificial delay before the fake OpenVMM crashes, when requested.
     crash_after: Option<Duration>,
     /// Whether stop requests are deliberately left unanswered.
@@ -515,23 +521,48 @@ pub fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let launch_capability = if options.boot_console.is_some() {
+        match read_capability() {
+            Ok(capability) => Some(capability),
+            Err(message) => {
+                eprintln!("{program}: {message}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+    let mut console = match boot_console(&options) {
+        Ok(console) => console,
+        Err(error) => {
+            eprintln!("{program}: {error}");
+            return ExitCode::from(1);
+        }
+    };
     let ended = match options.lifecycle {
-        Lifecycle::OneShot => Some(run_one_shot(&options)),
-        Lifecycle::Run => Some(run_microvm(&options)),
+        Lifecycle::OneShot => Some(run_one_shot(&options, &mut console)),
+        Lifecycle::Run => Some(run_microvm(&options, &mut console)),
         Lifecycle::Capture => Some(run_capture(&options)),
         Lifecycle::Managed => None,
     };
     if let Some(status) = ended {
+        if let Err(error) = console.flush() {
+            eprintln!("{program}: {error}");
+            return ExitCode::from(1);
+        }
         let _ = io::stdout().flush();
         let _ = io::stderr().flush();
         return exit_code(status);
     }
-    let capability = match read_capability() {
-        Ok(capability) => capability,
-        Err(message) => {
-            eprintln!("{program}: {message}");
-            return ExitCode::from(2);
-        }
+    let capability = match launch_capability {
+        Some(capability) => capability,
+        None => match read_capability() {
+            Ok(capability) => capability,
+            Err(message) => {
+                eprintln!("{program}: {message}");
+                return ExitCode::from(2);
+            }
+        },
     };
     thread::sleep(options.boot_delay);
     if let Some(after) = options.crash_after {
@@ -741,7 +772,7 @@ fn writers_of(_reader: &fs::File) -> Option<bool> {
 /// The entrypoint is `/bin/echo`, which prints its arguments, `/bin/sleep`, which sleeps for its
 /// argument in seconds, `/bin/true` or `/bin/false`, or any other program, which is not found;
 /// the `fake_exit_status=STATUS` token replaces the status.
-fn run_one_shot(options: &Options) -> i32 {
+fn run_one_shot(options: &Options, console: &mut dyn Write) -> i32 {
     let (program, arguments) = options
         .workload
         .split_first()
@@ -750,7 +781,10 @@ fn run_one_shot(options: &Options) -> i32 {
         });
     let status = match program {
         "/bin/echo" => {
-            println!("{}", arguments.join(" "));
+            if let Err(error) = writeln!(console, "{}", arguments.join(" ")) {
+                eprintln!("{}: {error}", options.program);
+                return 1;
+            }
             0
         }
         "/bin/sleep" => {
@@ -788,9 +822,9 @@ fn run_one_shot(options: &Options) -> i32 {
 /// of the `fake_exit_status=STATUS` token. A restore without its snapshot directory fails with 1,
 /// as OpenVMM fails a restore that it cannot read, and so does one whose console
 /// [`check_restored_console`] refuses; neither writes a report.
-fn run_microvm(options: &Options) -> i32 {
+fn run_microvm(options: &Options, console: &mut dyn Write) -> i32 {
     thread::sleep(options.boot_delay);
-    match &options.restore {
+    let message = match &options.restore {
         Some(snapshot) if !snapshot.is_dir() => {
             eprintln!(
                 "{}: cannot restore {}: no such snapshot directory",
@@ -806,9 +840,18 @@ fn run_microvm(options: &Options) -> i32 {
                 eprintln!("{}: {message}", options.program);
                 return 1;
             }
-            println!("{}: restored the microVM", options.program);
+            format!("{}: restored the microVM", options.program)
         }
-        None => println!("{}: booted the microVM", options.program),
+        None => format!("{}: booted the microVM", options.program),
+    };
+    let written = if options.binary_console {
+        console.write_all(&[b'A', 0xff, 0x80, b'\n'])
+    } else {
+        writeln!(console, "{message}")
+    };
+    if let Err(error) = written {
+        eprintln!("{}: {error}", options.program);
+        return 1;
     }
     let status = options.exit_status.unwrap_or(0);
     let (category, status_code) = if status == 0 {
@@ -1224,7 +1267,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         "--host-loopback-forward",
     ];
     // The options that only the microVMs of `nvx-rs run` and of captures take.
-    const RUN_VALUED: [&str; 7] = [
+    const RUN_VALUED: [&str; 8] = [
         "--processors",
         "--cpu-profile",
         "--memory-capacity",
@@ -1232,6 +1275,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         "--restore-processors",
         "--restore-memory",
         "--restore-ready-path",
+        "--guest-shutdown-action",
     ];
     // The options that only the VMs of templates' captures take.
     const CAPTURE_VALUED: [&str; 3] = [
@@ -1317,9 +1361,24 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     if !flags.contains("--single-process") {
         return Err("--single-process is required".to_owned());
     }
-    let (endpoint, report) = match lifecycle {
-        Lifecycle::Managed | Lifecycle::Capture => {
-            expect("--virtio-console", "none")?;
+    let boot_console = if run && values.contains_key("--guest-shutdown-action") {
+        if values.contains_key("--restore-snapshot") {
+            return Err("--guest-shutdown-action is only for a cold boot".to_owned());
+        }
+        expect("--guest-shutdown-action", "exit")?;
+        let endpoint = single("--virtio-console")?
+            .strip_prefix("listen=")
+            .filter(|endpoint| !endpoint.is_empty())
+            .ok_or("--virtio-console must name a listen= endpoint")?;
+        Some(endpoint.to_owned())
+    } else {
+        None
+    };
+    let (endpoint, report) =
+        if matches!(lifecycle, Lifecycle::Managed | Lifecycle::Capture) || boot_console.is_some() {
+            if boot_console.is_none() {
+                expect("--virtio-console", "none")?;
+            }
             if !flags.contains("--microvm-control-auth-stdin") {
                 return Err("--microvm-control-auth-stdin is required".to_owned());
             }
@@ -1333,8 +1392,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
                 );
             }
             (endpoint, Some(PathBuf::from(single("--microvm-report")?)))
-        }
-        Lifecycle::OneShot | Lifecycle::Run => {
+        } else {
             let kind = if run {
                 "a microVM run"
             } else {
@@ -1366,8 +1424,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
                 Some(_) => return Err("--microvm-report must be given at most once".to_owned()),
             };
             (String::new(), report)
-        }
-    };
+        };
     let hypervisor = single("--hypervisor")?;
     if !["kvm", "mshv", "whp"].contains(&hypervisor) {
         return Err(format!("unsupported hypervisor {hypervisor}"));
@@ -1533,7 +1590,12 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         // CLI's tokens may name a one-shot workload and place the children of an aggregate. The
         // guest of a workload of either mode has the targets of its directory shares, as a
         // one-shot sandbox's has: a direct share's, and those that the tokens place.
-        let (children, mut share_targets) = sandbox_shares(&values)?;
+        let (children, mut share_targets) = if boot_console.is_some() {
+            let maps = mapping_count(&token_values(MAPS_TOKEN))?;
+            (mapped_children(&values, maps)?, Vec::new())
+        } else {
+            sandbox_shares(&values)?
+        };
         match lifecycle {
             Lifecycle::Run => share_targets.clear(),
             _ => share_targets.extend(bound_targets(&token_values("nvx_share="))?),
@@ -1674,6 +1736,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         run,
         restore,
         restore_console,
+        boot_console,
         endpoint,
         args_dump: anchor.with_file_name(format!("fake-openvmm-{token}.json")),
         maps_dump: anchor.with_file_name(format!("fake-openvmm-{token}-maps.json")),
@@ -1686,6 +1749,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         exit_on_start: knob("fake_exit_on_start").and_then(|value| value.parse().ok()),
         exit_status: knob("fake_exit_status").and_then(|value| value.parse().ok()),
         boot_delay: millis("fake_boot_delay_ms").unwrap_or_default(),
+        binary_console: knob("fake_binary_console") == Some("1"),
         crash_after: millis("fake_crash_after_ms"),
         ignore_stop: knob("fake_ignore_stop") == Some("1"),
         exit_delay: millis("fake_exit_delay_ms").unwrap_or_default(),
@@ -2886,6 +2950,46 @@ fn record_session(options: &Options) {
     }
 }
 
+fn boot_console(options: &Options) -> io::Result<Box<dyn Write>> {
+    let Some(endpoint) = &options.boot_console else {
+        return Ok(Box::new(io::stdout()));
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+
+        let listener = UnixListener::bind(endpoint)?;
+        fs::set_permissions(endpoint, fs::Permissions::from_mode(0o600))?;
+        Ok(Box::new(listener.accept()?.0))
+    }
+    #[cfg(windows)]
+    {
+        let pipe = pipe_listener(endpoint)?;
+        accept_pipe(&pipe)?;
+        Ok(Box::new(PipeConsole(pipe)))
+    }
+    #[cfg(not(any(unix, windows)))]
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no boot-console listener on this host",
+    ))
+}
+
+#[cfg(windows)]
+struct PipeConsole(fs::File);
+
+#[cfg(windows)]
+impl Write for PipeConsole {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.0.write(data)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.sync_all()
+    }
+}
+
 #[cfg(unix)]
 /// Serves the fake control endpoint as a Unix-domain socket until a stop request.
 fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()> {
@@ -2909,24 +3013,20 @@ fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()>
 }
 
 #[cfg(windows)]
-/// Serves the fake control endpoint as a Windows named pipe until a stop request.
-fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()> {
+fn pipe_listener(endpoint: &str) -> io::Result<fs::File> {
     use std::fs::File;
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+    use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
 
-    use windows_sys::Win32::Foundation::{
-        ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-    };
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
     };
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
 
-    let name: Vec<u16> = std::ffi::OsStr::new(&options.endpoint.replace('/', "\\"))
+    let name: Vec<u16> = std::ffi::OsStr::new(&endpoint.replace('/', "\\"))
         .encode_wide()
         .chain([0])
         .collect();
@@ -2949,16 +3049,26 @@ fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()>
         return Err(io::Error::last_os_error());
     }
     // SAFETY: CreateNamedPipeW returned a fresh handle that nothing else owns.
-    let mut file = File::from(unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) });
+    Ok(File::from(unsafe {
+        OwnedHandle::from_raw_handle(handle as RawHandle)
+    }))
+}
+
+#[cfg(windows)]
+fn accept_pipe(file: &fs::File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GetLastError, HANDLE,
+    };
+    use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe};
+
     let pipe = file.as_raw_handle() as HANDLE;
-    let mut guest = Guest::new(options);
-    let mut epoch = 0;
     loop {
         // SAFETY: the handle is a pipe server instance; a null OVERLAPPED waits synchronously.
         if unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) } == 0 {
             // SAFETY: GetLastError has no preconditions.
             match unsafe { GetLastError() } {
-                ERROR_PIPE_CONNECTED => {}
+                ERROR_PIPE_CONNECTED => return Ok(()),
                 // The client left before the connection was accepted.
                 ERROR_NO_DATA => {
                     // SAFETY: the handle is a pipe server instance.
@@ -2968,6 +3078,23 @@ fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()>
                 error => return Err(io::Error::from_raw_os_error(error as i32)),
             }
         }
+        return Ok(());
+    }
+}
+
+#[cfg(windows)]
+/// Serves the fake control endpoint as a Windows named pipe until a stop request.
+fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
+
+    let mut file = pipe_listener(&options.endpoint)?;
+    let pipe = file.as_raw_handle() as HANDLE;
+    let mut guest = Guest::new(options);
+    let mut epoch = 0;
+    loop {
+        accept_pipe(&file)?;
         epoch += 1;
         record_session(options);
         let flow = serve_client(&mut file, options, capability, epoch, &mut guest);

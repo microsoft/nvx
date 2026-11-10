@@ -10,13 +10,15 @@ use std::time::{Duration, Instant};
 use crate::harness::{LAYER, NVX_RS, OPENVMM, Root, SCRATCH, UUID};
 
 /// The files of a test root that a release installs.
-const INSTALLED: [&str; 6] = [
+const INSTALLED: [&str; 8] = [
     OPENVMM,
     "build/vmlinux",
     "build/initramfs.cpio.gz",
     "build/openvmm.provenance.json",
     "build/vmlinux.provenance.json",
     "build/initramfs.provenance.json",
+    "build/initramfs-ubuntu.cpio.gz.packages.json",
+    "build/initramfs-azurelinux.cpio.gz.packages.json",
 ];
 
 /// Returns a root that is a checkout of NVX, with its `SOURCE-MANIFEST.json` and a `.git` that is

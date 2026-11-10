@@ -77,7 +77,9 @@ use crate::host::supervisor::{self, Reattached, Vmm};
 use crate::protocol::{CAPABILITY_LEN, GuestFeatures};
 
 pub(crate) use self::directory::{create_state_directory, prepare_state_directory};
-pub(crate) use self::outcome::{validate_outcome_destination, write_exec_outcome};
+pub(crate) use self::outcome::{
+    copy_openvmm_outcome, validate_outcome_destination, write_exec_outcome,
+};
 pub(crate) use self::start::{exec_workload, start};
 pub(crate) use self::stop::{deprovision, stop};
 

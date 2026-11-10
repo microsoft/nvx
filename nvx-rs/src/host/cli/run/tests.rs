@@ -1,22 +1,19 @@
-//! The shares of `run`: their targets stay single kernel tokens, and OpenVMM, not option order,
-//! attributes their policy paths.
+//! Cold-run shares stay kernel tokens through the checked VM configuration; restore keeps its
+//! existing policy-path lowering.
 
 use proptest::prelude::*;
 
 use super::*;
-use crate::host::sandbox::mount::MountAccess;
 use crate::protocol::cmdline::{self, parameters, virtio_mmio_devices};
 
-/// Returns the kernel command line that OpenVMM composes from `cmdline`, the `--cmdline` that
-/// `run` gives it for the cold boot of an aggregate of read-write shares, as its
-/// `build_microvm_command_line` and `append_microvm_virtio_discovery` do: its console parameters,
-/// `cmdline`, the virtio-mmio devices of its virtio-fs slot and of its boot virtio-console, and
-/// the aggregate's bootstrap tokens.
-fn effective_command_line(cmdline: &str) -> String {
+/// Models the kernel's discovery of the filesystem, control console, and boot console around the
+/// command line rendered by the actual cold VM configuration.
+fn effective_command_line(config: &VmConfig) -> String {
     format!(
-        "earlycon=xe9 console=hvc1 reboot=t panic=-1 {cmdline} \
-         virtio_mmio.device=0x1000@0xd0001000:17 virtio_mmio.device=0x1000@0xd0002000:18{}",
-        aggregate_command_line_fragment(&[MountAccess::ReadWrite])
+        "earlycon=xe9 console=hvc1 reboot=t panic=-1 {} \
+         virtio_mmio.device=0x1000@0xd0001000:17 virtio_mmio.device=0x1000@0xd0002000:18 \
+         virtio_mmio.device=0x1000@0xd0003000:19",
+        config.kernel_command_line().unwrap()
     )
 }
 
@@ -49,7 +46,44 @@ fn single_share_targets_must_remain_one_kernel_token() {
             ..Options::default()
         };
         let rules = options.network.egress_rules().unwrap();
-        assert!(extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err());
+        assert!(cold_config(&options, &rules).is_err());
+    }
+}
+
+#[test]
+fn cold_share_command_lines_fit_the_kernel_budget_to_the_byte() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let mut options = Options {
+        mounts: vec![
+            format!("/a,{},ro", first.display()),
+            format!("/b,{},rw", second.display()),
+        ],
+        ..Options::default()
+    };
+    let rules = options.network.egress_rules().unwrap();
+    let base = cold_config(&options, &rules).unwrap();
+    let fragment = export_command_line_fragment(base.filesystem.as_ref().unwrap());
+    let room = SANDBOX_COMMAND_LINE_MAX_SIZE
+        - base.kernel_command_line().unwrap().len()
+        - fragment.len()
+        - 2;
+    for unicode in [false, true] {
+        options.cmdline = if unicode {
+            "\u{e9}".repeat(room / 2) + &"x".repeat(room % 2)
+        } else {
+            "x".repeat(room)
+        };
+        let fitting = cold_config(&options, &rules).unwrap();
+        assert_eq!(
+            fitting.kernel_command_line().unwrap().len() + fragment.len() + 1,
+            SANDBOX_COMMAND_LINE_MAX_SIZE
+        );
+        options.cmdline.push('x');
+        assert!(cold_config(&options, &rules).is_err());
     }
 }
 
@@ -63,24 +97,27 @@ proptest! {
     fn share_tokens_hide_no_virtio_mmio_device(
         components in prop::collection::vec(component(), 2..5),
     ) {
+        let directory = tempfile::tempdir().unwrap();
+        let roots: Vec<_> = (0..components.len()).map(|index| directory.path().join(format!("host-{index}"))).collect();
+        for root in &roots { std::fs::create_dir(root).unwrap(); }
         let options = Options {
             mounts: components
                 .iter()
                 .enumerate()
-                .map(|(index, component)| format!("/share-{index}/{component},host-{index},rw"))
+                .map(|(index, component)| format!("/share-{index}/{component},{},rw", roots[index].display()))
                 .collect(),
             ..Options::default()
         };
         let rules = options.network.egress_rules().unwrap();
-        let result = extend_shares_and_network(&mut Vec::new(), &options, &rules);
+        let result = cold_config(&options, &rules);
         let separated = components.iter().any(|component| {
             component
                 .bytes()
                 .any(|byte| matches!(byte, b'\0' | b'"') || cmdline::is_space(byte))
         });
         prop_assert_eq!(result.is_err(), separated);
-        if let Ok(user) = result {
-            let line = effective_command_line(&user);
+        if let Ok(config) = result {
+            let line = effective_command_line(&config);
             let read: Vec<String> = parameters(line.as_bytes())
                 .map(|parameter| {
                     let mut text = parameter.name.to_vec();
@@ -92,12 +129,12 @@ proptest! {
                 })
                 .collect();
             prop_assert_eq!(read, line.split(' ').collect::<Vec<_>>());
-            prop_assert_eq!(virtio_mmio_devices(line.as_bytes()).count(), 2);
+            prop_assert_eq!(virtio_mmio_devices(line.as_bytes()).count(), 3);
         }
     }
 
     #[test]
-    fn policy_paths_attach_to_their_shares(
+    fn restore_policy_paths_attach_to_their_shares(
         events in prop::collection::vec((any::<bool>(), 0_u8..3, any::<bool>()), 0..40),
     ) {
         let directory = tempfile::tempdir().unwrap();
@@ -152,7 +189,7 @@ proptest! {
             ].map(str::to_owned);
             let (options, _) = parse(&arguments).unwrap();
             let rules = options.network.egress_rules().unwrap();
-            prop_assert!(extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err());
+            prop_assert!(cold_config(&options, &rules).is_err());
         }
     }
 }

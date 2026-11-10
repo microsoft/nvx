@@ -23,11 +23,11 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 
 use crate::hypervisor::Hypervisor;
 
-#[cfg(feature = "cli")]
-pub(crate) use self::endpoint::endpoint_server_pid_until;
 pub(crate) use self::endpoint::{
     ReadyListener, connect_endpoint, control_endpoint, endpoint_server_pid, listen_ready,
 };
+#[cfg(feature = "cli")]
+pub(crate) use self::endpoint::{endpoint_server_pid_until, transport_from_handle};
 pub use self::identity::file_identity;
 pub(crate) use self::identity::{
     Directory, file_id, is_deleted, link_count, opened_file_id, opened_file_identity,
@@ -47,7 +47,7 @@ pub(crate) use self::process::{
 };
 #[cfg(feature = "cli")]
 pub(crate) use self::spawn::spawn_foreground;
-pub(crate) use self::spawn::{LaunchedProcess, spawn_detached};
+pub(crate) use self::spawn::{LaunchedProcess, SpawnMode, spawn_with_stdio};
 
 /// Whether this host can run NVX microVMs.
 pub const SUPPORTED: bool = true;
