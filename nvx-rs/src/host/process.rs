@@ -2,10 +2,11 @@
 //!
 //! A [`ProcessRef`] names one process by its ID, its start time, and the [`BootId`] of the host
 //! boot during which it started, which together never name another process. [`Process::open`]
-//! checks a reference against the host and holds the process that it names through a handle of
-//! the operating system: a pidfd on Linux, and a process handle on Windows. Waits and termination
-//! go through that handle, so they reach the referenced process, whether or not the caller
-//! started it, and never another process that reuses its ID. A process that does not match its
+//! checks a reference against the host and returns [`Opened::Running`] with the process held
+//! through a handle of the operating system, or [`Opened::Exited`] with proof that the recorded
+//! process exited. The handle is a pidfd on Linux, and a process handle on Windows. Waits and
+//! termination go through that handle, so they reach the referenced process, whether or not the
+//! caller started it, and never another process that reuses its ID. A process that does not match its
 //! reference is never signaled, and neither is one that a reference from an earlier boot names:
 //! every process of that boot has exited.
 //!
@@ -188,14 +189,23 @@ pub struct Process {
     handle: platform::ProcessHandle,
 }
 
-/// Proof that a verified process exited, produced only by [`Process::wait`].
+/// The result of checking a recorded process reference against this host.
+#[derive(Debug)]
+pub enum Opened {
+    /// The process matched the recorded boot, ID, and start time; the caller owns its `Process`.
+    Running(Process),
+    /// The recorded process exited: its boot ended, or no running process matches its identity.
+    Exited(Exited),
+}
+
+/// Proof that a verified process exited, produced only by [`Process::wait`] or [`Process::open`].
 ///
 /// It proves exit, not the process's exit status, and cannot be constructed by a caller.
 #[derive(Debug)]
 pub struct Exited(());
 
 impl Process {
-    /// Finds the process that `reference` names, and returns `None` if it has exited.
+    /// Finds the process that `reference` names, or returns proof that it has exited.
     ///
     /// The process has exited when no process has its ID, when the process that has it started
     /// at another time, and when the reference comes from another boot.
@@ -207,12 +217,15 @@ impl Process {
     /// other users. Fails with [`io::ErrorKind::InvalidInput`] for a process ID that the host
     /// never assigns, such as 0, and with [`io::ErrorKind::Unsupported`] on hosts other than
     /// Linux and Windows.
-    pub fn open(reference: &ProcessRef) -> io::Result<Option<Self>> {
+    pub fn open(reference: &ProcessRef) -> io::Result<Opened> {
         let handle = open_reference(reference, BootId::current, platform::open_process)?;
-        Ok(handle.map(|handle| Self {
-            reference: reference.clone(),
-            handle,
-        }))
+        Ok(match handle {
+            Some(handle) => Opened::Running(Self {
+                reference: reference.clone(),
+                handle,
+            }),
+            None => Opened::Exited(Exited(())),
+        })
     }
 
     /// Returns the process that `handle` holds, whose identity the caller verified to be
