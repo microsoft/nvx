@@ -50,6 +50,8 @@
 //! `fake_boot_delay_ms=MS` delays the control endpoint, `fake_crash_after_ms=MS` makes the VM
 //! die, `fake_ignore_stop=1` ignores stop requests, `fake_exit_delay_ms=MS` delays the exit after
 //! an acknowledged stop, `fake_ignore_cancel=1` ignores cancellation,
+//! `fake_console_bytes=N` emits up to 16 MiB of `x` bytes on a run's console, and
+//! `fake_report_before_console=1` writes a run's report before console output or its boot delay.
 //! `fake_guest_features=MASK` advertises the decimal feature mask `MASK` instead of the current
 //! guest's, `fake_legacy_guest=1` refuses the features request like a guest agent that
 //! predates it, and `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot
@@ -404,6 +406,10 @@ struct Options {
     boot_delay: Duration,
     /// Whether the boot console emits the binary-output regression fixture.
     binary_console: bool,
+    /// Number of bytes in the sustained-console regression fixture.
+    console_bytes: usize,
+    /// Whether a run publishes its regression report before console output or boot delay.
+    report_before_console: bool,
     /// Artificial delay before the fake OpenVMM crashes, when requested.
     crash_after: Option<Duration>,
     /// Whether stop requests are deliberately left unanswered.
@@ -539,6 +545,17 @@ pub fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if options.report_before_console
+        && matches!(options.lifecycle, Lifecycle::OneShot | Lifecycle::Run)
+    {
+        let status = options.exit_status.unwrap_or(0);
+        write_report(
+            &options,
+            "run",
+            if status == 0 { "success" } else { "guest-exit" },
+            status,
+        );
+    }
     let ended = match options.lifecycle {
         Lifecycle::OneShot => Some(run_one_shot(&options, &mut console)),
         Lifecycle::Run => Some(run_microvm(&options, &mut console)),
@@ -846,6 +863,13 @@ fn run_microvm(options: &Options, console: &mut dyn Write) -> i32 {
     };
     let written = if options.binary_console {
         console.write_all(&[b'A', 0xff, 0x80, b'\n'])
+    } else if options.console_bytes != 0 {
+        let buffer = [b'x'; 8192];
+        (0..options.console_bytes)
+            .step_by(buffer.len())
+            .try_for_each(|offset| {
+                console.write_all(&buffer[..buffer.len().min(options.console_bytes - offset)])
+            })
     } else {
         writeln!(console, "{message}")
     };
@@ -1750,6 +1774,17 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         exit_status: knob("fake_exit_status").and_then(|value| value.parse().ok()),
         boot_delay: millis("fake_boot_delay_ms").unwrap_or_default(),
         binary_console: knob("fake_binary_console") == Some("1"),
+        console_bytes: match knob("fake_console_bytes") {
+            None => 0,
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|&count| count <= 16 * 1024 * 1024)
+                .ok_or_else(|| {
+                    "fake_console_bytes must be an integer from 0 through 16777216".to_owned()
+                })?,
+        },
+        report_before_console: knob("fake_report_before_console") == Some("1"),
         crash_after: millis("fake_crash_after_ms"),
         ignore_stop: knob("fake_ignore_stop") == Some("1"),
         exit_delay: millis("fake_exit_delay_ms").unwrap_or_default(),
