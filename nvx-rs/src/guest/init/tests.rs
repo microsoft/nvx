@@ -9,6 +9,7 @@
 
 mod capture;
 mod exec;
+pub(super) mod restore;
 pub(super) use exec::prepare_child;
 
 use std::collections::VecDeque;
