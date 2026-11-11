@@ -5,6 +5,12 @@
 //! Provision checks the same [`VmConfig`] that start reconstructs. Older records are
 //! refused, not migrated. Bindings still check the recorded caller-owned paths before
 //! launch, and the caller keeps those paths stable while the VM uses them.
+//!
+//! The configuration of a restored sandbox also records its [`Source`]: the name of its snapshot
+//! under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and
+//! the program and arguments of the workload that each restore runs under `workload`, which
+//! [`Config::source`] reads back for `start` to restore the sandbox and for `deprovision` to
+//! remove its view of the snapshot. That of a sandbox that boots cold records none of them.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -191,26 +197,31 @@ enum Upper {
     Ram { max_memory_percent: u8 },
 }
 
+/// The named snapshot from which each start of a restored sandbox restores it, and the workload
+/// that each restore runs: the only association between a snapshot and the sandboxes that it
+/// supplies, which their own configurations record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Source {
+    /// The snapshot's name.
+    pub(crate) snapshot: SnapshotName,
+    /// The absolute path of the snapshot's store.
+    pub(crate) store: PathBuf,
+    /// The program, an absolute guest path, and the arguments of the workload.
+    pub(crate) workload: Vec<String>,
+}
+
 /// Returns the JSON text of the configuration that `provision` records for `launch` and the other
 /// options, with `distro`, the launch's distro layer at the path that `provision` verified and
 /// records, and its binding, and `scratch`, the launch's scratch image at the path that
-/// `provision` records, and its binding, or `None` for an upper in RAM.
+/// `provision` records, and its binding, or `None` for an upper in RAM. The configuration of a
+/// restored sandbox also records its `source`, without any index of the sandboxes that a snapshot
+/// supplies; that of a sandbox that boots cold, whose `source` is `None`, records none.
 pub(crate) fn serialize_launch(
     launch: &SandboxLaunch,
     distro: &RecordedDistro,
     scratch: Option<&RecordedScratch>,
     config: &ProvisionConfig<'_>,
-) -> Result<String> {
-    serialize_launch_with_snapshot(launch, distro, scratch, config, None)
-}
-
-/// Records a restored sandbox's source alongside its own launch, without a snapshot index.
-pub(crate) fn serialize_launch_with_snapshot(
-    launch: &SandboxLaunch,
-    distro: &RecordedDistro,
-    scratch: Option<&RecordedScratch>,
-    config: &ProvisionConfig<'_>,
-    source_snapshot: Option<&SnapshotName>,
+    source: Option<&Source>,
 ) -> Result<String> {
     let settings = launch.settings();
     let (workload_uid, workload_gid) = settings.workload_identity;
@@ -237,7 +248,11 @@ pub(crate) fn serialize_launch_with_snapshot(
         distro_binding: distro.binding.clone(),
         scratch_binding: scratch.map(|scratch| scratch.binding.clone()),
         export: launch.export().cloned(),
-        source_snapshot: source_snapshot.cloned(),
+        source_snapshot: source.map(|source| source.snapshot.clone()),
+        source_store: source
+            .map(|source| path_string(&source.store))
+            .transpose()?,
+        workload: source.map(|source| source.workload.clone()),
     };
     record
         .vm_config(&record.launch()?)?
@@ -283,18 +298,33 @@ pub(crate) struct Config {
     /// launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_snapshot: Option<SnapshotName>,
+    /// The store of the snapshot of a restored sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_store: Option<String>,
+    /// The workload that each restore of a restored sandbox runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workload: Option<Vec<String>>,
 }
 
 impl Config {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "SL3.8a locks a restored sandbox's source snapshot"
-        )
-    )]
-    pub(crate) fn source_snapshot(&self) -> Option<&SnapshotName> {
-        self.source_snapshot.as_ref()
+    /// Returns the [`Source`] of a restored sandbox, or `None` for one that boots cold.
+    ///
+    /// A configuration that records only part of a source, a store that is not absolute, or an
+    /// empty workload fails as `sandbox configuration is malformed`.
+    pub(crate) fn source(&self) -> Result<Option<Source>> {
+        match (&self.source_snapshot, &self.source_store, &self.workload) {
+            (None, None, None) => Ok(None),
+            (Some(snapshot), Some(store), Some(workload))
+                if Path::new(store).is_absolute() && !workload.is_empty() =>
+            {
+                Ok(Some(Source {
+                    snapshot: snapshot.clone(),
+                    store: PathBuf::from(store),
+                    workload: workload.clone(),
+                }))
+            }
+            _ => Err(malformed()),
+        }
     }
 
     /// Returns the fields of `object`, a configuration that [`read_config`] read, which fails as

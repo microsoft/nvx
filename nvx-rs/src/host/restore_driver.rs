@@ -108,13 +108,6 @@ impl std::error::Error for ControlRestoreError {
 /// `maps` is the mapping table that `record` announces. A failure stops nothing: the caller keeps
 /// the VM's process, its outputs and its restore-ready listener, and decides what to do with
 /// them.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "SL3.8a's `snapshot restore` restores sandboxes through it"
-    )
-)]
 pub(crate) fn restore(
     launched: &mut Launched,
     record: &ActivationRecord,
