@@ -420,3 +420,19 @@ fn a_duplicated_transport_keeps_the_verified_connection_without_reconnecting() {
     drop(duplicate);
     assert_eq!(server.read(&mut response).unwrap(), 0);
 }
+
+#[test]
+fn a_wait_that_times_out_early_waits_again_until_its_deadline() {
+    // `WaitForSingleObject` can time out before as long as it was given has passed by `Instant`;
+    // this one always times out at once.
+    let deadline = Instant::now() + Duration::from_micros(20_500);
+    assert!(!wait_until(Some(deadline), |_| WAIT_TIMEOUT));
+    assert!(Instant::now() >= deadline);
+    // A deadline that passed still checks the event, once, without waiting.
+    let mut waits = Vec::new();
+    assert!(wait_until(Some(Instant::now()), |milliseconds| {
+        waits.push(milliseconds);
+        WAIT_OBJECT_0
+    }));
+    assert_eq!(waits, [0]);
+}
