@@ -610,19 +610,11 @@ impl Session {
         Ok(())
     }
 
-    /// Runs a workload and returns how it ended, as `ControlSession.exec` does: the request and
-    /// every response must arrive within `response_timeout` seconds of each other's start.
-    pub(crate) fn exec(
-        &mut self,
-        request: &ExecRequest,
-        response_timeout: f64,
-    ) -> Result<ExecResult> {
+    /// Checks the workload of `request` and returns the payload of its exec request, as
+    /// [`exec`](Self::exec) sends it, so that a caller can refuse a request before it starts a
+    /// VM.
+    pub(crate) fn exec_payload(request: &ExecRequest) -> Result<Vec<u8>> {
         let refused = |message: &str| Exit::error(ErrorCode::Unsupported, message);
-        if !(response_timeout > 0.0 && response_timeout < f64::INFINITY) {
-            return Err(refused(
-                "managed exec response timeout must be positive and finite",
-            ));
-        }
         let arguments = &request.arguments;
         if !(1..=MAX_ARGUMENTS).contains(&arguments.len()) {
             return Err(refused("managed exec requires 1 through 64 arguments"));
@@ -665,8 +657,24 @@ impl Session {
             environment,
         };
         // The checks above leave only the size of the request for the encoder to refuse.
-        let payload = encode_exec_payload(&workload)
-            .map_err(|_| refused("managed exec request exceeds the protocol limit"))?;
+        encode_exec_payload(&workload)
+            .map_err(|_| refused("managed exec request exceeds the protocol limit"))
+    }
+
+    /// Runs a workload and returns how it ended, as `ControlSession.exec` does: the request and
+    /// every response must arrive within `response_timeout` seconds of each other's start.
+    pub(crate) fn exec(
+        &mut self,
+        request: &ExecRequest,
+        response_timeout: f64,
+    ) -> Result<ExecResult> {
+        if !(response_timeout > 0.0 && response_timeout < f64::INFINITY) {
+            return Err(Exit::error(
+                ErrorCode::Unsupported,
+                "managed exec response timeout must be positive and finite",
+            ));
+        }
+        let payload = Self::exec_payload(request)?;
         let request_id = request_id()?;
         let deadline = Deadline::after(response_timeout);
         self.send(APP_EXEC, request_id, &payload, deadline)?;
