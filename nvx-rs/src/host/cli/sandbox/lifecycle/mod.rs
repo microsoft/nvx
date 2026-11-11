@@ -5,9 +5,14 @@
 //! matching saved VM only after authenticated readiness and mappings. Every lifecycle command
 //! takes the CLI store's recoverable lock; indeterminate launches retain their evidence.
 //!
+//! A restored sandbox, whose configuration names a named snapshot, restores it at each start in
+//! place of a cold boot, under the snapshot's lock, through the blocking restore driver, which
+//! readies the guest, maps the shares and runs the recorded workload.
+//!
 //! Exec and stop reattach with runtime and process verification. Stop requests NVXC shutdown,
 //! waits for exit, then forces only the verified process. Deprovision removes only this stopped
-//! sandbox's owned files. No running sandbox from the old runtime store is migrated.
+//! sandbox's owned files, and a restored sandbox's view of its snapshot under the snapshot's
+//! lock. No running sandbox from the old runtime store is migrated.
 //!
 //! A run launches the VM that a provision and a start would launch, in a temporary VM directory,
 //! without a state directory, executes one workload over NVXC, and stops it the way stop does.
@@ -93,7 +98,7 @@ pub(crate) fn provision(
     let scratch = RecordedScratch::new(launch)?;
     write_json(
         &config_path,
-        &serialize_launch(launch, distro, scratch.as_ref(), config)?,
+        &serialize_launch(launch, distro, scratch.as_ref(), config, None)?,
     )
 }
 
