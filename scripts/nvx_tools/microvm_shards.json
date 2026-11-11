@@ -64,20 +64,20 @@
         "structured-outcome": 0.6,
         "time-abi-conformance": 0.7,
         "time-host-correction": 14.0,
-        "untiered-network-policy": 14.0,
         "virtio-features": 0.7,
         "virtio-net": 3.8,
         "workload-identity": 0.7
       },
       "shards": [
         {
-          "seconds": 258.5,
+          "seconds": 251.7,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
             "directional-network-policy",
             "filesystem-comma-paths",
             "filesystem-snapshot",
+            "l3-l4-egress-policy",
             "lifecycle",
             "managed-lifecycle",
             "network-snapshot",
@@ -86,14 +86,13 @@
             "restore-memory",
             "restore-processors",
             "smp",
-            "smp-snapshot",
             "time-abi-conformance",
             "time-host-correction",
             "virtio-features"
           ]
         },
         {
-          "seconds": 258.4,
+          "seconds": 251.2,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -107,7 +106,6 @@
             "host-loopback-policy",
             "interrupt-map",
             "ipv6-egress-policy",
-            "l3-l4-egress-policy",
             "l3-l4-egress-port-ranges",
             "l3-l4-egress-protocols",
             "platform-aggregate-export",
@@ -117,9 +115,9 @@
             "private-network-ingress",
             "sandbox-blocks",
             "scratch-snapshot",
+            "smp-snapshot",
             "snapshot-rollback",
             "structured-outcome",
-            "untiered-network-policy",
             "virtio-net",
             "workload-identity"
           ]
@@ -168,14 +166,13 @@
         "structured-outcome": 0.5,
         "time-abi-conformance": 0.8,
         "time-host-correction": 14.0,
-        "untiered-network-policy": 14.1,
         "virtio-features": 0.6,
         "virtio-net": 3.7,
         "workload-identity": 0.6
       },
       "shards": [
         {
-          "seconds": 239.8,
+          "seconds": 233.0,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
@@ -189,16 +186,15 @@
             "platform-restore-processors",
             "platform-zero-fill",
             "restore-downtime",
+            "restore-processors",
             "scratch-snapshot",
             "smp",
             "smp-snapshot",
-            "snapshot-rollback",
-            "time-host-correction",
-            "untiered-network-policy"
+            "snapshot-rollback"
           ]
         },
         {
-          "seconds": 240.0,
+          "seconds": 232.7,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -219,10 +215,10 @@
             "platform-network-policy",
             "private-network-ingress",
             "restore-memory",
-            "restore-processors",
             "sandbox-blocks",
             "structured-outcome",
             "time-abi-conformance",
+            "time-host-correction",
             "virtio-features",
             "virtio-net",
             "workload-identity"
@@ -272,21 +268,20 @@
         "structured-outcome": 0.8,
         "time-abi-conformance": 1.6,
         "time-host-correction": 14.0,
-        "untiered-network-policy": 18.8,
         "virtio-features": 1.5,
         "virtio-net": 4.5,
         "workload-identity": 1.1
       },
       "shards": [
         {
-          "seconds": 339.3,
+          "seconds": 329.8,
           "scenarios": [
             "denied-filesystem-paths",
             "directional-network-policy",
             "endpoint-policy-snapshot",
             "filesystem-policy",
             "filesystem-shares",
-            "host-loopback-policy",
+            "l3-l4-egress-protocols",
             "network-snapshot",
             "platform-aggregate-export",
             "platform-filesystem",
@@ -296,12 +291,11 @@
             "restore-processors",
             "scratch-snapshot",
             "smp",
-            "smp-snapshot",
-            "untiered-network-policy"
+            "smp-snapshot"
           ]
         },
         {
-          "seconds": 339.3,
+          "seconds": 330.0,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -312,11 +306,11 @@
             "filesystem-snapshot",
             "guest-boot",
             "guest-identity",
+            "host-loopback-policy",
             "interrupt-map",
             "ipv6-egress-policy",
             "l3-l4-egress-policy",
             "l3-l4-egress-port-ranges",
-            "l3-l4-egress-protocols",
             "lifecycle",
             "managed-lifecycle",
             "platform-network-policy",
