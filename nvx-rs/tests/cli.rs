@@ -2617,19 +2617,21 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
     }
     // A cold boot that succeeds, a dry run, the restores that fail, the options that nvx-rs
     // refuses, its usage errors, and the help print none.
-    let snapshot = root.path.join("snapshot");
-    fs::create_dir(&snapshot).unwrap();
-    fs::write(snapshot.join("manifest.bin"), &*openvmm::NO_CONSOLE).unwrap();
-    let snapshot = snapshot.to_str().unwrap();
+    let store = root.path.join("store");
+    let store = store.to_str().unwrap();
+    let state = root.path.join("state");
+    let state = state.to_str().unwrap();
     for (options, status) in [
         (&[][..], 0),
         (&["--cmdline", "fake_exit_status=1", "--dry-run"][..], 0),
         (
             &[
                 "--restore-snapshot",
-                snapshot,
-                "--cmdline",
-                "fake_exit_status=1",
+                "base",
+                "--store-dir",
+                store,
+                "--state-dir",
+                state,
             ][..],
             1,
         ),

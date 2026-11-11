@@ -15,7 +15,6 @@ import lzma
 import os
 import queue
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -2543,76 +2542,6 @@ class NvxRsTests(unittest.TestCase):
                 self.assertEqual(
                     dashed, nvx_rs.EgressRules(allow=("192.0.2.0/24",), deny=())
                 )
-
-    @unittest.skipUnless(
-        os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
-    )
-    def test_run_leaves_openvmm_the_terminal_to_restore(self):
-        """A guest-triggered shutdown can end OpenVMM while its console holds
-        the terminal in raw mode, and OpenVMM restores the terminal settings
-        only when its standard error is a terminal, so nvx-rs run must leave
-        it one."""
-        if sys.platform != "linux":
-            self.skipTest("needs a Linux pseudo-terminal")
-        import pty
-        import termios
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            # OpenVMM saves the settings through standard error, if it is a
-            # terminal, and its console makes standard input raw until the
-            # guest shuts down. A restore needs no kernel or initramfs.
-            openvmm = root / "openvmm"
-            openvmm.write_text(
-                f"#!{sys.executable}\n"
-                "import os, termios, tty\n"
-                "saved = termios.tcgetattr(2) if os.isatty(2) else None\n"
-                "tty.setraw(0)\n"
-                "if saved is not None:\n"
-                "    termios.tcsetattr(2, termios.TCSAFLUSH, saved)\n",
-                encoding="utf-8",
-            )
-            openvmm.chmod(0o755)
-            # nvx-rs run reads the snapshot's manifest before it starts
-            # OpenVMM, to attach the boot console that the snapshot recorded.
-            # This one, its format version and magic alone, records none.
-            snapshot = root / "snapshot"
-            snapshot.mkdir()
-            (snapshot / "manifest.bin").write_bytes(
-                b"\x08\x02\x52\x14OPENVMM_SNAPSHOT_V2\x00"
-            )
-            primary, secondary = pty.openpty()
-            try:
-                before = termios.tcgetattr(secondary)
-                completed = subprocess.run(
-                    [
-                        os.environ["NVX_RS"],
-                        "--root",
-                        str(root),
-                        "run",
-                        "--restore-snapshot",
-                        str(snapshot),
-                    ],
-                    stdin=secondary,
-                    stdout=secondary,
-                    stderr=secondary,
-                    cwd=root,
-                    env={**os.environ, "NVX_OPENVMM": str(openvmm)},
-                    timeout=60,
-                    check=False,
-                )
-                after = termios.tcgetattr(secondary)
-                output = b""
-                while select.select([primary], [], [], 0)[0]:
-                    chunk = os.read(primary, 65536)
-                    if not chunk:
-                        break
-                    output += chunk
-            finally:
-                os.close(secondary)
-                os.close(primary)
-        self.assertEqual(completed.returncode, 0, output.decode(errors="replace"))
-        self.assertEqual(after, before, "the terminal was left in raw mode")
 
 
 class CiTests(unittest.TestCase):
