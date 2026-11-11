@@ -820,7 +820,7 @@ function Install-Toolchain {
         Update-ProcessPath
     }
     if ($null -eq (Get-PythonCommand -AllowMissing)) {
-        Install-WinGetPackage "Python.Python.3.12" @("--scope", "machine")
+        Install-WinGetPackage "Python.Python.3.14" @("--scope", "machine")
         Update-ProcessPath
     }
     if (-not (Test-VisualStudioBuildTools)) {
