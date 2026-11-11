@@ -245,6 +245,21 @@ pub(crate) fn transport_from_handle(pipe: TransportHandle) -> io::Result<Box<dyn
     Ok(Box::new(PipeTransport { pipe, event }))
 }
 
+/// Cancels the transfers pending on the pipe connection that `handle` duplicates, which then fail
+/// with `ERROR_OPERATION_ABORTED`. A transfer that starts later is not cancelled, so a caller
+/// repeats this until none starts.
+#[cfg(feature = "cli")]
+pub(crate) fn interrupt_transfers(handle: &TransportHandle) -> io::Result<()> {
+    // SAFETY: the handle is an open pipe handle of the caller's, and no OVERLAPPED is named.
+    if unsafe { CancelIoEx(raw(handle), ptr::null()) } == 0 {
+        let error = last_error();
+        if error != windows_sys::Win32::Foundation::ERROR_NOT_FOUND {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+    }
+    Ok(())
+}
+
 /// Returns the process that serves a named-pipe endpoint, or `None` if the pipe does not exist.
 ///
 /// OpenVMM keeps one pipe instance for its whole lifetime, so a missing pipe means no OpenVMM

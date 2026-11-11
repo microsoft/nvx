@@ -28,6 +28,27 @@ use crate::uuid::Uuid;
 #[cfg(any(target_os = "linux", windows))]
 mod reattach;
 
+#[cfg(all(feature = "cli", any(target_os = "linux", windows)))]
+impl Launched {
+    /// Spawns `command`, or the stand-in VMM without one, as a cold launch in `dir` spawns
+    /// OpenVMM, with these outputs and restore-ready listener.
+    pub(crate) fn stand_in(
+        dir: &VmDir,
+        outputs: VmOutputs,
+        ready: Option<ReadyListener>,
+        command: Option<(PathBuf, Vec<OsString>)>,
+    ) -> Self {
+        let mut prepared = stand_in(dir);
+        prepared.outputs = outputs;
+        prepared.ready = ready;
+        if let Some((program, arguments)) = command {
+            prepared.program = program;
+            prepared.arguments = arguments;
+        }
+        spawn(prepared).unwrap()
+    }
+}
+
 #[test]
 fn the_reserved_names_are_the_documented_ones_and_leave_the_openvmm_prefix_to_openvmm() {
     let names = [
