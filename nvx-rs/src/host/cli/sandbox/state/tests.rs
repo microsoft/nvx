@@ -2,6 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::host::sandbox::layer::LayerRole;
+use crate::host::sandbox::{DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY};
 
 #[test]
 fn restored_sandbox_records_round_trip_only_their_own_source() {
@@ -14,14 +15,15 @@ fn restored_sandbox_records_round_trip_only_their_own_source() {
         "11111111-1111-1111-1111-111111111111",
     );
     let binding = DistroBinding::verify(&layer).unwrap();
-    let launch =
-        SandboxLaunch::new(vec![layer], SandboxUpper::RAM, SandboxSettings::default()).unwrap();
-    let distro = RecordedDistro::new(&launch, binding).unwrap();
+    let distro = RecordedDistro::new(&layer, binding).unwrap();
     let options = ProvisionConfig {
         hypervisor: "whp",
         memory_mib: 128,
         cmdline: "",
         ram_upper_percent: None,
+        hostname: DEFAULT_HOSTNAME,
+        workload_identity: DEFAULT_WORKLOAD_IDENTITY,
+        export: None,
         network: None,
     };
     for name in [None, Some("My.snapshot-1"), Some("other")] {
@@ -30,7 +32,7 @@ fn restored_sandbox_records_round_trip_only_their_own_source() {
             store: directory.path().join("store"),
             workload: vec!["/bin/echo".to_owned(), name.to_owned()],
         });
-        let text = serialize_launch(&launch, &distro, None, &options, source.as_ref()).unwrap();
+        let text = serialize_launch(&distro, None, &options, source.as_ref()).unwrap();
         let object: Object = serde_json::from_str(&text).unwrap();
         for key in ["source_snapshot", "source_store", "workload"] {
             assert_eq!(object.contains_key(key), name.is_some(), "{key}");
