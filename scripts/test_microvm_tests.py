@@ -3372,6 +3372,191 @@ class PublicSandboxGptLayerTests(unittest.TestCase):
                 self.assertFalse(path.exists())
 
 
+class _FakeVmLifecycleTest:
+    """Emulates Cargo's run of the nvx-rs test vm_lifecycle: it takes its
+    inputs, and leaves the log and the outcome report of its VM, which
+    reports `outcome`, and exits with `returncode`."""
+
+    def __init__(
+        self,
+        returncode: int = 0,
+        outcome: Mapping[str, object] = sandbox_lifecycle_tests.MANAGED_SUCCESS,
+        log: bytes = b"OpenVMM started\n",
+    ) -> None:
+        self.returncode = returncode
+        self.outcome = outcome
+        self.log = log
+        self.calls: list[tuple[list[str], dict[str, str]]] = []
+        self.scratch = b""
+
+    def __call__(self, command: list[str], *, cwd: Path, env: dict[str, str]) -> Any:
+        self.calls.append((command, env))
+        inputs = json.loads(env["NVX_VM_LIFECYCLE"])
+        self.scratch = Path(inputs["scratch"]).read_bytes()
+        vm_dir = Path(inputs["vm_dir"])
+        vm_dir.mkdir()
+        (vm_dir / "openvmm.log").write_bytes(self.log)
+        (vm_dir / "outcome.json").write_text(
+            json.dumps(
+                {
+                    "backend": inputs["backend"],
+                    "outcome": self.outcome,
+                    "network_policy": {"status": "not-requested"},
+                    "teardown": dict.fromkeys(
+                        microvm_tests.OUTCOME_TEARDOWN_FIELDS, True
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        process = MagicMock()
+        process.wait.return_value = self.returncode
+        return process
+
+
+class PublicVmLifecycleTests(unittest.TestCase):
+    def _run(
+        self,
+        root: Path,
+        test: _FakeVmLifecycleTest,
+        processes: Sequence[tuple[int, ...]] = ((),),
+        cargo: str | None = "cargo",
+    ) -> tuple[Path, MagicMock]:
+        distro = root / "ubuntu-distro.erofs"
+        distro.write_bytes(b"distro")
+        template = root / "ubuntu-smoke-scratch.ext4"
+        template.write_bytes(b"scratch template")
+        for name in ("openvmm", "vmlinux", "initramfs.cpio.gz"):
+            (root / name).write_bytes(name.encode())
+        artifacts = managed_exec_tests.WorkloadArtifacts(
+            distro, "12345678-1234-1234-1234-123456789abc", template
+        )
+        output_dir = root / "results"
+        mkdtemp = tempfile.mkdtemp
+
+        def fixture(prefix: str) -> str:
+            return mkdtemp(prefix=prefix, dir=root)
+
+        listed = iter(processes)
+
+        def listing(_marker: str) -> tuple[int, ...]:
+            return next(listed, ())
+
+        with (
+            patch.object(microvm_tests.shutil, "which", return_value=cargo),
+            patch.object(
+                microvm_tests, "load_workload_artifacts", return_value=artifacts
+            ),
+            patch.object(microvm_tests.tempfile, "mkdtemp", side_effect=fixture),
+            patch.object(microvm_tests.subprocess, "Popen", side_effect=test),
+            patch.object(microvm_tests, "openvmm_processes", side_effect=listing),
+            patch.object(microvm_tests, "terminate_process") as terminate,
+            redirect_stdout(io.StringIO()),
+        ):
+            microvm_tests.run_vm_lifecycle(
+                root / "openvmm",
+                root / "vmlinux",
+                root / "initramfs.cpio.gz",
+                "mshv",
+                timeout=2,
+                output_dir=output_dir,
+            )
+        return output_dir, terminate
+
+    def test_the_test_takes_its_inputs_and_leaves_a_successful_stop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            test = _FakeVmLifecycleTest()
+            output_dir, terminate = self._run(root, test)
+            evidence = {path.name for path in output_dir.iterdir()}
+            fixtures = list(root.glob("nvx-vm-lifecycle-*"))
+
+        [(command, environment)] = test.calls
+        self.assertEqual(
+            command, microvm_tests.ignored_nvx_rs_test_command("cargo", "vm_lifecycle")
+        )
+        inputs = json.loads(environment["NVX_VM_LIFECYCLE"])
+        self.assertEqual(test.scratch, b"scratch template")
+        self.assertEqual(inputs.pop("backend"), "mshv")
+        self.assertEqual(inputs.pop("timeout_seconds"), 2)
+        self.assertEqual(inputs.pop("image"), str(root / "ubuntu-distro.erofs"))
+        self.assertEqual(
+            inputs.pop("image_uuid"), "12345678-1234-1234-1234-123456789abc"
+        )
+        for name, path in (
+            ("openvmm", "openvmm"),
+            ("kernel", "vmlinux"),
+            ("initramfs", "initramfs.cpio.gz"),
+        ):
+            self.assertEqual(inputs.pop(name), str(root / path))
+            self.assertEqual(
+                inputs.pop(f"{name}_sha256"),
+                hashlib.sha256(path.encode()).hexdigest(),
+            )
+        scratch, vm_dir = Path(inputs.pop("scratch")), Path(inputs.pop("vm_dir"))
+        self.assertEqual(inputs, {})
+        self.assertEqual((scratch.name, vm_dir.name), ("scratch.ext4", "vm"))
+        self.assertEqual(scratch.parent, vm_dir.parent)
+        self.assertTrue(scratch.parent.name.startswith("nvx-vm-lifecycle-"))
+        # The test keeps the capability, which nothing gives it or records.
+        self.assertNotIn("capability", environment["NVX_VM_LIFECYCLE"])
+        self.assertEqual(
+            evidence, {"vm-lifecycle-openvmm.log", "vm-lifecycle-outcome.json"}
+        )
+        self.assertEqual(fixtures, [])
+        terminate.assert_not_called()
+
+    def test_a_failed_test_fails_the_scenario_and_keeps_the_evidence_of_its_vm(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(RuntimeError, "failed with exit status 101"):
+                self._run(root, _FakeVmLifecycleTest(returncode=101))
+            self.assertTrue((root / "results" / "vm-lifecycle-openvmm.log").is_file())
+            self.assertEqual(list(root.glob("nvx-vm-lifecycle-*")), [])
+
+    def test_the_evidence_keeps_the_end_of_a_long_log(self):
+        limit = sandbox_lifecycle_tests.EVIDENCE_LIMIT
+        log = b"early\n" + bytes(range(256)) * (limit // 256) + b"the failure\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir, _ = self._run(Path(temporary), _FakeVmLifecycleTest(log=log))
+            evidence = (output_dir / "vm-lifecycle-openvmm.log").read_bytes()
+        omitted = len(log) - limit
+        self.assertEqual(
+            evidence,
+            f"... ({omitted} earlier bytes omitted)\n".encode() + log[omitted:],
+        )
+
+    def test_a_fixture_that_remains_fails_the_scenario(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(microvm_tests.shutil, "rmtree"),
+            self.assertRaisesRegex(RuntimeError, "could not be removed"),
+        ):
+            self._run(Path(temporary), _FakeVmLifecycleTest())
+
+    def test_a_failed_stop_fails_the_scenario(self):
+        outcome = {"operation": "run", "category": "killed", "status_code": 137}
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(RuntimeError, "the managed outcome is"):
+                self._run(Path(temporary), _FakeVmLifecycleTest(outcome=outcome))
+
+    def test_a_vm_that_outlives_the_test_is_ended_and_fails_the_scenario(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                RuntimeError, r"OpenVMM processes \[77\] outlived"
+            ):
+                self._run(root, _FakeVmLifecycleTest(), processes=((77,), ()))
+            self.assertEqual(list(root.glob("nvx-vm-lifecycle-*")), [])
+
+    def test_the_scenario_needs_cargo_before_it_starts_anything(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            test = _FakeVmLifecycleTest()
+            with self.assertRaisesRegex(common.ScriptError, "with Cargo"):
+                self._run(Path(temporary), test, cargo=None)
+        self.assertEqual(test.calls, [])
+
+
 class GuestIdentityScriptTests(unittest.TestCase):
     def test_guest_identity_checks_fail_before_success_markers(self):
         descriptor = microvm_tests.guest_descriptor("ubuntu")
@@ -16601,6 +16786,42 @@ class MicrovmTests(unittest.TestCase):
                 output_dir=output_dir,
             )
             ram_upper.assert_not_called()
+
+    def test_runner_dispatches_public_vm_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "mshv",
+                    "--scenario",
+                    "vm-lifecycle",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_vm_lifecycle") as run,
+                patch.object(microvm_tests, "run_sandbox_gpt_layer") as gpt_layer,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            # The VM of the nvx-rs test boots the run's artifacts.
+            run.assert_called_once_with(
+                microvm_tests.openvmm_binary_path(),
+                microvm_tests.artifact_path("vmlinux"),
+                microvm_tests.artifact_path("initramfs.cpio.gz"),
+                "mshv",
+                timeout=args.timeout,
+                output_dir=output_dir,
+            )
+            gpt_layer.assert_not_called()
 
     def test_a_default_run_runs_the_public_sandbox_scenarios(self):
         def require(path: Path, _description: str) -> Path:
