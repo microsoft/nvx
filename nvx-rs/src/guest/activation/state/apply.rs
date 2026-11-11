@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[cfg(doc)]
-use super::super::Devices;
-#[cfg(doc)]
 use super::Activation;
 use crate::activation::{self, ActivationRecord, Configuration, Publication};
 use crate::gpt::Expected;
 use crate::guest::mappings::{self, Access, SourceRoot};
 use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownError};
+#[cfg(doc)]
+use crate::guest::snapshot::Devices;
 use crate::guest::view::{self, MachineId};
 
 pub use crate::guest::view::{MACHINE_ID_FILE, RESOLVER_FILE};

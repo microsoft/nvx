@@ -396,9 +396,6 @@ variant nvx::guest::activation::ActivationState::Failed
 variant nvx::guest::activation::ActivationState::Ready
 variant nvx::guest::activation::ActivationState::Restricted
 variant nvx::guest::activation::ActivationState::Started
-trait nvx::guest::activation::AdmissionFence
-method nvx::guest::activation::AdmissionFence::close
-method nvx::guest::activation::AdmissionFence::open
 struct nvx::guest::activation::Applied (hidden)
 method nvx::guest::activation::Applied::gateway (hidden)
 method nvx::guest::activation::Applied::hostname (hidden)
@@ -431,9 +428,6 @@ field nvx::guest::activation::ApplyError::Network::teardown (hidden)
 variant nvx::guest::activation::ApplyError::View (hidden)
 field nvx::guest::activation::ApplyError::View::error (hidden)
 field nvx::guest::activation::ApplyError::View::teardown (hidden)
-struct nvx::guest::activation::CaptureBarrier
-method nvx::guest::activation::CaptureBarrier::cancel
-method nvx::guest::activation::CaptureBarrier::capture
 enum nvx::guest::activation::CaptureCause
 variant nvx::guest::activation::CaptureCause::Io
 field nvx::guest::activation::CaptureCause::Io::0
@@ -444,13 +438,6 @@ variant nvx::guest::activation::CaptureCause::Repair
 field nvx::guest::activation::CaptureCause::Repair::0
 variant nvx::guest::activation::CaptureCause::Time
 field nvx::guest::activation::CaptureCause::Time::0
-struct nvx::guest::activation::CaptureError
-method nvx::guest::activation::CaptureError::cause
-method nvx::guest::activation::CaptureError::into_cause
-method nvx::guest::activation::CaptureError::stage
-struct nvx::guest::activation::CapturePreparation
-method nvx::guest::activation::CapturePreparation::new
-method nvx::guest::activation::CapturePreparation::prepare
 enum nvx::guest::activation::CaptureStage
 variant nvx::guest::activation::CaptureStage::BootChecks
 variant nvx::guest::activation::CaptureStage::Capture
@@ -461,14 +448,6 @@ variant nvx::guest::activation::CaptureStage::Mounts
 variant nvx::guest::activation::CaptureStage::Release
 variant nvx::guest::activation::CaptureStage::Repair
 variant nvx::guest::activation::CaptureStage::Suppression
-enum nvx::guest::activation::Captured
-variant nvx::guest::activation::Captured::Continued
-variant nvx::guest::activation::Captured::Restored
-field nvx::guest::activation::Captured::Restored::0
-struct nvx::guest::activation::Devices
-field nvx::guest::activation::Devices::distro
-field nvx::guest::activation::Devices::filesystem_tag
-field nvx::guest::activation::Devices::scratch
 const nvx::guest::activation::MACHINE_ID_FILE
 const nvx::guest::activation::MOUNT_TABLE_LIMIT
 struct nvx::guest::activation::Mounted
@@ -492,9 +471,6 @@ variant nvx::guest::activation::RangeFault::Extra
 variant nvx::guest::activation::RangeFault::Gap
 variant nvx::guest::activation::RangeFault::Misaligned
 variant nvx::guest::activation::RangeFault::Overlap
-struct nvx::guest::activation::Repair
-method nvx::guest::activation::Repair::new
-method nvx::guest::activation::Repair::run
 enum nvx::guest::activation::RepairCause
 variant nvx::guest::activation::RepairCause::Activation
 field nvx::guest::activation::RepairCause::Activation::online
@@ -546,9 +522,6 @@ method nvx::guest::activation::Repaired::acknowledged_at
 method nvx::guest::activation::Repaired::cpus
 method nvx::guest::activation::Repaired::generation_id
 method nvx::guest::activation::Repaired::memory
-struct nvx::guest::activation::Restored
-method nvx::guest::activation::Restored::into_parts
-method nvx::guest::activation::Restored::restore
 struct nvx::guest::activation::RootTemplate (hidden)
 field nvx::guest::activation::RootTemplate::distro (hidden)
 field nvx::guest::activation::RootTemplate::filesystem_tag (hidden)
@@ -557,7 +530,6 @@ field nvx::guest::activation::RootTemplate::runtime (hidden)
 field nvx::guest::activation::RootTemplate::scratch (hidden)
 field nvx::guest::activation::RootTemplate::timeout (hidden)
 fn nvx::guest::activation::apply (hidden)
-fn nvx::guest::activation::repair
 mod nvx::guest::cgroup
 struct nvx::guest::cgroup::ExecutionCgroup
 method nvx::guest::cgroup::ExecutionCgroup::is_occupied
@@ -632,9 +604,6 @@ variant nvx::guest::clone::ActivationState::Failed
 variant nvx::guest::clone::ActivationState::Ready
 variant nvx::guest::clone::ActivationState::Restricted
 variant nvx::guest::clone::ActivationState::Started
-trait nvx::guest::clone::AdmissionFence
-method nvx::guest::clone::AdmissionFence::close
-method nvx::guest::clone::AdmissionFence::open
 struct nvx::guest::clone::Applied (hidden)
 method nvx::guest::clone::Applied::gateway (hidden)
 method nvx::guest::clone::Applied::hostname (hidden)
@@ -667,9 +636,6 @@ field nvx::guest::clone::ApplyError::Network::teardown (hidden)
 variant nvx::guest::clone::ApplyError::View (hidden)
 field nvx::guest::clone::ApplyError::View::error (hidden)
 field nvx::guest::clone::ApplyError::View::teardown (hidden)
-struct nvx::guest::clone::CaptureBarrier
-method nvx::guest::clone::CaptureBarrier::cancel
-method nvx::guest::clone::CaptureBarrier::capture
 enum nvx::guest::clone::CaptureCause
 variant nvx::guest::clone::CaptureCause::Io
 field nvx::guest::clone::CaptureCause::Io::0
@@ -680,13 +646,6 @@ variant nvx::guest::clone::CaptureCause::Repair
 field nvx::guest::clone::CaptureCause::Repair::0
 variant nvx::guest::clone::CaptureCause::Time
 field nvx::guest::clone::CaptureCause::Time::0
-struct nvx::guest::clone::CaptureError
-method nvx::guest::clone::CaptureError::cause
-method nvx::guest::clone::CaptureError::into_cause
-method nvx::guest::clone::CaptureError::stage
-struct nvx::guest::clone::CapturePreparation
-method nvx::guest::clone::CapturePreparation::new
-method nvx::guest::clone::CapturePreparation::prepare
 enum nvx::guest::clone::CaptureStage
 variant nvx::guest::clone::CaptureStage::BootChecks
 variant nvx::guest::clone::CaptureStage::Capture
@@ -697,14 +656,6 @@ variant nvx::guest::clone::CaptureStage::Mounts
 variant nvx::guest::clone::CaptureStage::Release
 variant nvx::guest::clone::CaptureStage::Repair
 variant nvx::guest::clone::CaptureStage::Suppression
-enum nvx::guest::clone::Captured
-variant nvx::guest::clone::Captured::Continued
-variant nvx::guest::clone::Captured::Restored
-field nvx::guest::clone::Captured::Restored::0
-struct nvx::guest::clone::Devices
-field nvx::guest::clone::Devices::distro
-field nvx::guest::clone::Devices::filesystem_tag
-field nvx::guest::clone::Devices::scratch
 const nvx::guest::clone::MACHINE_ID_FILE
 const nvx::guest::clone::MOUNT_TABLE_LIMIT
 struct nvx::guest::clone::Mounted
@@ -728,9 +679,6 @@ variant nvx::guest::clone::RangeFault::Extra
 variant nvx::guest::clone::RangeFault::Gap
 variant nvx::guest::clone::RangeFault::Misaligned
 variant nvx::guest::clone::RangeFault::Overlap
-struct nvx::guest::clone::Repair
-method nvx::guest::clone::Repair::new
-method nvx::guest::clone::Repair::run
 enum nvx::guest::clone::RepairCause
 variant nvx::guest::clone::RepairCause::Activation
 field nvx::guest::clone::RepairCause::Activation::online
@@ -782,9 +730,6 @@ method nvx::guest::clone::Repaired::acknowledged_at
 method nvx::guest::clone::Repaired::cpus
 method nvx::guest::clone::Repaired::generation_id
 method nvx::guest::clone::Repaired::memory
-struct nvx::guest::clone::Restored
-method nvx::guest::clone::Restored::into_parts
-method nvx::guest::clone::Restored::restore
 struct nvx::guest::clone::RootTemplate (hidden)
 field nvx::guest::clone::RootTemplate::distro (hidden)
 field nvx::guest::clone::RootTemplate::filesystem_tag (hidden)
@@ -793,7 +738,6 @@ field nvx::guest::clone::RootTemplate::runtime (hidden)
 field nvx::guest::clone::RootTemplate::scratch (hidden)
 field nvx::guest::clone::RootTemplate::timeout (hidden)
 fn nvx::guest::clone::apply (hidden)
-fn nvx::guest::clone::repair
 mod nvx::guest::console_pending (hidden)
 fn nvx::guest::console_pending::main (hidden)
 mod nvx::guest::device_io (hidden)
