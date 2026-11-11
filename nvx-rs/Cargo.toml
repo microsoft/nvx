@@ -139,6 +139,17 @@ name = "external-launch"
 path = "examples/external-launch.rs"
 required-features = ["host"]
 
+# Compile-only examples of the documented host and guest workflows, which nothing runs.
+[[example]]
+name = "host-workflows"
+path = "examples/host-workflows.rs"
+required-features = ["host"]
+
+[[example]]
+name = "guest-workflows"
+path = "examples/guest-workflows.rs"
+required-features = ["guest"]
+
 # The guest binaries. Their unit tests live in the library, so the binaries have no test harness.
 [[bin]]
 name = "nvx-console-pending"
