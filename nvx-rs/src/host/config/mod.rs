@@ -583,31 +583,7 @@ impl VmConfig {
                 )));
             }
         }
-        let console = match (self.console, console_endpoint) {
-            (ConsoleAttachment::Listener, Some(console_endpoint)) => {
-                check_endpoint(console_endpoint, "console_endpoint")?;
-                if console_endpoint == endpoint
-                    || (runtime.hypervisor == Hypervisor::Whp
-                        && console_endpoint.eq_ignore_ascii_case(endpoint))
-                {
-                    return Err(Error::unsupported(
-                        "boot and control console listeners require distinct endpoints",
-                    ));
-                }
-                format!("listen={console_endpoint}")
-            }
-            (ConsoleAttachment::Disconnected, None) => "none".to_owned(),
-            (ConsoleAttachment::Listener, None) => {
-                return Err(Error::unsupported(
-                    "a console listener needs console_endpoint",
-                ));
-            }
-            (ConsoleAttachment::Disconnected, Some(_)) => {
-                return Err(Error::unsupported(
-                    "a disconnected console takes no console_endpoint",
-                ));
-            }
-        };
+        let console = self.console_backend(runtime, endpoint, console_endpoint)?;
         let mut arguments = self.device_arguments()?;
         let capture = self.boot.as_ref().and_then(|boot| boot.capture.as_ref());
         arguments.extend(boot_arguments(
@@ -621,35 +597,40 @@ impl VmConfig {
             arguments.extend(capture.openvmm_arguments());
         }
         arguments.extend(console_arguments(&console, endpoint, report));
-        if let Some(profile) = &runtime.cpu_profile {
-            if profile.is_empty() {
-                return Err(Error::unsupported("Runtime.cpu_profile must not be empty"));
-            }
-            arguments.extend(["--cpu-profile".into(), profile.as_str().into()]);
-        }
-        let shutdown = match runtime.options.guest_shutdown {
-            GuestPowerAction::Exit => "exit",
-            GuestPowerAction::Halt => "halt",
-            GuestPowerAction::Reset => "reset",
-        };
-        arguments.extend(["--guest-shutdown-action".into(), shutdown.into()]);
-        if let Some(timeout) = runtime.options.control_auth_timeout {
-            if timeout < Duration::from_millis(1)
-                || timeout > Duration::from_secs(60)
-                || timeout.subsec_nanos() % 1_000_000 != 0
-            {
-                return Err(Error::unsupported(
-                    "LaunchOptions.control_auth_timeout must be whole milliseconds from 1 to 60000",
-                ));
-            }
-            arguments.extend([
-                "--microvm-control-auth-timeout-ms".into(),
-                timeout.as_millis().to_string().into(),
-            ]);
-        }
+        arguments.extend(runtime_arguments(runtime)?);
         check_argument_nuls(&arguments)?;
         fit_process_command_line(runtime.openvmm.as_os_str(), &arguments, 0)?;
         Ok(arguments)
+    }
+
+    /// Renders the console attachment shared by cold boots and restores.
+    fn console_backend(
+        &self,
+        runtime: &Runtime,
+        endpoint: &str,
+        console_endpoint: Option<&str>,
+    ) -> Result<String> {
+        match (self.console, console_endpoint) {
+            (ConsoleAttachment::Listener, Some(console_endpoint)) => {
+                check_endpoint(console_endpoint, "console_endpoint")?;
+                if console_endpoint == endpoint
+                    || (runtime.hypervisor == Hypervisor::Whp
+                        && console_endpoint.eq_ignore_ascii_case(endpoint))
+                {
+                    return Err(Error::unsupported(
+                        "boot and control console listeners require distinct endpoints",
+                    ));
+                }
+                Ok(format!("listen={console_endpoint}"))
+            }
+            (ConsoleAttachment::Disconnected, None) => Ok("none".to_owned()),
+            (ConsoleAttachment::Listener, None) => Err(Error::unsupported(
+                "a console listener needs console_endpoint",
+            )),
+            (ConsoleAttachment::Disconnected, Some(_)) => Err(Error::unsupported(
+                "a disconnected console takes no console_endpoint",
+            )),
+        }
     }
 
     /// Checks the configuration's part of a cold boot's OpenVMM command line on every
@@ -1186,6 +1167,38 @@ pub(crate) fn console_arguments(console: &str, endpoint: &str, report: &Path) ->
     ]
     .map(OsStr::to_os_string)
     .into()
+}
+
+/// Runtime options common to cold boots and restores.
+fn runtime_arguments(runtime: &Runtime) -> Result<Vec<OsString>> {
+    let mut arguments = Vec::new();
+    if let Some(profile) = &runtime.cpu_profile {
+        if profile.is_empty() {
+            return Err(Error::unsupported("Runtime.cpu_profile must not be empty"));
+        }
+        arguments.extend(["--cpu-profile".into(), profile.as_str().into()]);
+    }
+    let shutdown = match runtime.options.guest_shutdown {
+        GuestPowerAction::Exit => "exit",
+        GuestPowerAction::Halt => "halt",
+        GuestPowerAction::Reset => "reset",
+    };
+    arguments.extend(["--guest-shutdown-action".into(), shutdown.into()]);
+    if let Some(timeout) = runtime.options.control_auth_timeout {
+        if timeout < Duration::from_millis(1)
+            || timeout > Duration::from_secs(60)
+            || timeout.subsec_nanos() % 1_000_000 != 0
+        {
+            return Err(Error::unsupported(
+                "LaunchOptions.control_auth_timeout must be whole milliseconds from 1 to 60000",
+            ));
+        }
+        arguments.extend([
+            "--microvm-control-auth-timeout-ms".into(),
+            timeout.as_millis().to_string().into(),
+        ]);
+    }
+    Ok(arguments)
 }
 
 /// Refuses caller-selected endpoint names that OpenVMM's serial options cannot hold literally.
