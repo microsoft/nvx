@@ -2795,7 +2795,7 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
             config = json.loads(path.read_text(encoding="utf-8"))
             _role, image, identity = values["--layer"].split(",")
             config.update(
-                format=9,
+                format=10,
                 image={"format": "erofs", "path": image, "identity": identity},
                 upper={"kind": "ram", "max_memory_percent": 50},
                 scratch_binding=None,
@@ -2803,7 +2803,7 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
             if "records-scratch" in self.faults:
                 config["upper"] = {"kind": "scratch", "path": "scratch.ext4"}
             if "records-old-format" in self.faults:
-                config["format"] = 8
+                config["format"] = 9
             if "records-other-cap" in self.faults:
                 config["upper"]["max_memory_percent"] = 51
             path.write_text(json.dumps(config), encoding="utf-8")
@@ -3090,7 +3090,7 @@ class _FakeGptLayerSandboxCli(_FakeSandboxCli):
                 upper = "ram" if upper == "scratch" else "scratch"
             image = "erofs" if "records-erofs" in self.faults else "gpt"
             config.update(
-                format=9,
+                format=10,
                 image={"format": image, "path": disk, "identity": guid},
                 upper=(
                     {"kind": "ram", "max_memory_percent": 50}
