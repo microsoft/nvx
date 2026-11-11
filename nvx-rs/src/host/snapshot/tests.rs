@@ -1434,15 +1434,50 @@ fn snapshot_description_needs_no_data_read_access() {
     assert_eq!(Snapshot::open(&fixture.dir).unwrap().key(), &fixture.key);
 }
 
-struct RestoreFixture {
+pub(in crate::host) struct RestoreFixture {
     snapshot: SnapshotFixture,
-    config: VmConfig,
-    runtime: Runtime,
+    pub(in crate::host) config: VmConfig,
+    pub(in crate::host) runtime: Runtime,
     now: super::HostTime,
 }
 
 impl RestoreFixture {
-    fn new(nic: bool) -> Self {
+    #[cfg(any(target_os = "linux", windows))]
+    pub(in crate::host) fn current(nic: bool) -> Self {
+        let mut fixture = Self::new(nic);
+        fixture.retime(super::HostTime::now().unwrap());
+        fixture
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    pub(in crate::host) fn retime(&mut self, now: super::HostTime) {
+        self.now = now;
+        let time = self.snapshot.spec.time();
+        time.capture_utc_ns = now.utc_ns;
+        time.capture_monotonic_ns = now.monotonic_ns;
+        time.host_clock = now.clock.as_str().to_owned();
+        time.host_id = now.host_id.to_vec();
+        time.boot_id = now.boot_id.as_bytes().to_vec();
+        time.cut_to_anchor_ns = Some(0);
+        self.write_metadata();
+    }
+
+    pub(in crate::host) fn all_processors_online(&mut self) {
+        self.snapshot.spec.contract().boot_online_vp_count = 0;
+        self.config.processors = self.snapshot.spec.vp_count;
+        self.write_metadata();
+    }
+
+    pub(in crate::host) fn console_listener(&mut self) {
+        self.config.console = ConsoleAttachment::Listener;
+        let console = &mut self.snapshot.spec.contract().attachments[0];
+        console.reconnect_policy = "recreate-listener".to_owned();
+        console.identity_kind = "unix-socket".to_owned();
+        console.identity = b"/captured/boot-console".to_vec();
+        self.write_metadata();
+    }
+
+    pub(in crate::host) fn new(nic: bool) -> Self {
         let mut snapshot = SnapshotFixture::new();
         snapshot.spec = if nic {
             let mut spec = ManifestSpec::with_network();
@@ -1561,7 +1596,7 @@ impl RestoreFixture {
         .unwrap();
     }
 
-    fn opened(&self) -> Snapshot {
+    pub(in crate::host) fn opened(&self) -> Snapshot {
         Snapshot::open(&self.snapshot.dir).unwrap()
     }
 
@@ -1573,6 +1608,79 @@ impl RestoreFixture {
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{field}: {error}");
         assert!(error.message().contains(field), "{field}: {error}");
     }
+}
+
+#[test]
+fn a_restore_view_hard_links_only_the_fixed_openvmm_inventory() {
+    let fixture = SnapshotFixture::new();
+    let snapshot = Snapshot::open(&fixture.dir).unwrap();
+    let destination = fixture.root.path().join("view");
+    fs::create_dir(&destination).unwrap();
+    let mut created = Vec::new();
+    snapshot
+        .link_restore_view(&destination, &mut created)
+        .unwrap();
+    assert_eq!(created.len(), super::SNAPSHOT_ARTIFACTS.len());
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), created.len());
+    for path in &created {
+        let source = fixture
+            .dir
+            .join(OPENVMM_DIR)
+            .join(path.file_name().unwrap());
+        assert_eq!(
+            fs::metadata(path).unwrap().len(),
+            fs::metadata(&source).unwrap().len()
+        );
+        assert_eq!(
+            crate::host::platform::file_identity(path).unwrap(),
+            crate::host::platform::file_identity(&source).unwrap()
+        );
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let original = fs::metadata(&source).unwrap();
+            let linked = fs::metadata(path).unwrap();
+            assert_eq!(
+                (original.dev(), original.ino()),
+                (linked.dev(), linked.ino())
+            );
+            assert_eq!(original.nlink(), 2);
+        }
+    }
+    assert!(!destination.join(KEY_FILE).exists());
+    assert!(!destination.join(DESCRIPTION_FILE).exists());
+}
+
+#[test]
+fn partial_restore_links_report_the_original_error_and_only_created_entries() {
+    use std::error::Error as _;
+
+    let fixture = SnapshotFixture::new();
+    let snapshot = Snapshot::open(&fixture.dir).unwrap();
+    let destination = fixture.root.path().join("view");
+    fs::create_dir(&destination).unwrap();
+    let existing = destination.join("memory.bin");
+    fs::write(&existing, b"caller-owned").unwrap();
+    let mut created = Vec::new();
+    let error = snapshot
+        .link_restore_view(&destination, &mut created)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io);
+    assert_eq!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(created, [destination.join(MANIFEST_NAME)]);
+    for path in created {
+        fs::remove_file(path).unwrap();
+    }
+    assert_eq!(fs::read(&existing).unwrap(), b"caller-owned");
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
 }
 
 #[test]

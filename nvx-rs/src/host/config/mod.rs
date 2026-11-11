@@ -604,7 +604,7 @@ impl VmConfig {
     }
 
     /// Renders the console attachment shared by cold boots and restores.
-    fn console_backend(
+    pub(crate) fn console_backend(
         &self,
         runtime: &Runtime,
         endpoint: &str,
@@ -631,6 +631,43 @@ impl VmConfig {
                 "a disconnected console takes no console_endpoint",
             )),
         }
+    }
+
+    /// Renders checked devices at snapshot capacity, replacing only the captured NIC's policy.
+    pub(crate) fn restore_device_arguments(
+        &self,
+        capacity: u32,
+        nic: Option<NicConfig>,
+    ) -> Result<Vec<OsString>> {
+        self.check()?;
+        if self.boot.is_some() {
+            return Err(Error::unsupported("a snapshot restore does not take Boot"));
+        }
+        let mut config = self.clone();
+        config.processors = capacity;
+        match (config.network.as_mut(), nic) {
+            (Some(network), Some(nic)) => network.guest_network = Some(nic.guest_network),
+            (None, None) => {}
+            _ => {
+                return Err(Error::unsupported(
+                    "snapshot NIC presence differs from the requested VM's",
+                ));
+            }
+        }
+        let mut arguments = config.device_arguments()?;
+        if let Some(at) = arguments.iter().position(|argument| argument == "--net") {
+            arguments.splice(at..at + 2, ["--restore-network-policy".into()]);
+        }
+        if matches!(
+            self.root,
+            RootConfig::Layered(LayeredRoot {
+                upper: UpperConfig::Ram { .. },
+                ..
+            })
+        ) {
+            arguments.push("--restore-absent-scratch".into());
+        }
+        Ok(arguments)
     }
 
     /// Checks the configuration's part of a cold boot's OpenVMM command line on every
@@ -1170,7 +1207,7 @@ pub(crate) fn console_arguments(console: &str, endpoint: &str, report: &Path) ->
 }
 
 /// Runtime options common to cold boots and restores.
-fn runtime_arguments(runtime: &Runtime) -> Result<Vec<OsString>> {
+pub(crate) fn runtime_arguments(runtime: &Runtime) -> Result<Vec<OsString>> {
     let mut arguments = Vec::new();
     if let Some(profile) = &runtime.cpu_profile {
         if profile.is_empty() {
@@ -1202,7 +1239,7 @@ fn runtime_arguments(runtime: &Runtime) -> Result<Vec<OsString>> {
 }
 
 /// Refuses caller-selected endpoint names that OpenVMM's serial options cannot hold literally.
-fn check_endpoint(endpoint: &str, name: &str) -> Result<()> {
+pub(crate) fn check_endpoint(endpoint: &str, name: &str) -> Result<()> {
     if endpoint.is_empty() || endpoint.contains(['\0', ',', '=']) {
         return Err(Error::unsupported(format!(
             "{name} must name a nonempty endpoint without a NUL, comma, or equals sign",
@@ -1212,7 +1249,7 @@ fn check_endpoint(endpoint: &str, name: &str) -> Result<()> {
 }
 
 /// Checks OpenVMM arguments for NULs that cannot be passed to a process.
-fn check_argument_nuls(arguments: &[OsString]) -> Result<()> {
+pub(crate) fn check_argument_nuls(arguments: &[OsString]) -> Result<()> {
     if arguments
         .iter()
         .any(|argument| argument.to_string_lossy().contains('\0'))
