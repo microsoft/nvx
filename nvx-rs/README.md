@@ -1651,8 +1651,7 @@ refusing one whose root tokens the guest's parser refuses. Both deliver the live
 shares as the managed lifecycle does: the arguments export them at
 `nvx::host::filesystem::GUEST_EXPORT`, the command line announces the number of
 their mappings with `nvx_maps=`, and `mapping_table` gives the ordered table
-that `start` sends once the guest agent is ready; the CLI's one-shot `run` still
-renders them as boot tokens.
+that `start` and `sandbox run` send once the guest agent is ready.
 
 An adapter's plan renders the caller's tokens before those of its root, and
 refuses tokens that its root or OpenVMM's shares own.
@@ -2369,9 +2368,9 @@ another name, `start` checks the manifest beside the link's target, so
 that the check accepts there. `start` checks the binding before it launches
 OpenVMM, and hands OpenVMM the checked layer; see
 [Checked handoff](#checked-handoff). `run` and `start`
-plan the launch with the image format and the identity that the binding
-records, which name an EROFS layer, and launch it over a scratch disk, the one
-layered root that the guest's shell init assembles. A configuration
+launch the image of the format and the identity that the binding records, an
+EROFS layer or a GPT disk, over a scratch or a RAM upper, the layered root that
+nvx-init assembles. A configuration
 without a binding, as `nvx.py` wrote, fails with `sandbox configuration has no
 distro binding`, and a stale binding with what changed, such as `LAYER changed
 after its distro binding was made: its length differs`; both add `deprovision
@@ -2484,9 +2483,8 @@ exited. A scratch image that changed fails as a distro layer does, such as with
 `IMAGE changed after its scratch binding was made: its length differs;
 deprovision the sandbox and provision it again`, and one that another sandbox
 claims with `another sandbox claims the ext4 scratch image IMAGE`. `run` binds
-and claims the scratch image itself, and runs OpenVMM through a prepared
-launch until it exits; its command, which it prints, names the checked files,
-except in a dry run, which launches nothing. A sandbox whose upper is in RAM,
+the scratch image itself, checks the binding and claims the image as `start`
+does, and holds the claim until its VM exits. A sandbox whose upper is in RAM,
 `--upper ram`, has no scratch image: `provision` records `null` for the image
 and its binding, and neither `start` nor `run` binds or claims one.
 
@@ -2740,7 +2738,7 @@ at a time installs into a checkout, holding the lock of
 its holder exits. A command shares that lock, creating its file if needed and
 if it may, while it decides, reads the artifacts, and launches OpenVMM on them,
 `sandbox run` from before it reads its distro layer, which may be a release's,
-and `sandbox start` until its VM is ready. It thus never sees part of an
+and `sandbox start`, until their VM is ready. It thus never sees part of an
 installation, no download replaces the files that it reads, and a download
 that it waited for has it decide again. `sandbox provision` shares the lock
 where it can take it while it reads its distro layer and records the sandbox,
@@ -2833,16 +2831,19 @@ as `--option VALUE` or `--option=VALUE`, repeated options accumulate, and
 `--mount-deny`, `--mount-allow`, and `--mount-write` apply to the `--mount`
 before them.
 
-- `run` prints `>> COMMAND`, OpenVMM's command line, quoted as the Microsoft C
-  runtime splits a command line on Windows and as a POSIX shell splits one
-  elsewhere, as `nvx.py` quoted it with `subprocess.list2cmdline` and
-  `shlex.join`. Unless `--dry-run` is given, it then runs OpenVMM with the
-  standard streams, to which `--virtio-console console` attaches the guest's
-  boot console, and exits with its status; the command then names the
-  checked distro layer, and the scratch image of an upper on scratch, as
-  `/proc/self/fd/N` on Linux, which OpenVMM inherits, and by their final paths
-  on Windows, as [Checked handoff](#checked-handoff) describes.
-  `--outcome-report` asks OpenVMM for its outcome report.
+- `run` runs one workload in a sandbox of its own, which keeps no state
+  directory: it launches the VM that a `provision` and a `start` of its
+  options would launch, in a fresh temporary VM directory, and prints
+  `>> COMMAND`, OpenVMM's command line, quoted as the Microsoft C runtime
+  splits a command line on Windows and as a POSIX shell splits one elsewhere,
+  as `nvx.py` quoted it with `subprocess.list2cmdline` and `shlex.join`.
+  Unless `--dry-run` is given, it then executes the workload once through the
+  control session, as `exec` does, with its working directory and environment
+  options, asks the guest to shut the VM down, waits up to `--timeout` seconds
+  for OpenVMM to exit before it terminates it, removes the VM directory, and
+  prints the workload's standard output and then its standard error, and exits
+  with its status. `--outcome-report` forwards OpenVMM's outcome report of the
+  VM's stop.
 - `provision` records the sandbox in its state directory. `start` launches
   OpenVMM detached with the managed lifecycle, passes it a fresh capability
   through its standard input, and waits until the guest answers. `exec` runs a
@@ -2946,11 +2947,12 @@ switch too, since this build finds no VM in that sandbox.
 
 #### Guest features
 
-After the guest answers, `start` asks it for its control features and
-requires `GuestFeatures::LAYERED_SANDBOX`, the features that its launches use:
-per-execution environments (bit 4), since `exec` sends a working directory and
-an environment, and host path mapping tables (bit 6), since `start` then sends
-the mapping table of the sandbox's shares, which the guest agent mounts before
+After the guest answers, `start`, and `sandbox run`, ask it for its control
+features and require `GuestFeatures::LAYERED_SANDBOX`, the features that their
+launches use: per-execution environments (bit 4), since `exec` and
+`sandbox run` send a working directory and an environment, and host path
+mapping tables (bit 6), since they then send the mapping table of the
+sandbox's shares, which the guest agent mounts before
 it runs any workload; a mapping that it refuses fails the start, after the
 guest shuts down as `stop` has it do. It needs neither cancellation (bit 0),
 since the CLI never cancels a workload, and Ctrl-C ends the session, nor
@@ -2967,8 +2969,8 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
 
 #### Other differences from nvx.py
 
-- The cold boots of `run`, and `sandbox run`, attach the guest's console to the
-  terminal through the boot console, with `--virtio-console console`, where
+- The cold boots of `run` attach the guest's console to the terminal through
+  the boot console, with `--virtio-console console`, where
   `nvx.py` left it on the byte channel, `hvc0`, which took the terminal's
   input. The byte channel's output goes to standard error.
 - Long options cannot be abbreviated, where `argparse` accepted any prefix that
@@ -3071,15 +3073,9 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   way out. The command spells out OpenVMM's defaults and the rules in their
   canonical form, with the network options after the plan's other options; see
   [Sandbox networking](../doc/run.md#sandbox-networking).
-- `run` and `start` hand OpenVMM the files that their checks opened: its
-  command line names them `/proc/self/fd/N` on Linux, and by their final
-  paths, `\\?\` paths, on Windows, and on every host, a sandbox's scratch image
-  is claimed while it runs, so a second sandbox, or a `run`, on the same image
-  fails; see [Checked handoff](#checked-handoff). OpenVMM inherits no other
-  descriptor or handle of `run` beyond its standard streams, as `subprocess.run`
-  passes none with `close_fds`: on Windows, OpenVMM's handle list holds copies
-  of `run`'s standard handles, its checked files, and the scratch image's claim
-  alone.
+- A sandbox's scratch image is claimed while its VM runs, so a second
+  sandbox, or a `run`, on the same image fails; see
+  [Checked handoff](#checked-handoff).
 - On Linux, OpenVMM starts with the caller's umask without the owner's bits,
   where `nvx.py` passed the umask unchanged, so that a umask that clears the
   owner's own permissions, such as 0400, no longer keeps the caller, or `start`
@@ -3156,8 +3152,9 @@ and the arguments that OpenVMM receives, which the fake OpenVMM records, and
 into which the `>> ` line of a run splits back, with `CommandLineToArgvW` on
 Windows and a shell-word splitter on POSIX, as a property test checks for
 arbitrary kernel command lines too. The tables cover usage errors and help, the
-checks that refuse a command line before anything changes, dry runs, one-shot
-runs, the lifecycles of sandboxes of every configuration, their executions, the
+checks that refuse a command line before anything changes, dry runs, the runs
+of `nvx-rs run` and of `nvx-rs sandbox run`, the lifecycles of sandboxes of
+every configuration, their executions, the
 refusals of lifecycle operations, configurations of every format, from the
 hand-written `config.json` files of `tests/fixtures/state/`, `egress compile`,
 `artifacts`, and `download`, with the downloads of `run` and `sandbox`, which

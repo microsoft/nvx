@@ -1,14 +1,12 @@
-//! The runs that launch OpenVMM on the terminal: one-shot sandboxes of `nvx-rs sandbox run`, and
-//! the microVMs of `nvx-rs run`. Each prints the OpenVMM command as `>> COMMAND`, runs it with the
-//! standard streams, which carry the workload's output, or OpenVMM's, byte for byte, and exits
-//! with OpenVMM's status, which a one-shot sandbox's OpenVMM takes from its workload.
+//! The runs that launch OpenVMM on the terminal: the microVMs of `nvx-rs run`. Each prints the
+//! OpenVMM command as `>> COMMAND`, runs it with the standard streams, which carry the workload's
+//! output, or OpenVMM's, byte for byte, and exits with OpenVMM's status. The runs of
+//! `nvx-rs sandbox run`, which execute their workload over NVXC, are [`crate::sandbox_run`]'s.
 
-use crate::harness::{Content, LAYER, OPENVMM, Root, SCRATCH, in_parallel, native};
+use crate::harness::{Content, OPENVMM, Root, in_parallel, native};
 use crate::openvmm::{
     DISCONNECTED_CONSOLE, NO_CONSOLE, NO_NETWORK, NetworkPolicy, Options, TERMINAL_CONSOLE,
-    WORKLOAD, assert_checked_blocks, assert_checked_distro, assert_opened_distro,
-    assert_opened_images, assert_outcome_report, child, cold_boot, one_shot, restore, share_token,
-    snapshot,
+    assert_outcome_report, child, cold_boot, restore, share_token, snapshot,
 };
 
 /// The outcome report that OpenVMM writes for a run that asks for one.
@@ -35,8 +33,7 @@ struct Launch {
     environment: Vec<(&'static str, String)>,
     /// The arguments after `--root ROOT`, with placeholders.
     arguments: Vec<String>,
-    /// The options of the OpenVMM command, with placeholders, and with the paths of a sandbox's
-    /// images, which the run passes as files that it checked.
+    /// The options of the OpenVMM command, with placeholders.
     options: Options,
     /// The record of the arguments that the fake OpenVMM received, below the root, unless it
     /// refuses them.
@@ -125,40 +122,6 @@ impl Launch {
     }
 }
 
-/// Returns `nvx-rs sandbox run` of the distro layer and scratch image of the root that runs
-/// `entrypoint` with `options`.
-fn sandbox_run(entrypoint: &str, options: &[&str]) -> Vec<String> {
-    [
-        "sandbox",
-        "run",
-        "--layer",
-        LAYER,
-        "--scratch",
-        SCRATCH,
-        "--entrypoint",
-        entrypoint,
-    ]
-    .iter()
-    .chain(options)
-    .map(|argument| (*argument).to_owned())
-    .collect()
-}
-
-/// Returns the OpenVMM options of a one-shot sandbox that runs `entrypoint` with `arguments`,
-/// after the user's kernel command line `user`.
-fn workload(user: &str, entrypoint: &str, arguments: &[&str]) -> Options {
-    let mut tokens = vec![
-        format!("nvx_entrypoint={entrypoint}"),
-        WORKLOAD[1].to_owned(),
-    ];
-    tokens.extend(
-        arguments
-            .iter()
-            .map(|argument| format!("nvx_arg={argument}")),
-    );
-    one_shot().sandbox_kernel(user, &tokens)
-}
-
 /// Returns whether the launch is a cold boot of `nvx-rs run` that fails, which `run` follows with
 /// its CPU-profile guidance on a host whose CPU no built-in profile serves, as
 /// `run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves` checks.
@@ -180,152 +143,6 @@ fn run(options: &[&str]) -> Vec<String> {
         .chain(options)
         .map(|argument| (*argument).to_owned())
         .collect()
-}
-
-/// Returns the one-shot runs of `nvx-rs sandbox run`.
-fn sandbox_launches() -> Vec<Launch> {
-    let echo = || workload("", "/bin/echo", &["hello", "world"]);
-    let mut launches = vec![
-        launch(
-            "echo",
-            sandbox_run("/bin/echo", &["--arg", "hello", "--arg", "world"]),
-            echo(),
-            0,
-            "hello world\n",
-        ),
-        // The operation is `run` by default.
-        launch(
-            "default operation",
-            [
-                "sandbox",
-                "--layer",
-                LAYER,
-                "--scratch",
-                SCRATCH,
-                "--entrypoint",
-                "/bin/echo",
-                "--arg",
-                "hello",
-                "--arg",
-                "world",
-            ],
-            echo(),
-            0,
-            "hello world\n",
-        ),
-        launch(
-            "failure",
-            sandbox_run("/bin/false", &[]),
-            workload("", "/bin/false", &[]),
-            1,
-            "",
-        ),
-        // An upper in RAM attaches the distro layer alone, and needs no scratch image.
-        launch(
-            "RAM upper",
-            [
-                "sandbox",
-                "run",
-                "--layer",
-                LAYER,
-                "--upper",
-                "ram",
-                "--entrypoint",
-                "/bin/echo",
-                "--arg",
-                "hello",
-                "--arg",
-                "world",
-            ],
-            echo().in_ram(),
-            0,
-            "hello world\n",
-        )
-        .without("scratch.ext4"),
-        launch(
-            "missing program",
-            sandbox_run("/bin/missing", &[]),
-            workload("", "/bin/missing", &[]),
-            127,
-            "",
-        )
-        .with_stderr("openvmm: /bin/missing: not found\n"),
-        launch(
-            "outcome report",
-            sandbox_run(
-                "/bin/echo",
-                &[
-                    "--arg",
-                    "hello",
-                    "--arg",
-                    "world",
-                    "--outcome-report",
-                    "{root/reports/openvmm-run.json}",
-                ],
-            ),
-            echo().with("--microvm-report", ["{root/reports/openvmm-run.json}"]),
-            0,
-            "hello world\n",
-        )
-        .recorded_in(Some("build/fake-openvmm-reports.json"))
-        .reporting(Report {
-            path: "reports/openvmm-run.json",
-            category: "success",
-            status: 0,
-            network: NO_NETWORK,
-        }),
-        launch(
-            "network outcome report",
-            sandbox_run(
-                "/bin/true",
-                &[
-                    "--net",
-                    "10.0.0.2/24",
-                    "--network-profile",
-                    "portable",
-                    "--network-egress",
-                    "deny",
-                    "--network-egress-allow",
-                    "10.0.0.0/8:tcp:443",
-                    "--outcome-report",
-                    "{root/reports/openvmm-run.json}",
-                ],
-            ),
-            workload("", "/bin/true", &[])
-                .with("--net", ["10.0.0.2/24"])
-                .with("--network-profile", ["portable"])
-                .with("--network-egress", ["deny"])
-                .with("--network-ingress", ["deny"])
-                .with("--network-egress-allow", ["10.0.0.0/8:tcp:443"])
-                .with("--microvm-report", ["{root/reports/openvmm-run.json}"]),
-            0,
-            "",
-        )
-        .recorded_in(Some("build/fake-openvmm-reports.json"))
-        .reporting(Report {
-            path: "reports/openvmm-run.json",
-            category: "success",
-            status: 0,
-            network: ("applied", "rules", 1, 0, "allow"),
-        }),
-    ];
-    // OpenVMM exits with the status that its workload exits with, which the fake OpenVMM's
-    // `fake_exit_status=STATUS` sets.
-    for (name, status, command_line) in [
-        ("exit status", 7, "fake_exit_status=7"),
-        ("exit status 3", 3, "fake_exit_status=3"),
-        ("timeout status", 124, "fake_exit_status=124"),
-        ("killed status", 137, "fake_exit_status=137"),
-    ] {
-        launches.push(launch(
-            name,
-            sandbox_run("/bin/true", &["--cmdline", command_line]),
-            workload(command_line, "/bin/true", &[]),
-            status,
-            "",
-        ));
-    }
-    launches
 }
 
 /// Returns the runs of `nvx-rs run`.
@@ -679,10 +496,7 @@ fn run_launches() -> Vec<Launch> {
 
 #[test]
 fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
-    let cases: Vec<Launch> = sandbox_launches()
-        .into_iter()
-        .chain(run_launches())
-        .collect();
+    let cases: Vec<Launch> = run_launches();
     let (vendor, family, model, stepping) = crate::reported_cpu();
     let unserved = !crate::served(&vendor, family, model, stepping);
     in_parallel(&cases, |case| {
@@ -767,27 +581,9 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
         if let Some(record) = record {
             assert_eq!(root.openvmm_arguments(&record), arguments, "{}", case.name);
         }
-        let mut expected = expected_cold
+        let expected = expected_cold
             .map(|expected| expected.unwrap())
             .unwrap_or_else(|| case.options.clone());
-        // A sandbox's OpenVMM opens the images through the files that the run checked: the distro
-        // layer alone for an upper in RAM, and the scratch image too for one on scratch.
-        let blocks = expected.take("--microvm-sandbox-block");
-        if !blocks.is_empty() {
-            let checked = options.take("--microvm-sandbox-block");
-            let token = case
-                .record
-                .and_then(|record| record.strip_prefix("build/fake-openvmm-"))
-                .and_then(|name| name.strip_suffix(".json"))
-                .unwrap();
-            if blocks.len() == 1 {
-                assert_checked_distro(&root, &checked);
-                assert_opened_distro(&root, token);
-            } else {
-                assert_checked_blocks(&root, &checked);
-                assert_opened_images(&root, token);
-            }
-        }
         if cold {
             options = options.normalized_cold_outputs(true);
         }

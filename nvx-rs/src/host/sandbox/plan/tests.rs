@@ -14,7 +14,7 @@ use crate::host::network::{
     Protocol, ProxyScheme,
 };
 use crate::host::sandbox::distro::DistroBinding;
-use crate::host::sandbox::mount::{boot_shares, export_command_line_fragment};
+use crate::host::sandbox::mount::export_command_line_fragment;
 use crate::host::sandbox::tests::{deny, exported, host, host_text, native};
 use crate::host::sandbox::{LayerRole, MountAccess, MountKind, SandboxLaunch, SandboxLayer};
 
@@ -112,24 +112,15 @@ type Rendering = (
     fn(&ExportPlan) -> String,
 );
 
-/// Returns the renderings of the managed lifecycle, which announces a mapping table, and of the
-/// one-shot lifecycle, which carries boot tokens, by name.
-fn renderings() -> [(&'static str, Rendering); 2] {
-    [
+/// Returns the renderings of the managed lifecycle, which announces a mapping table, by name.
+fn renderings() -> [(&'static str, Rendering); 1] {
+    [(
+        "managed",
         (
-            "managed",
-            (
-                SandboxPlan::kernel_command_line,
-                export_command_line_fragment,
-            ),
+            SandboxPlan::kernel_command_line,
+            export_command_line_fragment,
         ),
-        (
-            "one-shot",
-            (SandboxPlan::one_shot_kernel_command_line, |export| {
-                boot_shares(export).unwrap().fragment
-            }),
-        ),
-    ]
+    )]
 }
 
 #[test]
@@ -378,20 +369,8 @@ fn the_managed_lifecycle_exports_the_shares_and_announces_their_mapping_table() 
             .collect::<Vec<_>>(),
         ["/workspace", "/srv/cache"]
     );
-    // The one-shot lifecycle renders the same plan as boot tokens.
-    let boot = boot_shares(&export).unwrap();
-    assert_eq!(
-        plan.one_shot_openvmm_arguments().unwrap()[blocks.len()..],
-        boot.arguments[..]
-    );
-    assert_eq!(
-        plan.one_shot_kernel_command_line("quiet").unwrap(),
-        format!("{base} {}", boot.tokens.join(" "))
-    );
-    // Without shares, both render alike, and nothing is mapped.
+    // Without shares, nothing is mapped.
     assert!(bare.mapping_table().is_empty());
-    assert_eq!(bare.one_shot_openvmm_arguments().unwrap(), blocks);
-    assert_eq!(bare.one_shot_kernel_command_line("quiet").unwrap(), base);
     assert!(!base.contains("nvx_maps="));
 }
 

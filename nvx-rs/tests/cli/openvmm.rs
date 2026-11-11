@@ -578,10 +578,45 @@ impl Options {
             .with("--microvm-report", ["<outcome>"]);
         options
     }
+
+    /// Returns these options of a `sandbox run` with the outputs of its VM directory named as
+    /// [`managed_run`] names them, once it has checked that the directory is a fresh one of the
+    /// run, which is gone once the run has ended, and that it holds the control endpoint on POSIX
+    /// hosts.
+    pub(crate) fn normalized_run_outputs(&self) -> Self {
+        let report = PathBuf::from(self.value("--microvm-report"));
+        assert!(report.is_absolute(), "{}", report.display());
+        assert_eq!(report.file_name().unwrap(), "outcome.json");
+        let parent = report.parent().unwrap();
+        let name = parent.file_name().unwrap().to_str().unwrap();
+        let suffix = name
+            .strip_prefix("nvx-sandbox-run-")
+            .expect("a run owns a fresh VM directory");
+        assert!(is_hex(suffix, 32), "{name}");
+        assert!(
+            !parent.exists(),
+            "the run left its VM directory: {}",
+            parent.display()
+        );
+        let control = self
+            .value("--microvm-control-console")
+            .strip_prefix("listen=")
+            .unwrap();
+        if cfg!(windows) {
+            let pipe = control.strip_prefix("//./pipe/openvmm-microvm-").unwrap();
+            assert!(is_hex(pipe, 32), "{control}");
+        } else {
+            assert_eq!(Path::new(control), parent.join("control.sock"));
+        }
+        self.clone()
+            .with("--microvm-control-console", ["listen=<control>"])
+            .with("--microvm-report", ["<outcome>"])
+    }
 }
 
 /// Returns the options with which a one-shot run of the minimal sandbox, `sandbox run --layer
-/// LAYER --scratch SCRATCH`, starts OpenVMM, with the paths of the images that a dry run shows.
+/// LAYER --scratch SCRATCH`, started OpenVMM, from which [`managed`] and [`managed_run`] derive
+/// those of its managed launches.
 pub(crate) fn one_shot() -> Options {
     Options::default()
         .with("--machine", ["microvm"])
@@ -615,6 +650,19 @@ pub(crate) fn managed(state: &str, endpoint: &str) -> Options {
             "--microvm-report",
             [format!("{{root/{state}/outcome.json}}")],
         )
+}
+
+/// Returns the options with which a run of the minimal sandbox, `sandbox run --layer LAYER
+/// --scratch SCRATCH`, starts OpenVMM, in the form that [`Options::persistent_expected`] projects:
+/// those of a start of the same sandbox, with the control endpoint and outcome report of the run's
+/// own VM directory, as [`Options::normalized_run_outputs`] names them.
+pub(crate) fn managed_run() -> Options {
+    one_shot()
+        .with("--microvm-lifecycle", ["managed"])
+        .with("--virtio-console", ["none"])
+        .with("--microvm-control-console", ["listen=<control>"])
+        .flag("--microvm-control-auth-stdin")
+        .with("--microvm-report", ["<outcome>"])
 }
 
 /// Returns the options with which `nvx-rs run` cold-boots its default guest, Alpine Linux, with
@@ -767,66 +815,6 @@ pub(crate) fn assert_stable_blocks(root: &Root, blocks: &[String], scratch: bool
         .map(|block| block.replace("file:\\\\?\\", "file:"))
         .collect();
     assert_eq!(actual, expected);
-}
-
-/// Asserts that `blocks`, the `--microvm-sandbox-block` values of a launch, attach the distro
-/// layer of the root read-only and then its scratch image through files that the launch checked:
-/// on Linux, descriptors that OpenVMM inherits, which it names as `/proc/self/fd/N`, and on
-/// Windows, the images' final paths.
-pub(crate) fn assert_checked_blocks(root: &Root, blocks: &[String]) {
-    let [distro, scratch] = blocks else {
-        panic!("not two sandbox block devices: {blocks:?}");
-    };
-    let distro = checked_distro(distro);
-    let scratch = scratch
-        .strip_prefix("scratch:file:")
-        .unwrap_or_else(|| panic!("not a scratch disk: {scratch}"));
-    if cfg!(windows) {
-        assert_eq!(
-            distro,
-            format!(r"\\?\{}", root.expand("{root/distro.erofs}"))
-        );
-        assert_eq!(
-            scratch,
-            format!(r"\\?\{}", root.expand("{root/scratch.ext4}"))
-        );
-    } else {
-        assert_ne!(descriptor(distro), descriptor(scratch));
-    }
-}
-
-/// Asserts that `blocks`, the `--microvm-sandbox-block` values of a launch whose upper is in RAM,
-/// attach the distro layer of the root alone, read-only, through a file that the launch checked,
-/// as [`assert_checked_blocks`] says.
-pub(crate) fn assert_checked_distro(root: &Root, blocks: &[String]) {
-    let [distro] = blocks else {
-        panic!("not one sandbox block device: {blocks:?}");
-    };
-    let distro = checked_distro(distro);
-    if cfg!(windows) {
-        assert_eq!(
-            distro,
-            format!(r"\\?\{}", root.expand("{root/distro.erofs}"))
-        );
-    } else {
-        descriptor(distro);
-    }
-}
-
-/// Returns the checked file of `block`, a `--microvm-sandbox-block` value that attaches a
-/// read-only distro layer.
-fn checked_distro(block: &str) -> &str {
-    block
-        .strip_prefix("distro:file:")
-        .and_then(|rest| rest.strip_suffix(",ro"))
-        .unwrap_or_else(|| panic!("not a read-only distro layer: {block}"))
-}
-
-/// Returns the number of the descriptor that `path`, `/proc/self/fd/N`, names.
-fn descriptor(path: &str) -> u32 {
-    path.strip_prefix("/proc/self/fd/")
-        .and_then(|number| number.parse::<u32>().ok())
-        .unwrap_or_else(|| panic!("not an inherited descriptor: {path}"))
 }
 
 /// Asserts that the fake OpenVMM of the launch whose records are named for `token` read the
