@@ -10,9 +10,10 @@
   summary, and commit mapping below cover positions 001-131, the PR09 fixups at positions
   241-243, the PR13 fixup at position 247, the PR18 fixup at position 248, the PR20 fixup at
   position 249, and the PR19 fixup at position 250.
-- NVX's pinned OpenVMM revision: `174da3a0d236b4b01182a8d73a47598e4fcb1eca`, position 251, the
-  head of microsoft/openvmm#5042, whose commit follows position 250, `23136b647`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5041 merged after position 249, `fb4f34126`,
+- NVX's pinned OpenVMM revision: `9f10ce7a8e9632d79b1d26f5a18ea899481856bf`, position 252, the
+  head of microsoft/openvmm#5044, whose commit follows position 251, `174da3a0d`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5042 merged after position 250, `23136b647`,
+  which microsoft/openvmm#5041 merged after position 249, `fb4f34126`,
   which microsoft/openvmm#5038 merged after position 248, `58d3c3b1d`,
   which microsoft/openvmm#5026 merged after position 247, `61cdd6397`,
   which microsoft/openvmm#5022 merged after position 246, `cd5cd3814`,
@@ -41,9 +42,9 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 120 commits past
-  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 251 are not yet
-  assigned to PRs, positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 121 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, 251, and 252 are not
+  yet assigned to PRs, positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248
   is a PR18 fixup, position 249 is a PR20 fixup, and position 250 is a PR19 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
@@ -1021,7 +1022,8 @@ ba105dd7f
   -> PR20 fixup [249]
   -> PR19 fixup [250]
   -> direct-claimed scratch attached in place [251]
-  -> 174da3a0d (NVX pin)
+  -> clock tokens split at Linux's whitespace [252]
+  -> 9f10ce7a8 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1058,7 +1060,7 @@ helper that the case uses.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 120 later commits,
+The NVX pin extends the chain past position 131 without merges. Of the 121 later commits,
 positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248 is a PR18 fixup,
 position 249 is a PR20 fixup, position 250 is a PR19 fixup, and the others are not yet classified
 or assigned to PRs.
@@ -1066,7 +1068,7 @@ Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-251 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-252 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1195,6 +1197,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 249 | `fb4f34126` | - | - | - | - | microVM: refuse an unaligned or reversed decoded snapshot RAM range (microsoft/openvmm#5038); fold into 098, its test's time ABI parameters into 147 |
 | 250 | `23136b647` | - | - | - | - | openvmm_helpers: check paired scratch when opening a snapshot (microsoft/openvmm#5041); fold into 093, its test's FIFO case into 237 |
 | 251 | `174da3a0d` | - | - | - | - | microVM: attach direct-claimed scratch in place instead of linking it (microsoft/openvmm#5042) |
+| 252 | `9f10ce7a8` | - | - | - | - | virt: split clock-token command lines at every Linux whitespace byte (microsoft/openvmm#5044) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1773,6 +1776,14 @@ all but that `pal` module: upstream main lacks the snapshot modules of PR11 and 
 restore of PR17, the sandbox blocks of PR19, and the direct-claimed scratch of position 166, so it
 follows position 166 upstream, and its `pal` open, which applies to upstream main as it is, has no
 other user.
+
+Position 252 changes only the time ABI's check of the clock tokens of a microVM's kernel command
+line, which position 135 adds to the time ABI module of `virt` that position 132 adds and positions
+139, 142, 144, 145, 148, 149, 152, 158, 160, and 193 also change: it splits the command line at
+every byte that Linux's `isspace` takes for whitespace, the vertical tab and 0xa0 among them,
+rather than at ASCII whitespace, and adds tests beside position 135's. It changes nothing that a
+mapped PR adds. Replaying it on upstream main conflicts in its only file: upstream main lacks the
+time ABI, so it follows the time ABI series upstream.
 
 ## PR summary
 
