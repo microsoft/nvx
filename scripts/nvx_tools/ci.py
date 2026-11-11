@@ -196,7 +196,7 @@ BENCHMARK_INPUT_PATHS = re.compile(
     r"scripts/nvx_tools/(?!(adversarial|adversarial_broker|adversarial_executor|"
     r"crate_release|create_linux_source_archive|managed_exec_tests|merge_queue|"
     r"microvm_durations|microvm_shards|microvm_tests|nightly_ci|openvmm_ci|"
-    r"openvmm_process|performance_history|runtime_adapter_tests|"
+    r"openvmm_process|performance_history|"
     r"sandbox_lifecycle_tests|sandbox_proxy_tests|sandbox_ram_upper_tests|"
     r"shard_plans)\.py$|"
     r"microvm_shards\.json$|adversarial_cases/|"

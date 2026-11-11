@@ -100,11 +100,7 @@ constant of the kernel tuning parameters that it admits among them, and
 `microvm_control_tty_command_line.rs`, the constant of
 `openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
 the function reads. The tests of `nvx::host::template` compile them, and check
-each token of a template's kernel command line with OpenVMM's own function, and
-the kernel tuning parameters of a template with OpenVMM's own constant. The
-runtime adapter in `tests/runtime-adapter/` compiles them too, as the allowlist
-with which the guest agent of a template's VM checks its kernel command line,
-and its tests pin the set of tokens that they admit.
+each token of a template's kernel command line with OpenVMM's own function.
 
 The tests cannot call OpenVMM's broker or its allowlist: OpenVMM's workspace
 needs a later Rust release than `nvx`'s minimum, and the `nvx-rs` job cannot
