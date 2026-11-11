@@ -28,14 +28,14 @@ use super::session::ExecRequest;
 use super::{Exit, Result, io_error, output};
 use crate::ErrorCode;
 use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
+use crate::host::filesystem::{ExportPlan, ReservedTargets};
 use crate::host::paths;
 use crate::host::runtime::RuntimeIdentity;
-use crate::host::sandbox::distro::DistroFormat;
+use crate::host::sandbox::DEFAULT_ENTRYPOINT;
+use crate::host::sandbox::distro::{DistroBinding, DistroFormat};
+use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
-use crate::host::sandbox::options::{
-    SandboxOperation, SandboxOptions, sandbox_mounts, validate_sandbox_systemd_policy,
-};
-use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
+use crate::host::sandbox::options::{SandboxOperation, SandboxOptions, sandbox_mounts};
 use crate::protocol::root::RootUpper;
 
 pub(crate) use self::lifecycle::ProvisionConfig;
@@ -46,7 +46,7 @@ pub(super) use self::options::{
 };
 pub(crate) use self::options::{Options, path_string};
 pub(crate) use self::state::Source;
-use self::state::{NetworkRecord, RecordedDistro};
+use self::state::{NetworkRecord, RecordedDistro, check_images, check_workload};
 
 /// The artifacts of a sandbox, found when an operation first needs them.
 pub(crate) struct Artifacts<'a> {
@@ -248,54 +248,60 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
     ) {
         let rules = options.network.egress_rules()?;
         let mounts = sandbox_mounts(&options.mounts, &options.policy_paths, options.mount_owner)?;
-        let mut settings = SandboxSettings {
-            entrypoint: options.entrypoint.clone(),
-            args: options.args.clone(),
-            hostname: options.hostname.clone(),
-            workload_identity: options.workload_user,
-            ..SandboxSettings::default()
-        };
-        // The workload of a run, and that of a restore, is an exec request, which no boot token
-        // carries: a run's control session checks it, and `snapshot restore` a restore's.
-        if operation == SandboxOperation::Run || source.is_some() {
-            let workload = SandboxSettings::default();
-            (settings.entrypoint, settings.args) = (workload.entrypoint, workload.args);
-        }
-        // The checks above require --scratch for an upper on scratch, and refuse it for one in
-        // RAM.
-        let upper = match options.upper.unwrap_or(RootUpper::Scratch) {
-            RootUpper::Scratch => {
-                SandboxUpper::scratch(options.scratch.as_deref().unwrap_or_default())
-            }
-            RootUpper::Ram => SandboxUpper::RAM,
-        };
         let layers = options
             .layers
             .iter()
             .map(|layer| {
                 Ok(match options.layer_format {
-                    Some(DistroFormat::Gpt) => crate::host::sandbox::SandboxLayer::gpt(
-                        layer.role(),
-                        &path_string(layer.path())?,
-                        layer.uuid(),
-                    ),
+                    Some(DistroFormat::Gpt) => {
+                        SandboxLayer::gpt(layer.role(), &path_string(layer.path())?, layer.uuid())
+                    }
                     _ => layer.clone(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let launch = SandboxLaunch::new(layers, upper, settings)?;
+        // A sandbox takes one read-only layer, of the one role of a layer: its distro layer.
+        let layer = match &layers[..] {
+            [layer] => layer.clone(),
+            layers => {
+                let message = match layers.first() {
+                    Some(layer) => format!("duplicate sandbox layer role(s): {}", layer.role()),
+                    None => "a sandbox requires exactly one read-only distro layer".to_owned(),
+                };
+                return Err(Exit::error(ErrorCode::Unsupported, message));
+            }
+        };
+        // The workload of a run, and that of a restore, is an exec request, which no boot token
+        // carries: a run's control session checks it, and `snapshot restore` a restore's.
+        let (entrypoint, args) = if operation == SandboxOperation::Run || source.is_some() {
+            (DEFAULT_ENTRYPOINT, &[][..])
+        } else {
+            (options.entrypoint.as_str(), &options.args[..])
+        };
+        check_workload(entrypoint, args, &options.hostname, options.workload_user)?;
+        // The checks above require --scratch for an upper on scratch, and refuse it for one in
+        // RAM.
+        let scratch = match options.upper.unwrap_or(RootUpper::Scratch) {
+            RootUpper::Scratch => Some(paths::normalized(Path::new(
+                options.scratch.as_deref().unwrap_or_default(),
+            ))),
+            RootUpper::Ram => None,
+        };
         validate_mounts(&mounts)?;
-        launch.validated()?;
+        check_images(&layer, scratch.as_deref(), None)?;
         // The shares are planned once, from their resolved host paths, and `provision` records
         // the plan, whose identities each `start` checks again.
-        let launch = launch.with_export(plan_mounts(&mounts)?)?;
+        let export = plan_mounts(&mounts)?;
+        if let Some(export) = &export {
+            export.check(ReservedTargets::CONTAINER_ROOT)?;
+        }
         // `run` and `provision` verify the distro layer explicitly, at the path given;
         // `provision` records its binding, which `start` checks without reading the layer again.
-        let binding = validate_sandbox_systemd_policy(&launch)?;
+        let binding = DistroBinding::verify(&layer)?;
         // The network's policy is checked before anything launches or is recorded.
         sandbox_network(&options.network, &rules)?;
         let network = NetworkRecord::new(&options.network, &rules);
-        Some((launch, binding, network))
+        Some((layer, scratch, export, binding, network))
     } else {
         None
     };
@@ -318,30 +324,27 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
         inherit_default_environment: options.inherit_default_environment,
     };
     match (operation, launch) {
-        (SandboxOperation::Provision, Some((launch, binding, network))) => {
+        (SandboxOperation::Provision, Some((layer, scratch, export, binding, network))) => {
             // `provision` records the layer at its resolved path, where `start` checks the
             // binding, with the manifest beside that path.
-            let distro = RecordedDistro::new(&launch, binding)?;
+            let distro = RecordedDistro::new(&layer, binding)?;
             let state_dir = state_dir("provision")?;
             // A provision runs no artifact, so it needs no artifact root; without one, `start`
             // checks the shares against the artifacts that it runs.
             let located = locate(root).ok();
             refuse_own_files(
                 Some(("state directory", Path::new(state_dir))),
-                &launch,
+                layer.path(),
+                scratch.as_deref(),
+                export.as_ref(),
                 located.as_ref(),
             )?;
             lifecycle::provision(
                 state_dir,
-                &launch,
+                &layer,
+                scratch.as_deref(),
                 &distro,
-                &ProvisionConfig {
-                    hypervisor: hypervisor(options.hypervisor),
-                    memory_mib: options.memory_mib,
-                    cmdline: &options.cmdline,
-                    ram_upper_percent: options.ram_upper_percent,
-                    network: network.as_ref(),
-                },
+                &recorded(&options, export.as_ref(), network.as_ref()),
                 source,
                 options.timeout,
             )
@@ -379,7 +382,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
         (SandboxOperation::Deprovision, _) => {
             lifecycle::deprovision(state_dir("deprovision")?, &artifacts, options.timeout)
         }
-        (SandboxOperation::Run, Some((launch, binding, network))) => {
+        (SandboxOperation::Run, Some((layer, scratch, export, binding, network))) => {
             if options.state_dir.is_some() {
                 return Err(Exit::error(
                     ErrorCode::Unsupported,
@@ -387,12 +390,12 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
                 ));
             }
             // A run launches the layer at the path that a provision would record.
-            let distro = RecordedDistro::new(&launch, binding)?;
+            let distro = RecordedDistro::new(&layer, binding)?;
             let held = early.transpose()?.unwrap_or_else(Hold::none);
             let Some(result) = lifecycle::run(
-                &launch,
                 &distro,
-                network.as_ref(),
+                scratch.as_deref(),
+                &recorded(&options, export.as_ref(), network.as_ref()),
                 &artifacts,
                 &options,
                 &request,
@@ -412,12 +415,33 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
     }
 }
 
+/// Returns the options of `options` that `provision` records beside the images of its launch, with
+/// `export`, the export plan of its shares, and `network`, the record of its network options,
+/// which a run records and reads back too.
+fn recorded<'a>(
+    options: &'a Options,
+    export: Option<&'a ExportPlan>,
+    network: Option<&'a NetworkRecord>,
+) -> ProvisionConfig<'a> {
+    ProvisionConfig {
+        hypervisor: hypervisor(options.hypervisor),
+        memory_mib: options.memory_mib,
+        cmdline: &options.cmdline,
+        ram_upper_percent: options.ram_upper_percent,
+        hostname: &options.hostname,
+        workload_identity: options.workload_user,
+        export,
+        network,
+    }
+}
+
 /// Refuses a share of the sandbox's own files: one whose host path equals, contains, or lies
 /// inside `directory`, if the sandbox has one, with its name, its state directory, a run's VM
-/// directory, or a restored sandbox's snapshot store; the image or scratch image of `launch`; or,
-/// if known, the OpenVMM, kernel, or Alpine initramfs of the artifact root of `artifacts`, or the
-/// OpenVMM that `NVX_OPENVMM` names instead, which a run runs. Through it, the guest could read or
-/// change the sandbox's records, its storage, its snapshot, or what the host runs.
+/// directory, or a restored sandbox's snapshot store; its image, `image`, or its scratch image,
+/// `scratch`, if any; or, if known, the OpenVMM, kernel, or Alpine initramfs of the artifact root
+/// of `artifacts`, or the OpenVMM that `NVX_OPENVMM` names instead, which a run runs. The shares
+/// are the children of `export`, if any. Through them, the guest could read or change the
+/// sandbox's records, its storage, its snapshot, or what the host runs.
 ///
 /// The paths are compared once [`paths::resolve`] has resolved them, without a Windows verbatim
 /// prefix. Resolution follows symbolic links and junctions, but not hard links or bind mounts.
@@ -426,22 +450,20 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
 /// directory, checks before it creates its VM directory and launches its VM.
 fn refuse_own_files(
     directory: Option<(&str, &Path)>,
-    launch: &SandboxLaunch,
+    image: &Path,
+    scratch: Option<&Path>,
+    export: Option<&ExportPlan>,
     artifacts: Option<&Located>,
 ) -> Result {
-    let Some(export) = launch.export() else {
+    let Some(export) = export else {
         return Ok(());
     };
     let mut owned: Vec<_> = directory
         .map(|(name, path)| (name, path.to_owned()))
         .into_iter()
         .collect();
-    owned.push(("image", launch.distro().path().to_owned()));
-    owned.extend(
-        launch
-            .scratch()
-            .map(|path| ("scratch image", path.to_owned())),
-    );
+    owned.push(("image", image.to_owned()));
+    owned.extend(scratch.map(|path| ("scratch image", path.to_owned())));
     if let Some(Located { dir, openvmm }) = artifacts {
         owned.extend([
             ("OpenVMM", dir.openvmm()),

@@ -1383,6 +1383,49 @@ fn unusable_guest_ram(root: &Root) {
     assert!(!root.below("state").exists());
 }
 
+/// A start refuses a configuration whose kernel command line holds a token of the sandbox profile,
+/// `nvx_*`, or of `--mount`, `virtfs_*`, as Linux or the guest's init reads the line, before it
+/// launches OpenVMM. `provision` records the profile's tokens that the configuration of the VM
+/// leaves to the caller, such as `nvx_entrypoint`, and the start refuses those too.
+#[test]
+fn starts_refuse_the_kernel_tokens_of_the_sandbox_profile_and_of_its_mounts() {
+    let root = Root::new();
+    root.nvx_rs(&provision(
+        "{root/state}",
+        &["--cmdline", "quiet nvx_entrypoint=/bin/true"],
+    ))
+    .assert_silent_success();
+    let config = json(&root.below("state/config.json"));
+    for (cmdline, fragment) in [
+        (None, "nvx_entrypoint is owned by the sandbox profile"),
+        // Linux reads dashes in a parameter's name as underscores.
+        (
+            Some("nvx-sandbox=0"),
+            "nvx-sandbox is owned by the sandbox profile",
+        ),
+        // The guest's init splits the line at whitespace alone, whatever its quotes.
+        (
+            Some("\"a nvx_mode=one-shot\""),
+            "nvx_mode is owned by the sandbox profile",
+        ),
+        (
+            Some("virtfs_tag=microvm"),
+            "virtfs_tag is owned by the sandbox --mount option",
+        ),
+    ] {
+        if let Some(cmdline) = cmdline {
+            let mut config = config.clone();
+            config["cmdline"] = json!(cmdline);
+            root.write("state/config.json", config.to_string());
+        }
+        let before = root.snapshot();
+        let outcome = operate(&root, "start", "state", &[]);
+        assert_refused(&root, &outcome, "unsupported", &[fragment]);
+        assert_eq!(root.snapshot(), before, "{cmdline:?}");
+    }
+    operate(&root, "deprovision", "state", &[]).assert_silent_success();
+}
+
 /// A state directory must be a directory: a file there fails every operation, and provision
 /// leaves it as it is.
 fn not_a_directory(root: &Root) {
