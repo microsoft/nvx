@@ -1,0 +1,45 @@
+From: NVX maintainers
+Subject: [PATCH] sched: charge a running task at most a second at once
+
+update_se() charges the running task the task clock's advance since its
+last update. A running task's runtime updates at least once a tick, so
+the advance is about a tick, unless the task's CPU did not run in
+between. A virtual CPU that a snapshot stopped did not: across the
+snapshot's downtime, the TSC that sched_clock() reads advances by the
+downtime, so the task that ran at the capture is charged the whole
+downtime at its first update after the restore.
+
+EEVDF keeps the sum of the queued entities' vruntime keys, each times its
+weight, in an s64, and multiplies a key by a weight to decide
+eligibility. A nice-0 task's vruntime advances by its runtime, and its
+key times its weight overflows an s64 once the advance exceeds
+2^63 / 1024 ns, about 104 days, and sooner when heavier entities are
+queued with it. After a downtime of a year, pick_eevdf() can then find
+no eligible entity, and pick_task_fair() dereferences its NULL result
+with the runqueue lock held. The oops kills the task, whose exit
+schedules and takes that lock again, so its CPU spins forever.
+
+Charge at most a second of one update: the rest is time in which the
+task did not run. Its CPU time and its cgroup's CPU usage then leave the
+downtime out, as those of the tasks that did not run at the capture do.
+
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -1232,6 +1232,17 @@ static s64 update_se(struct rq *rq, struct sched_entity *se)
+ 	delta_exec = now - se->exec_start;
+ 	if (unlikely(delta_exec <= 0))
+ 		return delta_exec;
++
++	/*
++	 * A running task's runtime updates at least once a tick, so a delta
++	 * of more than a second is time in which its CPU did not run, such
++	 * as the downtime of a snapshot, across which the TSC that
++	 * sched_clock() reads advances. Charged, it can overflow the s64 sum
++	 * of EEVDF's weighted vruntime keys, after which pick_eevdf() finds
++	 * no eligible entity.
++	 */
++	if (unlikely(delta_exec > NSEC_PER_SEC))
++		delta_exec = NSEC_PER_SEC;
+ 
+ 	se->exec_start = now;
+ 	if (entity_is_task(se)) {

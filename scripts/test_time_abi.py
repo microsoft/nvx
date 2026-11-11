@@ -1644,6 +1644,43 @@ class RunnerWiringTests(unittest.TestCase):
                     )
         self.assertEqual(len(quiet.writes), 1)
 
+    def test_capture_snapshot_gives_the_pre_capture_script_time_of_its_own(self):
+        # After the trigger, a guest that stays silent, as one whose pre-capture
+        # script outlasts the timeout does, times out only once the time that
+        # the script may take has passed too.
+        boot = benchmark.BOOT_MARKER + b": 3.22.1\n"
+        probed = benchmark.SMP_PROBE_COMPLETION_MARKER + b"\n"
+        for extra in (0.0, 0.5):
+            interaction = ScriptedInteraction([boot], 0, [[probed], [], []])
+            with (
+                self.subTest(extra=extra),
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(benchmark, "InteractiveProcess", return_value=interaction),
+                patch.object(benchmark, "terminate"),
+                patch.object(benchmark, "OUTPUT_DRAIN_TIMEOUT_SECONDS", 0.0),
+            ):
+                started = time.monotonic()
+                with self.assertRaisesRegex(
+                    RuntimeError, f"snapshot was not captured within {0.25 + extra:g}s"
+                ):
+                    benchmark.capture_snapshot(
+                        KVM_BOOT,
+                        Path(temporary) / "snapshot",
+                        timeout=0.25,
+                        processors=1,
+                        pre_capture_script="true\n",
+                        pre_capture_seconds=extra,
+                    )
+                self.assertGreaterEqual(time.monotonic() - started, 0.25 + extra)
+                self.assertEqual(
+                    interaction.writes[1:],
+                    [
+                        benchmark.snapshot_request_script(
+                            1, teardown_mode="guest-exit"
+                        ).encode()
+                    ],
+                )
+
     def test_openvmm_process_queries_the_status_before_the_first_input(self):
         status = time_abi.status_script().encode()
         answered = [BOOT_LINE.encode(), STATUS_OK.encode()]

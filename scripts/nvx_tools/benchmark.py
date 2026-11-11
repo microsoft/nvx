@@ -138,6 +138,7 @@ SMP_PROBE_PATH = "/tmp/nvx-smp-probe"
 # of the architecture guide lists it.
 MICROVM_NETWORK_IRQ = 16
 SNAPSHOT_CAPTURE_PATH = "/tmp/nvx-c"
+SNAPSHOT_PRE_CAPTURE_PATH = "/tmp/nvx-pre-capture"
 SNAPSHOT_POST_RESTORE_PATH = "/tmp/nvx-post-restore"
 SNAPSHOT_GUEST_DISPATCH_MARKER = b"NVX-SNAPSHOT-DISPATCHED"
 SNAPSHOT_CAPTURE_TIMING = "openvmm-input-gate-to-publication"
@@ -4101,8 +4102,17 @@ def prepare_snapshot_capture_script(
     teardown_mode: str,
     network_gateway: str | None = None,
     ioapic_irq: int | None = None,
+    pre_capture_script: str | None = None,
     post_restore_script: str | None = None,
 ) -> str:
+    """Return the console input that stages the SMP probe and the capture
+    controller, and starts the controller.
+
+    The controller runs the probe, waits for the harness's trigger line, runs
+    ``pre_capture_script``, if any, then requests the capture, and in the
+    restored guest runs ``post_restore_script``, if any, before it prints the
+    restore marker.
+    """
     probe = smp_probe_script(
         processors,
         exit_guest=False,
@@ -4113,11 +4123,22 @@ def prepare_snapshot_capture_script(
         "snapshot-capture-controller.sh.in",
         SMP_PROBE_PATH=SMP_PROBE_PATH,
         DISPATCH_MARKER=SNAPSHOT_GUEST_DISPATCH_MARKER.decode(),
+        PRE_CAPTURE_ACTION=(
+            f"{SNAPSHOT_PRE_CAPTURE_PATH}\n" if pre_capture_script is not None else ""
+        ),
         POST_RESTORE_ACTION=(
             f"{SNAPSHOT_POST_RESTORE_PATH}\n" if post_restore_script is not None else ""
         ),
         RESTORE_MARKER=RESTORE_MARKER.decode(),
     ) + _guest_exit_script(teardown_mode)
+    pre_capture_setup = ""
+    if pre_capture_script is not None:
+        pre_capture_setup = (
+            f"cat >{SNAPSHOT_PRE_CAPTURE_PATH} <<'NVX_PRE_CAPTURE_SCRIPT'\n"
+            f"{pre_capture_script}"
+            "NVX_PRE_CAPTURE_SCRIPT\n"
+            f"chmod +x {SNAPSHOT_PRE_CAPTURE_PATH}\n"
+        )
     post_restore_setup = ""
     if post_restore_script is not None:
         post_restore_setup = (
@@ -4132,6 +4153,7 @@ def prepare_snapshot_capture_script(
         SMP_PROBE=probe,
         SNAPSHOT_CAPTURE_PATH=SNAPSHOT_CAPTURE_PATH,
         SNAPSHOT_CAPTURE=capture,
+        PRE_CAPTURE_SETUP=pre_capture_setup,
         POST_RESTORE_SETUP=post_restore_setup,
     )
 
@@ -5397,6 +5419,8 @@ def capture_snapshot(
     smp_ioapic_irq: int | None = None,
     snapshot_profile: bool = False,
     profile_sink: list[dict[str, object]] | None = None,
+    pre_capture_script: str | None = None,
+    pre_capture_seconds: float = 0.0,
     post_restore_script: str | None = None,
     log_path: Path | None = None,
     boot_marker: bytes = BOOT_MARKER,
@@ -5409,7 +5433,12 @@ def capture_snapshot(
     time generation come only from OpenVMM's stderr. With ``time_abi_status``,
     the source guest first answers a time ABI status query, and the capture
     starts only after the query exits. ``log_filter`` is OpenVMM's log filter,
-    which must keep the records of :data:`CAPTURE_LOG_FILTER`.
+    which must keep the records of :data:`CAPTURE_LOG_FILTER`. With
+    ``processors``, the guest runs ``pre_capture_script`` and
+    ``post_restore_script`` as :func:`prepare_snapshot_capture_script`
+    describes. The guest must reach the capture's trigger within ``timeout``,
+    and the capture must then end within ``timeout`` plus
+    ``pre_capture_seconds``, the time that ``pre_capture_script`` may take.
     """
     if snapshot_path.exists():
         shutil.rmtree(snapshot_path)
@@ -5430,7 +5459,8 @@ def capture_snapshot(
         set_windows_affinity(process.pid, windows_cpus)
 
     output = SeparatedOutput(interaction)
-    deadline = time.monotonic() + timeout
+    limit = timeout
+    deadline = time.monotonic() + limit
     status_sent = False
     boot_seen = False
     snapshot_requested = False
@@ -5453,7 +5483,7 @@ def capture_snapshot(
 
     def request_snapshot() -> None:
         nonlocal snapshot_requested, snapshot_started_ns
-        nonlocal snapshot_dispatched_ns, snapshot_request_bytes, deadline
+        nonlocal snapshot_dispatched_ns, snapshot_request_bytes, deadline, limit
         nonlocal storage
         payload = snapshot_request_script(
             processors,
@@ -5472,7 +5502,8 @@ def capture_snapshot(
         snapshot_dispatched_ns = time.perf_counter_ns()
         snapshot_request_bytes = len(payload)
         snapshot_requested = True
-        deadline = time.monotonic() + timeout
+        limit = timeout + pre_capture_seconds
+        deadline = time.monotonic() + limit
 
     def stop_storage() -> None:
         if storage is not None:
@@ -5489,7 +5520,7 @@ def capture_snapshot(
             observe_snapshot_publication()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"snapshot was not captured within {timeout:g}s")
+                raise TimeoutError(f"snapshot was not captured within {limit:g}s")
             try:
                 poll_interval = 0.001 if snapshot_requested else 0.25
                 stream, chunk = output.get(timeout=min(remaining, poll_interval))
@@ -5541,6 +5572,7 @@ def capture_snapshot(
                             teardown_mode=teardown_mode,
                             network_gateway=smp_network_gateway,
                             ioapic_irq=smp_ioapic_irq,
+                            pre_capture_script=pre_capture_script,
                             post_restore_script=post_restore_script,
                         ).encode("utf-8")
                     )
