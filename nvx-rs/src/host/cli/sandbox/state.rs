@@ -7,6 +7,10 @@
 //! provision it again. Bindings still check the recorded caller-owned paths before launch, and the
 //! caller keeps those paths stable while the VM uses them.
 //!
+//! Provision checks the images, the workload and the export plan of its options with
+//! [`check_images`] and [`check_workload`], as the plan of the sandbox profile checked them, and
+//! each start checks them again in the record, with [`Config::check`].
+//!
 //! The network is the [`NetworkRecord`] of the sandbox's network options, from which each start
 //! builds the network's policy again, as provision built it.
 //!
@@ -34,13 +38,16 @@ use crate::host::cli::snapshots::Name as SnapshotName;
 use crate::host::cli::{Exit, Result, io_error, io_message};
 use crate::host::config::{
     Boot, ConsoleAttachment, LayeredRoot, NetworkConfig, RootConfig, UpperConfig, VmConfig,
+    reject_container_path, reject_disk_path,
 };
-use crate::host::filesystem::ExportPlan;
+use crate::host::filesystem::{ExportPlan, ReservedTargets};
 use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
+use crate::host::sandbox::mount::{HostQueries, check_distinct_export_roots, os_error};
 use crate::host::sandbox::scratch::ScratchBinding;
-use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
+use crate::host::sandbox::{DEFAULT_ENTRYPOINT, has_kernel_separator, require_file};
+use crate::net::is_valid_hostname;
 use crate::protocol::root::{RAM_UPPER_CAPS, RootImage};
 use crate::uuid::Uuid;
 
@@ -110,6 +117,87 @@ fn resolved(path: &Path) -> Result<String> {
     path_string(&paths::resolve(path).map_err(Exit::from_os_error)?)
 }
 
+/// Refuses the workload of a sandbox as the plan of the sandbox profile refused it: an
+/// `entrypoint` that is not an absolute path or that holds whitespace, a control character, or a
+/// quote, an argument of `args` that is empty or holds one, a `hostname` that is not a lowercase
+/// RFC 1123 label of up to 63 characters, and the root's UID or GID in `identity`.
+pub(crate) fn check_workload(
+    entrypoint: &str,
+    args: &[String],
+    hostname: &str,
+    (uid, gid): (u32, u32),
+) -> Result {
+    let refused = |message: &str| Err(Exit::error(ErrorCode::Unsupported, message));
+    if !entrypoint.starts_with('/') || has_kernel_separator(entrypoint) {
+        return refused(
+            "sandbox entrypoint must be an absolute path without whitespace, control characters, \
+             or quotes",
+        );
+    }
+    if args
+        .iter()
+        .any(|argument| argument.is_empty() || has_kernel_separator(argument))
+    {
+        return refused(
+            "sandbox arguments must be nonempty and contain no whitespace, control characters, or \
+             quotes",
+        );
+    }
+    if !is_valid_hostname(hostname) {
+        return refused("sandbox hostname must be a lowercase RFC 1123 label up to 63 characters");
+    }
+    if uid == 0 || gid == 0 {
+        return refused("sandbox workload identity must be a non-root UID:GID");
+    }
+    Ok(())
+}
+
+/// Refuses the images of a sandbox as the plan of the sandbox profile refused them before its
+/// launch: `distro`, and `scratch`, the scratch image of an upper on scratch, must each be a
+/// regular file whose path, and the path to which it resolves, has no comma, semicolon, or
+/// unbalanced bracket, and does not end in an extension with which OpenVMM would not attach it as
+/// a raw image. It also refuses `export`, if any, once its directories and files overlap, by path
+/// or through a hard link or a bind mount, or once [`ExportPlan::verify`] refuses it.
+///
+/// A missing image fails with [`ErrorCode::Unavailable`], as `distro EROFS layer not found:
+/// PATH`, `distro GPT image not found: PATH`, or `ext4 scratch image not found: PATH`.
+pub(crate) fn check_images(
+    distro: &SandboxLayer,
+    scratch: Option<&Path>,
+    export: Option<&ExportPlan>,
+) -> Result {
+    let image = match distro.format() {
+        DistroFormat::Erofs => "distro EROFS layer",
+        DistroFormat::Gpt => "distro GPT image",
+    };
+    let images = [
+        (Some(distro.path()), image),
+        (scratch, "ext4 scratch image"),
+    ];
+    for (path, description) in images {
+        let Some(path) = path else {
+            continue;
+        };
+        require_file(path, description)?;
+        let shown = path.display().to_string();
+        reject_disk_path(path, &shown)?;
+        reject_container_path(path, &shown)?;
+        // A provisioned sandbox records the resolved path, which must also fit OpenVMM's block
+        // device option and name a raw image.
+        let resolved = paths::resolve(path).map_err(|error| os_error(&error, Some(path)))?;
+        if resolved != path {
+            let shown = format!("{shown} resolves to {}", resolved.display());
+            reject_disk_path(&resolved, &shown)?;
+            reject_container_path(&resolved, &shown)?;
+        }
+    }
+    if let Some(export) = export {
+        check_distinct_export_roots(export, &HostQueries::native())?;
+        export.verify()?;
+    }
+    Ok(())
+}
+
 /// The distro layer that `provision` records, at the path that it records for it, with the
 /// binding of the layer at that path, which `start` checks.
 pub(crate) struct RecordedDistro {
@@ -120,7 +208,7 @@ pub(crate) struct RecordedDistro {
 }
 
 impl RecordedDistro {
-    /// Returns the distro layer of `launch` at the path that `provision` records, the path given,
+    /// Returns the distro layer `layer` at the path that `provision` records, the path given,
     /// resolved, with a binding of the layer there: `binding`, which explicit
     /// verification of the layer at the path given made, if it holds at the recorded path, and
     /// otherwise the binding that explicit verification of the layer at the recorded path makes,
@@ -129,8 +217,7 @@ impl RecordedDistro {
     /// The check of `binding` at the recorded path reads nothing, and passes unless the paths name
     /// different manifests: when the path given is a link to a layer of another name, `start`
     /// checks the manifest beside the link's target, so `provision` verifies the layer there too.
-    pub(crate) fn new(launch: &SandboxLaunch, binding: DistroBinding) -> Result<Self> {
-        let distro = launch.distro();
+    pub(crate) fn new(distro: &SandboxLayer, binding: DistroBinding) -> Result<Self> {
         let path = resolved(distro.path())?;
         let image = Image {
             path,
@@ -162,11 +249,11 @@ pub(crate) struct RecordedScratch {
 }
 
 impl RecordedScratch {
-    /// Returns the scratch image of `launch` at the path that `provision` records, the path given,
-    /// resolved, with a binding of the image there, which claims nothing, or `None` for a launch
-    /// whose upper is in RAM, which has no scratch image.
-    pub(crate) fn new(launch: &SandboxLaunch) -> Result<Option<Self>> {
-        let Some(scratch) = launch.scratch() else {
+    /// Returns the scratch image `scratch` at the path that `provision` records, the path given,
+    /// resolved, with a binding of the image there, which claims nothing, or `None` for an upper
+    /// in RAM, which has no scratch image.
+    pub(crate) fn new(scratch: Option<&Path>) -> Result<Option<Self>> {
+        let Some(scratch) = scratch else {
             return Ok(None);
         };
         let path = resolved(scratch)?;
@@ -295,21 +382,19 @@ impl NetworkRecord {
     }
 }
 
-/// Returns the JSON text of the configuration that `provision` records for `launch` and the other
-/// options, with `distro`, the launch's distro layer at the path that `provision` verified and
-/// records, and its binding, and `scratch`, the launch's scratch image at the path that
-/// `provision` records, and its binding, or `None` for an upper in RAM. The configuration of a
-/// restored sandbox also records its `source`, without any index of the sandboxes that a snapshot
-/// supplies; that of a sandbox that boots cold, whose `source` is `None`, records none.
+/// Returns the JSON text of the configuration that `provision` records for the options of
+/// `config`, with `distro`, the distro layer at the path that `provision` verified and records,
+/// and its binding, and `scratch`, the scratch image at the path that `provision` records, and its
+/// binding, or `None` for an upper in RAM, once [`Config::check`] has checked it. The configuration
+/// of a restored sandbox also records its `source`, without any index of the sandboxes that a
+/// snapshot supplies; that of a sandbox that boots cold, whose `source` is `None`, records none.
 pub(crate) fn serialize_launch(
-    launch: &SandboxLaunch,
     distro: &RecordedDistro,
     scratch: Option<&RecordedScratch>,
     config: &ProvisionConfig<'_>,
     source: Option<&Source>,
 ) -> Result<String> {
-    let settings = launch.settings();
-    let (workload_uid, workload_gid) = settings.workload_identity;
+    let (workload_uid, workload_gid) = config.workload_identity;
     let record = Config {
         format: CONFIG_FORMAT,
         image: distro.image.clone(),
@@ -323,7 +408,7 @@ pub(crate) fn serialize_launch(
                     .unwrap_or(UpperConfig::DEFAULT_MAX_MEMORY_PERCENT),
             },
         },
-        hostname: settings.hostname.clone(),
+        hostname: config.hostname.to_owned(),
         workload_uid,
         workload_gid,
         hypervisor: config.hypervisor.to_owned(),
@@ -332,15 +417,16 @@ pub(crate) fn serialize_launch(
         cmdline: config.cmdline.to_owned(),
         distro_binding: distro.binding.clone(),
         scratch_binding: scratch.map(|scratch| scratch.binding.clone()),
-        export: launch.export().cloned(),
+        export: config.export.cloned(),
         source_snapshot: source.map(|source| source.snapshot.clone()),
         source_store: source
             .map(|source| path_string(&source.store))
             .transpose()?,
         workload: source.map(|source| source.workload.clone()),
     };
+    record.check()?;
     record
-        .vm_config(&record.launch()?)?
+        .vm_config()?
         .check()
         .map_err(super::error_with_cause)?;
     pretty_serde(&record, DESCRIPTION)
@@ -483,27 +569,60 @@ impl Config {
         &self.cmdline
     }
 
-    /// Reconstructs and validates the recorded image, upper, network and export.
-    pub(crate) fn launch(&self) -> Result<SandboxLaunch> {
-        let upper = match &self.upper {
-            Upper::Scratch { path } => SandboxUpper::scratch(path),
-            Upper::Ram { max_memory_percent } if RAM_UPPER_CAPS.contains(max_memory_percent) => {
-                SandboxUpper::RAM
-            }
-            _ => return Err(malformed()),
-        };
-        let launch = SandboxLaunch::new(
-            vec![self.image.layer()],
-            upper,
-            SandboxSettings {
-                hostname: self.hostname.clone(),
-                workload_identity: (self.workload_uid, self.workload_gid),
-                ..SandboxSettings::default()
-            },
-        )?;
-        let launch = launch.with_export(self.export.clone())?;
-        launch.validated()?;
-        Ok(launch)
+    /// Checks the recorded image, upper, workload and export at each start, as the plan of the
+    /// sandbox profile checked them: a RAM upper's cap from 1 to 90 percent, or the configuration
+    /// is malformed; the image's identity, a UUID in its canonical text; the workload, as
+    /// [`check_workload`] checks it with the default entrypoint; the export plan, for the
+    /// container root; and the images and the export plan, as [`check_images`] checks them.
+    pub(crate) fn check(&self) -> Result {
+        if let Upper::Ram { max_memory_percent } = &self.upper
+            && !RAM_UPPER_CAPS.contains(max_memory_percent)
+        {
+            return Err(malformed());
+        }
+        let (distro, identity) = (self.distro(), self.workload_identity());
+        if Uuid::parse(distro.uuid()).is_none() {
+            let message = format!(
+                "{} layer UUID is invalid: {:?}",
+                distro.role(),
+                distro.uuid()
+            );
+            return Err(Exit::error(ErrorCode::Unsupported, message));
+        }
+        check_workload(DEFAULT_ENTRYPOINT, &[], &self.hostname, identity)?;
+        if let Some(export) = &self.export {
+            export.check(ReservedTargets::CONTAINER_ROOT)?;
+        }
+        check_images(&distro, self.scratch().as_deref(), self.export.as_ref())
+    }
+
+    /// Returns the recorded image, as the distro layer that `start` checks.
+    pub(crate) fn distro(&self) -> SandboxLayer {
+        self.image.layer()
+    }
+
+    /// Returns the recorded scratch image, spelled with its components alone, or `None` for an
+    /// upper in RAM.
+    pub(crate) fn scratch(&self) -> Option<PathBuf> {
+        match &self.upper {
+            Upper::Scratch { path } => Some(paths::normalized(Path::new(path))),
+            Upper::Ram { .. } => None,
+        }
+    }
+
+    /// Returns the workload's hostname.
+    pub(crate) fn hostname(&self) -> &str {
+        &self.hostname
+    }
+
+    /// Returns the workload's UID and GID.
+    pub(crate) fn workload_identity(&self) -> (u32, u32) {
+        (self.workload_uid, self.workload_gid)
+    }
+
+    /// Returns the export plan of the shares, if any.
+    pub(crate) fn export(&self) -> Option<&ExportPlan> {
+        self.export.as_ref()
     }
 
     /// The binding that start checks against the recorded image.
@@ -528,7 +647,7 @@ impl Config {
     }
 
     /// The shared projection checked at provision and consumed unchanged at start.
-    pub(crate) fn vm_config(&self, launch: &SandboxLaunch) -> Result<VmConfig> {
+    pub(crate) fn vm_config(&self) -> Result<VmConfig> {
         let identity = Some(Uuid::parse(&self.image.identity).ok_or_else(malformed)?);
         let format = match self.image.format {
             DistroFormat::Erofs => RootImage::erofs(identity),
@@ -543,7 +662,7 @@ impl Config {
                 max_memory_percent: *max_memory_percent,
             },
         };
-        let (uid, gid) = launch.settings().workload_identity;
+        let (uid, gid) = self.workload_identity();
         let mut command_line = format!("nvx_sandbox=1 nvx_mode=managed nvx_identity={uid}:{gid}");
         if !self.cmdline.is_empty() {
             command_line.push(' ');
@@ -571,7 +690,7 @@ impl Config {
                 machine_id: MachineIdMode::Generated,
             },
             network,
-            filesystem: launch.export().cloned(),
+            filesystem: self.export.clone(),
             console: ConsoleAttachment::Disconnected,
             boot: Some(Boot {
                 command_line,
