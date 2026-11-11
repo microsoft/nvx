@@ -1200,7 +1200,9 @@ otherwise read or change: `provision` refuses a share whose resolved host path
 equals, contains, or lies inside the sandbox's state directory, its image, its
 scratch image, or the OpenVMM, kernel, or initramfs of the artifact root, or
 the OpenVMM that `NVX_OPENVMM` names, before it records the sandbox, and
-`start` refuses one again before it launches the VM.
+`start` refuses one again before it launches the VM. The `start` of a restored
+sandbox also refuses a share that reaches its snapshot store, whose files the
+view of each restore links, before it takes the snapshot's lock.
 `start` resolves the recorded host paths again, so a share that came to reach
 one of these files through a link since `provision` is refused too. A
 `provision` that finds no artifact root leaves the artifacts to `start`. A

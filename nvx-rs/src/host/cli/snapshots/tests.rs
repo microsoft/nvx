@@ -236,3 +236,57 @@ fn shared_directory_acls_are_refused_before_publication() {
     assert!(pending.dir().exists());
     assert!(!held.dir.exists());
 }
+
+/// Returns a store with the published snapshot `first`, and a VM directory with a view of it.
+fn restored_view(root: &Path) -> (Store, VmDir) {
+    fs::create_dir_all(root).unwrap();
+    let store = Store::create(&root.join("store")).unwrap();
+    let held = store.lock(&name("first"), Deadline::after(0.0)).unwrap();
+    held.publish(staged(&held)).unwrap();
+    let path = root.join("vm");
+    crate::host::vm::create_private_dir(&path).unwrap();
+    let vm = VmDir::open(&path).unwrap();
+    let view = path.join(OPENVMM_DIR);
+    crate::host::vm::create_private_dir(&view).unwrap();
+    for name in SNAPSHOT_ARTIFACTS {
+        fs::hard_link(held.dir.join(OPENVMM_DIR).join(name), view.join(name)).unwrap();
+    }
+    drop(held);
+    (store, vm)
+}
+
+#[test]
+fn removing_a_view_takes_only_the_snapshots_links_and_keeps_the_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, vm) = restored_view(root.path());
+    let held = store.lock(&name("first"), Deadline::after(0.0)).unwrap();
+    held.remove_view(&vm).unwrap();
+    assert!(!vm.path().join(OPENVMM_DIR).exists());
+    held.remove_view(&vm).unwrap();
+    held.open().unwrap();
+    // A view that holds anything else keeps it, and one that is a link keeps its target.
+    let (store, vm) = restored_view(&root.path().join("extra"));
+    fs::write(vm.path().join(OPENVMM_DIR).join("other"), b"kept").unwrap();
+    let held = store.lock(&name("first"), Deadline::after(0.0)).unwrap();
+    let error = held.remove_view(&vm).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::ForeignFiles), "{error:?}");
+    assert_eq!(
+        fs::read(vm.path().join(OPENVMM_DIR).join("other")).unwrap(),
+        b"kept"
+    );
+    let (store, vm) = restored_view(&root.path().join("linked"));
+    let view = vm.path().join(OPENVMM_DIR);
+    let target = root.path().join("target");
+    fs::rename(&view, &target).unwrap();
+    link_directory(&view, &target);
+    let held = store.lock(&name("first"), Deadline::after(0.0)).unwrap();
+    let error = held.remove_view(&vm).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::ForeignFiles), "{error:?}");
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 3);
+    // A VM directory in the store, here the snapshot's own, whose `openvmm/` holds the snapshot's
+    // files, is refused before anything goes.
+    let own = VmDir::open(&held.dir).unwrap();
+    let error = held.remove_view(&own).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    held.open().unwrap();
+}
