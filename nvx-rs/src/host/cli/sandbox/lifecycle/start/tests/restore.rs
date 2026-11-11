@@ -27,7 +27,7 @@ use crate::host::sandbox::distro::DistroBinding;
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::options::sandbox_mounts;
-use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
+use crate::host::sandbox::{DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY};
 use crate::host::snapshot::tests::RestoreFixture;
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR};
 use crate::protocol::root::RootImage;
@@ -678,17 +678,18 @@ fn deprovision_removes_a_restored_sandboxs_view_only_under_its_snapshots_lock() 
         "11111111-1111-1111-1111-111111111111",
     );
     let binding = DistroBinding::verify(&layer).unwrap();
-    let launch =
-        SandboxLaunch::new(vec![layer], SandboxUpper::RAM, SandboxSettings::default()).unwrap();
     let options = ProvisionConfig {
         hypervisor: "kvm",
         memory_mib: 512,
         cmdline: "",
         ram_upper_percent: None,
+        hostname: DEFAULT_HOSTNAME,
+        workload_identity: DEFAULT_WORKLOAD_IDENTITY,
+        export: None,
         network: None,
     };
-    let distro = RecordedDistro::new(&launch, binding).unwrap();
-    let text = serialize_launch(&launch, &distro, None, &options, Some(&source)).unwrap();
+    let distro = RecordedDistro::new(&layer, binding).unwrap();
+    let text = serialize_launch(&distro, None, &options, Some(&source)).unwrap();
     write_json(&state_dir.join(CONFIG_NAME), &text).unwrap();
     let state_path = state_dir.to_str().unwrap();
     let artifacts = Artifacts { root: None };
@@ -728,20 +729,20 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
     let store = fixture.root.path().join("store");
     let mounts = sandbox_mounts(&[format!("/data,{},rw", store.display())], &[], None).unwrap();
     validate_mounts(&mounts).unwrap();
-    let launch = SandboxLaunch::new(vec![layer], SandboxUpper::RAM, SandboxSettings::default())
-        .unwrap()
-        .with_export(plan_mounts(&mounts).unwrap())
-        .unwrap();
+    let export = plan_mounts(&mounts).unwrap();
     let options = ProvisionConfig {
         hypervisor: "kvm",
         memory_mib: 512,
         cmdline: "",
         ram_upper_percent: None,
+        hostname: DEFAULT_HOSTNAME,
+        workload_identity: DEFAULT_WORKLOAD_IDENTITY,
+        export: export.as_ref(),
         network: None,
     };
-    let distro = RecordedDistro::new(&launch, binding).unwrap();
+    let distro = RecordedDistro::new(&layer, binding).unwrap();
     let source = fixture.source();
-    let text = serialize_launch(&launch, &distro, None, &options, Some(&source)).unwrap();
+    let text = serialize_launch(&distro, None, &options, Some(&source)).unwrap();
     write_json(&state_dir.join(CONFIG_NAME), &text).unwrap();
     let root = fixture.state("checkout");
     let artifacts = Artifacts {

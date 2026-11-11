@@ -31,16 +31,18 @@ use crate::host::cli::artifacts::{Located, locate};
 use crate::host::cli::deadline::RETRY_INTERVAL;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
-    Config, NetworkRecord, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
-    write_json,
+    Config, NetworkRecord, RecordedDistro, RecordedScratch, Source, check_images, read_config,
+    serialize_launch, write_json,
 };
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
 use crate::host::cli::session::Session;
 use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result};
+use crate::host::filesystem::ExportPlan;
 use crate::host::process::{Opened, Process};
 use crate::host::runtime::{IdentityPart, LaunchOptions, Runtime, RuntimeIdentity};
-use crate::host::sandbox::{SandboxLaunch, require_file};
+use crate::host::sandbox::layer::SandboxLayer;
+use crate::host::sandbox::require_file;
 use crate::host::vm::SavedVm;
 use crate::protocol::GuestFeatures;
 
@@ -59,7 +61,7 @@ pub(crate) const LOCK_RETRY_INTERVAL: Duration = RETRY_INTERVAL;
 /// The version of outcome reports.
 pub(crate) const OUTCOME_SCHEMA_VERSION: u64 = 1;
 
-/// The options of a launch, besides the launch itself, that `provision` records.
+/// The options of a launch, besides its images, that `provision` records.
 pub(crate) struct ProvisionConfig<'a> {
     /// `--hypervisor`, resolved.
     pub(crate) hypervisor: &'a str,
@@ -69,6 +71,12 @@ pub(crate) struct ProvisionConfig<'a> {
     pub(crate) cmdline: &'a str,
     /// The RAM upper's cap, or the default when omitted.
     pub(crate) ram_upper_percent: Option<u8>,
+    /// `--hostname`.
+    pub(crate) hostname: &'a str,
+    /// `--workload-user`.
+    pub(crate) workload_identity: (u32, u32),
+    /// The export plan of the shares, if any.
+    pub(crate) export: Option<&'a ExportPlan>,
     /// The network options, or `None` without `--net`.
     pub(crate) network: Option<&'a NetworkRecord>,
 }
@@ -77,13 +85,16 @@ pub(crate) struct ProvisionConfig<'a> {
 /// `nvx-rs sandbox`.
 pub(crate) const REQUIRED_FEATURES: GuestFeatures = GuestFeatures::LAYERED_SANDBOX;
 
-/// Records a launch and its distro layer, at the path at which it was verified, with the layer's
-/// binding, in a new state directory, as `provision` does, with the binding of its scratch image,
-/// if its upper is on scratch, at the path that it records for it, and `source`, the named
-/// snapshot that each start of a sandbox of `snapshot restore` restores, or `None`.
+/// Records the launch of the distro layer `distro`, at the path at which it was verified, with
+/// the layer's binding, over `scratch`, the scratch image of an upper on scratch, with the options
+/// of `config`, in a new state directory, as `provision` does, with the binding of its scratch
+/// image at the path that it records for it, and `source`, the named snapshot that each start of
+/// a sandbox of `snapshot restore` restores, or `None`. `layer` is the distro layer as given,
+/// whose images it checks again, with the export plan, as [`check_images`] does.
 pub(crate) fn provision(
     state_path: &str,
-    launch: &SandboxLaunch,
+    layer: &SandboxLayer,
+    scratch: Option<&Path>,
     distro: &RecordedDistro,
     config: &ProvisionConfig<'_>,
     source: Option<&Source>,
@@ -99,11 +110,11 @@ pub(crate) fn provision(
             "sandbox is already provisioned",
         ));
     }
-    launch.validated()?;
-    let scratch = RecordedScratch::new(launch)?;
+    check_images(layer, scratch, config.export)?;
+    let scratch = RecordedScratch::new(scratch)?;
     write_json(
         &config_path,
-        &serialize_launch(launch, distro, scratch.as_ref(), config, source)?,
+        &serialize_launch(distro, scratch.as_ref(), config, source)?,
     )
 }
 

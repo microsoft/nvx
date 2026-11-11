@@ -24,10 +24,10 @@ use crate::host::cli::download::Hold;
 use crate::host::cli::exec_lock::ExecLock;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
-    Config, NetworkRecord, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
+    Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
 };
 use crate::host::cli::sandbox::{
-    Artifacts, Options, error_with_cause, hypervisor, path_string, refuse_own_files,
+    Artifacts, Options, error_with_cause, path_string, refuse_own_files,
 };
 use crate::host::cli::session::{ExecRequest, ExecResult, Session};
 use crate::host::cli::shell::format_command;
@@ -41,9 +41,9 @@ use crate::host::report::Report;
 use crate::host::restore::RestoreEvidence;
 use crate::host::restore_driver::{self, Cancel, ControlRestoreError, Workload};
 use crate::host::runtime::{ArtifactIdentity, Runtime, RuntimeIdentity};
-use crate::host::sandbox::SandboxLaunch;
 use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
 use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, CheckedScratch};
+use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
 use crate::host::session::{ExecEvent, SessionError};
 use crate::host::snapshot::OPENVMM_DIR;
 use crate::host::vm::{self, Launched, Prepared, SavedVm, VmDir};
@@ -98,42 +98,51 @@ fn start_locked(
         Found::Mismatched(saved, _, differences) => return Err(mismatched(&saved, &differences)),
     }
     let config = Config::new(config)?;
-    let launch = config.launch()?;
+    config.check()?;
     let source = config.source()?;
+    let image = config.distro();
+    let scratch_image = config.scratch();
     refuse_own_files(
         Some(("state directory", state_dir)),
-        &launch,
+        image.path(),
+        scratch_image.as_deref(),
+        config.export(),
         Some(&locate(artifacts.root)?),
     )?;
     // The view of each restore links the snapshot's files, which a share of the store would
     // give the guest to change.
     if let Some(source) = &source {
-        refuse_own_files(Some(("snapshot store", &source.store)), &launch, None)?;
+        refuse_own_files(
+            Some(("snapshot store", &source.store)),
+            image.path(),
+            scratch_image.as_deref(),
+            config.export(),
+            None,
+        )?;
     }
     let binding = config.distro_binding();
     let scratch_binding = config.scratch_binding()?;
     let distro = binding
-        .check(launch.distro(), DISTRO_POLICY_REVISION)
+        .check(&image, DISTRO_POLICY_REVISION)
         .map_err(binding_error)?;
-    let scratch = match (scratch_binding, launch.scratch()) {
+    let scratch = match (scratch_binding, scratch_image) {
         (Some(scratch_binding), Some(scratch)) => Some(
             scratch_binding
-                .check(scratch, Instant::now() + CLAIM_RELEASE_WAIT)
+                .check(&scratch, Instant::now() + CLAIM_RELEASE_WAIT)
                 .map_err(binding_error)?,
         ),
         _ => None,
     };
-    let plan = launch.bound_plan(binding)?;
     // Keep provision's refusal of caller-owned nvx_* tokens, without launching its old plan.
-    plan.kernel_command_line(config.cmdline())?;
+    check_command_line(&config)?;
     artifacts.require()?;
     let runtime = runtime_for(artifacts, &config, artifacts.launch_identity()?)?;
     let restore = source.as_ref().map(|source| Restore {
         source,
-        identity: launch.settings().workload_identity,
+        identity: config.workload_identity(),
         forward_status,
     });
-    let config = config.vm_config(&launch)?;
+    let config = config.vm_config()?;
     let started = launch_locked(lock, &runtime, config, restore, scratch, timeout, vm::spawn);
     drop(distro);
     started
@@ -537,11 +546,11 @@ pub(crate) fn exec_workload(
 /// Runs one workload in a VM of its own and stops the VM, as `sandbox run` does, and returns how
 /// the workload ended, or nothing for a dry run, which launches nothing.
 ///
-/// The VM is the one that `start` launches for the configuration that `provision` records for
-/// `launch`, whose distro layer `distro` is at the path that `provision` records, and `network`,
-/// the record of its network options, if any, with the options of `options`: the run serializes
-/// that configuration and reads it back as `start` does, then launches it as `start` does, but in
-/// a temporary VM directory rather than a state directory.
+/// The VM is the one that `start` launches for the configuration that `provision` records for the
+/// options of `provision`, with the distro layer `distro` at the path that `provision` records,
+/// over `scratch`, the scratch image of an upper on scratch, as given, and with the options of
+/// `options`: the run serializes that configuration and reads it back as `start` does, then
+/// launches it as `start` does, but in a temporary VM directory rather than a state directory.
 /// Before it downloads or launches anything, it refuses what `start` refuses of the configuration
 /// and `exec` of `request`, after a missing artifact; it then refuses the shares that `start`
 /// refuses, with its VM directory in place of a state directory, and those of the OpenVMM that it
@@ -554,45 +563,37 @@ pub(crate) fn exec_workload(
 /// removes the VM directory, which it keeps only if it cannot confirm that exit. It holds `held`,
 /// the lock of the downloads, until the VM is ready or has failed to be.
 pub(crate) fn run(
-    launch: &SandboxLaunch,
     distro: &RecordedDistro,
-    network: Option<&NetworkRecord>,
+    scratch: Option<&Path>,
+    provision: &ProvisionConfig<'_>,
     artifacts: &Artifacts<'_>,
     options: &Options,
     request: &ExecRequest,
     held: Hold,
 ) -> Result<Option<ExecResult>> {
-    let hypervisor = hypervisor(options.hypervisor);
-    let provision = ProvisionConfig {
-        hypervisor,
-        memory_mib: options.memory_mib,
-        cmdline: &options.cmdline,
-        ram_upper_percent: options.ram_upper_percent,
-        network,
-    };
-    let recorded = record(launch, distro, &provision).and_then(|(config, launch)| {
+    let recorded = record(distro, scratch, provision).and_then(|config| {
         // As `start` does, refuse the user's own nvx_* tokens, and the command line that the
         // launch would refuse, such as one that holds double quotes.
-        launch
-            .bound_plan(config.distro_binding())?
-            .kernel_command_line(config.cmdline())?;
-        let vm_config = config.vm_config(&launch)?;
+        check_command_line(&config)?;
+        let vm_config = config.vm_config()?;
         vm_config.check_command_line().map_err(error_with_cause)?;
         Session::exec_payload(request)?;
-        Ok((config, launch, vm_config))
+        Ok((config, vm_config))
     });
     // A run that its options refuse downloads nothing, and reports a missing artifact first.
     let hold = match recorded {
-        Ok(_) => artifacts.ensure_under(held, hypervisor)?,
+        Ok(_) => artifacts.ensure_under(held, provision.hypervisor)?,
         Err(_) => held,
     };
     artifacts.require()?;
-    let (config, launch, vm_config) = recorded?;
+    let (config, vm_config) = recorded?;
     let name = hex(&random_bytes::<16>()?);
     let path = std::env::temp_dir().join(format!("nvx-sandbox-run-{name}"));
     refuse_own_files(
         Some(("VM directory", &path)),
-        &launch,
+        config.distro().path(),
+        config.scratch().as_deref(),
+        config.export(),
         Some(&locate(artifacts.root)?),
     )?;
     if !options.dry_run
@@ -612,12 +613,12 @@ pub(crate) fn run(
     } else {
         let distro = config
             .distro_binding()
-            .check(launch.distro(), DISTRO_POLICY_REVISION)
+            .check(&config.distro(), DISTRO_POLICY_REVISION)
             .map_err(error_with_cause)?;
-        let scratch = match (config.scratch_binding()?, launch.scratch()) {
+        let scratch = match (config.scratch_binding()?, config.scratch()) {
             (Some(binding), Some(scratch)) => Some(
                 binding
-                    .check(scratch, Instant::now() + CLAIM_RELEASE_WAIT)
+                    .check(&scratch, Instant::now() + CLAIM_RELEASE_WAIT)
                     .map_err(error_with_cause)?,
             ),
             _ => None,
@@ -749,22 +750,45 @@ pub(crate) fn run(
     result
 }
 
-/// Returns the configuration that `provision` records for `launch`, whose distro layer `distro` is
-/// at the path that `provision` records, with the options of `config`, as `start` reads it back,
-/// and the launch that `start` makes of it, which checks its shares again.
+/// Returns the configuration that `provision` records for the options of `config`, with the
+/// distro layer `distro` at the path that `provision` records, over `scratch`, the scratch image of
+/// an upper on scratch, as given, as `start` reads it back and checks it, shares included.
 fn record(
-    launch: &SandboxLaunch,
     distro: &RecordedDistro,
+    scratch: Option<&Path>,
     config: &ProvisionConfig<'_>,
-) -> Result<(Config, SandboxLaunch)> {
-    let scratch = RecordedScratch::new(launch)?;
-    let record = serialize_launch(launch, distro, scratch.as_ref(), config, None)?;
+) -> Result<Config> {
+    let scratch = RecordedScratch::new(scratch)?;
+    let record = serialize_launch(distro, scratch.as_ref(), config, None)?;
     let config = Config::new(
         serde_json::from_str(&record)
             .map_err(|error| Exit::error(ErrorCode::Other, error.to_string()))?,
     )?;
-    let launch = config.launch()?;
-    Ok((config, launch))
+    config.check()?;
+    Ok(config)
+}
+
+/// Refuses the user's kernel command line of `config` as the plan of the sandbox profile refuses
+/// it: a NUL; a token that the profile or the `--mount` option owns, an `nvx_*` or `virtfs_*` one,
+/// as Linux or the guest's init reads it; and a line that, with the boot tokens of the root and
+/// the bootstrap tokens of the shares, exceeds its 1024-byte x86 budget, or conflicts with or hides
+/// those of the root. It builds that plan from the configuration: the one part of a start and a
+/// run that still goes through the old `host::sandbox` launch.
+fn check_command_line(config: &Config) -> Result {
+    let upper = match config.scratch() {
+        Some(scratch) => SandboxUpper::scratch_at(scratch),
+        None => SandboxUpper::RAM,
+    };
+    let settings = SandboxSettings {
+        hostname: config.hostname().to_owned(),
+        workload_identity: config.workload_identity(),
+        ..SandboxSettings::default()
+    };
+    SandboxLaunch::new(vec![config.distro()], upper, settings)?
+        .with_export(config.export().cloned())?
+        .bound_plan(config.distro_binding())?
+        .kernel_command_line(config.cmdline())?;
+    Ok(())
 }
 
 /// Removes the temporary VM directory of a run, with what its VM left in it: OpenVMM's log and
