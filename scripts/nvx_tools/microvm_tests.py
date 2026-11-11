@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zlib
 from collections.abc import Callable, Collection, Sequence
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
@@ -66,15 +67,38 @@ from .common import (
     sha256_file,
 )
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
-from .managed_exec_tests import run_managed_exec_configuration, workload_artifact_paths
+from .managed_exec_tests import (
+    WorkloadArtifacts,
+    load_workload_artifacts,
+    run_managed_exec_configuration,
+    workload_artifact_paths,
+)
 from .microvm_durations import REPORT_NAME, DurationReport
 from .microvm_shards import configure_parser as configure_shards_parser
 from .microvm_shards import load_partition, shard_scenarios
 from .nvx_rs import EgressRules, compile_egress_policy
 from .openvmm_process import BootConsole, OpenvmmProcess
-from .sandbox_lifecycle_tests import run_sandbox_lifecycle
+from .sandbox_lifecycle_tests import (
+    CONFIG,
+    OUTCOME,
+    PROBE,
+    PROVISIONED_ENTRIES,
+    STOPPED_ENTRIES,
+    LifecycleAcceptance,
+    check_managed_report,
+    managed_report,
+    run_acceptance,
+    run_sandbox_lifecycle,
+)
 from .sandbox_proxy_tests import run_sandbox_proxy_only
-from .sandbox_ram_upper_tests import run_sandbox_ram_upper
+from .sandbox_ram_upper_tests import (
+    MANAGED_TOKENS,
+    RAM_UPPER_TOKEN,
+    SCRATCH_TOKEN,
+    check_run_report,
+    probe_markers,
+    run_sandbox_ram_upper,
+)
 from .shard_plans import parse_shard
 from .time_abi import (
     ABI_VERSION,
@@ -132,6 +156,7 @@ MICROVM_TEST_SCENARIOS = (
     "restore-memory",
     "restore-processors",
     "sandbox-blocks",
+    "sandbox-gpt-layer",
     "sandbox-lifecycle",
     "sandbox-proxy-only",
     "sandbox-ram-upper",
@@ -160,6 +185,7 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "platform-restore-processors",
         "platform-zero-fill",
         "sandbox-blocks",
+        "sandbox-gpt-layer",
         "sandbox-lifecycle",
         "sandbox-proxy-only",
         "sandbox-ram-upper",
@@ -175,6 +201,7 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
 PUBLIC_SANDBOX_SCENARIOS = frozenset(
     (
         "managed-exec-config",
+        "sandbox-gpt-layer",
         "sandbox-lifecycle",
         "sandbox-proxy-only",
         "sandbox-ram-upper",
@@ -1604,6 +1631,398 @@ def run_managed_lifecycle(
         raise RuntimeError(
             "managed lifecycle without a control endpoint was not rejected before boot"
         )
+
+
+# The sandbox-gpt-layer scenario's GPT disk, which it lays out as UEFI does and
+# as nvx-init reads a layered root's disk: its logical block size, the type of
+# its partitions, Linux's filesystem data, and the bytes of its first
+# partition, which configure an adapter and which nvx-init reads without
+# interpreting them. Its second partition is the root's one layer: an ext4
+# copy of the tree of the Ubuntu EROFS layer, which a guest writes.
+GPT_SECTOR = 512
+GPT_LINUX_DATA = uuid.UUID("0fc63daf-8483-4772-8e79-3d69d8477de4")
+GPT_FIRST_PARTITION = b"nvx sandbox-gpt-layer\n"
+# Partitions start on 1 MiB boundaries, as partitioning tools align them.
+GPT_ALIGNMENT = 2048
+# The partition entry array: its number of entries and their size, in bytes.
+GPT_ENTRIES = 128
+GPT_ENTRY_SIZE = 128
+# The layer partition leaves the tree room: at least GPT_LAYER_MIN_BYTES, and
+# GPT_LAYER_EXPANSION times the compressed EROFS layer, whose tree takes about
+# twice the layer's size in ext4.
+GPT_LAYER_MIN_BYTES = 256 << 20
+GPT_LAYER_EXPANSION = 4
+GPT_LAYER_MEMORY_MIB = 512
+GPT_LAYER_READY_MARKER = b"NVX-GPT-LAYER-READY"
+# The guest that writes the layer has the EROFS layer as its distro block
+# device, vda, and the GPT disk as its scratch, vdb, whose layer partition
+# Linux reads from the disk's table as vdb2.
+GPT_LAYER_SCRIPT = """set -eu
+fail() {
+    echo "NVX-GPT-LAYER-FAIL code=$1"
+    nvx-exit "$1"
+    exit "$1"
+}
+for name in vda vdb2; do
+    tries=0
+    while [ ! -b "/dev/$name" ] && [ "$tries" -lt 200 ]; do
+        sleep 0.05
+        tries=$((tries + 1))
+    done
+    [ -b "/dev/$name" ] || fail 20
+done
+mkdir -p /mnt/nvx-image /mnt/nvx-layer
+mount -t erofs -o ro /dev/vda /mnt/nvx-image || fail 21
+mkfs.ext4 -q -F -O ^has_journal /dev/vdb2 || fail 22
+mount -t ext4 /dev/vdb2 /mnt/nvx-layer || fail 23
+cp -a /mnt/nvx-image/. /mnt/nvx-layer/ || fail 24
+df -k /mnt/nvx-layer
+umount /mnt/nvx-layer || fail 25
+umount /mnt/nvx-image || fail 26
+echo NVX-GPT-LAYER-READY
+nvx-exit 0
+"""
+# The kernel command-line token of a scratch upper, on the scratch block
+# device's whole ext4 filesystem.
+SCRATCH_UPPER_TOKEN = "nvx_scratch=0xd0006000,ext4"
+# The guest's block devices, one per line, the lower directory of its root's
+# overlay, and its kernel command line.
+GPT_VIEW_SCRIPT = (
+    "ls /sys/block && grep ' / / ' /proc/self/mountinfo | "
+    "grep -o 'lowerdir=[^,]*' && cat /proc/cmdline"
+)
+# The overlay's lower directory of the disk's layer, its second partition.
+GPT_LOWER_DIRECTORY = "lowerdir=/run/nvx/layers/p2"
+
+
+def write_gpt_disk(path: Path, layer_bytes: int) -> str:
+    """Write a new GPT disk at ``path`` and return its GUID.
+
+    The disk has a protective MBR, the primary header and its array of
+    GPT_ENTRIES entries, the first partition, 4 KiB that hold
+    GPT_FIRST_PARTITION, an empty layer partition of ``layer_bytes``, whole
+    sectors, and, after a gap of GPT_ALIGNMENT sectors, the backup array and
+    header that end it. Each partition takes a GUID of its own, and starts on
+    a GPT_ALIGNMENT boundary.
+    """
+    if layer_bytes <= 0 or layer_bytes % GPT_SECTOR:
+        raise ScriptError("a GPT disk's layer partition takes whole sectors")
+    first = (GPT_ALIGNMENT, GPT_ALIGNMENT + 4096 // GPT_SECTOR - 1)
+    layer = (2 * GPT_ALIGNMENT, 2 * GPT_ALIGNMENT + layer_bytes // GPT_SECTOR - 1)
+    sectors = (layer[1] // GPT_ALIGNMENT + 2) * GPT_ALIGNMENT
+    array_sectors = GPT_ENTRIES * GPT_ENTRY_SIZE // GPT_SECTOR
+    guid = uuid.uuid4()
+    entries = bytearray(GPT_ENTRIES * GPT_ENTRY_SIZE)
+    for index, (start, end) in enumerate((first, layer)):
+        struct.pack_into(
+            "<16s16sQQQ",
+            entries,
+            index * GPT_ENTRY_SIZE,
+            GPT_LINUX_DATA.bytes_le,
+            uuid.uuid4().bytes_le,
+            start,
+            end,
+            0,
+        )
+
+    def header(own: int, alternate: int, array: int) -> bytes:
+        block = bytearray(GPT_SECTOR)
+        struct.pack_into(
+            "<8sIIIIQQQQ16sQIII",
+            block,
+            0,
+            b"EFI PART",
+            0x0001_0000,
+            92,
+            0,
+            0,
+            own,
+            alternate,
+            2 + array_sectors,
+            sectors - 2 - array_sectors,
+            guid.bytes_le,
+            array,
+            GPT_ENTRIES,
+            GPT_ENTRY_SIZE,
+            zlib.crc32(entries),
+        )
+        struct.pack_into("<I", block, 16, zlib.crc32(block[:92]))
+        return bytes(block)
+
+    # The protective MBR: one record of type 0xEE from LBA 1 over the rest of
+    # the disk, with the addresses that UEFI gives it.
+    mbr = bytearray(GPT_SECTOR)
+    mbr[446:454] = bytes((0x00, 0x00, 0x02, 0x00, 0xEE, 0xFF, 0xFF, 0xFF))
+    struct.pack_into("<II", mbr, 454, 1, min(sectors - 1, 0xFFFF_FFFF))
+    mbr[510:512] = b"\x55\xaa"
+    with path.open("xb") as disk:
+        disk.truncate(sectors * GPT_SECTOR)
+        for sector, data in (
+            (0, mbr),
+            (1, header(1, sectors - 1, 2)),
+            (2, entries),
+            (first[0], GPT_FIRST_PARTITION),
+            (sectors - 1 - array_sectors, entries),
+            (sectors - 1, header(sectors - 1, 1, sectors - 1 - array_sectors)),
+        ):
+            disk.seek(sector * GPT_SECTOR)
+            disk.write(data)
+    return str(guid)
+
+
+class GptLayerAcceptance(LifecycleAcceptance):
+    """The CLI's cold cells of a GPT disk on the selected backend: over a
+    scratch upper and a RAM upper, a `sandbox run`, and a managed sandbox's
+    `provision`, `start`, `exec`, `stop`, and `deprovision`."""
+
+    evidence_prefix = "sandbox-gpt-layer-"
+
+    def __init__(
+        self,
+        backend: str,
+        *,
+        timeout: float,
+        output_dir: Path,
+        artifacts: WorkloadArtifacts,
+        root: Path,
+        executable: Path,
+        kernel: Path,
+        initrd: Path,
+    ) -> None:
+        super().__init__(
+            backend,
+            timeout=timeout,
+            output_dir=output_dir,
+            artifacts=artifacts,
+            root=root,
+        )
+        self.executable = executable
+        self.kernel = kernel
+        self.initrd = initrd
+        self.disk = root / "distro.gpt"
+        self.guid = ""
+
+    def run(self) -> None:
+        self.write_disk()
+        digest = sha256_file(self.disk)
+        for upper in ("scratch", "ram"):
+            self.check_run(upper)
+            self.check_managed(upper)
+        if sha256_file(self.disk) != digest:
+            raise RuntimeError("the GPT sandboxes modified their disk")
+        self.require_processes((), "after the GPT sandboxes")
+
+    def write_disk(self) -> None:
+        """Writes the GPT disk, then has a guest of the control initramfs
+        format its layer partition as ext4 and copy the EROFS layer's tree
+        into it."""
+        layer_bytes = max(
+            GPT_LAYER_MIN_BYTES,
+            GPT_LAYER_EXPANSION * self.artifacts.distro.stat().st_size,
+        )
+        layer_bytes += -layer_bytes % (1 << 20)
+        self.guid = write_gpt_disk(self.disk, layer_bytes)
+        command = workload_boot_command(
+            self.executable,
+            self.backend,
+            self.kernel,
+            self.initrd,
+            GPT_LAYER_MEMORY_MIB,
+            "quiet loglevel=0",
+        )
+        command.extend(
+            (
+                "--microvm-sandbox-block",
+                _block_arg("distro", self.artifacts.distro, read_only=True),
+                "--microvm-sandbox-block",
+                _block_arg("scratch", self.disk, read_only=False),
+            )
+        )
+        run_guest_script(
+            command,
+            GPT_LAYER_SCRIPT,
+            GPT_LAYER_READY_MARKER,
+            timeout=self.timeout,
+            log_path=self.output_dir / f"{self.evidence_prefix}disk.log",
+        )
+
+    def options(self, upper: str, scratch_name: str) -> list[str]:
+        """Returns the options of `run` and `provision` of the disk over
+        `upper`, with a new copy of the scratch template at `scratch_name` in
+        the fixture for a scratch upper."""
+        options = [
+            "--hypervisor",
+            self.backend,
+            "--layer",
+            f"distro,{self.disk},{self.guid}",
+            "--layer-format",
+            "gpt",
+            "--memory-mib",
+            "256",
+        ]
+        if upper == "ram":
+            return [*options, "--upper", "ram"]
+        scratch = self.root / scratch_name
+        shutil.copyfile(self.artifacts.scratch_template, scratch)
+        return [*options, "--scratch", str(scratch)]
+
+    def check_boot(self, command_line: str, upper: str, context: str) -> None:
+        """Checks that `command_line`, or a quoted command that holds it,
+        boots the disk's layer over `upper` alone, in a VM that nvx-init
+        manages."""
+        tokens = [token.strip("'\"") for token in command_line.split()]
+        layers = [token for token in tokens if token.startswith("nvx_layer=")]
+        selected, other = (
+            (SCRATCH_UPPER_TOKEN, RAM_UPPER_TOKEN)
+            if upper == "scratch"
+            else (RAM_UPPER_TOKEN, SCRATCH_TOKEN)
+        )
+        if (
+            layers != [f"nvx_layer=distro,0xd0003000,gpt:{self.guid}"]
+            or tokens.count(selected) != 1
+            or any(token.startswith(other) for token in tokens)
+            or not all(token in tokens for token in MANAGED_TOKENS)
+        ):
+            raise RuntimeError(
+                f"{context} does not boot the GPT disk over the {upper} upper "
+                f"in a VM that nvx-init manages: {command_line!r}"
+            )
+
+    def check_probe(
+        self, result: subprocess.CompletedProcess[bytes], what: str
+    ) -> None:
+        """Checks that `result`, of the smoke probe of a managed execution,
+        reports that its checks passed."""
+        for marker in probe_markers(entry=True):
+            if marker not in result.stdout:
+                raise RuntimeError(f"{what} did not report {marker.decode()}")
+
+    def check_run(self, upper: str) -> None:
+        """A run, which keeps no state, boots the disk over `upper`, passes
+        the probe's checks of an execution of nvx-init once, and forwards the
+        report of its VM's graceful stop."""
+        report = self.root / f"run-{upper}-outcome.json"
+        result = self.invoke(
+            "run",
+            *self.options(upper, "run-scratch.ext4"),
+            "--outcome-report",
+            str(report),
+            "--entrypoint",
+            PROBE,
+            "--arg=init",
+            "--arg=entry",
+            state=None,
+        )
+        self.save_evidence(f"run-{upper}.log", result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        command = lines[0].decode(errors="replace") if lines else ""
+        # The disk's path names the fixture, so it names the run's OpenVMM to
+        # the process checks and to cleanup. The run may name the disk as it
+        # resolved its path.
+        attached = {
+            f"distro:file:{disk},ro" for disk in (self.disk, self.disk.resolve())
+        }
+        if (
+            not command.startswith(">> ")
+            or not any(disk in command for disk in attached)
+            or command.count("--microvm-sandbox-block")
+            != (2 if upper == "scratch" else 1)
+            or ("scratch:file:" in command) != (upper == "scratch")
+        ):
+            raise RuntimeError(
+                f"the GPT/{upper} run did not attach its disk and upper alone: "
+                f"{command!r}"
+            )
+        self.check_boot(command, upper, f"the GPT/{upper} run's OpenVMM command")
+        self.check_probe(result, f"the GPT/{upper} run's probe")
+        self.copy_evidence(report, f"run-{upper}-outcome.json")
+        check_run_report(report, self.backend)
+        if self.state.exists():
+            raise RuntimeError("the run created sandbox state")
+        self.require_processes((), f"after the GPT/{upper} run")
+
+    def check_managed(self, upper: str) -> None:
+        """A managed sandbox records the disk and `upper`, boots them, passes
+        the probe's managed checks with the disk's layer as its root's lower
+        directory, and stops and is deprovisioned as any other does."""
+        self.invoke(
+            "provision", *self.options(upper, "managed-scratch.ext4"), state=self.state
+        )
+        self.require_entries(
+            self.state, PROVISIONED_ENTRIES, f"after the GPT/{upper} provision"
+        )
+        config = json.loads((self.state / CONFIG).read_text(encoding="utf-8"))
+        image, recorded = config.get("image"), config.get("upper")
+        if (
+            not isinstance(image, dict)
+            or cast(dict[str, object], image).get("format") != "gpt"
+            or cast(dict[str, object], image).get("identity") != self.guid
+            or not isinstance(recorded, dict)
+            or cast(dict[str, object], recorded).get("kind") != upper
+        ):
+            raise RuntimeError(
+                f"provision recorded the GPT/{upper} root as {image!r} over {recorded!r}"
+            )
+        self.start(description=f"GPT/{upper} start")
+        result = self.exec(PROBE, "--arg=init", "--arg=entry")
+        self.save_evidence(f"{upper}-probe.log", result.stdout + result.stderr)
+        self.check_probe(result, f"the managed GPT/{upper} probe")
+        result = self.exec(
+            "/bin/sh", "--arg=-c", f"--arg={GPT_VIEW_SCRIPT}", expected=None
+        )
+        self.save_evidence(f"{upper}-view.log", result.stdout + result.stderr)
+        lines = result.stdout.decode(errors="replace").splitlines()
+        if result.returncode != 0 or len(lines) < 2:
+            raise RuntimeError(
+                f"the guest view of GPT/{upper} returned {result.returncode}"
+            )
+        devices = [name for name in lines[:-2] if name.startswith("vd")]
+        expected = ["vda", "vdb"] if upper == "scratch" else ["vda"]
+        if devices != expected or lines[-2] != GPT_LOWER_DIRECTORY:
+            raise RuntimeError(
+                f"the guest of GPT/{upper} has the virtio block devices {devices} "
+                f"and the root's {lines[-2]!r}"
+            )
+        self.check_boot(
+            lines[-1], upper, f"the GPT/{upper} guest's kernel command line"
+        )
+        self.invoke("stop", state=self.state)
+        self.require_entries(self.state, STOPPED_ENTRIES, f"after the GPT/{upper} stop")
+        self.copy_evidence(self.state / OUTCOME, f"{upper}-outcome.json")
+        check_managed_report(managed_report(self.state), self.backend)
+        self.require_processes((), f"after the GPT/{upper} stop")
+        self.invoke("deprovision", state=self.state)
+        if self.state.exists():
+            raise RuntimeError(f"deprovision kept the GPT/{upper} sandbox's state")
+
+
+def run_sandbox_gpt_layer(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Run the CLI's cold cells of a GPT disk, over a scratch upper and a RAM
+    upper, whose disk a guest of `executable`, `kernel`, and `initrd` writes
+    from the Ubuntu EROFS layer."""
+    artifacts = load_workload_artifacts()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="nvx-public-gpt-layer-"))
+    run_acceptance(
+        GptLayerAcceptance(
+            backend,
+            timeout=timeout,
+            output_dir=output_dir,
+            artifacts=artifacts,
+            root=root,
+            executable=executable,
+            kernel=kernel,
+            initrd=initrd,
+        )
+    )
 
 
 def run_structured_outcome(
@@ -11571,6 +11990,19 @@ def _run_scenarios(
             f"Running public RAM-upper sandboxes on OpenVMM/{args.backend}",
         )
         run_sandbox_ram_upper(args.backend, timeout=args.timeout, output_dir=output_dir)
+    if "sandbox-gpt-layer" in scenarios:
+        report.start(
+            "sandbox-gpt-layer",
+            f"Running public GPT-layer sandboxes on OpenVMM/{args.backend}",
+        )
+        run_sandbox_gpt_layer(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
     if "managed-lifecycle" in scenarios:
         report.start(
             "managed-lifecycle",

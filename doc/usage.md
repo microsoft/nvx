@@ -1252,8 +1252,8 @@ against the public OpenVMM CLI. Repeat `--scenario` to select a subset; without
 it, every scenario supported by the selected guest runs, except `smp-lapic`,
 which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper`, the public sandbox scenarios,
-drive the public `nvx-rs sandbox` lifecycle commands (see
+`sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`, the public
+sandbox scenarios, drive the public `nvx-rs sandbox` lifecycle commands (see
 [Run](run.md#managed-lifecycle)) and also read the Ubuntu distro layer, its
 manifest, and the sandbox scratch template, which
 [`download`](#download) installs and the guest-artifact build makes; a run
@@ -1265,7 +1265,8 @@ and `virtio-features` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
 `platform-zero-fill`, `platform-filesystem`, `platform-aggregate-export`,
 `platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper` scenarios. Ubuntu also rejects
+`sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`
+scenarios. Ubuntu also rejects
 the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
 the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
 detectors the guest's time ABI watcher reports; without `--scenario`, it runs
