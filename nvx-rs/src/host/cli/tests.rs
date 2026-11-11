@@ -18,7 +18,7 @@ fn usages_are_one_line_and_helps_list_every_option() {
         (&download::SYNTAX, &download::OPTIONS[..]),
         (&egress::SYNTAX, &[][..]),
         (&egress::COMPILE_SYNTAX, &[][..]),
-        (&run::SYNTAX, &run::OPTIONS[..]),
+        (&run::SYNTAX, &run::options()[..]),
         (&sandbox::tests::SYNTAX, &sandbox::tests::OPTIONS[..]),
     ] {
         let usage = syntax.usage();

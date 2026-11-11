@@ -9,20 +9,10 @@ use std::path::Path;
 use std::time::Duration;
 use std::{mem, ptr};
 
-#[cfg(feature = "cli")]
-use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, INVALID_HANDLE_VALUE,
-};
 use windows_sys::Win32::Foundation::{
     GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
     WAIT_TIMEOUT,
 };
-#[cfg(feature = "cli")]
-use windows_sys::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-};
-#[cfg(feature = "cli")]
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
@@ -276,58 +266,6 @@ pub(crate) enum SpawnMode {
         /// Leaves the caller's job when that job permits breakaway.
         breakaway_from_job: bool,
     },
-}
-
-/// Starts OpenVMM in the caller's console, process group, and working directory, as
-/// `subprocess.run` starts a child, with copies of the caller's standard handles as its own.
-///
-/// Unlike `std::process::Command`, which lets the child inherit every inheritable handle of the
-/// caller, it passes the child no other handle of the caller than the handles `inherit`, which
-/// keep their values in the child, through the handle list of [`spawn_with_stdio`], with the same
-/// window, under the same lock, for processes that the caller spawns concurrently without one.
-/// Unlike `std::process::Command` too, which escapes the arguments of a batch file for `cmd.exe`,
-/// it fails with [`io::ErrorKind::InvalidInput`] for a batch file, as [`refuse_batch_file`] says.
-#[cfg(feature = "cli")]
-pub(crate) fn spawn_foreground(
-    program: &Path,
-    arguments: &[OsString],
-    inherit: &[Inherited<'_>],
-) -> io::Result<LaunchedProcess> {
-    let stdio = [
-        standard_handle(STD_INPUT_HANDLE)?,
-        standard_handle(STD_OUTPUT_HANDLE)?,
-        standard_handle(STD_ERROR_HANDLE)?,
-    ];
-    spawn_listed(program, arguments, None, stdio, inherit, None, 0)
-}
-
-/// Returns a copy of the caller's standard handle `which`, or `None` if the caller has none, as
-/// `std::process::Command` gives a child the standard handles of its caller.
-#[cfg(feature = "cli")]
-fn standard_handle(which: STD_HANDLE) -> io::Result<Option<OwnedHandle>> {
-    // SAFETY: GetStdHandle has no preconditions.
-    let handle = unsafe { GetStdHandle(which) };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return Ok(None);
-    }
-    let mut copy = ptr::null_mut();
-    // SAFETY: the source and target are this process, and the output pointer is valid; a
-    // standard handle that is not open fails the copy.
-    if unsafe {
-        DuplicateHandle(
-            GetCurrentProcess(),
-            handle,
-            GetCurrentProcess(),
-            &mut copy,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(owned(copy))
 }
 
 /// Starts `program` with `arguments` in `working_dir`, or in the caller's working directory, with

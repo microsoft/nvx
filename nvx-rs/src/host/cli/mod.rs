@@ -16,8 +16,9 @@
 //!   `nvx.py download` that it replaced; it leaves `nvx-rs` itself alone.
 //! - `egress compile PATH` compiles an egress policy file of `--network-egress-policy-file` and
 //!   prints its native rules as JSON.
-//! - `run` boots or restores a microVM on the terminal, with the options, checks, outputs, and
-//!   exit statuses of the `nvx.py run` that it replaced.
+//! - `run` boots a microVM on the terminal, with the options, checks, outputs, and exit statuses
+//!   of the `nvx.py run` that it replaced, or restores a named snapshot once, as
+//!   `snapshot restore` restores one.
 //! - `sandbox` runs or manages a sandbox, with the options, outputs, exit statuses, outcome
 //!   reports, and state directories of the `nvx.py sandbox` that it replaced.
 //! - `snapshot capture` captures a blockless VM into an immutable named snapshot, and

@@ -192,21 +192,30 @@ fn commands_download_nothing_for_options_that_they_refuse() {
 }
 
 #[test]
-fn restores_download_nothing_for_snapshots_that_they_cannot_read() {
-    // A restore reads its snapshot's manifest first, and one that it cannot read fails it as
-    // options that it refuses do: after the missing artifact, without the download that would
-    // provide it, and with the checkout as it was.
-    for arguments in [
-        vec!["run", "--restore-snapshot", "missing", "--dry-run"],
-        vec!["run", "--restore-snapshot", "missing"],
+fn restores_download_nothing_for_snapshots_that_they_cannot_open() {
+    // A restore refuses a raw OpenVMM snapshot, and opens its snapshot's store, before it reads
+    // anything else: one that it cannot open fails it before the download that a provision of
+    // its sandbox would make, and leaves the checkout as it was.
+    for (arguments, code) in [
+        (vec!["run", "--restore-snapshot", "missing"], "unsupported"),
+        (
+            vec![
+                "run",
+                "--restore-snapshot",
+                "base",
+                "--store-dir",
+                "store",
+                "--state-dir",
+                "state",
+            ],
+            "not-found",
+        ),
     ] {
         let root = checkout(&INSTALLED);
         let before = root.snapshot();
         let outcome = root.nvx_rs(&arguments);
-        outcome.assert_error("artifact-missing", &["OpenVMM"]);
-        let mut after = root.snapshot();
-        after.remove("build/.nvx-download.lock");
-        assert_eq!(after, before, "{arguments:?}");
+        outcome.assert_error(code, &[]);
+        assert_eq!(root.snapshot(), before, "{arguments:?}");
     }
 }
 

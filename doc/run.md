@@ -358,10 +358,10 @@ loopback in both directions without a port list, and
 preserves the existing guest-to-host mapping without publishing guest ports.
 Guest-originated traffic remains subject to egress policy.
 
-Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
-`--cpu-profile`, `--mount`, `--net`, `--network-profile`, `--cmdline`,
-`--restore-snapshot`, `--restore-processors`, and `--restore-ready-path`. The
-`nvx-rs run` performs these translations and additions:
+Most options of a cold boot of `nvx-rs run` pass through unchanged:
+`--machine`, `--processors`, `--cpu-profile`, `--mount`, `--net`,
+`--network-profile`, and `--cmdline`. The `nvx-rs run` performs these
+translations and additions:
 
 | `nvx-rs run` | Direct OpenVMM option |
 | --- | --- |
@@ -371,10 +371,14 @@ Most `nvx-rs run` options pass through unchanged: `--machine`, `--processors`,
 | `--hypervisor auto` | `--hypervisor kvm` on Linux or `--hypervisor whp` on Windows |
 | `--memory-mib N` | `--memory NM` |
 | `--memory-capacity-mib N` | `--memory-capacity NM` on a fresh boot |
-| `--restore-memory-mib N` | `--restore-memory NM` |
 | A fresh boot | `--virtio-console console`, which attaches the guest's console, the boot console `hvc1`, to the terminal |
-| A restore of a snapshot whose boot console was on the terminal | `--virtio-console console`, which attaches that console to the terminal again |
 | `--dry-run` | No equivalent; this only prints the generated command |
+
+`nvx-rs run --restore-snapshot NAME --store-dir PATH --state-dir PATH` restores
+a named snapshot that `nvx-rs snapshot capture` published once, as
+`nvx-rs snapshot restore` does, and no longer a raw OpenVMM snapshot directory,
+which it refuses; see [`run`](usage.md#run). Restore a raw snapshot with
+OpenVMM directly, as below.
 
 Always include `--single-process`. Include `--virtio-console console` to type
 into the guest's shell on a fresh boot: without a boot console, the guest's
@@ -382,12 +386,8 @@ console is the byte channel, `hvc0`, which takes no input, so OpenVMM discards
 the terminal's keystrokes, though Ctrl-Q still opens its REPL. A restore keeps
 the console of its snapshot. OpenVMM requires `--virtio-console console` again
 to restore a snapshot of a boot that passed it, and refuses `--virtio-console`
-for a snapshot without a boot console. `nvx-rs run` reads the snapshot's
-`manifest.bin`, even with `--dry-run`, and passes `--virtio-console console`
-to a restore exactly when the snapshot's boot console was on the terminal; it
-refuses a snapshot whose manifest it cannot read, which OpenVMM could not
-restore either. When restoring, omit `--memory`, `--kernel`, `--initrd`, and
-`--net`, whose addresses the snapshot keeps; see
+for a snapshot without a boot console. When restoring, omit `--memory`,
+`--kernel`, `--initrd`, and `--net`, whose addresses the snapshot keeps; see
 [Networked snapshots](#networked-snapshots). Every restore gives the guest
 fresh entropy through the time ABI's restore packet. Do not pass
 `--guest ubuntu` during restore; the captured RAM and machine contract already
@@ -531,11 +531,14 @@ attachments, and so does a restore, unless it installs a new policy on a
 A snapshot captured with `--net` keeps its NIC's addresses and the digest of
 its network policy. Restore it with `--network-profile portable`, without
 `--net`, and with the network policy options of the capture, which OpenVMM
-checks against that digest before the guest runs. `nvx-rs run` passes them to
-OpenVMM as given, and refuses `--net` on a restore:
+checks against that digest before the guest runs:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --processors 1 \
+  --hypervisor kvm \
   --restore-snapshot /var/lib/nvx/snapshot \
   --network-profile portable \
   --network-egress deny \
@@ -562,7 +565,11 @@ options of the new policy, which may include `--network-ingress allow`,
 explicit `--host-loopback allow`, and forwards, for example:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+./bin/openvmm \
+  --single-process \
+  --machine microvm \
+  --processors 1 \
+  --hypervisor kvm \
   --restore-snapshot /var/lib/nvx/template \
   --restore-network-policy \
   --network-profile portable \
@@ -589,9 +596,11 @@ workload that has already run, but under the deny-all that workload had no
 connectivity, so nothing in the snapshot depends on the policy, and the restore
 grants it connectivity that it never had. OpenVMM rejects the option for a cold
 boot, for a snapshot without a NIC or whose NIC was captured with any other
-policy, and for a `workload-start` or `instance-checkpoint` snapshot, and
-`nvx-rs run` rejects it without `--restore-snapshot`. A [platform NIC
-template](#platform-nic-templates) takes the option too.
+policy, and for a `workload-start` or `instance-checkpoint` snapshot. A
+[platform NIC template](#platform-nic-templates) takes the option too, and so
+does each restore of a named snapshot with a NIC through
+`nvx-rs run --restore-snapshot` or `nvx-rs snapshot restore`, which installs the
+policy of its network options; see [`run`](usage.md#run).
 
 ### Platform NIC templates
 
@@ -659,8 +668,7 @@ slot's device and the guest's kernel command line stay as captured, without a
 its host, mount tag `microvm` itself, and bind each child where it needs it.
 The dormant slot of a snapshot of another tier, or without a tier, still
 binds only a `--mount`, and a snapshot captured with an export requires that
-export again. `nvx-rs run`, which passes no sandbox blocks, cannot restore a
-platform snapshot.
+export again.
 
 ## Snapshots of an earlier OpenVMM
 
@@ -682,17 +690,24 @@ same on every backend (see
 
 ## Snapshot restore readiness
 
-Restore an existing microVM snapshot with an optional host-readiness endpoint:
+Restore an existing microVM snapshot with OpenVMM and an optional
+host-readiness endpoint:
 
 ```bash
-nvx-rs/target/release/nvx-rs run \
+./bin/openvmm \
+  --single-process \
   --machine microvm \
   --processors 8 \
+  --hypervisor kvm \
   --restore-snapshot /var/lib/nvx/snapshot \
   --restore-processors 4 \
-  --restore-memory-mib 1024 \
+  --restore-memory 1024M \
   --restore-ready-path /run/nvx/restore-ready.sock
 ```
+
+`nvx-rs run --restore-snapshot` and `nvx-rs snapshot restore` own the endpoint
+of each of their restores, whose event they wait for, and restore the
+processors that their snapshot had online.
 
 The endpoint must already be listening. OpenVMM connects to a Unix domain
 socket on Linux or a `//./pipe/...` named pipe on Windows and writes exactly
@@ -712,7 +727,7 @@ write the complete event aborts and tears down the restore.
 
 For restore-time memory expansion, capture a fresh snapshot with
 `--memory-mib 512 --memory-capacity-mib 2048`, then select a target with
-`--restore-memory-mib 512`, `1024`, or `2048`. The snapshot's `memory.bin`
+`--restore-memory 512M`, `1024M`, or `2048M`. The snapshot's `memory.bin`
 remains exactly 512 MiB; selected expansion ranges receive fresh per-launch
 backing and are onlined before restore readiness.
 

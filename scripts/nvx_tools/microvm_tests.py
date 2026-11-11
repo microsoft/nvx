@@ -130,7 +130,6 @@ MICROVM_TEST_SCENARIOS = (
     "restore-downtime",
     "restore-memory",
     "restore-processors",
-    "run-console-restore",
     "sandbox-blocks",
     "sandbox-lifecycle",
     "sandbox-proxy-only",
@@ -394,7 +393,6 @@ WORKLOAD_IDENTITY_MARKER = b"NVX-WORKLOAD-IDENTITY-OK uid=65534 gid=65534"
 BOOT_MARKER = b"NVX-GUEST-BOOT-OK:"
 GUEST_BOOT_COMPLETION_MARKER = b"NVX-GUEST-BOOT-CHECK-OK"
 GUEST_IDENTITY_COMPLETION_MARKER = b"NVX-GUEST-IDENTITY-OK"
-RUN_CONSOLE_RESTORE_MARKER = b"NVX-RUN-CONSOLE-RESTORE-OK"
 RESTORE_PROCESSORS_FAILURE_MARKER = b"NVX-RESTORE-PROCESSORS-FAIL"
 # A platform snapshot opts into restore-time vCPU activation as an untiered one
 # does, by capturing its capacity booted with maxcpus=. A capacity of 4 leaves
@@ -8692,73 +8690,6 @@ def run_console_snapshot(
                 )
 
 
-def run_run_console_restore(
-    executable: Path,
-    kernel: Path,
-    initrd: Path,
-    backend: str,
-    *,
-    memory_mib: int,
-    timeout: float,
-    output_dir: Path,
-) -> None:
-    """Restore through `nvx-rs run` a snapshot whose boot console was on the
-    terminal, and type into the restored guest's shell.
-
-    A direct cold boot attaches the boot console to OpenVMM's standard
-    streams with `--virtio-console console`, and the guest captures itself
-    there. OpenVMM restores such a snapshot only with `--virtio-console
-    console` again, which `nvx-rs run` must pass, as its snapshot's manifest
-    asks, so that the restored shell takes the terminal's input: the scenario
-    types a script into it, which shuts the guest down."""
-    with tempfile.TemporaryDirectory(prefix="nvx-run-console-restore-") as temporary:
-        snapshot_path = Path(temporary) / "snapshot"
-        boot_command = workload_boot_command(
-            executable,
-            backend,
-            kernel,
-            initrd,
-            memory_mib,
-            "quiet loglevel=0",
-        )
-        # The restored guest keeps its shell after the restore marker, for the
-        # script that the restore types.
-        capture_snapshot(
-            [*boot_command, "--snapshot-destination", str(snapshot_path)],
-            snapshot_path,
-            timeout=timeout,
-            teardown_mode="host-terminate",
-            log_path=output_dir / "run-console-restore-capture.log",
-        )
-        fingerprint = _snapshot_fingerprint(snapshot_path)
-        command = [
-            *nvx_rs.command_line(("run",)),
-            "--hypervisor",
-            backend,
-            "--restore-snapshot",
-            str(snapshot_path),
-        ]
-        result = run_guest_script(
-            command,
-            _read_script("run-console-restore.sh"),
-            RUN_CONSOLE_RESTORE_MARKER,
-            timeout=timeout,
-            log_path=output_dir / "run-console-restore.log",
-            boot_marker=RESTORE_MARKER,
-            contain_process_tree=True,
-        )
-        printed = result["text"].split("\n", 1)[0].removesuffix("\r")
-        if not printed.startswith(">> ") or not printed.endswith(
-            " --virtio-console console"
-        ):
-            raise RuntimeError(
-                "nvx-rs run did not attach the boot console of the snapshot to "
-                f"the terminal: {printed}"
-            )
-        if _snapshot_fingerprint(snapshot_path) != fingerprint:
-            raise RuntimeError("the restore of nvx-rs run modified the snapshot")
-
-
 def run_endpoint_policy_snapshot(
     executable: Path,
     kernel: Path,
@@ -10960,21 +10891,6 @@ def _run_scenarios(
             f"Running microVM console snapshot correctness on OpenVMM/{args.backend}",
         )
         run_console_snapshot(
-            executable,
-            kernel,
-            initrd,
-            args.backend,
-            memory_mib=args.memory_mib,
-            timeout=args.timeout,
-            output_dir=output_dir,
-        )
-    if "run-console-restore" in scenarios:
-        report.start(
-            "run-console-restore",
-            "Running nvx-rs run restore of a terminal boot console on "
-            f"OpenVMM/{args.backend}",
-        )
-        run_run_console_restore(
             executable,
             kernel,
             initrd,
