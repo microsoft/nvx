@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 
 use serde_json::{Value, json};
 
-use crate::harness::{Content, HYPERVISOR, Root, is_hex};
+use crate::harness::{Content, HYPERVISOR, Root, is_hex, sandbox_relative};
 
 /// The options of OpenVMM that take no value.
 const FLAGS: [&str; 3] = [
@@ -189,8 +189,17 @@ pub(crate) fn one_shot() -> Options {
         .flag("--single-process")
         .with("--hypervisor", [HYPERVISOR])
         .with("--memory", ["256M"])
-        .with("--kernel", ["{root/build/vmlinux}"])
-        .with("--initrd", ["{root/build/initramfs.cpio.gz}"])
+        .with(
+            "--kernel",
+            [format!("{{root/{}}}", sandbox_relative("build/vmlinux"))],
+        )
+        .with(
+            "--initrd",
+            [format!(
+                "{{root/{}}}",
+                sandbox_relative("build/initramfs.cpio.gz")
+            )],
+        )
         .sandbox_kernel("", &WORKLOAD)
 }
 
@@ -425,7 +434,9 @@ pub(crate) fn assert_opened_distro(root: &Root, token: &str) {
 /// Asserts that the fake OpenVMM of the launch whose records are named for `token` read the block
 /// devices of `expected`, each with its role and content, whole, in order.
 fn assert_opened(root: &Root, token: &str, expected: &[(&str, &str)]) {
-    let opened = root.json(&format!("build/fake-openvmm-{token}-blocks.json"));
+    let opened = root.json(&sandbox_relative(&format!(
+        "build/fake-openvmm-{token}-blocks.json"
+    )));
     let opened: Vec<(&str, &str)> = opened
         .as_array()
         .unwrap()

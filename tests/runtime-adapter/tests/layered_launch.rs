@@ -21,7 +21,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use nvx::exec::{Key, Limits, Timers, Window};
-use nvx::host::artifacts::Artifacts;
+use nvx::host::artifacts::{Architecture, ArtifactDir, Artifacts, Guest};
 use nvx::host::filesystem::GUEST_EXPORT;
 use nvx::host::launch::{DEFAULT_MEMORY_MIB, PROCESS_COMMAND_LINE_LIMIT, VmmLaunch};
 use nvx::host::network;
@@ -852,21 +852,66 @@ fn a_launch_refuses_shares_that_it_cannot_export() {
 #[test]
 fn the_host_program_refuses_shares_before_it_touches_the_store() {
     let directory = directory("layered-share-command");
-    // NVX's artifacts in a release's layout, which the launch takes, but which boot nothing.
+    // Local artifacts of the host ISA, which the launch takes, but which boot nothing.
     let artifacts = directory.join("artifacts");
-    let openvmm = if cfg!(windows) {
-        "bin/openvmm.exe"
-    } else {
-        "bin/openvmm"
-    };
-    let mut sums = String::new();
-    for name in [openvmm, "guest/vmlinux", "guest/initramfs.cpio.gz"] {
-        let path = artifacts.join(name);
+    let runtime = ArtifactDir::repository(&artifacts)
+        .unwrap()
+        .with_architecture(if cfg!(target_arch = "aarch64") {
+            Architecture::Aarch64
+        } else {
+            Architecture::X86_64
+        })
+        .unwrap();
+    for path in [
+        runtime.openvmm(),
+        runtime.kernel(),
+        runtime.initramfs(Guest::Alpine),
+    ] {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, name).unwrap();
-        sums.push_str(&format!("{}  {name}\n", "0".repeat(64)));
+        fs::write(&path, b"non-bootable fixture").unwrap();
     }
-    fs::write(artifacts.join("SHA256SUMS"), sums).unwrap();
+    if cfg!(target_arch = "aarch64") {
+        let mut pe = [0_u8; 70];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[60..64].copy_from_slice(&64_u32.to_le_bytes());
+        pe[64..68].copy_from_slice(b"PE\0\0");
+        pe[68..70].copy_from_slice(&0xaa64_u16.to_le_bytes());
+        fs::write(runtime.openvmm(), pe).unwrap();
+        let mut image = [0_u8; 64];
+        image[16..24].copy_from_slice(&4096_u64.to_le_bytes());
+        image[24..32].copy_from_slice(&10_u64.to_le_bytes());
+        image[56..60].copy_from_slice(b"ARM\x64");
+        fs::write(runtime.kernel(), image).unwrap();
+        fs::write(
+            runtime
+                .initramfs(Guest::Alpine)
+                .with_extension("gz.packages.json"),
+            r#"{"architecture":"aarch64"}"#,
+        )
+        .unwrap();
+    }
+    for (path, member) in [
+        (
+            artifacts.join("build/openvmm.provenance.json"),
+            "executable_sha256",
+        ),
+        (
+            runtime.kernel().with_extension("provenance.json"),
+            "kernel_sha256",
+        ),
+        (
+            runtime
+                .initramfs(Guest::Alpine)
+                .with_file_name("initramfs.provenance.json"),
+            "initramfs_sha256",
+        ),
+    ] {
+        fs::write(
+            path,
+            format!(r#"{{"format":1,"{member}":"{}"}}"#, "0".repeat(64)),
+        )
+        .unwrap();
+    }
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../SOURCE-MANIFEST.json");
     fs::copy(manifest, artifacts.join("SOURCE-MANIFEST.json")).unwrap();
 

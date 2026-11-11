@@ -1213,6 +1213,7 @@ struct FakeRoot {
     workload: Option<Workload>,
     /// The read end of a pipe whose write end the test holds, which the application takes as the
     /// announcer that it starts, if the test made one with [`ending`](Self::ending).
+    #[cfg(target_arch = "x86_64")]
     ending: Option<OwnedFd>,
     /// The announcer that a clone's application started, for a record whose network publishes
     /// the workload's listeners, until the worker collected its end: the read end of a pipe,
@@ -1257,6 +1258,7 @@ impl FakeRoot {
             #[cfg(target_arch = "x86_64")]
             deadlines: Vec::new(),
             workload,
+            #[cfg(target_arch = "x86_64")]
             ending: None,
             announcer: None,
         }
@@ -1286,6 +1288,7 @@ impl FakeRoot {
 
     /// Makes the announcer that a clone's application starts end once the test drops the returned
     /// write end of its pipe.
+    #[cfg(target_arch = "x86_64")]
     fn ending(mut self) -> (Self, OwnedFd) {
         let (read, write) = announcer_pipe();
         self.ending = Some(read);
@@ -1537,6 +1540,7 @@ const GROUP: &str = "root:x:0:\nstaff:x:50:\nworkload:x:1000:\n";
 /// Returns a pipe that stands for the pidfd of a clone's announcer: its read end, which polls
 /// readable once the write end closes, and its write end. Both close on exec, so that no program
 /// that a test spawns holds the write end, and keeps the announcer from ending.
+#[cfg(target_arch = "x86_64")]
 fn announcer_pipe() -> (OwnedFd, OwnedFd) {
     nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap()
 }

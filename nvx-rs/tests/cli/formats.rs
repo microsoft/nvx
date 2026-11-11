@@ -15,7 +15,7 @@ use nvx::host::sandbox::scratch::ScratchBinding;
 use nvx::host::sandbox::{LayerRole, SandboxLayer};
 use serde_json::{Value, json};
 
-use crate::harness::{HYPERVISOR, Root, UUID, entries, in_parallel, json};
+use crate::harness::{HYPERVISOR, Root, UUID, entries, in_parallel, json, sandbox_relative};
 use crate::lifecycle::{PROVISIONED, provision, sandbox};
 use crate::openvmm::{Options, WORKLOAD, assert_checked_blocks, assert_opened_images, managed};
 
@@ -207,14 +207,15 @@ fn configurations_of_every_format_start_and_exec() {
                     .as_str()
                     .unwrap()
                     .to_owned();
-                let mut options =
-                    Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
+                let mut options = Options::parse(
+                    &root.openvmm_arguments(&sandbox_relative("build/fake-openvmm-state.json")),
+                );
                 assert_checked_blocks(&root, &options.take("--microvm-sandbox-block"));
                 assert_opened_images(&root, "state");
                 let mut expected = openvmm(managed("state", &endpoint));
                 expected.take("--microvm-sandbox-block");
                 expected.assert_matches(&root, &options, name);
-                let mapped = root.below("build/fake-openvmm-state-maps.json");
+                let mapped = root.below(&sandbox_relative("build/fake-openvmm-state-maps.json"));
                 match maps {
                     Some(table) => assert_eq!(json(&mapped), *table, "{name}"),
                     None => assert!(!mapped.exists(), "{name}"),

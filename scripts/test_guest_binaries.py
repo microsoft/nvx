@@ -23,6 +23,9 @@ from nvx_tools import (  # noqa: E402
     collect_ubuntu_sources,
     elf,
     guest_binaries,
+    managed_exec_tests,
+    microvm_tests,
+    sandbox_lifecycle_tests,
     ubuntu,
 )
 from nvx_tools.build_constants import (  # noqa: E402
@@ -1414,6 +1417,230 @@ class GuestBinaryArchitectureTests(unittest.TestCase):
         with patch.object(nvx, "check_guest_binaries") as called:
             args.handler(args)
         called.assert_called_once_with(None, architecture="aarch64")
+
+    def test_distro_cli_selects_architecture_qualified_work_and_output(self):
+        for architecture in ("x86_64", "aarch64"):
+            directory = BuildConstants.BUILD_DIR
+            if architecture != "x86_64":
+                directory /= architecture
+            for output in (None, Path("custom/distro.erofs")):
+                arguments = [
+                    "build-distro-layer",
+                    "--guest",
+                    "ubuntu",
+                    "--architecture",
+                    architecture,
+                ]
+                if output is not None:
+                    arguments.extend(("--output", str(output)))
+                args = nvx.parse_args(arguments)
+                with patch.object(nvx, "build_distro_layer") as called:
+                    args.handler(args)
+                selected = called.call_args.args[0]
+                self.assertEqual(selected.architecture, architecture)
+                self.assertEqual(selected.work.parent, directory)
+                self.assertEqual(
+                    selected.output, output or directory / "ubuntu-distro.erofs"
+                )
+                self.assertFalse(selected.replace)
+        with self.assertRaisesRegex(build.ScriptError, "unsupported distro-layer"):
+            build_config.DistroLayerBuildConfig(architecture="arm64")
+
+    def test_arm_distro_producer_uses_matching_root_packages_and_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            root = directory / "root"
+            root.mkdir()
+            output = directory / "distro.erofs"
+            config = build_config.DistroLayerBuildConfig(
+                guest="ubuntu",
+                work=directory / "work",
+                output=output,
+                architecture="aarch64",
+            )
+            customization = (root / "input",)
+            helpers = {"nvx-init": {"source_sha256": "b" * 64}}
+
+            def mkfs(command: Sequence[str | os.PathLike[str]]) -> None:
+                Path(command[-2]).write_bytes(b"unit-test-erofs")
+
+            with (
+                patch.object(build, "_require_linux"),
+                patch.object(
+                    build, "_prepare_guest_root", return_value=root
+                ) as prepare,
+                patch.object(build, "_install_guest_files", return_value=helpers),
+                patch.object(ubuntu, "apply_metadata_policy"),
+                patch.object(ubuntu, "package_records", return_value=[]) as records,
+                patch.object(build, "_normalize_initramfs_metadata"),
+                patch.object(
+                    ubuntu, "customization_files", return_value=customization
+                ) as sources,
+                patch.object(
+                    ubuntu, "converter_input_sha256", return_value="a" * 64
+                ) as digest,
+                patch.object(
+                    ubuntu,
+                    "package_manifest",
+                    return_value={"architecture": "arm64", "packages": []},
+                ) as manifest,
+                patch.object(build, "require_tool", return_value="mkfs.erofs"),
+                patch.object(build, "run_checked", side_effect=mkfs),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                build.build_distro_layer(config)
+            self.assertEqual(prepare.call_args.args[0].architecture, "aarch64")
+            records.assert_called_once_with(root, architecture="aarch64")
+            sources.assert_called_once_with("aarch64")
+            digest.assert_called_once_with(customization, architecture="aarch64")
+            manifest.assert_called_once_with(root, helpers, architecture="aarch64")
+            document = json.loads(
+                output.with_name("distro.erofs.manifest.json").read_text()
+            )
+            self.assertEqual(document["architecture"], "arm64")
+            self.assertEqual(document["input_sha256"], "a" * 64)
+            self.assertEqual(document["uuid"], ubuntu.erofs_uuid("a" * 64))
+
+    def test_arm_public_scenarios_require_namespaced_matching_layer_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with patch.object(BuildConstants, "BUILD_DIR", directory):
+                paths = managed_exec_tests.workload_artifact_paths(
+                    architecture="aarch64"
+                )
+                for path, _ in paths:
+                    self.assertEqual(path.parent, directory / "aarch64")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"unit fixture")
+                manifest = paths[1][0]
+                manifest.write_text(
+                    json.dumps({"architecture": "arm64", "uuid": "unit-uuid"})
+                )
+                selected = managed_exec_tests.load_workload_artifacts(
+                    architecture="aarch64"
+                )
+                self.assertEqual(selected.distro, paths[0][0])
+                manifest.write_text(
+                    json.dumps({"architecture": "amd64", "uuid": "unit-uuid"})
+                )
+                with self.assertRaisesRegex(build.ScriptError, "architecture arm64"):
+                    managed_exec_tests.load_workload_artifacts(architecture="aarch64")
+                paths[0][0].unlink()
+                (directory / paths[0][0].name).write_bytes(b"foreign x86 fixture")
+                with self.assertRaises(build.ScriptError):
+                    managed_exec_tests.load_workload_artifacts(architecture="aarch64")
+
+    def test_arm_lifecycle_identity_fixture_uses_matching_provenance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            initramfs = sandbox_lifecycle_tests.InitramfsBuildConstants.PROVENANCE_NAME
+            names = (
+                sandbox_lifecycle_tests.OpenVMMBuildConstants.PROVENANCE_NAME,
+                "aarch64/Image.provenance.json",
+                f"aarch64/{initramfs}",
+            )
+            expected = {
+                name: {sandbox_lifecycle_tests.INITRAMFS_DIGEST: "a" * 64}
+                for name in names
+            }
+            for name, value in expected.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(value), encoding="utf-8")
+            artifacts = microvm_tests.WorkloadArtifacts(
+                root / "distro.erofs", "fixture-uuid", root / "scratch.ext4"
+            )
+            case = sandbox_lifecycle_tests.LifecycleAcceptance(
+                "whp",
+                timeout=5,
+                output_dir=root,
+                artifacts=artifacts,
+                root=root / "case",
+                architecture="aarch64",
+            )
+            with patch.object(BuildConstants, "BUILD_DIR", root):
+                self.assertEqual(
+                    sandbox_lifecycle_tests.read_build_provenance(
+                        architecture="aarch64"
+                    ),
+                    expected,
+                )
+                case.write_other_runtime()
+                (root / "aarch64" / initramfs).unlink()
+                with self.assertRaisesRegex(RuntimeError, "unreadable"):
+                    sandbox_lifecycle_tests.read_build_provenance(
+                        architecture="aarch64"
+                    )
+            copied = json.loads(
+                (case.other_root / "build" / "aarch64" / initramfs).read_text()
+            )
+            self.assertNotEqual(copied, expected[f"aarch64/{initramfs}"])
+            self.assertFalse((case.other_root / "build" / initramfs).exists())
+            kernel = case.other_root / "build" / "aarch64" / "Image.provenance.json"
+            self.assertEqual(json.loads(kernel.read_text()), expected[names[1]])
+
+    def test_arm_microvm_runner_selects_image_and_requires_explicit_scenarios(self):
+        args = nvx.parse_args(
+            [
+                "test-microvm",
+                "--backend",
+                "whp",
+                "--architecture",
+                "aarch64",
+                "--scenario",
+                "managed-lifecycle",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            args.output_dir = Path(temporary)
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(
+                    microvm_tests, "require_file", side_effect=require
+                ) as required,
+                patch.object(microvm_tests, "_run_scenarios") as run,
+                patch.object(microvm_tests, "report_time_abi_evidence"),
+                patch.object(microvm_tests, "DurationReport"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            kernel = run.call_args.kwargs["kernel"]
+            self.assertEqual(kernel, BuildConstants.BUILD_DIR / "aarch64" / "Image")
+            self.assertEqual(
+                run.call_args.kwargs["initrd"],
+                BuildConstants.BUILD_DIR / "aarch64" / "initramfs.cpio.gz",
+            )
+            self.assertNotIn(
+                BuildConstants.BUILD_DIR / "vmlinux",
+                [call.args[0] for call in required.call_args_list],
+            )
+            with patch.object(microvm_tests, "run_sandbox_lifecycle") as public:
+                microvm_tests._run_scenarios(
+                    MagicMock(),
+                    args,
+                    ["sandbox-lifecycle"],
+                    descriptor=microvm_tests.guest_descriptor("alpine"),
+                    executable=Path("openvmm.exe"),
+                    kernel=kernel,
+                    initrd=run.call_args.kwargs["initrd"],
+                    output_dir=args.output_dir,
+                )
+            public.assert_called_once_with(
+                "whp",
+                timeout=args.timeout,
+                output_dir=args.output_dir,
+                architecture="aarch64",
+            )
+        args.scenario = None
+        with (
+            patch.object(microvm_tests, "validate_openvmm_test_backend"),
+            self.assertRaisesRegex(build.ScriptError, "explicit --scenario"),
+        ):
+            microvm_tests.run(args)
 
 
 if __name__ == "__main__":

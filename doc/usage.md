@@ -970,13 +970,17 @@ and runtime qualification gates are not waived.
 ```text
 python3 scripts/nvx.py build-distro-layer
     --guest ubuntu
+    [--architecture {x86_64,aarch64}]
     [--output PATH]
     [--replace]
 ```
 
 Builds the immutable Ubuntu EROFS `distro` layer directly on Linux. The default
-output is `build/ubuntu-distro.erofs`. Existing output or manifest files are
-rejected unless `--replace` is present.
+output is `build/ubuntu-distro.erofs`. `--architecture` defaults to x86-64;
+`aarch64` selects the pinned ARM64 Ubuntu Base and supplemental lock and defaults
+to `build/aarch64/ubuntu-distro.erofs`, with its matching manifest beside it.
+An explicit `--output` is honored for either ISA. Existing output or manifest
+files are rejected unless `--replace` is present.
 
 ### `build-scratch-template`
 
@@ -1000,7 +1004,11 @@ fixes the clock of `mkfs.ext4` with `E2FSPROGS_FAKE_TIME` and its directory
 hash seed, and ignores the caller's other `E2FSPROGS_*` and `MKE2FS_*`
 variables, so e2fsprogs 1.46.5 and 1.47.0 of Debian 12, Ubuntu 22.04 and
 24.04, and Azure Linux 3 format the same bytes, whose SHA-256
-`UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins. It warns when
+`UbuntuBuildConstants.SCRATCH_TEMPLATE_SHA256` pins. When libext2fs's compiler
+defaults to unsigned `char`, the producer uses the same package's `debugfs`
+to select the existing signed-directory-hash format and update its checksums.
+Already canonical x86 output is untouched; the UUID, layout and pinned hash
+are unchanged. It warns when
 `mkfs.ext4` formats other bytes. The guest Docker build formats the template
 with the Ubuntu distro layer, in the pinned Debian image, for
 [`build-guest`](#build-guest) and for CI, which caches, records, and hands it
@@ -1133,6 +1141,7 @@ OpenVMM's tests, and CI checks that it passed the pinned revision with
 ```text
 python3 scripts/nvx.py test-microvm
     --backend {kvm,mshv,whp}
+    [--architecture {x86_64,aarch64}]
     [--guest {alpine,ubuntu,azurelinux}]
     [--scenario SCENARIO]...
     [--debug-kernel]
@@ -1167,6 +1176,11 @@ the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
 detectors the guest's time ABI watcher reports; without `--scenario`, it runs
 only the same-host restore scenarios `smp`, `smp-snapshot`,
 `restore-processors`, `restore-downtime`, and `snapshot-tiers`.
+The architecture defaults to x86-64. ARM requires explicit `--scenario`
+selection and uses `build/aarch64/Image`, matching initramfs and managed-layer
+inputs; it does not qualify every scenario listed here for ARM. Public sandbox
+scenarios retain the existing one-VP CLI contract; `--processors` does not add
+a sandbox processor option or change saved configurations.
 `--shard INDEX/COUNT`, such as `1/2`, runs shard INDEX of the COUNT shards of
 the default Alpine suite on the default kernel, the scenarios of a run without
 `--scenario` but the public sandbox scenarios, which CI runs in its guest and
