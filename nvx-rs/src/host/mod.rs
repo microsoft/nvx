@@ -55,7 +55,9 @@
 //!   restore from a [`Snapshot`](snapshot::Snapshot) hard-links the snapshot's OpenVMM files into
 //!   the VM directory and binds its restore-ready listener before any spawn.
 //! - [`restore`] orders caller-driven activation to Ready without I/O or a clock, and listens for
-//!   OpenVMM's restore-ready event from the held VM process.
+//!   OpenVMM's restore-ready event from the held VM process. The private `restore_driver` (feature
+//!   `cli`) drives it over the [`session`] for NVX's blocking callers, through Ready, the mapping
+//!   table and the workload's start.
 //! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
 //!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
 //!
@@ -90,6 +92,8 @@ pub mod platform;
 pub mod process;
 pub mod report;
 pub mod restore;
+#[cfg(feature = "cli")]
+mod restore_driver;
 pub mod runtime;
 pub mod sandbox;
 pub mod seal;

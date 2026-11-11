@@ -278,6 +278,16 @@ pub(crate) fn transport_from_handle(handle: TransportHandle) -> io::Result<Box<d
     }))
 }
 
+/// Ends the pending and later transfers of the connection that `handle` duplicates, by shutting
+/// the socket down in both directions: a read then ends the stream, and a write fails.
+#[cfg(feature = "cli")]
+pub(crate) fn interrupt_transfers(handle: &TransportHandle) -> io::Result<()> {
+    match nix::sys::socket::shutdown(handle.as_raw_fd(), nix::sys::socket::Shutdown::Both) {
+        Ok(()) | Err(sys::Errno::ENOTCONN) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Returns the process that listens on a control endpoint, or `None` if nothing listens.
 pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
     endpoint_server_pid_until(endpoint, Instant::now() + Duration::from_secs(5))

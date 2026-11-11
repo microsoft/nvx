@@ -185,6 +185,28 @@ impl ControlSession {
         )
     }
 
+    /// Sends nvx-init's activate message, whose `payload` carries a restore's activation record
+    /// and workload identity, and returns the activation that the guest's Ready reports.
+    #[cfg(feature = "cli")]
+    pub(crate) fn activate(
+        &mut self,
+        payload: &[u8],
+        deadline: Instant,
+    ) -> Result<crate::activation::ReadyActivation, SessionError> {
+        let request_id = request_id()?;
+        self.send_app(protocol::APP_ACTIVATE, request_id, payload, Some(deadline))?;
+        match self.read_reply(request_id, Some(deadline))? {
+            (APP_READY, 0, ready) => {
+                crate::activation::ReadyActivation::decode(&ready).map_err(|error| {
+                    SessionError::Protocol(format!("the guest's Ready is invalid: {error}"))
+                })
+            }
+            _ => Err(SessionError::Protocol(
+                "the guest agent did not activate the restore".to_owned(),
+            )),
+        }
+    }
+
     /// Asks the guest agent which control features its image provides.
     ///
     /// An agent that predates the request refuses it as an unsupported operation, which means
