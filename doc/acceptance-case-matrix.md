@@ -28,7 +28,7 @@ its own in turn.
 | --- | ---: | ---: | ---: | ---: |
 | [The adapter's scenarios](#the-adapters-scenarios) | 157 | 0 | 114 | 43 |
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
-| [MicroVM scenarios](#microvm-scenarios) | 52 | 49 | 3 | 0 |
+| [MicroVM scenarios](#microvm-scenarios) | 52 | 48 | 3 | 1 |
 | [CI](#ci) | 69 | 43 | 3 | 23 |
 | [Docs](#docs) | 36 | 35 | 1 | 0 |
 
@@ -330,7 +330,7 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `restore-downtime` | kept |  |
 | `restore-memory` | kept |  |
 | `restore-processors` | kept |  |
-| `run-console-restore` | kept |  |
+| `run-console-restore` | retired | SL3.8b removes `nvx-rs run`'s restore of a raw OpenVMM snapshot and the boot console that it reattached on the terminal: `run --restore-snapshot` restores a named snapshot through `snapshot restore`'s path |
 | `sandbox-blocks` | kept |  |
 | `sandbox-lifecycle` | kept | SL5.1b keeps it running, or gives it its fate |
 | `sandbox-proxy-only` | kept | SL5.1b keeps it running, or gives it its fate |
