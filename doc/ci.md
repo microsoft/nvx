@@ -2311,14 +2311,14 @@ which holds the NVX mechanics, on GitHub-hosted Ubuntu and Windows runners
 through the [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml)
 action, on the Rust release that `rust-toolchain.toml` pins. It runs rustfmt,
 Clippy with warnings denied for all targets and features, for the library with
-and without default features, and for the `cli` and `testing` features alone,
-the unit, protocol
+and without default features, and for the `serde`, `cli` and `testing`
+features alone, the unit, protocol
 conformance-vector and property, and fake-OpenVMM instance tests, a test that
 the direct children of `nvx::host` depend on one another without cycles, rustdoc
 with warnings denied, the minimum Rust version check, and the macOS cross-check.
-Clippy checks `cli` alone and `testing` alone so that the compiler checks the
-private code that each of them builds, which the code of other features may
-otherwise use.
+Clippy checks `serde`, `cli` and `testing` alone so that the compiler checks the
+code that each of them builds, which the code of other features may
+otherwise use; the musl check of the guest binaries checks `guest` alone.
 It also validates bundled artifact staging with a fixture package. The action
 sets `NVX_BUNDLE=skip` for `--all-features` builds, so that `bundled` stages
 nothing instead of downloading the pinned release.
