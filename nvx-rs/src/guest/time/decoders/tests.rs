@@ -63,6 +63,28 @@ fn packet_errors_name_the_invalid_field() {
     assert_eq!(error.to_string(), "restore memory range 0 is invalid");
 }
 
+#[test]
+fn packets_accept_a_downtime_of_up_to_365_days() {
+    let with_downtime = |downtime_ns: u64| {
+        let mut bytes = valid_header();
+        bytes[16..24].copy_from_slice(&downtime_ns.to_le_bytes());
+        PacketHeader::parse(&bytes)
+    };
+    // 365 days of 86,400 seconds, the bound included.
+    let limit = 31_536_000_000_000_000_u64;
+    assert_eq!(with_downtime(limit).unwrap().downtime_ns, limit);
+    let error = with_downtime(limit + 1).unwrap_err();
+    assert_eq!(error, PacketError::Downtime(limit + 1));
+    assert_eq!(
+        error.to_string(),
+        "restore packet downtime 31536000000000001 ns exceeds the 365-day limit"
+    );
+    assert_eq!(
+        with_downtime(u64::MAX).unwrap_err(),
+        PacketError::Downtime(u64::MAX)
+    );
+}
+
 /// A valid time sample of generation 4, as OpenVMM's `TimeSample::encode` writes it.
 fn valid_sample() -> [u8; SAMPLE_SIZE] {
     let mut bytes = [0; SAMPLE_SIZE];

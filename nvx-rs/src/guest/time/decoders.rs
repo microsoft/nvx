@@ -105,8 +105,9 @@ const SKEW_BOUND_NS: u64 = 1000;
 const SLEW_RATE_PPM: i128 = 2000;
 /// Seconds in a day.
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
-/// Maximum accepted downtime of thirty days.
-const DOWNTIME_LIMIT_NS: u64 = 30 * SECONDS_PER_DAY * NSEC_PER_SEC as u64;
+/// Maximum accepted downtime, inclusive: 365 days, the fixed duration of 31,536,000 seconds
+/// rather than a calendar year, which OpenVMM's time ABI also accepts.
+const DOWNTIME_LIMIT_NS: u64 = 365 * SECONDS_PER_DAY * NSEC_PER_SEC as u64;
 /// kHz in a MHz, which scale the whole MHz of `/proc/cpuinfo`.
 const KHZ_PER_MHZ: u64 = 1000;
 /// Offset magnitude at or above which correction steps the clock.
@@ -197,7 +198,7 @@ pub(crate) enum PacketError {
     ZeroGeneration,
     /// The rate deviation exceeds 250 ppm.
     RateDeviation(i32),
-    /// The downtime exceeds 30 days.
+    /// The downtime exceeds 365 days.
     Downtime(u64),
     /// The packet ends before the memory ranges, the entropy, and the DNS server that its header
     /// gives.
@@ -249,7 +250,7 @@ impl Display for PacketError {
             ),
             Self::Downtime(downtime) => write!(
                 formatter,
-                "restore packet downtime {downtime} ns exceeds 30 days"
+                "restore packet downtime {downtime} ns exceeds the 365-day limit"
             ),
             Self::IncompleteBody => formatter.write_str("restore packet body is incomplete"),
             Self::Range(index) => write!(formatter, "restore memory range {index} is invalid"),

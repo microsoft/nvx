@@ -1792,7 +1792,7 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
     rejected.push(mutate(12, &(-16_384_001_i32).to_le_bytes()));
     rejected.push(mutate(
         16,
-        &(2_592_000_u64 * 1_000_000_000 + 1).to_le_bytes(),
+        &(31_536_000_u64 * 1_000_000_000 + 1).to_le_bytes(),
     ));
     // A packet of an earlier OpenVMM's version 5 is refused.
     rejected.push(mutate(3, &[5]));
@@ -1815,7 +1815,7 @@ fn time_test_mode_checks_packet_and_sample_boundaries() {
     }
 
     for (index, packet) in [
-        time_packet(0, 8, &[], 1, 16_384_000, 2_592_000 * 1_000_000_000),
+        time_packet(0, 8, &[], 1, 16_384_000, 31_536_000 * 1_000_000_000),
         time_packet(0, 0, &[], 1, -16_384_000, 0),
     ]
     .iter()
