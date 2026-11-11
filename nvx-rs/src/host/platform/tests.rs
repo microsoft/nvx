@@ -28,11 +28,9 @@ fn a_bounded_read_refuses_a_regular_file_that_holds_more_than_its_bound() {
         error.to_string(),
         "it holds more than the 3 bytes that a record may hold"
     );
-    assert!(is_refused(&error), "{error}");
     // A file that is missing is a failure of the host's, not a refusal of what a file is.
     let error = open_regular(&directory.path().join("missing")).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
-    assert!(!is_refused(&error), "{error}");
 }
 
 #[cfg(unix)]
@@ -50,7 +48,6 @@ fn an_open_of_a_regular_file_refuses_a_link_and_a_directory() {
             "it is a link, or not a regular file",
             "{name}"
         );
-        assert!(is_refused(&error), "{name}: {error}");
     }
 }
 

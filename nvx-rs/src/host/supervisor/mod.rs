@@ -108,8 +108,8 @@
 //! VM whose VMM had exited by then as one that it stopped, and clears the runtime record of its
 //! launch. [`Vmm::stop_unless_exited`] stops nothing then, and keeps the record, so that
 //! [`reattach`] finds that the VM exited without its holder, as a caller that tells how the VM
-//! ended, such as a clone's, needs: a holder that checked whether the VMM had exited, then stopped
-//! the VM, would otherwise attribute to its stop a VMM that exited in between.
+//! ended needs: a holder that checked whether the VMM had exited, then stopped the VM, would
+//! otherwise attribute to its stop a VMM that exited in between.
 //!
 //! # Reattach
 //!
@@ -135,31 +135,21 @@
 //!    identity of the launch that the lease reserves,
 //!    [`Lease::launch`](crate::host::template::Lease::launch), before any VMM of the clone
 //!    exists. It returns the sandbox's lock.
-//! 2. Under that lock, the caller plans the clone with
-//!    [`ClonePlan::new`](crate::host::template::ClonePlan::new), which checks the clone's image,
-//!    upper, and memory target against the generation, and claims the clone's scratch image, if
-//!    it has one, as
-//!    [`ScratchBinding::check`](crate::host::sandbox::scratch::ScratchBinding::check) does. It
-//!    then launches the clone with
-//!    [`ClonePlan::launch`](crate::host::template::ClonePlan::launch), which checks that the
-//!    binding records the lease, writes the clone's files in the sandbox, and runs [`launch`] as
-//!    the reserved launch, which [`LockedStore::begin_launch`] requires of a sandbox that holds a
-//!    lease, and begins once, under that lock alone, whatever its outcome. The clone's VMM
-//!    restores the generation's snapshot in place, and on Linux listens beside it, at the control
-//!    socket that the lease reserves in the generation's payload, named after the launch, which
-//!    [`Starting::endpoint`] and the runtime record name, as every launch's endpoint, rather than
-//!    at the sandbox's own socket.
-//! 3. Still under that lock, the caller runs the clone's restore sequence:
-//!    [`Restoring::activate`](crate::host::template::Restoring::activate) waits for the VMM's
-//!    restore-ready event, activates the clone through the adapter's framing of its control
-//!    session, and checks its Ready, by a deadline that runs from the launch;
-//!    [`Activated::start`](crate::host::template::Activated::start) starts its sandbox; and
-//!    [`Started::commit`](crate::host::template::Started::commit) commits the launch, as
-//!    [`Starting::commit`] does. A failure ends the launch, as [`Starting::abandon`] does, through
-//!    the VMM's verified identity, and the sandbox records it until the release, with the evidence
-//!    that attributes it, as a [`CloneFailure`](crate::host::template::CloneFailure) describes: a
-//!    launch that cannot be ended keeps its journal, and the lease, and so does one whose failure
-//!    cannot be recorded before its end, whose VMM is ended through its handle.
+//! 2. Under that lock, the caller launches the clone with [`launch`], as the reserved launch,
+//!    which [`LockedStore::begin_launch`] requires of a sandbox that holds a lease, and which
+//!    begins once, under that lock alone, whatever its outcome. The supervisor prepares nothing of
+//!    the restore: the caller binds what the restore needs before the launch, such as its
+//!    restore-ready endpoint, and its `command` gives OpenVMM the restore's options, such as
+//!    `--restore-ready-path`. The clone's VMM restores the generation's snapshot in place, and on
+//!    Linux listens beside it, at the control socket that the lease reserves in the generation's
+//!    payload, named after the launch, which [`Starting::endpoint`] and the runtime record name,
+//!    as every launch's endpoint, rather than at the sandbox's own socket.
+//! 3. Still under that lock, the caller checks, through its own transport, that the clone's
+//!    restore completed: that the VMM sent its restore-ready event, and that the clone was
+//!    activated, reported Ready and started, as the caller's protocol requires. Only then does it
+//!    commit the launch with [`Starting::commit`], which writes the runtime record. A failure ends
+//!    the launch with [`Starting::abandon`], through the VMM's verified identity: a launch that
+//!    cannot be ended keeps its journal, and the lease.
 //! 4. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
 //!    [`Store::release`](crate::host::template::Store::release) ends the lease, under the
 //!    sandbox's lock, taken through the lease's path,
@@ -194,20 +184,13 @@
 //! - After the acquisition, the binding reserves a launch that never began, and that no later lock
 //!   begins: a release ends the lease at once, and another acquisition, which checks the
 //!   generation's eligibility again, reserves another launch.
-//! - After the launch's journal, before or after the spawn, or in the clone's restore sequence,
-//!   before its commit, [`reattach`] ends the launch, as [`LockedStore::recover`] does, and the
-//!   lease lasts until it has: a launch that cannot be ended yet is
-//!   [`Reattached::Indeterminate`], and keeps it.
+//! - After the launch's journal, before or after the spawn, before its commit, [`reattach`] ends
+//!   the launch, as [`LockedStore::recover`] does, and the lease lasts until it has: a launch
+//!   that cannot be ended yet is [`Reattached::Indeterminate`], and keeps it.
 //! - After the commit, the runtime record names the VM, which [`reattach`] holds again: the lease
 //!   lasts as long as the VM runs, until a stop or a termination verifies its exit.
 //! - During a release, the binding goes first, durably, and leaves the record of the lease, which
 //!   a retirement removes.
-//!
-//! The caller of a clone's launch that restarts takes the clone over with
-//! [`reattach_clone`](crate::host::template::reattach_clone), which reattaches as [`reattach`]
-//! does, records the failure of a launch that it ended, checks the activation of a clone whose
-//! launch committed in a new session, and ends a clone that another runtime identity launched, or
-//! that fails the check, through its verified identity.
 //!
 //! The evidence of the VM's exit decides each outcome. A record of an earlier boot, or of a process
 //! ID that another process now has, names a VM that has exited: reattach clears it, and the lease
@@ -232,9 +215,7 @@ mod reattach;
 mod tests;
 mod vmm;
 
-pub(crate) use self::launch::launch_reporting;
 pub use self::launch::{Starting, launch};
-pub(crate) use self::reattach::reattach_reporting;
 pub use self::reattach::{Reattached, reattach};
 pub use self::vmm::{StopOutcome, Stopped, Vmm};
 pub use super::platform::inherit::{Inherited, SpawnLock, lock_spawns, spawn_command};

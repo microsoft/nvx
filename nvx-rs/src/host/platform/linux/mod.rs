@@ -23,7 +23,7 @@ pub(crate) use self::endpoint::{
 };
 pub use self::identity::file_identity;
 pub(crate) use self::identity::{
-    Directory, file_id, is_deleted, link_count, opened_file_id, opened_file_identity,
+    Directory, file_id, is_deleted, opened_file_id, opened_file_identity,
 };
 pub(crate) use self::log_claim::{claim_log, log_claim_held, serves_launch};
 pub use self::private::create_private_dir;

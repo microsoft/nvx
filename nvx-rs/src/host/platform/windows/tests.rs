@@ -129,18 +129,24 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
         }
         received
     };
+    // A fresh endpoint and its listener, as a restore binds them.
+    let listen = || {
+        let endpoint = control_endpoint(Path::new("unused")).unwrap();
+        let listener = ReadyListener::bind(&endpoint).unwrap();
+        (endpoint, listener)
+    };
     // A client that sent nothing, as a VMM that fails as it starts, and one that sent its
     // event, each closed before the listener accepted their connection: what they sent
     // remains to read, and then the end of the pipe.
     for sent in [&b""[..], b"the event\n"] {
-        let (endpoint, mut listener) = listen_ready(Path::new("unused")).unwrap();
+        let (endpoint, mut listener) = listen();
         let mut client = fs::OpenOptions::new().write(true).open(&endpoint).unwrap();
         client.write_all(sent).unwrap();
         drop(client);
         assert_eq!(receive_all(&mut listener), sent);
     }
     // A client that closes once the listener accepted its connection.
-    let (endpoint, mut listener) = listen_ready(Path::new("unused")).unwrap();
+    let (endpoint, mut listener) = listen();
     let client = fs::OpenOptions::new().write(true).open(&endpoint).unwrap();
     let mut received = Vec::new();
     assert!(

@@ -434,22 +434,9 @@ fn a_key_holds_what_its_capture_made() {
     );
     assert!(made.has_network());
     assert_eq!(made.guest_network().as_deref(), Some("10.0.0.2/24"));
-    assert_eq!(
-        made.ipv6_gateway(),
-        Some(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xa00, 1))
-    );
     let template = key(&support::class(), &ManifestSpec::template());
     assert!(!template.has_network());
-    assert_eq!(
-        (template.guest_network(), template.ipv6_gateway()),
-        (None, None)
-    );
-    let mut spec = ManifestSpec::with_network();
-    let network = spec.network();
-    network.ipv6.clear();
-    network.ipv6_prefix_length = 0;
-    network.ipv6_gateway.clear();
-    assert_eq!(key(&network_class(), &spec).ipv6_gateway(), None);
+    assert_eq!(template.guest_network(), None);
     assert_eq!(made.filesystem_tag(), "microvm");
     assert_eq!(made.invariants(), &Invariants::new());
 }

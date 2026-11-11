@@ -32,7 +32,7 @@ its own in turn.
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
 | [MicroVM scenarios](#microvm-scenarios) | 54 | 51 | 2 | 1 |
 | [CI](#ci) | 69 | 43 | 3 | 23 |
-| [Docs](#docs) | 36 | 35 | 1 | 0 |
+| [Docs](#docs) | 36 | 34 | 1 | 1 |
 
 ## The adapter's scenarios
 
@@ -500,9 +500,9 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/host/sandbox/prepared.rs - host::sandbox::prepared::PreparedLaunch (line 92)` | kept | Its launch type leaves with the old launch paths (#1087), whose PR retires it |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 75)` | kept | The sandbox store leaves (#1121), whose PR retires it |
 | `nvx-rs/src/host/supervisor/mod.rs - host::supervisor (line 33)` | kept | The old supervisor leaves (#1087), whose PR retires it |
-| `nvx-rs/src/host/template/clone.rs - host::template::clone::ClonePlan (line 247)` | kept | The old clone path leaves (#1121), whose PR retires it |
-| `nvx-rs/src/host/template/plan.rs - host::template::plan::TemplatePlan (line 137)` | kept | The old clone path leaves (#1121), whose PR retires it |
-| `nvx-rs/src/host/template/store.rs - host::template::store::Store (line 474)` | kept | The old clone path leaves (#1121), whose PR retires it |
+| `nvx-rs/src/host/template/clone.rs - host::template::clone::ClonePlan (line 247)` | retired | `ClonePlan` and `CloneRequest` leave with the old clone path (SL6.2b, #1121) |
+| `nvx-rs/src/host/template/plan.rs - host::template::plan::TemplatePlan (line 137)` | kept | The template store leaves (SL6.2a, #1121), whose PR retires it |
+| `nvx-rs/src/host/template/store.rs - host::template::store::Store (line 473)` | kept | The template store leaves (SL6.2a, #1121), whose PR retires it |
 | `nvx-rs/src/host/transport.rs - host::transport (line 22)` | kept |  |
 | `nvx-rs/src/lib.rs - (line 58)` | kept |  |
 | `nvx-rs/src/protocol/nvxs/mod.rs - protocol::nvxs (line 68)` | kept |  |

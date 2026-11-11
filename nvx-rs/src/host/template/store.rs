@@ -28,7 +28,6 @@ use crate::host::store::lease::{
     ID_LEN, StoreRecord, hex, read_identity, read_private, read_record, store_error,
 };
 
-pub(super) use self::capture::SOCKET_PATH_LIMIT;
 pub use self::capture::{CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, TRANSACTION_NAME};
 pub use self::leases::{Acquired, LEASES_NAME, Retirement, TOMBSTONES_NAME};
 pub use crate::host::store::lease::{

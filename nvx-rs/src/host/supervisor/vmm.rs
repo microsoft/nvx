@@ -98,12 +98,10 @@ impl Vmm {
     /// [`stop`](Self::stop) does. A VMM that had exited by then ended without its holder, however
     /// recently the holder found it running: the stop runs no step, signals nothing, and clears
     /// nothing, so that the record tells [`reattach`] that the VM exited unheld, as one that exits
-    /// while no caller holds it does. A caller that tells how the VM ended then reattaches, as
-    /// [`reattach_clone`](crate::host::template::reattach_clone) does, which records a clone's
-    /// failure, with the loss of its status if no report of the guest's own end tells why its VM
-    /// exited, before it clears the record. [`stop`](Self::stop) ends such a VM as one that it
-    /// stopped, and clears its record, so a holder that checks whether the VMM has exited, then
-    /// stops the VM with it, attributes to its stop a VMM that exits in between.
+    /// while no caller holds it does. A caller that tells how the VM ended then reattaches.
+    /// [`stop`](Self::stop) ends such a VM as one that it stopped, and clears its record, so a
+    /// holder that checks whether the VMM has exited, then stops the VM with it, attributes to its
+    /// stop a VMM that exits in between.
     ///
     /// A VMM that runs as the stop begins is stopped as [`stop`](Self::stop) stops it, with the
     /// same result, and its exit is the stop's from then on. Fails as [`stop`](Self::stop) fails.

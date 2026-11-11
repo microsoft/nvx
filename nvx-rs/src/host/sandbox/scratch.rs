@@ -170,8 +170,7 @@ impl CheckedScratch {
     /// read the image's metadata.
     ///
     /// It reads the file's metadata alone, never the image's content. The scratch image of a
-    /// clone must present the geometry of its template's scratch, its length included, as
-    /// [`ClonePlan`](crate::host::template::ClonePlan) checks before the clone's launch.
+    /// clone must present the geometry of its template's scratch, its length included.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a
     /// physical block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io)
@@ -258,12 +257,6 @@ impl ScratchBinding {
     /// Returns the length in bytes.
     pub fn length(&self) -> u64 {
         self.length
-    }
-
-    /// Returns the binding's version, which a [check](Self::check) requires to be
-    /// [`SCRATCH_BINDING_VERSION`].
-    pub(crate) fn version(&self) -> u32 {
-        self.version
     }
 
     /// Returns the binding of the image that `seal` seals.

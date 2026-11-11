@@ -440,7 +440,6 @@ fn entries_that_are_links_or_not_regular_files_are_refused_as_the_platform_refus
             "it is a link, or not a regular file",
             "{name}"
         );
-        assert!(platform::is_refused(&error), "{name}: {error}");
     }
 }
 

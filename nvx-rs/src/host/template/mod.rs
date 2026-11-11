@@ -31,45 +31,12 @@
 //!   sandbox, until [`Store::release`] ends the lease once the clone's VM has exited. A tombstone
 //!   quarantines a generation, which takes no new lease, and [`Store::retire`] deletes it once its
 //!   leases have drained.
-//! - [`ClonePlan::new`] plans the clone of a leased generation, as a [`CloneRequest`] asks, under
-//!   the lock that acquired the lease, before the clone's launch: it checks the clone's image
-//!   against its binding, its upper, in RAM or on the caller's scratch image, which it claims, its
-//!   memory target against the template, and its export, if it has one, an aggregate of host
-//!   directories and files, as a cold launch exports it, which the template's dormant filesystem
-//!   slot binds, and refuses a request that the template cannot serve, such as an image longer
-//!   than the template's placeholder, the capacity of every clone's image, or of other block
-//!   sizes, or a network that attaches a NIC where the template has none, none where it has one,
-//!   or one at another guest address than the template's, before any VMM starts.
-//! - [`ClonePlan::launch`] launches the clone, as the launch that its lease reserves, once the
-//!   objects of its export are still those that its plan found: OpenVMM restores the generation's
-//!   snapshot in place with the clone's devices and export, and the clone's activation record
-//!   waits in its sandbox, as a [`Restoring`] describes.
-//! - [`Restoring::activate`] runs the clone's restore sequence through the adapter's framing of
-//!   the clone's control session, a [`CloneControl`]: it waits for OpenVMM's restore-ready event,
-//!   then connects, sends the clone's activation record in the adapter's Activate, and checks the
-//!   activation that the clone's Ready reports, by a deadline that starts with the launch, and
-//!   resends the same record in a new session once the adapter lost one. [`Activated::start`]
-//!   then sends the clone's mapping table, if it has an export, and starts the clone's sandbox
-//!   once the guest applied every mapping, by a deadline that starts at its Ready, and
-//!   [`Started::commit`] commits the launch.
-//! - The plan, the launch, and the restore sequence fail with a [`CloneFailure`], whose
-//!   [`Evidence`] attributes it to an [`Outcome`], at a [`Stage`], once the clone got as far as
-//!   its [`Progress`], with the [`Teardown`] that followed: a failure from the launch on ends the
-//!   clone's VMM through its verified identity, and is recorded in the clone's sandbox, which
-//!   keeps its lease while a VM of the clone may run. Only a failure of the template quarantines
-//!   the leased generation, through its tombstone, [`CloneFailure::quarantine`].
-//! - [`reattach_clone`] takes a clone over once the caller of its launch restarted: it checks the
-//!   clone's activation in a new session, and ends a clone that another runtime identity
-//!   launched, or that fails its check, or classifies how it ended; [`CloneRecords::read`] reads
-//!   what the clone's sandbox keeps of it, for the operations that list, inspect, or remove
-//!   clones.
 //!
 //! # Snapshot metadata
 //!
 //! The metadata types remain aliases of [`snapshot`](super::snapshot)'s types for template
 //! users. That module describes their canonical encoding and conformance vectors.
 
-mod clone;
 mod plan;
 mod store;
 
@@ -80,12 +47,6 @@ pub use super::snapshot::{
 };
 pub(super) use super::snapshot::{eligibility, key, manifest};
 
-pub use self::clone::{
-    Activated, CloneControl, CloneFailure, ClonePlan, CloneRecords, CloneRequest, CloneUpper,
-    Evidence, FAILURE_FORMAT, FailureRecord, MAX_ACTIVATION_SESSIONS, Outcome, Progress,
-    READY_TO_START_TIMEOUT, RESTORE_READY_EVENT, RESTORE_TO_READY_TIMEOUT, ReattachedClone,
-    RestoreDeadlines, Restoring, Stage, Started, Teardown, reattach_clone, status_evidence,
-};
 pub use self::plan::{MEMORY_BLOCK_SIZE, SCRATCH_NAME, TemplatePlan, TemplateResources};
 pub use self::store::{
     Acquired, CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, GENERATIONS_NAME, Generation,

@@ -14,7 +14,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO,
     FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, GETFINALPATHNAMEBYHANDLE_FLAGS,
     GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-    GetFinalPathNameByHandleW, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
+    GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
 };
 
 use super::{FileId, FileKind, FileSeal, SEAL_VERSION, SealScheme, SealTime};
@@ -112,11 +112,6 @@ pub(super) fn open_read(path: &Path) -> io::Result<File> {
 /// See [`super::final_path`].
 pub(super) fn final_path(file: &File) -> io::Result<PathBuf> {
     final_path_by(file, VOLUME_NAME_DOS)
-}
-
-/// See [`super::final_volume_path`].
-pub(super) fn final_volume_path(file: &File) -> io::Result<PathBuf> {
-    final_path_by(file, VOLUME_NAME_GUID)
 }
 
 /// Returns the final path of the open `file`, which names its volume as `volume` asks.

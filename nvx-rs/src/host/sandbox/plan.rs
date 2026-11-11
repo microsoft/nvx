@@ -106,7 +106,7 @@ mod form;
 
 use std::ffi::OsString;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -340,16 +340,6 @@ impl SandboxNetwork {
         } else {
             network::template_arguments(&self.guest_network)
         })
-    }
-
-    /// Returns the DNS server that OpenVMM names to the guest under the policy, given the IPv6
-    /// gateway of the guest's NIC if the NIC has an IPv6 identity, as [`network::dns_server`]
-    /// chooses it: the gateway, of either family, whose DNS service the policy lets the guest
-    /// reach, if any.
-    ///
-    /// Fails as [`openvmm_arguments`](Self::openvmm_arguments) does.
-    pub(crate) fn dns_server(&self, ipv6_gateway: Option<Ipv6Addr>) -> Result<Option<IpAddr>> {
-        network::dns_server(&self.policy, self.gateway, ipv6_gateway)
     }
 }
 

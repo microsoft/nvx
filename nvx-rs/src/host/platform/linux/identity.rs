@@ -44,11 +44,6 @@ pub(crate) fn opened_file_id(file: &File) -> io::Result<(u64, u128)> {
     Ok((metadata.dev(), u128::from(metadata.ino())))
 }
 
-/// Returns the number of names, its hard links, of the file that `file` holds open.
-pub(crate) fn link_count(file: &File) -> io::Result<u64> {
-    Ok(file.metadata()?.nlink())
-}
-
 /// An open directory, through which operations name its entries, so that they reach the entries
 /// of the directory that it opened, whatever its path names meanwhile.
 pub(crate) struct Directory(File);

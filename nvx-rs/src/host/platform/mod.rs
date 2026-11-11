@@ -10,7 +10,7 @@
 //!
 //! Its crate-private reads of regular files open a file without following a link, or on Windows
 //! any other reparse point, refuse one that is not a regular file before reading anything from
-//! it, and read it within a bound; `is_refused` tells their refusals from failures of the host's.
+//! it, and read it within a bound.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -43,7 +43,7 @@ use windows as imp;
 pub(crate) use imp::*;
 pub use imp::{SUPPORTED, create_private_dir, file_identity, process_start_time};
 
-/// Why this module refused a file for what the file is, as [`is_refused`] tells.
+/// Why this module refused a file for what the file is.
 #[derive(Debug)]
 struct Refused(String);
 
@@ -54,15 +54,6 @@ impl fmt::Display for Refused {
 }
 
 impl std::error::Error for Refused {}
-
-/// Returns whether `error` is one with which this module refused a file for what the file is,
-/// rather than an operation of the host's that failed: a link, or a file that is not a regular
-/// file, which [`open_regular`] refuses, as [`refused_open`] and [`regular`] do for other opens
-/// that follow no link, and a file that holds more than its bound, which [`read_at_most`]
-/// refuses.
-pub(crate) fn is_refused(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(|inner| inner.is::<Refused>())
-}
 
 /// Returns the error of a file that is a link, or not a regular file.
 fn not_regular() -> io::Error {

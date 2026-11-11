@@ -9,12 +9,11 @@ use std::thread;
 use std::time::Instant;
 
 use super::caller::CallerFiles;
-use super::caller::{is_report_staging, is_store_temporary};
 use super::files::{io_error, remove_if_present};
 use super::identity::RuntimeIdentity;
 use super::launch::{Launch, Recovery, end_process};
 use super::lease::{Lease, clone_socket_name, is_clone_socket, open_payload};
-use super::names::{CLONE_FILE_NAMES, FILE_NAMES, LOCK_NAME};
+use super::names::{CLONE_FILE_NAMES, LOCK_NAME};
 use super::record::{LaunchId, LaunchJournal, LogClaim, RuntimeRecord};
 use super::{CLAIM_RELEASE_WAIT, LOCK_RETRY_INTERVAL, SandboxStore, record, store_error, vmm};
 use crate::error::{Error, ErrorCode, Result};
@@ -100,36 +99,6 @@ impl LockedStore {
         self.reserved
             .as_ref()
             .map(|reservation| &reservation.launch)
-    }
-
-    /// Returns the path of the Linux socket at which the VMM of the launch that
-    /// [`reserved`](Self::reserved) returns listens.
-    pub(crate) fn reserved_socket(&self) -> Option<&Path> {
-        self.reserved
-            .as_ref()
-            .map(|reservation| reservation.socket.as_path())
-    }
-
-    /// Returns the paths at which the store reaches the entries of the sandbox's directory that
-    /// it owns, which its transitions replace and remove: its files, [`FILE_NAMES`], at its own
-    /// paths, whether or not they exist, which the file system resolves as it resolves every
-    /// name, without regard to case on Windows, say; and the temporary files of its records and
-    /// the files in which a VMM staged an outcome report, under the names by which the directory
-    /// lists them now, as a [removal] finds them.
-    ///
-    /// [removal]: crate::host::store#removal
-    pub(crate) fn owned_entries(&self) -> io::Result<Vec<PathBuf>> {
-        let mut owned: Vec<PathBuf> = FILE_NAMES.iter().map(|name| self.path(name)).collect();
-        for entry in std::fs::read_dir(self.dir())? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if let Some(name) = name.to_str()
-                && (is_store_temporary(name) || is_report_staging(name))
-            {
-                owned.push(entry.path());
-            }
-        }
-        Ok(owned)
     }
 
     /// Opens the sandbox's directory through its path, as one handle through which a release of

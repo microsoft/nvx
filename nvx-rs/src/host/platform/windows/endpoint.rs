@@ -1,5 +1,5 @@
 //! The named pipes of OpenVMM's endpoints: its control endpoint and the transport over it, and
-//! the listener of a clone's restore-ready event.
+//! the listener of a restore-ready event.
 
 use std::io;
 use std::os::windows::io::OwnedHandle;
@@ -44,7 +44,7 @@ pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
 /// The bytes that the inbound buffer of a restore-ready pipe holds, more than OpenVMM's event.
 const READY_BUFFER_LEN: u32 = 4096;
 
-/// The listener at which the launch of a clone awaits the restore-ready event of its VMM: the
+/// The listener at which a restore awaits the restore-ready event of its VMM: the
 /// one instance of a named pipe, inbound and overlapped, which only the current user may open,
 /// from this host alone, and which takes the connection of the VMM before the host accepts it.
 #[derive(Debug)]
@@ -55,19 +55,6 @@ pub(crate) struct ReadyListener {
     event: OwnedHandle,
     /// Whether the host accepted the VMM's connection.
     connected: bool,
-}
-
-/// Listens at a fresh named pipe, whose name it draws at random, as the restore-ready endpoint of
-/// a clone's launch, and returns the endpoint, as OpenVMM's `--restore-ready-path` takes it, and
-/// its listener. The first instance of the pipe is the listener's, so no other process holds the
-/// name, and the pipe's protected access control list allows the current user alone.
-pub(crate) fn listen_ready(_socket_path: &Path) -> io::Result<(String, ReadyListener)> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
-    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let endpoint = format!("//./pipe/nvx-restore-ready-{suffix}");
-    let listener = ReadyListener::bind(&endpoint)?;
-    Ok((endpoint, listener))
 }
 
 impl ReadyListener {

@@ -822,17 +822,6 @@ impl SnapshotKey {
         self.machine.nic.as_ref().map(guest_network_of)
     }
 
-    /// Returns the gateway of the IPv6 identity of the template's NIC, or `None` for a template
-    /// without a NIC or whose NIC has no IPv6 identity.
-    pub(crate) fn ipv6_gateway(&self) -> Option<Ipv6Addr> {
-        self.machine
-            .nic
-            .as_ref()?
-            .ipv6
-            .as_ref()
-            .map(|ipv6| ipv6.gateway)
-    }
-
     /// Returns the tag of the filesystem slot, on which a clone's export is bound.
     pub fn filesystem_tag(&self) -> &str {
         &self.filesystem_tag

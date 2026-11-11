@@ -351,13 +351,6 @@ pub(crate) fn opened_file_id(file: &fs::File) -> io::Result<(u64, u128)> {
     Ok((seal.device(), seal.file_id()))
 }
 
-/// Returns the number of names, its hard links, of the file that `file` holds open.
-pub(crate) fn link_count(file: &fs::File) -> io::Result<u64> {
-    Ok(u64::from(
-        handle_information(file.as_raw_handle() as HANDLE)?.nNumberOfLinks,
-    ))
-}
-
 /// Returns the volume serial number and 64-bit file index of the file that `handle` holds open.
 fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
     let information = handle_information(handle)?;

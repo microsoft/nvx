@@ -1,5 +1,5 @@
 //! The Unix sockets of OpenVMM's endpoints: its control endpoint and the transport over it, and
-//! the listener of a clone's restore-ready event.
+//! the listener of a restore-ready event.
 
 use std::fs::{self, File, Permissions};
 use std::io::{self, Read};
@@ -24,7 +24,7 @@ pub(crate) fn control_endpoint(socket_path: &Path) -> io::Result<String> {
         .ok_or_else(|| io::Error::other("control socket path is not valid UTF-8"))
 }
 
-/// The listener at which the launch of a clone awaits the restore-ready event of its VMM: a Unix
+/// The listener at which a restore awaits the restore-ready event of its VMM: a Unix
 /// socket, which the VMM connects to once, and which queues its connection until the host
 /// accepts it, then the connection that the host accepted, from which it reads the event.
 #[derive(Debug)]
@@ -36,7 +36,7 @@ pub(crate) struct ReadyListener {
 }
 
 /// Listens at the Unix socket `socket_path`, in place of a socket that an earlier launch left
-/// there, as the restore-ready endpoint of a clone's launch, and returns the endpoint, as
+/// there, as the restore-ready endpoint of a restore, and returns the endpoint, as
 /// OpenVMM's `--restore-ready-path` takes it, and its listener. The socket has mode 0600,
 /// whatever the umask, as [`set_ready_socket_mode`] gives it.
 pub(crate) fn listen_ready(socket_path: &Path) -> io::Result<(String, ReadyListener)> {
@@ -79,19 +79,9 @@ impl ReadyListener {
     /// arrive: `false` once the VMM closed its end of the connection.
     ///
     /// The endpoint's first connection must be the VMM's: one of another process fails with
-    /// [`io::ErrorKind::PermissionDenied`].
-    pub(crate) fn receive(
-        &mut self,
-        pid: u32,
-        received: &mut Vec<u8>,
-        limit: usize,
-        timeout: Duration,
-    ) -> io::Result<bool> {
-        self.receive_checked(pid, received, limit, timeout, false)
-    }
-
-    /// Receives only from the original socket peer while it still runs, never from a cached
-    /// numeric PID that a later process reused. Requires Linux's `SO_PEERPIDFD`.
+    /// [`io::ErrorKind::PermissionDenied`]. It receives only from the original socket peer while
+    /// it still runs, never from a cached numeric PID that a later process reused. Requires
+    /// Linux's `SO_PEERPIDFD`.
     pub(crate) fn receive_verified(
         &mut self,
         pid: u32,
@@ -224,7 +214,7 @@ fn check_original_peer(connection: &UnixStream, accept_unreaped: bool) -> io::Re
 }
 
 /// Gives the restore-ready socket at `socket_path`, which the caller bound, the mode 0600, whatever
-/// the umask: its owner, the user of the clone's VMM, may connect to it, which takes the
+/// the umask: its owner, the user of the VMM, may connect to it, which takes the
 /// permission to write it, and no one else may.
 ///
 /// The socket is opened only to locate it, following no link at its name, and refused unless it
