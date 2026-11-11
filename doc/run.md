@@ -1293,7 +1293,7 @@ inside a writable part of a share. On Windows, it refuses a path that only a
 verbatim `\\?\` path names, such as that of a directory whose name ends in a
 period or a space, which the path without the prefix would not name. The
 shares' children follow their resolved host paths. A managed sandbox stores
-the plan in its typed configuration, in format 9. Each `start` checks it again,
+the plan in its typed configuration, in format 10. Each `start` checks it again,
 as `run` does once it has verified the distro layer: it refuses a host path
 that no longer holds a directory or regular file as recorded, a recorded path
 whose file identity changed, and shares whose host paths came to overlap, such

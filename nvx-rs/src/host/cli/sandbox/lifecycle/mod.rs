@@ -31,7 +31,8 @@ use crate::host::cli::artifacts::{Located, locate};
 use crate::host::cli::deadline::RETRY_INTERVAL;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
-    Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch, write_json,
+    Config, NetworkRecord, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
+    write_json,
 };
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
 use crate::host::cli::session::Session;
@@ -68,6 +69,8 @@ pub(crate) struct ProvisionConfig<'a> {
     pub(crate) cmdline: &'a str,
     /// The RAM upper's cap, or the default when omitted.
     pub(crate) ram_upper_percent: Option<u8>,
+    /// The network options, or `None` without `--net`.
+    pub(crate) network: Option<&'a NetworkRecord>,
 }
 
 /// The control features that the layered sandbox root must provide for the requests of

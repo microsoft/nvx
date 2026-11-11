@@ -24,7 +24,7 @@ use crate::host::cli::download::Hold;
 use crate::host::cli::exec_lock::ExecLock;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
-    Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
+    Config, NetworkRecord, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
 };
 use crate::host::cli::sandbox::{
     Artifacts, Options, error_with_cause, hypervisor, path_string, refuse_own_files,
@@ -538,9 +538,10 @@ pub(crate) fn exec_workload(
 /// the workload ended, or nothing for a dry run, which launches nothing.
 ///
 /// The VM is the one that `start` launches for the configuration that `provision` records for
-/// `launch`, whose distro layer `distro` is at the path that `provision` records, with the options
-/// of `options`: the run serializes that configuration and reads it back as `start` does, then
-/// launches it as `start` does, but in a temporary VM directory rather than a state directory.
+/// `launch`, whose distro layer `distro` is at the path that `provision` records, and `network`,
+/// the record of its network options, if any, with the options of `options`: the run serializes
+/// that configuration and reads it back as `start` does, then launches it as `start` does, but in
+/// a temporary VM directory rather than a state directory.
 /// Before it downloads or launches anything, it refuses what `start` refuses of the configuration
 /// and `exec` of `request`, after a missing artifact; it then refuses the shares that `start`
 /// refuses, with its VM directory in place of a state directory, and those of the OpenVMM that it
@@ -555,6 +556,7 @@ pub(crate) fn exec_workload(
 pub(crate) fn run(
     launch: &SandboxLaunch,
     distro: &RecordedDistro,
+    network: Option<&NetworkRecord>,
     artifacts: &Artifacts<'_>,
     options: &Options,
     request: &ExecRequest,
@@ -566,6 +568,7 @@ pub(crate) fn run(
         memory_mib: options.memory_mib,
         cmdline: &options.cmdline,
         ram_upper_percent: options.ram_upper_percent,
+        network,
     };
     let recorded = record(launch, distro, &provision).and_then(|(config, launch)| {
         // As `start` does, refuse the user's own nvx_* tokens, and the command line that the
