@@ -1,19 +1,17 @@
-//! Tests of a capture's preparation, request, and release, with a fake fence and a fake system,
-//! whose mount table, devices, and time ABI each test chooses, which record their calls in one
-//! log, and of the live system's lookups in a temporary directory.
+//! Tests of a capture's mount checks, with a fake system whose mount table and devices each test
+//! chooses, which records its calls in a log, of the names of a capture's stages, causes, and
+//! failures, and of the live system's lookups in a temporary directory.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::mounts::{self, DeviceNumber};
 use super::*;
-use crate::guest::reseed::Seed;
-use crate::guest::sys::{Errno, PortError};
+use crate::guest::snapshot::{self as mounts, CaptureFailure, Devices, Disposition};
+use crate::guest::sys::Errno;
 
 /// The base address of the distro device's MMIO window.
 const DISTRO: u64 = 0xd000_3000;
@@ -25,10 +23,6 @@ const TAG: &str = "microvm";
 const DISTRO_WINDOW: &str = "/sys/devices/virtio-mmio-cmdline/virtio-mmio.0";
 /// The sysfs directory of the scratch device's MMIO window.
 const SCRATCH_WINDOW: &str = "/sys/devices/virtio-mmio-cmdline/virtio-mmio.1";
-/// The VM generation ID of the template.
-const GENERATION: GenerationId = GenerationId::from_bytes([7; GenerationId::LENGTH]);
-/// The VM generation ID of a clone that a restore started.
-const RESTORED: GenerationId = GenerationId::from_bytes([8; GenerationId::LENGTH]);
 
 /// The mount table of a template's guest before its root's assembly, which blocks no capture.
 const TEMPLATE_TABLE: &str = "\
@@ -41,30 +35,18 @@ const TEMPLATE_TABLE: &str = "\
 25 21 0:24 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:7 - cgroup2 none rw
 ";
 
-/// A call of a test's fence or system.
+/// A call of a test's system.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Call {
-    /// The fence closed.
-    Close,
-    /// The fence opened.
-    Open,
     /// The mount table was read.
     MountTable,
     /// The windows at an MMIO base were looked up.
     Windows(u64),
     /// A block device was looked up by its number.
     BlockDevice(DeviceNumber),
-    /// The time ABI prepared the capture.
-    PreCapture,
-    /// The stall detectors' settings were restored.
-    CancelCapture,
-    /// The VM generation ID was read.
-    GenerationId,
-    /// A capture was requested.
-    Capture(CaptureRequest),
 }
 
-/// The log of the calls of a test's fence and system, which they share.
+/// The log of the calls of a test's system.
 #[derive(Clone, Default)]
 struct Calls(Arc<Mutex<Vec<Call>>>);
 
@@ -83,92 +65,10 @@ impl Calls {
     }
 }
 
-/// A fence that records when it closes and opens, and that fails to close with an error that a
-/// test chooses, or while it is closed, whichever of its handles closed it.
-struct FakeFence {
-    /// The log.
-    calls: Calls,
-    /// The error number with which the fence fails to close, if any.
-    failure: Option<Errno>,
-    /// Whether the fence is closed, which its handles share.
-    closed: Arc<AtomicBool>,
-}
-
-impl FakeFence {
-    /// Returns another handle of the fence, which shares its state and its log.
-    fn handle(&self) -> Self {
-        Self {
-            calls: self.calls.clone(),
-            failure: None,
-            closed: Arc::clone(&self.closed),
-        }
-    }
-
-    /// Returns whether the fence is closed.
-    fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
-    }
-}
-
-impl AdmissionFence for FakeFence {
-    fn close(&mut self) -> io::Result<()> {
-        if let Some(errno) = self.failure {
-            return Err(errno.into());
-        }
-        if self.closed.swap(true, Ordering::SeqCst) {
-            return Err(Errno::EBUSY.into());
-        }
-        self.calls.push(Call::Close);
-        Ok(())
-    }
-
-    fn open(&mut self) {
-        assert!(
-            self.closed.swap(false, Ordering::SeqCst),
-            "the fence opened while open"
-        );
-        self.calls.push(Call::Open);
-    }
-}
-
-/// How the fake time ABI's preparation of a capture ends.
-#[derive(Clone, Copy, Debug)]
-enum Preparation {
-    /// It suppresses the stall detectors.
-    Succeeds,
-    /// The boot checks are still pending.
-    BootChecks,
-    /// The capture checks cannot run.
-    CaptureChecks,
-    /// Another capture is pending.
-    Pending,
-    /// The detectors' settings cannot be saved, with this error number.
-    Suppression(Errno),
-    /// A detector cannot be suppressed, nor the others restored, with this error number, so
-    /// the time ABI holds their suppression.
-    Unrestored(Errno),
-    /// The thread may still hold some of the permission for the ports, with this error number,
-    /// after a preparation that held the suppression or not.
-    PortRelease(Errno, bool),
-}
-
-/// How the fake capture ends.
-#[derive(Clone, Copy, Debug)]
-enum Outcome {
-    /// The VM continues without a restore.
-    Continued,
-    /// A restore started the VM, a clone.
-    Restored,
-    /// The request fails.
-    Fails,
-    /// The request fails, and the thread may still hold some of the permission for the ports.
-    PortRelease,
-}
-
-/// A system that records its calls, with a mount table, devices, and a time ABI that a test
-/// chooses: by default, the template's table, the distro's and the scratch's windows, a distro
-/// device with partitions, a scratch device, and two other devices, and a time ABI that
-/// prepares, reads the VM generation ID, and continues without a restore.
+/// A system that records its calls, with a mount table and devices that a test chooses: by
+/// default, the template's table, the distro's and the scratch's windows, a distro device with
+/// partitions, a scratch device, and two other devices. The mount checks ask nothing of its time
+/// ABI.
 struct FakeSystem {
     /// The log.
     calls: Calls,
@@ -178,14 +78,6 @@ struct FakeSystem {
     windows: HashMap<u64, Vec<PathBuf>>,
     /// The sysfs directory of each block device.
     devices: HashMap<DeviceNumber, PathBuf>,
-    /// How the time ABI's preparation ends.
-    preparation: Preparation,
-    /// Whether the detectors' settings cannot be restored.
-    restoration_fails: bool,
-    /// Whether the VM generation ID cannot be read.
-    generation_fails: bool,
-    /// How the capture ends.
-    outcome: Outcome,
 }
 
 impl FakeSystem {
@@ -225,10 +117,6 @@ impl FakeSystem {
                     ),
                 ),
             ]),
-            preparation: Preparation::Succeeds,
-            restoration_fails: false,
-            generation_fails: false,
-            outcome: Outcome::Continued,
         }
     }
 
@@ -258,62 +146,20 @@ impl System for FakeSystem {
             .ok_or_else(|| Errno::ENOENT.into())
     }
 
-    fn pre_capture(&mut self) -> Result<(), PreCaptureError> {
-        self.calls.push(Call::PreCapture);
-        match self.preparation {
-            Preparation::Succeeds => Ok(()),
-            Preparation::BootChecks => Err(PreCaptureError::BootChecks(TimeError::PortAccess(
-                Errno::EPERM.into(),
-            ))),
-            Preparation::CaptureChecks => {
-                Err(PreCaptureError::CaptureChecks(TimeError::StateUnavailable))
-            }
-            Preparation::Pending => Err(PreCaptureError::Pending),
-            Preparation::Suppression(errno) => Err(PreCaptureError::Suppression(errno)),
-            Preparation::Unrestored(errno) => Err(PreCaptureError::Unrestored(errno)),
-            Preparation::PortRelease(errno, suppressed) => Err(PreCaptureError::PortRelease {
-                error: PortError::Revoke(errno).into(),
-                suppressed,
-            }),
-        }
+    fn pre_capture_until(&mut self, _deadline: Instant) -> Result<(), (PreCaptureError, bool)> {
+        unreachable!("the mount checks prepare no capture")
     }
 
     fn cancel_capture(&mut self) -> Result<(), Vec<u8>> {
-        self.calls.push(Call::CancelCapture);
-        if self.restoration_fails {
-            Err(b"read /run/nvx/time-suppression: No such file or directory".to_vec())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn pre_capture_until(&mut self, _deadline: Instant) -> Result<(), (PreCaptureError, bool)> {
-        let result = self.pre_capture();
-        let held = result
-            .as_ref()
-            .map_or_else(PreCaptureError::holds_suppression, |()| true);
-        result.map_err(|error| (error, held))
+        unreachable!("the mount checks restore no stall detectors")
     }
 
     fn generation_id(&mut self) -> Result<GenerationId, TimeError> {
-        self.calls.push(Call::GenerationId);
-        if self.generation_fails {
-            Err(TimeError::GenerationIdUnavailable)
-        } else {
-            Ok(GENERATION)
-        }
+        unreachable!("the mount checks read no VM generation ID")
     }
 
-    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureOutcome, (TimeError, bool)> {
-        self.calls.push(Call::Capture(request));
-        match self.outcome {
-            Outcome::Continued => Ok(CaptureOutcome::Continued),
-            Outcome::Restored => Ok(CaptureOutcome::Restored(
-                Restore::to(RESTORED).holding(seed()),
-            )),
-            Outcome::Fails => Err((TimeError::StateUnavailable, true)),
-            Outcome::PortRelease => Err((PortError::Revoke(Errno::ENOMEM).into(), true)),
-        }
+    fn capture(&mut self, _request: CaptureRequest) -> Result<CaptureOutcome, (TimeError, bool)> {
+        unreachable!("the mount checks request no capture")
     }
 }
 
@@ -326,84 +172,16 @@ fn number(major: u32, minor: u32) -> DeviceNumber {
 /// host filesystem device's tag.
 fn devices() -> Devices {
     Devices {
-        distro: Device {
-            mmio: DISTRO,
-            sectors: None,
-        },
-        scratch: Device {
-            mmio: SCRATCH,
-            sectors: Some(2048),
-        },
+        distro: DISTRO,
+        scratch: SCRATCH,
         filesystem_tag: TAG.to_owned(),
     }
 }
 
-/// Returns an open fence that records its calls in `calls`.
-fn fence(calls: &Calls) -> FakeFence {
-    FakeFence {
-        calls: calls.clone(),
-        failure: None,
-        closed: Arc::default(),
-    }
-}
-
-/// Prepares a capture of the template's devices behind `fence`, on `system`.
-fn prepare(
-    fence: FakeFence,
-    system: FakeSystem,
-) -> Result<CaptureBarrier<FakeFence>, CaptureError> {
-    CapturePreparation::new(fence, devices()).prepare_with(Box::new(system))
-}
-
-/// Returns a barrier that `system` prepared behind a fence, which record their calls in `calls`,
-/// with the preparation's calls taken.
-fn prepared(calls: &Calls, system: FakeSystem) -> CaptureBarrier<FakeFence> {
-    let barrier = prepare(fence(calls), system).unwrap();
-    assert_eq!(calls.take(), preparation_calls());
-    barrier
-}
-
-/// Returns the calls of a preparation of the template's table that succeeds.
-fn preparation_calls() -> Vec<Call> {
-    vec![
-        Call::Close,
-        Call::MountTable,
-        Call::Windows(DISTRO),
-        Call::Windows(SCRATCH),
-        Call::PreCapture,
-    ]
-}
-
-/// Returns the platform tier's request of a capture of the template, in the in-memory mode.
-fn platform_request() -> CaptureRequest {
-    CaptureRequest::in_memory(ScratchPolicy::Fresh, GENERATION)
-}
-
-/// Returns the seed of the clone, whose bytes start with its new VM generation ID.
-fn seed() -> Seed {
-    let mut bytes = [0x5a; Seed::LENGTH];
-    bytes[..GenerationId::LENGTH].copy_from_slice(&RESTORED.to_bytes());
-    Seed::from_bytes(bytes)
-}
-
-#[test]
-fn the_fence_closes_before_the_checks_and_the_detectors_are_suppressed_before_the_capture() {
-    let calls = Calls::default();
-    let barrier = prepare(fence(&calls), FakeSystem::new(&calls)).unwrap();
-    // The fence first, then the mount table, then the time ABI, which suppresses the detectors.
-    assert_eq!(calls.take(), preparation_calls());
-    assert!(matches!(barrier.capture().unwrap(), Captured::Continued));
-    // The capture's request follows the suppression. A VM that continues opens the fence, then
-    // restores the detectors' settings.
-    assert_eq!(
-        calls.take(),
-        [
-            Call::GenerationId,
-            Call::Capture(platform_request()),
-            Call::Open,
-            Call::CancelCapture,
-        ]
-    );
+/// Checks the mount table of `system` for the template's devices, as a capture does before it
+/// prepares anything.
+fn check(system: &mut FakeSystem) -> Result<(), CaptureCause> {
+    mounts::check_mounts(system, &devices(), None)
 }
 
 #[test]
@@ -457,47 +235,38 @@ fn each_mount_from_the_template_s_devices_blocks_a_capture() {
     ];
     for (line, origin, mount_point) in cases {
         let calls = Calls::default();
-        let system = FakeSystem::new(&calls).with_lines(&format!("{line}\n"));
-        let error = prepare(fence(&calls), system).unwrap_err();
-        assert_eq!(error.stage(), CaptureStage::Mounts, "{line}");
-        let CaptureCause::Mounted(mounted) = error.cause() else {
-            panic!("{error:?}");
+        let mut system = FakeSystem::new(&calls).with_lines(&format!("{line}\n"));
+        let cause = check(&mut system).unwrap_err();
+        let CaptureCause::Mounted(mounted) = &cause else {
+            panic!("{cause:?}");
         };
         assert_eq!(mounted.origin(), origin, "{line}");
         assert_eq!(mounted.mount_point(), Path::new(mount_point));
         assert_eq!(
-            error.to_string(),
-            format!("failed to check the mount table: {mount_point} is mounted from {origin}")
+            cause.to_string(),
+            format!("{mount_point} is mounted from {origin}")
         );
-        // The time ABI prepares nothing, and the fence opens again.
-        let calls = calls.take();
-        assert_eq!(calls.first(), Some(&Call::Close));
-        assert_eq!(calls.last(), Some(&Call::Open));
-        assert!(!calls.contains(&Call::PreCapture), "{calls:?}");
-        assert!(!calls.contains(&Call::CancelCapture), "{calls:?}");
     }
 }
 
 #[test]
 fn the_first_blocking_mount_of_the_table_is_reported() {
     let calls = Calls::default();
-    let system = FakeSystem::new(&calls).with_lines(
+    let mut system = FakeSystem::new(&calls).with_lines(
         "30 23 0:30 / /run/nvx/rootfs rw - overlay overlay rw\n\
          31 23 254:0 / /run/nvx/layers/distro ro - erofs /dev/vda ro\n",
     );
-    let error = prepare(fence(&calls), system).unwrap_err();
+    let cause = check(&mut system).unwrap_err();
     assert_eq!(
-        error.to_string(),
-        "failed to check the mount table: /run/nvx/rootfs is mounted from an overlay"
+        cause.to_string(),
+        "/run/nvx/rootfs is mounted from an overlay"
     );
     assert_eq!(
         calls.take(),
         [
-            Call::Close,
             Call::MountTable,
             Call::Windows(DISTRO),
             Call::Windows(SCRATCH),
-            Call::Open,
         ]
     );
 }
@@ -508,28 +277,24 @@ fn mounts_from_other_devices_and_tags_block_no_capture() {
     // Another tag's export, a tmpfs whose source names the tag or an overlay, a file system on
     // another block device, and one whose source names the distro's node but whose device is
     // another's, below a window whose name only starts with the scratch's.
-    let system = FakeSystem::new(&calls).with_lines(
+    let mut system = FakeSystem::new(&calls).with_lines(
         "30 23 0:31 / /mnt/other ro - virtiofs other ro\n\
          31 23 0:32 / /mnt/tag rw - tmpfs microvm rw\n\
          32 23 0:33 / /mnt/overlay rw - tmpfs overlay rw\n\
          33 23 254:32 / /mnt/vdc rw - ext4 /dev/vdc rw\n\
          34 23 254:48 / /mnt/vdd rw - ext4 /dev/vda rw\n",
     );
-    let barrier = prepare(fence(&calls), system).unwrap();
+    check(&mut system).unwrap();
     assert_eq!(
         calls.take(),
         [
-            Call::Close,
             Call::MountTable,
             Call::Windows(DISTRO),
             Call::Windows(SCRATCH),
             Call::BlockDevice(number(254, 32)),
             Call::BlockDevice(number(254, 48)),
-            Call::PreCapture,
         ]
     );
-    barrier.cancel().unwrap();
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
 }
 
 #[test]
@@ -540,10 +305,7 @@ fn a_device_without_a_window_has_nothing_mounted_from_it() {
     // The kernel lists no window at the scratch's base, as in a VM without a scratch device.
     system.windows.remove(&SCRATCH);
     system.devices.remove(&number(254, 16));
-    let barrier = prepare(fence(&calls), system).unwrap();
-    assert!(calls.take().contains(&Call::PreCapture));
-    drop(barrier);
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
+    check(&mut system).unwrap();
 }
 
 #[test]
@@ -576,368 +338,32 @@ fn a_mount_table_that_cannot_be_checked_blocks_a_capture() {
         let calls = Calls::default();
         let mut system = FakeSystem::new(&calls);
         system.table = table;
-        let error = prepare(fence(&calls), system).unwrap_err();
-        assert_eq!(error.stage(), CaptureStage::Mounts);
-        let CaptureCause::Io(cause) = error.cause() else {
-            panic!("{error:?}");
+        let cause = check(&mut system).unwrap_err();
+        let CaptureCause::Io(error) = &cause else {
+            panic!("{cause:?}");
         };
-        assert_eq!(cause.kind(), kind, "{error}");
-        assert_eq!(
-            error.to_string(),
-            format!("failed to check the mount table: {text}")
-        );
-        let calls = calls.take();
-        assert_eq!(calls.last(), Some(&Call::Open));
-        assert!(!calls.contains(&Call::PreCapture), "{calls:?}");
+        assert_eq!(error.kind(), kind, "{cause}");
+        assert_eq!(cause.to_string(), text);
     }
     // A table of the limit's length is read whole.
     let calls = Calls::default();
     let mut system = FakeSystem::new(&calls);
     system.table = Ok(vec![b'\n'; MOUNT_TABLE_LIMIT]);
-    prepare(fence(&calls), system).unwrap().cancel().unwrap();
-}
-
-#[test]
-fn a_fence_that_fails_to_close_stops_the_preparation() {
-    let calls = Calls::default();
-    let fence = FakeFence {
-        failure: Some(Errno::EIO),
-        ..fence(&calls)
-    };
-    let error = prepare(fence, FakeSystem::new(&calls)).unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Fence);
-    let CaptureCause::Io(cause) = error.cause() else {
-        panic!("{error:?}");
-    };
-    assert_eq!(cause.raw_os_error(), Some(Errno::EIO as i32));
-    assert_eq!(
-        error.to_string(),
-        format!("failed to fence workload admission: {}", Errno::EIO.desc())
-    );
-    // Nothing else runs, and the fence that did not close does not open.
-    assert_eq!(calls.take(), Vec::<Call>::new());
-}
-
-#[test]
-fn a_preparation_behind_a_fence_that_another_holds_closed_fails_and_leaves_it_closed() {
-    let calls = Calls::default();
-    let gate = fence(&calls);
-    let barrier = prepare(gate.handle(), FakeSystem::new(&calls)).unwrap();
-    assert_eq!(calls.take(), preparation_calls());
-    // A second preparation behind the same gate, whose time ABI would find the first one's
-    // suppression pending, cannot close the fence, so it never opens it.
-    let mut system = FakeSystem::new(&calls);
-    system.preparation = Preparation::Pending;
-    let error = prepare(gate.handle(), system).unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Fence);
-    let CaptureCause::Io(cause) = error.cause() else {
-        panic!("{error:?}");
-    };
-    assert_eq!(cause.raw_os_error(), Some(Errno::EBUSY as i32));
-    assert_eq!(calls.take(), Vec::<Call>::new());
-    assert!(gate.is_closed());
-
-    // The first barrier holds the fence closed until it opens it, after which the next
-    // preparation closes it again.
-    barrier.cancel().unwrap();
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
-    assert!(!gate.is_closed());
-    let barrier = prepare(gate.handle(), FakeSystem::new(&calls)).unwrap();
-    assert_eq!(calls.take(), preparation_calls());
-    drop(barrier);
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
-    assert!(!gate.is_closed());
-}
-
-#[test]
-fn a_failed_time_preparation_names_its_stage_and_opens_the_fence() {
-    // Each failure, its stage, and whether the time ABI holds the detectors' suppression.
-    let cases = [
-        (Preparation::BootChecks, CaptureStage::BootChecks, false),
-        (
-            Preparation::CaptureChecks,
-            CaptureStage::CaptureChecks,
-            false,
-        ),
-        (Preparation::Pending, CaptureStage::Suppression, false),
-        (
-            Preparation::Suppression(Errno::EROFS),
-            CaptureStage::Suppression,
-            false,
-        ),
-        (
-            Preparation::Unrestored(Errno::EIO),
-            CaptureStage::Suppression,
-            true,
-        ),
-        (
-            Preparation::PortRelease(Errno::ENOMEM, false),
-            CaptureStage::CaptureChecks,
-            false,
-        ),
-        (
-            Preparation::PortRelease(Errno::ENOMEM, true),
-            CaptureStage::CaptureChecks,
-            true,
-        ),
-    ];
-    for (failure, stage, held) in cases {
-        let calls = Calls::default();
-        let mut system = FakeSystem::new(&calls);
-        system.preparation = failure;
-        let error = prepare(fence(&calls), system).unwrap_err();
-        assert_eq!(error.stage(), stage, "{failure:?}");
-        match (failure, error.cause()) {
-            (Preparation::BootChecks | Preparation::CaptureChecks, CaptureCause::Time(_))
-            | (Preparation::Pending, CaptureCause::Pending) => {}
-            (
-                Preparation::Suppression(errno) | Preparation::Unrestored(errno),
-                CaptureCause::Io(cause),
-            ) if cause.raw_os_error() == Some(errno as i32) => {}
-            (Preparation::PortRelease(..), CaptureCause::Time(TimeError::PortRelease(_))) => {
-                assert_eq!(
-                    error.to_string(),
-                    format!(
-                        "failed to run the time ABI's capture checks: ioperm revoke: {}",
-                        Errno::ENOMEM.desc()
-                    )
-                );
-            }
-            _ => panic!("{failure:?}: {error:?}"),
-        }
-        // The fence opens, and the barrier restores the detectors' settings that the time ABI
-        // holds, or nothing.
-        let mut expected = preparation_calls();
-        expected.push(Call::Open);
-        if held {
-            expected.push(Call::CancelCapture);
-        }
-        assert_eq!(calls.take(), expected, "{failure:?}");
-    }
-}
-
-#[test]
-fn a_held_suppression_that_a_failed_preparation_cannot_restore_is_a_release_error() {
-    let calls = Calls::default();
-    let mut system = FakeSystem::new(&calls);
-    system.preparation = Preparation::Unrestored(Errno::EIO);
-    system.restoration_fails = true;
-    let error = prepare(fence(&calls), system).unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Release);
-    assert_eq!(
-        error.to_string(),
-        "failed to restore the stall detectors: read /run/nvx/time-suppression: No such file or \
-         directory"
-    );
-    let mut expected = preparation_calls();
-    expected.extend([Call::Open, Call::CancelCapture]);
-    assert_eq!(calls.take(), expected);
-}
-
-#[test]
-fn a_port_permission_that_the_thread_may_hold_outranks_a_failed_restore() {
-    let calls = Calls::default();
-    let mut system = FakeSystem::new(&calls);
-    system.preparation = Preparation::PortRelease(Errno::ENOMEM, true);
-    system.restoration_fails = true;
-    let error = prepare(fence(&calls), system).unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::CaptureChecks);
-    assert!(
-        matches!(error.cause(), CaptureCause::Time(TimeError::PortRelease(_))),
-        "{error:?}"
-    );
-    // The barrier still tried to restore the detectors' settings.
-    let mut expected = preparation_calls();
-    expected.extend([Call::Open, Call::CancelCapture]);
-    assert_eq!(calls.take(), expected);
-}
-
-#[test]
-fn cancel_and_drop_open_the_fence_then_restore_the_detectors() {
-    let calls = Calls::default();
-    prepared(&calls, FakeSystem::new(&calls)).cancel().unwrap();
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
-
-    drop(prepared(&calls, FakeSystem::new(&calls)));
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
-}
-
-#[test]
-fn a_failed_restoration_of_the_detectors_is_reported_after_the_fence_opens() {
-    let failing = |calls: &Calls| {
-        let mut system = FakeSystem::new(calls);
-        system.restoration_fails = true;
-        system
-    };
-    let text = "failed to restore the stall detectors: read /run/nvx/time-suppression: No such file \
-                or directory";
-    let calls = Calls::default();
-    let error = prepared(&calls, failing(&calls)).cancel().unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Release);
-    assert_eq!(error.to_string(), text);
-    // The barrier releases once: dropping it after the failure releases nothing more.
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
-
-    let error = prepared(&calls, failing(&calls)).capture().unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Release);
-    assert_eq!(error.to_string(), text);
-    assert_eq!(
-        calls.take(),
-        [
-            Call::GenerationId,
-            Call::Capture(platform_request()),
-            Call::Open,
-            Call::CancelCapture,
-        ]
-    );
-
-    drop(prepared(&calls, failing(&calls)));
-    assert_eq!(calls.take(), [Call::Open, Call::CancelCapture]);
-}
-
-#[test]
-fn a_restored_clone_gets_the_fence_closed_with_the_detectors_suppressed() {
-    let calls = Calls::default();
-    let restored = |calls: &Calls| {
-        let mut system = FakeSystem::new(calls);
-        system.outcome = Outcome::Restored;
-        let Captured::Restored(restored) = prepared(calls, system).capture().unwrap() else {
-            panic!("the clone continued");
-        };
-        restored
-    };
-    let clone = restored(&calls);
-    // Nothing opens the fence before repair, and the time daemon restores the detectors'
-    // settings once repair finishes the restore.
-    assert_eq!(
-        calls.take(),
-        [Call::GenerationId, Call::Capture(platform_request())]
-    );
-    assert_eq!(clone.restore().generation_id(), RESTORED);
-    let (mut restore, mut fence) = clone.into_parts();
-    assert_eq!(
-        format!("{restore:?}"),
-        format!("{:?}", Restore::to(RESTORED).holding(seed()))
-    );
-    // The restore holds the clone's seed, for repair to take.
-    assert_eq!(
-        restore.take_seed().map(|seed| seed.generation_id()),
-        Some(RESTORED)
-    );
-    assert_eq!(calls.take(), Vec::<Call>::new());
-    // A preparation behind another handle of the fence cannot close it, so it opens nothing.
-    let error = prepare(fence.handle(), FakeSystem::new(&calls)).unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Fence);
-    assert_eq!(calls.take(), Vec::<Call>::new());
-    // The caller opens the fence once the clone may admit executions, after its repair.
-    fence.open();
-    assert_eq!(calls.take(), [Call::Open]);
-
-    // A clone that is dropped leaves the fence closed.
-    drop(restored(&calls));
-    assert_eq!(
-        calls.take(),
-        [Call::GenerationId, Call::Capture(platform_request())]
-    );
-}
-
-#[test]
-fn a_failed_capture_restores_the_detectors_and_opens_the_fence_only_before_its_request() {
-    let calls = Calls::default();
-    let mut system = FakeSystem::new(&calls);
-    system.generation_fails = true;
-    let error = prepared(&calls, system).capture().unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::GenerationId);
-    assert!(
-        matches!(
-            error.cause(),
-            CaptureCause::Time(TimeError::GenerationIdUnavailable)
-        ),
-        "{error:?}"
-    );
-    assert_eq!(
-        error.to_string(),
-        "failed to read the VM generation ID: the VM generation ID is unavailable"
-    );
-    assert_eq!(
-        calls.take(),
-        [Call::GenerationId, Call::Open, Call::CancelCapture]
-    );
-
-    // A request that fails may fail in a clone that its restore left unrepaired, so the fence
-    // stays closed.
-    let mut system = FakeSystem::new(&calls);
-    system.outcome = Outcome::Fails;
-    let error = prepared(&calls, system).capture().unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Capture);
-    assert_eq!(
-        error.to_string(),
-        "failed to request the capture: the time state is unavailable"
-    );
-    assert!(std::error::Error::source(&error).is_some());
-    assert_eq!(
-        calls.take(),
-        [
-            Call::GenerationId,
-            Call::Capture(platform_request()),
-            Call::CancelCapture,
-        ]
-    );
-}
-
-#[test]
-fn a_failed_capture_whose_detectors_cannot_be_restored_is_a_release_error() {
-    let release = "failed to restore the stall detectors: read /run/nvx/time-suppression: No such \
-                   file or directory";
-    let calls = Calls::default();
-    let failing = |calls: &Calls| {
-        let mut system = FakeSystem::new(calls);
-        system.restoration_fails = true;
-        system
-    };
-    let mut system = failing(&calls);
-    system.generation_fails = true;
-    let error = prepared(&calls, system).capture().unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Release);
-    assert_eq!(error.to_string(), release);
-    assert_eq!(
-        calls.take(),
-        [Call::GenerationId, Call::Open, Call::CancelCapture]
-    );
-
-    let mut system = failing(&calls);
-    system.outcome = Outcome::Fails;
-    let error = prepared(&calls, system).capture().unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Release);
-    assert_eq!(error.to_string(), release);
-    let request_calls = [
-        Call::GenerationId,
-        Call::Capture(platform_request()),
-        Call::CancelCapture,
-    ];
-    assert_eq!(calls.take(), request_calls);
-
-    // A permission for the ports that the thread may still hold takes precedence.
-    let mut system = failing(&calls);
-    system.outcome = Outcome::PortRelease;
-    let error = prepared(&calls, system).capture().unwrap_err();
-    assert_eq!(error.stage(), CaptureStage::Capture);
-    assert!(
-        matches!(error.cause(), CaptureCause::Time(TimeError::PortRelease(_))),
-        "{error:?}"
-    );
-    assert_eq!(calls.take(), request_calls);
+    check(&mut system).unwrap();
 }
 
 #[test]
 fn errors_name_their_stage_and_their_cause() {
-    let error = CaptureError::new(CaptureStage::Suppression, CaptureCause::Pending);
+    let failure = CaptureFailure {
+        stage: CaptureStage::Suppression,
+        cause: CaptureCause::Pending,
+        disposition: Disposition::Resumed,
+    };
     assert_eq!(
-        error.to_string(),
+        failure.to_string(),
         "failed to suppress the stall detectors: a capture is already pending"
     );
-    assert!(std::error::Error::source(&error).is_none());
-    assert!(matches!(error.into_cause(), CaptureCause::Pending));
+    assert!(std::error::Error::source(&failure).is_none());
     let stages = [
         (CaptureStage::Fence, "fence workload admission"),
         (CaptureStage::Mounts, "check the mount table"),

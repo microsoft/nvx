@@ -480,7 +480,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/activation/mod.rs - activation (line 130)` | kept |  |
 | `nvx-rs/src/exec/mod.rs - exec (line 113)` | retired | The exec engine leaves (SL6.11a) |
 | `nvx-rs/src/gpt/mod.rs - gpt (line 43)` | kept |  |
-| `nvx-rs/src/guest/activation.rs - guest::activation (line 195)` | kept | Its capture preparation and admission fence leave (#1087), whose PR rewrites it on `guest::snapshot::capture` |
+| `nvx-rs/src/guest/activation.rs - guest::activation (line 158)` | kept | SL6.11c rewrote it on `guest::snapshot::capture`, when its capture preparation and admission fence left (#1087) |
 | `nvx-rs/src/guest/activation/state.rs - guest::activation::state::Activation (line 56)` | kept |  |
 | `nvx-rs/src/guest/cgroup.rs - guest::cgroup (line 36)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/entry.rs - guest::entry (line 90)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
@@ -489,7 +489,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/guest/gpt.rs - guest::gpt (line 18)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/mapper.rs - guest::mappings::mapper (line 107)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/table.rs - guest::mappings::table::MappingTable (line 47)` | kept |  |
-| `nvx-rs/src/guest/mod.rs - guest (line 40)` | kept | The guest-agent guidelines quote it |
+| `nvx-rs/src/guest/mod.rs - guest (line 39)` | kept | The guest-agent guidelines quote it |
 | `nvx-rs/src/guest/nvxs.rs - guest::nvxs (line 22)` | kept |  |
 | `nvx-rs/src/guest/process.rs - guest::process (line 12)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/process.rs - guest::process (line 39)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
