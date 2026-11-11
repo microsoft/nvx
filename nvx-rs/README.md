@@ -3569,6 +3569,18 @@ python3 ../scripts/nvx.py test-guest-binaries \
   --binaries ../build/nvx-rs-guest-binaries
 ```
 
+The [security checklist](tests/security_checklist.rs) checks, through the
+public API alone and without a VM, each security requirement that the host's
+documentation states: the guest targets of an export and a read-only path
+inside a writable one, the checks of a staged image and the claim of a scratch
+image, which callers keep in directories that only their own account can write,
+the exported objects that each start checks again, a VM's private directory and
+its new private log, the exit proof of a saved VM, the owner of its endpoint,
+and its recovery from the saved values, and a snapshot's strict directory. An
+idle copy of the test binary stands in for a VM's process. The checks that NVX
+makes of a restore need a captured snapshot, so the unit tests of
+`nvx::host::vm`, `nvx::host::snapshot`, and `nvx::host::restore` check them.
+
 Two examples compile the documented workflows through the public API alone,
 and nothing runs them: [`host-workflows`](examples/host-workflows.rs), a cold
 boot, a capture into a snapshot, a restore from it, finding a VM again after its
