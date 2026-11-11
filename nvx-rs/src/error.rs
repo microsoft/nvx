@@ -132,8 +132,8 @@ pub enum ErrorCode {
     SandboxRunning,
     /// `sandbox-exited`: the sandbox's VM exited without a stop. A start launches it again.
     SandboxExited,
-    /// `sandbox-busy`: another lifecycle transition of the sandbox held its lock until the
-    /// deadline passed.
+    /// `sandbox-busy`: another lifecycle transition, or exec, of the sandbox held its lock until
+    /// the deadline passed.
     SandboxBusy,
     /// `runtime-mismatch`: the sandbox's VM runs under another runtime identity than the
     /// artifacts', so it is not driven, and only a stop, which terminates it, applies.

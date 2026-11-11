@@ -14,7 +14,8 @@
 //! `nvx.py sandbox` and `nvx.py run`, and that this test replayed until microsoft/nvx#728 retired
 //! them.
 //!
-//! The other tests check what `nvx-rs` adds to `nvx.py`.
+//! The other tests check what `nvx-rs` adds to `nvx.py`, as those of [`exec_lock`] check that the
+//! executions of a managed sandbox run one at a time, across processes.
 #![cfg(all(
     feature = "cli",
     feature = "testing",
@@ -29,6 +30,8 @@ mod download;
 mod dry_run;
 #[path = "cli/egress.rs"]
 mod egress;
+#[path = "cli/exec_lock.rs"]
+mod exec_lock;
 #[path = "cli/formats.rs"]
 mod formats;
 #[path = "cli/harness.rs"]
@@ -898,7 +901,7 @@ fn a_restarted_cli_drives_only_a_vm_of_its_runtime_identity() {
     // The terminated OpenVMM published no outcome report, and its log stays.
     assert_eq!(
         state_entries(&root, "state"),
-        ["config.json", "openvmm.log", "sandbox.lock"]
+        ["config.json", "exec.lock", "openvmm.log", "sandbox.lock"]
     );
     assert_eq!(
         transition(&root, "stop", "state", &[]),
@@ -1207,7 +1210,7 @@ fn a_sandbox_whose_openvmm_exited_reports_it_once_and_starts_again() {
     );
     assert_eq!(
         state_entries(&root, "state"),
-        ["config.json", "openvmm.log", "sandbox.lock"]
+        ["config.json", "exec.lock", "openvmm.log", "sandbox.lock"]
     );
     assert_eq!(
         transition(&root, "stop", "state", &[]),

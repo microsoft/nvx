@@ -12,6 +12,20 @@ use crate::host::sandbox::mount::PolicyKind;
 use crate::host::sandbox::options::PolicyPathOption;
 
 #[test]
+fn exec_wait_defaults_to_sixty_seconds_and_uses_timeout_number_rules() {
+    assert_eq!(parse(&["exec".to_owned()]).unwrap().0.wait, 60.0);
+    let (options, unknown) =
+        parse(&["exec", "--wait", "0.05", "--timeout", "2"].map(str::to_owned)).unwrap();
+    assert!(unknown.is_empty());
+    assert_eq!((options.wait, options.timeout), (0.05, 2.0));
+    for value in ["0", "-1", "nan", "inf", "1e400", "invalid"] {
+        let error = parse(&["exec".to_owned(), "--wait".to_owned(), value.to_owned()]).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::ArgumentInvalid));
+        assert!(error.message().unwrap().contains("--wait"));
+    }
+}
+
+#[test]
 fn the_upper_is_scratch_or_ram() {
     let upper = |value: &str| {
         parse(&["--upper".to_owned(), value.to_owned()]).map(|(options, _)| options.upper)

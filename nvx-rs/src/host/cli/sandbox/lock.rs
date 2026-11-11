@@ -4,6 +4,7 @@ use super::error_with_cause;
 use super::lifecycle::{CONFIG_NAME, LOCK_RETRY_INTERVAL, create_state_directory};
 use crate::ErrorCode;
 use crate::host::cli::deadline::Deadline;
+use crate::host::cli::exec_lock;
 use crate::host::cli::store::{LockedState, StateDir, StateFile};
 use crate::host::cli::{Exit, Result, io_error};
 use crate::host::platform;
@@ -162,6 +163,9 @@ impl LifecycleLock {
             .filter(|name| !matches!(name, StateFile::Lock | StateFile::Config))
             .chain([StateFile::Config])
             .collect();
+        directory
+            .remove_file(exec_lock::NAME)
+            .map_err(|error| io_error(ErrorCode::Io, &error, &state_dir.join(exec_lock::NAME)))?;
         self.remove_files(&names)?;
         let foreign = remaining(&state_dir)?;
         if !foreign.is_empty() {
@@ -235,7 +239,11 @@ fn remaining(path: &Path) -> Result<Vec<String>> {
                     )));
                 }
             };
-            (name != StateFile::Lock.name() && !name.starts_with(".nfs")).then_some(Ok(name))
+            // On a file system without POSIX deletion, the removed exec lock of an exec that is
+            // still ending stays under its name until that exec closes it.
+            let gone = name == exec_lock::NAME && platform::is_deleted(&path.join(&name));
+            (name != StateFile::Lock.name() && !gone && !name.starts_with(".nfs"))
+                .then_some(Ok(name))
         })
         .collect()
 }

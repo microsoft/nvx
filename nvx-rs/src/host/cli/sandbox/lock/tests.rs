@@ -115,6 +115,16 @@ fn removals_refuse_live_records_and_keep_foreign_files() {
         assert!(state.join(CONFIG_NAME).exists());
         std::fs::remove_file(path).unwrap();
     }
+    std::fs::write(state.join("exec.lock"), "owned").unwrap();
+    let foreign_exec_names = [
+        "exec.lock.foreign",
+        ".exec.lock.42.tmp",
+        ".exec.lock.x.tmp",
+        ".exec.lock.42.tmp.more",
+    ];
+    for name in foreign_exec_names {
+        std::fs::write(state.join(name), "keep").unwrap();
+    }
     std::fs::write(state.join("foreign.txt"), "keep").unwrap();
     let lock = LifecycleLock::acquire(&state, 10.0, false).unwrap();
     let error = lock.remove(10.0).unwrap_err();
@@ -123,6 +133,10 @@ fn removals_refuse_live_records_and_keep_foreign_files() {
         std::fs::read_to_string(state.join("foreign.txt")).unwrap(),
         "keep"
     );
+    for name in foreign_exec_names {
+        assert_eq!(std::fs::read_to_string(state.join(name)).unwrap(), "keep");
+    }
+    assert!(!state.join("exec.lock").exists());
     assert!(!state.join(CONFIG_NAME).exists());
     assert!(!state.join(StateFile::Lock.name()).exists());
 }
@@ -142,6 +156,7 @@ fn removal_cleans_owned_temporaries_without_touching_a_neighbour() {
         "openvmm.log",
         "outcome.json",
         "control.capability",
+        "exec.lock",
     ] {
         std::fs::write(state.join(name), "owned").unwrap();
     }

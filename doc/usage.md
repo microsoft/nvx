@@ -99,7 +99,7 @@ each code for callers of the `nvx` library.
 | `sandbox-not-running` | 1 | `exec` or `stop` found the VM of a provisioned sandbox not running. |
 | `sandbox-running` | 1 | `start` or `deprovision` found the sandbox's VM, or a launch of it, running. |
 | `sandbox-exited` | 1 | The sandbox's OpenVMM exited without a `stop`: the transition that finds it reports it and clears its runtime record, and `start` launches the sandbox again. |
-| `sandbox-busy` | 1 | Another lifecycle transition held the sandbox's lock until `--timeout` passed. |
+| `sandbox-busy` | 1 | Another lifecycle transition held the sandbox's lock until `--timeout` passed, or another `exec` held its exec lock until `--wait` passed. |
 | `runtime-mismatch` | 1 | The sandbox's VM runs under another runtime identity than the artifacts', whose differing parts the message names, so only `stop`, which terminates it, applies. |
 | `vmm-indeterminate` | 1 | Whether the sandbox's OpenVMM runs cannot be determined, so its records remain for a later attempt. |
 | `format-unsupported` | 1 | A record or report has a format that this build does not read, such as the state of a sandbox that another build provisioned or started. |
@@ -259,6 +259,7 @@ nvx-rs/target/release/nvx-rs sandbox
     [--workload-user UID:GID]
     [--memory-mib MIB]
     [--timeout SECONDS]
+    [--wait SECONDS]
     [--exec-timeout-ms MILLISECONDS]
     [--cwd GUEST_PATH]
     [--environment KEY=VALUE]...
@@ -313,6 +314,7 @@ do, and their names cannot be abbreviated either.
 | `--workload-user UID:GID` | `65534:65534` | Select the fixed non-root workload identity for `run` or `provision`. Both IDs must be ASCII decimal integers from 1 to 4294967294, without signs, whitespace, or underscores. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. |
 | `--timeout SECONDS` | `60` | Set the timeout for each managed control request and its response in `start`, `exec`, and `stop`, and the longest time that `provision`, `start`, `stop`, and `deprovision` wait for another lifecycle transition of the sandbox. It is a decimal number, with an optional fraction and exponent, that must be finite and greater than 0. |
+| `--wait SECONDS` | `60` | Set the longest time that a managed `exec` waits for the `exec` that another `nvx-rs` process runs in the sandbox to end, since a sandbox runs one `exec` at a time; it then fails with `sandbox-busy`. `stop` never waits for an `exec`. Like `--timeout`, which still bounds each wait for another lifecycle transition, it is a decimal number that must be finite and greater than 0. |
 | `--exec-timeout-ms MILLISECONDS` | `0` | Set the managed `exec` guest workload timeout to an ASCII decimal integer from 0 to 4294967295, without signs, whitespace, or underscores; zero disables the workload deadline. This is separate from the finite host `--timeout` control deadline. |
 | `--cwd GUEST_PATH` | `/` | Set an absolute working directory inside the workload root for managed `exec`. It is resolved after the workload identity and root are applied; missing, inaccessible, or non-directory paths fail the workload launch. Default and layered environments point `PWD` at this directory; an exact replacement environment controls `PWD` itself. |
 | `--environment KEY=VALUE` | omitted | Set the exact managed `exec` environment. Repeat for multiple entries. Empty values, spaces, additional equals signs, and UTF-8 are preserved. Inline values are visible in the invoking host process arguments; use `--environment-file` for sensitive values. |

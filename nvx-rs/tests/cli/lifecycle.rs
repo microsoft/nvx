@@ -47,6 +47,12 @@ fn running() -> Vec<&'static str> {
     names
 }
 
+fn with_exec(mut names: Vec<&'static str>) -> Vec<&'static str> {
+    names.push("exec.lock");
+    names.sort_unstable();
+    names
+}
+
 /// Returns the arguments of the lifecycle operation `operation` of the sandbox whose state
 /// directory is `state`, with `options`.
 pub(crate) fn sandbox<S: AsRef<str>>(operation: &str, state: &str, options: &[S]) -> Vec<String> {
@@ -576,7 +582,12 @@ fn check_lifecycle(case: &Configuration) {
         let context = format!("{}, start {round}", case.name);
         root.nvx_rs(&sandbox::<&str>("start", case.argument, &[]))
             .assert_silent_success();
-        assert_eq!(entries(&state), running(), "{context}");
+        let expected = if round == 1 {
+            running()
+        } else {
+            with_exec(running())
+        };
+        assert_eq!(entries(&state), expected, "{context}");
         let (endpoint, process) =
             assert_runtime_record(&root, case.state, &json(&state.join("runtime.json")));
         assert_capability(&state);
@@ -596,7 +607,7 @@ fn check_lifecycle(case: &Configuration) {
         let outcome = root.nvx_rs(&sandbox("exec", case.argument, options));
         outcome.assert_success();
         assert_eq!(outcome.stdout(), *stdout, "{context}");
-        assert_eq!(entries(&state), running(), "{context}");
+        assert_eq!(entries(&state), with_exec(running()), "{context}");
         root.nvx_rs(&sandbox::<&str>("stop", case.argument, &[]))
             .assert_silent_success();
         assert!(
@@ -606,7 +617,7 @@ fn check_lifecycle(case: &Configuration) {
                 .is_some(),
             "{context}: OpenVMM runs on"
         );
-        assert_eq!(entries(&state), STOPPED, "{context}");
+        assert_eq!(entries(&state), with_exec(STOPPED.to_vec()), "{context}");
         assert_outcome_report(
             &json(&state.join("outcome.json")),
             HYPERVISOR,
@@ -669,7 +680,12 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
     for round in 1..=2 {
         let context = format!("start {round}");
         operate(&root, "start", "state", &[]).assert_silent_success();
-        assert_eq!(entries(&state), running(), "{context}");
+        let expected = if round == 1 {
+            running()
+        } else {
+            with_exec(running())
+        };
+        assert_eq!(entries(&state), expected, "{context}");
         let (endpoint, process) =
             assert_runtime_record(&root, "state", &json(&state.join("runtime.json")));
         let mut options = Options::parse(&root.openvmm_arguments("build/fake-openvmm-state.json"));
@@ -694,7 +710,7 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
                 .is_some(),
             "{context}: OpenVMM runs on"
         );
-        assert_eq!(entries(&state), STOPPED, "{context}");
+        assert_eq!(entries(&state), with_exec(STOPPED.to_vec()), "{context}");
         assert_outcome_report(
             &json(&state.join("outcome.json")),
             HYPERVISOR,
@@ -738,7 +754,7 @@ fn stops_keep_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
                 .is_some(),
             "{context}: OpenVMM runs on"
         );
-        assert_eq!(entries(&state), STOPPED, "{context}");
+        assert_eq!(entries(&state), with_exec(STOPPED.to_vec()), "{context}");
         let report = state.join("outcome.json");
         let (permissions, expected) = (mode(&report), FAKE_REPORT_MODE & !(umask & 0o077));
         assert_eq!(
@@ -1071,7 +1087,7 @@ fn managed_execs_exit_with_the_workload_status() {
             "{}: the workload outlived its timeout",
             case.name
         );
-        assert_eq!(entries(&state), running(), "{}", case.name);
+        assert_eq!(entries(&state), with_exec(running()), "{}", case.name);
     }
     root.nvx_rs(&sandbox::<&str>("stop", "{root/state}", &[]))
         .assert_silent_success();
@@ -1143,7 +1159,12 @@ fn refusals_of_a_running_sandbox(root: &Root) {
     for operation in ["stop", "exec"] {
         let outcome = operate(root, operation, "state", &[]);
         assert_refused(root, &outcome, "sandbox-not-running", &["not running"]);
-        assert_eq!(entries(&state), STOPPED, "{operation}");
+        let expected = if operation == "exec" {
+            with_exec(STOPPED.to_vec())
+        } else {
+            STOPPED.to_vec()
+        };
+        assert_eq!(entries(&state), expected, "{operation}");
     }
     operate(root, "deprovision", "state", &[]).assert_silent_success();
 }
@@ -1542,7 +1563,7 @@ fn refusals_of_lifecycle_operations() {
 /// that refuses access for good, and provision waits for a removed one, which a file system
 /// without POSIX deletion keeps under its name until its last handle closes (microsoft/nvx#464).
 #[cfg(windows)]
-mod windows {
+pub(crate) mod windows {
     use std::fs::{self, File};
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
@@ -1580,7 +1601,7 @@ mod windows {
     /// Deletes the file `path` as a file system without POSIX deletion deletes a file that other
     /// handles hold: its name stays, and opening it fails, until the last handle closes, of which
     /// the returned one is the last unless others hold the file.
-    fn delete_pending(path: &Path) -> File {
+    pub(crate) fn delete_pending(path: &Path) -> File {
         let file = fs::OpenOptions::new()
             .access_mode(DELETE)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)

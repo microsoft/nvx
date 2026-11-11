@@ -134,7 +134,7 @@ fn not_regular() -> io::Error {
 /// only for writing, and the open does not wait, as it would for a FIFO without a reader. The
 /// umask may have cleared even the current user's permission to write it, so a lock file of the
 /// current user that the user can open for writing no more is given its mode again.
-fn open_lock(path: &Path) -> Result<File> {
+pub(crate) fn open_lock(path: &Path) -> Result<File> {
     let open = || {
         let mut options = OpenOptions::new();
         options

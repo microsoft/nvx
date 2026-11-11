@@ -54,6 +54,8 @@ options:
   --timeout TIMEOUT     control operation timeout, and the longest wait for
                         another lifecycle transition of the sandbox, in
                         seconds (default: 60)
+  --wait WAIT           the longest wait for another exec of the sandbox, in
+                        seconds (default: 60)
   --exec-timeout-ms EXEC_TIMEOUT_MS
                         guest workload timeout in milliseconds; zero disables
                         it
@@ -146,7 +148,7 @@ fn seconds(value: &str) -> std::result::Result<f64, String> {
 
 /// The options of `nvx-rs sandbox`, which parse with the defaults of the former
 /// `nvx.py sandbox`.
-pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
+pub(in crate::host::cli) const OPTIONS: [Spec; 37] = [
     Spec::one("--layer"),
     Spec::one("--layer-format"),
     Spec::one("--scratch"),
@@ -159,6 +161,7 @@ pub(in crate::host::cli) const OPTIONS: [Spec; 36] = [
     Spec::one("--workload-user"),
     Spec::one("--memory-mib"),
     Spec::one("--timeout"),
+    Spec::one("--wait"),
     Spec::one("--exec-timeout-ms"),
     Spec::one("--cwd"),
     Spec::one("--environment"),
@@ -214,6 +217,8 @@ pub(crate) struct Options {
     pub(crate) memory_mib: u64,
     /// `--timeout` in seconds, 60 by default.
     pub(crate) timeout: f64,
+    /// `--wait` in seconds, 60 by default.
+    pub(crate) wait: f64,
     /// `--exec-timeout-ms`, 0 by default.
     pub(crate) exec_timeout_ms: u32,
     /// `--cwd`.
@@ -259,6 +264,7 @@ impl Default for Options {
             workload_user: DEFAULT_WORKLOAD_IDENTITY,
             memory_mib: 256,
             timeout: 60.0,
+            wait: 60.0,
             exec_timeout_ms: 0,
             cwd: None,
             environment: Vec::new(),
@@ -321,6 +327,7 @@ impl Receiver for Options {
             }
             "--memory-mib" => self.memory_mib = integer(&text(), 1..=MAX_MEMORY_MIB)?,
             "--timeout" => self.timeout = seconds(&text())?,
+            "--wait" => self.wait = seconds(&text())?,
             "--exec-timeout-ms" => self.exec_timeout_ms = integer(&text(), 0..=u32::MAX)?,
             "--cwd" => self.cwd = Some(text()),
             "--environment" => self.environment.push(text()),
