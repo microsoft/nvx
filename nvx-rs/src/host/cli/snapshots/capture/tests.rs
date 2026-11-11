@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::host::platform;
-use crate::host::process::{Opened, ProcessRef};
+use crate::host::process::{BootId, Opened, ProcessRef};
 use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, class};
 use crate::host::snapshot::{MANIFEST_NAME, Snapshot};
 use crate::host::spawn::{self, VmmCommand};
@@ -21,6 +21,9 @@ use crate::protocol::{
 
 const HELPER: &str = "host::cli::snapshots::capture::tests::capture_helper";
 const COMMAND_HELPER: &str = "host::cli::snapshots::capture::tests::command_helper";
+/// Names the VM directory that a fake VMM started before its capture enters once its capability
+/// arrives.
+const STARTED_VM_DIR: &str = "NVX_CAPTURE_STARTED_VM_DIR";
 
 type Inventory = Vec<(PathBuf, (u64, u128), u64, std::time::SystemTime)>;
 
@@ -45,6 +48,43 @@ impl Fixture {
         capture(&options, &runtime(self.root.path()), |prepared| {
             Ok(fake_spawn(self.root.path(), prepared, behavior))
         })
+    }
+
+    /// Captures with a fake VMM that starts before the capture and waits for the capability that
+    /// its launch hands over, so that the capture's timeout, which bounds launch too, never runs
+    /// while the VMM's process starts. The returned guard ends the fake only once dropped, so that
+    /// the caller can check first that the capture stopped it.
+    fn capture_started(&self, name: &str, behavior: &str, timeout: u32) -> (Result, OwnedCommand) {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", HELPER, "--ignored", "--nocapture"])
+            .env(STARTED_VM_DIR, self.vm_dir())
+            .current_dir(self.root.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut vmm = OwnedCommand(crate::host::tests::spawn_locked(&mut command).unwrap());
+        let reference = ProcessRef {
+            pid: vmm.0.id(),
+            start_time: platform::process_start_time(vmm.0.id()).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        };
+        record(self.root.path(), &reference);
+        let Opened::Running(process) = Process::open(&reference).unwrap() else {
+            panic!("the fake VMM exited before its capture");
+        };
+        wait_file(&self.root.path().join("started"));
+        let mut stdin = vmm.0.stdin.take().unwrap();
+        let mut options = self.options(name);
+        options.timeout = timeout;
+        let result = capture(&options, &runtime(self.root.path()), |prepared| {
+            write_recipe(self.root.path(), &prepared, behavior);
+            // As `spawn_vm` does, this hands the VMM its capability on its standard input.
+            stdin.write_all(prepared.capability().as_bytes()).unwrap();
+            drop(stdin);
+            Ok(process)
+        });
+        (result, vmm)
     }
 
     fn store(&self) -> Store {
@@ -158,7 +198,8 @@ fn runtime(root: &Path) -> Runtime {
     }
 }
 
-fn fake_spawn(root: &Path, prepared: Prepared, behavior: &str) -> Process {
+/// Checks the durable barrier that a spawn follows, and writes the fake VMM's recipe.
+fn write_recipe(root: &Path, prepared: &Prepared, behavior: &str) {
     let dir = prepared.outputs().log.parent().unwrap();
     let journal: Value =
         serde_json::from_slice(&fs::read(dir.join("launch.json")).unwrap()).unwrap();
@@ -212,12 +253,16 @@ fn fake_spawn(root: &Path, prepared: Prepared, behavior: &str) -> Process {
         serde_json::to_vec(&recipe).unwrap(),
     )
     .unwrap();
+}
+
+fn fake_spawn(root: &Path, prepared: Prepared, behavior: &str) -> Process {
+    write_recipe(root, &prepared, behavior);
     let command = VmmCommand::new(
         std::env::current_exe().unwrap(),
         ["--exact", HELPER, "--ignored", "--nocapture"]
             .map(Into::into)
             .to_vec(),
-        dir,
+        prepared.outputs().log.parent().unwrap(),
     );
     let child = spawn::spawn_vm(
         &command,
@@ -226,17 +271,22 @@ fn fake_spawn(root: &Path, prepared: Prepared, behavior: &str) -> Process {
     )
     .unwrap();
     let process = child.process().unwrap();
+    record(root, process.reference());
+    child.detach();
+    drop(prepared);
+    process
+}
+
+/// Records an owned fake VMM, which the fixture ends if a test leaves it running.
+fn record(root: &Path, reference: &ProcessRef) {
     let path = root.join("processes.json");
     let mut references: Vec<ProcessRef> = if path.exists() {
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap()
     } else {
         Vec::new()
     };
-    references.push(process.reference().clone());
+    references.push(reference.clone());
     fs::write(path, serde_json::to_vec(&references).unwrap()).unwrap();
-    child.detach();
-    drop(prepared);
-    process
 }
 
 fn wait_file(path: &Path) {
@@ -354,8 +404,16 @@ fn duplicate_names_and_a_failed_new_capture_never_change_an_existing_snapshot() 
 #[test]
 fn a_capture_ack_and_successful_output_without_timely_exit_are_stopped_but_never_finished() {
     let fixture = Fixture::new();
-    let error = fixture.capture("late", "hang", 1).unwrap_err();
+    // The timeout bounds launch too: the fake VMM starts before it, and the timeout leaves the
+    // handshake of two processes room on a loaded host, so that only the exit wait times out.
+    let (result, _vmm) = fixture.capture_started("late", "hang", 5);
+    let error = result.unwrap_err();
     assert_eq!(error.code(), Some(ErrorCode::TimedOut), "{error:?}");
+    assert_eq!(
+        error.message(),
+        Some("capture VM did not exit before its deadline"),
+        "only the wait for the acknowledged capture's exit may time out"
+    );
     assert!(fixture.root.path().join("ack.json").exists());
     assert!(fixture.vm_dir().join(OPENVMM_DIR).exists());
     assert!(fixture.vm_dir().join("outcome.json").exists());
@@ -648,8 +706,17 @@ fn respond(stream: &mut (impl Read + Write), capability: &[u8], refused: bool) {
 #[test]
 #[ignore = "authenticated fake VMM subprocess; not real-VM capture proof"]
 fn capture_helper() {
+    // Started before its capture, the fake reports that it runs, and enters its VM directory,
+    // as a spawned VMM starts in it, once its capability arrives.
+    let started = std::env::var_os(STARTED_VM_DIR);
+    if started.is_some() {
+        fs::write("started", b"").unwrap();
+    }
     let mut capability = Vec::new();
     std::io::stdin().read_to_end(&mut capability).unwrap();
+    if let Some(dir) = started {
+        std::env::set_current_dir(dir).unwrap();
+    }
     assert_eq!(capability.len(), CAPABILITY_LEN);
     assert_eq!(fs::read("control.capability").unwrap(), capability);
     let directory = std::env::current_dir().unwrap();
