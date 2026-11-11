@@ -80,15 +80,20 @@ from .nvx_rs import EgressRules, compile_egress_policy
 from .openvmm_process import BootConsole, OpenvmmProcess
 from .sandbox_lifecycle_tests import (
     CONFIG,
+    EVIDENCE_LIMIT,
+    LOG,
     OUTCOME,
     PROBE,
     PROVISIONED_ENTRIES,
     STOPPED_ENTRIES,
     LifecycleAcceptance,
+    bounded_evidence,
     check_managed_report,
     managed_report,
+    openvmm_processes,
     run_acceptance,
     run_sandbox_lifecycle,
+    terminate_process,
 )
 from .sandbox_proxy_tests import run_sandbox_proxy_only
 from .sandbox_ram_upper_tests import (
@@ -172,6 +177,7 @@ MICROVM_TEST_SCENARIOS = (
     "untiered-network-policy",
     "virtio-features",
     "virtio-net",
+    "vm-lifecycle",
     "workload-identity",
 )
 UBUNTU_UNSUPPORTED_SCENARIOS = frozenset(("console-snapshot",))
@@ -192,12 +198,14 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "scratch-snapshot",
         "snapshot-tiers",
         "virtio-features",
+        "vm-lifecycle",
     )
 )
-# The public `nvx-rs sandbox` scenarios, which also read the Ubuntu distro
-# layer and the sandbox scratch template that `nvx-rs download` installs. A
-# default run runs them, but CI runs them in its guest and sandbox jobs, which
-# take those Ubuntu artifacts, rather than in the shards of the default suite.
+# The public scenarios, of `nvx-rs sandbox` and of the public API's VM
+# lifecycle, which also read the Ubuntu distro layer and the sandbox scratch
+# template that `nvx-rs download` installs. A default run runs them, but CI
+# runs them in its guest and sandbox jobs, which take those Ubuntu artifacts,
+# rather than in the shards of the default suite.
 PUBLIC_SANDBOX_SCENARIOS = frozenset(
     (
         "managed-exec-config",
@@ -205,6 +213,7 @@ PUBLIC_SANDBOX_SCENARIOS = frozenset(
         "sandbox-lifecycle",
         "sandbox-proxy-only",
         "sandbox-ram-upper",
+        "vm-lifecycle",
     )
 )
 # The same-host restore cases also run on the CI debug kernel (doc/ci.md),
@@ -1456,8 +1465,9 @@ def run_workload_identity(
 MANAGED_LIFECYCLE_TEST = "managed_lifecycle"
 
 
-def managed_lifecycle_test_command(cargo: str) -> list[str]:
-    """Return the Cargo command that runs MANAGED_LIFECYCLE_TEST."""
+def ignored_nvx_rs_test_command(cargo: str, test: str) -> list[str]:
+    """Return the Cargo command that runs the ignored tests of the nvx-rs
+    test target ``test``."""
     return [
         cargo,
         "test",
@@ -1465,11 +1475,16 @@ def managed_lifecycle_test_command(cargo: str) -> list[str]:
         os.fspath(nvx_rs.DIRECTORY / "Cargo.toml"),
         "--locked",
         "--test",
-        MANAGED_LIFECYCLE_TEST,
+        test,
         "--",
         "--ignored",
         "--nocapture",
     ]
+
+
+def managed_lifecycle_test_command(cargo: str) -> list[str]:
+    """Return the Cargo command that runs MANAGED_LIFECYCLE_TEST."""
+    return ignored_nvx_rs_test_command(cargo, MANAGED_LIFECYCLE_TEST)
 
 
 def run_managed_lifecycle(
@@ -1631,6 +1646,119 @@ def run_managed_lifecycle(
         raise RuntimeError(
             "managed lifecycle without a control endpoint was not rejected before boot"
         )
+
+
+# The ignored nvx-rs test of a cold VM's lifecycle through the public API of
+# `nvx`: nvx-rs/tests/vm_lifecycle.rs.
+VM_LIFECYCLE_TEST = "vm_lifecycle"
+VM_LIFECYCLE_EVIDENCE_PREFIX = "vm-lifecycle-"
+
+
+def end_openvmm_processes(marker: str, timeout: float) -> tuple[int, ...]:
+    """End every OpenVMM process whose arguments contain ``marker``, wait
+    ``timeout`` seconds at most until they are gone, and return their IDs."""
+    processes = openvmm_processes(marker)
+    for pid in processes:
+        with suppress(OSError):
+            terminate_process(pid)
+    deadline = time.monotonic() + timeout
+    while survivors := openvmm_processes(marker):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"OpenVMM processes {list(survivors)} survived")
+        time.sleep(0.05)
+    return processes
+
+
+def run_vm_lifecycle(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Run a cold VM's lifecycle through the public API of `nvx`.
+
+    The nvx-rs test VM_LIFECYCLE_TEST creates and spawns a VM of nvx-init over
+    the Ubuntu EROFS layer and a new copy of the sandbox scratch template,
+    lets the launch go, reattaches to the VM from the values that it saved,
+    and stops it through its guest. This gives the test its inputs, then
+    checks what it leaves: OpenVMM's outcome report, and no OpenVMM process.
+    """
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise ScriptError(
+            "the vm-lifecycle scenario runs the nvx-rs test "
+            f"{VM_LIFECYCLE_TEST} with Cargo, which is not on PATH; "
+            "install Rust (https://rustup.rs)"
+        )
+    artifacts = load_workload_artifacts()
+    # Cargo runs the test in the nvx-rs directory, so every path is absolute.
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="nvx-vm-lifecycle-")).resolve()
+    vm_dir = root / "vm"
+    try:
+        scratch = root / "scratch.ext4"
+        shutil.copyfile(artifacts.scratch_template, scratch)
+        inputs = {
+            "backend": backend,
+            "openvmm": os.fspath(executable.resolve()),
+            "openvmm_sha256": sha256_file(executable),
+            "kernel": os.fspath(kernel.resolve()),
+            "kernel_sha256": sha256_file(kernel),
+            "initramfs": os.fspath(initrd.resolve()),
+            "initramfs_sha256": sha256_file(initrd),
+            "image": os.fspath(artifacts.distro.resolve()),
+            "image_uuid": artifacts.layer_uuid,
+            "scratch": os.fspath(scratch),
+            "vm_dir": os.fspath(vm_dir),
+            "timeout_seconds": timeout,
+        }
+        test_command = ignored_nvx_rs_test_command(cargo, VM_LIFECYCLE_TEST)
+        print(f">> {shlex.join(test_command)}", flush=True)
+        process = subprocess.Popen(
+            test_command,
+            cwd=BuildConstants.REPO_ROOT,
+            env=dict(os.environ, NVX_VM_LIFECYCLE=json.dumps(inputs)),
+        )
+        try:
+            returncode = process.wait()
+        except BaseException:
+            # As in the managed-lifecycle scenario, a signal that reached
+            # nvx.py alone leaves Cargo's descendants running.
+            terminate_process_tree(process, process_group=False)
+            raise
+        for name in (LOG, OUTCOME):
+            source = vm_dir / name
+            if source.is_file():
+                # The end of each file, where a failure shows.
+                with source.open("rb") as stream:
+                    size = stream.seek(0, os.SEEK_END)
+                    stream.seek(max(0, size - EVIDENCE_LIMIT))
+                    data = stream.read(EVIDENCE_LIMIT)
+                (output_dir / f"{VM_LIFECYCLE_EVIDENCE_PREFIX}{name}").write_bytes(
+                    bounded_evidence(data, size - len(data))
+                )
+        if returncode != 0:
+            raise RuntimeError(
+                f"the VM lifecycle test {VM_LIFECYCLE_TEST} failed with exit "
+                f"status {returncode}; see its output above and "
+                f"{output_dir / (VM_LIFECYCLE_EVIDENCE_PREFIX + LOG)}"
+            )
+        check_managed_report(managed_report(vm_dir), backend)
+    finally:
+        # The test stops its VM even when it fails, but not once it is ended,
+        # and the VM's arguments name the fixture.
+        survivors = end_openvmm_processes(root.name, timeout)
+        shutil.rmtree(root, ignore_errors=True)
+    if survivors:
+        raise RuntimeError(
+            f"OpenVMM processes {list(survivors)} outlived the VM lifecycle test"
+        )
+    if root.exists():
+        raise RuntimeError(f"the VM lifecycle's fixture {root} could not be removed")
 
 
 # The sandbox-gpt-layer scenario's GPT disk, which it lays out as UEFI does and
@@ -11996,6 +12124,19 @@ def _run_scenarios(
             f"Running public GPT-layer sandboxes on OpenVMM/{args.backend}",
         )
         run_sandbox_gpt_layer(
+            executable,
+            kernel,
+            initrd,
+            args.backend,
+            timeout=args.timeout,
+            output_dir=output_dir,
+        )
+    if "vm-lifecycle" in scenarios:
+        report.start(
+            "vm-lifecycle",
+            f"Running the public API's cold VM lifecycle on OpenVMM/{args.backend}",
+        )
+        run_vm_lifecycle(
             executable,
             kernel,
             initrd,

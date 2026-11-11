@@ -3692,6 +3692,17 @@ that it leaves:
 python3 ../scripts/nvx.py test-microvm --backend kvm --scenario managed-lifecycle
 ```
 
+`tests/vm_lifecycle.rs` is an ignored test of a cold VM's lifecycle through
+the public API alone, on a real hypervisor: `host::vm::create`, `spawn`,
+`reattach` from the values that the caller saved, once the launch is gone,
+and `stop`, through a request to the guest, nvx-init, over the Ubuntu layer
+and a scratch upper. `nvx.py test-microvm --scenario vm-lifecycle` gives it
+its inputs, runs it with Cargo, and checks the outcome report that it leaves:
+
+```bash
+python3 ../scripts/nvx.py test-microvm --backend kvm --scenario vm-lifecycle
+```
+
 ### Specification tests
 
 The tests take their expectations from what this README and the documents
