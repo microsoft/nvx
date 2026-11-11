@@ -337,10 +337,19 @@ impl Root {
     /// no standard input.
     pub(crate) fn command<S: AsRef<OsStr>>(&self, arguments: &[S]) -> Command {
         let mut command = Command::new(NVX_RS);
+        command.arg("--root").arg(&self.path);
+        let arguments: Vec<&OsStr> = arguments.iter().map(AsRef::as_ref).collect();
+        if arguments.first().is_some_and(|argument| *argument == "run")
+            && !arguments.contains(&OsStr::new("--architecture"))
+        {
+            // These fixtures contain x86 artifacts even on a native ARM test host.
+            command
+                .args(["run", "--architecture", "x86_64"])
+                .args(&arguments[1..]);
+        } else {
+            command.args(arguments);
+        }
         command
-            .arg("--root")
-            .arg(&self.path)
-            .args(arguments)
             .current_dir(&self.path)
             .env_remove("NVX_OPENVMM")
             .env_remove("NVX_AUTO_DOWNLOAD")

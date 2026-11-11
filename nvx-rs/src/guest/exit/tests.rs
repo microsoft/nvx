@@ -1,7 +1,11 @@
+use std::ffi::CString;
+#[cfg(target_arch = "x86_64")]
 use std::fs;
+#[cfg(target_arch = "x86_64")]
 use std::os::unix::ffi::OsStrExt;
 
 use super::*;
+#[cfg(target_arch = "x86_64")]
 use crate::guest::status::ExitStatus;
 use crate::guest::status::tests::command_line;
 
@@ -40,6 +44,7 @@ fn exit_code_takes_a_decimal_number_up_to_255() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn writes_one_byte_at_the_control_port() {
     let file = tempfile::NamedTempFile::new().unwrap();
     let port = CString::new(file.path().as_os_str().as_bytes()).unwrap();
@@ -58,6 +63,7 @@ fn writes_one_byte_at_the_control_port() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn fails_when_it_cannot_open_or_write_the_device() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("port");

@@ -51,7 +51,12 @@
 //! instructions, which only `port` executes, as inline assembly. The constants of the kernel's
 //! and the processor's interfaces, such as procfs and sysfs paths, OpenVMM's ports, CPUID
 //! leaves, and MSRs, are defined here once, so that the programs name them.
+//!
+//! Private helpers used only by the x86 diagnostic or restore clients build with those clients.
+//! Architecture-neutral helpers with unit tests also build on every ISA under `cfg(test)`.
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64;
 mod clock;
 mod discipline;
 mod entry;
@@ -62,7 +67,10 @@ pub(crate) mod kernel;
 mod mapping;
 #[cfg(target_arch = "x86_64")]
 mod msr;
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod platform;
 mod poll;
+#[cfg(target_arch = "x86_64")]
 mod port;
 mod process;
 mod rooted;
@@ -83,68 +91,87 @@ use std::os::unix::ffi::OsStringExt;
 
 pub(crate) use nix::errno::Errno;
 pub(crate) use nix::sys::signal::Signal;
-pub(crate) use nix::sys::time::{TimeSpec, TimeValLike};
-
-pub(crate) use clock::{Clock, clock_time, monotonic_ms, sleep_once, sleep_until_monotonic};
 #[cfg(target_arch = "x86_64")]
-pub(crate) use clock::{monotonic_ns, syscall_monotonic_nanoseconds};
-pub(crate) use discipline::{ClockAdjustment, ClockDiscipline, FrequencyHold, adjust_clock};
+pub(crate) use nix::sys::time::TimeSpec;
+pub(crate) use nix::sys::time::TimeValLike;
+
+pub(crate) use clock::{Clock, clock_time, monotonic_ms, sleep_until_monotonic};
+#[cfg(target_arch = "x86_64")]
+pub(crate) use clock::{monotonic_ns, sleep_once, syscall_monotonic_nanoseconds};
+pub(crate) use discipline::ClockDiscipline;
+pub(crate) use discipline::{ClockAdjustment, FrequencyHold, adjust_clock};
 pub(crate) use entry::{EntryChild, file_size};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use fd::close_inherited_descriptors;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use fd::unlink;
 pub(crate) use fd::{
     CreatedFile, FileDescriptor, FileLock, Mode, OpenFlags, create_directory, create_memfd,
     create_pipe, create_socket_pair, lock_file, open, open_at, page_size, try_lock_directory,
-    unlink,
+    try_lock_file,
 };
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) use filesystem::TmpfsMount;
 pub(crate) use filesystem::{
-    MountFlags, PATH_MAX, ScratchDirectory, TmpfsMount, check_exists, chmod, chown,
-    enter_private_mount_namespace, mount, mount_id, path_c_string, path_exists, read_file,
-    read_line, read_number, unmount, write_file, write_number,
+    MountFlags, PATH_MAX, chmod, chown, enter_private_mount_namespace, mount, mount_id,
+    path_c_string, path_exists, read_file, read_number, unmount, write_file, write_number,
 };
+#[cfg(target_arch = "x86_64")]
+pub(crate) use filesystem::{ScratchDirectory, check_exists, read_line};
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) use ioctl::reread_partition_table;
 pub(crate) use ioctl::{
-    block_device_size, console_pending, flush_block_buffers, logical_block_size,
-    reread_partition_table, reseed_random,
+    block_device_size, console_pending, flush_block_buffers, logical_block_size, reseed_random,
 };
 pub(crate) use mapping::MemoryMapping;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use msr::{MsrAccess, MsrFile};
+#[cfg(target_arch = "aarch64")]
+pub(crate) use platform::{check_released, power_off};
 pub(crate) use poll::{Pollable, hung_up, poll, readable_or_hung_up};
+#[cfg(target_arch = "x86_64")]
 pub(crate) use port::{PORT_DEVICE, Port};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use port::{PortAccess, PortError, check_released, power_off, probe_port};
 pub(crate) use process::set_command_name;
 pub(crate) use process::{
-    ChildStatus, DirectStdout, ForkResult, ProcessId, Stdout, WaitTarget, current_process, detach,
-    exec, exit_immediately, fork, ignore_interrupt_and_hangup, is_unreaped, kill_process,
-    kill_process_group, kill_through_pidfd, open_pidfd, process_exists, process_group_of,
-    process_name, reap_any_nonblocking, restore_sigpipe, signal_process_group,
-    signal_through_pidfd, take_inherited_descriptor, try_wait, wait, wait_named,
-    write_port_diagnostic, write_standard_error,
+    ChildStatus, ForkResult, ProcessId, Stdout, WaitTarget, current_process, detach, exec,
+    exit_immediately, fork, ignore_interrupt_and_hangup, is_unreaped, kill_process,
+    kill_process_group, kill_through_pidfd, open_pidfd, process_group_of, reap_any_nonblocking,
+    restore_sigpipe, signal_process_group, signal_through_pidfd, take_inherited_descriptor,
+    try_wait, wait_named, write_port_diagnostic, write_standard_error,
 };
 #[cfg(target_arch = "x86_64")]
-pub(crate) use process::{discard_standard_input, syscall_process_id};
+pub(crate) use process::{DirectStdout, discard_standard_input, process_name, syscall_process_id};
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) use process::{process_exists, wait};
 pub(crate) use rooted::{
     FileKind, FileStatus, MountAttributes, change_mode, create_directory_at, create_file_at,
     detach_mount, file_status, is_whole_file_system, move_mount, open_beneath, open_tree,
     set_mount_attributes, unmount_beneath,
 };
 pub(crate) use scheduler::{
-    AffinityGuard, IdlePriority, SchedulingPolicy, current_affinity, current_cpu, current_thread,
-    pin_current_thread, promote_all_threads, scheduling_policy, set_scheduling_policy,
-    thread_count,
+    AffinityGuard, IdlePriority, pin_current_thread, promote_all_threads, thread_count,
+};
+#[cfg(target_arch = "x86_64")]
+pub(crate) use scheduler::{
+    SchedulingPolicy, current_affinity, current_cpu, current_thread, scheduling_policy,
+    set_scheduling_policy,
 };
 pub(crate) use secret::zeroize;
-#[cfg(target_arch = "x86_64")]
-pub(crate) use signal::write_standard_error_without_sigpipe;
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) use signal::ChildSignalWait;
 pub(crate) use signal::{
-    ChildSignalWait, SignalDescriptor, ignore_signals, queue_user_signal, reset_child_signal,
-    write_without_sigpipe,
+    SignalDescriptor, ignore_signals, reset_child_signal, write_without_sigpipe,
 };
+#[cfg(target_arch = "x86_64")]
+pub(crate) use signal::{queue_user_signal, write_standard_error_without_sigpipe};
 pub(crate) use sock_diag::{
     INET_DIAG_BUFFER_LENGTH, InetDiagMessage, decode_inet_diag_dump, dump_ipv6_tcp_sockets,
 };
-pub(crate) use socket::{UdpSocket, connect_datagram};
+pub(crate) use socket::UdpSocket;
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) use socket::connect_datagram;
 pub(crate) use spawn::{ChildSpec, PreparedChild, REPORT_LENGTH};
 pub(crate) use terminal::{configure_raw, drain};
 pub(crate) use timer::Timer;

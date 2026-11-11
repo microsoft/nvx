@@ -1,24 +1,31 @@
 //! The time tools' runtime: persistent state, violation events, port-B transactions, and the
 //! wall clock's discipline, over the system layer's owners.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
+#[cfg(target_arch = "x86_64")]
+use std::ffi::CString;
 use std::fmt::{self, Display};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+#[cfg(target_arch = "x86_64")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use super::Phase;
 use super::api::Violation;
-use super::decoders::{
-    self, ClockRates, GuestReads, HostClock, SAMPLE_SIZE, TimeSample, TimeSampleError,
-};
+#[cfg(target_arch = "x86_64")]
+use super::decoders::{self, ClockRates, GuestReads, SAMPLE_SIZE, TimeSample, TimeSampleError};
 use super::events::{EventSource, ViolationCode, format_event};
-use super::state::{SampleRejection, TimeState};
+use super::sample;
+pub(crate) use super::sample::{BestSample, SAMPLE_ATTEMPTS, SAMPLE_BOUND_NS, SampleResult};
+use super::state::{CheckState, SampleRejection, TimeState};
+#[cfg(target_arch = "x86_64")]
 use crate::guest::sys::x86::{self, msr};
 use crate::guest::sys::{
-    self, ClockAdjustment, ClockDiscipline, CreatedFile, Errno, FileDescriptor, FileLock,
-    ForkResult, FrequencyHold, Mode, MsrAccess, MsrFile, OpenFlags, Port, PortAccess, PortError,
-    TimeValLike, kernel,
+    self, ClockAdjustment, ClockDiscipline, CreatedFile, Errno, FileLock, ForkResult,
+    FrequencyHold, Mode, OpenFlags, TimeValLike, kernel,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::{FileDescriptor, MsrAccess, MsrFile, Port, PortAccess, PortError};
 use crate::protocol::status;
 
 /// Statuses with which a fatal time-ABI failure stops the VM through the control port, which
@@ -31,6 +38,7 @@ pub(crate) enum PowerOffStatus {
     /// The runtime watcher observed a time-ABI violation.
     Violation = status::TIME_VIOLATION,
     /// Restore-time repair could not complete safely.
+    #[cfg(target_arch = "x86_64")]
     Repair = status::TIME_REPAIR,
 }
 
@@ -42,18 +50,25 @@ impl PowerOffStatus {
 }
 
 /// Selector requesting the restore packet.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const SELECT_PACKET: u8 = 0xa5;
 /// Selector requesting the VM generation identifier.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const SELECT_GENERATION_ID: u8 = 0xa6;
 /// Selector requesting a host time sample.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const SELECT_TIME_SAMPLE: u8 = 0xa7;
 /// Status bit indicating that a restore packet can be read.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const PORTB_PACKET_AVAILABLE: u8 = 0x02;
 /// Status bit indicating that a generation identifier can be read.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const PORTB_GENERATION_ID_AVAILABLE: u8 = 0x20;
 /// Status bit indicating that the time-sample window is supported.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const PORTB_TIME_WINDOW: u8 = 0x40;
 /// Snapshot-port value acknowledging completed restore repair.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const SNAPSHOT_ACKNOWLEDGE: u8 = 2;
 
 /// Top-level NVX runtime directory, which also holds the time tools' locks and private records.
@@ -63,10 +78,7 @@ pub(crate) const RUN_DIR: &CStr = c"/run/nvx";
 /// workload's root, where even a workload of user ID 0 must reach no lock that it could hold,
 /// so the locks and private records stay in [`RUN_DIR`].
 pub(crate) const TIME_DIR: &CStr = c"/run/nvx/time";
-/// Published time state file.
-pub(crate) const STATE_PATH: &CStr = c"/run/nvx/time/state";
-/// Temporary state file atomically renamed into place.
-const STATE_TEMP_PATH: &CStr = c"/run/nvx/time/.state";
+pub(crate) use super::state::STATE_PATH;
 /// Advisory lock protecting state updates.
 const STATE_LOCK_PATH: &CStr = c"/run/nvx/time-state.lock";
 /// Published time-daemon process identifier.
@@ -76,17 +88,25 @@ pub(crate) const DAEMON_PID_TEMP_PATH: &CStr = c"/run/nvx/time/daemon.pid.tmp";
 /// The time daemon's command name, which it takes whichever program started it, and by which
 /// the published process identifier is recognized.
 pub(crate) const DAEMON_NAME: &CStr = c"nvx-time";
+/// Private daemon ownership, separate from the root assembler's runtime-directory reservation.
+pub(crate) const DAEMON_LOCK_PATH: &CStr = c"/run/nvx/time-daemon.lock";
 /// Saved stall-detector settings during capture/restore.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const SUPPRESSION_PATH: &CStr = c"/run/nvx/time-suppression";
 /// Advisory lock protecting suppression state.
+#[cfg(target_arch = "x86_64")]
 const SUPPRESSION_LOCK_PATH: &CStr = c"/run/nvx/time-suppression.lock";
 /// Private restore record consumed by the daemon.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const RESTORE_PATH: &CStr = c"/run/nvx/time-restore";
 /// Temporary restore-record file.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const RESTORE_TEMP_PATH: &CStr = c"/run/nvx/time-restore.tmp";
 /// Advisory lock serializing port-window transactions.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const PORTB_LOCK_PATH: &CStr = c"/run/nvx/portb.lock";
 /// Temporary mount point used to force an RCU grace period.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const RCU_SYNC_PATH: &CStr = c"/run/nvx/rcu-sync";
 
 /// Mode of the runtime directories: `rwxr-xr-x`.
@@ -104,10 +124,12 @@ const PUBLIC_FILE_MODE: Mode = Mode::S_IRUSR
 pub(crate) const PRIVATE_FILE_MODE: Mode = Mode::S_IRUSR.union(Mode::S_IWUSR);
 
 /// Longest prefix of a path that a restore diagnostic quotes, as C's `%.200s` did.
+#[cfg(target_arch = "x86_64")]
 const QUOTED_PATH_LIMIT: usize = 200;
 
 /// The stall detectors that capture suppresses, and the value that suppresses each: RCU's stall
 /// warnings, the soft-lockup detector, and the hung-task detector. Only the first must exist.
+#[cfg(target_arch = "x86_64")]
 const SUPPRESSED_DETECTORS: [(&CStr, i64); 3] = [
     (kernel::RCU_STALL_SUPPRESS, 1),
     (kernel::SOFT_WATCHDOG, 0),
@@ -119,13 +141,9 @@ const KERNEL_LOG_PRIORITY: &[u8] = b"<2>";
 /// The priority prefix of a diagnostic that the program writes to the kernel log: `KERN_ERR`.
 const DIAGNOSTIC_PRIORITY: &[u8] = b"<3>";
 
-/// Number of host samples that boot, restore repair, and each discipline poll take at most.
-pub(crate) const SAMPLE_ATTEMPTS: usize = 3;
-/// The largest uncertainty of a time sample that the guest accepts, in nanoseconds: the host
-/// pairs its UTC with the guest TSC within 100 µs.
-pub(crate) const SAMPLE_BOUND_NS: i64 = 100_000;
 /// The smallest declared TSC rate, in Hz, that pairs a time sample: any lower rate is a misread
 /// of the frequency MSR.
+#[cfg(target_arch = "x86_64")]
 const MIN_TSC_HZ: u64 = 1_000_000;
 
 /// Seconds after which RCU reports a CPU stall in NVX's guest kernels, which the checks require
@@ -137,17 +155,23 @@ pub(crate) const DEFAULT_STALL_TIMEOUT_S: i64 = 21;
 /// testable.
 pub(crate) trait PrivilegedOps: Sync {
     /// Reads the time-stamp counter after the instructions before it.
+    #[cfg(target_arch = "x86_64")]
     fn read_tsc(&self) -> u64;
     /// Reads the realtime clock, in nanoseconds since the Unix epoch.
+    #[cfg(target_arch = "x86_64")]
     fn realtime_ns(&self) -> i64;
     /// Takes the calling thread's permission for the time ABI's ports, for one transaction,
     /// which [`PortAccess::release`] ends.
+    #[cfg(target_arch = "x86_64")]
     fn open_ports(&self) -> Result<PortAccess<'_>, PortError>;
     /// Opens the MSR device of `cpu`.
+    #[cfg(target_arch = "x86_64")]
     fn open_msr(&self, cpu: usize, access: MsrAccess) -> Result<MsrDescriptor, Errno>;
     /// Reads the register `msr`.
+    #[cfg(target_arch = "x86_64")]
     fn read_msr(&self, descriptor: &MsrDescriptor, msr: u32) -> Result<u64, Errno>;
     /// Writes `value` to the register `msr`.
+    #[cfg(target_arch = "x86_64")]
     fn write_msr(&self, descriptor: &MsrDescriptor, msr: u32, value: u64) -> Result<(), Errno>;
     /// Applies `adjustment` to the wall clock's discipline.
     fn adjust_clock(&self, adjustment: ClockAdjustment) -> Result<ClockDiscipline, Errno>;
@@ -161,6 +185,7 @@ pub(crate) trait PrivilegedOps: Sync {
 }
 
 /// An MSR device, or the token of a test's fake.
+#[cfg(target_arch = "x86_64")]
 pub(crate) enum MsrDescriptor {
     /// A device that the kernel opened.
     Real(MsrFile),
@@ -177,22 +202,27 @@ pub(crate) enum MsrDescriptor {
 pub(crate) struct RealOps;
 
 impl PrivilegedOps for RealOps {
+    #[cfg(target_arch = "x86_64")]
     fn read_tsc(&self) -> u64 {
         x86::rdtsc_lfence()
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn realtime_ns(&self) -> i64 {
         clock_ns(sys::Clock::Realtime)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn open_ports(&self) -> Result<PortAccess<'_>, PortError> {
         PortAccess::request()
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn open_msr(&self, cpu: usize, access: MsrAccess) -> Result<MsrDescriptor, Errno> {
         MsrFile::open(cpu, access).map(MsrDescriptor::Real)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn read_msr(&self, descriptor: &MsrDescriptor, msr: u32) -> Result<u64, Errno> {
         match descriptor {
             MsrDescriptor::Real(file) => file.read(msr),
@@ -201,6 +231,7 @@ impl PrivilegedOps for RealOps {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn write_msr(&self, descriptor: &MsrDescriptor, msr: u32, value: u64) -> Result<(), Errno> {
         match descriptor {
             MsrDescriptor::Real(file) => file.write(msr, value),
@@ -241,6 +272,7 @@ impl PrivilegedOps for RealOps {
 
 /// Returns the negative `errno` of an MSR access, or zero for one that succeeded, as the time
 /// ABI's diagnostics print it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn msr_error<T>(result: &Result<T, Errno>) -> i32 {
     result.as_ref().err().map_or(0, |&error| -(error as i32))
 }
@@ -259,6 +291,7 @@ pub(crate) struct Runtime<'a> {
     /// Current VM generation.
     generation: AtomicU32,
     /// The declared TSC rate, `F`, in Hz, once known, or zero.
+    #[cfg(target_arch = "x86_64")]
     tsc_hz: AtomicU64,
     /// Whether an asynchronous child may have interrupted console output.
     async_output: AtomicBool,
@@ -275,6 +308,7 @@ impl<'a> Runtime<'a> {
             strict: false,
             violation: Mutex::new(None),
             generation: AtomicU32::new(0),
+            #[cfg(target_arch = "x86_64")]
             tsc_hz: AtomicU64::new(0),
             async_output: AtomicBool::new(false),
             report_lock: Mutex::new(()),
@@ -293,6 +327,13 @@ impl<'a> Runtime<'a> {
     /// Returns whether conformance failures are report-only.
     pub(crate) fn report_only(&self) -> bool {
         self.report_only
+    }
+
+    /// Reports an operation that rejected a sample without turning rejection into a violation.
+    pub(crate) fn log_sample_failure(&self, detail: &dyn Display) {
+        let line = format!("NVX-TIME-DIAGNOSTIC: rejected sample: {detail}\n");
+        self.ops
+            .write_kernel_log(&[DIAGNOSTIC_PRIORITY, line.as_bytes()].concat());
     }
 
     /// Returns whether a violation fails the call instead of powering off the VM.
@@ -321,6 +362,7 @@ impl<'a> Runtime<'a> {
 
     /// Records the declared TSC rate, `F`, in Hz, that the boot checks validated, unless it is
     /// zero, for none.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn set_tsc_hz(&self, value: u64) {
         if value != 0 {
             self.tsc_hz.store(value, Ordering::Relaxed);
@@ -329,6 +371,7 @@ impl<'a> Runtime<'a> {
 
     /// Returns the declared TSC rate, `F`, in Hz: the one that the runtime recorded, or else the
     /// frequency MSR's, of CPU 0, which it then records.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn tsc_hz(&self) -> Result<u64, SampleError> {
         let recorded = self.tsc_hz.load(Ordering::Relaxed);
         if recorded != 0 {
@@ -354,6 +397,7 @@ impl<'a> Runtime<'a> {
 
     /// Takes the calling thread's permission for the time ABI's ports, for one transaction,
     /// which [`PortAccess::release`] ends.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn open_ports(&self) -> Result<PortAccess<'a>, PortError> {
         self.ops.open_ports()
     }
@@ -363,6 +407,7 @@ impl<'a> Runtime<'a> {
     /// event's write to OpenVMM's debug console, and in the time daemon, whose standard streams
     /// are on the null device. Until a later transaction revokes the permission, the thread
     /// starts nothing, as [`fork_process`] checks.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn log_release_failure(&self, error: PortError) {
         let record = format!("nvx-time: {error}\n");
         self.ops
@@ -400,6 +445,7 @@ impl<'a> Runtime<'a> {
         );
         self.ops
             .write_kernel_log(&[KERNEL_LOG_PRIORITY, line.as_bytes()].concat());
+        #[cfg(target_arch = "x86_64")]
         if let Ok(ports) = self.open_ports() {
             if self.async_output.load(Ordering::Relaxed) {
                 ports.write_u8(Port::PortbData, b'\n');
@@ -411,6 +457,19 @@ impl<'a> Runtime<'a> {
             // as `fork_process` checks.
             if let Err(error) = ports.release() {
                 self.log_release_failure(error);
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let separator = if self.async_output.load(Ordering::Relaxed) {
+                b"\n".as_slice()
+            } else {
+                b"".as_slice()
+            };
+            if let Err(error) = sys::platform::write_console(separator, line.as_bytes()) {
+                let diagnostic = format!("nvx-time: platform event output: {error}\n");
+                self.ops
+                    .write_kernel_log(&[DIAGNOSTIC_PRIORITY, diagnostic.as_bytes()].concat());
             }
         }
         let separator: &[u8] = if self.async_output.load(Ordering::Relaxed) {
@@ -445,6 +504,7 @@ impl<'a> Runtime<'a> {
 
     /// Reports that restore-time repair failed, a fatal event of the restore phase, and powers off
     /// with the repair status unless report-only or strict.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn repair_failure(&self, code: ViolationCode, detail: &[u8]) {
         self.fail_fatal(
             PowerOffStatus::Repair,
@@ -480,11 +540,42 @@ pub(crate) fn cpu_time_ns() -> i64 {
     clock_ns(sys::Clock::ProcessCpuTime)
 }
 
+/// Checks the same portable detector policy on both guest architectures.
+pub(crate) fn check_debug_watchdogs() -> Result<(), String> {
+    let setting = |path| match sys::read_number::<i64>(path) {
+        Ok(value) => Ok(Some(value)),
+        Err(Errno::ENOENT) => Ok(None),
+        Err(error) => Err(format!("read {path:?}: {error}")),
+    };
+    debug_watchdog_policy(
+        setting(kernel::SOFT_WATCHDOG)?,
+        setting(kernel::HUNG_TASK_TIMEOUT)?,
+    )
+}
+
+/// Allows a kernel with neither detector, but requires enabled detectors when exposed.
+pub(super) fn debug_watchdog_policy(soft: Option<i64>, hung: Option<i64>) -> Result<(), String> {
+    if soft.is_none() && hung.is_none() {
+        return Ok(());
+    }
+    if soft != Some(1) {
+        return Err(format!("soft_watchdog is {}", soft.unwrap_or(-1)));
+    }
+    match hung {
+        Some(timeout) if timeout != 0 => Ok(()),
+        _ => Err(format!("hung_task_timeout_secs is {}", hung.unwrap_or(-1))),
+    }
+}
+
 /// Why the time tools could not start a process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnError {
     /// The calling thread may hold port permission, which the process would inherit.
+    #[cfg(target_arch = "x86_64")]
     Ports(PortError),
+    /// The thread may retain restricted platform authority.
+    #[cfg(target_arch = "aarch64")]
+    Authority(Errno),
     /// `fork` failed.
     Fork(Errno),
 }
@@ -494,7 +585,10 @@ impl Display for SpawnError {
     /// port permission, such as `ioperm revoke: Cannot allocate memory`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            #[cfg(target_arch = "x86_64")]
             Self::Ports(error) => error.fmt(formatter),
+            #[cfg(target_arch = "aarch64")]
+            Self::Authority(error) => write!(formatter, "platform release: {error}"),
             Self::Fork(error) => formatter.write_str(error.desc()),
         }
     }
@@ -505,7 +599,10 @@ impl std::error::Error for SpawnError {}
 /// Forks the process, as [`sys::fork`] does, once the calling thread holds no port permission,
 /// which the child would inherit.
 pub(crate) fn fork_process() -> Result<ForkResult, SpawnError> {
+    #[cfg(target_arch = "x86_64")]
     sys::check_released().map_err(SpawnError::Ports)?;
+    #[cfg(target_arch = "aarch64")]
+    sys::check_released().map_err(SpawnError::Authority)?;
     sys::fork().map_err(SpawnError::Fork)
 }
 
@@ -532,21 +629,48 @@ pub(crate) fn lock_file(path: &CStr) -> Result<FileLock, Errno> {
 
 /// Loads and parses the published time state.
 pub(crate) fn state_load() -> Result<TimeState, Errno> {
-    let text = sys::read_file(STATE_PATH)?;
-    TimeState::parse(&text).ok_or(Errno::EINVAL)
+    TimeState::load()
 }
 
 /// Atomically persists one complete time state.
 pub(crate) fn state_store(state: &TimeState) -> Result<(), Errno> {
-    replace_file(STATE_PATH, STATE_TEMP_PATH, state.to_string().as_bytes())
+    state.store()
 }
 
 /// Applies one read-modify-write update to the time state under its lock.
 pub(crate) fn state_apply(update: impl FnOnce(&mut TimeState)) -> Result<(), Errno> {
     let _lock = lock_file(STATE_LOCK_PATH)?;
-    let mut state = state_load().unwrap_or_default();
+    let mut state = state_load()?;
     update(&mut state);
     state_store(&state)
+}
+
+/// Publishes one phase through the same locked state update on either architecture.
+pub(crate) fn record_check(
+    phase: Phase,
+    mut check: CheckState,
+    counter_hz: u64,
+    timer_hz: u64,
+) -> Result<(), Errno> {
+    if phase.check_index().is_none() {
+        return Err(Errno::EINVAL);
+    }
+    state_apply(|state| {
+        check.generation = if phase == Phase::Boot {
+            0
+        } else {
+            state.generation
+        };
+        if let Some(record) = state.check_mut(phase) {
+            *record = check;
+        }
+        if counter_hz != 0 {
+            state.tsc_hz = counter_hz;
+        }
+        if timer_hz != 0 {
+            state.lapic_hz = timer_hz;
+        }
+    })
 }
 
 /// Increments the persisted violation counter when state exists.
@@ -558,6 +682,7 @@ fn count_violation() -> Result<(), Errno> {
 }
 
 /// Loads validated TSC and LAPIC rates from state.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn rates_load() -> Result<(u64, u64), Errno> {
     let state = state_load()?;
     if state.tsc_hz == 0 || state.lapic_hz == 0 {
@@ -570,6 +695,7 @@ pub(crate) fn rates_load() -> Result<(u64, u64), Errno> {
 /// Saves the stall detectors' settings in the suppression record, and suppresses them for a
 /// snapshot capture; see [`Suppression::save`]. A record that exists already, of a pending
 /// capture, is `EEXIST`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn suppression_save() -> Result<(), SaveError> {
     make_runtime_directories();
     SUPPRESSION.save()
@@ -577,6 +703,7 @@ pub(crate) fn suppression_save() -> Result<(), SaveError> {
 
 /// Why a save of the stall detectors' settings failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(target_arch = "x86_64")]
 pub(crate) enum SaveError {
     /// The save failed with this error, and left the settings as they were: it changed none, or
     /// undid every change and removed its record. A record that exists already, of a pending
@@ -594,6 +721,7 @@ fn describe(prefix: &[u8], error: Errno) -> Vec<u8> {
 
 /// Restores the stall detectors' settings from the suppression record, and removes the record;
 /// see [`Suppression::restore`]. A missing record succeeds when `missing_ok`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn suppression_restore(missing_ok: bool) -> Result<(), Vec<u8>> {
     make_runtime_directories();
     SUPPRESSION.restore(missing_ok)
@@ -602,6 +730,7 @@ pub(crate) fn suppression_restore(missing_ok: bool) -> Result<(), Vec<u8>> {
 /// The suppression of the stall detectors for a capture: the detectors, the record of their
 /// saved settings, which exists while a capture is pending, and the lock that serializes the
 /// record's saves and restores, so that each restores only the settings that a save recorded.
+#[cfg(target_arch = "x86_64")]
 struct Suppression<'a> {
     /// The detectors, of which only the first must exist, and the value that suppresses each.
     detectors: &'a [(&'a CStr, i64)],
@@ -612,12 +741,14 @@ struct Suppression<'a> {
 }
 
 /// The guest's suppression of its stall detectors.
+#[cfg(target_arch = "x86_64")]
 const SUPPRESSION: Suppression<'static> = Suppression {
     detectors: &SUPPRESSED_DETECTORS,
     record: SUPPRESSION_PATH,
     lock: SUPPRESSION_LOCK_PATH,
 };
 
+#[cfg(target_arch = "x86_64")]
 impl Suppression<'_> {
     /// Saves the detectors' settings in the record, and suppresses the detectors, under the
     /// lock, so that no restore runs between its reads and its writes. A record that exists
@@ -706,6 +837,7 @@ impl Suppression<'_> {
 }
 
 /// Reads a byte buffer using one scalar four-byte port access per chunk.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn portb_read(ports: &PortAccess<'_>, port: Port, buffer: &mut [u8]) {
     for chunk in buffer.chunks_mut(size_of::<u32>()) {
         let bytes = ports.read_u32(port).to_ne_bytes();
@@ -714,11 +846,13 @@ pub(crate) fn portb_read(ports: &PortAccess<'_>, port: Port, buffer: &mut [u8]) 
 }
 
 /// Locks the shared port-window transaction.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn lock_portb() -> Result<FileLock, Errno> {
     lock_file(PORTB_LOCK_PATH)
 }
 
 /// Formats a failure of [`lock_portb`]: `portb lock: `, then the description of `error`.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn portb_lock_failure(error: Errno) -> Vec<u8> {
     describe(b"portb lock: ", error)
 }
@@ -726,6 +860,7 @@ pub(crate) fn portb_lock_failure(error: Errno) -> Vec<u8> {
 /// Latches and decodes one host time sample: brackets the selector write with TSC reads, then
 /// reads the realtime clock between two more, with which the guest pairs the sample's guest TSC,
 /// before it reads the time window.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn take_sample(
     ports: &PortAccess<'_>,
     ops: &dyn PrivilegedOps,
@@ -748,43 +883,81 @@ pub(crate) fn take_sample(
     Ok((TimeSample::parse(&bytes)?, reads))
 }
 
-/// Narrowest valid sample observed during one attempt group, and the frequency correction that
-/// its host clock correction asks for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BestSample {
-    /// Guest-to-host offset in nanoseconds.
-    pub(crate) theta: i64,
-    /// Pairing uncertainty in nanoseconds.
-    pub(crate) epsilon: i64,
-    /// The discipline of host UTC that the sample published.
-    pub(crate) host: HostClock,
-    /// The frequency correction, in scaled ppm, that runs the wall clock at host UTC's rate.
-    pub(crate) frequency: i64,
-    /// Whether Linux's ±500 ppm limit clamped `frequency`.
-    pub(crate) limited: bool,
-    /// Whether the sample carried the test-hook flag: host overrides, which only tests make, of
-    /// the time that it published were active.
-    pub(crate) test_hooks: bool,
+/// Reads x86 hardware only; command dispatch, formatting and pairing are shared.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn diagnostic_sample(
+    runtime: &Runtime<'_>,
+) -> Result<sample::DiagnosticSample, Vec<u8>> {
+    let rates = clock_rates(runtime).map_err(|error| error.to_string().into_bytes())?;
+    let (taken, reads) = {
+        let ports = runtime
+            .open_ports()
+            .map_err(|error| error.to_string().into_bytes())?;
+        let status = ports.read_u8(Port::PortbStatus);
+        if status & PORTB_TIME_WINDOW == 0 {
+            return Err(format!("portb status 0x{status:02x} has no time window").into_bytes());
+        }
+        let _lock = lock_portb().map_err(portb_lock_failure)?;
+        take_sample(&ports, runtime.ops).map_err(|error| error.to_string().into_bytes())?
+    };
+    Ok(sample::DiagnosticSample {
+        sample: sample::Sample {
+            flags: taken.flags,
+            generation: taken.generation,
+            utc_ns: taken.utc_ns,
+            counter: taken.tsc,
+            pairing_ns: taken.pairing_ns,
+            host_status: match taken.host.status {
+                super::state::HostClockStatus::Unknown => 0,
+                super::state::HostClockStatus::Synchronized => 1,
+                super::state::HostClockStatus::FreeRunning => 2,
+                super::state::HostClockStatus::Unreliable => 3,
+            },
+            disruption: taken.host.disruption,
+            correction: taken.host.correction,
+            correction_bound: taken.host.correction_bound,
+            max_error_us: taken.host.max_error_us,
+        },
+        reads: sample::Reads {
+            before: reads.before,
+            after: reads.after,
+            realtime_ns: reads.realtime_ns,
+            realtime_counter: reads.realtime_tsc,
+            realtime_half_cycles: reads.realtime_half_cycles,
+        },
+        rates: sample::Rates {
+            counter_hz: rates.tsc_hz,
+            kernel_hz: decoders::kernel_tsc_hz(rates.tsc_hz).max(1000),
+            frequency: rates.frequency,
+        },
+    })
 }
 
-/// Whether the selected sample satisfied the requested uncertainty bound.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SampleResult {
-    /// The sample was within the bound.
-    Accepted,
-    /// A valid sample was selected but remained wider than the bound.
-    Wide,
+/// Reads the same diagnostic record over the admitted ARM binding.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn diagnostic_sample(
+    _runtime: &Runtime<'_>,
+) -> Result<sample::DiagnosticSample, Vec<u8>> {
+    sample::arm64::Clock::open()
+        .and_then(|clock| clock.diagnostic())
+        .map_err(|error| error.to_string().into_bytes())
 }
 
 /// Why no host time sample could be selected. Its `Display` is the diagnostic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
+#[cfg_attr(target_arch = "x86_64", derive(Clone, Copy, PartialEq, Eq))]
 pub(crate) enum SampleError {
+    /// A Linux clock operation needed to interpret the sample failed.
+    Operation(&'static str, Errno),
     /// The thread could not take, or give up, the permission for the ports.
+    #[cfg(target_arch = "x86_64")]
     Ports(PortError),
     /// The guest could not read the declared TSC rate, with which it pairs a sample, from the
     /// frequency MSR: the error, or the implausible rate that it read.
+    #[cfg(target_arch = "x86_64")]
     TscRate(Result<u64, Errno>),
     /// The port window, of this status, offers no time sample.
+    #[cfg(target_arch = "x86_64")]
     NoTimeWindow(u8),
     /// A sample came from another VM generation, which a restore must handle first.
     Generation {
@@ -794,14 +967,21 @@ pub(crate) enum SampleError {
         expected: u32,
     },
     /// No attempt took a valid sample: the last attempt's error, if any.
+    #[cfg(target_arch = "x86_64")]
     Invalid(Option<TimeSampleError>),
+    /// The restricted ARM transaction or effective architectural counter was invalid.
+    #[cfg(target_arch = "aarch64")]
+    Arm(sample::arm64::Error),
 }
 
 impl SampleError {
     /// Returns how the discipline records the rejection of a poll's sample that failed so.
     pub(crate) fn rejection(&self) -> SampleRejection {
         match self {
+            #[cfg(target_arch = "x86_64")]
             Self::Invalid(Some(TimeSampleError::Tsc { .. })) => SampleRejection::Tsc,
+            #[cfg(target_arch = "aarch64")]
+            Self::Arm(sample::arm64::Error::Counter(_)) => SampleRejection::Tsc,
             _ => SampleRejection::Invalid,
         }
     }
@@ -810,19 +990,24 @@ impl SampleError {
 impl Display for SampleError {
     /// Writes the diagnostic, such as `time sample generation 7, expected 6`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
+        match self {
+            Self::Operation(operation, error) => write!(formatter, "{operation}: {error}"),
+            #[cfg(target_arch = "x86_64")]
             Self::Ports(error) => error.fmt(formatter),
+            #[cfg(target_arch = "x86_64")]
             Self::TscRate(Err(error)) => write!(
                 formatter,
                 "MSR {:#010x} read: {}",
                 msr::HV_TSC_FREQUENCY,
                 error.desc()
             ),
+            #[cfg(target_arch = "x86_64")]
             Self::TscRate(Ok(rate)) => write!(
                 formatter,
                 "MSR {:#010x} (TSC rate) is {rate} Hz",
                 msr::HV_TSC_FREQUENCY
             ),
+            #[cfg(target_arch = "x86_64")]
             Self::NoTimeWindow(status) => write!(
                 formatter,
                 "portb status 0x{status:02x} has no time-sample window"
@@ -831,25 +1016,49 @@ impl Display for SampleError {
                 formatter,
                 "time sample generation {sample}, expected {expected}"
             ),
+            #[cfg(target_arch = "x86_64")]
             Self::Invalid(Some(error)) => error.fmt(formatter),
+            #[cfg(target_arch = "x86_64")]
             Self::Invalid(None) => formatter.write_str("no valid time sample"),
+            #[cfg(target_arch = "aarch64")]
+            Self::Arm(error) => error.fmt(formatter),
         }
     }
 }
 
 impl std::error::Error for SampleError {}
 
+#[cfg(target_arch = "aarch64")]
+impl From<sample::arm64::Error> for SampleError {
+    fn from(error: sample::arm64::Error) -> Self {
+        match error {
+            sample::arm64::Error::Operation(operation, error) => Self::Operation(operation, error),
+            sample::arm64::Error::Generation { observed, expected } => Self::Generation {
+                sample: observed,
+                expected,
+            },
+            error => Self::Arm(error),
+        }
+    }
+}
+
 /// Returns the rates with which the guest's realtime clock counts its TSC: the declared TSC rate,
 /// and the kernel's frequency correction.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn clock_rates(runtime: &Runtime<'_>) -> Result<ClockRates, SampleError> {
     Ok(ClockRates {
         tsc_hz: runtime.tsc_hz()?,
-        frequency: current_frequency(runtime),
+        frequency: runtime
+            .ops
+            .adjust_clock(ClockAdjustment::Query)
+            .map_err(|error| SampleError::Operation("query adjtimex", error))?
+            .scaled_ppm,
     })
 }
 
 /// Selects the lowest-uncertainty valid sample from a bounded attempt count, in one port
 /// transaction, which ends before this returns.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn best_sample(
     runtime: &Runtime<'_>,
     attempts: usize,
@@ -865,6 +1074,7 @@ pub(crate) fn best_sample(
 
 /// Selects the lowest-uncertainty valid sample through `ports`, pairing each with the guest's
 /// clocks at `rates`, as [`best_sample`] does.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn select_sample(
     ports: &PortAccess<'_>,
     ops: &dyn PrivilegedOps,
@@ -877,52 +1087,88 @@ pub(crate) fn select_sample(
     if status & PORTB_TIME_WINDOW == 0 {
         return Err(SampleError::NoTimeWindow(status));
     }
-    let mut best: Option<BestSample> = None;
-    let mut invalid = None;
-    for _ in 0..attempts {
-        let (sample, reads) = match take_sample(ports, ops) {
-            Ok(taken) => taken,
-            Err(error) => {
-                invalid = Some(error);
-                continue;
-            }
-        };
+    sample::select_sample(attempts, bound_ns, SampleError::Invalid(None), || {
+        let (sample, reads) = take_sample(ports, ops)
+            .map_err(|error| sample::AttemptError::Retry(SampleError::Invalid(Some(error))))?;
         if sample.generation != generation {
-            return Err(SampleError::Generation {
+            return Err(sample::AttemptError::Fatal(SampleError::Generation {
                 sample: sample.generation,
                 expected: generation,
-            });
+            }));
         }
-        let (theta, epsilon) = match decoders::pair_sample(&sample, &reads, rates) {
-            Ok(pairing) => pairing,
-            Err(error) => {
-                invalid = Some(error);
-                continue;
-            }
-        };
+        let (theta, epsilon) = decoders::pair_sample(&sample, &reads, rates)
+            .map_err(|error| sample::AttemptError::Retry(SampleError::Invalid(Some(error))))?;
         let (frequency, limited) = decoders::guest_frequency(sample.host.correction, rates.tsc_hz);
-        let candidate = BestSample {
+        Ok(BestSample {
             theta,
             epsilon,
             host: sample.host,
             frequency,
             limited,
             test_hooks: sample.test_hooks(),
-        };
-        if best.is_none_or(|best| epsilon < best.epsilon) {
-            best = Some(candidate);
-        }
-        if epsilon <= bound_ns {
-            return Ok((SampleResult::Accepted, candidate));
-        }
-    }
-    best.map(|best| (SampleResult::Wide, best))
-        .ok_or(SampleError::Invalid(invalid))
+        })
+    })
+}
+
+/// Takes a sample using the admitted binding and the same bounded selection as x86.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn best_sample(
+    _runtime: &Runtime<'_>,
+    attempts: usize,
+    bound_ns: i64,
+    generation: u32,
+) -> Result<(SampleResult, BestSample), SampleError> {
+    let clock = sample::arm64::Clock::open().map_err(SampleError::from)?;
+    sample::select_sample(
+        attempts,
+        bound_ns,
+        SampleError::Operation("no valid time sample", Errno::EPROTO),
+        || match clock.sample(generation) {
+            Ok(paired) => Ok(paired.measurement()),
+            Err(error @ (sample::arm64::Error::Wire(_) | sample::arm64::Error::Counter(_))) => {
+                Err(sample::AttemptError::Retry(SampleError::from(error)))
+            }
+            Err(error) => Err(sample::AttemptError::Fatal(SampleError::from(error))),
+        },
+    )
+}
+
+/// Serializes x86 sample/correction/state as before; ARM serializes each device transaction.
+pub(crate) fn discipline_sample(
+    runtime: &Runtime<'_>,
+) -> (
+    Result<(SampleResult, BestSample), SampleError>,
+    Option<FileLock>,
+) {
+    #[cfg(target_arch = "x86_64")]
+    let lock = lock_portb().ok();
+    #[cfg(target_arch = "x86_64")]
+    let result = if lock.is_some() {
+        best_sample(
+            runtime,
+            SAMPLE_ATTEMPTS,
+            SAMPLE_BOUND_NS,
+            runtime.generation(),
+        )
+    } else {
+        Err(SampleError::Invalid(None))
+    };
+    #[cfg(target_arch = "aarch64")]
+    let (lock, result) = (
+        None,
+        best_sample(
+            runtime,
+            SAMPLE_ATTEMPTS,
+            SAMPLE_BOUND_NS,
+            runtime.generation(),
+        ),
+    );
+    (result, lock)
 }
 
 /// Steps realtime by a signed nanosecond offset.
 pub(crate) fn step_clock(runtime: &Runtime<'_>, offset_ns: i64) -> Result<(), Errno> {
-    let (seconds, nanoseconds) = decoders::split_offset(offset_ns);
+    let (seconds, nanoseconds) = sample::split_offset(offset_ns);
     runtime
         .ops
         .adjust_clock(ClockAdjustment::Step {
@@ -955,7 +1201,7 @@ pub(crate) fn synchronize(runtime: &Runtime<'_>, sample: &BestSample) -> Result<
     step_clock(runtime, sample.theta)?;
     hold_frequency(
         runtime,
-        decoders::frequency_hold(0, sample.epsilon, sample.frequency, sample.host.error_us()),
+        sample::frequency_hold(0, sample.epsilon, sample.frequency, sample.host.error_us()),
     )
 }
 
@@ -963,6 +1209,7 @@ pub(crate) fn synchronize(runtime: &Runtime<'_>, sample: &BestSample) -> Result<
 /// correction that the host's clock correction asks for.
 pub(crate) fn initial_sample(runtime: &Runtime<'_>) -> Result<BestSample, Vec<u8>> {
     let (result, sample) = {
+        #[cfg(target_arch = "x86_64")]
         let _lock = lock_portb().map_err(portb_lock_failure)?;
         best_sample(
             runtime,
@@ -987,6 +1234,7 @@ pub(crate) fn wide_sample(epsilon: i64) -> Vec<u8> {
 
 /// Writes `entropy` at the start of the restored entropy file, and reports a failure to write
 /// or close it with the file's path.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn write_entropy(
     file: FileDescriptor,
     path: &CStr,
@@ -1011,5 +1259,5 @@ pub(crate) fn write_entropy(
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) mod tests;

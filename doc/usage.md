@@ -122,6 +122,7 @@ each code for callers of the `nvx` library.
 
 ```text
 nvx-rs/target/release/nvx-rs run
+    [--architecture {x86_64,aarch64}]
     [--guest {alpine,ubuntu,azurelinux}]
     [--hypervisor {auto,whp,kvm,mshv}]
     [--machine {microvm}]
@@ -156,10 +157,11 @@ nvx-rs/target/release/nvx-rs run
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--architecture {x86_64,aarch64}` | native host ISA | Select the guest artifact ISA, using the native host ISA when omitted. ARM cold boot uses `build/aarch64/Image` and matching Alpine/Ubuntu manifests; it never falls back to x86 files or an unqualified release. ARM snapshot/activation modes remain unsupported. |
 | `--guest {alpine,ubuntu,azurelinux}` | `alpine` | Select Alpine, Ubuntu, or Azure Linux userland with the same NVX kernel. This option is not used for snapshot restore. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
-| `--memory-mib MIB` | guest-specific | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux. |
+| `--memory-mib MIB` | guest-specific | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. ARM cold boot is further capped at 64512 MiB (63 GiB): the approved 36-bit GPA space excludes the fixed 3-4 GiB aperture; other reservations are separate. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux. |
 | `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot, in the range of `--memory-mib`. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count, written as one of the choices. |
 | `--cpu-profile ID` | `auto` | Select the guest's [CPU profile](#cpu-profiles): `auto` for the built-in profile of the host's CPU, which falls back with a warning to a development profile derived from this host on an Intel or AMD CPU that no built-in profile serves, a built-in profile ID, or `host` for that development profile. A restore uses the snapshot's profile, which `auto` and, for a host profile, `host` also name. |
@@ -358,6 +360,11 @@ package for the selected platform, `download` uses the nearest first-parent
 ancestor that has one. Those fallback artifacts match that ancestor, not
 `HEAD`. It checks at most 20 commits, at one GitHub API request each, and reads
 the history with `git`. Update the checkout to install a newer release.
+
+There is no qualified ARM64 release catalog yet. On an ARM64 host, `download`
+rejects release selection before querying GitHub instead of installing an
+x86 package. Explicit ARM cold boots use matching local artifacts built with
+`--architecture aarch64`; already-present artifacts need no download.
 
 `download` checks the size of the package, the names of its members, and every
 file against the package's `SHA256SUMS`, and then installs it: it replaces the
@@ -805,6 +812,7 @@ also fails for an executable stack: a `PT_GNU_STACK` program header with
 
 ```text
 python3 scripts/nvx.py check-guest-binaries [--toolchain TOOLCHAIN]
+    [--architecture {x86_64,aarch64}]
 ```
 
 The Linux-only check command adds the `x86_64-unknown-linux-musl` target to the
@@ -815,11 +823,14 @@ executables run on the host. It ignores an inherited `NVX_GUEST_BINARIES`, so
 that the integration tests run the binaries that Cargo builds from the
 checkout. The `nvx-rs` CI job runs it with the toolchain that its action
 selects, before it builds the binaries.
+`--architecture` explicitly selects the musl target; x86-64 remains the default.
+Tests require a Linux host capable of executing the selected target.
 
 ### `build-guest-binaries`
 
 ```text
 python3 scripts/nvx.py build-guest-binaries --output DIRECTORY
+    [--architecture {x86_64,aarch64}]
 ```
 
 The Linux-only build command checks the exact `rust-toolchain.toml` pin and
@@ -840,16 +851,24 @@ It updates the output of an earlier build in place, adding `nvx-managed-agent`,
 manifest does not record them and removing the retired `nvx-port-io` executable
 when that build's manifest records it, and refuses any other existing
 `DIRECTORY`.
+`--architecture aarch64` uses the same producer with the ARM cold-boot
+inventory, a matching ELF machine and a separate output directory. Missing
+required helpers and stale sources fail inspection; compilation alone is not
+qualification. Omitting the option preserves the ten-helper x86 build and
+legacy manifest.
 
 ### `test-guest-binaries`
 
 ```text
 python3 scripts/nvx.py test-guest-binaries --binaries DIRECTORY
+    [--architecture {x86_64,aarch64}]
 ```
 
 The Linux-only test command validates the ten binaries and build manifest,
 sets `NVX_GUEST_BINARIES`, and runs the musl `guest_tools` integration test
 against that exact directory.
+`--architecture` selects its musl target and expected inventory; it defaults
+to x86-64 and requires a host that can execute that target.
 
 See [Setup](setup.md) for host prerequisites.
 
@@ -869,6 +888,7 @@ revision and is used before packaging kernel provenance inputs.
 
 ```text
 python3 scripts/nvx.py build-guest
+    [--architecture {x86_64,aarch64}]
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
     [--debug-kernel]
@@ -881,11 +901,15 @@ Docker. `--guest all` also builds the Ubuntu EROFS distro layer and the
 sandbox scratch template; see [`build-scratch-template`](#build-scratch-template).
 `--debug-kernel` also builds the CI debug kernel, `build/vmlinux-debug`; see
 [Build](build.md#ci-debug-kernel).
+`--architecture` defaults to x86-64. ARM uses the same producers with
+separate inputs and outputs, supports Alpine or Ubuntu cold boot, and rejects
+the all-guests distro-layer and x86 debug-kernel modes. It does not select or
+approve a CPU profile.
 
 ### `build-kernel`
 
 ```console
-python3 scripts/nvx.py build-kernel [--debug]
+python3 scripts/nvx.py build-kernel [--debug] [--architecture {x86_64,aarch64}]
 ```
 
 Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
@@ -893,11 +917,14 @@ Fetches, verifies, patches, and builds the pinned kernel directly on Linux.
 production build also requires its configuration to be the one that the
 kernel feature inventory generates; see
 [Kernel configuration](build.md#kernel-configuration).
+`--architecture aarch64` selects the ARM inventory, patches and namespaced
+`Image` output; the default remains x86-64 `vmlinux`.
 
 ### `kernel-config`
 
 ```console
 python3 scripts/nvx.py kernel-config [--native] [--check]
+    [--architecture {x86_64,aarch64}]
 ```
 
 Generates `kernel/config-microvm` and `kernel/config-microvm.derived` from the
@@ -907,11 +934,13 @@ every other symbol. By default it generates them in the Docker build's image,
 whose toolchain builds CI's kernels; `--native` generates them on Linux with
 the host's toolchain. `--check` fails if the checked-in files differ instead of
 writing them. See [Kernel configuration](build.md#kernel-configuration).
+`--architecture` defaults to x86-64; ARM generates its separate configuration
+and derived record from the pinned ARM Kconfig source.
 
 ### `check-kernel-config`
 
 ```console
-python3 scripts/nvx.py check-kernel-config
+python3 scripts/nvx.py check-kernel-config [--architecture {x86_64,aarch64}]
 ```
 
 Checks, without a kernel source, that every setting of the kernel feature
@@ -919,15 +948,22 @@ inventory holds in `kernel/config-microvm` and that every other symbol that it
 sets is recorded, with the same value, in `kernel/config-microvm.derived`. A
 newly enabled symbol that neither accounts for fails the check, which CI's
 quality job runs on every change and which `verify` runs too.
+`--architecture aarch64` checks the ARM inventory and actual-value exclusions
+instead; the default x86 check and attribution remain unchanged.
 
 ### `build-initramfs`
 
 ```console
 python3 scripts/nvx.py build-initramfs [--guest {alpine,ubuntu,azurelinux}]
+    [--architecture {x86_64,aarch64}]
 ```
 
 Builds the selected initramfs. Alpine and Ubuntu build directly on Linux; Azure
 Linux uses Docker. Alpine is the default.
+`--architecture` defaults to x86-64. ARM selects separate Alpine or Ubuntu
+archives, package identities, helper inventory and output paths, and rejects
+Azure Linux rather than using x86 inputs. Required guest-time implementation
+and runtime qualification gates are not waived.
 
 ### `build-distro-layer`
 
@@ -1040,6 +1076,7 @@ itself.
 
 ```text
 python3 scripts/nvx.py build
+    [--architecture {x86_64,aarch64}]
     [--guest {alpine,ubuntu,azurelinux,all}]
     [--native]
     [--debug-kernel]
@@ -1049,6 +1086,8 @@ python3 scripts/nvx.py build
 
 Runs `build-guest` followed by `build-openvmm`. The options have the same
 meaning as on those individual commands.
+`--architecture` selects the guest producers, with x86-64 the default; it
+does not change the host's native OpenVMM build target or select a CPU profile.
 
 See [Build](build.md) for dependencies, outputs, and native build details.
 
@@ -1400,6 +1439,18 @@ the run summary records their absolute location. See
 for the trust boundary, wrapper contract, artifacts, and CI policy.
 
 ## CPU profiles
+
+ARM64 development cold boots use the same `--cpu-profile` option and normal
+launch/admission path. `auto` selects the supported built-in ARM profile;
+`host` derives a separate canonical, policy-filtered native profile with its
+own ID/digest. Both retain native PAC capability through ordinary Linux
+userspace key handling, not a new guest key service. The actual counter Hz
+remains separate from CPU identity and is paired with it through the same
+machine time binding. Kernel and Rust-helper return-signing policy is
+unchanged. ARM snapshots are not supported; see
+[ARM build and qualification scope](build.md#build).
+
+The existing x86-64 profiles and their selection behavior are unchanged:
 
 Every microVM presents a CPU profile to its guest: the complete CPUID surface
 of one CPU generation, which OpenVMM pins and every backend shares (see the

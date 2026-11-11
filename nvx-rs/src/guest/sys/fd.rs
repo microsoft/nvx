@@ -6,6 +6,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 pub(crate) use nix::fcntl::OFlag as OpenFlags;
 use nix::fcntl::{FcntlArg, FdFlag, Flock, FlockArg, SealFlag, fcntl};
+#[cfg(any(target_arch = "x86_64", test))]
 use nix::poll::{PollFd, PollFlags};
 use nix::sys::memfd::{MFdFlags, memfd_create};
 use nix::sys::socket::{AddressFamily, Shutdown, SockFlag, SockType, shutdown, socketpair};
@@ -96,6 +97,7 @@ impl FileDescriptor {
     }
 
     /// Sets the file's size to `length` bytes, preserving the C cast from `u64` to `off_t`.
+    #[cfg(any(target_arch = "x86_64", test))]
     pub(crate) fn truncate(&self, length: u64) -> Result<(), Errno> {
         nix::unistd::ftruncate(&self.0, length as _)
     }
@@ -126,6 +128,7 @@ impl FileDescriptor {
     /// Waits at most `timeout_ms` milliseconds for data to read, with one `poll` call.
     ///
     /// Returns whether `poll` reported `POLLIN`. An interrupted call is an error, not a retry.
+    #[cfg(any(target_arch = "x86_64", test))]
     pub(crate) fn wait_readable(&self, timeout_ms: u16) -> Result<bool, Errno> {
         let mut descriptors = [PollFd::new(self.0.as_fd(), PollFlags::POLLIN)];
         let ready = nix::poll::poll(&mut descriptors, timeout_ms)?;
@@ -333,6 +336,16 @@ pub(crate) fn lock_file(path: &CStr, mode: Mode) -> Result<FileLock, Errno> {
     }
 }
 
+/// Takes a file's exclusive lock without waiting, creating it privately when missing.
+pub(crate) fn try_lock_file(path: &CStr, mode: Mode) -> Result<FileLock, Errno> {
+    let flags =
+        OpenFlags::O_RDWR | OpenFlags::O_CREAT | OpenFlags::O_CLOEXEC | OpenFlags::O_NOFOLLOW;
+    let descriptor = nix::fcntl::open(path, flags, mode)?;
+    Flock::lock(descriptor, FlockArg::LockExclusiveNonblock)
+        .map(|lock| FileLock { _lock: lock })
+        .map_err(|(_, error)| error)
+}
+
 /// Opens the directory `path` and takes its exclusive lock without waiting, or fails with
 /// `EWOULDBLOCK` while another open file description holds a lock on it, in this process or
 /// another.
@@ -345,7 +358,7 @@ pub(crate) fn try_lock_directory(path: &CStr) -> Result<FileLock, Errno> {
 }
 
 /// A file that this process creates, which dropping the owner closes and removes unless the
-/// process [keeps](Self::keep) or [renames](Self::rename) it first.
+/// process keeps it (the x86 restore recorder) or [renames](Self::rename) it first.
 #[derive(Debug)]
 pub(crate) struct CreatedFile<'a> {
     /// The file's path, until the process keeps or renames the file.
@@ -386,6 +399,7 @@ impl<'a> CreatedFile<'a> {
     }
 
     /// Closes the file and keeps it, even when closing fails, which it reports.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn keep(mut self) -> Result<(), Errno> {
         self.path = None;
         self.descriptor.take().map_or(Ok(()), FileDescriptor::close)

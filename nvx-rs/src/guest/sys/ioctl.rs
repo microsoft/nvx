@@ -130,6 +130,7 @@ pub(crate) fn flush_block_buffers(descriptor: &FileDescriptor) -> Result<(), Err
 /// returns. It needs `CAP_SYS_ADMIN`, and fails with `EBUSY` while one of the disk's partitions is
 /// open, as a mounted one is, and with `EINVAL` on a partition, or on a disk that the kernel does
 /// not partition.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn reread_partition_table(descriptor: &FileDescriptor) -> Result<(), Errno> {
     // SAFETY: `BLKRRPART` reads no argument.
     unsafe { blkrrpart(descriptor.raw()) }?;

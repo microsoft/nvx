@@ -1,49 +1,57 @@
 //! The time ABI's typed calls, through which a guest init or agent runs its steps in process.
 
+#[cfg(target_arch = "x86_64")]
 use std::ffi::CString;
 use std::fmt::{self, Display};
 use std::io;
+#[cfg(target_arch = "x86_64")]
 use std::net::IpAddr;
+#[cfg(target_arch = "x86_64")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_arch = "x86_64")]
 use std::path::PathBuf;
 
-use super::checks::{self, Checks};
+#[cfg(target_arch = "x86_64")]
+use super::NSEC_PER_USEC;
+use super::Phase;
+#[cfg(target_arch = "x86_64")]
+use super::checks;
+use super::checks::Checks;
+#[cfg(target_arch = "x86_64")]
 use super::cpu_mask::CpuMask;
 use super::daemon;
+#[cfg(target_arch = "x86_64")]
 use super::decoders::{self, PACKET_HEADER_SIZE, PacketError, PacketHeader, RestorePacket};
 use super::events::{CheckId, ViolationCode};
+#[cfg(target_arch = "aarch64")]
+use super::state::TimeState;
+#[cfg(target_arch = "x86_64")]
 use super::state::{CheckState, CheckStatus, Discontinuity, DowntimeSource, TimeState};
 use super::system::{
-    self, BestSample, PORTB_GENERATION_ID_AVAILABLE, PORTB_PACKET_AVAILABLE, PRIVATE_FILE_MODE,
-    PowerOffStatus, RESTORE_PATH, RESTORE_TEMP_PATH, RealOps, Runtime, SAMPLE_ATTEMPTS,
-    SAMPLE_BOUND_NS, SELECT_GENERATION_ID, SELECT_PACKET, SampleError, SampleResult, SaveError,
-    SpawnError, clock_ns, cpu_time_ns, current_frequency, fork_process, initial_sample, portb_read,
-    state_apply, state_load, state_store,
+    self, PowerOffStatus, RealOps, Runtime, SpawnError, clock_ns, cpu_time_ns, current_frequency,
+    fork_process, initial_sample, state_store,
 };
-use super::{NSEC_PER_USEC, Phase};
+#[cfg(target_arch = "x86_64")]
+use super::system::{
+    BestSample, PORTB_GENERATION_ID_AVAILABLE, PORTB_PACKET_AVAILABLE, PRIVATE_FILE_MODE,
+    RESTORE_PATH, RESTORE_TEMP_PATH, SAMPLE_ATTEMPTS, SAMPLE_BOUND_NS, SELECT_GENERATION_ID,
+    SELECT_PACKET, SampleError, SampleResult, SaveError, portb_read, state_apply, state_load,
+};
 use crate::guest::GenerationId;
+#[cfg(target_arch = "x86_64")]
 use crate::guest::reseed::Seed;
-use crate::guest::sys::{
-    self, Errno, FileDescriptor, ForkResult, OpenFlags, Port, PortAccess, PortError, kernel,
-};
-use crate::protocol::cmdline::{self, Token};
+use crate::guest::sys::{self, Errno, ForkResult, kernel};
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::{FileDescriptor, OpenFlags, Port, PortAccess, PortError};
 
-/// The kernel command-line token that makes the time ABI report-only, `nvx_time_abi=report-only`.
-const REPORT_ONLY_TOKEN: Token<'static> = Token {
-    name: b"nvx_time_abi",
-    value: Some(b"report-only"),
-};
-
-/// The guest side of NVX time ABI version one: its cold-boot time step and the start of its time
-/// daemon, its VM generation ID, the capture request with the repair of a restore, and the
-/// restore's finish, which run in the calling process.
+/// The shared cold-boot step, supervised time daemon and VM generation identity.
+/// On x86, the same API also prepares capture and repairs and finishes restores.
 ///
-/// A call needs the privileges of `nvx-time`: `CAP_SYS_RAWIO` for OpenVMM's I/O ports, and
-/// write access to `/run/nvx`. It takes the permission for the ports only for each of its port
-/// transactions, on the calling thread, and returns only once the thread holds none of it, or
-/// fails with [`TimeError::PortRelease`], after which the thread must start neither a thread
-/// nor a process, which would inherit the permission; [`Command`](crate::guest::spawn::Command)
-/// refuses to start one from it. No call waits for a child that it did not start.
+/// Calls need write access to `/run/nvx` and the ISA's hardware interface: x86's port permission
+/// and MSR devices, or ARM's restricted platform device and architected EL0 counter.
+/// Every transaction releases its authority before another process can be started.
+/// [`Command`](crate::guest::spawn::Command) refuses to inherit retained authority.
+/// No call waits for a child that it did not start.
 ///
 /// A violation of the time ABI is reported by a violation event on the console, in the kernel
 /// log, and on OpenVMM's debug console. In enforcing mode, the event stops the VM, so the call
@@ -66,16 +74,18 @@ impl TimeAbi {
     /// Returns the time ABI in the mode that the kernel command line selects: report-only when
     /// it holds `nvx_time_abi=report-only`, and enforcing otherwise.
     pub fn new() -> Self {
-        Self {
-            report_only: cmdline_requests_report_only(),
-            strict: false,
-        }
+        Self::with_report_only(cmdline_requests_report_only())
     }
 
     /// Returns the time ABI in report-only mode, whatever the kernel command line selects.
     pub fn report_only() -> Self {
+        Self::with_report_only(true)
+    }
+
+    /// Constructs the mode already resolved by the command dispatcher.
+    pub(crate) const fn with_report_only(report_only: bool) -> Self {
         Self {
-            report_only: true,
+            report_only,
             strict: false,
         }
     }
@@ -126,8 +136,8 @@ impl TimeAbi {
     /// the wall clock to it, holds the frequency correction that the host's clock correction
     /// asks for, and publishes the time state, which starts at generation zero.
     ///
-    /// The sample pairs the frequency MSR's declared TSC rate, which it reads through
-    /// `/dev/cpu/0/msr`, so devtmpfs must be mounted first. A sample that cannot be taken within
+    /// The sample uses the declared counter rate: x86's frequency MSR or ARM's a8/CNTFRQ binding.
+    /// The hardware device must be available first. A sample that cannot be taken within
     /// its bound is a violation of check C12, which does not fail the call in report-only mode:
     /// the step then leaves the wall clock unsynchronized, which [`ColdBoot::synchronized`]
     /// tells. The step starts no process: [`start_daemon`](Self::start_daemon) starts the time
@@ -142,8 +152,8 @@ impl TimeAbi {
     ///
     /// The child runs the deferred boot checks in the background, at idle priority, and then
     /// becomes the time daemon: it disciplines the wall clock, watches the kernel log for
-    /// violations, and runs repair step 7 of the restores that
-    /// [`restore_finish`](Self::restore_finish) hands it. It runs in a session of its own, with
+    /// violations, and on x86-64 runs repair step 7 of the restores that
+    /// `restore_finish` hands it. It runs in a session of its own, with
     /// its standard streams on the null device, until the VM stops or `SIGTERM` stops it, and
     /// waits only for the children that it starts itself. It takes the command name `nvx-time`,
     /// by which the calls of the time ABI recognize it. The caller supervises it and collects
@@ -166,12 +176,15 @@ impl TimeAbi {
                 daemon::boot_checker(&self.enforcing_runtime(), &boot)
             }
             Ok(ForkResult::Parent(child)) => Ok(child.raw().unsigned_abs()),
+            #[cfg(target_arch = "x86_64")]
             Err(SpawnError::Ports(error)) => Err(error.into()),
+            #[cfg(target_arch = "aarch64")]
+            Err(SpawnError::Authority(error)) => Err(TimeError::PlatformRelease(error.into())),
             Err(SpawnError::Fork(error)) => Err(TimeError::Spawn(error.into())),
         }
     }
 
-    /// Reads the VM generation ID, which a [capture](Self::capture) needs.
+    /// Reads the VM generation ID, also used by x86-64's `capture`.
     pub fn generation_id(&self) -> Result<GenerationId, TimeError> {
         let runtime = self.runtime();
         settled(&runtime, read_generation_id(&runtime))
@@ -191,6 +204,7 @@ impl TimeAbi {
     /// requested it, in which the call does not return. With [`CaptureRequest::finish`],
     /// [`Restore::finished`] tells whether the call finished the restore, and how it reports a
     /// failed handoff of repair step 7.
+    #[cfg(target_arch = "x86_64")]
     pub fn capture(&self, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
         let runtime = self.runtime();
         settled(&runtime, capture(&runtime, request))
@@ -209,6 +223,7 @@ impl TimeAbi {
     /// passes to init, or to the nearest subreaper, without the process's descriptors. The call
     /// returns when step 7 ends, which reports its failures by their events only, as
     /// `nvx-time restore-finish` does.
+    #[cfg(target_arch = "x86_64")]
     pub fn restore_finish(&self, request: RestoreFinish) -> Result<(), TimeError> {
         let runtime = self.runtime();
         settled(&runtime, restore_finish(&runtime, request))
@@ -229,6 +244,7 @@ impl TimeAbi {
     /// Like the other calls, it fails with [`TimeError::PortRelease`], as
     /// [`PreCaptureError::PortRelease`], if the thread may still hold some of the permission for
     /// the ports.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn pre_capture(&self) -> Result<(), PreCaptureError> {
         released_preparation(
             pre_capture(&self.enforcing_runtime()),
@@ -240,6 +256,7 @@ impl TimeAbi {
     /// removes their record, as `nvx-time cancel-capture` does, or fails with its diagnostic,
     /// such as `read /run/nvx/time-suppression: No such file or directory`. It takes no
     /// permission for the ports.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn cancel_capture(&self) -> Result<(), Vec<u8>> {
         system::suppression_restore(false)
     }
@@ -253,19 +270,30 @@ impl Default for TimeAbi {
 }
 
 /// Returns whether the kernel command line selects report-only mode: whether it holds the
-/// `nvx_time_abi=report-only` token, among the tokens into which [`cmdline::init_tokens`] splits
+/// `nvx_time_abi=report-only` token, among the tokens into which
+/// [`crate::protocol::cmdline::init_tokens`] splits
 /// it as the guest's init does.
 fn cmdline_requests_report_only() -> bool {
-    let Ok(text) = sys::read_file(kernel::COMMAND_LINE) else {
-        return false;
+    let text = match sys::read_file(kernel::COMMAND_LINE) {
+        Ok(text) => text,
+        Err(error) => {
+            sys::write_standard_error(
+                format!("nvx-time: read kernel command line: {error}; keeping enforcing mode\n")
+                    .as_bytes(),
+            );
+            return false;
+        }
     };
-    cmdline::init_tokens(&text).any(|token| token == REPORT_ONLY_TOKEN)
+    super::sample::report_only(&text, false)
 }
 
 /// Ends a call with `result`, unless the calling thread may still hold port permission that a
 /// failed revocation left, which the call reports instead.
 fn released<T>(result: Result<T, TimeError>) -> Result<T, TimeError> {
+    #[cfg(target_arch = "x86_64")]
     sys::check_released().map_err(TimeError::from)?;
+    #[cfg(target_arch = "aarch64")]
+    sys::check_released().map_err(|error| TimeError::PlatformRelease(error.into()))?;
     result
 }
 
@@ -282,6 +310,7 @@ fn settled<T>(runtime: &Runtime<'_>, result: Result<T, TimeError>) -> Result<T, 
 /// Ends a preparation of a capture with `result`, unless the calling thread may still hold port
 /// permission, as `released` tells, which the preparation reports instead, with whether it holds
 /// the stall detectors' suppression.
+#[cfg(target_arch = "x86_64")]
 fn released_preparation(
     result: Result<(), PreCaptureError>,
     released: Result<(), PortError>,
@@ -339,9 +368,10 @@ fn cold_boot(runtime: &Runtime<'_>) -> Result<ColdBoot, TimeError> {
     };
     let mut state = TimeState::default();
     state.synchronized = initial.is_some();
+    state.violations = checks.failures as u64;
     match &initial {
         Some((sample, _)) => state.record_sample(sample),
-        None => state.frequency_ppb = decoders::frequency_to_ppb(current_frequency(runtime)),
+        None => state.frequency_ppb = super::sample::frequency_to_ppb(current_frequency(runtime)),
     }
     if let Err(error) = state_store(&state) {
         return Err(check_failed(
@@ -360,6 +390,7 @@ fn cold_boot(runtime: &Runtime<'_>) -> Result<ColdBoot, TimeError> {
 }
 
 /// The read of [`TimeAbi::generation_id`].
+#[cfg(target_arch = "x86_64")]
 fn read_generation_id(runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> {
     let ports = runtime.open_ports()?;
     if ports.read_u8(Port::PortbStatus) & PORTB_GENERATION_ID_AVAILABLE == 0 {
@@ -374,8 +405,18 @@ fn read_generation_id(runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> 
     Ok(GenerationId::from_bytes(id))
 }
 
+/// Reads the same a6 generation record through the restricted ARM transport.
+#[cfg(target_arch = "aarch64")]
+fn read_generation_id(_runtime: &Runtime<'_>) -> Result<GenerationId, TimeError> {
+    sys::platform::generation_id().map_err(|error| match error {
+        Errno::EOPNOTSUPP => TimeError::GenerationIdUnavailable,
+        error => TimeError::PlatformAccess(error.into()),
+    })
+}
+
 /// Why [`TimeAbi::pre_capture`] failed.
 #[derive(Debug)]
+#[cfg(target_arch = "x86_64")]
 pub(crate) enum PreCaptureError {
     /// The boot checks were still pending when the wait ended: a violation of check C10, which
     /// a report-only call reports with its event.
@@ -403,6 +444,7 @@ pub(crate) enum PreCaptureError {
     },
 }
 
+#[cfg(target_arch = "x86_64")]
 impl PreCaptureError {
     /// Returns whether the call that failed holds the suppression of the stall detectors, as a
     /// call that succeeded does: their record stays, and the caller restores their settings with
@@ -420,8 +462,16 @@ impl PreCaptureError {
 }
 
 /// The preparation of [`TimeAbi::pre_capture`].
+#[cfg(target_arch = "x86_64")]
 fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
-    let (state, completed) = checks::wait_for_checks(true);
+    let (state, completed) = checks::wait_for_checks(true).map_err(|error| {
+        PreCaptureError::BootChecks(check_failed(
+            runtime,
+            Phase::Capture,
+            CheckId::C10,
+            format!("cannot read the time state: {error}"),
+        ))
+    })?;
     if !completed {
         return Err(PreCaptureError::BootChecks(check_failed(
             runtime,
@@ -469,6 +519,7 @@ fn pre_capture(runtime: &Runtime<'_>) -> Result<(), PreCaptureError> {
 
 /// How a snapshot treats the guest's scratch disk, which the capture request selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg(target_arch = "x86_64")]
 pub enum ScratchPolicy {
     /// The snapshot keeps no scratch disk: the capture happens before the scratch disk is
     /// mounted, and a restore attaches a new one.
@@ -477,6 +528,7 @@ pub enum ScratchPolicy {
     Paired,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl ScratchPolicy {
     /// Returns the byte that requests the capture through the snapshot port.
     pub(crate) fn request(self) -> u8 {
@@ -493,6 +545,7 @@ impl ScratchPolicy {
 /// [`in_memory`](Self::in_memory), which writes no file, and returns it as the [`Restore`]'s
 /// owned [`Seed`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(target_arch = "x86_64")]
 pub struct CaptureRequest {
     /// The snapshot's scratch policy.
     scratch: ScratchPolicy,
@@ -507,6 +560,7 @@ pub struct CaptureRequest {
 /// How a restore hands over the fresh entropy of its restore packet: the mode of a
 /// [`CaptureRequest`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(target_arch = "x86_64")]
 enum EntropyMode {
     /// The file mode: the restore writes the entropy to the file at this path, which only its
     /// owner may read and write.
@@ -515,6 +569,7 @@ enum EntropyMode {
     InMemory,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl CaptureRequest {
     /// Describes a capture in the file mode, with the `scratch` policy, by the VM process whose
     /// generation ID, from [`TimeAbi::generation_id`], is `generation_id`. A restore writes the
@@ -557,6 +612,7 @@ impl CaptureRequest {
 
 /// How a capture request ended, in the VM process in which it returned.
 #[derive(Debug)]
+#[cfg(target_arch = "x86_64")]
 pub enum CaptureOutcome {
     /// The VM continued without a restore: no snapshot was taken, or the restore packet was of
     /// the recorded generation. The entropy file of the file mode is removed.
@@ -572,6 +628,7 @@ pub enum CaptureOutcome {
 /// [`take_seed`](Self::take_seed) hands it over, so it is neither `Clone` nor comparable: the
 /// seed has one owner.
 #[derive(Debug)]
+#[cfg(target_arch = "x86_64")]
 pub struct Restore {
     /// The packet's flags.
     flags: u8,
@@ -591,6 +648,7 @@ pub struct Restore {
     seed: Option<Seed>,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Restore {
     /// Returns whether the call finished the restore, as [`CaptureRequest::finish`] asked.
     /// Otherwise, the caller activates the restore's processors and memory, applies its network
@@ -676,6 +734,7 @@ impl Restore {
 /// announces its listeners under it, as a cold boot under that policy learns them from the
 /// `virtnet_dns=` and `virtnet_ingress=` tokens of its command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg(target_arch = "x86_64")]
 pub struct RestoreNetwork {
     /// The DNS server, one of the gateway's addresses, or `None` when the policy lets the guest
     /// reach no DNS service of the gateway.
@@ -684,6 +743,7 @@ pub struct RestoreNetwork {
     announce_listeners: bool,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl RestoreNetwork {
     /// Returns the network settings with `dns_server` and `announce_listeners`.
     pub(crate) const fn new(dns_server: Option<IpAddr>, announce_listeners: bool) -> Self {
@@ -707,6 +767,7 @@ impl RestoreNetwork {
 
 /// A range of guest physical memory that a restore adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg(target_arch = "x86_64")]
 pub struct MemoryRange {
     /// The range's first guest physical address.
     start: u64,
@@ -714,6 +775,7 @@ pub struct MemoryRange {
     length: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl MemoryRange {
     /// Returns the range's first guest physical address.
     pub fn start(&self) -> u64 {
@@ -728,6 +790,7 @@ impl MemoryRange {
 
 /// The flags with which a capture in the file mode creates the entropy file: write-only, created
 /// or truncated, and never through a symbolic link.
+#[cfg(target_arch = "x86_64")]
 const ENTROPY_FLAGS: OpenFlags = OpenFlags::O_WRONLY
     .union(OpenFlags::O_CREAT)
     .union(OpenFlags::O_TRUNC)
@@ -735,6 +798,7 @@ const ENTROPY_FLAGS: OpenFlags = OpenFlags::O_WRONLY
     .union(OpenFlags::O_CLOEXEC);
 
 /// The capture request and repair of [`TimeAbi::capture`].
+#[cfg(target_arch = "x86_64")]
 fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutcome, TimeError> {
     let CaptureRequest {
         scratch,
@@ -801,6 +865,7 @@ fn capture(runtime: &Runtime<'_>, request: CaptureRequest) -> Result<CaptureOutc
 
 /// Loads the persisted generation, and the declared TSC rate that the boot checks recorded, with
 /// which repair pairs its time sample without reading the frequency MSR, into the runtime.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn load_generation(runtime: &Runtime<'_>) {
     if let Ok(state) = state_load() {
         runtime.set_generation(state.generation as u32);
@@ -809,6 +874,7 @@ pub(crate) fn load_generation(runtime: &Runtime<'_>) {
 }
 
 /// Where a capture hands over a restore's fresh entropy, in its request's mode.
+#[cfg(target_arch = "x86_64")]
 enum EntropySink {
     /// The file mode's entropy file, which the capture created.
     File {
@@ -821,6 +887,7 @@ enum EntropySink {
     Seed,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl EntropySink {
     /// Closes and removes the file mode's entropy file, of a capture that restored no packet.
     fn discard(self) {
@@ -845,6 +912,7 @@ impl EntropySink {
 
 /// What repair step 2's port reads returned, which repair validates once their transaction
 /// ended.
+#[cfg(target_arch = "x86_64")]
 enum PacketRead {
     /// The packet's header is invalid.
     InvalidHeader(PacketError),
@@ -859,12 +927,14 @@ enum PacketRead {
 }
 
 /// The time sample that repair selected, or why it could select none.
+#[cfg(target_arch = "x86_64")]
 type SampleRead = Result<(SampleResult, BestSample), SampleError>;
 
 /// Repair step 2's port reads, after the capture read the status, step 1: selects the restore
 /// packet, and reads its header and, when the header is valid and follows the `recorded`
 /// generation, its body, with four-byte reads, and then, for a valid packet, takes the time
 /// sample of the packet's generation, to which repair steps the wall clock.
+#[cfg(target_arch = "x86_64")]
 fn read_packet(runtime: &Runtime<'_>, ports: &PortAccess<'_>, recorded: u32) -> PacketRead {
     ports.write_u8(Port::PortbStatus, SELECT_PACKET);
     let mut header = [0_u8; PACKET_HEADER_SIZE];
@@ -906,6 +976,7 @@ fn read_packet(runtime: &Runtime<'_>, ports: &PortAccess<'_>, recorded: u32) -> 
 }
 
 /// What a restore transaction writes, and where.
+#[cfg(target_arch = "x86_64")]
 struct RepairTarget {
     /// The VM generation ID before the snapshot, which the packet must replace.
     previous_id: GenerationId,
@@ -920,6 +991,7 @@ struct RepairTarget {
 /// Repair steps 2 and 3, once the port transaction that read the packet and its time sample
 /// ended: validates them, steps the clock to the sample and holds the frequency correction that
 /// its host clock correction asks for, hands over the packet's entropy, and records the restore.
+#[cfg(target_arch = "x86_64")]
 fn repair_restore(
     runtime: &Runtime<'_>,
     read: PacketRead,
@@ -1049,6 +1121,7 @@ fn repair_restore(
 
 /// Applies one successful restore packet, and the time sample to which repair stepped the wall
 /// clock, to persistent state.
+#[cfg(target_arch = "x86_64")]
 fn apply_repair(
     state: &mut TimeState,
     packet: &PacketHeader,
@@ -1088,8 +1161,10 @@ fn apply_repair(
 /// Its `Display` form is a CPU list in the kernel's syntax, such as `1-3,6`, or `none` for the
 /// empty set.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg(target_arch = "x86_64")]
 pub struct CpuSet(CpuMask);
 
+#[cfg(target_arch = "x86_64")]
 impl CpuSet {
     /// Returns the empty set.
     pub const fn new() -> Self {
@@ -1123,6 +1198,7 @@ impl CpuSet {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl From<CpuMask> for CpuSet {
     /// Returns the set of the mask's CPUs.
     fn from(mask: CpuMask) -> Self {
@@ -1130,6 +1206,7 @@ impl From<CpuMask> for CpuSet {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Display for CpuSet {
     /// Writes the set as a CPU list in the kernel's syntax, or `none` for the empty set.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1139,6 +1216,7 @@ impl Display for CpuSet {
 
 /// The finish of a restore, [`TimeAbi::restore_finish`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg(target_arch = "x86_64")]
 pub struct RestoreFinish {
     /// Whether to acknowledge the restore through the snapshot port.
     acknowledge: bool,
@@ -1146,6 +1224,7 @@ pub struct RestoreFinish {
     new_cpus: CpuSet,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl RestoreFinish {
     /// Describes a finish that records no new CPUs and sends no acknowledgement.
     pub fn new() -> Self {
@@ -1168,6 +1247,7 @@ impl RestoreFinish {
 }
 
 /// The finish of [`TimeAbi::restore_finish`].
+#[cfg(target_arch = "x86_64")]
 fn restore_finish(runtime: &Runtime<'_>, request: RestoreFinish) -> Result<(), TimeError> {
     let RestoreFinish {
         acknowledge,
@@ -1233,6 +1313,7 @@ fn restore_finish(runtime: &Runtime<'_>, request: RestoreFinish) -> Result<(), T
 
 /// Reports that restore-time repair failed, which stops the VM unless report-only or strict,
 /// and returns the violation.
+#[cfg(target_arch = "x86_64")]
 fn repair_failed(
     runtime: &Runtime<'_>,
     code: ViolationCode,
@@ -1320,16 +1401,26 @@ impl Display for Violation {
 pub enum TimeError {
     /// The calling thread could not take the permission for OpenVMM's ports, which needs
     /// `CAP_SYS_RAWIO`.
+    #[cfg(target_arch = "x86_64")]
     PortAccess(io::Error),
     /// The kernel did not revoke the calling thread's permission for OpenVMM's ports. The
     /// thread may still hold some of it, and must start neither a thread nor a process, which
     /// [`Command`](crate::guest::spawn::Command) refuses to start from it.
+    #[cfg(target_arch = "x86_64")]
     PortRelease(io::Error),
     /// The lock that serializes the transactions of port B's window failed.
+    #[cfg(target_arch = "x86_64")]
     PortLock(io::Error),
+    /// The restricted ARM platform transaction could not start or complete.
+    #[cfg(target_arch = "aarch64")]
+    PlatformAccess(io::Error),
+    /// The thread may retain platform authority and must not start another process.
+    #[cfg(target_arch = "aarch64")]
+    PlatformRelease(io::Error),
     /// The time state, which the cold-boot time step publishes, is unavailable.
     StateUnavailable,
     /// The entropy file could not be created.
+    #[cfg(target_arch = "x86_64")]
     EntropyFile {
         /// The file's path.
         path: PathBuf,
@@ -1346,6 +1437,7 @@ pub enum TimeError {
     Violation(Violation),
 }
 
+#[cfg(target_arch = "x86_64")]
 impl From<PortError> for TimeError {
     /// Returns the error of a port transaction that could not start or end.
     fn from(error: PortError) -> Self {
@@ -1360,12 +1452,22 @@ impl From<PortError> for TimeError {
 impl Display for TimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(target_arch = "x86_64")]
             Self::PortAccess(error) => write!(formatter, "ioperm: {}", sys::describe(error)),
+            #[cfg(target_arch = "x86_64")]
             Self::PortRelease(error) => {
                 write!(formatter, "ioperm revoke: {}", sys::describe(error))
             }
+            #[cfg(target_arch = "x86_64")]
             Self::PortLock(error) => write!(formatter, "portb lock: {}", sys::describe(error)),
+            #[cfg(target_arch = "aarch64")]
+            Self::PlatformAccess(error) => write!(formatter, "platform: {}", sys::describe(error)),
+            #[cfg(target_arch = "aarch64")]
+            Self::PlatformRelease(error) => {
+                write!(formatter, "platform release: {}", sys::describe(error))
+            }
             Self::StateUnavailable => formatter.write_str("the time state is unavailable"),
+            #[cfg(target_arch = "x86_64")]
             Self::EntropyFile { path, source } => write!(
                 formatter,
                 "open {}: {}",
@@ -1384,15 +1486,19 @@ impl Display for TimeError {
 impl std::error::Error for TimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::PortAccess(error)
-            | Self::PortRelease(error)
-            | Self::PortLock(error)
-            | Self::Spawn(error)
-            | Self::EntropyFile { source: error, .. } => Some(error),
+            #[cfg(target_arch = "x86_64")]
+            Self::PortAccess(error) | Self::PortRelease(error) | Self::PortLock(error) => {
+                Some(error)
+            }
+            Self::Spawn(error) => Some(error),
+            #[cfg(target_arch = "x86_64")]
+            Self::EntropyFile { source: error, .. } => Some(error),
+            #[cfg(target_arch = "aarch64")]
+            Self::PlatformAccess(error) | Self::PlatformRelease(error) => Some(error),
             Self::StateUnavailable | Self::GenerationIdUnavailable | Self::Violation(_) => None,
         }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;

@@ -57,6 +57,7 @@ impl<'a> KmsgRecord<'a> {
 /// One line of the kernel's log as `syslog(2)` returns it: `<priority>`, then `[seconds]` when the
 /// kernel stamps its messages, then the message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) struct SyslogLine<'a> {
     /// Microseconds since boot of the line's timestamp, when it has a well-formed one.
     pub(crate) timestamp_us: Option<u64>,
@@ -64,6 +65,7 @@ pub(crate) struct SyslogLine<'a> {
     pub(crate) message: &'a [u8],
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl<'a> SyslogLine<'a> {
     /// Parses one line. A timestamp is spaces, then decimal seconds with a decimal fraction,
     /// between brackets. A line whose brackets hold anything else keeps them in its message.
@@ -92,6 +94,7 @@ impl<'a> SyslogLine<'a> {
 }
 
 /// Parses a log timestamp, spaces then `seconds.fraction` in decimal, into microseconds.
+#[cfg(any(target_arch = "x86_64", test))]
 fn microseconds(stamp: &[u8]) -> Option<u64> {
     /// Microseconds in a second.
     const PER_SECOND: u64 = 1_000_000;
@@ -157,6 +160,7 @@ impl TickMode {
     }
 
     /// Returns the mode's name, as the time probe prints it.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Periodic => "periodic",
@@ -194,6 +198,7 @@ impl ClockEventState {
     }
 
     /// Returns the state's name, as the time probe prints it.
+    #[cfg(any(target_arch = "x86_64", test))]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Detached => "detached",

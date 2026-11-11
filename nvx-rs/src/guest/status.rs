@@ -21,12 +21,15 @@ pub(crate) enum ExitStatus {
     Usage = 2,
     /// A benchmark could not open, connect, size, or time its device, or a diagnostic could not
     /// prepare or run its measurement.
+    #[cfg(any(target_arch = "x86_64", test))]
     SetupFailure = 3,
     /// A benchmark transfer or send was incomplete.
+    #[cfg(any(target_arch = "x86_64", test))]
     TransferFailure = 4,
     /// The managed agent, or its execution helper before it executed the workload, failed.
     AgentFailure = 125,
     /// A benchmark could not write its result.
+    #[cfg(any(target_arch = "x86_64", test))]
     OutputFailure = 255,
 }
 
@@ -39,10 +42,13 @@ pub(crate) enum CommandError {
     Operation,
     /// A benchmark could not open, connect, size, or time its device, or a diagnostic could not
     /// prepare or run its measurement.
+    #[cfg(any(target_arch = "x86_64", test))]
     Setup,
     /// A benchmark transfer or send was incomplete.
+    #[cfg(any(target_arch = "x86_64", test))]
     Transfer,
     /// A benchmark could not write its result.
+    #[cfg(any(target_arch = "x86_64", test))]
     Output,
     /// The managed agent or its execution helper failed for any reason, including an invalid
     /// command line. It has reported why where its C program did.
@@ -55,8 +61,11 @@ impl From<Result<(), CommandError>> for ExitStatus {
             Ok(()) => Self::Success,
             Err(CommandError::Usage) => Self::Usage,
             Err(CommandError::Operation) => Self::Failure,
+            #[cfg(any(target_arch = "x86_64", test))]
             Err(CommandError::Setup) => Self::SetupFailure,
+            #[cfg(any(target_arch = "x86_64", test))]
             Err(CommandError::Transfer) => Self::TransferFailure,
+            #[cfg(any(target_arch = "x86_64", test))]
             Err(CommandError::Output) => Self::OutputFailure,
             Err(CommandError::Agent) => Self::AgentFailure,
         }

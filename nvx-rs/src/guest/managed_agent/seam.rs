@@ -38,7 +38,11 @@ impl Default for Paths {
             cgroup_root: "/sys/fs/cgroup".into(),
             hostfs_dir: "/run/nvx/hostfs".into(),
             proc_cmdline: "/proc/cmdline".into(),
-            diagnostic_port: "/dev/port".into(),
+            diagnostic_port: if cfg!(target_arch = "x86_64") {
+                "/dev/port".into()
+            } else {
+                "/dev/console".into()
+            },
             null_device: "/dev/null".into(),
             machine_id: "/run/nvx/workload-machine-id".into(),
             time_status: "/run/nvx/time".into(),

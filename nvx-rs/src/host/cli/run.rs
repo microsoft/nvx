@@ -56,7 +56,7 @@ use super::sandbox::{
 use super::shell::format_command;
 use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{Guest, require_artifact};
+use crate::host::artifacts::{Architecture, Guest, require_artifact};
 use crate::host::sandbox::mount::{
     AGGREGATE_MOUNT_TARGET, MountKind, MountOwner, POLICY_KINDS, PolicyKind,
     aggregate_child_argument, aggregate_child_name, aggregate_command_line_fragment,
@@ -74,6 +74,9 @@ pub(super) const SYNTAX: Syntax = Syntax {
     help: "\
 options:
   -h, --help            show this help message and exit
+  --architecture {x86_64,aarch64}
+                        guest artifact ISA (default: native host ISA);
+                        aarch64 uses build/aarch64 and requires local artifacts
   --guest {alpine,ubuntu,azurelinux}
   --hypervisor {auto,whp,kvm,mshv}
   --machine {microvm}
@@ -149,6 +152,10 @@ const MACHINES: [&str; 1] = ["microvm"];
 /// The choices of `--processors` and `--restore-processors`, the processor counts that a microVM
 /// takes.
 const PROCESSORS: [&str; 4] = ["1", "2", "4", "8"];
+/// Approved ARM microVM GPA width; this is address space, not a 64-GiB RAM allowance.
+const ARM64_MICROVM_GPA_BITS: u32 = 36;
+/// Logical RAM ceiling after the fixed 3-4 GiB MMIO aperture, before other reservations.
+const ARM64_MICROVM_MAX_RAM_MIB: u64 = (1_u64 << (ARM64_MICROVM_GPA_BITS - 20)) - 1024;
 
 /// The stable ID of the attachment of a microVM's boot console, `hvc1`, in a snapshot's machine
 /// contract.
@@ -159,7 +166,8 @@ const BOOT_CONSOLE: &str = "console:microvm-virtio0";
 const INHERITED_ATTACHMENT: &str = "require-inherited-attachment";
 
 /// The options of `nvx-rs run`, which parse with the defaults of the former `nvx.py run`.
-pub(super) const OPTIONS: [Spec; 30] = [
+pub(super) const OPTIONS: [Spec; 31] = [
+    Spec::one("--architecture"),
     Spec::one("--guest"),
     Spec::one("--hypervisor"),
     Spec::one("--machine"),
@@ -195,6 +203,8 @@ pub(super) const OPTIONS: [Spec; 30] = [
 /// The parsed options of `nvx-rs run`: the namespace of the former `nvx.py run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Options {
+    /// Explicit guest artifact ISA, retaining the existing x86-64 default.
+    pub(crate) architecture: Architecture,
     /// `--guest`, Alpine by default.
     pub(crate) guest: Guest,
     /// `--hypervisor`, `auto` by default.
@@ -238,6 +248,7 @@ pub(crate) struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            architecture: Architecture::native(),
             guest: Guest::Alpine,
             hypervisor: "auto",
             machine: "microvm",
@@ -276,6 +287,12 @@ impl Receiver for Options {
     fn take(&mut self, name: &'static str, value: Option<&str>) -> std::result::Result<(), String> {
         let text = || value.unwrap_or_default().to_owned();
         match name {
+            "--architecture" => {
+                self.architecture = match choice(&text(), &["x86_64", "aarch64"])? {
+                    "aarch64" => Architecture::Aarch64,
+                    _ => Architecture::X86_64,
+                };
+            }
             "--guest" => {
                 let guest = choice(&text(), &GUESTS)?;
                 self.guest = Guest::ALL
@@ -335,6 +352,18 @@ fn check(options: &Options) -> Result {
     let refused = |message: String| Err(Exit::error(ErrorCode::Unsupported, message));
     let network = &options.network;
     let restore = options.restore_snapshot.is_some();
+    if options.architecture == Architecture::Aarch64 {
+        if restore || options.memory_capacity_mib.is_some() || options.guest == Guest::AzureLinux {
+            return refused(
+                "ARM64 Phase 1 supports Alpine/Ubuntu cold boot, not snapshot restore, memory activation, or Azure Linux".into(),
+            );
+        }
+        if memory_mib(options) > ARM64_MICROVM_MAX_RAM_MIB {
+            return refused(format!(
+                "ARM64 microVM RAM exceeds {ARM64_MICROVM_MAX_RAM_MIB} MiB (63 GiB): the approved 36-bit GPA space reserves the fixed 3-4 GiB aperture; other reservations are separate"
+            ));
+        }
+    }
     if restore && network.net.is_some() {
         return refused(
             "--net is not accepted for restore; the snapshot already fixes the network addressing"
@@ -415,7 +444,8 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     // its host path holds, which a download may install.
     let refused = terminal_console.as_ref().is_some_and(Result::is_err)
         || extend_shares_and_network(&mut Vec::new(), &options, &rules).is_err();
-    let located = locate(root)?;
+    let mut located = locate(root)?;
+    located.dir = located.dir.with_architecture(options.architecture)?;
     // A restore boots no kernel or initramfs: the snapshot holds the guest.
     let guest = options.restore_snapshot.is_none().then_some(options.guest);
     let hold = if refused {
@@ -425,6 +455,10 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     };
     let Located { dir, openvmm } = located;
     require_artifact(&openvmm, "OpenVMM release binary")?;
+    #[cfg(windows)]
+    if options.architecture == Architecture::Aarch64 {
+        crate::host::artifacts::check_arm64_pe(&openvmm)?;
+    }
     let mut command = vec![
         path_text(&path_string(&openvmm)?),
         "--single-process".to_owned(),

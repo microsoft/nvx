@@ -18,6 +18,108 @@ use crate::guest::sys::tests::{
 };
 use crate::guest::sys::{ForkResult, wait};
 
+#[test]
+fn read_only_root_queries_use_only_named_roles_and_distinguish_absence_and_errors() {
+    use crate::guest::root::{BlockRoleState, Role};
+    let arguments = |role: &str| {
+        [
+            CString::new("--root-device").unwrap(),
+            CString::new(role).unwrap(),
+        ]
+    };
+    let mut out = Vec::new();
+    assert_eq!(
+        root_device_command(&arguments("distro"), &mut out, |role| {
+            assert_eq!(role, Role::Distro);
+            Ok(BlockRoleState::Ready("/dev/vdz".into()))
+        }),
+        Some(Ok(true)),
+    );
+    assert_eq!(out, b"/dev/vdz\n");
+    out.clear();
+    assert_eq!(
+        root_device_command(&arguments("scratch"), &mut out, |role| {
+            assert_eq!(role, Role::Scratch);
+            Ok(BlockRoleState::Ready("/dev/vdc".into()))
+        }),
+        Some(Ok(true)),
+    );
+    assert_eq!(out, b"/dev/vdc\n");
+    for state in [BlockRoleState::Absent, BlockRoleState::Probing] {
+        out.clear();
+        assert_eq!(
+            root_device_command(&arguments("distro"), &mut out, |_| Ok(state)),
+            Some(Ok(false))
+        );
+        assert!(out.is_empty());
+    }
+    for (state, expected) in [
+        (BlockRoleState::Absent, true),
+        (BlockRoleState::Probing, false),
+        (BlockRoleState::Ready("/dev/vdz".into()), false),
+    ] {
+        out.clear();
+        assert_eq!(
+            root_device_command(&arguments("no-scratch"), &mut out, |role| {
+                assert_eq!(role, Role::Scratch);
+                Ok(state)
+            }),
+            Some(Ok(expected)),
+        );
+        assert!(out.is_empty());
+    }
+    assert!(
+        root_device_command(&arguments("distro"), &mut out, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "duplicate or wrong driver",
+            ))
+        })
+        .unwrap()
+        .unwrap_err()
+        .contains("duplicate or wrong driver")
+    );
+    assert!(
+        root_device_command(&arguments("0xd0003000"), &mut out, |_| panic!(
+            "no arbitrary addresses"
+        ))
+        .unwrap()
+        .is_err()
+    );
+    for invalid in [
+        vec![CString::new("--root-device").unwrap()],
+        vec![
+            CString::new("--root-device").unwrap(),
+            CString::new("distro").unwrap(),
+            CString::new("extra").unwrap(),
+        ],
+    ] {
+        assert!(
+            root_device_command(&invalid, &mut out, |_| panic!(
+                "no lookup for invalid arguments"
+            ))
+            .unwrap()
+            .is_err()
+        );
+    }
+    assert!(
+        root_device_command(&[], &mut out, |_| panic!("default init is not discovery")).is_none()
+    );
+}
+
+#[test]
+fn read_only_root_queries_surface_device_output_failures() {
+    let arguments = ["--root-device", "distro"].map(|value| CString::new(value).unwrap());
+    let mut buffer: [u8; 0] = [];
+    assert!(
+        root_device_command(&arguments, &mut buffer.as_mut_slice(), |_| {
+            Ok(crate::guest::root::BlockRoleState::Ready("/dev/vdz".into()))
+        })
+        .unwrap()
+        .is_err()
+    );
+}
+
 /// One operation that PID 1 asked its system for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Call {

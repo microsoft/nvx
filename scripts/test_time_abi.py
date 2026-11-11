@@ -979,6 +979,77 @@ class MonitorTests(unittest.TestCase):
         assert mshv is not None
         time_abi.validate_boot_marker(mshv, backend="mshv")
 
+    def test_normal_arm_cli_uses_architected_counter_not_x86_frequency_or_lapic(self):
+        arm_line = BOOT_LINE.replace("tsc_hz=2194804000", "tsc_hz=19200000").replace(
+            "lapic_hz=1000000000", "lapic_hz=0"
+        )
+        for profile in ("auto", "host"):
+            command = [
+                "nvx-rs.exe",
+                "--root",
+                "repository",
+                "run",
+                "--architecture",
+                "aarch64",
+                "--hypervisor",
+                "whp",
+                "--cpu-profile",
+                profile,
+            ]
+            monitor = TimeAbiMonitor(command)
+            self.assertTrue(monitor.cold_boot)
+            monitor.feed(arm_line.encode() + STATUS_OK.encode())
+            self.assertEqual(
+                monitor.require_boot("qualification", online_cpus=4)["tsc_hz"],
+                "19200000",
+            )
+        fields = time_abi.parse_marker(arm_line)
+        assert fields is not None
+        with patch.object(time_abi.platform, "machine", return_value="ARM64"):
+            for profile in ("auto", "host"):
+                native = TimeAbiMonitor(["nvx-rs.exe", "run", "--cpu-profile", profile])
+                native.feed(arm_line.encode() + STATUS_OK.encode())
+                self.assertEqual(
+                    native.require_boot("native omitted ISA")["tsc_hz"], "19200000"
+                )
+            report_only = TimeAbiMonitor(["nvx-rs.exe", "run"])
+            with self.assertRaisesRegex(TimeAbiFailure, "report-only"):
+                report_only.feed(
+                    arm_line.replace("NVX-TIME-ABI:", "NVX-TIME-REPORT:").encode()
+                    + STATUS_OK.encode()
+                )
+            mixed = TimeAbiMonitor(["nvx-rs.exe", "run"])
+            mixed.feed(arm_line.encode())
+            with self.assertRaisesRegex(TimeAbiFailure, "report-only"):
+                mixed.feed(
+                    arm_line.replace("NVX-TIME-ABI:", "NVX-TIME-REPORT:").encode()
+                    + STATUS_OK.encode()
+                )
+        for frequency in ("1", "24000000", "4294967295"):
+            time_abi.validate_boot_marker(
+                {**fields, "tsc_hz": frequency}, backend="kvm", architecture="aarch64"
+            )
+        for frequency in ("0", "-1", "4294967296", "fast"):
+            with self.assertRaises(TimeAbiFailure):
+                time_abi.validate_boot_marker(
+                    {**fields, "tsc_hz": frequency},
+                    backend="whp",
+                    architecture="aarch64",
+                )
+        with self.assertRaises(TimeAbiFailure):
+            time_abi.validate_boot_marker(
+                {**fields, "lapic_hz": "200000000"},
+                backend="whp",
+                architecture="aarch64",
+            )
+        with self.assertRaises(TimeAbiFailure):
+            time_abi.validate_boot_marker(fields, backend="whp")
+        self.assertFalse(
+            time_abi.is_cold_boot_command(
+                ["nvx-rs", "run", "--restore-snapshot", "snapshot"]
+            )
+        )
+
     def test_validates_restore_marker_fields_against_the_backend(self):
         restore = time_abi.parse_marker(RESTORE_LINE)
         assert restore is not None
@@ -2554,18 +2625,22 @@ class DoctorTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        scaled_ppm = decoders["SCALED_PPM"]
+        shared = rust_integer_constants(
+            (root / "nvx-rs" / "src" / "guest" / "time" / "sample.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        scaled_ppm = shared["SCALED_PPM"]
         self.assertEqual(scaled_ppm, 1 << 16)
         self.assertEqual(
-            decoders["FREQUENCY_LIMIT"], doctor.GUEST_FREQUENCY_LIMIT_PPM * scaled_ppm
+            shared["FREQUENCY_LIMIT"], doctor.GUEST_FREQUENCY_LIMIT_PPM * scaled_ppm
         )
         self.assertEqual(
             decoders["RATE_DEVIATION_LIMIT"], doctor.RESTORE_TOLERANCE_PPM * scaled_ppm
         )
         self.assertEqual(
             doctor.RATE_TOLERANCE_PPM,
-            (decoders["FREQUENCY_LIMIT"] - decoders["RATE_DEVIATION_LIMIT"])
-            / scaled_ppm,
+            (shared["FREQUENCY_LIMIT"] - decoders["RATE_DEVIATION_LIMIT"]) / scaled_ppm,
         )
         rate = rust_integer_constants(
             pinned_openvmm_file(self, "vmm_core/virt/src/time_abi/rate.rs")

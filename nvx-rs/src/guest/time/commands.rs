@@ -1,27 +1,44 @@
 //! `nvx-time`'s commands, which run the time ABI's typed calls or the program's own steps.
 
+#[cfg(target_arch = "x86_64")]
 use std::ffi::OsStr;
-use std::fmt::{Display, Write as _};
+use std::fmt::Display;
+#[cfg(target_arch = "x86_64")]
+use std::fmt::Write as _;
 use std::io::Write;
+#[cfg(target_arch = "x86_64")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_arch = "x86_64")]
 use std::path::PathBuf;
 
+#[cfg(target_arch = "x86_64")]
+use super::NSEC_PER_USEC;
+#[cfg(target_arch = "x86_64")]
 use super::api::{
     self, CaptureOutcome, CaptureRequest, CpuSet, PreCaptureError, RestoreFinish, ScratchPolicy,
-    TimeAbi, TimeError,
 };
+use super::api::{TimeAbi, TimeError};
 use super::checks::{self, Checks};
+#[cfg(target_arch = "x86_64")]
 use super::cpu_mask::CpuMask;
+#[cfg(target_arch = "x86_64")]
 use super::decoders::{self, GENERATION_ID_SIZE};
 use super::events::CheckId;
-use super::system::{self, PORTB_TIME_WINDOW, Runtime, clock_ns, cpu_time_ns};
-use super::{NSEC_PER_USEC, Phase, USAGE};
+use super::system::{self, Runtime};
+#[cfg(target_arch = "x86_64")]
+use super::system::{clock_ns, cpu_time_ns};
+use super::{Phase, USAGE};
+#[cfg(target_arch = "x86_64")]
 use crate::guest::GenerationId;
+#[cfg(target_arch = "x86_64")]
 use crate::guest::parse::parse_decimal;
 use crate::guest::status::CommandError;
-use crate::guest::sys::{self, Port, PortError};
+use crate::guest::sys;
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::PortError;
 
 /// The capture requests that `capture` accepts, and writes to the snapshot port: 0 or 1.
+#[cfg(target_arch = "x86_64")]
 const CAPTURE_REQUESTS: std::ops::RangeInclusive<u64> = 0..=1;
 
 /// Writes one command diagnostic assembled from raw byte slices.
@@ -37,6 +54,7 @@ fn usage(err: &mut dyn Write, line: &[u8]) -> Result<(), CommandError> {
 
 /// Reports why the thread could not take, or give up, its permission for the time ABI's ports,
 /// such as `nvx-time: ioperm: Operation not permitted`, and fails.
+#[cfg(target_arch = "x86_64")]
 fn port_failure(err: &mut dyn Write, error: PortError) -> CommandError {
     report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
     CommandError::Operation
@@ -47,7 +65,12 @@ fn port_failure(err: &mut dyn Write, error: PortError) -> CommandError {
 /// that the thread may still hold once, when the command ends.
 fn time_failure(err: &mut dyn Write, error: TimeError) -> CommandError {
     match error {
-        TimeError::Violation(_) | TimeError::PortRelease(_) => {}
+        TimeError::Violation(_) => {}
+        #[cfg(target_arch = "x86_64")]
+        TimeError::PortRelease(_) => {}
+        #[cfg(target_arch = "aarch64")]
+        TimeError::PlatformRelease(_) => {}
+        #[cfg(target_arch = "x86_64")]
         TimeError::EntropyFile { path, source } => report(
             err,
             &[
@@ -71,7 +94,10 @@ fn cmd_boot(abi: TimeAbi, runtime: &Runtime<'_>, err: &mut dyn Write) -> Result<
         Err(TimeError::Spawn(error)) => Err(boot_checks_unstarted(runtime, sys::describe(&error))),
         // The step ran, but the thread may still hold port permission, which the daemon would
         // inherit.
+        #[cfg(target_arch = "x86_64")]
         Err(error @ TimeError::PortRelease(_)) => Err(boot_checks_unstarted(runtime, error)),
+        #[cfg(target_arch = "aarch64")]
+        Err(error @ TimeError::PlatformRelease(_)) => Err(boot_checks_unstarted(runtime, error)),
         Err(error) => Err(time_failure(err, error)),
     }
 }
@@ -88,6 +114,7 @@ fn boot_checks_unstarted(runtime: &Runtime<'_>, reason: impl Display) -> Command
 }
 
 /// Runs explicit capture or restore conformance checks.
+#[cfg(target_arch = "x86_64")]
 fn cmd_check(
     runtime: &Runtime<'_>,
     arguments: &[&[u8]],
@@ -146,6 +173,7 @@ fn cmd_check(
 /// requires, runs the capture checks, and suppresses the stall detectors before the snapshot.
 /// A preparation that fails leaves the detectors as they were, as far as it can: the snapshot
 /// script cancels only a capture whose preparation succeeded.
+#[cfg(target_arch = "x86_64")]
 fn cmd_pre_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError> {
     abi.pre_capture().map_err(|error| {
         if error.holds_suppression() {
@@ -158,6 +186,7 @@ fn cmd_pre_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError
 /// Reports why the preparation of a capture failed, such as `nvx-time: cannot suppress the stall
 /// detectors: a capture is already pending`, and fails. A violation's event is its only report,
 /// and `run` reports a permission that the thread may still hold once, when the command ends.
+#[cfg(target_arch = "x86_64")]
 fn pre_capture_failure(err: &mut dyn Write, error: PreCaptureError) -> CommandError {
     let reason = match error {
         PreCaptureError::BootChecks(_)
@@ -180,6 +209,7 @@ fn pre_capture_failure(err: &mut dyn Write, error: PreCaptureError) -> CommandEr
 }
 
 /// Cancels capture by restoring saved stall-detector settings.
+#[cfg(target_arch = "x86_64")]
 fn cmd_cancel_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandError> {
     abi.cancel_capture().map_err(|detail| {
         report(err, &[b"nvx-time: ", &detail, b"\n"]);
@@ -188,6 +218,7 @@ fn cmd_cancel_capture(abi: TimeAbi, err: &mut dyn Write) -> Result<(), CommandEr
 }
 
 /// Parses a capture request, 0 or 1, as plain decimal.
+#[cfg(target_arch = "x86_64")]
 fn parse_capture_request(text: &[u8]) -> Option<u8> {
     parse_decimal(text)
         .filter(|request| CAPTURE_REQUESTS.contains(request))
@@ -197,6 +228,7 @@ fn parse_capture_request(text: &[u8]) -> Option<u8> {
 /// Reads the request of `capture 0|1 GENERATION_ID ENTROPY_FILE [--finish]`, in the file mode,
 /// in which the restore's entropy goes to `ENTROPY_FILE`, or returns `None` for an invalid
 /// command line.
+#[cfg(target_arch = "x86_64")]
 fn capture_request(arguments: &[&[u8]]) -> Option<CaptureRequest> {
     let (request, previous_id, entropy_path, finish) = match arguments {
         [request, id, path] => (request, id, path, false),
@@ -224,6 +256,7 @@ fn capture_request(arguments: &[&[u8]]) -> Option<CaptureRequest> {
 /// flags, online VP count, range count, and new generation ID, the DNS server of its network
 /// settings, or `-` for none, `1` if they ask the guest to announce its listeners, or else `0`,
 /// and each range's start and length.
+#[cfg(target_arch = "x86_64")]
 fn cmd_capture(
     abi: TimeAbi,
     arguments: &[&[u8]],
@@ -266,6 +299,7 @@ fn cmd_capture(
 
 /// Records new CPUs, acknowledges the restore when asked, and hands repair step 7 to the daemon
 /// or runs it.
+#[cfg(target_arch = "x86_64")]
 fn cmd_restore_finish(
     abi: TimeAbi,
     arguments: &[&[u8]],
@@ -289,8 +323,18 @@ fn cmd_restore_finish(
 }
 
 /// Prints persisted status after waiting for pending checks.
-fn cmd_status(runtime: &Runtime<'_>, out: &mut dyn Write) -> Result<(), CommandError> {
-    let (state, completed) = checks::wait_for_checks(false);
+fn cmd_status(
+    runtime: &Runtime<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<(), CommandError> {
+    let (state, completed) = checks::wait_for_checks(false).map_err(|error| {
+        report(
+            err,
+            &[format!("nvx-time: read time state: {error}\n").as_bytes()],
+        );
+        CommandError::Operation
+    })?;
     let _ = out.write_all(state.status_markers(runtime.report_only()).as_bytes());
     if completed && state.checks_ok() {
         Ok(())
@@ -306,70 +350,21 @@ fn cmd_sample(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), CommandError> {
-    let rates = system::clock_rates(runtime).map_err(|error| {
-        report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
+    let sample = system::diagnostic_sample(runtime).map_err(|detail| {
+        report(err, &[b"nvx-time: ", &detail, b"\n"]);
         CommandError::Operation
     })?;
-    let taken = {
-        let ports = runtime
-            .open_ports()
-            .map_err(|error| port_failure(err, error))?;
-        let status = ports.read_u8(Port::PortbStatus);
-        if status & PORTB_TIME_WINDOW == 0 {
-            report(
-                err,
-                &[
-                    format!("nvx-time: portb status 0x{status:02x} has no time window\n")
-                        .as_bytes(),
-                ],
-            );
-            return Err(CommandError::Operation);
-        }
-        let _lock = system::lock_portb().map_err(|error| {
-            report(
-                err,
-                &[b"nvx-time: ", &system::portb_lock_failure(error), b"\n"],
-            );
-            CommandError::Operation
-        })?;
-        system::take_sample(&ports, runtime.ops)
-    };
-    let (sample, reads) = taken.map_err(|error| {
-        report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
-        CommandError::Operation
-    })?;
-    let host = &sample.host;
-    let bound = |bound: Option<u32>| bound.map_or_else(|| "unknown".to_owned(), |b| b.to_string());
-    let mut line = format!(
-        "flags=0x{:02x} generation={} status={} utc_ns={} tsc={} pairing_ns={} disruption={} \
-         correction={} correction_bound={} max_error_us={} before={} after={} realtime_ns={}",
-        sample.flags,
-        sample.generation,
-        host.status,
-        sample.utc_ns,
-        sample.tsc,
-        sample.pairing_ns,
-        host.disruption,
-        host.correction,
-        bound(host.correction_bound),
-        bound(host.max_error_us),
-        reads.before,
-        reads.after,
-        reads.realtime_ns
-    );
-    let pairing = decoders::pair_sample(&sample, &reads, rates);
-    if let Ok((theta, epsilon)) = pairing {
-        let (frequency, limited) = decoders::guest_frequency(host.correction, rates.tsc_hz);
-        let _ = write!(
-            line,
-            " theta_ns={theta} epsilon_ns={epsilon} frequency={frequency} frequency_limited={}",
-            u8::from(limited)
-        );
-    }
-    line.push('\n');
+    let (line, pairing) = sample.format();
     let _ = out.write_all(line.as_bytes());
-    pairing.map(drop).map_err(|error| {
-        report(err, &[format!("nvx-time: {error}\n").as_bytes()]);
+    pairing.map_err(|error| {
+        report(
+            err,
+            &[format!(
+                "nvx-time: sample counter {} outside latch reads {}..{}\n",
+                error.counter, error.before, error.after
+            )
+            .as_bytes()],
+        );
         CommandError::Operation
     })
 }
@@ -398,11 +393,14 @@ pub(super) fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), CommandError> {
-    let abi = if report_only {
-        TimeAbi::report_only()
-    } else {
-        TimeAbi::new()
-    };
+    let command_line = sys::read_file(sys::kernel::COMMAND_LINE).map_err(|error| {
+        report(
+            err,
+            &[format!("nvx-time: read kernel command line: {error}\n").as_bytes()],
+        );
+        CommandError::Operation
+    })?;
+    let abi = TimeAbi::with_report_only(super::sample::report_only(&command_line, report_only));
     let runtime = abi.runtime();
     sys::reset_child_signal();
     let Some((&command, rest)) = arguments.split_first() else {
@@ -410,22 +408,37 @@ pub(super) fn run(
     };
     let result = match (command, rest) {
         (b"boot", []) => cmd_boot(abi, &runtime, err),
+        #[cfg(target_arch = "x86_64")]
         (b"check", arguments) => cmd_check(&runtime, arguments, err),
+        #[cfg(target_arch = "x86_64")]
         (b"pre-capture", []) => cmd_pre_capture(abi, err),
+        #[cfg(target_arch = "x86_64")]
         (b"capture", arguments) => cmd_capture(abi, arguments, out, err),
+        #[cfg(target_arch = "x86_64")]
         (b"cancel-capture", []) => cmd_cancel_capture(abi, err),
+        #[cfg(target_arch = "x86_64")]
         (b"restore-finish", arguments) => cmd_restore_finish(abi, arguments, err),
-        (b"status", []) => cmd_status(&runtime, out),
+        (b"status", []) => cmd_status(&runtime, out, err),
         (b"sample", []) => cmd_sample(&runtime, out, err),
         (b"generation-id", []) => cmd_generation_id(abi, out, err),
+        #[cfg(target_arch = "x86_64")]
         (b"exhaustive", []) => checks::exhaustive(&runtime, out),
         _ => usage(err, USAGE),
     };
     match sys::check_released() {
         Ok(()) => result,
+        #[cfg(target_arch = "x86_64")]
         Err(error) => Err(port_failure(err, error)),
+        #[cfg(target_arch = "aarch64")]
+        Err(error) => {
+            report(
+                err,
+                &[format!("nvx-time: platform release: {error}\n").as_bytes()],
+            );
+            Err(CommandError::Operation)
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;

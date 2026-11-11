@@ -26,13 +26,17 @@
 //!   controlling terminal, or to its standard error when the console does not open, and reads
 //!   nothing from it;
 //! - ends the VM itself, without another guest program: it writes every file system's modified
-//!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control port with a
-//!   status: 0 after `SIGTERM`, or 125, as `nvx-init-agent`'s failures do, after a failure, which
+//!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control interface
+//!   with a status: 0 after `SIGTERM`, or 125, as `nvx-init-agent`'s failures do, after a failure, which
 //!   an `NVX-INIT-ERROR:` line on the console names first.
 //!
-//! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
+//! Outside PID 1, the default invocation fails with status 2. Its private read-only
+//! `--root-device distro|scratch|no-scratch` mode only discovers the fixed block roles:
+//! 0 means found/satisfied, 1 means not yet present (or scratch present for `no-scratch`),
+//! and 2 means invalid input or a fatal discovery error. It changes no devices or process state.
 
 use std::ffi::{CStr, CString};
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -188,17 +192,72 @@ impl System for RealSystem {
 /// then ends it, so it does not return; elsewhere it fails with status 2.
 #[doc(hidden)]
 pub fn main() -> ExitCode {
+    let arguments = sys::args();
+    if let Some(result) = root_device_command(
+        arguments.get(1..).unwrap_or_default(),
+        &mut io::stdout().lock(),
+        super::root::lookup_block_role,
+    ) {
+        return match result {
+            Ok(satisfied) => ExitCode::from(u8::from(!satisfied)),
+            Err(error) => {
+                sys::write_standard_error(format!("nvx-init: root device: {error}\n").as_bytes());
+                ExitCode::from(2)
+            }
+        };
+    }
     sys::restore_sigpipe();
     if sys::current_process().raw() != INIT_PROCESS {
         sys::write_standard_error(b"nvx-init: runs only as PID 1\n");
         return ExitStatus::Usage.into();
     }
-    let arguments = sys::args();
     init(
         &mut RealSystem { signals: None },
         arguments.get(1..).unwrap_or_default(),
     );
     ExitStatus::Failure.into()
+}
+
+/// Dispatches the private pure lookup before PID-1 behavior, with no arbitrary address input.
+fn root_device_command(
+    arguments: &[CString],
+    out: &mut dyn Write,
+    lookup: impl FnOnce(super::root::Role) -> io::Result<super::root::BlockRoleState>,
+) -> Option<Result<bool, String>> {
+    use super::root::{BlockRoleState, Role};
+    if arguments
+        .first()
+        .is_none_or(|argument| argument.as_bytes() != b"--root-device")
+    {
+        return None;
+    }
+    let (role, absence) = match arguments {
+        [_, role] if role.as_bytes() == b"distro" => (Role::Distro, false),
+        [_, role] if role.as_bytes() == b"scratch" => (Role::Scratch, false),
+        [_, role] if role.as_bytes() == b"no-scratch" => (Role::Scratch, true),
+        _ => {
+            return Some(Err(
+                "usage: nvx-init --root-device distro|scratch|no-scratch".into(),
+            ));
+        }
+    };
+    Some(
+        lookup(role)
+            .map_err(|error| error.to_string())
+            .and_then(|state| {
+                if absence {
+                    return Ok(matches!(state, BlockRoleState::Absent));
+                }
+                match state {
+                    BlockRoleState::Absent | BlockRoleState::Probing => Ok(false),
+                    BlockRoleState::Ready(path) => {
+                        writeln!(out, "{}", path.display()).map_err(|error| error.to_string())?;
+                        out.flush().map_err(|error| error.to_string())?;
+                        Ok(true)
+                    }
+                }
+            }),
+    )
 }
 
 /// Serves as PID 1 with the helpers that `arguments` name until the VM must end, and then ends

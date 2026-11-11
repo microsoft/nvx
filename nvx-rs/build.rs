@@ -68,6 +68,9 @@ mod bundle {
             // The OpenVMM backend supports Linux and Windows hosts only.
             _ => return,
         };
+        if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
+            fail("no qualified ARM64 bundle/release catalog exists; build explicit local ARM64 artifacts without bundled instead of staging an x86 package".to_owned());
+        }
         let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
         let source = match env::var_os(SOURCE_DIR) {
             Some(directory) => {

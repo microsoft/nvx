@@ -31,6 +31,29 @@ class GuestBinaryBuildResult:
 
     source_sha256: str
     binaries: dict[str, str]
+    architecture: str = "x86_64"
+
+
+def guest_rust_target(architecture: str) -> str:
+    """Resolve an explicit guest ISA without inferring it from the build host."""
+    try:
+        return GuestRustBuildConstants.TARGETS[architecture]
+    except KeyError as error:
+        raise ScriptError(
+            f"unsupported Rust guest architecture: {architecture}"
+        ) from error
+
+
+def guest_binary_inventory(architecture: str = "x86_64") -> tuple[str, ...]:
+    """Keep x86's inventory and omit non-cold-boot ARM diagnostic executables."""
+    guest_rust_target(architecture)
+    if architecture == "x86_64":
+        return GuestRustBuildConstants.BINARIES
+    return tuple(
+        binary
+        for binary in GuestRustBuildConstants.BINARIES
+        if binary not in ("nvx-mmio-write", "nvx-device-io", "nvx-time-probe")
+    )
 
 
 def guest_binary_source_files(root: Path | None = None) -> tuple[Path, ...]:
@@ -145,7 +168,9 @@ def _dep_info_paths(dep_info: Path) -> tuple[str, ...]:
     return tuple(paths)
 
 
-def _check_guest_build_inputs(target_directory: Path) -> None:
+def _check_guest_build_inputs(
+    target_directory: Path, architecture: str = "x86_64"
+) -> None:
     """Fail unless the source identity covers every file that the build read.
 
     Cargo's dep-info for each executable lists every source file of the crate
@@ -161,11 +186,11 @@ def _check_guest_build_inputs(target_directory: Path) -> None:
     identity = {path.resolve() for path in guest_binary_source_files()}
     outputs = (
         target_directory
-        / GuestRustBuildConstants.TARGET
+        / guest_rust_target(architecture)
         / GuestRustBuildConstants.PROFILE
     )
     omitted: set[str] = set()
-    for binary in GuestRustBuildConstants.BINARIES:
+    for binary in guest_binary_inventory(architecture):
         dep_info = require_file(
             outputs / f"{binary}.d", f"Cargo dep-info of Rust guest binary {binary}"
         )
@@ -202,14 +227,14 @@ def _check_guest_build_inputs(target_directory: Path) -> None:
         )
 
 
-def _guest_cargo_arguments() -> list[str]:
+def _guest_cargo_arguments(architecture: str = "x86_64") -> list[str]:
     """Return the Cargo arguments that select the canonical guest build."""
     return [
         "--locked",
         "--profile",
         GuestRustBuildConstants.PROFILE,
         "--target",
-        GuestRustBuildConstants.TARGET,
+        guest_rust_target(architecture),
         "--no-default-features",
         "--features",
         GuestRustBuildConstants.FEATURE,
@@ -218,18 +243,21 @@ def _guest_cargo_arguments() -> list[str]:
 
 def _manifest(result: GuestBinaryBuildResult) -> dict[str, object]:
     """Return the stable on-disk manifest for a completed build."""
-    return {
+    manifest: dict[str, object] = {
         "domain": GuestRustBuildConstants.BUILD_MANIFEST_DOMAIN,
         "format": GuestRustBuildConstants.BUILD_MANIFEST_FORMAT,
         "toolchain": GuestRustBuildConstants.TOOLCHAIN,
-        "target": GuestRustBuildConstants.TARGET,
+        "target": guest_rust_target(result.architecture),
         "profile": GuestRustBuildConstants.PROFILE,
         "source_sha256": result.source_sha256,
         "binaries": result.binaries,
     }
+    if result.architecture != "x86_64":
+        manifest["architecture"] = result.architecture
+    return manifest
 
 
-def _validate_output_path(output: Path) -> None:
+def _validate_output_path(output: Path, architecture: str = "x86_64") -> None:
     """Reject output paths that overlap source or hold unrelated files."""
     crate = GuestRustBuildConstants.DIRECTORY.resolve()
     toolchain = GuestRustBuildConstants.TOOLCHAIN_FILE.resolve()
@@ -242,10 +270,12 @@ def _validate_output_path(output: Path) -> None:
     ):
         raise ScriptError(f"guest binary output overlaps source inputs: {output}")
     if output.exists():
-        _validate_owned_output(output)
+        _validate_owned_output(output, architecture)
 
 
-def _validate_owned_output(output: Path) -> tuple[str, ...]:
+def _validate_owned_output(
+    output: Path, architecture: str = "x86_64"
+) -> tuple[str, ...]:
     """Require an existing output to be a complete build owned by this tool.
 
     Return the retired executables that the output holds, which its build manifest
@@ -257,6 +287,7 @@ def _validate_owned_output(output: Path) -> tuple[str, ...]:
             f"guest binary output exists and is not a directory: {output}"
         )
     actual = {entry.name for entry in output.iterdir()}
+    inventory = guest_binary_inventory(architecture)
     retired = tuple(
         binary
         for binary in GuestRustBuildConstants.RETIRED_BINARIES
@@ -265,11 +296,9 @@ def _validate_owned_output(output: Path) -> tuple[str, ...]:
     missing = tuple(
         binary
         for binary in GuestRustBuildConstants.ADDED_BINARIES
-        if binary not in actual
+        if binary in inventory and binary not in actual
     )
-    present = tuple(
-        binary for binary in GuestRustBuildConstants.BINARIES if binary not in missing
-    )
+    present = tuple(binary for binary in inventory if binary not in missing)
     expected = {
         GuestRustBuildConstants.BUILD_MANIFEST_NAME,
         *present,
@@ -315,13 +344,13 @@ def _validate_owned_output(output: Path) -> tuple[str, ...]:
     return retired
 
 
-def _install_output(staging: Path, output: Path) -> None:
+def _install_output(staging: Path, output: Path, architecture: str = "x86_64") -> None:
     """Install staging without recursively deleting an existing directory."""
     if not output.exists():
         staging.replace(output)
         return
-    retired = _validate_owned_output(output)
-    for binary in GuestRustBuildConstants.BINARIES:
+    retired = _validate_owned_output(output, architecture)
+    for binary in guest_binary_inventory(architecture):
         (staging / binary).replace(output / binary)
     # Remove retired executables while the previous manifest still records them, so
     # that an interrupted installation leaves an output that the next build accepts.
@@ -333,7 +362,9 @@ def _install_output(staging: Path, output: Path) -> None:
     staging.rmdir()
 
 
-def check_guest_binaries(toolchain: str | None = None) -> None:
+def check_guest_binaries(
+    toolchain: str | None = None, *, architecture: str = "x86_64"
+) -> None:
     """Lint and test the guest binaries for musl.
 
     ``toolchain`` names the Rust toolchain, by default the exact repository pin.
@@ -344,7 +375,7 @@ def check_guest_binaries(toolchain: str | None = None) -> None:
     selected = toolchain or pinned_guest_rust_toolchain()
     rustup = require_tool("rustup")
     cargo = require_tool("cargo")
-    target = GuestRustBuildConstants.TARGET
+    target = guest_rust_target(architecture)
     guest = (
         "--locked",
         "--target",
@@ -374,30 +405,29 @@ def check_guest_binaries(toolchain: str | None = None) -> None:
         )
 
 
-def inspect_guest_binaries(directory: Path) -> GuestBinaryBuildResult:
+def inspect_guest_binaries(
+    directory: Path, *, architecture: str = "x86_64"
+) -> GuestBinaryBuildResult:
     """Validate and identify a current, previously staged guest build."""
+    guest_rust_target(architecture)
     directory = directory.resolve()
-    retired = _validate_owned_output(directory)
-    missing = [
-        binary
-        for binary in GuestRustBuildConstants.BINARIES
-        if not (directory / binary).is_file()
-    ]
+    inventory = guest_binary_inventory(architecture)
+    retired = _validate_owned_output(directory, architecture)
+    missing = [binary for binary in inventory if not (directory / binary).is_file()]
     if retired or missing:
         raise ScriptError(
             f"guest binary output is not a current build of every executable: "
             f"{directory}"
         )
-    paths = [directory / binary for binary in GuestRustBuildConstants.BINARIES]
-    check_static_executables(paths)
+    paths = [directory / binary for binary in inventory]
+    check_static_executables(paths, architecture=architecture)
     result = GuestBinaryBuildResult(
         source_sha256=guest_binary_source_sha256(),
         binaries={
             binary: sha256_file(path)
-            for binary, path in zip(
-                GuestRustBuildConstants.BINARIES, paths, strict=True
-            )
+            for binary, path in zip(inventory, paths, strict=True)
         },
+        architecture=architecture,
     )
     manifest_path = directory / GuestRustBuildConstants.BUILD_MANIFEST_NAME
     manifest = cast(
@@ -412,14 +442,28 @@ def inspect_guest_binaries(directory: Path) -> GuestBinaryBuildResult:
     return result
 
 
-def build_guest_binaries(output: Path) -> GuestBinaryBuildResult:
+def build_guest_binaries(
+    output: Path, *, architecture: str = "x86_64"
+) -> GuestBinaryBuildResult:
     """Build, statically check, digest, and stage a fresh set of executables."""
+    rust_target = guest_rust_target(architecture)
+    inventory = guest_binary_inventory(architecture)
     if sys.platform != "linux":
         raise ScriptError("Rust guest binaries can be built only on Linux")
     if not output.name:
         raise ScriptError("guest binary output must name a directory")
     output = output.resolve()
-    _validate_output_path(output)
+    _validate_output_path(output, architecture)
+    if output.exists():
+        manifest = json.loads(
+            (output / GuestRustBuildConstants.BUILD_MANIFEST_NAME).read_text(
+                encoding="utf-8"
+            )
+        )
+        if manifest.get("target", GuestRustBuildConstants.TARGET) != rust_target:
+            raise ScriptError(
+                f"guest binary output belongs to another architecture: {output}"
+            )
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=f".{output.name}.work-",
@@ -440,22 +484,20 @@ def build_guest_binaries(output: Path) -> GuestBinaryBuildResult:
             cargo,
             f"+{toolchain}",
             "build",
-            *_guest_cargo_arguments(),
+            *_guest_cargo_arguments(architecture),
         ]
-        for binary in GuestRustBuildConstants.BINARIES:
+        for binary in inventory:
             command.extend(("--bin", binary))
         run_checked(
             command,
             cwd=GuestRustBuildConstants.DIRECTORY,
             env=environment,
         )
-        _check_guest_build_inputs(target)
+        _check_guest_build_inputs(target, architecture)
 
-        built_directory = (
-            target / GuestRustBuildConstants.TARGET / GuestRustBuildConstants.PROFILE
-        )
+        built_directory = target / rust_target / GuestRustBuildConstants.PROFILE
         staged_paths: list[Path] = []
-        for binary in GuestRustBuildConstants.BINARIES:
+        for binary in inventory:
             source = require_file(
                 built_directory / binary, f"built Rust guest binary {binary}"
             )
@@ -463,35 +505,34 @@ def build_guest_binaries(output: Path) -> GuestBinaryBuildResult:
             shutil.copyfile(source, destination)
             destination.chmod(0o755)
             staged_paths.append(destination)
-        check_static_executables(staged_paths)
+        check_static_executables(staged_paths, architecture=architecture)
         if guest_binary_source_sha256() != source_sha256:
             raise ScriptError(
                 "Rust guest binary source inputs changed during the build"
             )
         result = GuestBinaryBuildResult(
             source_sha256=source_sha256,
-            binaries={
-                binary: sha256_file(staging / binary)
-                for binary in GuestRustBuildConstants.BINARIES
-            },
+            binaries={binary: sha256_file(staging / binary) for binary in inventory},
+            architecture=architecture,
         )
         (staging / GuestRustBuildConstants.BUILD_MANIFEST_NAME).write_text(
             json.dumps(_manifest(result), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
             newline="\n",
         )
-        _install_output(staging, output)
+        _install_output(staging, output, architecture)
         return result
 
 
-def test_guest_binaries(binaries: Path) -> None:
+def test_guest_binaries(binaries: Path, *, architecture: str = "x86_64") -> None:
     """Run the musl integration tests against a staged guest-profile build."""
+    target = guest_rust_target(architecture)
     if sys.platform != "linux":
         raise ScriptError("Rust guest binaries can be tested only on Linux")
     binaries = binaries.resolve()
     if not binaries.is_dir():
         raise ScriptError(f"guest binary directory not found: {binaries}")
-    for binary in GuestRustBuildConstants.BINARIES:
+    for binary in guest_binary_inventory(architecture):
         require_file(binaries / binary, f"Rust guest binary {binary}")
     require_file(
         binaries / GuestRustBuildConstants.BUILD_MANIFEST_NAME,
@@ -506,7 +547,7 @@ def test_guest_binaries(binaries: Path) -> None:
             "test",
             "--locked",
             "--target",
-            GuestRustBuildConstants.TARGET,
+            target,
             "--no-default-features",
             "--features",
             GuestRustBuildConstants.FEATURE,

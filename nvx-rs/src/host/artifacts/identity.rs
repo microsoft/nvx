@@ -108,9 +108,86 @@ pub(super) fn provenance_identity(
             "does not have format {PROVENANCE_FORMAT}"
         )));
     }
+
     provenance
         .get(field)
         .and_then(Value::as_str)
         .and_then(sha256_identity)
         .ok_or_else(|| invalid(&format!("has no SHA-256 digest in {field}")))
+}
+
+/// Rejects a Windows OpenVMM executable from another ISA before any process or WHP call.
+#[cfg(all(windows, feature = "cli"))]
+pub(crate) fn check_arm64_pe(path: &Path) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+
+    let invalid =
+        |problem: &str| Error::unavailable(format!("ARM64 OpenVMM {}: {problem}", path.display()));
+    let mut file = fs::File::open(path)
+        .map_err(|error| invalid("cannot open executable").with_source(error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| invalid("cannot read executable length").with_source(error))?
+        .len();
+    let mut dos = [0; 64];
+    file.read_exact(&mut dos)
+        .map_err(|error| invalid("truncated PE DOS header").with_source(error))?;
+    if &dos[..2] != b"MZ" {
+        return Err(invalid("not a Windows PE executable"));
+    }
+    let offset = u64::from(u32::from_le_bytes(
+        dos[60..64].try_into().expect("fixed DOS header"),
+    ));
+    if offset < 64 || offset.checked_add(6).is_none_or(|end| end > length) {
+        return Err(invalid("PE header offset is outside the executable"));
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| invalid("cannot seek PE header").with_source(error))?;
+    let mut pe = [0; 6];
+    file.read_exact(&mut pe)
+        .map_err(|error| invalid("truncated PE header").with_source(error))?;
+    if &pe[..4] != b"PE\0\0" || u16::from_le_bytes([pe[4], pe[5]]) != 0xaa64 {
+        return Err(invalid(
+            "executable is not native ARM64 (PE machine 0xaa64)",
+        ));
+    }
+    Ok(())
+}
+
+/// Applies the same bounded ARM64 direct-Image header rules as the existing Python producer.
+/// A filename or an ELF from another ISA is not sufficient admission.
+pub(super) fn check_arm64_image(path: &Path) -> Result<()> {
+    let invalid =
+        |problem: &str| Error::unavailable(format!("ARM64 kernel {}: {problem}", path.display()));
+    let mut file =
+        fs::File::open(path).map_err(|error| invalid("cannot open Image").with_source(error))?;
+    let length = file
+        .metadata()
+        .map_err(|error| invalid("cannot read Image length").with_source(error))?
+        .len();
+    let mut header = [0; 64];
+    file.read_exact(&mut header)
+        .map_err(|error| invalid("truncated Image header").with_source(error))?;
+    if header[56..60] != *b"ARM\x64" {
+        return Err(invalid("not an uncompressed ARM64 Linux Image"));
+    }
+    let double = |offset| {
+        u64::from_le_bytes(
+            header[offset..offset + 8]
+                .try_into()
+                .expect("fixed Image header"),
+        )
+    };
+    let offset = double(8);
+    let size = double(16);
+    let flags = double(24);
+    if flags & 1 != 0 || (flags >> 1) & 3 != 1 || flags & !0xf != 0 || flags & 8 == 0 {
+        return Err(invalid(
+            "Image requires little-endian 4-KiB pages and reservation-safe placement",
+        ));
+    }
+    if size < length || offset % 4096 != 0 || offset.checked_add(size).is_none() {
+        return Err(invalid("invalid Image footprint or text offset"));
+    }
+    Ok(())
 }

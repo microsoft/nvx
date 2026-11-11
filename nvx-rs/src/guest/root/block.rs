@@ -2,9 +2,9 @@
 //! MMIO windows name, and the block devices of a GPT disk's partitions, whose table a clone asks
 //! the kernel to reread.
 //!
-//! The VMM declares each device on the kernel command line, so the kernel names its MMIO window
-//! `virtio-mmio.N` in `/proc/iomem`, and creates its block device below the window's device in
-//! `/sys/devices/virtio-mmio-cmdline`.
+//! x86 discovers command-line devices through `/proc/iomem` and
+//! `/sys/devices/virtio-mmio-cmdline`. ARM discovers the fixed root-bus OF `reg` windows through
+//! platform devices' `of_node` links. Neither identifies a device role by its `vdX` name.
 
 use std::fs::{self, File};
 use std::io;
@@ -14,17 +14,23 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::kernel::{Kernel, Paths};
-use super::{Device, DeviceStep, Error, Role};
-use crate::guest::parse::{parse_decimal, parse_hexadecimal};
+use super::{BlockRoleState, Device, DeviceStep, Error, Role};
+use crate::guest::parse::parse_decimal;
+#[cfg(not(target_arch = "aarch64"))]
+use crate::guest::parse::parse_hexadecimal;
 use crate::guest::sys;
 use crate::uuid::Uuid;
 
 /// The interval between two polls for a block device that has not appeared yet.
 pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// The prefix of the name of a virtio MMIO window in `/proc/iomem`.
+#[cfg(not(target_arch = "aarch64"))]
 const WINDOW_PREFIX: &[u8] = b"virtio-mmio.";
 /// The directory, below sysfs, of the virtio MMIO devices that the kernel command line declares.
+#[cfg(not(target_arch = "aarch64"))]
 const WINDOW_DEVICES: &str = "devices/virtio-mmio-cmdline";
+#[cfg(target_arch = "aarch64")]
+mod platform;
 /// The byte offset of the EROFS superblock on its device.
 const EROFS_SUPERBLOCK: u64 = 1024;
 /// The EROFS superblock's magic number, which it starts with, little-endian.
@@ -126,6 +132,7 @@ pub(super) fn prepare(
 /// block devices of the partitions that the kernel created from the table that the disk held
 /// before, and creates those of the table that it holds now, and their nodes. It checks nothing
 /// else of the device, whose checks [`prepare`] makes. Returns the path of its node.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(super) fn reread(
     kernel: &mut dyn Kernel,
     paths: &Paths,
@@ -236,10 +243,35 @@ fn find(paths: &Paths, mmio: u64) -> io::Result<Option<String>> {
     Ok(None)
 }
 
+/// Performs one pure role lookup; the caller owns its retry deadline and error policy.
+pub(super) fn lookup(paths: &Paths, mmio: u64) -> io::Result<BlockRoleState> {
+    let windows = window_directories(paths, mmio)?;
+    let window = match windows.as_slice() {
+        [] => return Ok(BlockRoleState::Absent),
+        [window] => window,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "multiple transports claim one block role",
+            ));
+        }
+    };
+    let Some(name) = block_device(window)? else {
+        return Ok(BlockRoleState::Probing);
+    };
+    let node = paths.dev.join(name);
+    match fs::symlink_metadata(&node) {
+        Ok(_) => Ok(BlockRoleState::Ready(node)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(BlockRoleState::Probing),
+        Err(error) => Err(error),
+    }
+}
+
 /// Returns the sysfs directories of the virtio MMIO windows that the kernel lists at `mmio` in
 /// `/proc/iomem`, in its order, below which it creates their virtio devices, and the block devices
 /// and partitions of those. A directory may not exist yet: the kernel lists a window before it adds
 /// the window's device.
+#[cfg(not(target_arch = "aarch64"))]
 pub(crate) fn window_directories(paths: &Paths, mmio: u64) -> io::Result<Vec<PathBuf>> {
     let windows = fs::read(paths.proc.join("iomem"))?;
     let mut directories = Vec::new();
@@ -264,8 +296,15 @@ pub(crate) fn window_directories(paths: &Paths, mmio: u64) -> io::Result<Vec<Pat
     Ok(directories)
 }
 
+/// Returns the unique OF-created fixed virtio-MMIO device by its published resource.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn window_directories(paths: &Paths, mmio: u64) -> io::Result<Vec<PathBuf>> {
+    platform::window_directories(paths, mmio)
+}
+
 /// Returns the name of the first block device, in byte order, of the first virtio device of the
 /// window device `window`, or `None` while there is none.
+#[cfg(not(target_arch = "aarch64"))]
 fn block_device(window: &Path) -> io::Result<Option<String>> {
     for device in sorted_entries(window)? {
         if !device.starts_with("virtio") {
@@ -279,6 +318,12 @@ fn block_device(window: &Path) -> io::Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+/// Returns the sole block child of the fixed OF-created transport, once it has probed.
+#[cfg(target_arch = "aarch64")]
+fn block_device(window: &Path) -> io::Result<Option<String>> {
+    platform::block_device(window)
 }
 
 /// Returns the names of the entries of `directory` that are UTF-8, in byte order, or none if it
