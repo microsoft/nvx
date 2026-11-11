@@ -9,6 +9,65 @@ const CLI: &str = "nvx_identity=1000:1001 nvx_control_tty=hvc2";
 const EXPORT: &str =
     "virtfs_dir=/run/nvx/hostfs/root virtfs_tag=hostfs virtfs_mode=rw virtfs_aggregate=1";
 
+/// The steps of NVX's reference space, as nvx-init takes them and the guest-agent guidelines
+/// quote them, compile against the space's own interface. The test runs none of them: they would
+/// mount over and switch the test host's root.
+#[test]
+fn the_reference_space_steps_compile() {
+    // A cold boot: the root, an image under its upper, and the host export; the runtime's file
+    // systems; the view; then the VM's one switch. The mapper keeps the root's descriptors for
+    // the host's mapping table, which comes after Ready.
+    let cold = |assembly: &Assembly,
+                export: Option<&HostExport>,
+                configuration: &View,
+                dns: Option<IpAddr>|
+     -> Result<(Root, Mapper, Option<SourceRoot>)> {
+        let mut root = root::assemble(assembly).map_err(system_error)?;
+        let source = export
+            .map(|export| root.mount_export(&export.tag, export.mode.into()))
+            .transpose()
+            .map_err(system_error)?;
+        root.mount_runtime(Some(Path::new("/run/nvx/time")))
+            .map_err(system_error)?;
+        let mut target = TargetRoot::open(root.path()).map_err(system_error)?;
+        target
+            .add_mount(&root.path().join("run"))
+            .map_err(system_error)?;
+        let mapper = Mapper::new(target, Reserved::container_root());
+        view::apply(&mut root, configuration, dns)?;
+        root.switch().map_err(system_error)?;
+        Ok((root, mapper, source))
+    };
+    // The host's mapping table, part by part, beneath the switched root.
+    let map = |table: &mut MappingTable, mapper: &mut Mapper, source: &SourceRoot, part: &[u8]| {
+        table.apply(part, |mappings| {
+            mapper
+                .apply(source, mappings)
+                .map_err(|error| (error.entry(), error))
+        })
+    };
+    // A restore: the record's root, export and view; the runtime's file systems; the announcer
+    // of the restore's listeners, which the init starts and owns; then the VM's one switch.
+    let restored = |record: &activation::ActivationRecord,
+                    template: &RootTemplate,
+                    deadline: Option<Instant>,
+                    announce: &mut dyn FnMut(Option<std::net::Ipv4Addr>) -> Result<()>|
+     -> Result<Applied> {
+        let mut applied =
+            guest_activation::apply(record, template, deadline).map_err(activation_error)?;
+        applied
+            .root_mut()
+            .mount_runtime(Some(Path::new("/run/nvx/time")))
+            .map_err(activation_error)?;
+        if applied.publication() == activation::Publication::Published {
+            announce(applied.gateway())?;
+        }
+        applied.root_mut().switch().map_err(activation_error)?;
+        Ok(applied)
+    };
+    let _ = (cold, map, restored);
+}
+
 #[test]
 fn restored_sessions_keep_the_deadline_of_the_actual_repair_acknowledgement() {
     let repaired = crate::guest::snapshot::repair::tests::repaired_fixture();
