@@ -12498,6 +12498,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
                 self.assertIn("--scenario vm-lifecycle", acceptance)
                 self.assertIn("--scenario snapshot-core", acceptance)
                 self.assertIn("--scenario snapshot-tiers", acceptance)
+                self.assertIn("--scenario untiered-network-policy", acceptance)
                 self.assertIn(
                     '--output-dir "build/test-results/public-exec-${{ inputs.backend }}"',
                     acceptance,

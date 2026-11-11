@@ -1270,8 +1270,9 @@ which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
 `sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`, the public
 sandbox scenarios, drive the public `nvx-rs sandbox` lifecycle commands (see
-[Run](run.md#managed-lifecycle)), `snapshot-core` and `snapshot-tiers` capture
-and restore named snapshots with `nvx-rs snapshot` and `nvx-rs run` (see
+[Run](run.md#managed-lifecycle)), `snapshot-core`, `snapshot-tiers`, and
+`untiered-network-policy` capture and restore named snapshots, the last with a
+NIC, with `nvx-rs snapshot` and `nvx-rs run` (see
 [Run](run.md#named-snapshots)), and `vm-lifecycle` drives a VM through the
 public API of `nvx`; they also read the Ubuntu distro layer, its
 manifest, and the sandbox scratch template, which
@@ -1285,7 +1286,8 @@ the sandbox-control-dependent `snapshot-core`, `snapshot-tiers`,
 `platform-restore-processors`, `platform-zero-fill`, `platform-filesystem`,
 `platform-aggregate-export`, `platform-network-policy`, `managed-exec-config`,
 `sandbox-lifecycle`, `sandbox-proxy-only`, `sandbox-ram-upper`,
-`sandbox-gpt-layer`, and `vm-lifecycle` scenarios. Ubuntu also rejects
+`sandbox-gpt-layer`, `vm-lifecycle`, and `untiered-network-policy` scenarios.
+Ubuntu also rejects
 the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
 the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
 detectors the guest's time ABI watcher reports; without `--scenario`, it runs
