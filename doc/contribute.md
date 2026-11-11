@@ -93,7 +93,6 @@ change selects, with the commands of the actions below, and runs them with
 | Markdown files and `doc/` paths | Every relative link and image in a tracked Markdown file resolves to a tracked file, and every anchor to a heading slug that GitHub generates, ignoring code. Every `doc/` path that a tracked file mentions resolves too, except the test fixtures that `DOC_PATH_FIXTURES` lists. | [check-quality](../.github/actions/check-quality/action.yml), [check_markdown_links.py](../scripts/check_markdown_links.py) |
 | Tests | Every test lives in a test file, and production files hold only the test hooks that the allowlist allows; see [Test layout](#test-layout) | [check-quality](../.github/actions/check-quality/action.yml), [check_test_layout.py](../scripts/check_test_layout.py) |
 | `nvx-rs/` | rustfmt, Clippy and rustdoc with warnings denied, Clippy also for the `serde`, `cli` and `testing` features alone, tests including a bundled-release fixture, the minimum supported Rust version, a macOS check, the public API against its snapshots in `nvx-rs/public-api/`, and, through `nvx.py`, the musl lint, tests, build, digest manifest, and static-ELF check of the guest binaries; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml), [public_api.py](../scripts/public_api.py) |
-| `tests/runtime-adapter/` | rustfmt, then Clippy and rustdoc with warnings denied, the build, the tests, and the minimum supported Rust version of `nvx`, in the protocol-only, host-only, and, on Linux, static musl guest-only configurations; see [Rust crates](ci.md#rust-crates) | [check-nvx-rs](../.github/actions/check-nvx-rs/action.yml) |
 | NVX CLI | Compiles `scripts/`, runs every `scripts/test_*.py` module, and checks command help, on Linux and Windows, and compares the copies of OpenVMM's protocol vectors in `nvx-rs/tests/vectors/openvmm/`, and of the identities of its built-in CPU profiles in `nvx-rs/src/host/cli/cpu_generations.json`, with the submodule's files | [validate-nvx](../.github/actions/validate-nvx/action.yml), [ci.yml](../.github/workflows/ci.yml) |
 
 check-quality names each shell script that it checks, and a CLI test fails
@@ -151,13 +150,8 @@ of their own beside its source, as [Test layout](#test-layout) describes, and
 integration tests in its `tests` directory, and also runs
 `tests/guest_tools.rs` against the exact guest-profile binaries. Tests of the NVX
 mechanics, such as the conformance vectors of the control protocol, belong in
-`nvx`. Tests of what an independent adapter observes through
-the public API of `nvx` alone, such as its own framing over the control
-session between the host and the guest, belong in the
-[runtime adapter](../tests/runtime-adapter/README.md), whose consolidated
-suite the microVM jobs run on each backend with
-`scripts/nvx.py test-runtime-adapter --backend BACKEND`. [Continuous integration](ci.md)
-describes how CI checks OpenVMM's own CI and what the NVX microVM suite covers.
+`nvx`. [Continuous integration](ci.md) describes how CI checks OpenVMM's own CI
+and what the NVX microVM suite covers.
 
 ## Test layout
 

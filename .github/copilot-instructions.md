@@ -34,9 +34,7 @@
   change selects, with their commands read from the actions, and `--run` runs
   them.
 - For changes under `nvx-rs/`, run the commands in
-  [check-nvx-rs](./actions/check-nvx-rs/action.yml). It also checks the
-  runtime adapter in `tests/runtime-adapter/`, which builds on `nvx`; run its
-  steps for changes to either.
+  [check-nvx-rs](./actions/check-nvx-rs/action.yml).
   They need no hypervisor.
 - OpenVMM source changes also require the package-scoped checks prescribed by the
   nested repository. Do not claim unavailable hardware or cross-platform gates

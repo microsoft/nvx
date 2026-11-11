@@ -68,7 +68,7 @@ lists.
      `nvx-rs/src/host/cli/cpu_generations.json` and the copy in
      `scripts/nvx_tools/time_abi.py`.
 3. `python3 scripts/local_gates.py --run` runs the gates that these changes
-   select, such as `nvx-rs`'s and the runtime adapter's.
+   select, such as `nvx-rs`'s.
 4. Stage only the gitlink and the coordinated changes, and commit, signed,
    when the user asked for commits or a pull request, with a subject such as
    `openvmm: pin <topic>`. Stop rather than commit unsigned, and never amend or
