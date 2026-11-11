@@ -11,6 +11,10 @@
 //! `snapshot capture` publishes a named snapshot, as [`capture`] describes. `snapshot restore`
 //! provisions a managed sandbox whose configuration records the snapshot, its store and a
 //! workload, then starts it, and each later start of the sandbox restores the snapshot again.
+//! The sandbox's NIC comes from the snapshot, which `snapshot capture --net` gives one, so a
+//! restore takes no `--net`: the network options of a restore of a snapshot with a NIC are the
+//! restore's own policy, at the NIC's address, as for `run --restore-snapshot`, and a snapshot
+//! without a NIC takes none.
 
 pub(super) mod capture;
 
@@ -55,7 +59,11 @@ const RESTORE_SYNTAX: Syntax = Syntax {
 Provision a managed sandbox with the options of sandbox provision, then start
 it from a named snapshot, under the snapshot's lock, and run its workload, the
 entrypoint and its arguments, which must exit with status 0 within the
-timeout. Each later start of the sandbox restores the snapshot again.
+timeout. Each later start of the sandbox restores the snapshot again. The
+sandbox's NIC comes from the snapshot, which snapshot capture --net gives one,
+so a restore takes no --net: a snapshot with a NIC needs --network-profile,
+and its network options are the restore's own policy, at the NIC's address;
+a snapshot without a NIC takes no network options.
 
 positional arguments:
   NAME                  the snapshot's name
@@ -81,7 +89,6 @@ options:
   --mount-allow HOST_PATH
   --mount-write HOST_PATH
   --mount-owner {vmm,caller}
-  --net IPV4/PREFIX
   --network-profile {portable}
   --network-egress {allow,deny}
   --network-ingress {allow,deny}
@@ -93,8 +100,10 @@ options:
   --host-loopback-forward HOST_LOOPBACK_FORWARD",
 };
 
-/// The options of `sandbox` that only an execution or a cold boot takes, which a restore lacks.
-const NOT_RESTORED: [&str; 9] = [
+/// The options of `sandbox` that only an execution or a cold boot takes, which a restore lacks:
+/// a restore's NIC comes from its snapshot, which `snapshot capture --net` gives one, so it takes
+/// no `--net`.
+const NOT_RESTORED: [&str; 10] = [
     "--cwd",
     "--environment",
     "--environment-file",
@@ -104,6 +113,7 @@ const NOT_RESTORED: [&str; 9] = [
     "--outcome-report",
     "--cmdline",
     "--dry-run",
+    "--net",
 ];
 
 /// A parsed `snapshot` command.
@@ -198,15 +208,19 @@ pub(super) fn run(root: Option<&str>, command: Command) -> Result {
 }
 
 /// Restores a new managed sandbox from a named snapshot, as `snapshot restore` does: provisions
-/// the sandbox with the source that [`restore_source`] checks, and starts it.
+/// the sandbox with the source that [`restore_source`] checks, and its network at the snapshot's
+/// NIC, as [`run::restored_network`](super::run::restored_network) gives it, and starts it. It
+/// refuses the network options of a snapshot without a NIC, and those of a snapshot with one
+/// without `--network-profile`, before it provisions anything.
 fn restore(root: Option<&str>, options: RestoreOptions) -> Result {
     let RestoreOptions {
         name,
         store_dir,
-        sandbox: options,
+        sandbox: mut options,
     } = options;
     let snapshot = name.expect("the parser requires a snapshot name");
-    let (source, _) = restore_source(snapshot, &store_dir, &options)?;
+    let (source, nic) = restore_source(snapshot, &store_dir, &options)?;
+    options.network = super::run::restored_network(options.network, nic)?;
     sandbox::restore(root, options, source)
 }
 
