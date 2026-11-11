@@ -97,6 +97,8 @@ nvx-rs\target\release\nvx-rs.exe run
 - [Module diagrams](doc/modules/README.md) - Diagrams of the modules of the `nvx` crate and the
   dependencies between them.
 - [Continuous integration](doc/ci.md) - Instructions for running and maintaining NVX CI.
+- [Case matrix](doc/acceptance-case-matrix.md) - The fate of each test of the runtime adapter, of
+  CI and of the docs, and of each microVM scenario, before NVX deletes the adapter.
 - [Copilot-driven adversarial testing](doc/adversarial-testing.md) - Bounded adaptive stress and
   containment campaigns.
 - [Package and source delivery](doc/distribution.md) - Instructions for packaging and distributing
