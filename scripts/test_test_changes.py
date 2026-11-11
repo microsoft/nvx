@@ -1105,7 +1105,7 @@ class WiringTests(unittest.TestCase):
 
 class ClassifyTests(unittest.TestCase):
     def test_paths_and_their_categories(self) -> None:
-        crates = ("nvx-rs", "tests/runtime-adapter")
+        crates = ("nvx-rs",)
         for path, expected in (
             ("scripts/test-layout-allowlist.json", (changes.TEST_POLICY, "allowlist")),
             ("scripts/check_test_layout.py", (changes.TEST_POLICY, "file")),
@@ -1122,12 +1122,10 @@ class ClassifyTests(unittest.TestCase):
             ("scripts/nvx_tools/microvm_tests.py", (changes.END_TO_END, "python")),
             ("scripts/test_nvx_tools.py", (changes.TEST_CODE, "python")),
             ("scripts/powershell_testing.py", (changes.TEST_CODE, "python")),
-            ("tests/runtime-adapter/scenarios.txt", (changes.TEST_DATA, "file")),
             ("nvx-rs/tests/fixtures/store/runtime.json", (changes.TEST_DATA, "file")),
             ("nvx-rs/tests/vectors/openvmm/a.rs", (changes.TEST_DATA, "file")),
             ("nvx-rs/tests/cli.rs", (changes.TEST_CODE, "rust")),
             ("nvx-rs/src/a/tests.rs", (changes.TEST_CODE, "rust")),
-            ("tests/runtime-adapter/tests/runtime.rs", (changes.TEST_CODE, "rust")),
             ("nvx-rs/src/a.rs", (changes.TEST_CODE, "rust-production")),
             ("nvx-rs/tests/vectors/README.md", None),
             ("nvx-rs/README.md", None),

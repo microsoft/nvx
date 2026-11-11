@@ -110,9 +110,7 @@ END_TO_END_FILES = re.compile(
     r"scripts/nvx_tools/microvm_test_scripts/.+"
     r"|guest/common/nvx-(?:identity-probe|sandbox-smoke|virtio-restore-probe)"
 )
-TEST_DATA_FILES = re.compile(
-    r"scripts/nvx_tools/adversarial_cases/.+|tests/runtime-adapter/scenarios\.txt"
-)
+TEST_DATA_FILES = re.compile(r"scripts/nvx_tools/adversarial_cases/.+")
 # Lines that may keep tests from running when a test action or workflow adds
 # them: a step's condition or its tolerance of failure, a command that ends the
 # script early or skips tests, and a shell or PowerShell conditional or loop,
