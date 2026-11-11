@@ -234,21 +234,18 @@ a cold boot that declares that profile, and passing boot checks. It then
 captures the guest and restores it with `auto` and no hook: the restore must
 take the snapshot's host profile without another warning, and pass the warp
 probe and its restore checks.
-The `snapshot-core` scenario first sends a snapshot request to a guest that
-OpenVMM launched without a snapshot destination. OpenVMM releases the request,
-so it returns in the source, which must continue exactly once. Before the
-request, the guest's snapshot agent saved and overrode the stall detectors'
-settings, and it must restore them when the request returns
-(`nvx-time cancel-capture`). Afterwards, `nvx-time status` must exit 0 with a
-passing boot line at generation 0 and no restore line, and
-`/sys/module/rcupdate/parameters/rcu_cpu_stall_suppress` must read 0.
 The `snapshot-rollback` scenario fails a capture after its quiesce. The
 guest's RAM has a file of its own, so the snapshot destination's parent holds
 nothing, and it disappears after boot: the capture quiesces and saves the VM,
 then fails to publish, and OpenVMM rolls it back. The request must return in
 the source with status 0, after OpenVMM's capture profile records exactly one
 quiesce and one save but no publication, and the source must pass the checks
-that `snapshot-core` runs after its released request. Once the parent is back,
+of a released request. Before the request, the guest's snapshot agent saved
+and overrode the stall detectors' settings, and it must restore them when the
+request returns (`nvx-time cancel-capture`): `nvx-time status` must then exit 0
+with a passing boot line at generation 0 and no restore line, and
+`/sys/module/rcupdate/parameters/rcu_cpu_stall_suppress` must read 0. Once the
+parent is back,
 a second request of the same source must publish a snapshot and end the
 source with status 0, leaving only the snapshot in the parent, and the
 snapshot's restore must continue past that request exactly once.
@@ -350,8 +347,8 @@ line and adds it to the GitHub job summary, because CI keeps the guest logs only
 for failed jobs: the number of warp probe runs with their worst
 `max_abs_offset_ns` and `max_backward_ns`, the count and `elapsed_us` range of
 the newest check that each `nvx-time status` query reported (boot after a cold
-boot, restore after a restore, and capture after `snapshot-core`'s released
-request), the exhaustive check's summary, and the
+boot, restore after a restore, and capture after `snapshot-rollback`'s
+rolled-back request), the exhaustive check's summary, and the
 `restore-downtime` stall counts. Where the guest reports a check's CPU time
 (`cpu_us`), the line also gives its range and how many checks exceed the
 backend's CPU-time budget for their phase. The budgets come from guest
@@ -367,8 +364,8 @@ The `nvx-microvm-debug-{kvm,mshv,whp}` jobs run `test-microvm --debug-kernel`
 on the CI debug kernel (`build/vmlinux-debug`, built from
 `kernel/config-microvm-debug`), whose soft-lockup and hung-task detectors
 production kernels leave out. It selects the same-host restore scenarios
-`smp`, `smp-snapshot`, `restore-processors`, `restore-downtime`, and
-`snapshot-tiers`. The jobs skip every other test step, because those boot the
+`smp`, `smp-snapshot`, `restore-processors`, and `restore-downtime`. The jobs
+skip every other test step, because those boot the
 production kernel, which the `nvx-microvm-guests-{kvm,mshv,whp}` jobs and
 WHP's runtime adapter job already cover: the public managed execution
 configuration, the Ubuntu and Azure Linux guest tests, the Ubuntu sandbox
@@ -376,11 +373,9 @@ layer and live-share smoke tests, the caller-owned live-share test, and the
 runtime adapter scenarios. Any
 RCU stall, soft lockup, or hung task makes the guest's time ABI watcher power
 off with status 194, which fails the run. Every guest those scenarios restore
-asks `nvx-time status` before it exits
-(`snapshot-tiers` after its tier assertions), which waits for the restore's
-deferred checks and must report a passing restore line, so no restore leaves
-its checks pending. The one exception is `snapshot-tiers`' gate-timeout check,
-whose guest OpenVMM stops at the restore gate on purpose. The harness refuses
+asks `nvx-time status` before it exits, which waits for the restore's deferred
+checks and must report a passing restore line, so no restore leaves its checks
+pending. The harness refuses
 a kernel whose `vmlinux-debug.config` lacks the detectors, because the guest's
 boot check of those detectors passes vacuously. To bound the cost, pull requests
 run the debug kernel on MSHV only, rather than on KVM, whose general runners
@@ -560,7 +555,14 @@ tmpfs in guest memory, with no scratch image, and sandboxes whose root is a
 GPT disk, over either upper, so that the three backends run the CLI's twelve
 cold cells (see the [case matrix](acceptance-case-matrix.md#cold-boots)). The
 public `vm-lifecycle` scenario then creates, spawns, reattaches to, and stops
-a VM through the public API of `nvx`.
+a VM through the public API of `nvx`. The public `snapshot-core` and
+`snapshot-tiers` scenarios capture a named snapshot with
+`nvx-rs snapshot capture`, with nvx-init as the guest, and restore it with
+`snapshot restore` and `run --restore-snapshot` (see
+[Run](run.md#named-snapshots)): restores of each image format over each upper,
+repeated restores with fresh entropy and machine IDs, clocks that follow the
+host's across the downtime, concurrent restores that take turns at the
+snapshot's lock, failed restores, and snapshots that no restore changes.
 Their bounded evidence is part of the backend's failure logs. The same
 entrypoint then verifies a live virtio-fs
 share inside the container: a read-write `/workspace` share with a denied

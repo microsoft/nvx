@@ -1254,7 +1254,9 @@ which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
 `sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`, the public
 sandbox scenarios, drive the public `nvx-rs sandbox` lifecycle commands (see
-[Run](run.md#managed-lifecycle)), and `vm-lifecycle` drives a VM through the
+[Run](run.md#managed-lifecycle)), `snapshot-core` and `snapshot-tiers` capture
+and restore named snapshots with `nvx-rs snapshot` and `nvx-rs run` (see
+[Run](run.md#named-snapshots)), and `vm-lifecycle` drives a VM through the
 public API of `nvx`; they also read the Ubuntu distro layer, its
 manifest, and the sandbox scratch template, which
 [`download`](#download) installs and the guest-artifact build makes; a run
@@ -1263,16 +1265,16 @@ files is missing. Alpine remains the
 default. Ubuntu and Azure Linux cannot act as sandbox control, so they reject
 the Alpine-control-only `interrupt-map`, `sandbox-blocks`, `scratch-snapshot`,
 and `virtio-features` scenarios and
-the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
-`platform-zero-fill`, `platform-filesystem`, `platform-aggregate-export`,
-`platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, `sandbox-ram-upper`, `sandbox-gpt-layer`, and
-`vm-lifecycle` scenarios. Ubuntu also rejects
+the sandbox-control-dependent `snapshot-core`, `snapshot-tiers`,
+`platform-restore-processors`, `platform-zero-fill`, `platform-filesystem`,
+`platform-aggregate-export`, `platform-network-policy`, `managed-exec-config`,
+`sandbox-lifecycle`, `sandbox-proxy-only`, `sandbox-ram-upper`,
+`sandbox-gpt-layer`, and `vm-lifecycle` scenarios. Ubuntu also rejects
 the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
 the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
 detectors the guest's time ABI watcher reports; without `--scenario`, it runs
 only the same-host restore scenarios `smp`, `smp-snapshot`,
-`restore-processors`, `restore-downtime`, and `snapshot-tiers`.
+`restore-processors`, and `restore-downtime`.
 `--shard INDEX/COUNT`, such as `1/2`, runs shard INDEX of the COUNT shards of
 the default Alpine suite on the default kernel, the scenarios of a run without
 `--scenario` but the public sandbox scenarios, which CI runs in its guest and

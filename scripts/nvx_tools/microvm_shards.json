@@ -60,9 +60,7 @@
         "scratch-snapshot": 3.4,
         "smp": 21.2,
         "smp-snapshot": 26.1,
-        "snapshot-core": 13.4,
         "snapshot-rollback": 1.5,
-        "snapshot-tiers": 6.8,
         "structured-outcome": 0.6,
         "time-abi-conformance": 0.7,
         "time-host-correction": 14.0,
@@ -73,12 +71,11 @@
       },
       "shards": [
         {
-          "seconds": 267.8,
+          "seconds": 258.5,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
             "directional-network-policy",
-            "endpoint-policy-snapshot",
             "filesystem-comma-paths",
             "filesystem-snapshot",
             "lifecycle",
@@ -88,20 +85,20 @@
             "restore-downtime",
             "restore-memory",
             "restore-processors",
+            "smp",
             "smp-snapshot",
-            "snapshot-core",
-            "snapshot-tiers",
             "time-abi-conformance",
             "time-host-correction",
             "virtio-features"
           ]
         },
         {
-          "seconds": 269.3,
+          "seconds": 258.4,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
             "denied-filesystem-paths",
+            "endpoint-policy-snapshot",
             "filesystem-owner",
             "filesystem-policy",
             "filesystem-shares",
@@ -120,7 +117,6 @@
             "private-network-ingress",
             "sandbox-blocks",
             "scratch-snapshot",
-            "smp",
             "snapshot-rollback",
             "structured-outcome",
             "untiered-network-policy",
@@ -168,9 +164,7 @@
         "scratch-snapshot": 3.2,
         "smp": 22.6,
         "smp-snapshot": 28.5,
-        "snapshot-core": 12.9,
         "snapshot-rollback": 1.5,
-        "snapshot-tiers": 6.3,
         "structured-outcome": 0.5,
         "time-abi-conformance": 0.8,
         "time-host-correction": 14.0,
@@ -181,7 +175,7 @@
       },
       "shards": [
         {
-          "seconds": 250.3,
+          "seconds": 239.8,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
@@ -190,23 +184,21 @@
             "filesystem-shares",
             "filesystem-snapshot",
             "interrupt-map",
+            "ipv6-egress-policy",
             "platform-filesystem",
             "platform-restore-processors",
             "platform-zero-fill",
             "restore-downtime",
-            "restore-processors",
             "scratch-snapshot",
             "smp",
             "smp-snapshot",
-            "snapshot-core",
             "snapshot-rollback",
-            "snapshot-tiers",
             "time-host-correction",
             "untiered-network-policy"
           ]
         },
         {
-          "seconds": 248.7,
+          "seconds": 240.0,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -217,7 +209,6 @@
             "guest-boot",
             "guest-identity",
             "host-loopback-policy",
-            "ipv6-egress-policy",
             "l3-l4-egress-policy",
             "l3-l4-egress-port-ranges",
             "l3-l4-egress-protocols",
@@ -228,6 +219,7 @@
             "platform-network-policy",
             "private-network-ingress",
             "restore-memory",
+            "restore-processors",
             "sandbox-blocks",
             "structured-outcome",
             "time-abi-conformance",
@@ -276,9 +268,7 @@
         "scratch-snapshot": 8.8,
         "smp": 30.9,
         "smp-snapshot": 46.6,
-        "snapshot-core": 17.2,
         "snapshot-rollback": 1.5,
-        "snapshot-tiers": 12.0,
         "structured-outcome": 0.8,
         "time-abi-conformance": 1.6,
         "time-host-correction": 14.0,
@@ -289,14 +279,14 @@
       },
       "shards": [
         {
-          "seconds": 354.1,
+          "seconds": 339.3,
           "scenarios": [
             "denied-filesystem-paths",
             "directional-network-policy",
             "endpoint-policy-snapshot",
             "filesystem-policy",
+            "filesystem-shares",
             "host-loopback-policy",
-            "interrupt-map",
             "network-snapshot",
             "platform-aggregate-export",
             "platform-filesystem",
@@ -307,12 +297,11 @@
             "scratch-snapshot",
             "smp",
             "smp-snapshot",
-            "snapshot-tiers",
             "untiered-network-policy"
           ]
         },
         {
-          "seconds": 353.7,
+          "seconds": 339.3,
           "scenarios": [
             "command-line-limit",
             "console-exit",
@@ -320,10 +309,10 @@
             "cpu-profile-fallback",
             "filesystem-comma-paths",
             "filesystem-owner",
-            "filesystem-shares",
             "filesystem-snapshot",
             "guest-boot",
             "guest-identity",
+            "interrupt-map",
             "ipv6-egress-policy",
             "l3-l4-egress-policy",
             "l3-l4-egress-port-ranges",
@@ -334,7 +323,6 @@
             "platform-zero-fill",
             "private-network-ingress",
             "sandbox-blocks",
-            "snapshot-core",
             "snapshot-rollback",
             "structured-outcome",
             "time-abi-conformance",

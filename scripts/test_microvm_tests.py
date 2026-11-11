@@ -6,7 +6,6 @@ import ast
 import errno
 import functools
 import hashlib
-import inspect
 import io
 import ipaddress
 import itertools
@@ -3519,6 +3518,903 @@ class PublicVmLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(common.ScriptError, "with Cargo"):
                 self._run(Path(temporary), test, cargo=None)
         self.assertEqual(test.calls, [])
+
+
+# The length of the fake scratch template, and so of the dormant scratch of
+# the fake snapshots, in MiB.
+_SNAPSHOT_SCRATCH_MIB = 1
+
+
+def _probe_label(script: str) -> str:
+    """Returns the label of the snapshot probe ``script``."""
+    labelled = re.search(r"^report label (\S+)$", script, re.MULTILINE)
+    assert labelled is not None
+    return labelled[1]
+
+
+class _FakeSnapshotCli:
+    """Emulates the commands of `nvx-rs` that the public snapshot scenarios
+    run: `snapshot capture` and `snapshot restore`, `run --restore-snapshot`,
+    and `sandbox exec`, `stop`, and `deprovision` of a restored sandbox, with
+    the snapshot's lock, and the guests of the restores, which run the
+    snapshot probe.
+
+    Each fault names a regression of the capture, of the restores, or of
+    their guests that the scenarios must detect.
+    """
+
+    def __init__(self, *faults: str) -> None:
+        self.faults = set(faults)
+        # The snapshot's lock, which the scenarios' one snapshot takes.
+        self.lock = threading.Lock()
+        self.records = threading.Lock()
+        self.booted = 0.0
+        self.running: dict[int, bool] = {}
+        self.guests: dict[Path, dict[str, str]] = {}
+        self.backends: dict[Path, str] = {}
+        # The files that execs wrote in each sandbox's upper, and its share,
+        # by its state, and the state of the newest managed restore.
+        self.uppers: dict[Path, set[str]] = {}
+        self.shares: dict[Path, Path] = {}
+        self.newest: Path | None = None
+        # The VMs that no termination ends, and those that cleanup ended
+        # through their records.
+        self.unkillable: set[int] = set()
+        self.killed: list[int] = []
+        self.next_pid = 7000
+        self.commands: list[list[str]] = []
+
+    def __call__(
+        self, command: list[str], **_: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        arguments = command[command.index("--root") + 2 :]
+        with self.records:
+            self.commands.append(arguments)
+        returncode, stdout, stderr = self._dispatch(arguments)
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+    @staticmethod
+    def _options(words: list[str]) -> tuple[dict[str, str], list[str]]:
+        values: dict[str, str] = {}
+        arguments: list[str] = []
+        index = 0
+        while index < len(words):
+            if words[index].startswith("--arg="):
+                arguments.append(words[index].removeprefix("--arg="))
+                index += 1
+            else:
+                values[words[index]] = words[index + 1]
+                index += 2
+        return values, arguments
+
+    @staticmethod
+    def _error(code: str, message: str) -> _CliResult:
+        return 1, b"", f"error[{code}]: {message}\n".encode()
+
+    def _dispatch(self, arguments: list[str]) -> _CliResult:
+        if arguments[:2] == ["snapshot", "capture"]:
+            return self._capture(arguments[2], self._options(arguments[3:])[0])
+        if arguments[:2] in (["snapshot", "restore"], ["run", "--restore-snapshot"]):
+            values, workload = self._options(arguments[3:])
+            return self._restore(
+                arguments[2], values, workload, one_off=arguments[0] == "run"
+            )
+        assert arguments[0] == "sandbox"
+        values, workload = self._options(arguments[2:])
+        handlers: dict[str, Callable[[Path, dict[str, str], list[str]], _CliResult]]
+        handlers = {
+            "exec": self._exec,
+            "stop": self._stop,
+            "deprovision": self._deprovision,
+        }
+        return handlers[arguments[1]](Path(values["--state-dir"]), values, workload)
+
+    def _capture(self, name: str, values: dict[str, str]) -> _CliResult:
+        assert values["--scratch-mib"] == str(_SNAPSHOT_SCRATCH_MIB)
+        assert values["--timeout"].isdigit()
+        if {"capture-vm-runs", "capture-vm-survives"} & self.faults:
+            # The capture fails, and its launch journal keeps naming its VM,
+            # which still runs, and outlives every attempt to end it, too.
+            pid = self._spawn()
+            if "capture-vm-survives" in self.faults:
+                self.unkillable.add(pid)
+            journal = Path(values["--store-dir"]) / "capture"
+            journal.mkdir(parents=True)
+            (journal / microvm_tests.CAPTURE_JOURNAL).write_text(
+                json.dumps({"process": {"pid": pid, "startTime": pid * 7}}),
+                encoding="utf-8",
+            )
+            return self._error("timed-out", "the capture's VM did not exit in time")
+        store = Path(values["--store-dir"])
+        directory = microvm_tests.snapshot_directory(store, name)
+        (directory / "openvmm").mkdir(parents=True)
+        for entry in (
+            "key.bin",
+            "snapshot.json",
+            "openvmm/manifest.bin",
+            "openvmm/memory.bin",
+            "openvmm/state.bin",
+        ):
+            (directory / entry).write_bytes(entry.encode())
+        if "capture-leaves-its-vm" in self.faults:
+            (store / "capture").mkdir()
+        if "capture-publishes-more" in self.faults:
+            (directory / "scratch.img").write_bytes(b"scratch")
+        self.booted = time.time()
+        return 0, b"Snapshot captured\n", b""
+
+    def _restore(
+        self, name: str, values: dict[str, str], workload: list[str], *, one_off: bool
+    ) -> _CliResult:
+        state = Path(values["--state-dir"])
+        timeout = float(values["--timeout"])
+        busy = self._error(
+            "sandbox-busy",
+            f"another command still holds the lock of the snapshot {name}",
+        )
+        # A restore opens the snapshot under its lock before it provisions.
+        unlocked = "unserialized-restores" in self.faults or (
+            "waiters-skip-the-lock" in self.faults and state.name.startswith("wait-")
+        )
+        if not unlocked:
+            if not self.lock.acquire(timeout=timeout):
+                return busy
+            self.lock.release()
+        state.mkdir()
+        for entry in ("config.json", "sandbox.lock"):
+            (state / entry).write_text("{}", encoding="utf-8")
+        result = self._start(
+            name, state, values, workload, one_off=one_off, unlocked=unlocked
+        )
+        if one_off and "run-keeps-its-sandbox" not in self.faults:
+            shutil.rmtree(state)
+        return result
+
+    def _start(
+        self,
+        name: str,
+        state: Path,
+        values: dict[str, str],
+        workload: list[str],
+        *,
+        one_off: bool,
+        unlocked: bool,
+    ) -> _CliResult:
+        scratch = values.get("--scratch")
+        zeroed = False
+        if scratch is not None:
+            image = Path(scratch).read_bytes()
+            dormant = _SNAPSHOT_SCRATCH_MIB << 20
+            geometry = "BlockGeometry {{ length: {}, logical_block_size: 512 }}"
+            if len(image) != dormant and "serves-any-scratch" not in self.faults:
+                if "launches-before-refusing" in self.faults:
+                    # A VM starts and exits before the refusal, and leaves its
+                    # log and outcome report in the sandbox's state.
+                    self.terminate(self._spawn())
+                    for name in ("openvmm.log", "outcome.json"):
+                        (state / name).write_text("{}", encoding="utf-8")
+                return self._error(
+                    "unsupported",
+                    f"snapshot scratch geometry {geometry.format(len(image))} differs "
+                    f"from the dormant scratch's {geometry.format(dormant)}",
+                )
+            zeroed = not any(image) and "mounts-zeroed-scratch" not in self.faults
+        if not unlocked and not self.lock.acquire(timeout=float(values["--timeout"])):
+            return self._error(
+                "sandbox-busy",
+                f"another command still holds the lock of the snapshot {name}",
+            )
+        locked = not unlocked
+        if "waiters-share-the-lock" in self.faults and state.name.startswith("wait-"):
+            # The waiters wait for the first restore, but not for each other.
+            self.lock.release()
+            locked = False
+        try:
+            (state / "openvmm").mkdir()
+            directory = microvm_tests.snapshot_directory(
+                Path(values["--store-dir"]), name
+            )
+            if one_off and "restore-changes-snapshot" in self.faults:
+                with (directory / "openvmm" / "memory.bin").open("ab") as memory:
+                    memory.write(b"changed")
+            if one_off and "leaks-a-link" in self.faults:
+                leftover = state.parent.parent / "leftover.bin"
+                if not leftover.exists():
+                    os.link(directory / "openvmm" / "memory.bin", leftover)
+            if zeroed:
+                # The guest cannot mount the zeroed scratch as its upper, so its
+                # VM exits before the workload runs, and frees the lock.
+                self.terminate(self._spawn())
+                if "failure-keeps-the-lock" in self.faults:
+                    locked = False
+                return self._error(
+                    "exited", "OpenVMM exited during startup: guest-exit status 125"
+                )
+            guest = self._guest(values)
+            self.guests[state] = guest
+            self.backends[state] = values["--hypervisor"]
+            assert values["--entrypoint"] == "/bin/sh" and workload[0] == "-c"
+            script = workload[1]
+            stdout = self._probe(script, guest)
+            label = _probe_label(script)
+            held = script == microvm_tests.snapshot_probe_script(label, hold=True)
+            if not held:
+                assert script == microvm_tests.snapshot_probe_script(label)
+            # A held workload keeps the lock until its share releases it, but
+            # for the first one's that ends at once.
+            if held and not (label == "hold" and "holder-ends-early" in self.faults):
+                share = self._share_path(values)
+                assert share is not None
+                release = share / microvm_tests.SNAPSHOT_RELEASE
+                deadline = time.monotonic() + float(values["--timeout"])
+                while not release.exists():
+                    if time.monotonic() >= deadline:
+                        return self._error("exited", "the workload timed out")
+                    time.sleep(0.01)
+        finally:
+            if locked:
+                self.lock.release()
+        if not one_off:
+            share = self._share_path(values)
+            if share is not None:
+                self.shares[state] = share
+            self._launch(state)
+        return 0, stdout, b""
+
+    def _guest(self, values: dict[str, str]) -> dict[str, str]:
+        """Returns what the guest of a restore of ``values`` keeps."""
+        gpt = values.get("--layer-format") == "gpt"
+        ram = values.get("--upper") == "ram" or "upper-in-ram" in self.faults
+        return {
+            "machine": (
+                "0" * 32 if "shared-machine-id" in self.faults else uuid.uuid4().hex
+            ),
+            "host": (
+                "nvx-sandbox"
+                if "ignores-hostname" in self.faults
+                else values.get("--hostname", "nvx-sandbox")
+            ),
+            "id": values.get("--workload-user", "65534:65534"),
+            "lower": (
+                "/run/nvx/layers/p2"
+                if gpt and "gpt-root-is-distro" not in self.faults
+                else "/run/nvx/layers/distro"
+            ),
+            "upper": ("/run/nvx/tmpfs/upper" if ram else "/run/nvx/scratch/upper"),
+            "devices": "vda,vdb",
+            "net": "eth0,lo" if "has-nic" in self.faults else "lo",
+            "release": "ubuntu",
+            "share": self._share(values),
+        }
+
+    @staticmethod
+    def _share_path(values: dict[str, str]) -> Path | None:
+        """Returns the host directory of the share of a restore of
+        ``values``, if it has one."""
+        if "--mount" not in values:
+            return None
+        target, path, mode = values["--mount"].rsplit(",", 2)
+        assert (target, mode) == (microvm_tests.SNAPSHOT_SHARE_TARGET, "ro")
+        return Path(path)
+
+    def _share(self, values: dict[str, str]) -> str:
+        """Returns the marker of the share of a restore of ``values``, or
+        none."""
+        path = self._share_path(values)
+        if path is None:
+            return "none"
+        if "shares-one-export" in self.faults:
+            path = path.with_name("hold-share")
+        return (path / "marker").read_text(encoding="ascii")
+
+    def _probe(self, script: str, guest: dict[str, str]) -> bytes:
+        """Returns what the snapshot probe ``script`` prints in ``guest``."""
+        label = _probe_label(script)
+        wall = self.booted if "stale-clock" in self.faults else time.time()
+        reused = "reused-entropy" in self.faults
+        fields = {
+            "label": label,
+            "wall": f"{wall:.9f}",
+            "uptime": (
+                "0.01"
+                if "uptime-restarts" in self.faults
+                else f"{wall - self.booted:.2f}"
+            ),
+            "uuid": "1" * 8 + "-1111-1111-1111-" + "1" * 12
+            if reused
+            else str(uuid.uuid4()),
+            "rng": "ab" * 32 if reused else os.urandom(32).hex(),
+            "temp": f"tmp.{os.urandom(5).hex()}",
+            **guest,
+        }
+        output = " ".join(f"{key}={value}" for key, value in fields.items())
+        return f"NVX-SNAPSHOT-PROBE {output}\n".encode()
+
+    def _spawn(self) -> int:
+        """Returns the process ID of a new running VM."""
+        with self.records:
+            pid = self.next_pid
+            self.next_pid += 1
+            self.running[pid] = True
+            return pid
+
+    def _launch(self, state: Path) -> None:
+        pid = self._spawn()
+        with self.records:
+            self.newest = state
+        capability = os.urandom(32)
+        (state / "control.capability").write_bytes(capability)
+        (state / "runtime.json").write_text(
+            json.dumps(
+                {
+                    "capability": list(capability),
+                    "vmDir": str(state.resolve()),
+                    "process": {"pid": pid, "startTime": pid * 7, "boot": "b" * 32},
+                    "endpoint": str(state / "control.sock"),
+                    "runtime": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _pid(self, state: Path) -> int | None:
+        path = state / "runtime.json"
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))["process"]["pid"]
+
+    def _exec(
+        self, state: Path, values: dict[str, str], workload: list[str]
+    ) -> _CliResult:
+        pid = self._pid(state)
+        if pid is None or not self.running[pid]:
+            return self._error("sandbox-not-running", "sandbox is not running")
+        # Without uppers of their own, the sandboxes' /tmp is the first's.
+        upper = (
+            next(iter(self.uppers.values()))
+            if "shares-one-upper" in self.faults and self.uppers
+            else self.uppers.setdefault(state, set())
+        )
+        if values["--entrypoint"] == "/bin/touch":
+            upper.add(Path(workload[0]).name)
+            return 0, b"", b""
+        if workload == ["-c", microvm_tests.SNAPSHOT_VIEW_SCRIPT]:
+            # Rebound shares all show the newest restore's.
+            share = (
+                self.shares[self.newest]
+                if "rebinds-shares" in self.faults and self.newest is not None
+                else self.shares[state]
+            )
+            marker = (share / "marker").read_text(encoding="ascii")
+            files = sorted(upper) or ["nvx-upper-*"]
+            lines = [f"share={marker}", *(f"file={name}" for name in files)]
+            return 0, "".join(f"{line}\n" for line in lines).encode(), b""
+        guest = dict(self.guests[state])
+        if "exec-sees-another-root" in self.faults:
+            guest["upper"] = "/run/nvx/other/upper"
+        assert values["--entrypoint"] == "/bin/sh" and workload[0] == "-c"
+        return 0, self._probe(workload[1], guest), b""
+
+    def _stop(self, state: Path, _: dict[str, str], __: list[str]) -> _CliResult:
+        pid = self._pid(state)
+        if pid is None or not self.running[pid]:
+            return self._error("sandbox-not-running", "sandbox is not running")
+        self.terminate(pid)
+        for name in ("runtime.json", "control.capability"):
+            (state / name).unlink()
+        outcome = (
+            {"operation": "restore", "category": "guest-exit", "status_code": 1}
+            if "stop-reports-failure" in self.faults
+            else microvm_tests.RESTORED_SUCCESS
+        )
+        (state / "outcome.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "instance_id": "33" * 16,
+                    "backend": self.backends[state],
+                    "outcome": outcome,
+                    "network_policy": {
+                        "status": "not-requested",
+                        "status_code": 0,
+                        "mode": "none",
+                        "allow_rule_count": 0,
+                        "deny_rule_count": 0,
+                        "host_loopback": "none",
+                    },
+                    "teardown": dict.fromkeys(
+                        microvm_tests.OUTCOME_TEARDOWN_FIELDS, True
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return 0, b"", b""
+
+    def _deprovision(
+        self, state: Path, values: dict[str, str], _: list[str]
+    ) -> _CliResult:
+        pid = self._pid(state)
+        if pid is not None and self.running[pid]:
+            return self._error(
+                "sandbox-running", "sandbox must be stopped before deprovision"
+            )
+        # Deprovision removes a restore's view under the snapshot's lock.
+        if (state / "openvmm").is_dir():
+            if not self.lock.acquire(timeout=float(values["--timeout"])):
+                return self._error("sandbox-busy", "the snapshot's lock is busy")
+            self.lock.release()
+        shutil.rmtree(state)
+        return 0, b"", b""
+
+    def processes(self, _: str) -> tuple[int, ...]:
+        with self.records:
+            return tuple(sorted(pid for pid, up in self.running.items() if up))
+
+    def terminate(self, pid: int) -> None:
+        with self.records:
+            if pid not in self.unkillable:
+                self.running[pid] = False
+
+    def kill(self, runtime: dict[str, Any], _timeout: float, _marker: str) -> None:
+        pid = runtime["process"]["pid"]
+        self.killed.append(pid)
+        self.terminate(pid)
+        if self.running[pid]:
+            raise RuntimeError(f"OpenVMM process {pid} survived its kill")
+
+
+class PublicSnapshotTests(unittest.TestCase):
+    """The public snapshot scenarios, snapshot-core and snapshot-tiers, with
+    a fake of the CLI and of the guests of its restores."""
+
+    def _run(
+        self, root: Path, fake: _FakeSnapshotCli, scenario: str = "snapshot-core"
+    ) -> tuple[Path, MagicMock]:
+        distro = root / "ubuntu-distro.erofs"
+        distro.write_bytes(b"distro")
+        template = root / "ubuntu-smoke-scratch.ext4"
+        template.write_bytes(b"\x01" * (_SNAPSHOT_SCRATCH_MIB << 20))
+        artifacts = managed_exec_tests.WorkloadArtifacts(
+            distro, "12345678-1234-1234-1234-123456789abc", template
+        )
+        output_dir = root / "results"
+        mkdtemp = tempfile.mkdtemp
+
+        def fixture(prefix: str) -> str:
+            return mkdtemp(prefix=prefix, dir=root)
+
+        constants = {
+            "SNAPSHOT_CORE_BUSY_TIMEOUT_SECONDS": 0.05,
+            "SNAPSHOT_CORE_EXCLUSION_SECONDS": 0.2,
+            "SNAPSHOT_CORE_DOWNTIME_MARGIN_SECONDS": 0.1,
+            "SNAPSHOT_CLOCK_TOLERANCE_SECONDS": 0.1,
+            "GPT_LAYER_MIN_BYTES": 1 << 20,
+        }
+        with ExitStack() as stack:
+            for name, value in constants.items():
+                stack.enter_context(patch.object(microvm_tests, name, value))
+            stack.enter_context(
+                patch.object(
+                    microvm_tests, "load_workload_artifacts", return_value=artifacts
+                )
+            )
+            stack.enter_context(
+                patch.object(microvm_tests.tempfile, "mkdtemp", side_effect=fixture)
+            )
+            stack.enter_context(
+                patch.object(microvm_tests.subprocess, "run", side_effect=fake)
+            )
+            stack.enter_context(
+                patch.object(nvx_rs, "require_binary", return_value=_FAKE_NVX_RS)
+            )
+            for module in (microvm_tests, sandbox_lifecycle_tests):
+                stack.enter_context(
+                    patch.object(
+                        module, "openvmm_processes", side_effect=fake.processes
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        module, "terminate_process", side_effect=fake.terminate
+                    )
+                )
+            stack.enter_context(
+                patch.object(microvm_tests, "kill_openvmm", side_effect=fake.kill)
+            )
+            guest = stack.enter_context(patch.object(microvm_tests, "run_guest_script"))
+            if scenario == "snapshot-core":
+                microvm_tests.run_snapshot_core("kvm", timeout=2, output_dir=output_dir)
+            else:
+                microvm_tests.run_snapshot_tiers(
+                    Path("openvmm"),
+                    Path("vmlinux"),
+                    Path("initramfs.cpio.gz"),
+                    "kvm",
+                    timeout=2,
+                    output_dir=output_dir,
+                )
+        return output_dir, guest
+
+    @staticmethod
+    def _option(arguments: list[str], name: str) -> str | None:
+        return arguments[arguments.index(name) + 1] if name in arguments else None
+
+    def test_snapshot_core_captures_and_restores_one_snapshot_again_and_again(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            journal = root / "pids.jsonl"
+            fake = _FakeSnapshotCli()
+            with patch.dict(
+                os.environ, {"NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL": str(journal)}
+            ):
+                output_dir, guest = self._run(root, fake)
+            recorded = [
+                json.loads(line)["pid"]
+                for line in journal.read_text(encoding="utf-8").splitlines()
+            ]
+            evidence = {path.name for path in output_dir.iterdir()}
+            fixtures = list(root.glob("nvx-snapshot-core-*"))
+
+        self.assertEqual(fixtures, [])
+        self.assertFalse(any(fake.running.values()))
+        guest.assert_not_called()
+        # The capture, two one-off restores, the managed restore that refuses
+        # the short scratch and its deprovision, the one-off restore over the
+        # zeroed scratch, then three managed restores at once and a one-off
+        # one that cannot wait for the lock, two execs in each managed one,
+        # and its stop and its deprovision.
+        labels = [arguments[1] for arguments in fake.commands]
+        self.assertEqual(
+            labels[:6],
+            [
+                "capture",
+                "--restore-snapshot",
+                "--restore-snapshot",
+                "restore",
+                "deprovision",
+                "--restore-snapshot",
+            ],
+        )
+        self.assertEqual(
+            sorted(labels[6:10]),
+            ["--restore-snapshot", "restore", "restore", "restore"],
+        )
+        self.assertEqual(labels[10:], ["exec"] * 6 + ["stop", "deprovision"] * 3)
+        short = fake.commands[3]
+        self.assertEqual(
+            Path(str(self._option(short, "--state-dir"))).name, "short-scratch"
+        )
+        self.assertEqual(
+            self._option(fake.commands[4], "--state-dir"),
+            self._option(short, "--state-dir"),
+        )
+        # The three managed restores at once each take a share of their own,
+        # and the last a scratch upper.
+        managed = [
+            arguments
+            for arguments in fake.commands
+            if arguments[:2] == ["snapshot", "restore"] and "--mount" in arguments
+        ]
+        self.assertEqual(
+            sorted(
+                (
+                    self._option(arguments, "--hostname"),
+                    Path(str(self._option(arguments, "--mount")).split(",")[1]).name,
+                    self._option(arguments, "--upper"),
+                )
+                for arguments in managed
+            ),
+            [
+                ("hold", "hold-share", "ram"),
+                ("wait-one", "wait-one-share", "ram"),
+                ("wait-two", "wait-two-share", None),
+            ],
+        )
+        runs = [arguments for arguments in fake.commands if arguments[0] == "run"]
+        repeat_ram, repeat_scratch, zeroed = runs[:3]
+        self.assertEqual(
+            [
+                self._option(repeat_ram, name)
+                for name in ("--upper", "--hostname", "--workload-user")
+            ],
+            ["ram", "core-one", "65534:65534"],
+        )
+        self.assertIsNone(self._option(repeat_ram, "--scratch"))
+        self.assertEqual(
+            [
+                self._option(repeat_scratch, name)
+                for name in ("--upper", "--hostname", "--workload-user")
+            ],
+            [None, "core-two", "1:1"],
+        )
+        # Each scratch upper's image is a new copy of the template.
+        scratches = [
+            self._option(arguments, "--scratch")
+            for arguments in (repeat_scratch, short, zeroed)
+        ]
+        self.assertEqual(len(set(scratches)), 3)
+        busy = next(arguments for arguments in runs[3:])
+        self.assertEqual(self._option(busy, "--timeout"), "0.05")
+        # The VM of the restore over the zeroed scratch image, 7000, exited
+        # by itself, and only the managed restores record theirs.
+        self.assertEqual(sorted(recorded), [7001, 7002, 7003])
+        names = {
+            "capture",
+            "repeat-ram",
+            "repeat-scratch",
+            "short-scratch",
+            "short-scratch-deprovision",
+            "zeroed-scratch",
+            "busy",
+            "checks.json",
+        }
+        for label in ("hold", "wait-one", "wait-two"):
+            names |= {
+                label,
+                f"{label}-write",
+                f"{label}-view",
+                f"{label}-stop",
+                f"{label}-deprovision",
+                f"{label}-outcome.json",
+            }
+        self.assertEqual(
+            evidence,
+            {
+                f"snapshot-core-{name}"
+                if name.endswith(".json")
+                else f"snapshot-core-{name}.log"
+                for name in names
+            },
+        )
+
+    def test_snapshot_core_detects_regressions_of_snapshots_and_their_restores(self):
+        regressions = {
+            "capture-leaves-its-vm": "the capture left its VM's directory",
+            "capture-publishes-more": "the named snapshot holds ['key.bin', 'openvmm'",
+            "stale-clock": "the repeat-ram restore's guest clock reads",
+            "uptime-restarts": "the repeat-ram restore's guest booted at",
+            "ignores-hostname": "reports host=nvx-sandbox, expected core-one",
+            "has-nic": "reports net=eth0,lo, expected lo",
+            "run-keeps-its-sandbox": "the repeat-ram run left its sandbox's state",
+            "restore-changes-snapshot": "the repeat-ram restore changed the named",
+            "leaks-a-link": "or left links to its files",
+            "reused-entropy": "the repeated restores reused a kernel random UUID",
+            "shared-machine-id": "the repeated restores reused a machine ID",
+            # The guest then cannot mount the short scratch image either.
+            "serves-any-scratch": (
+                "short-scratch: nvx-rs snapshot restore returned 1, expected 1 "
+                "with error[unsupported]; stdout=''; stderr='error[exited]"
+            ),
+            "launches-before-refusing": (
+                "the short-scratch restore left ['config.json', 'openvmm.log', "
+                "'outcome.json', 'sandbox.lock'] in its sandbox's state"
+            ),
+            "mounts-zeroed-scratch": (
+                "zeroed-scratch: nvx-rs run --restore-snapshot returned 0, expected 1 "
+                "with error[exited]"
+            ),
+            "unserialized-restores": (
+                "busy: nvx-rs run --restore-snapshot returned 0, expected 1 "
+                "with error[sandbox-busy]"
+            ),
+            "waiters-skip-the-lock": (
+                "restore linked its view of the snapshot while the hold restore "
+                "held the snapshot's lock"
+            ),
+            # The first restore's workload does not wait for the scenario.
+            "holder-ends-early": (
+                "the hold restore ended before the scenario released it"
+            ),
+            "waiters-share-the-lock": (
+                "restore linked its view of the snapshot while the wait-"
+            ),
+            # The next restore cannot have the lock.
+            "failure-keeps-the-lock": (
+                "hold: nvx-rs snapshot restore returned 1, expected 0"
+            ),
+            "shares-one-export": "the wait-one restore's guest reports share=hold",
+            "rebinds-shares": "the hold sandbox reads the share markers ['wait-",
+            "shares-one-upper": (
+                "the hold sandbox finds ['nvx-upper-hold', 'nvx-upper-wait-one', "
+                "'nvx-upper-wait-two']"
+            ),
+            "stop-reports-failure": "the hold sandbox reported the outcome",
+        }
+        for fault, message in regressions.items():
+            with (
+                self.subTest(fault=fault),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                fake = _FakeSnapshotCli(fault)
+                with self.assertRaisesRegex(RuntimeError, re.escape(message)):
+                    self._run(root, fake)
+                # Cleanup stops and deprovisions every restored sandbox, and
+                # removes the fixture.
+                self.assertFalse(any(fake.running.values()))
+                self.assertEqual(list(root.glob("nvx-snapshot-core-*")), [])
+                self.assertTrue(
+                    (root / "results" / "snapshot-core-checks.json").is_file()
+                )
+
+    def test_snapshot_core_ends_the_vm_of_a_failed_capture_through_its_journal(
+        self,
+    ):
+        # Cleanup ends the VM that the capture's launch journal names, as it
+        # ends a sandbox's, and removes the fixture once that VM has exited.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = _FakeSnapshotCli("capture-vm-runs")
+            with self.assertRaisesRegex(RuntimeError, "capture: nvx-rs snapshot"):
+                self._run(root, fake)
+            self.assertEqual(fake.killed, [7000])
+            self.assertFalse(any(fake.running.values()))
+            self.assertEqual(list(root.glob("nvx-snapshot-core-*")), [])
+
+    def test_snapshot_core_keeps_its_fixture_while_a_vm_may_survive(self):
+        # Cleanup cannot end the VM of a failed capture, so the fixture, whose
+        # store holds what recovers that VM, stays for recovery.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = _FakeSnapshotCli("capture-vm-survives")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"OpenVMM process 7000 survived its kill.*"
+                r"fixture preserved for recovery",
+            ):
+                self._run(root, fake)
+            fixtures = list(root.glob("nvx-snapshot-core-*"))
+            self.assertEqual(len(fixtures), 1)
+            self.assertTrue((fixtures[0] / "sandboxes").is_dir())
+            self.assertTrue((fixtures[0] / "store" / "capture").is_dir())
+
+    def test_snapshot_tiers_restores_each_image_format_over_each_upper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            journal = root / "pids.jsonl"
+            fake = _FakeSnapshotCli()
+            with patch.dict(
+                os.environ, {"NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL": str(journal)}
+            ):
+                output_dir, guest = self._run(root, fake, "snapshot-tiers")
+            recorded = journal.read_text(encoding="utf-8").splitlines()
+            fixtures = list(root.glob("nvx-snapshot-tiers-*"))
+            checks = json.loads(
+                (output_dir / "snapshot-tiers-checks.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(fixtures, [])
+        self.assertFalse(any(fake.running.values()))
+        self.assertEqual(len(recorded), 4)
+        # A guest of the control initramfs writes the GPT disk from the EROFS
+        # layer.
+        guest.assert_called_once()
+        self.assertEqual(
+            guest.call_args.args[1:],
+            (microvm_tests.GPT_LAYER_SCRIPT, microvm_tests.GPT_LAYER_READY_MARKER),
+        )
+        self.assertEqual(
+            [record["operation"] for record in checks],
+            [
+                "capture",
+                *(
+                    f"{image}-{upper}{step}"
+                    for image in ("erofs", "gpt")
+                    for upper in ("scratch", "ram")
+                    for step in ("", "-exec", "-stop", "-deprovision")
+                ),
+            ],
+        )
+        restores = [
+            arguments
+            for arguments in fake.commands
+            if arguments[:2] == ["snapshot", "restore"]
+        ]
+        self.assertEqual(
+            [
+                (
+                    self._option(arguments, "--layer-format"),
+                    self._option(arguments, "--upper"),
+                    self._option(arguments, "--scratch") is not None,
+                )
+                for arguments in restores
+            ],
+            [
+                (None, None, True),
+                (None, "ram", False),
+                ("gpt", None, True),
+                ("gpt", "ram", False),
+            ],
+        )
+
+    def test_snapshot_tiers_detects_regressions_of_the_restored_roots(self):
+        regressions = {
+            "gpt-root-is-distro": (
+                "the gpt-scratch restore's guest reports lower=/run/nvx/layers/"
+                "distro, expected /run/nvx/layers/p2"
+            ),
+            "upper-in-ram": (
+                "the erofs-scratch restore's guest reports upper=/run/nvx/tmpfs/"
+                "upper, expected /run/nvx/scratch/upper"
+            ),
+            "exec-sees-another-root": (
+                "an exec in the erofs-scratch sandbox reports "
+                "upper=/run/nvx/other/upper"
+            ),
+        }
+        for fault, message in regressions.items():
+            with (
+                self.subTest(fault=fault),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                fake = _FakeSnapshotCli(fault)
+                with self.assertRaisesRegex(RuntimeError, re.escape(message)):
+                    self._run(root, fake, "snapshot-tiers")
+                self.assertFalse(any(fake.running.values()))
+                self.assertEqual(list(root.glob("nvx-snapshot-tiers-*")), [])
+
+    def test_snapshot_probes_report_before_they_hold_and_take_plain_labels(self):
+        hold_loop = "while [ ! -e /data/release ]; do\n    sleep 0.1\ndone\n"
+        for hold in (False, True):
+            with self.subTest(hold=hold):
+                script = microvm_tests.snapshot_probe_script("hold", hold=hold)
+                self.assertTrue(script.startswith("set -eu\n"))
+                self.assertIn("report label hold\n", script)
+                self.assertIn("if [ -r /data/marker ]; then\n", script)
+                # A held probe waits for the host after its report.
+                self.assertEqual(
+                    script.endswith(f"printf '%s\\n' \"$line\"\n{hold_loop}"), hold
+                )
+                self.assertEqual(hold_loop in script, hold)
+        for label in ("", "Hold", "wait one", "-hold", 'a"b'):
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(ValueError, "invalid snapshot probe label"),
+            ):
+                microvm_tests.snapshot_probe_script(label)
+
+    def test_snapshot_probe_reports_each_field_once_in_a_linux_shell(self):
+        if sys.platform != "linux":
+            self.skipTest("the probe reads Linux's /proc and /sys")
+        result = subprocess.run(
+            ["sh", "-c", microvm_tests.snapshot_probe_script("host")],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        report = microvm_tests.snapshot_probe_report(result.stdout, "host")
+        self.assertEqual(report["id"], f"{os.getuid()}:{os.getgid()}")
+        self.assertEqual(report["host"], socket.gethostname())
+        self.assertIn("lo", report["net"].split(","))
+        self.assertRegex(report["rng"], r"^[0-9a-f]{64}$")
+        uuid.UUID(report["uuid"])
+        self.assertLessEqual(abs(float(report["wall"]) - time.time()), 30)
+
+    def test_snapshot_probe_reports_are_one_well_formed_line_by_label(self):
+        fields = " ".join(
+            f"{key}={'hold' if key == 'label' else 'x'}"
+            for key in sorted(microvm_tests.SNAPSHOT_PROBE_FIELDS)
+        )
+        report = f"NVX-SNAPSHOT-PROBE {fields}"
+        other = report.replace("label=hold", "label=wait-one")
+        output = f"noise\r\n{report}\r\n{other}\n".encode()
+        self.assertEqual(
+            microvm_tests.snapshot_probe_report(output, "hold")["label"], "hold"
+        )
+        for broken, message in (
+            (b"", "printed 0 reports, not 1"),
+            (f"{report}\n{report}\n".encode(), "printed 2 reports, not 1"),
+            (f"{report} uptime=1\n".encode(), "malformed report"),
+            (report.replace(" temp=x", "").encode(), "malformed report"),
+            (f"{report} extra\n".encode(), "malformed report"),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(RuntimeError, message),
+            ):
+                microvm_tests.snapshot_probe_report(broken, "hold")
 
 
 class GuestIdentityScriptTests(unittest.TestCase):
@@ -7690,9 +8586,8 @@ class MicrovmTests(unittest.TestCase):
             if isinstance(node, ast.Call)
             and ast.unparse(node.func) == "TcpConsole.connect"
         ]
-        # The console-snapshot capture and restore, and the snapshot-tier
-        # capture, restore, and gate-timeout restore.
-        self.assertEqual(len(connects), 5)
+        # The console-snapshot capture and restore.
+        self.assertEqual(len(connects), 2)
         for keywords in connects:
             self.assertRegex(
                 keywords.get("monitor", ""), r"^TimeAbiMonitor\(\w*command\)$"
@@ -7718,79 +8613,8 @@ class MicrovmTests(unittest.TestCase):
         # init starts the managed agent instead of a shell.
         self.assertEqual(
             [k["monitor"] for k in connects if k.get("time_abi_status") == "True"],
-            ["TimeAbiMonitor(capture_command)"] * 2,
+            ["TimeAbiMonitor(capture_command)"],
         )
-
-    def test_snapshot_core_script_handles_no_clocksource(self):
-        # The time ABI fixes the clocksource on every backend, so snapshot-core
-        # neither selects nor waits for one.
-        script = microvm_tests._read_script("snapshot-core.sh")
-
-        for text in ("clocksource", "kvm-clock", "tsc-early", "@SELECT", "@VALIDATE"):
-            self.assertNotIn(text, script)
-        self.assertIn("/sbin/nvx-reseed", script)
-        self.assertIn("/sbin/nvx-reseed --sample", script)
-        self.assertIn("NVX-SNAPSHOT-GENERATION-ID-", script)
-        self.assertIn("NVX-SNAPSHOT-UUID-", script)
-        self.assertIn("NVX-SNAPSHOT-TEMP-ID-", script)
-
-    def test_snapshot_core_checks_that_restored_processes_cannot_reach_the_ports(self):
-        # nvx-time holds the port permission only for each port transaction, so
-        # the processes that it starts on a restored VM cannot reach the ports.
-        script = microvm_tests._read_script("snapshot-core.sh")
-
-        self.assertIn(
-            'port_access="$(/sbin/nvx-time test port-access)" || fail 55', script
-        )
-        self.assertIn('echo "NVX-SNAPSHOT-PORT-ACCESS-$port_access"', script)
-        self.assertEqual(script.count("|| fail 55"), 1)
-
-    def test_snapshot_core_reads_the_entropy_that_nvx_time_kept(self):
-        # The restore packet is consumed by nvx-time capture, which leaves the
-        # entropy of an untiered restore in /run/nvx/restore-entropy.
-        shell = _posix_shell()
-        if shell is None:
-            self.skipTest("POSIX shell is unavailable")
-        script = microvm_tests._read_script("snapshot-core.sh")
-        self.assertNotIn("OPENVMM_ENTROPY_V1", script)
-        self.assertNotIn("/dev/port", script)
-        section = (
-            "generation_id_after="
-            + script.split("generation_id_after=", 1)[1].split("rng=", 1)[0]
-        )
-        generation = bytes(range(16))
-        cases = (
-            (generation + bytes(48), "00" * 16, "reseeded", 0),
-            (generation + bytes(47), "00" * 16, "FAIL 44", 44),
-            (bytes(16) + bytes(48), "00" * 16, "FAIL 52", 52),
-            (generation + bytes(48), generation.hex(), "FAIL 51", 51),
-        )
-        for entropy, before, expected, status in cases:
-            with self.subTest(expected=expected):
-                with tempfile.TemporaryDirectory() as temporary:
-                    path = Path(temporary) / "restore-entropy"
-                    path.write_bytes(entropy)
-                    body = (
-                        section.replace("/run/nvx/restore-entropy", path.as_posix())
-                        .replace("/sbin/nvx-time", "nvx_time")
-                        .replace("/sbin/nvx-reseed", "nvx_reseed")
-                    )
-                    result = subprocess.run(
-                        [shell],
-                        input=(
-                            "set -eu\n"
-                            'fail() { echo "FAIL $1"; exit "$1"; }\n'
-                            f"nvx_time() {{ echo {generation.hex()}; }}\n"
-                            'nvx_reseed() { echo "reseeded"; }\n'
-                            f"generation_id_before={before}\n" + body
-                        ),
-                        text=True,
-                        capture_output=True,
-                        timeout=10,
-                        check=False,
-                    )
-                self.assertEqual(result.returncode, status, result.stderr)
-                self.assertIn(expected, result.stdout)
 
     def test_smp_worker_requires_bounded_local_timer_progress(self):
         shell = _posix_shell()
@@ -7853,83 +8677,6 @@ class MicrovmTests(unittest.TestCase):
                         (root / "result").read_text(encoding="ascii").split(),
                         ["1", "101", "1"],
                     )
-
-    def test_snapshot_core_waits_for_no_destination_marker_line_before_exit(self):
-        events: list[tuple[str, bytes | str | None]] = []
-        marker = b"NVX-SNAPSHOT-NO-DESTINATION-OK"
-        command = ["openvmm", "--hypervisor", "whp", "--kernel", "vmlinux"]
-
-        class StopAfterNoDestination(Exception):
-            pass
-
-        class FakeProcess:
-            def __init__(self) -> None:
-                self.console = bytearray(b"NVX-SNAPSHOT-NO-DESTINATION-OK\r\n")
-
-            def __enter__(self):
-                return self
-
-            def __exit__(
-                self,
-                _exception_type: type[BaseException] | None,
-                _exception: BaseException | None,
-                _traceback: object | None,
-            ) -> None:
-                return None
-
-            @property
-            def output(self) -> bytes:
-                return bytes(self.console)
-
-            def wait_for(self, expected: bytes, _timeout: float) -> None:
-                events.append(("wait_for", expected))
-
-            def wait_for_line(self, expected: bytes, _timeout: float) -> None:
-                events.append(("wait_for_line", expected))
-
-            def send_line(self, line: str) -> None:
-                events.append(("send_line", line))
-
-            def send_bytes(self, data: bytes) -> None:
-                events.append(("send_bytes", data.decode()))
-                self.console.extend(_canceled_capture_output("whp"))
-
-            def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
-                events.append(("wait", None))
-                return openvmm_process.OpenvmmProcessResult(0, marker + b"\n")
-
-        with (
-            patch.object(microvm_tests, "workload_boot_command", return_value=command),
-            patch.object(microvm_tests, "OpenvmmProcess", return_value=FakeProcess()),
-            patch.object(
-                microvm_tests.tempfile,
-                "TemporaryDirectory",
-                side_effect=StopAfterNoDestination,
-            ),
-            self.assertRaises(StopAfterNoDestination),
-        ):
-            microvm_tests.run_snapshot_core(
-                Path("openvmm"),
-                Path("vmlinux"),
-                Path("initramfs"),
-                "whp",
-                memory_mib=128,
-                timeout=1,
-                output_dir=Path("logs"),
-            )
-
-        self.assertEqual(
-            events,
-            [
-                ("wait_for", microvm_tests.BOOT_MARKER),
-                ("send_line", "nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK"),
-                ("wait_for_line", marker),
-                ("send_bytes", microvm_tests.canceled_capture_checks()),
-                ("wait_for_line", microvm_tests.CANCELED_CAPTURE_DONE_MARKER),
-                ("send_line", "nvx-exit 0"),
-                ("wait", None),
-            ],
-        )
 
     def test_canceled_capture_checks_query_status_and_rcu_suppression(self):
         script = microvm_tests.canceled_capture_checks()
@@ -8278,10 +9025,6 @@ class MicrovmTests(unittest.TestCase):
             ),
             b"17",
         )
-        self.assertEqual(
-            microvm_tests._parse_marker_pair(output, b"PAIR-"),
-            (4, 5),
-        )
         with self.assertRaisesRegex(RuntimeError, "exactly one"):
             microvm_tests._single_marker_value(b"X-1\nX-2\n", b"X-")
         with self.assertRaisesRegex(RuntimeError, "exactly one"):
@@ -8296,8 +9039,6 @@ class MicrovmTests(unittest.TestCase):
                 b"FRAME-",
                 b"-END",
             )
-        with self.assertRaisesRegex(RuntimeError, "malformed"):
-            microvm_tests._parse_marker_pair(b"PAIR-4\n", b"PAIR-")
 
     def test_console_snapshot_script_preserves_backend_specific_rx_and_tx(self):
         kvm, kvm_count, kvm_rx = microvm_tests._console_snapshot_script("kvm")
@@ -8374,114 +9115,6 @@ class MicrovmTests(unittest.TestCase):
         self.assertIn("10.0.0.1 5678", script)
         self.assertNotIn("@HTTP_PORT@", script)
         self.assertNotIn("@UDP_PORT@", script)
-
-    def test_snapshot_tier_scripts_preserve_tier_specific_policy(self):
-        platform = microvm_tests._snapshot_tier_script("platform")
-        workload = microvm_tests._snapshot_tier_script("workload-start")
-        checkpoint = microvm_tests._snapshot_tier_script("instance-checkpoint")
-
-        self.assertIn("/sbin/nvx-snapshot --tier platform", platform)
-        self.assertIn("date -u -s 200001010000.00", platform)
-        self.assertNotIn("mkfs.ext4", platform)
-        self.assertIn("/sbin/nvx-snapshot --tier workload-start", workload)
-        self.assertIn("mkfs.ext4 -F /dev/vdb", workload)
-        self.assertIn("runtime-post-restore", workload)
-        self.assertIn(": >/run/nvx/workload-ran", workload)
-        self.assertIn("[ -e /run/nvx/workload-ran ]", workload)
-        self.assertIn("/sbin/nvx-snapshot\n", checkpoint)
-        self.assertIn("captured-workload-id", checkpoint)
-        self.assertIn(
-            "printf 'restored-direct-claimed\\n' "
-            ">/run/nvx/scratch/direct-claimed\nsync",
-            checkpoint,
-        )
-        self.assertNotIn("@CAPTURE_ACTION@", checkpoint)
-
-    def test_restored_tier_guests_report_their_restore_checks_before_exiting(self):
-        # The debug-kernel lane gates on snapshot-tiers, so every restored tier
-        # guest waits for its deferred restore checks before it exits.
-        status = microvm_tests.status_script().rstrip("\n")
-        for tier in ("platform", "workload-start", "instance-checkpoint"):
-            with self.subTest(tier=tier):
-                script = microvm_tests._snapshot_tier_script(tier)
-                self.assertNotIn("@STATUS_QUERY@", script)
-                self.assertLess(
-                    script.index(f"NVX-TIER-{tier.upper()}-LAYER-"),
-                    script.index(f"set +e\n{status}\n"),
-                )
-                # The guest waits for the host's byte, so the query's lines
-                # reach the console before nvx-exit stops the VM.
-                self.assertTrue(
-                    script.endswith(
-                        f"{status}\ndd if=/dev/hvc1 bs=1 count=1 >/dev/null 2>&1\n"
-                        "nvx-exit 0\n"
-                    )
-                )
-        runner = inspect.getsource(microvm_tests._run_snapshot_tier)
-        self.assertIn("_check_restore_status(\n            restore_console,", runner)
-        # The status baseline is taken before the milestone reads, so a query
-        # one of them consumes still counts for the wait.
-        self.assertLess(
-            runner.index("status_baseline = console.status_queries"),
-            runner.index("console.wait_for(released_marker, timeout)"),
-        )
-        self.assertLess(
-            runner.index("console.wait_for_time_abi_status("),
-            runner.index('console.send_bytes(b"Z")\n                restored = '),
-        )
-        self.assertIn("since=status_baseline", runner)
-
-    def test_snapshot_tier_entry_points_reject_unsupported_tiers(self):
-        with self.assertRaisesRegex(ValueError, "unsupported snapshot tier 'invalid'"):
-            microvm_tests._snapshot_tier_script("invalid")
-        with self.assertRaisesRegex(ValueError, "unsupported snapshot tier 'invalid'"):
-            microvm_tests._run_snapshot_tier(
-                "invalid",
-                Path("openvmm"),
-                Path("vmlinux"),
-                Path("initrd"),
-                "kvm",
-                memory_mib=128,
-                timeout=60,
-                output_dir=Path("logs"),
-            )
-
-    def test_snapshot_tier_runner_dispatches_all_tiers(self):
-        with patch.object(microvm_tests, "_run_snapshot_tier") as run_tier:
-            microvm_tests.run_snapshot_tiers(
-                Path("openvmm"),
-                Path("vmlinux"),
-                Path("initrd"),
-                "whp",
-                memory_mib=128,
-                timeout=60,
-                output_dir=Path("logs"),
-            )
-
-        self.assertEqual(
-            [entry.args[0] for entry in run_tier.call_args_list],
-            ["platform", "workload-start", "instance-checkpoint"],
-        )
-
-    def test_snapshot_storage_policy_selects_generation_and_materialization(self):
-        self.assertEqual(microvm_tests._snapshot_storage_policy("platform"), ())
-        workload = microvm_tests._snapshot_storage_policy("workload-start")
-        checkpoint = microvm_tests._snapshot_storage_policy("instance-checkpoint")
-
-        self.assertEqual(
-            workload,
-            (
-                "--snapshot-block-identity",
-                "generation",
-                "--snapshot-generation-id",
-                "00112233445566778899aabbccddee01",
-                "--snapshot-scratch-restore-mode",
-                "private-copy",
-            ),
-        )
-        self.assertEqual(checkpoint[-1], "direct-claimed")
-        with self.assertRaisesRegex(ValueError, "unsupported snapshot tier"):
-            microvm_tests._snapshot_storage_policy("other")
 
     def test_lifecycle_uses_one_vcpu_linux_guest(self):
         with (
@@ -15872,6 +16505,55 @@ class MicrovmTests(unittest.TestCase):
             )
             gpt_layer.assert_not_called()
 
+    def test_runner_dispatches_public_snapshot_scenarios(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--scenario",
+                    "snapshot-core",
+                    "--scenario",
+                    "snapshot-tiers",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_snapshot_core") as core,
+                patch.object(microvm_tests, "run_snapshot_tiers") as tiers,
+                patch.object(microvm_tests, "run_vm_lifecycle") as vm_lifecycle,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            core.assert_called_once_with(
+                "whp", timeout=args.timeout, output_dir=output_dir
+            )
+            # The guest that writes the GPT disk boots the run's artifacts.
+            tiers.assert_called_once_with(
+                microvm_tests.openvmm_binary_path(),
+                microvm_tests.artifact_path("vmlinux"),
+                microvm_tests.artifact_path("initramfs.cpio.gz"),
+                "whp",
+                timeout=args.timeout,
+                output_dir=output_dir,
+            )
+            vm_lifecycle.assert_not_called()
+        # CI runs them in its guest and sandbox jobs, which take the Ubuntu
+        # artifacts, and not on the debug kernel, which the CLI never boots.
+        for scenario in ("snapshot-core", "snapshot-tiers"):
+            self.assertIn(scenario, microvm_tests.PUBLIC_SANDBOX_SCENARIOS)
+            self.assertIn(scenario, microvm_tests.SANDBOX_CONTROL_SCENARIOS)
+            self.assertNotIn(scenario, microvm_tests.default_suite())
+            self.assertNotIn(scenario, microvm_tests.DEBUG_KERNEL_SCENARIOS)
+
     def test_a_default_run_runs_the_public_sandbox_scenarios(self):
         def require(path: Path, _description: str) -> Path:
             return path
@@ -16194,7 +16876,6 @@ class MicrovmTests(unittest.TestCase):
             "smp-snapshot": "run_smp_snapshot",
             "restore-processors": "run_restore_processors",
             "restore-downtime": "run_restore_downtime",
-            "snapshot-tiers": "run_snapshot_tiers",
         }
         self.assertEqual(tuple(dispatch), microvm_tests.DEBUG_KERNEL_SCENARIOS)
         with tempfile.TemporaryDirectory() as temporary:
