@@ -1,5 +1,5 @@
 //! The repair of a clone that a restore of a template's snapshot started, in the caller's
-//! process: [`Repair`], and [`repair`], which runs one once, as the [module](super) describes.
+//! process: [`Repair`], which [`capture`](super::capture) runs, as the [module](super) describes.
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -55,15 +55,6 @@ const CPU_ONLINE_FILE: &str = "online";
 /// The state of a memory block that is online.
 const ONLINE: &[u8] = b"online";
 
-/// Repairs the clone that `restore` started, once, as [`Repair::run`] does, and returns the
-/// repaired clone.
-///
-/// The call takes the restore, so it can't be retried: a caller that retries a failed repair
-/// keeps a [`Repair`] instead.
-pub fn repair(restore: Restore) -> Result<Repaired, RepairError> {
-    Repair::new(restore).run()
-}
-
 /// The repair of a clone that a restore started, of the [`Restore`] that the clone's capture
 /// returned, as the [module](super) describes: its processor target, its memory target, its
 /// reseed, and its finish, with the acknowledgement that the host awaits.
@@ -82,10 +73,8 @@ pub fn repair(restore: Restore) -> Result<Repaired, RepairError> {
 ///
 /// The repair takes the time ABI in strict mode, [`TimeAbi::strict`], so that a violation of the
 /// ABI fails it, with the violation's status, instead of stopping the VM: it never powers the VM
-/// off, and the caller ends the VM with [`RepairError::status`]. The repair never touches the
-/// caller's fence of workload admission, which stays closed: the caller opens it when the clone
-/// may admit executions, such as once it is activated.
-pub struct Repair {
+/// off, and the caller ends the VM with [`RepairError::status`].
+pub(super) struct Repair {
     /// The restore that the clone's capture returned, without its seed.
     restore: Restore,
     /// The restore's fresh entropy, until the reseed drops it.
@@ -104,15 +93,10 @@ pub struct Repair {
 }
 
 impl Repair {
-    /// Returns the repair of the clone that `restore` started, which takes the restore's seed:
-    /// the clone's capture requests the in-memory mode,
+    /// Returns the repair of the clone that `restore` started, on `system`, which takes the
+    /// restore's seed: the clone's capture requests the in-memory mode,
     /// [`CaptureRequest::in_memory`](crate::guest::time::CaptureRequest::in_memory), so that the
     /// restore holds it.
-    pub fn new(restore: Restore) -> Self {
-        Self::with_system(restore, live_system())
-    }
-
-    /// Returns the repair of the clone that `restore` started, on `system`.
     pub(super) fn with_system(mut restore: Restore, system: Box<dyn RepairSystem>) -> Self {
         let seed = restore.take_seed();
         Self {
@@ -139,7 +123,7 @@ impl Repair {
     /// finish that never returned, such as after a panic, is final, and every later call returns
     /// that error again. A failed finish may have acknowledged the restore already. Once the
     /// repair completed, every later call returns the same [`Repaired`], without another step.
-    pub fn run(&mut self) -> Result<Repaired, RepairError> {
+    pub(super) fn run(&mut self) -> Result<Repaired, RepairError> {
         self.resume().map_err(|error| RepairError {
             progress: self.progress,
             ..error
@@ -407,9 +391,9 @@ fn first_found(log: &mut BTreeMap<u64, bool>, block: u64) -> bool {
         .is_some_and(|found| !mem::replace(found, true))
 }
 
-/// A clone that its [`Repair`] repaired: its new VM generation ID, the resources that it has,
-/// which an activation checks against the resources that it expects, and when its repair
-/// acknowledged its restore.
+/// A clone that its capture repaired, as [`capture`](super::capture) describes: its new VM
+/// generation ID, the resources that it has, which an activation checks against the resources
+/// that it expects, and when its repair acknowledged its restore.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Repaired {
     /// The new VM generation ID.
@@ -688,9 +672,8 @@ impl fmt::Display for RepairCause {
 /// Why a clone's repair failed: the stage that failed, its cause, and how far the repair got.
 ///
 /// Its `Display` form names the stage and the cause, such as `failed to activate the memory
-/// target: memory range 0 overlaps the RAM before it`. A clone keeps one error of a final
-/// failure, which every later [`Repair::run`] returns again. The caller ends the clone's VM with
-/// its [`status`](Self::status), after an error line that names it.
+/// target: memory range 0 overlaps the RAM before it`. The caller ends the clone's VM with its
+/// [`status`](Self::status), after an error line that names it.
 #[derive(Clone, Debug)]
 pub struct RepairError {
     /// The stage that failed.

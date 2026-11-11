@@ -141,7 +141,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
-| [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation, with the retained template capture and clone repair interface |
+| [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 | [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
 | [`nvx::guest::view`](#nvxguestview) | The VM-wide hostname, machine ID, and single-server resolver, whose binds the layered root owns |
@@ -1459,9 +1459,8 @@ A violation of the ABI stops the VM in enforcing mode, with the time ABI's
 status, as `nvx-time` does; in strict mode, `TimeAbi::strict`, which a caller
 that owns the VM's exit status and shutdown selects, the call fails with the
 `Violation`, whose `status` is the one with which enforcing mode stops the VM,
-and the time daemon and the legacy activation capture's preparation enforce
-the ABI all the same. The single-call snapshot capture below uses strict
-preparation instead.
+and the time daemon enforces the ABI all the same, while the single-call
+snapshot capture below prepares strictly.
 
 A call takes the permission for OpenVMM's ports on the calling thread for each
 port transaction alone, and fails with `TimeError::PortRelease` if the thread
@@ -1503,67 +1502,34 @@ The caller owns its transport. After answering the capture request, send
 nothing until `capture` returns. After `Continued` or a `Resumed` failure,
 report on the same session. After `Restored`, take the session's RESET, then
 call `GuestConnection::acknowledge(window)` on that session before receiving
-the activation record. The activation module retains its legacy Device-shaped
-capture and repair interfaces.
+the activation record.
 
 ### `nvx::guest::activation`
 
-x86_64: the preparation of a template's guest for a capture before its root's
-assembly, and the repair of each clone that a restore of its snapshot starts,
-for a guest init or agent, whether or not it is PID 1.
+x86_64: the activation of each clone that a restore of a template's snapshot
+starts, once `nvx::guest::snapshot::capture` repaired it, for a guest init or
+agent, whether or not it is PID 1.
 
 `nvx::guest::clone` remains a compatibility alias. Activation itself holds no
-admission fence and starts no process; the older capture interface below
-retains its caller-owned fence.
+admission fence and starts no process.
 
-`CapturePreparation`, of the caller's `AdmissionFence` and the `Devices` that
-the template's clones replace, the `distro` and scratch block devices, which
-their MMIO windows name, and the host filesystem device's virtio-fs tag:
-`prepare` closes the fence, so that no execution starts, refuses with a
-`Mounted` the first mount from those devices, a distro partition included, or
-from an overlay, bind mounts included, in a bounded read of
-`/proc/self/mountinfo` of at most `MOUNT_TABLE_LIMIT` bytes, then waits for the
-time ABI's boot checks, runs its capture checks, and suppresses the stall
-detectors, as `nvx-time pre-capture` does, and returns an owned
-`CaptureBarrier`.
-
-`CaptureBarrier::capture` requests the capture with the platform tier's request,
-in the in-memory mode, through `TimeAbi::capture`, and returns
-`Captured::Continued` once it opened the fence and restored the detectors'
-settings, or, in a clone, `Captured::Restored`, with the fence still closed,
-since nothing else may run before repair acknowledges the restore, and the
-detectors suppressed until the time daemon restores their settings:
-`Restored::into_parts` hands the `Restore` that repair takes next, which holds
-the restore's `Seed`, and the closed fence to the caller, which keeps it closed
-through the repair and opens it once the clone may admit executions, such as
-once it is activated.
-
-`CaptureBarrier::cancel`, a dropped barrier, and a failure to read the VM
-generation ID open the fence and restore the detectors' settings; a capture
-request that fails restores the settings but leaves the fence closed, since it
-may fail in a clone whose restore it could not repair. Each failure is a
-`CaptureError`, with its `CaptureStage` and `CaptureCause`.
-
-`repair`, or a `Repair` that the caller may retry, repairs the clone of a
-`Restore` next: it checks that the online CPUs are a prefix that the restore's
-processor target does not undercut, brings the target's other CPUs online
-through sysfs, and verifies them; with a memory target, it checks, before it
-adds any memory block, that the kernel's block size is 128 MiB and that the
-restore's ranges continue the captured RAM in logical order, with no gap,
-overlap, or range in the MMIO aperture, while the host bounds the target by the
-snapshot's capacity, then adds and onlines the blocks through sysfs, as
-`nvx-snapshot` does, and verifies them; it reseeds the kernel's random number
-generator with the `Seed`, having drawn no randomness before, and drops it; and
-it finishes the restore through `TimeAbi::restore_finish`, with the CPUs that
-the restore brought online and the acknowledgement when the host gates its input
-until then, which hands the deferred time work to the time daemon that the
-caller supervises.
+In a clone, the capture repairs the restore before it returns: it checks that
+the online CPUs are a prefix that the restore's processor target does not
+undercut, brings the target's other CPUs online through sysfs, and verifies
+them; with a memory target, it checks, before it adds any memory block, that
+the kernel's block size is 128 MiB and that the restore's ranges continue the
+captured RAM in logical order, with no gap, overlap, or range in the MMIO
+aperture, while the host bounds the target by the snapshot's capacity, then
+adds and onlines the blocks through sysfs, as `nvx-snapshot` does, and verifies
+them; it reseeds the kernel's random number generator with the `Seed`, having
+drawn no randomness before, and drops it; and it finishes the restore through
+the time ABI, with the CPUs that the restore brought online and the
+acknowledgement when the host gates its input until then, which hands the
+deferred time work to the time daemon that the caller supervises.
 
 It returns the `Repaired` clone, with its generation ID, its online CPUs and
-memory, when it acknowledged the restore, and the activation record that the
-restore packet carried, and never touches the fence. It adds no memory block
-twice, and reseeds and finishes at most once, so a failure at or after the
-reseed is final.
+memory, and when it acknowledged the restore. It adds no memory block twice,
+and reseeds and finishes at most once.
 
 Each failure is a `RepairError`, with its `RepairStage`, its `RepairCause`, and
 the repair's `RepairProgress`, and `RepairError::status` selects the status, of
@@ -1571,7 +1537,7 @@ the repair's `RepairProgress`, and `RepairError::status` selects the status, of
 
 The capture and the repair take the time ABI in strict mode, so that a violation
 of it fails them, with its status, rather than stopping the VM, and only the
-capture's preparation and the time daemon enforce it.
+time daemon enforces it.
 
 An `Activation` of the `Repaired` clone, or, with `Activation::with_resources`,
 of the resources and the instant of the acknowledgement that a repair reports,
@@ -2957,11 +2923,11 @@ table before it returns to the init agent, and any other guest init or agent
 can use them too. Any guest init or agent can also run the steps of `nvx-time`
 and `nvx-reseed` in its own process, through the
 `nvx::guest::time` and `nvx::guest::reseed` calls, on which both programs run,
-and a template's guest prepares for a capture before its root's assembly through
-`nvx::guest::clone`, which runs the steps of `nvx-time pre-capture` behind the
-caller's fence of workload admission, and through which each clone repairs its
-restore: it activates the restore's memory target, reseeds the kernel's random
-number generator, and finishes the restore, as `nvx-snapshot` does.
+and a template's guest captures before its root's assembly through
+`nvx::guest::snapshot::capture`, which runs the steps of `nvx-time pre-capture`
+and, in each clone, repairs its restore: it activates the restore's memory
+target, reseeds the kernel's random number generator, and finishes the restore,
+as `nvx-snapshot` does.
 Nor is the hidden `gpt` module a program: it reads the partition table of a GPT
 disk's block device.
 

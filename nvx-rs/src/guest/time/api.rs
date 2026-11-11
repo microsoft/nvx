@@ -88,9 +88,8 @@ impl TimeAbi {
     /// enforcing mode.
     ///
     /// The time daemon that [`start_daemon`](Self::start_daemon) starts enforces the ABI even
-    /// then, since no caller owns its failures, and so does the legacy activation capture's
-    /// preparation, as `nvx-time pre-capture` does. The single-call
-    /// [`snapshot::capture`](crate::guest::snapshot::capture) uses strict preparation instead.
+    /// then, since no caller owns its failures, while
+    /// [`snapshot::capture`](crate::guest::snapshot::capture) prepares its capture strictly.
     pub fn strict(self) -> Self {
         Self {
             strict: !self.report_only,
