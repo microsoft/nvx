@@ -811,6 +811,7 @@ def run_guest_script(
     contain_process_tree: bool = False,
     boot_marker: bytes = BOOT_MARKER,
     on_stderr: Callable[[bytes], None] | None = None,
+    expected_exit_status: int = 0,
 ) -> GuestScriptResult:
     """Run ``script`` in the shell of the guest that ``command`` boots, and
     require it to print the line ``completion_marker``.
@@ -847,6 +848,7 @@ def run_guest_script(
         contain_process_tree=contain_process_tree,
         time_abi_status=True,
         on_stderr=on_stderr,
+        expected_exit_status=expected_exit_status,
     )
     output = _guest_script_output(result["text"])
     if not contains_output_line(output.encode("utf-8"), completion_marker):

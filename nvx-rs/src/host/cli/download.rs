@@ -52,7 +52,9 @@ use super::artifacts::{Located, locate};
 use super::sandbox::HYPERVISORS;
 use super::{Exit, Result, check_interrupt, io_error, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{ArtifactDir, Guest, Layout, MANIFEST_NAME, REPO_BUILD_DIR};
+use crate::host::artifacts::{
+    Architecture, ArtifactDir, Guest, Layout, MANIFEST_NAME, REPO_BUILD_DIR,
+};
 
 /// The usage and help of the parser.
 pub(super) const SYNTAX: Syntax = Syntax {
@@ -188,8 +190,9 @@ impl Report {
     }
 }
 
-/// Returns the release platform of `hypervisor` on this host, as `_release_platform` of `nvx.py`
-/// did: Windows takes `whp`, and Linux `kvm` and `mshv`, and `auto` selects the first of them.
+/// Selects the legacy x86 release's OS/backend, independently of the downloader's CPU ISA.
+/// ARM artifact targets are rejected by `action` before release selection; downloading x86
+/// artifacts as data does not require the host to be able to execute them.
 fn platform(hypervisor: &str) -> Result<&'static str> {
     let (host, platforms): (&str, &[(&str, &'static str)]) = if cfg!(windows) {
         ("windows", &[("whp", "windows-whp")])
@@ -709,6 +712,12 @@ fn action(
     };
     if !is_checkout(dir) || !enabled()? {
         return Ok(Action::Proceed);
+    }
+    if dir.architecture() == Architecture::Aarch64 {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "ARM64 release downloads are not qualified; build the matching local ARM64 Image and initramfs instead of downloading x86 artifacts",
+        ));
     }
     for path in install::destinations(dir) {
         if install::exists(&path).map_err(|error| io_error(ErrorCode::Io, &error, &path))? {

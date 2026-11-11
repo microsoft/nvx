@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,14 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nvx  # noqa: E402
-from nvx_tools import guest_binaries  # noqa: E402
+from nvx_tools import (  # noqa: E402
+    build,
+    build_config,
+    collect_ubuntu_sources,
+    elf,
+    guest_binaries,
+    ubuntu,
+)
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
     GuestRustBuildConstants,
@@ -1039,6 +1047,373 @@ class GuestBinaryCliTests(unittest.TestCase):
                     args.handler(args)
                 identity.assert_called_once_with(root)
                 self.assertEqual(stdout.getvalue(), "c" * 64 + "\n")
+
+
+class GuestBinaryArchitectureTests(unittest.TestCase):
+    def test_common_guest_build_cli_selects_one_architecture_for_every_producer(self):
+        args = nvx.parse_args(
+            [
+                "build-guest",
+                "--guest",
+                "ubuntu",
+                "--architecture",
+                "aarch64",
+                "--native",
+            ]
+        )
+        config = nvx._build_config(args)
+        self.assertEqual(config.kernel.architecture, "aarch64")
+        self.assertEqual(config.docker.architecture, "aarch64")
+        with (
+            patch.object(build, "build_kernel") as kernel,
+            patch.object(build, "build_initramfs") as initramfs,
+        ):
+            build.build_guest(config)
+        kernel.assert_called_once_with(config.kernel)
+        self.assertEqual(initramfs.call_args.args[0].architecture, "aarch64")
+        self.assertIn("aarch64", initramfs.call_args.args[0].work.parts)
+        self.assertEqual(
+            nvx._build_config(nvx.parse_args(["build-guest"])),
+            build_config.BuildConfig(),
+        )
+        for extra in (["--guest", "all"], ["--debug-kernel"]):
+            rejected = nvx._build_config(
+                nvx.parse_args(["build-guest", "--architecture", "aarch64", *extra])
+            )
+            with self.assertRaises(build.ScriptError):
+                build.build_guest(rejected)
+
+    def test_arm_ubuntu_source_inputs_keep_architecture_and_reject_mixing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            packages = [
+                {
+                    "architecture": "arm64",
+                    "source_name": "busybox",
+                    "source_version": "1:1.37.0-7ubuntu1",
+                }
+            ]
+            manifest: dict[str, object] = {
+                "guest": "ubuntu",
+                "release": "26.04.1",
+                "architecture": "arm64",
+                "packages": packages,
+            }
+            arm = root / "arm.json"
+            arm.write_text(json.dumps(manifest), encoding="utf-8")
+            architecture, requirements = collect_ubuntu_sources._source_requirements(
+                [arm]
+            )
+            self.assertEqual(architecture, "arm64")
+            self.assertEqual(requirements[0]["source_name"], "busybox")
+            x86 = root / "x86.json"
+            x86.write_text(
+                json.dumps({**manifest, "architecture": "amd64"}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(build.ScriptError, "different architectures"):
+                collect_ubuntu_sources._source_requirements([arm, x86])
+            packages[0]["architecture"] = "amd64"
+            arm.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(build.ScriptError, "non-ARM Ubuntu package"):
+                collect_ubuntu_sources._source_requirements([arm])
+
+    def test_arm_initramfs_inputs_and_work_are_distinct_from_x86(self):
+        x86 = build_config.BuildConfig.initramfs_config("alpine")
+        arm = build_config.BuildConfig.initramfs_config("alpine", "aarch64")
+        self.assertEqual(x86.architecture, "x86_64")
+        self.assertNotEqual(x86.work, arm.work)
+        self.assertNotEqual(x86.output, arm.output)
+        self.assertIn("aarch64", arm.work.parts)
+        self.assertIn("aarch64", build._alpine_tarball(arm).name)
+        self.assertIn("x86_64", build._alpine_tarball(x86).name)
+        legacy = build.initramfs_provenance_inputs()
+        selected = build.initramfs_provenance_inputs("aarch64")
+        self.assertNotIn("architecture", legacy)
+        self.assertEqual(selected["architecture"], "aarch64")
+        self.assertNotEqual(selected["alpine"], legacy["alpine"])
+        with self.assertRaisesRegex(
+            build.ScriptError, "refusing to use x86 userland or package locks"
+        ):
+            build_config.BuildConfig.initramfs_config("azurelinux", "aarch64")
+
+    def test_arm_ubuntu_lock_is_separate_and_keeps_source_versions(self):
+        x86 = ubuntu.load_package_lock()
+        arm = ubuntu.load_package_lock(architecture="aarch64")
+        self.assertEqual(len(x86), len(arm))
+        for before, after in zip(x86, arm, strict=True):
+            self.assertEqual(before["name"], after["name"])
+            self.assertEqual(before["source_name"], after["source_name"])
+            self.assertEqual(before["source_version"], after["source_version"])
+            self.assertEqual(before["version"], after["version"])
+            self.assertEqual(after["architecture"], "arm64")
+            self.assertNotEqual(before["sha256"], after["sha256"])
+            self.assertIn("ports.ubuntu.com/ubuntu-ports/", after["url"])
+        with self.assertRaisesRegex(build.ScriptError, "architecture must be 'arm64'"):
+            ubuntu.load_package_lock(ubuntu.package_lock_path(), architecture="aarch64")
+        self.assertNotEqual(
+            ubuntu.converter_input_sha256(ubuntu.customization_files()),
+            ubuntu.converter_input_sha256(
+                ubuntu.customization_files("aarch64"), architecture="aarch64"
+            ),
+        )
+
+    def test_arm_package_manifest_rejects_an_actual_x86_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installed = root / "lib" / "apk" / "db" / "installed"
+            installed.parent.mkdir(parents=True)
+            installed.write_text("P:busybox\nV:1\nA:x86_64\n\n", encoding="utf-8")
+            output = root / "initramfs.cpio.gz"
+            with self.assertRaisesRegex(
+                build.ScriptError, "incompatible package: busybox"
+            ):
+                build._write_apk_manifest(root, output, {}, architecture="aarch64")
+            installed.write_text("P:busybox\nV:1\nA:aarch64\n\n", encoding="utf-8")
+            build._write_apk_manifest(root, output, {}, architecture="aarch64")
+            manifest = json.loads(
+                output.with_name(output.name + ".packages.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["architecture"], "aarch64")
+            self.assertEqual(manifest["packages"][0]["architecture"], "aarch64")
+
+    def test_arm_initramfs_cli_preserves_legacy_default_routing(self):
+        for selected in ([], ["--architecture", "aarch64"]):
+            args = nvx.parse_args(["build-initramfs", *selected])
+            with patch.object(nvx, "build_initramfs") as called:
+                args.handler(args)
+            self.assertEqual(
+                called.call_args.args[0],
+                build_config.BuildConfig.initramfs_config(
+                    "alpine", "aarch64" if selected else "x86_64"
+                ),
+            )
+
+    def test_arm_cold_boot_inventory_keeps_required_time_and_omits_diagnostics(self):
+        self.assertIs(
+            guest_binaries.guest_binary_inventory(),
+            GuestRustBuildConstants.BINARIES,
+        )
+        inventory = guest_binaries.guest_binary_inventory("aarch64")
+        self.assertEqual(len(inventory), 7)
+        self.assertIn("nvx-time", inventory)
+        self.assertIn("nvx-init", inventory)
+        self.assertIn("nvx-exit", inventory)
+        for binary in ("nvx-mmio-write", "nvx-device-io", "nvx-time-probe"):
+            self.assertNotIn(binary, inventory)
+
+    def test_docker_architecture_input_reuses_the_shared_producer_and_export(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        builder = dockerfile.split("FROM ${RUST_BUILDER_IMAGE} AS guest-binaries", 1)[
+            1
+        ].split("\nFROM ", 1)[0]
+        self.assertIn("ARG NVX_ARCHITECTURE", builder)
+        self.assertIn("ARG NVX_ARCHITECTURE=x86_64", dockerfile)
+        self.assertIn("guest_rust_target(sys.argv[1])", builder)
+        self.assertIn('set -- --architecture "$NVX_ARCHITECTURE"', builder)
+        self.assertEqual(dockerfile.count("build-guest-binaries"), 1)
+        self.assertIn(
+            "FROM scratch AS guest-binary-artifacts\n"
+            "COPY --from=guest-binaries /out/guest-binaries/ /",
+            dockerfile,
+        )
+
+    def test_explicit_target_resolution_and_legacy_manifest(self):
+        for architecture, target in GuestRustBuildConstants.TARGETS.items():
+            with self.subTest(architecture=architecture):
+                self.assertEqual(guest_binaries.guest_rust_target(architecture), target)
+                self.assertIn(
+                    target, guest_binaries._guest_cargo_arguments(architecture)
+                )
+        with self.assertRaisesRegex(guest_binaries.ScriptError, "unsupported"):
+            guest_binaries.guest_rust_target("arm64")
+        result = guest_binaries.GuestBinaryBuildResult("a" * 64, {})
+        self.assertEqual(
+            guest_binaries._manifest(result),
+            {
+                "domain": GuestRustBuildConstants.BUILD_MANIFEST_DOMAIN,
+                "format": GuestRustBuildConstants.BUILD_MANIFEST_FORMAT,
+                "toolchain": GuestRustBuildConstants.TOOLCHAIN,
+                "target": GuestRustBuildConstants.TARGET,
+                "profile": GuestRustBuildConstants.PROFILE,
+                "source_sha256": "a" * 64,
+                "binaries": {},
+            },
+        )
+
+    @staticmethod
+    def _elf(machine: int) -> bytes:
+        return struct.pack(
+            "<16sHHIQQQIHHHHHH",
+            b"\x7fELF\x02\x01\x01" + bytes(9),
+            2,
+            machine,
+            1,
+            0,
+            64,
+            0,
+            0,
+            64,
+            56,
+            0,
+            64,
+            0,
+            0,
+        )
+
+    def test_elf_machine_admission_rejects_mixed_and_unknown_isa(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            x86, arm = root / "x86", root / "arm"
+            x86.write_bytes(self._elf(62))
+            arm.write_bytes(self._elf(183))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    elf.check_static_executables([arm], architecture="aarch64")[
+                        0
+                    ].machine,
+                    183,
+                )
+                self.assertEqual(
+                    elf.check_static_executables([x86], architecture="x86_64")[
+                        0
+                    ].machine,
+                    62,
+                )
+                self.assertEqual(len(elf.check_static_executables([x86, arm])), 2)
+            for paths, architecture in (
+                ([x86], "aarch64"),
+                ([arm], "x86_64"),
+                ([arm, x86], "aarch64"),
+                ([arm], "arm64"),
+            ):
+                with self.subTest(architecture=architecture, paths=paths):
+                    with self.assertRaises(guest_binaries.ScriptError):
+                        elf.check_static_executables(paths, architecture=architecture)
+
+    def test_arm_build_preserves_fresh_targets_and_checks_staged_isa(self):
+        targets: list[Path] = []
+
+        def cargo(
+            command: list[str | os.PathLike[str]],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+        ) -> None:
+            target = Path(env["CARGO_TARGET_DIR"])
+            targets.append(target)
+            self.assertEqual(cwd, GuestRustBuildConstants.DIRECTORY)
+            self.assertIn("--locked", command)
+            self.assertEqual(command[1], "+1.97.1")
+            self.assertEqual(
+                command[command.index("--target") + 1], "aarch64-unknown-linux-musl"
+            )
+            inventory = guest_binaries.guest_binary_inventory("aarch64")
+            self.assertEqual(
+                [
+                    command[index + 1]
+                    for index, value in enumerate(command)
+                    if value == "--bin"
+                ],
+                list(inventory),
+            )
+            outputs = target / "aarch64-unknown-linux-musl" / "guest"
+            outputs.mkdir(parents=True)
+            for binary in inventory:
+                (outputs / binary).write_bytes(self._elf(183))
+            _write_dep_info(
+                outputs,
+                list(inventory),
+                (GuestRustBuildConstants.DIRECTORY / "src" / "lib.rs",),
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "arm"
+            with (
+                patch.object(guest_binaries.sys, "platform", "linux"),
+                patch.object(guest_binaries, "require_tool", return_value="cargo"),
+                patch.object(guest_binaries, "run_checked", side_effect=cargo),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                for _ in range(2):
+                    result = guest_binaries.build_guest_binaries(
+                        output, architecture="aarch64"
+                    )
+                    self.assertEqual(
+                        guest_binaries.inspect_guest_binaries(
+                            output, architecture="aarch64"
+                        ),
+                        result,
+                    )
+                with self.assertRaisesRegex(guest_binaries.ScriptError, "not owned"):
+                    guest_binaries.inspect_guest_binaries(output)
+                before = _contents(output)
+                with self.assertRaisesRegex(guest_binaries.ScriptError, "not owned"):
+                    guest_binaries.build_guest_binaries(output)
+                self.assertEqual(_contents(output), before)
+                required = output / "nvx-time"
+                required_bytes = required.read_bytes()
+                required.unlink()
+                with self.assertRaisesRegex(guest_binaries.ScriptError, "not owned"):
+                    guest_binaries.inspect_guest_binaries(
+                        output, architecture="aarch64"
+                    )
+                required.write_bytes(required_bytes)
+                required.chmod(0o755)
+                guest_binaries.build_guest_binaries(output, architecture="aarch64")
+                manifest_path = output / "manifest.json"
+                original = manifest_path.read_bytes()
+                stale = json.loads(original)
+                stale["source_sha256"] = "0" * 64
+                manifest_path.write_text(json.dumps(stale), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    guest_binaries.ScriptError, "does not match the current"
+                ):
+                    guest_binaries.inspect_guest_binaries(
+                        output, architecture="aarch64"
+                    )
+                manifest_path.write_bytes(original)
+                self.assertEqual(_contents(output), before)
+            self.assertEqual(len(targets), 3)
+            self.assertEqual(len(set(targets)), 3)
+            self.assertTrue(all(not target.exists() for target in targets))
+            manifest = json.loads(
+                (output / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["architecture"], "aarch64")
+            self.assertEqual(manifest["target"], "aarch64-unknown-linux-musl")
+            self.assertEqual(manifest["toolchain"], "1.97.1")
+
+    def test_arm_cli_routes_only_explicit_architecture(self):
+        for command, path_option, function in (
+            ("build-guest-binaries", "--output", "build_guest_binaries"),
+            ("test-guest-binaries", "--binaries", "test_guest_binaries"),
+        ):
+            args = nvx.parse_args(
+                [
+                    command,
+                    path_option,
+                    "build/arm/guest-binaries",
+                    "--architecture",
+                    "aarch64",
+                ]
+            )
+            result = guest_binaries.GuestBinaryBuildResult("a" * 64, {}, "aarch64")
+            with (
+                patch.object(nvx, function, return_value=result) as called,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                args.handler(args)
+            called.assert_called_once_with(
+                Path("build/arm/guest-binaries"), architecture="aarch64"
+            )
+        args = nvx.parse_args(["check-guest-binaries", "--architecture", "aarch64"])
+        with patch.object(nvx, "check_guest_binaries") as called:
+            args.handler(args)
+        called.assert_called_once_with(None, architecture="aarch64")
 
 
 if __name__ == "__main__":

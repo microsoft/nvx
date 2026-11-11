@@ -18,9 +18,15 @@ use crate::guest::mappings::{Access, Mapping, SourceRoot};
 use crate::guest::sys::MountAttributes;
 
 /// The base address of the distro device's MMIO window.
+#[cfg(not(target_arch = "aarch64"))]
 const DISTRO: u64 = 0xd000_0000;
+#[cfg(target_arch = "aarch64")]
+const DISTRO: u64 = crate::protocol::root::DISTRO_MMIO_BASE;
 /// The base address of the scratch device's MMIO window.
+#[cfg(not(target_arch = "aarch64"))]
 const SCRATCH: u64 = 0x1_d000_1000;
+#[cfg(target_arch = "aarch64")]
+const SCRATCH: u64 = crate::protocol::root::SCRATCH_MMIO_BASE;
 /// The UUID of the test's EROFS image.
 const UUID: Uuid = Uuid::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 /// The GUID of the tests' GPT disks.
@@ -82,6 +88,28 @@ impl Guest {
                 SCRATCH + 0x1ff,
             ),
         );
+        #[cfg(target_arch = "aarch64")]
+        for (index, address) in [(0, DISTRO), (1, SCRATCH)] {
+            let tree = paths.sys.join("firmware/devicetree/base");
+            let node = tree.join(format!("fixed-role-{index}"));
+            fs::create_dir_all(&node).unwrap();
+            fs::write(tree.join("#address-cells"), 2_u32.to_be_bytes()).unwrap();
+            fs::write(tree.join("#size-cells"), 2_u32.to_be_bytes()).unwrap();
+            fs::write(node.join("compatible"), b"virtio,mmio\0").unwrap();
+            fs::write(
+                node.join("reg"),
+                [address, 0x1000]
+                    .into_iter()
+                    .flat_map(u64::to_be_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let window = paths
+                .sys
+                .join(format!("bus/platform/devices/fixed-role-{index}"));
+            fs::create_dir_all(&window).unwrap();
+            std::os::unix::fs::symlink(node, window.join("of_node")).unwrap();
+        }
         // The defaults of the overlay's options, as the guest's kernel sets them: all off.
         for parameter in [
             "metacopy",
@@ -257,7 +285,18 @@ fn attach(root: &Path, index: usize, name: &str, sectors: u64) {
 /// window `index` of the guest in `root`, without its node. The device is read-only at window 0,
 /// where the tests attach the distro device, and writable elsewhere, as at the scratch's window 1.
 fn probe(root: &Path, index: usize, name: &str, sectors: u64) {
+    #[cfg(not(target_arch = "aarch64"))]
     let window = format!("sys/devices/virtio-mmio-cmdline/virtio-mmio.{index}");
+    #[cfg(target_arch = "aarch64")]
+    let window = format!("sys/bus/platform/devices/fixed-role-{index}");
+    #[cfg(target_arch = "aarch64")]
+    if !root.join(&window).join("driver").is_symlink() {
+        std::os::unix::fs::symlink(
+            "/sys/bus/platform/drivers/virtio-mmio",
+            root.join(&window).join("driver"),
+        )
+        .unwrap();
+    }
     fs::create_dir_all(
         root.join(window)
             .join(format!("virtio{index}/block/{name}")),
@@ -549,7 +588,7 @@ fn devices_are_found_when_they_appear_and_missing_ones_time_out() {
     assert_eq!(guest.kernel.sleeps(), 2);
     assert_eq!(
         error.to_string(),
-        "the scratch device at MMIO 0x1d0001000 did not appear"
+        format!("the scratch device at MMIO {SCRATCH:#x} did not appear")
     );
     // The assembly checks the scratch device before it mounts anything.
     assert!(guest.kernel.mounts().is_empty());

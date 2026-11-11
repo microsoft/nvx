@@ -60,6 +60,7 @@ pub(super) trait Kernel: MappingKernel + Send + Sync {
 
     /// Asks the kernel to reread the partition table of the disk whose whole-disk block device is
     /// `device`, as [`sys::reread_partition_table`] does.
+    #[cfg(any(target_arch = "x86_64", test))]
     fn reread_partitions(&mut self, device: &CStr) -> Result<(), Errno>;
 
     /// Reads and checks the partition table of the GPT disk that `file` opens, the whole-disk
@@ -126,6 +127,7 @@ impl Kernel for SystemKernel {
         descriptor.close()
     }
 
+    #[cfg(any(target_arch = "x86_64", test))]
     fn reread_partitions(&mut self, device: &CStr) -> Result<(), Errno> {
         let descriptor = sys::open(
             device,

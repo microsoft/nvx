@@ -1649,7 +1649,13 @@ fn nvx::guest::time_probe::main (hidden)
 fn nvx::guest_path
 mod nvx::host
 mod nvx::host::artifacts
+enum nvx::host::artifacts::Architecture
+variant nvx::host::artifacts::Architecture::Aarch64
+variant nvx::host::artifacts::Architecture::X86_64
+method nvx::host::artifacts::Architecture::kernel_name
+method nvx::host::artifacts::Architecture::name
 struct nvx::host::artifacts::ArtifactDir
+method nvx::host::artifacts::ArtifactDir::architecture
 method nvx::host::artifacts::ArtifactDir::artifact
 method nvx::host::artifacts::ArtifactDir::distro_layer
 method nvx::host::artifacts::ArtifactDir::distro_manifest
@@ -1668,6 +1674,7 @@ method nvx::host::artifacts::ArtifactDir::require_openvmm
 method nvx::host::artifacts::ArtifactDir::root
 method nvx::host::artifacts::ArtifactDir::runtime_identity
 method nvx::host::artifacts::ArtifactDir::sandbox_artifacts
+method nvx::host::artifacts::ArtifactDir::with_architecture
 struct nvx::host::artifacts::ArtifactPaths
 field nvx::host::artifacts::ArtifactPaths::guests
 field nvx::host::artifacts::ArtifactPaths::kernel

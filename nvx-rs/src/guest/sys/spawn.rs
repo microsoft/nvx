@@ -458,7 +458,7 @@ impl PreparedChild {
     /// returns into Rust. `fork` may occur in a multithreaded process: the child makes only
     /// direct async-signal-safe system calls over storage allocated before the fork.
     pub(crate) fn spawn(mut self) -> Result<Started, Errno> {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         if super::check_released().is_err() {
             return Err(Errno::EPERM);
         }

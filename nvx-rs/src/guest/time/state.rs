@@ -1,11 +1,15 @@
-//! The published `/run/nvx/time/state` representation.
+//! The shared, unchanged `/run/nvx/time/state` representation and atomic publication.
 
 use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
-use super::Phase;
-use super::decoders;
-use super::system::BestSample;
+use super::sample::{self as decoders, BestSample, Phase};
+use crate::guest::sys::{self, CreatedFile, Errno, Mode};
+
+/// Existing published time-state path, shared by both counter architectures.
+pub(crate) const STATE_PATH: &std::ffi::CStr = c"/run/nvx/time/state";
+/// Existing temporary file for an atomic state replacement.
+pub(crate) const STATE_TEMP_PATH: &std::ffi::CStr = c"/run/nvx/time/.state";
 
 /// Defines an enumeration of the tokens of one state-file field, with each token's spelling.
 macro_rules! tokens {
@@ -158,6 +162,45 @@ pub(crate) struct CheckState {
     pub(crate) failures: Option<u64>,
 }
 
+impl CheckState {
+    /// Records a completed phase, including actual report-only failures on either ISA.
+    pub(crate) fn completed(
+        cpus: u64,
+        elapsed_us: i64,
+        cpu_us: i64,
+        failures: Option<u64>,
+    ) -> Self {
+        Self {
+            status: Some(if failures.is_some_and(|failures| failures != 0) {
+                CheckStatus::Fail
+            } else {
+                CheckStatus::Ok
+            }),
+            cpus,
+            elapsed_us,
+            cpu_us,
+            failures,
+            ..Self::default()
+        }
+    }
+}
+
+/// Waits for boot-only or all persisted checks using the existing status deadline.
+pub(crate) fn wait_for_checks(boot_only: bool) -> Result<(TimeState, bool), Errno> {
+    use super::deferred::{STATUS_POLL, STATUS_WAIT};
+    let deadline = std::time::Instant::now() + STATUS_WAIT;
+    loop {
+        let state = TimeState::load()?;
+        if !state.pending(boot_only) {
+            return Ok((state, true));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok((state, false));
+        }
+        std::thread::sleep(STATUS_POLL);
+    }
+}
+
 /// Complete state published under `/run/nvx/time/state`, of version one of its format.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TimeState {
@@ -165,9 +208,9 @@ pub(crate) struct TimeState {
     pub(crate) generation: u64,
     /// Boot, capture, and restore records, in the order of `Phase::CHECKS`.
     checks: [CheckState; 3],
-    /// Validated TSC frequency in hertz.
+    /// Validated counter Hz: TSC on x86, CNTVCT on ARM, in the compatible `tsc_hz` slot.
     pub(crate) tsc_hz: u64,
-    /// Validated local-APIC timer frequency in hertz.
+    /// Validated local-APIC timer Hz on x86; zero on ARM, which has no local APIC.
     pub(crate) lapic_hz: u64,
     /// Number of observed clock discontinuities.
     pub(crate) discontinuities: u64,
@@ -195,7 +238,7 @@ pub(crate) struct TimeState {
     /// The status of host UTC that the latest accepted sample reported.
     pub(crate) host_status: HostClockStatus,
     /// The host's clock correction that the latest accepted sample published: how fast host UTC
-    /// runs against the TSC counted at the declared rate, minus one, in parts per billion.
+    /// runs against the counter counted at the declared rate, minus one, in parts per billion.
     pub(crate) host_correction_ppb: i64,
     /// The host's bound on the error of its correction, in parts per billion, if it knows one.
     pub(crate) host_correction_bound_ppb: Option<u64>,
@@ -203,7 +246,7 @@ pub(crate) struct TimeState {
     /// one.
     pub(crate) host_max_error_us: Option<u64>,
     /// The disruption counter of the latest accepted sample, which changes when host UTC steps,
-    /// the host resumes from a suspension, or the guest TSC's offset from the host's changes.
+    /// the host resumes from a suspension, or the guest counter's offset from the host's changes.
     pub(crate) host_disruption: u64,
     /// Whether the latest accepted sample carried the test-hook flag: host overrides, which only
     /// tests make, of the time that it published were active.
@@ -256,6 +299,21 @@ impl Default for TimeState {
 }
 
 impl TimeState {
+    /// Loads the existing state format without replacing a malformed record with a default.
+    pub(crate) fn load() -> Result<Self, Errno> {
+        let text = sys::read_file(STATE_PATH)?;
+        Self::parse(&text).ok_or(Errno::EINVAL)
+    }
+
+    /// Durably replaces the published record using the existing ownership and mode.
+    pub(crate) fn store(&self) -> Result<(), Errno> {
+        let mode = Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IROTH;
+        let file = CreatedFile::create(STATE_TEMP_PATH, false, mode)?;
+        file.write_all(self.to_string().as_bytes())?;
+        file.sync()?;
+        file.rename(STATE_PATH)
+    }
+
     /// Records the accepted time sample `sample`: the wall clock's offset from host UTC and its
     /// uncertainty, the frequency correction that the discipline holds, whether Linux's limit
     /// clamped it, the discipline of host UTC that the sample published, and whether host test
@@ -364,10 +422,10 @@ impl TimeState {
     /// Returns the phases whose checks have run, with their records and outcomes, in state-file
     /// order.
     fn recorded(&self) -> impl Iterator<Item = (Phase, &CheckState, CheckStatus)> {
-        Phase::CHECKS
-            .into_iter()
-            .zip(&self.checks)
-            .filter_map(|(phase, check)| Some((phase, check, check.status?)))
+        Phase::CHECKS.into_iter().filter_map(|phase| {
+            let check = self.check(phase)?;
+            Some((phase, check, check.status?))
+        })
     }
 
     /// Returns whether the boot check, or unless `boot_only` any recorded check, is pending.

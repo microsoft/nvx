@@ -7,6 +7,71 @@ use super::*;
 use crate::host::sandbox::mount::MountAccess;
 use crate::protocol::cmdline::{self, parameters, virtio_mmio_devices};
 
+#[test]
+fn runtime_architecture_defaults_to_native_and_preserves_explicit_selection() {
+    let (native, _) = parse(&[]).unwrap();
+    assert_eq!(native.architecture, Architecture::native());
+    let (legacy, _) = parse(&["--architecture".into(), "x86_64".into()]).unwrap();
+    assert_eq!(legacy.architecture, Architecture::X86_64);
+    let (arm, remaining) = parse(&["--architecture".into(), "aarch64".into()]).unwrap();
+    assert!(remaining.is_empty());
+    assert_eq!(arm.architecture, Architecture::Aarch64);
+    assert!(parse(&["--architecture".into(), "unknown".into()]).is_err());
+}
+
+#[test]
+fn arm_auto_and_host_profile_selection_is_forwarded_without_guest_constants() {
+    for profile in ["auto", "host"] {
+        let (options, remaining) =
+            parse(&["--architecture", "aarch64", "--cpu-profile", profile].map(str::to_owned))
+                .unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(options.architecture, Architecture::Aarch64);
+        assert_eq!(options.cpu_profile.as_deref(), Some(profile));
+        assert!(check(&options).is_ok());
+    }
+}
+
+#[test]
+fn approved_arm_36_bit_gpa_space_is_not_a_64_gib_ram_allowance() {
+    let mut options = Options {
+        architecture: Architecture::Aarch64,
+        memory_mib: Some(63 * 1024),
+        ..Options::default()
+    };
+    assert!(check(&options).is_ok());
+    for memory in [63 * 1024 + 1, 64 * 1024] {
+        options.memory_mib = Some(memory);
+        assert!(check(&options).is_err());
+    }
+    options.architecture = Architecture::X86_64;
+    assert!(check(&options).is_ok());
+}
+
+#[test]
+fn arm_out_of_scope_modes_are_refused_before_artifact_discovery() {
+    for options in [
+        Options {
+            architecture: Architecture::Aarch64,
+            restore_snapshot: Some("not-opened".into()),
+            ..Options::default()
+        },
+        Options {
+            architecture: Architecture::Aarch64,
+            memory_capacity_mib: Some(256),
+            ..Options::default()
+        },
+        Options {
+            architecture: Architecture::Aarch64,
+            guest: Guest::AzureLinux,
+            ..Options::default()
+        },
+    ] {
+        let failure = run(None, options).unwrap_err();
+        assert!(format!("{failure:?}").contains("ARM64 Phase 1"));
+    }
+}
+
 /// Returns the kernel command line that OpenVMM composes from `cmdline`, the `--cmdline` that
 /// `run` gives it for the cold boot of an aggregate of read-write shares, as its
 /// `build_microvm_command_line` and `append_microvm_virtio_discovery` do: its console parameters,

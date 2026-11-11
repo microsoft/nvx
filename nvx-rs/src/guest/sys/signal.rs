@@ -1,12 +1,17 @@
 //! Signal dispositions, masks, descriptors, and queued signals.
 
 use std::os::fd::{AsFd, BorrowedFd};
+#[cfg(any(target_arch = "x86_64", test))]
 use std::time::Duration;
 
 use nix::sys::signal::{SigHandler, SigSet, SigmaskHow, Signal};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 
-use super::{Errno, FileDescriptor, Mode, OpenFlags, Pollable, ProcessId, poll};
+#[cfg(target_arch = "x86_64")]
+use super::ProcessId;
+use super::{Errno, FileDescriptor, Mode, OpenFlags};
+#[cfg(any(target_arch = "x86_64", test))]
+use super::{Pollable, poll};
 
 /// One signal read from a [`SignalDescriptor`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +196,7 @@ pub(crate) fn reset_child_signal() {
 /// Sends `SIGUSR1` to `process` with `value`, which a [`SignalEvent`] returns.
 ///
 /// `nix` does not wrap `sigqueue`, so this calls it through libc.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn queue_user_signal(process: ProcessId, value: u32) -> Result<(), Errno> {
     let value = nix::libc::sigval {
         sival_ptr: value as usize as *mut nix::libc::c_void,
@@ -204,6 +210,7 @@ pub(crate) fn queue_user_signal(process: ProcessId, value: u32) -> Result<(), Er
 /// it from a signal descriptor. Dropping it closes the descriptor and restores the thread's
 /// previous signal mask.
 #[derive(Debug)]
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) struct ChildSignalWait {
     /// The thread's signal mask before the wait blocked `SIGCHLD`.
     previous: SigSet,
@@ -211,6 +218,7 @@ pub(crate) struct ChildSignalWait {
     descriptor: SignalFd,
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl ChildSignalWait {
     /// Blocks `SIGCHLD` in the calling thread before the caller forks the child that it waits
     /// for, so that the signal of a child that ends at once stays pending.
@@ -250,6 +258,7 @@ impl ChildSignalWait {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl Drop for ChildSignalWait {
     /// Restores the previous signal mask, best effort, if `restore` has not.
     fn drop(&mut self) {

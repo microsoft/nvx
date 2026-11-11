@@ -11,7 +11,8 @@ use std::str::FromStr;
 pub(crate) use nix::mount::MsFlags as MountFlags;
 use nix::sched::CloneFlags;
 use nix::sys::stat::{FchmodatFlags, Mode};
-use nix::unistd::{AccessFlags, Gid, Uid};
+use nix::unistd::AccessFlags;
+use nix::unistd::{Gid, Uid};
 
 use super::{Errno, OpenFlags, errno_of};
 use crate::guest::parse::parse_decimal;
@@ -154,8 +155,10 @@ pub(crate) fn enter_private_mount_namespace() -> Result<(), Errno> {
 /// It also removes a directory that existed already, such as one that an interrupted earlier
 /// owner left behind, which the owner then reuses.
 #[derive(Debug)]
+#[cfg(target_arch = "x86_64")]
 pub(crate) struct ScratchDirectory<'a>(&'a CStr);
 
+#[cfg(target_arch = "x86_64")]
 impl<'a> ScratchDirectory<'a> {
     /// Creates `path` as a directory with `mode` unless it exists already, ignoring other
     /// failures as the C program did, because a later use of the directory reports them.
@@ -170,6 +173,7 @@ impl<'a> ScratchDirectory<'a> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Drop for ScratchDirectory<'_> {
     /// Removes the directory, which must be empty, best effort.
     fn drop(&mut self) {
@@ -184,8 +188,10 @@ impl Drop for ScratchDirectory<'_> {
 /// A tmpfs mount, which dropping the owner unmounts, best effort, unless
 /// [`unmount`](Self::unmount) did.
 #[derive(Debug)]
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) struct TmpfsMount<'a>(Option<&'a CStr>);
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl<'a> TmpfsMount<'a> {
     /// Mounts a tmpfs named `source` on `target`, without set-user-ID files, device files, or
     /// executables, and with the filesystem's mount options `options`.
@@ -206,6 +212,7 @@ impl<'a> TmpfsMount<'a> {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl Drop for TmpfsMount<'_> {
     /// Unmounts the filesystem, best effort, unless [`unmount`](Self::unmount) did.
     fn drop(&mut self) {

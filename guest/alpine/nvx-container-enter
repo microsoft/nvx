@@ -10,6 +10,15 @@ workload_home=$6
 shift 6
 tools=$rootfs/.nvx-agent
 
+case $(uname -m) in
+    x86_64) loader=ld-musl-x86_64.so.1 ;;
+    aarch64) loader=ld-musl-aarch64.so.1 ;;
+    *)
+        echo "NVX-SANDBOX-ERROR: unsupported control guest architecture" >&2
+        exit 125
+        ;;
+esac
+
 mount --make-rprivate /
 rm -rf "$tools"
 mkdir -p \
@@ -19,7 +28,7 @@ mkdir -p \
     "$rootfs/proc" \
     "$rootfs/sys"
 mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$tools"
-cp /lib/ld-musl-x86_64.so.1 "$tools/ld-musl-x86_64.so.1"
+cp "/lib/$loader" "$tools/$loader"
 cp /bin/setpriv "$tools/setpriv"
 cp -L /usr/lib/libcap-ng.so.0 "$tools/libcap-ng.so.0"
 cp -L /usr/lib/libeconf.so.0 "$tools/libeconf.so.0"
@@ -70,7 +79,7 @@ ln -s /proc/self/fd/2 "$rootfs/dev/stderr"
 
 hostname "$hostname_value"
 export HOME="$workload_home" USER="$workload_name" LOGNAME="$workload_name"
-exec chroot "$rootfs" /.nvx-agent/ld-musl-x86_64.so.1 \
+exec chroot "$rootfs" "/.nvx-agent/$loader" \
     --library-path /.nvx-agent \
     /.nvx-agent/setpriv \
     --reuid "$workload_uid" \

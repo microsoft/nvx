@@ -68,8 +68,11 @@ class SourceMetadata(TypedDict):
     authenticated_by: str | None
 
 
-def _source_requirements(manifests: list[Path]) -> tuple[SourceRequirement, ...]:
+def _source_requirements(
+    manifests: list[Path],
+) -> tuple[str, tuple[SourceRequirement, ...]]:
     requirements: dict[tuple[str, str], SourceRequirement] = {}
+    architecture: str | None = None
     for path in manifests:
         try:
             raw_document = json.loads(path.read_text(encoding="utf-8"))
@@ -81,9 +84,13 @@ def _source_requirements(manifests: list[Path]) -> tuple[SourceRequirement, ...]
         if (
             document.get("guest") != "ubuntu"
             or document.get("release") != UbuntuBuildConstants.VERSION
-            or document.get("architecture") != UbuntuBuildConstants.ARCHITECTURE
+            or document.get("architecture") not in ("amd64", "arm64")
         ):
             raise ScriptError(f"{path} is not a pinned Ubuntu package manifest")
+        selected_architecture = str(document["architecture"])
+        if architecture is not None and architecture != selected_architecture:
+            raise ScriptError("Ubuntu package manifests use different architectures")
+        architecture = selected_architecture
         raw_packages = document.get("packages")
         if not isinstance(raw_packages, list):
             raise ScriptError(f"{path} has no packages array")
@@ -91,6 +98,11 @@ def _source_requirements(manifests: list[Path]) -> tuple[SourceRequirement, ...]
             if not isinstance(raw_package, dict):
                 raise ScriptError(f"{path} contains a non-object package record")
             package = cast(dict[str, object], raw_package)
+            if architecture == "arm64" and package.get("architecture") not in (
+                "arm64",
+                "all",
+            ):
+                raise ScriptError(f"{path} contains a non-ARM Ubuntu package")
             source_name = package.get("source_name")
             source_version = package.get("source_version")
             if (
@@ -108,7 +120,8 @@ def _source_requirements(manifests: list[Path]) -> tuple[SourceRequirement, ...]
             }
     if not requirements:
         raise ScriptError("Ubuntu package manifests contain no source requirements")
-    return tuple(requirements[key] for key in sorted(requirements))
+    assert architecture is not None
+    return architecture, tuple(requirements[key] for key in sorted(requirements))
 
 
 def _checksum_records(value: str, label: str) -> list[SourceChecksum]:
@@ -743,7 +756,7 @@ def collect_ubuntu_sources(
     _validate_source_output(output)
     output = output.resolve()
     _validate_source_output(output)
-    requirements = _source_requirements(manifests)
+    architecture, requirements = _source_requirements(manifests)
     records, indexes = _load_source_records(cache, requirements)
     missing = [
         f"{requirement['source_name']}={requirement['source_version']}"
@@ -820,7 +833,7 @@ def collect_ubuntu_sources(
                 "format": UbuntuBuildConstants.SOURCE_MANIFEST_FORMAT,
                 "release": UbuntuBuildConstants.VERSION,
                 "codename": UbuntuBuildConstants.CODENAME,
-                "architecture": UbuntuBuildConstants.ARCHITECTURE,
+                "architecture": architecture,
                 "source_indexes": source_indexes,
                 "packages": collected,
             },

@@ -3,7 +3,6 @@
 use super::*;
 
 /// Returns the nice value of the process `process`, the 19th field of its procfs `stat` file.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn nice_of(process: crate::guest::sys::ProcessId) -> i32 {
     let stat = std::fs::read_to_string(format!("/proc/{}/stat", process.raw())).unwrap();
     // The command name, the second field, is in parentheses, and may hold spaces.

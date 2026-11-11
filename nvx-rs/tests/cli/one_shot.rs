@@ -662,8 +662,9 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
         .into_iter()
         .chain(run_launches())
         .collect();
-    let (vendor, family, model, stepping) = crate::reported_cpu();
-    let unserved = !crate::served(&vendor, family, model, stepping);
+    let unserved = crate::reported_cpu().is_some_and(|(vendor, family, model, stepping)| {
+        !crate::served(&vendor, family, model, stepping)
+    });
     in_parallel(&cases, |case| {
         let root = Root::new();
         for (relative, content) in &case.files {

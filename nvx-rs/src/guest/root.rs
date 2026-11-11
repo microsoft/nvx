@@ -184,6 +184,7 @@ use super::sys::{self, Errno, MountFlags};
 use crate::gpt::{Expected, GptError, Partition};
 use crate::uuid::Uuid;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) use self::block::window_directories;
 pub use self::bootstrap::{Bootstrap, BootstrapStep, Resources, bootstrap};
 pub(crate) use self::kernel::Paths;
@@ -250,6 +251,25 @@ pub enum Role {
     Distro,
     /// The writable ext4 scratch, which holds the overlay's upper and work directories.
     Scratch,
+}
+
+/// Read-only discovery of a fixed role, without preparing or mutating its block device.
+pub(crate) enum BlockRoleState {
+    /// No transport has been registered for the role.
+    Absent,
+    /// Its transport exists, but its block child or devtmpfs node has not appeared.
+    Probing,
+    /// The unique block child and its devtmpfs node exist.
+    Ready(PathBuf),
+}
+
+/// Looks up only the two contracted block roles, without mounts, flushes or partition changes.
+pub(crate) fn lookup_block_role(role: Role) -> io::Result<BlockRoleState> {
+    let address = match role {
+        Role::Distro => crate::protocol::root::DISTRO_MMIO_BASE,
+        Role::Scratch => crate::protocol::root::SCRATCH_MMIO_BASE,
+    };
+    block::lookup(&Paths::default(), address)
 }
 
 impl Role {
@@ -521,6 +541,7 @@ pub(crate) fn assemble_until(
 ///
 /// The check is bounded, and reads no file's content: of each directory, it reads the status,
 /// and at most one entry besides `.` and `..`, and it opens nothing below it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn assemble_fresh(
     assembly: &Assembly,
     deadline: Option<Instant>,
@@ -545,6 +566,7 @@ pub(crate) fn assemble_fresh(
 ///
 /// It needs `CAP_SYS_ADMIN`, and the kernel refuses it while one of the disk's partitions is
 /// open, as a mounted one is.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn reread_partitions(
     distro: Device,
     timeout: Duration,
@@ -567,11 +589,11 @@ enum Contents {
     /// Whatever they hold, which the root keeps, as [`assemble`] accepts: a cold sandbox's
     /// scratch keeps its upper across boots.
     Kept,
-    /// Nothing: each must be missing or empty, as [`assemble_fresh`] requires.
+    /// Nothing: each must be missing or empty, as a clone's `assemble_fresh` requires.
     Fresh,
 }
 
-/// Implements [`assemble_until`] and [`assemble_fresh`] with `kernel`, and with the kernel's
+/// Implements [`assemble_until`] and a clone's `assemble_fresh` with `kernel`, and with the kernel's
 /// interfaces at `paths`, accepting the upper's `contents`.
 fn assemble_with(
     kernel: Box<dyn Kernel>,

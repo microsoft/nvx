@@ -78,6 +78,32 @@ fn run_downloads_the_release_of_a_checkout_without_artifacts() {
 }
 
 #[test]
+fn an_explicit_x86_dry_run_reaches_download_history_on_any_host_isa() {
+    let root = checkout(&INSTALLED);
+    let outcome = root.nvx_rs(&["run", "--architecture", "x86_64", "--dry-run"]);
+    assert_eq!(outcome.status, Some(1), "{}", outcome.describe());
+    assert!(outcome.stdout.is_empty(), "{}", outcome.describe());
+    let stderr = outcome.stderr();
+    let lines: Vec<_> = stderr.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", outcome.describe());
+    assert_eq!(
+        lines[0],
+        format!(
+            ">> {} holds no NVX artifacts, so nvx-rs downloads its release; set \
+             NVX_AUTO_DOWNLOAD=0 to skip that",
+            root.text()
+        ),
+    );
+    assert!(
+        lines[1]
+            .starts_with("error[unavailable]: download needs a Git checkout to find its release: "),
+        "{}",
+        outcome.describe()
+    );
+    assert_no_staging(&root);
+}
+
+#[test]
 fn run_downloads_nothing_over_some_artifacts() {
     let root = checkout(&["build/vmlinux"]);
     let before = root.snapshot();

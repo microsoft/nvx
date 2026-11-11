@@ -25,6 +25,7 @@
 //! `scripts/nvx_tools/common.py`, so that `nvx-rs` and the `nvx.py` commands that build,
 //! install, benchmark, and test the guests agree on where each artifact is.
 
+mod architecture;
 mod dir;
 mod guest;
 mod identity;
@@ -42,8 +43,11 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::host::platform;
 use crate::host::store::RuntimeIdentity;
 
+pub use self::architecture::Architecture;
 pub use self::dir::{ArtifactDir, ArtifactPaths, GuestPaths, Layout};
 pub use self::guest::Guest;
+#[cfg(all(windows, feature = "cli"))]
+pub(crate) use self::identity::check_arm64_pe;
 #[cfg(feature = "cli")]
 pub(crate) use self::require::require_artifact;
 pub(crate) use self::require::require_existing;

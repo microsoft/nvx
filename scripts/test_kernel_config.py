@@ -15,15 +15,17 @@ generation.
 from __future__ import annotations
 
 import argparse
+import struct
 import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nvx_tools import build, build_config, common, kconfig  # noqa: E402
+from nvx_tools import build, build_config, common, elf, kconfig  # noqa: E402
 from nvx_tools import kernel_config as kc  # noqa: E402
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
@@ -33,6 +35,7 @@ from nvx_tools.kernel_features import (  # noqa: E402
     KERNEL_CONFIG_CHECKS,
     KERNEL_FEATURES,
     KernelFeature,
+    features_for_architecture,
 )
 from test_kconfig import read_tree, write_tree  # noqa: E402
 
@@ -102,6 +105,25 @@ class AttributionTests(unittest.TestCase):
         values = {"BASE": "y", "OPTION": "y"}
         with self.assertRaisesRegex(common.ScriptError, "CONFIG_OPTION=y"):
             kc.derive(tree, values, kc.inventory_settings(features("CONFIG_BASE=y")))
+
+    def test_strict_attribution_cannot_treat_an_unknown_symbol_as_hidden(self):
+        tree = read_tree()
+        settings = kc.inventory_settings(features("CONFIG_BASE=y"))
+        with self.assertRaisesRegex(
+            common.ScriptError, "unknown Kconfig symbol CONFIG_UNKNOWN=y"
+        ):
+            kc.derive(
+                tree,
+                {"BASE": "y", "UNKNOWN": "y"},
+                settings,
+                require_known_symbols=True,
+            )
+        self.assertEqual(
+            kc.derive(
+                tree, {"BASE": "y", "HELPER": "y"}, settings, require_known_symbols=True
+            )["HELPER"][1],
+            kc.NO_PROMPT,
+        )
 
 
 class InventoryTests(unittest.TestCase):
@@ -437,6 +459,211 @@ class BuildCheckTests(unittest.TestCase):
                             REPO_ROOT / KernelBuildConstants.DERIVED_CONFIG,
                         ),
                     )
+
+
+class ArmKernelBindingTests(unittest.TestCase):
+    def test_actual_arm_config_rejects_x86_leakage_even_with_forged_attribution(self):
+        config = (REPO_ROOT / KernelBuildConstants.ARM_INPUT_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        record = kc.DerivedRecord.parse(
+            (REPO_ROOT / KernelBuildConstants.ARM_DERIVED_CONFIG).read_text(
+                encoding="utf-8"
+            )
+        )
+        arm = features_for_architecture("aarch64")
+        for symbol in (
+            "X86_64",
+            "HVC_XE9",
+            "SERIAL_8250",
+            "ACPI",
+            "COMPAT",
+            "HOTPLUG_CPU",
+            "HAS_IOPORT_MAP",
+        ):
+            lines = [
+                line
+                for line in config.splitlines()
+                if (assignment := kc.Assignment.parse(line)) is None
+                or assignment.symbol != symbol
+            ]
+            lines.append(f"CONFIG_{symbol}=y")
+            entries = dict(record.entries)
+            entries[symbol] = (kc.Assignment(symbol, "y"), kc.NO_PROMPT)
+            forged = replace(record, entries=entries).render()
+            problems = kc.arm_configuration_problems(
+                "\n".join(lines) + "\n", forged, arm
+            )
+            self.assertTrue(
+                any(
+                    f"excluded option CONFIG_{symbol}=y" in problem
+                    for problem in problems
+                ),
+                problems,
+            )
+
+    def test_actual_arm_config_rejects_unnecessary_explicit_extension(self):
+        config = (REPO_ROOT / KernelBuildConstants.ARM_INPUT_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        record = (REPO_ROOT / KernelBuildConstants.ARM_DERIVED_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        arm = features_for_architecture("aarch64")
+        extension = KernelFeature(
+            name="unnecessary-arm-extension",
+            summary="Test extension",
+            rationale="Negative fixture",
+            consumers=("test",),
+            validation=("test",),
+            settings=("CONFIG_ARM64_SVE=y",),
+        )
+        lines = [line for line in config.splitlines() if "CONFIG_ARM64_SVE" not in line]
+        problems = kc.arm_configuration_problems(
+            "\n".join(lines) + "\nCONFIG_ARM64_SVE=y\n",
+            record,
+            (*arm, extension),
+        )
+        self.assertTrue(
+            any(
+                "unnecessary or unreviewed CONFIG_ARM64_SVE=y" in problem
+                for problem in problems
+            ),
+            problems,
+        )
+
+    def test_arm_audit_still_requires_common_product_capabilities(self):
+        config = (REPO_ROOT / KernelBuildConstants.ARM_INPUT_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        record = (REPO_ROOT / KernelBuildConstants.ARM_DERIVED_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CONFIG_CGROUPS=y", config)
+        problems = kc.arm_configuration_problems(
+            config.replace("CONFIG_CGROUPS=y", "# CONFIG_CGROUPS is not set"),
+            record,
+            features_for_architecture("aarch64"),
+        )
+        self.assertTrue(
+            any("CONFIG_CGROUPS=y" in problem for problem in problems), problems
+        )
+
+    def test_arm_audit_keeps_gpt_and_unavoidable_arm_capabilities(self):
+        config = (REPO_ROOT / KernelBuildConstants.ARM_INPUT_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        record = (REPO_ROOT / KernelBuildConstants.ARM_DERIVED_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        values = kc.parse_config(config)
+        self.assertEqual(values["EFI_PARTITION"], "y")
+        self.assertEqual(values["HAS_IOPORT"], "y")
+        self.assertEqual(values["NO_IOPORT_MAP"], "y")
+        self.assertEqual(values.get("HAS_IOPORT_MAP", "n"), "n")
+        self.assertEqual(
+            kc.arm_configuration_problems(
+                config, record, features_for_architecture("aarch64")
+            ),
+            [],
+        )
+
+    def test_arm_inventory_is_coherent_and_keeps_x86_inventory_identity(self):
+        self.assertIs(features_for_architecture("x86_64"), KERNEL_FEATURES)
+        arm = features_for_architecture("aarch64")
+        self.assertEqual(kc.inventory_problems(arm), [])
+        settings = kc.inventory_settings(arm)
+        for symbol, value in {
+            "ARM64_4K_PAGES": "y",
+            "ARM_GIC_V3": "y",
+            "OF_RESERVED_MEM": "y",
+            "HVC_NVX_MMIO": "y",
+            "VIRTIO_MMIO_CMDLINE_DEVICES": "n",
+            "DEVMEM": "n",
+            "DEVPORT": "n",
+            "COMPAT": "n",
+            "MEMORY_HOTPLUG": "n",
+            "PT_RECLAIM": "n",
+            "ARM64_PTR_AUTH": "y",
+            "ARM64_PTR_AUTH_KERNEL": "n",
+        }.items():
+            self.assertEqual(settings[symbol][1].value, value)
+        with self.assertRaises(ValueError):
+            features_for_architecture("arm64")
+
+    def test_arm_pac_uses_existing_user_keys_without_enabling_kernel_signing(self):
+        config = (REPO_ROOT / KernelBuildConstants.ARM_INPUT_CONFIG).read_text(
+            encoding="utf-8"
+        )
+        values = kc.parse_config(config)
+        for symbol, value in {
+            "ARM64_PTR_AUTH": "y",
+            "ARM64_PTR_AUTH_KERNEL": "n",
+            "STACKPROTECTOR": "y",
+            "STACKPROTECTOR_STRONG": "y",
+        }.items():
+            self.assertEqual(values.get(symbol, "n"), value)
+        x86 = kc.inventory_settings(features_for_architecture("x86_64"))
+        self.assertNotIn("ARM64_PTR_AUTH", x86)
+        self.assertNotIn("ARM64_PTR_AUTH_KERNEL", x86)
+
+    def test_kernel_paths_and_patch_sets_keep_architectures_separate(self):
+        x86 = build_config.KernelBuildConfig.for_architecture("x86_64")
+        self.assertEqual(x86, build_config.KernelBuildConfig())
+        arm = build_config.KernelBuildConfig.for_architecture("aarch64")
+        self.assertEqual(arm.output.name, "Image")
+        self.assertEqual(arm.input_config, KernelBuildConstants.ARM_INPUT_CONFIG)
+        self.assertEqual(arm.make_architecture, ("ARCH=arm64",))
+        self.assertNotEqual(arm.work.parent, x86.work.parent)
+
+        def patches(architecture: str) -> list[str]:
+            source = cast(
+                dict[str, object],
+                build.kernel_provenance_inputs(architecture)["source"],
+            )
+            records = cast(list[dict[str, str]], source["patches"])
+            return [record["path"] for record in records]
+
+        x86_patches = patches("x86_64")
+        arm_patches = patches("aarch64")
+        self.assertEqual(arm_patches[: len(x86_patches)], x86_patches)
+        self.assertTrue(
+            all(
+                path.startswith("kernel/patches/arm64/")
+                for path in arm_patches[len(x86_patches) :]
+            )
+        )
+        with self.assertRaises(common.ScriptError):
+            build_config.KernelBuildConfig(architecture="arm64")
+
+    def test_image_header_checks_exact_flags_bounds_and_overflow(self):
+        def header(
+            offset: int = 0, size: int = 64, flags: int = 10, magic: int = 0x644D5241
+        ) -> bytes:
+            return struct.pack(
+                "<IIQQQQQQII", 0, 0, offset, size, flags, 0, 0, 0, magic, 0
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "Image"
+            path.write_bytes(header())
+            self.assertEqual(elf.read_arm64_image(path)["image_size"], 64)
+            for data in [
+                b"ELF",
+                header(magic=0),
+                header(flags=11),
+                header(flags=8),
+                header(flags=12),
+                header(flags=14),
+                header(flags=2),
+                header(flags=26),
+                header(size=63),
+                header(offset=1),
+                header(offset=0xFFFFFFFFFFFFF000, size=4096),
+            ]:
+                path.write_bytes(data)
+                with self.assertRaises(common.ScriptError):
+                    elf.read_arm64_image(path)
 
 
 if __name__ == "__main__":
