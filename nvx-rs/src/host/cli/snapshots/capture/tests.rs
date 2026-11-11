@@ -165,7 +165,6 @@ fn name(text: &str) -> Name {
 
 fn options(root: &Path, snapshot: &str) -> Options {
     let arguments = [
-        "capture".to_owned(),
         snapshot.to_owned(),
         "--store-dir".to_owned(),
         root.join("store").to_str().unwrap().to_owned(),
@@ -298,20 +297,12 @@ fn wait_file(path: &Path) {
 }
 
 #[test]
-fn capture_parser_refuses_restore_bad_names_and_invalid_options() {
+fn capture_parser_refuses_bad_names_and_invalid_options() {
     for arguments in [
-        vec!["restore", "name"],
-        vec!["capture", "../escape", "--store-dir", "store"],
-        vec!["capture", "name"],
-        vec!["capture", "name", "--store-dir", "store", "--timeout", "0"],
-        vec![
-            "capture",
-            "name",
-            "--store-dir",
-            "store",
-            "--processors",
-            "3",
-        ],
+        vec!["../escape", "--store-dir", "store"],
+        vec!["name"],
+        vec!["name", "--store-dir", "store", "--timeout", "0"],
+        vec!["name", "--store-dir", "store", "--processors", "3"],
     ] {
         assert!(
             parse(
@@ -323,10 +314,7 @@ fn capture_parser_refuses_restore_bad_names_and_invalid_options() {
             .is_err()
         );
     }
-    assert!(matches!(
-        parse(&["capture".to_owned(), "--help".to_owned()]),
-        Err(Exit::Help(_))
-    ));
+    assert!(matches!(parse(&["--help".to_owned()]), Err(Exit::Help(_))));
     CAPTURE_SYNTAX.assert_lists(&OPTIONS);
 }
 

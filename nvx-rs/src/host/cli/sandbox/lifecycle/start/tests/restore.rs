@@ -9,13 +9,17 @@ use serde_json::{Value, json};
 
 use super::super::*;
 use crate::activation::{ActivationRecord, Image, Network, Publication, ReadyActivation, Upper};
+use crate::host::artifacts::{
+    ArtifactDir, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_PROVENANCE_NAME, OPENVMM_PROVENANCE_NAME,
+};
 use crate::host::cli::hex;
 use crate::host::cli::sandbox::lifecycle::{ProvisionConfig, deprovision};
 use crate::host::cli::sandbox::state::{RecordedDistro, serialize_launch, write_json};
-use crate::host::cli::snapshots::Name;
+use crate::host::cli::snapshots::{self, Name};
 use crate::host::cli::store::StateDir;
 use crate::host::filesystem::{Bind, ExportChild, ExportPlan, Owner};
 use crate::host::network::{Access, NetworkPolicy};
+use crate::host::paths::resolve;
 use crate::host::process::{Opened, Process, ProcessRef};
 use crate::host::sandbox::distro::DistroBinding;
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
@@ -598,6 +602,102 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
     );
     assert_eq!(fixture.view("state"), 0);
     assert!(fixture.spawned().is_empty());
+}
+
+/// Returns an artifact root with the fakes and provenance whose presence a start checks before
+/// it launches anything, which no start of these tests runs.
+fn artifact_root(root: &Path) -> String {
+    let dir = ArtifactDir::from_dir(root).unwrap();
+    for (artifact, provenance, field) in [
+        (dir.openvmm(), OPENVMM_PROVENANCE_NAME, "executable_sha256"),
+        (dir.kernel(), KERNEL_PROVENANCE_NAME, "kernel_sha256"),
+        (
+            dir.initramfs(Guest::Alpine),
+            INITRAMFS_PROVENANCE_NAME,
+            "initramfs_sha256",
+        ),
+    ] {
+        for (path, contents) in [
+            (artifact, "fake".to_owned()),
+            (
+                dir.artifact(provenance),
+                json!({ "format": 1, field: "ab".repeat(32) }).to_string(),
+            ),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+    }
+    root.to_str().unwrap().to_owned()
+}
+
+/// `snapshot restore` provisions a sandbox whose configuration records the snapshot, the store as
+/// the command resolved it, and the workload, an exec request that may hold whitespace and
+/// quotes, which no boot token can, and starts it as a restore of that snapshot: a start with
+/// memory that the snapshot refuses, which only a restore checks, fails before it launches or
+/// links anything, and leaves the sandbox provisioned.
+#[test]
+fn snapshot_restore_records_its_source_and_starts_a_restore_of_it() {
+    let fixture = Fixture::new(false);
+    let root = artifact_root(&fixture.state("checkout"));
+    let layer = fixture.state("distro.erofs");
+    fs::write(&layer, "distro").unwrap();
+    let store = fixture.root.path().join("store");
+    let state = fixture.state("command");
+    let workload = ["/bin/echo", "a \"restored\" sandbox"];
+    let arguments = [
+        "restore",
+        "source",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--layer",
+        &format!(
+            "distro,{},11111111-1111-1111-1111-111111111111",
+            layer.display()
+        ),
+        "--upper",
+        "ram",
+        "--hypervisor",
+        if cfg!(windows) { "whp" } else { "kvm" },
+        "--memory-mib",
+        "2176",
+        "--entrypoint",
+        workload[0],
+        "--arg",
+        workload[1],
+        "--timeout",
+        "10",
+    ]
+    .map(str::to_owned);
+    let (command, unrecognized) = snapshots::parse(&arguments).unwrap();
+    assert!(unrecognized.is_empty(), "{unrecognized:?}");
+    let error = snapshots::run(Some(&root), command).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    let message = error.message().unwrap_or_default();
+    assert!(
+        message.contains("snapshot memory must be from boot"),
+        "{message}"
+    );
+    let record = read_config(&state.join(CONFIG_NAME)).unwrap();
+    assert_eq!(record["source_snapshot"], "source");
+    assert_eq!(record["workload"], json!(workload));
+    assert_eq!(
+        Config::new(record).unwrap().source().unwrap(),
+        Some(Source {
+            snapshot: name(),
+            store: resolve(&store).unwrap(),
+            workload: workload.map(str::to_owned).to_vec(),
+        })
+    );
+    assert_eq!(fixture.view("command"), 0);
+    assert!(fixture.snapshot_free());
+    let artifacts = Artifacts {
+        root: Some(root.as_str()),
+    };
+    deprovision(state.to_str().unwrap(), &artifacts, 5.0).unwrap();
+    assert!(!state.exists());
 }
 
 /// Reads one record of the control endpoint, or `None` once the host has gone.

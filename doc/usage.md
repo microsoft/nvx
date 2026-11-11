@@ -383,7 +383,60 @@ evidence and reports an error. Unknown files or nonempty unjournaled capture-slo
 contents are kept for inspection, not deleted; an empty launch lock alone is
 harmless. Known host and OpenVMM atomic staging files are recovered only with
 a valid launch journal. Captures in one store serialize; snapshot locks remain
-separate from their immutable directories. Restore commands are not added here.
+separate from their immutable directories. [`snapshot restore`](#snapshot-restore)
+starts managed sandboxes from them.
+
+### `snapshot restore`
+
+```sh
+nvx-rs/target/release/nvx-rs snapshot restore baseline \
+    --store-dir /private/snapshots --state-dir /private/sandboxes/restored \
+    --layer distro,/images/distro.erofs,UUID --upper ram --hypervisor kvm
+```
+
+`snapshot restore` provisions a managed sandbox in `--state-dir` with the
+options of [`sandbox provision`](#sandbox), but for those that only an
+execution or a cold boot takes, `--cwd`, `--environment`, `--environment-file`,
+`--inherit-default-environment`, `--exec-timeout-ms`, `--wait`,
+`--outcome-report`, `--cmdline`, and `--dry-run`, then starts it from the named
+snapshot of `--store-dir`. The sandbox's configuration records the snapshot,
+its store, and the sandbox's workload, `--entrypoint` with its `--arg` values,
+and each later `sandbox start` of the sandbox restores the snapshot again. Each
+restore runs the workload over the control protocol, as `run` and `exec` do,
+not from the kernel command line, so its entrypoint and arguments may contain
+whitespace and double quotes, which `sandbox provision` refuses; the command
+checks them as `exec` checks its workload before it provisions anything. The
+state directory must be outside the store. The guest of a restore accepts only
+a fresh scratch image, whose upper no earlier root wrote, such as a new empty
+ext4 image, so a later start of a restored sandbox with a scratch image refuses
+once an earlier start has created the sandbox's view of the snapshot, as each
+start does before its guest can use the image: deprovision the sandbox and
+restore the snapshot again with a fresh one. A missing snapshot provisions
+nothing; a sandbox whose start fails stays provisioned, as after
+`sandbox provision`.
+
+A restore attaches the sandbox's image and upper in place of the snapshot's
+placeholder image and dormant scratch: the image must fit the placeholder,
+with its block sizes, and a scratch upper must be as long as the dormant
+scratch. The VM keeps the processors that the snapshot had online, and
+`--memory-mib` must be a multiple of 128 between the snapshot's boot memory and
+its capacity. The snapshot fixes the NIC: one that `snapshot capture` captured
+has none, so its restores take no `--net`. A restore of a snapshot with a NIC
+installs the restore's own network policy, whose DNS server and listener
+announcements the guest applies as it activates.
+
+Each start holds the snapshot's exclusive lock, which it waits for up to
+`--timeout`, from before it links the snapshot's files into the sandbox's view
+of it, `openvmm/` in the state directory, until the start ends or the VM has
+exited, and `sandbox deprovision` holds it while it removes the view, so it
+needs the snapshot's store: concurrent restores of one snapshot start one at a
+time. Once the guest is ready, it maps the sandbox's shares and runs the
+workload, whose output the command forwards, and waits for it to exit with
+status 0 within `--timeout`, as the default workload, `/bin/sh`, does at once;
+any other end fails the start, which ends the VM. The sandbox then runs as a
+started one does, for `sandbox exec` and `sandbox stop`. A start journals its
+launch as a cold start does, so a restore whose command dies before the guest
+is ready never completes, and the next command of the sandbox ends its VM.
 
 ### `download`
 

@@ -1,4 +1,4 @@
-//! Immutable named snapshots and their external, exclusive locks.
+//! Immutable named snapshots and their external, exclusive locks, and the `snapshot` command.
 //!
 //! Names map to hexadecimal directory names under `snapshots/`. Each published directory
 //! contains only the strict snapshot's three entries; its lock stays under `locks/`.
@@ -7,6 +7,10 @@
 //! Each start of a restored sandbox links the snapshot's files into the sandbox's view of it
 //! under the snapshot's lock, which [`LockedSnapshot::remove_view`] also takes to remove the
 //! view.
+//!
+//! `snapshot capture` publishes a named snapshot, as [`capture`] describes. `snapshot restore`
+//! provisions a managed sandbox whose configuration records the snapshot, its store and a
+//! workload, then starts it, and each later start of the sandbox restores the snapshot again.
 
 pub(super) mod capture;
 
@@ -16,13 +20,221 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::args::{Parser, Receiver, Spec, Syntax, choice};
 use super::deadline::Deadline;
+use super::sandbox::{self, Source};
+use super::session::{ExecRequest, Session};
 use super::store::{LockedState, StateDir};
 use super::{Exit, Result, hex, io_error, temporary_path};
+use crate::host::sandbox::options::SandboxOperation;
 use crate::host::snapshot::{OPENVMM_DIR, SNAPSHOT_ARTIFACTS, Snapshot};
 use crate::host::vm::VmDir;
 use crate::host::{filesystem, paths, platform, store};
 use crate::{Error, ErrorCode};
+
+/// The parser of the snapshot command.
+const SYNTAX: Syntax = Syntax {
+    command: "snapshot",
+    arguments: "[-h] {capture,restore} ...",
+    help: "\
+positional arguments:
+  {capture,restore}
+    capture   capture a named snapshot
+    restore   restore a managed sandbox from a named snapshot
+
+options:
+  -h, --help  show this help message and exit",
+};
+
+/// The parser of the restore command.
+const RESTORE_SYNTAX: Syntax = Syntax {
+    command: "snapshot restore",
+    arguments: "[-h] --store-dir PATH --state-dir PATH [OPTIONS] NAME",
+    help: "\
+Provision a managed sandbox with the options of sandbox provision, then start
+it from a named snapshot, under the snapshot's lock, and run its workload, the
+entrypoint and its arguments, which must exit with status 0 within the
+timeout. Each later start of the sandbox restores the snapshot again.
+
+positional arguments:
+  NAME                  the snapshot's name
+
+options:
+  -h, --help            show this help message and exit
+  --store-dir PATH      the named snapshot store
+  --state-dir STATE_DIR
+  --layer ROLE,PATH,IMAGE_UUID
+  --layer-format {erofs,gpt}
+  --scratch SCRATCH
+  --upper {scratch,ram}
+  --ram-upper-percent PERCENT
+  --entrypoint ENTRYPOINT
+  --arg SANDBOX_ARG
+  --hostname HOSTNAME
+  --workload-user UID:GID
+  --memory-mib MEMORY_MIB
+  --timeout TIMEOUT
+  --hypervisor {auto,whp,kvm,mshv}
+  --mount GUEST_TARGET,HOST_PATH[,ro|rw]
+  --mount-deny HOST_PATH
+  --mount-allow HOST_PATH
+  --mount-write HOST_PATH
+  --mount-owner {vmm,caller}
+  --net IPV4/PREFIX
+  --network-profile {portable}
+  --network-egress {allow,deny}
+  --network-ingress {allow,deny}
+  --network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]
+  --network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]
+  --network-egress-policy-file PATH
+  --host-loopback {allow,deny}
+  --network-proxy IPV4:TCP-PORT
+  --host-loopback-forward HOST_LOOPBACK_FORWARD",
+};
+
+/// The options of `sandbox` that only an execution or a cold boot takes, which a restore lacks.
+const NOT_RESTORED: [&str; 9] = [
+    "--cwd",
+    "--environment",
+    "--environment-file",
+    "--inherit-default-environment",
+    "--exec-timeout-ms",
+    "--wait",
+    "--outcome-report",
+    "--cmdline",
+    "--dry-run",
+];
+
+/// A parsed `snapshot` command.
+pub(super) enum Command {
+    /// `snapshot capture ...`.
+    Capture(capture::Options),
+    /// `snapshot restore ...`.
+    Restore(Box<RestoreOptions>),
+}
+
+/// The options of `snapshot restore`: the snapshot's name and store, and those of the sandbox
+/// that it provisions.
+pub(super) struct RestoreOptions {
+    /// `NAME`, which the parser requires.
+    name: Option<Name>,
+    /// `--store-dir`, which the parser requires.
+    store_dir: String,
+    /// The options of the sandbox, whose operation is `provision`.
+    sandbox: sandbox::Options,
+}
+
+impl Receiver for RestoreOptions {
+    fn take(&mut self, name: &'static str, value: Option<&str>) -> std::result::Result<(), String> {
+        let text = value.unwrap_or_default().to_owned();
+        match name {
+            "NAME" => self.name = Some(Name::try_from(text).map_err(|error| error.to_string())?),
+            "--store-dir" => self.store_dir = text,
+            _ => self.sandbox.take(name, value)?,
+        }
+        Ok(())
+    }
+}
+
+/// Parses a `snapshot` command, and returns it with the arguments that its parser does not
+/// recognize.
+pub(super) fn parse(arguments: &[String]) -> Result<(Command, Vec<String>)> {
+    let (index, mut extras) = Parser::new(&[], &[Spec::one("snapshot_operation")])
+        .split_command(arguments, &mut |_: &'static str, _: Option<&str>| Ok(()))
+        .map_err(|stop| Exit::from_stop(stop, &SYNTAX))?;
+    let operation = choice(&arguments[index], &["capture", "restore"])
+        .map_err(|message| Exit::usage(&SYNTAX, ErrorCode::ArgumentInvalid, message))?;
+    let arguments = &arguments[index + 1..];
+    if operation == "capture" {
+        let (options, unrecognized) = capture::parse(arguments)?;
+        extras.extend(unrecognized);
+        return Ok((Command::Capture(options), extras));
+    }
+    let mut options = RestoreOptions {
+        name: None,
+        store_dir: String::new(),
+        sandbox: sandbox::Options {
+            operation: SandboxOperation::Provision,
+            ..sandbox::Options::default()
+        },
+    };
+    extras.extend(
+        Parser::new(&restore_options(), &[Spec::one("NAME")])
+            .parse(arguments, &mut options)
+            .map_err(|stop| Exit::from_stop(stop, &RESTORE_SYNTAX))?,
+    );
+    for (missing, option) in [
+        (options.store_dir.is_empty(), "--store-dir"),
+        (options.sandbox.state_dir.is_none(), "--state-dir"),
+    ] {
+        if missing {
+            return Err(Exit::usage(
+                &RESTORE_SYNTAX,
+                ErrorCode::ArgumentMissing,
+                format!("{option} is required"),
+            ));
+        }
+    }
+    Ok((Command::Restore(Box::new(options)), extras))
+}
+
+/// Returns the options of `snapshot restore`: those of `sandbox`, but those that only an
+/// execution or a cold boot takes, and `--store-dir`.
+fn restore_options() -> Vec<Spec> {
+    sandbox::OPTIONS
+        .into_iter()
+        .filter(|spec| !NOT_RESTORED.contains(&spec.name))
+        .chain([Spec::one("--store-dir")])
+        .collect()
+}
+
+/// Runs a `snapshot` command.
+pub(super) fn run(root: Option<&str>, command: Command) -> Result {
+    match command {
+        Command::Capture(options) => capture::run(root, options),
+        Command::Restore(options) => restore(root, *options),
+    }
+}
+
+/// Restores a new managed sandbox from a named snapshot, as `snapshot restore` does: opens the
+/// snapshot, so that a missing one provisions nothing, then provisions the sandbox with its
+/// source, whose workload is the sandbox's entrypoint and arguments, and starts it. Before it
+/// provisions anything, it refuses a state directory in the store, as each start and deprovision
+/// of the sandbox refuses one before it removes anything, and a workload that is not a valid exec
+/// request: each restored start sends the workload as one, not as boot tokens, so it may contain
+/// whitespace, which `sandbox provision` refuses.
+fn restore(root: Option<&str>, options: RestoreOptions) -> Result {
+    let RestoreOptions {
+        name,
+        store_dir,
+        sandbox: options,
+    } = options;
+    let snapshot = name.expect("the parser requires a snapshot name");
+    let store = paths::resolve(Path::new(&store_dir)).map_err(Exit::from_os_error)?;
+    outside_store(
+        &store,
+        Path::new(options.state_dir.as_deref().unwrap_or_default()),
+    )?;
+    let workload: Vec<String> = std::iter::once(options.entrypoint.clone())
+        .chain(options.args.iter().cloned())
+        .collect();
+    Session::exec_payload(&ExecRequest {
+        arguments: workload.clone(),
+        timeout_ms: 0,
+        cwd: None,
+        environment: None,
+        inherit_default_environment: false,
+    })?;
+    Store::open(&store)?
+        .lock(&snapshot, Deadline::after(options.timeout))?
+        .open()?;
+    let source = Source {
+        snapshot,
+        store,
+        workload,
+    };
+    sandbox::restore(root, options, source)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String")]

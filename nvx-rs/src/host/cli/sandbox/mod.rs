@@ -44,10 +44,11 @@ pub(super) use self::lifecycle::{copy_openvmm_outcome, validate_outcome_destinat
 pub(super) use self::one_shot::run_openvmm;
 pub(super) use self::options::sandbox_network;
 pub(super) use self::options::{
-    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, hypervisor, parse, path_text,
+    HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, OPTIONS, hypervisor, parse, path_text,
 };
 pub(crate) use self::options::{Options, path_string};
 use self::state::RecordedDistro;
+pub(crate) use self::state::Source;
 
 /// The artifacts of a sandbox, found when an operation first needs them.
 pub(crate) struct Artifacts<'a> {
@@ -133,6 +134,25 @@ pub(crate) fn error_with_cause(error: crate::Error) -> Exit {
 
 /// Runs the operation of `options`, as `command_sandbox` did.
 pub(super) fn run(root: Option<&str>, options: Options) -> Result {
+    run_from(root, options, None)
+}
+
+/// Provisions the sandbox of `options`, whose operation is `provision`, with `source`, the named
+/// snapshot that each of its starts restores, then starts it, as `snapshot restore` does.
+pub(super) fn restore(root: Option<&str>, options: Options, source: Source) -> Result {
+    let (state_dir, timeout) = (options.state_dir.clone(), options.timeout);
+    run_from(root, options, Some(&source))?;
+    lifecycle::start(
+        state_dir
+            .as_deref()
+            .expect("provision required --state-dir"),
+        &Artifacts { root },
+        timeout,
+    )
+}
+
+/// Runs the operation of `options`, recording `source` with the sandbox that it provisions.
+fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Result {
     let operation = options.operation;
     if !matches!(
         operation,
@@ -198,9 +218,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             workload_identity: options.workload_user,
             ..SandboxSettings::default()
         };
-        // A run's workload is its exec request, which no boot token carries, and which its control
-        // session checks.
-        if operation == SandboxOperation::Run {
+        // The workload of a run, and that of a restore, is an exec request, which no boot token
+        // carries: a run's control session checks it, and `snapshot restore` a restore's.
+        if operation == SandboxOperation::Run || source.is_some() {
             let workload = SandboxSettings::default();
             (settings.entrypoint, settings.args) = (workload.entrypoint, workload.args);
         }
@@ -283,6 +303,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
                     cmdline: &options.cmdline,
                     ram_upper_percent: options.ram_upper_percent,
                 },
+                source,
                 options.timeout,
             )
         }

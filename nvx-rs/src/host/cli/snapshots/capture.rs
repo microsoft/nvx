@@ -25,13 +25,6 @@ use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR, finish_capt
 use crate::host::transport;
 use crate::host::vm::{self, Prepared, VmDir, VmOutputs};
 
-/// The snapshot subcommand parser.
-const SYNTAX: Syntax = Syntax {
-    command: "snapshot",
-    arguments: "[-h] {capture} ...",
-    help: "positional arguments:\n  {capture}  capture a named snapshot\n\noptions:\n  -h, --help  show this help message and exit",
-};
-
 /// The capture command parser.
 const CAPTURE_SYNTAX: Syntax = Syntax {
     command: "snapshot capture",
@@ -153,19 +146,12 @@ impl Receiver for Options {
     }
 }
 
-/// Parses only the capture operation; restore belongs to later slices.
+/// Parses the options of a capture, which follow `capture`.
 pub(in crate::host::cli) fn parse(arguments: &[String]) -> Result<(Options, Vec<String>)> {
-    let (index, mut extras) = Parser::new(&[], &[Spec::one("snapshot_operation")])
-        .split_command(arguments, &mut |_: &'static str, _: Option<&str>| Ok(()))
-        .map_err(|stop| Exit::from_stop(stop, &SYNTAX))?;
-    choice(&arguments[index], &["capture"])
-        .map_err(|message| Exit::usage(&SYNTAX, ErrorCode::ArgumentInvalid, message))?;
     let mut options = Options::default();
-    extras.extend(
-        Parser::new(&OPTIONS, &[Spec::one("NAME")])
-            .parse(&arguments[index + 1..], &mut options)
-            .map_err(|stop| Exit::from_stop(stop, &CAPTURE_SYNTAX))?,
-    );
+    let extras = Parser::new(&OPTIONS, &[Spec::one("NAME")])
+        .parse(arguments, &mut options)
+        .map_err(|stop| Exit::from_stop(stop, &CAPTURE_SYNTAX))?;
     if options.store_dir.is_empty() {
         return Err(Exit::usage(
             &CAPTURE_SYNTAX,
