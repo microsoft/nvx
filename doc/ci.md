@@ -558,7 +558,9 @@ a proxy-only network, whose guest reaches a test proxy on host loopback at
 its gateway and no other destination, sandboxes whose overlay upper is a
 tmpfs in guest memory, with no scratch image, and sandboxes whose root is a
 GPT disk, over either upper, so that the three backends run the CLI's twelve
-cold cells (see the [case matrix](acceptance-case-matrix.md#cold-boots)).
+cold cells (see the [case matrix](acceptance-case-matrix.md#cold-boots)). The
+public `vm-lifecycle` scenario then creates, spawns, reattaches to, and stops
+a VM through the public API of `nvx`.
 Their bounded evidence is part of the backend's failure logs. The same
 entrypoint then verifies a live virtio-fs
 share inside the container: a read-write `/workspace` share with a denied
@@ -689,9 +691,9 @@ platform jobs don't take it, but the package job of each platform downloads
 both through the
 [`package-release`](../.github/actions/package-release/action.yml) action,
 the provenance into `build/`, so that each package ships the `nvx-rs` of its
-operating system. The `managed-lifecycle` scenario also builds
-and runs the ignored `nvx-rs` test `tests/managed_lifecycle.rs` with Cargo on
-the runner.
+operating system. The `managed-lifecycle` and `vm-lifecycle` scenarios also
+build and run the ignored `nvx-rs` tests `tests/managed_lifecycle.rs` and
+`tests/vm_lifecycle.rs` with Cargo on the runner.
 
 Once the required artifacts are
 ready, benchmarks run in parallel with the NVX test layer, each on its backend's
