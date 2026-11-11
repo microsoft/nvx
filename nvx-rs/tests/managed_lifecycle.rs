@@ -15,12 +15,19 @@
 //! - `NVX_MANAGED_LIFECYCLE_TIMEOUT`: the longest wait for each operation, in seconds.
 //! - `NVX_MANAGED_LIFECYCLE_OUTPUT_DIR`: receives OpenVMM's output, `managed-lifecycle.log`, and
 //!   the guest console, `managed-lifecycle-guest.log`, which the scenario then scans.
+//! - `NVX_MANAGED_LIFECYCLE_PROCESSORS`: optionally asserts the fixture's online CPU count.
+//! - `NVX_MANAGED_LIFECYCLE_ROOT_MODE`: `direct` (the default) or `sandbox`, whose existing
+//!   working-directory refusal reports status 125 rather than a direct-agent error record.
+//! - `NVX_MANAGED_LIFECYCLE_PREVIOUS_STATE`: optionally asserts `present` or `absent` for the
+//!   state left by an earlier cycle using the same scratch, or a fresh RAM upper.
 //!
 //! The test also records OpenVMM's process ID in `NVX_ADVERSARIAL_OPENVMM_PID_JOURNAL`, if set,
 //! as the microVM scenarios do for the adversarial campaigns.
 //!
 //! These checks were `run_managed_lifecycle` of `scripts/nvx_tools/microvm_tests.py`, which drove
 //! the control session from Python until microsoft/nvx#359 left the protocol to nvx-rs alone.
+//! Stale-target checks send an old numeric request ID through the current session; they do not
+//! replay an old-epoch outer record or establish old-epoch wire/output rejection.
 #![cfg(all(feature = "host", any(target_os = "linux", windows)))]
 
 use std::env;
@@ -115,6 +122,31 @@ impl Guest {
             .expect("the control endpoint accepts the capability")
     }
 
+    /// Starts a workload that stays active after its readiness marker.
+    fn waiting(&self, session: &mut ControlSession, body: &str) -> u64 {
+        let deadline = Instant::now() + self.timeout;
+        let workload = Workload {
+            argv: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!("printf ready; {body}"),
+            ],
+            timeout_ms: 0,
+            cwd: None,
+            environment: WorkloadEnvironment::Default,
+        };
+        let id = session.start_exec(&workload, deadline).unwrap();
+        let mut ready = Vec::new();
+        while ready.len() < b"ready".len() {
+            match session.next_exec_event(id, Some(deadline)).unwrap() {
+                ExecEvent::Stdout(bytes) => ready.extend(bytes),
+                event => panic!("the waiting workload did not become ready: {event:?}"),
+            }
+        }
+        assert_eq!(ready, b"ready");
+        id
+    }
+
     /// Runs `argv` in `session` and returns how it ended.
     fn exec(
         &self,
@@ -135,11 +167,22 @@ impl Guest {
         let request = session
             .start_exec(&workload, deadline)
             .expect("the guest accepts the request");
+        self.finish_exec(session, request, deadline, &format!("{argv:?}"))
+    }
+
+    /// Collects the terminal outcome and all output of an already started request.
+    fn finish_exec(
+        &self,
+        session: &mut ControlSession,
+        request: u64,
+        deadline: Instant,
+        description: &str,
+    ) -> Outcome {
         let mut outcome = Outcome::default();
         loop {
             match session
                 .next_exec_event(request, Some(deadline))
-                .unwrap_or_else(|error| panic!("{argv:?} did not end: {error}"))
+                .unwrap_or_else(|error| panic!("{description} did not end: {error}"))
             {
                 ExecEvent::Stdout(chunk) => outcome.stdout.extend(chunk),
                 ExecEvent::Stderr(chunk) => outcome.stderr.extend(chunk),
@@ -374,6 +417,12 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
             .expect("NVX_MANAGED_LIFECYCLE_TIMEOUT is a number of seconds"),
     );
     let output_dir = PathBuf::from(variable("NVX_MANAGED_LIFECYCLE_OUTPUT_DIR"));
+    let sandbox =
+        env::var_os("NVX_MANAGED_LIFECYCLE_ROOT_MODE").is_some_and(|mode| match mode.to_str() {
+            Some("sandbox") => true,
+            Some("direct") => false,
+            _ => panic!("NVX_MANAGED_LIFECYCLE_ROOT_MODE must be direct or sandbox"),
+        });
     fs::create_dir_all(&output_dir).unwrap();
     let log = File::create(output_dir.join("managed-lifecycle.log")).unwrap();
     let capability = generate_capability().unwrap();
@@ -416,6 +465,48 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
     session
         .ping(Instant::now() + timeout)
         .expect("the guest agent is ready");
+    if let Ok(processors) = env::var("NVX_MANAGED_LIFECYCLE_PROCESSORS") {
+        let processors: u32 = processors
+            .parse()
+            .expect("the fixture VP count is an integer");
+        assert!(processors > 0);
+        let expected = if processors == 1 {
+            "0\n".to_owned()
+        } else {
+            format!("0-{}\n", processors - 1)
+        };
+        let online = guest.exec(
+            &mut session,
+            &["/bin/cat", "/sys/devices/system/cpu/online"],
+            5_000,
+            None,
+            WorkloadEnvironment::Default,
+        );
+        assert!(
+            online.printed(&expected),
+            "the fixture's online CPUs: {online:?}"
+        );
+        println!("NVX-MANAGED-TOPOLOGY-OK cpus={processors}");
+    }
+    if let Ok(expected) = env::var("NVX_MANAGED_LIFECYCLE_PREVIOUS_STATE") {
+        assert!(matches!(expected.as_str(), "present" | "absent"));
+        let state = guest.exec(
+            &mut session,
+            &[
+                "/bin/sh",
+                "-c",
+                "if [ -e /tmp/nvx-managed-state ]; then printf present; else printf absent; fi",
+            ],
+            5_000,
+            None,
+            WorkloadEnvironment::Default,
+        );
+        assert!(
+            state.printed(&expected),
+            "the fixture's persisted state: {state:?}"
+        );
+        println!("NVX-MANAGED-PERSISTENCE-OK expected={expected}");
+    }
     let exact = vec!["EMPTY=".to_owned(), COMPLEX.to_owned()];
     let first = guest.exec(
         &mut session,
@@ -523,6 +614,60 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
         after_timeout.printed("still-usable"),
         "the guest was not usable after a timeout: {after_timeout:?}"
     );
+    let active = guest.waiting(&mut session, "sleep 5; printf survived-stale; exit 0");
+    let other = Workload {
+        argv: vec!["/bin/true".to_owned()],
+        timeout_ms: 0,
+        cwd: None,
+        environment: WorkloadEnvironment::Default,
+    };
+    for attempt in 0..2 {
+        let deadline = Instant::now() + timeout;
+        let rejected = session.start_exec(&other, deadline).unwrap();
+        assert_ne!(active, rejected);
+        assert_eq!(
+            session.next_exec_event(rejected, Some(deadline)).unwrap(),
+            ExecEvent::Rejected {
+                status: 16,
+                category: nvx::protocol::BUSY.to_owned(),
+            }
+        );
+        if attempt == 0 {
+            // The second busy response orders this stale cancel before natural completion.
+            session.cancel_exec(rejected, deadline).unwrap();
+        }
+    }
+    let survived = guest.finish_exec(
+        &mut session,
+        active,
+        Instant::now() + timeout,
+        "the active workload after stale-target cancellation",
+    );
+    assert!(survived.printed("survived-stale"), "{survived:?}");
+    println!("NVX-MANAGED-BUSY-STALE-TARGET-OK natural-success");
+
+    let cancelled = guest.waiting(&mut session, "exec sleep 30");
+    let deadline = Instant::now() + timeout;
+    session.cancel_exec(cancelled, deadline).unwrap();
+    assert_eq!(
+        session.next_exec_event(cancelled, Some(deadline)).unwrap(),
+        ExecEvent::Exit {
+            category: ExitCategory::Cancelled,
+            status: 137,
+        }
+    );
+    println!("NVX-MANAGED-TARGET-CANCEL-OK status=137");
+    let nonzero = guest.exec(
+        &mut session,
+        &["/bin/sh", "-c", "printf out; printf err >&2; exit 7"],
+        5_000,
+        None,
+        WorkloadEnvironment::Default,
+    );
+    assert_eq!(nonzero.exit, Some((ExitCategory::Exit, 7)), "{nonzero:?}");
+    assert_eq!(nonzero.stdout, b"out");
+    assert_eq!(nonzero.stderr, b"err");
+    println!("NVX-MANAGED-NONZERO-DRAIN-OK status=7");
     // A workload that leaves a descendant in a session of its own, outside the workload's process
     // group, which keeps the workload's output open, ends at once with its own status: the guest
     // finds the descendant in the workload's cgroup and ends it. The next workload runs, which the
@@ -551,8 +696,8 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
         after_detached.printed("still-usable"),
         "the guest did not settle a workload's descendant: {after_detached:?}"
     );
-    // The guest refuses a working directory that the workload cannot enter, with its error
-    // number and a diagnostic that names it, before anything of the workload runs.
+    // Both agents refuse the workload before it runs; the sandbox preserves its helper's
+    // diagnostic and status 125, while the direct agent sends a typed error with its errno.
     for (description, cwd, error) in REFUSED_CWDS {
         let refused = guest.exec(
             &mut session,
@@ -562,11 +707,16 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
             WorkloadEnvironment::Default,
         );
         let diagnostic = String::from_utf8_lossy(&refused.stderr);
+        let (expected_exit, expected_refusal, verb) = if sandbox {
+            (Some((ExitCategory::Exit, 125)), None, "use")
+        } else {
+            (None, Some((error, CWD_FAILED.to_owned())), "enter")
+        };
         assert!(
-            refused.exit.is_none()
-                && refused.refusal == Some((error, CWD_FAILED.to_owned()))
+            refused.exit == expected_exit
+                && refused.refusal == expected_refusal
                 && refused.stdout.is_empty()
-                && diagnostic.contains(&format!("cannot enter working directory {cwd}: ")),
+                && diagnostic.contains(&format!("cannot {verb} working directory {cwd}: ")),
             "the {description} working directory {cwd} was not refused clearly: {refused:?} \
              ({diagnostic})"
         );
@@ -586,6 +736,30 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
         after_refusals.printed("still-usable"),
         "a refused workload ran, or the guest was not usable after refusals: {after_refusals:?}"
     );
+
+    let old_request = guest.waiting(&mut session, "exec sleep 30");
+    drop(session);
+    let mut session = guest.connect();
+    let new_request = guest.waiting(&mut session, "sleep 5; printf after-reset; exit 0");
+    assert_ne!(old_request, new_request);
+    let deadline = Instant::now() + timeout;
+    session.cancel_exec(old_request, deadline).unwrap();
+    let barrier = session.start_exec(&other, deadline).unwrap();
+    assert_eq!(
+        session.next_exec_event(barrier, Some(deadline)).unwrap(),
+        ExecEvent::Rejected {
+            status: 16,
+            category: nvx::protocol::BUSY.to_owned(),
+        }
+    );
+    let after_reset = guest.finish_exec(
+        &mut session,
+        new_request,
+        Instant::now() + timeout,
+        "the new session's active workload after an old target was cancelled",
+    );
+    assert!(after_reset.printed("after-reset"), "{after_reset:?}");
+    println!("NVX-MANAGED-RESET-RECONNECT-OK stale-target-survived");
 
     // Stop ends the VM, and OpenVMM exits successfully once it has written its report.
     session

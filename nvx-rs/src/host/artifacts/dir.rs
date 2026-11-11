@@ -157,17 +157,11 @@ impl ArtifactDir {
 
     /// Returns the path of a guest's distro layer, if the guest provides one.
     pub fn distro_layer(&self, guest: Guest) -> Option<PathBuf> {
-        if self.architecture == Architecture::Aarch64 {
-            return None;
-        }
         guest.distro_layer_name().map(|name| self.artifact(name))
     }
 
     /// Returns the path of the manifest of a guest's distro layer, if the guest provides one.
     pub fn distro_manifest(&self, guest: Guest) -> Option<PathBuf> {
-        if self.architecture == Architecture::Aarch64 {
-            return None;
-        }
         guest
             .distro_manifest_name()
             .map(|name| self.artifact(&name))
@@ -180,7 +174,12 @@ impl ArtifactDir {
     ///
     /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
     pub fn require_openvmm(&self) -> Result<PathBuf> {
-        required(self.openvmm(), "OpenVMM release binary")
+        let path = required(self.openvmm(), "OpenVMM release binary")?;
+        #[cfg(windows)]
+        if self.architecture == Architecture::Aarch64 {
+            super::check_arm64_pe(&path)?;
+        }
+        Ok(path)
     }
 
     /// Checks that the guest kernel is a regular file and returns its path.
@@ -257,14 +256,13 @@ impl ArtifactDir {
     ///
     /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
     pub fn sandbox_artifacts(&self) -> Result<Artifacts> {
-        if self.architecture == Architecture::Aarch64 {
-            return Err(Error::unsupported(
-                "ARM64 managed sandboxes are not qualified by the Phase 1 cold-boot contract",
-            ));
-        }
         self.require_openvmm()?;
         self.require_kernel()?;
-        required(self.initramfs(Guest::Alpine), "initramfs")?;
+        if self.architecture == Architecture::Aarch64 {
+            self.require_initramfs(Guest::Alpine)?;
+        } else {
+            required(self.initramfs(Guest::Alpine), "initramfs")?;
+        }
         Ok(Artifacts::located(self))
     }
 

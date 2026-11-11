@@ -46,7 +46,7 @@ use crate::host::store::RuntimeIdentity;
 pub use self::architecture::Architecture;
 pub use self::dir::{ArtifactDir, ArtifactPaths, GuestPaths, Layout};
 pub use self::guest::Guest;
-#[cfg(all(windows, feature = "cli"))]
+#[cfg(windows)]
 pub(crate) use self::identity::check_arm64_pe;
 #[cfg(feature = "cli")]
 pub(crate) use self::require::require_artifact;
@@ -169,6 +169,13 @@ impl Artifacts {
                 ));
             }
         }
+        if let Some(directory) = self.artifact_dir()
+            && directory.architecture() == Architecture::Aarch64
+        {
+            directory.require_openvmm()?;
+            directory.require_kernel()?;
+            directory.require_initramfs(Guest::Alpine)?;
+        }
         Ok(())
     }
 
@@ -202,7 +209,7 @@ impl Artifacts {
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) as
     /// [`check_manifest`] does.
-    fn from_artifact_dir(directory: &ArtifactDir) -> Result<Self> {
+    pub fn from_artifact_dir(directory: &ArtifactDir) -> Result<Self> {
         check_manifest(&directory.root().join(MANIFEST_NAME))?;
         Ok(Self::located(directory))
     }

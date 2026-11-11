@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use nvx::ErrorKind;
-use nvx::host::artifacts::ArtifactDir;
+use nvx::host::artifacts::{Architecture, ArtifactDir};
 use nvx::host::store::{ArtifactIdentity, IdentityPart, RuntimeIdentity};
 use runtime_adapter::GUEST_BUILD;
 use runtime_adapter::runtime::Runtime;
@@ -121,6 +121,34 @@ fn another_build_of_the_guest_agent_is_another_runtime() {
         let error = Runtime::from_dir(&root, build).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{build:?}: {error}");
     }
+}
+
+#[test]
+fn an_explicit_arm_runtime_keeps_the_legacy_x86_identity_and_paths_separate() {
+    let root = directory("arm-qualified");
+    lay_out(&root, false);
+    let build = root.join("build/aarch64");
+    fs::create_dir_all(&build).unwrap();
+    for (name, field, digest) in [
+        ("Image.provenance.json", "kernel_sha256", KERNEL),
+        ("initramfs.provenance.json", "initramfs_sha256", INITRAMFS),
+    ] {
+        fs::write(
+            build.join(name),
+            format!("{{\"format\":1,\"{field}\":\"{digest}\"}}"),
+        )
+        .unwrap();
+    }
+    let arm =
+        Runtime::from_dir_for_architecture(&root, GUEST_BUILD, Architecture::Aarch64).unwrap();
+    assert_eq!(arm.identity, identity(GUEST_BUILD));
+    assert_eq!(arm.artifacts.kernel, build.join("Image"));
+    assert_eq!(arm.artifacts.initrd, build.join("initramfs.cpio.gz"));
+    let legacy = Runtime::from_dir(&root, GUEST_BUILD).unwrap();
+    assert_eq!(legacy.artifacts.kernel, root.join("build/vmlinux"));
+    fs::remove_file(build.join("Image.provenance.json")).unwrap();
+    assert!(Runtime::from_dir_for_architecture(&root, GUEST_BUILD, Architecture::Aarch64).is_err());
+    assert!(Runtime::from_dir(&root, GUEST_BUILD).is_ok());
 }
 
 #[test]

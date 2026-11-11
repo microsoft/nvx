@@ -53,7 +53,50 @@ fn explicit_arm_paths_never_change_legacy_default_or_openvmm_location() {
     assert_eq!(arm.openvmm(), legacy.openvmm());
     assert_eq!(arm.openvmm().file_name().unwrap(), openvmm_executable());
     assert_eq!(arm.paths().guests.len(), 2);
-    assert!(arm.distro_layer(Guest::Ubuntu).is_none());
+    assert_eq!(
+        arm.distro_layer(Guest::Ubuntu).unwrap(),
+        root.path().join("build/aarch64/ubuntu-distro.erofs")
+    );
+    assert!(arm.sandbox_artifacts().is_err());
+}
+
+#[test]
+fn arm_managed_artifacts_require_matching_native_kernel_and_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let arm = ArtifactDir::repository(root.path())
+        .unwrap()
+        .with_architecture(Architecture::Aarch64)
+        .unwrap();
+    fs::create_dir_all(arm.openvmm().parent().unwrap()).unwrap();
+    let mut executable = [0; 70];
+    executable[..2].copy_from_slice(b"MZ");
+    executable[60..64].copy_from_slice(&64_u32.to_le_bytes());
+    executable[64..68].copy_from_slice(b"PE\0\0");
+    executable[68..70].copy_from_slice(&0xaa64_u16.to_le_bytes());
+    fs::write(arm.openvmm(), executable).unwrap();
+    fs::create_dir_all(arm.kernel().parent().unwrap()).unwrap();
+    fs::write(arm.kernel(), image()).unwrap();
+    fs::write(
+        arm.initramfs(Guest::Alpine),
+        b"unit fixture, not a bootable CPIO",
+    )
+    .unwrap();
+    assert!(arm.sandbox_artifacts().is_err());
+    fs::write(
+        arm.package_manifest(Guest::Alpine),
+        r#"{"architecture":"x86_64"}"#,
+    )
+    .unwrap();
+    assert!(arm.sandbox_artifacts().is_err());
+    fs::write(
+        arm.package_manifest(Guest::Alpine),
+        r#"{"architecture":"aarch64"}"#,
+    )
+    .unwrap();
+    let artifacts = arm.sandbox_artifacts().unwrap();
+    assert_eq!(artifacts.kernel, arm.kernel());
+    assert_eq!(artifacts.initrd, arm.initramfs(Guest::Alpine));
+    fs::write(arm.kernel(), b"foreign kernel").unwrap();
     assert!(arm.sandbox_artifacts().is_err());
 }
 

@@ -90,6 +90,13 @@ class DistroLayerBuildConfig:
     )
     output: Path = artifact_path(UbuntuBuildConstants.DISTRO_NAME)
     replace: bool = False
+    architecture: str = "x86_64"
+
+    def __post_init__(self) -> None:
+        if self.architecture not in ("x86_64", "aarch64"):
+            raise ScriptError(
+                f"unsupported distro-layer architecture: {self.architecture}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,18 +240,22 @@ class BuildConfig:
     @staticmethod
     def distro_layer_config(
         guest: str = UbuntuBuildConstants.GUEST_NAME,
+        architecture: str = "x86_64",
     ) -> DistroLayerBuildConfig:
         descriptor = guest_descriptor(guest)
+        directory = BuildConstants.BUILD_DIR
+        if architecture != "x86_64":
+            directory /= architecture
         return DistroLayerBuildConfig(
             guest=descriptor.name,
             work=(
-                BuildConstants.BUILD_DIR
+                directory
                 / InitramfsBuildConstants.DISTRO_WORK_DIRECTORY_TEMPLATE.format(
                     guest=descriptor.name
                 )
             ),
-            output=artifact_path(
-                BuildConstants.DISTRO_NAME_TEMPLATE.format(guest=descriptor.name)
-            ),
+            output=directory
+            / BuildConstants.DISTRO_NAME_TEMPLATE.format(guest=descriptor.name),
             replace=True,
+            architecture=architecture,
         )

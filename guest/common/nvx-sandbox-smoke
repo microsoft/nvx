@@ -242,6 +242,25 @@ check_machine_id() {
 # The workload can neither use the processor's I/O ports, whose read ends
 # the reader with SIGSEGV without the permission, nor obtain the permission.
 check_ports() {
+    case "${1:-$(uname -m)}" in
+        x86_64) ;;
+        aarch64)
+            for raw_device in /dev/mem /dev/port /dev/nvx-platform; do
+                [ ! -e "$raw_device" ] && [ ! -L "$raw_device" ] ||
+                    fail "the workload can reach raw device $raw_device"
+            done
+            for probe in snapshot "snapshot grant"; do
+                port_status=0
+                # The ARM helper must refuse the x86-only diagnostic itself.
+                # shellcheck disable=SC2086
+                /sbin/nvx-time test port-probe $probe 2>/dev/null || port_status=$?
+                [ "$port_status" -eq 2 ] ||
+                    fail "an ARM x86-port diagnostic ended with status $port_status"
+            done
+            return
+            ;;
+        *) fail "unsupported workload architecture ${1:-$(uname -m)}" ;;
+    esac
     port_status=0
     # The shell reports the signal on standard error, so silence it.
     { /sbin/nvx-time test port-probe snapshot; } 2>/dev/null || port_status=$?

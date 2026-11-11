@@ -496,8 +496,10 @@ class ProxyOnlyAcceptance(LifecycleAcceptance):
                 )
 
 
-def run_sandbox_proxy_only(backend: str, *, timeout: float, output_dir: Path) -> None:
-    artifacts = load_workload_artifacts()
+def run_sandbox_proxy_only(
+    backend: str, *, timeout: float, output_dir: Path, architecture: str = "x86_64"
+) -> None:
+    artifacts = load_workload_artifacts(architecture=architecture)
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-proxy-"))
     run_acceptance(
@@ -507,5 +509,6 @@ def run_sandbox_proxy_only(backend: str, *, timeout: float, output_dir: Path) ->
             output_dir=output_dir,
             artifacts=artifacts,
             root=root,
+            architecture=architecture,
         )
     )

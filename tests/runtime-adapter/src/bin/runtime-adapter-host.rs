@@ -4002,7 +4002,13 @@ fn runtime(guest_build: &str) -> Result<Runtime, String> {
                 Artifacts::ENV_DIR
             )
         })?;
-    Runtime::from_dir(directory, guest_build).map_err(|error| describe(&error))
+    let architecture = if cfg!(target_arch = "aarch64") {
+        nvx::host::artifacts::Architecture::Aarch64
+    } else {
+        nvx::host::artifacts::Architecture::X86_64
+    };
+    Runtime::from_dir_for_architecture(directory, guest_build, architecture)
+        .map_err(|error| describe(&error))
 }
 
 /// Connects to the control endpoint of the VM `vmm`, and attaches a session with `capability`,

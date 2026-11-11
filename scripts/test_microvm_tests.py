@@ -4289,6 +4289,10 @@ class MicrovmTests(unittest.TestCase):
         console: bytes = b"NVX-GUEST-BOOT-OK: managed\n",
         report: dict[str, object] | None = None,
         rejected: int = 1,
+        processors: int = 1,
+        layered: microvm_tests.WorkloadArtifacts | None = None,
+        scratch: Path | None = None,
+        expected_previous_state: str | None = None,
     ) -> list[tuple[list[str], dict[str, str], object]]:
         """Runs the scenario with a stand-in for the nvx-rs test, which leaves
         `console`, `report`, and `returncode` as the real one would."""
@@ -4327,6 +4331,10 @@ class MicrovmTests(unittest.TestCase):
                 memory_mib=256,
                 timeout=5,
                 output_dir=output_dir,
+                processors=processors,
+                layered=layered,
+                scratch=scratch,
+                expected_previous_state=expected_previous_state,
             )
         return runs
 
@@ -4407,6 +4415,56 @@ class MicrovmTests(unittest.TestCase):
             self.assertEqual(openvmm[openvmm.index(option) + 1], value)
         self.assertIn("--microvm-control-auth-stdin", openvmm)
         self.assertEqual(preserved, self._managed_report())
+
+    def test_managed_layered_inputs_reuse_the_same_authenticated_test(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = microvm_tests.WorkloadArtifacts(
+                root / "distro.erofs", "fixture-uuid", root / "template.ext4"
+            )
+            for mode in ("scratch", "ram"):
+                output = root / mode
+                output.mkdir()
+                scratch = root / "scratch.ext4" if mode == "scratch" else None
+                runs = self._run_managed_lifecycle(
+                    output,
+                    processors=8,
+                    layered=artifacts,
+                    scratch=scratch,
+                    expected_previous_state="present" if scratch else "absent",
+                )
+                self.assertEqual(len(runs), 1)
+                command, environment, _ = runs[0]
+                self.assertIn("managed_lifecycle", command)
+                openvmm = json.loads(environment["NVX_MANAGED_LIFECYCLE_COMMAND"])
+                self.assertEqual(openvmm[openvmm.index("--processors") + 1], "8")
+                blocks = [
+                    openvmm[index + 1]
+                    for index, option in enumerate(openvmm)
+                    if option == "--microvm-sandbox-block"
+                ]
+                self.assertIn(f"distro:file:{artifacts.distro.resolve()},ro", blocks)
+                if scratch:
+                    self.assertIn(f"scratch:file:{scratch.resolve()}", blocks)
+                else:
+                    self.assertEqual(len(blocks), 1)
+                cmdline = openvmm[openvmm.index("--cmdline") + 1]
+                self.assertIn("nvx_sandbox=1", cmdline)
+                self.assertIn(
+                    "nvx_scratch=0xd0006000,ext4"
+                    if scratch
+                    else "nvx_overlay_upper=ramfs",
+                    cmdline.split(),
+                )
+                self.assertIn("--microvm-control-auth-stdin", openvmm)
+                self.assertEqual(environment["NVX_MANAGED_LIFECYCLE_PROCESSORS"], "8")
+                self.assertEqual(
+                    environment["NVX_MANAGED_LIFECYCLE_ROOT_MODE"], "sandbox"
+                )
+                self.assertEqual(
+                    environment["NVX_MANAGED_LIFECYCLE_PREVIOUS_STATE"],
+                    "present" if scratch else "absent",
+                )
 
     def test_managed_lifecycle_hands_the_test_an_absolute_pid_journal(self):
         # The nvx-rs test records OpenVMM in an adversarial campaign's journal
@@ -16153,7 +16211,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "whp", timeout=args.timeout, output_dir=output_dir
+                "whp",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
 
     def test_runner_dispatches_public_sandbox_lifecycle(self):
@@ -16184,7 +16245,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "mshv", timeout=args.timeout, output_dir=output_dir
+                "mshv",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
             managed_exec.assert_not_called()
 
@@ -16214,7 +16278,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "kvm", timeout=args.timeout, output_dir=output_dir
+                "kvm",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
             lifecycle.assert_not_called()
 
@@ -16244,7 +16311,10 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once_with(
-                "whp", timeout=args.timeout, output_dir=output_dir
+                "whp",
+                timeout=args.timeout,
+                output_dir=output_dir,
+                architecture="x86_64",
             )
             lifecycle.assert_not_called()
 
