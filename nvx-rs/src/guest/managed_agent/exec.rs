@@ -8,8 +8,8 @@ use crate::guest::process::Child;
 use crate::guest::spawn::{self as sandbox_spawn, Barrier};
 use crate::guest::sys::{self, Errno, FileDescriptor, ProcessId, c_string};
 use crate::protocol::{
-    self, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, BUSY, CWD_FAILED,
-    GuestExecPayload, LAUNCH_FAILED, OUTER_DATA,
+    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, BUSY,
+    CWD_FAILED, GuestExecPayload, LAUNCH_FAILED, OUTER_DATA,
 };
 
 use super::AgentConfig;
@@ -862,6 +862,12 @@ fn handle_control(
                 ExecControl::None
             }
         });
+    }
+    if request.kind == APP_ACTIVATE && session.has_restored() {
+        // The started activation never applies again: an identical retry gets its cached Ready,
+        // and any other fails it, which ends the workload with the session.
+        session.activate(request)?;
+        return Ok(ExecControl::None);
     }
     session.send_error(request.request_id, Errno::EBUSY as i32, BUSY)?;
     Ok(ExecControl::None)
