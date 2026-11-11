@@ -26,18 +26,20 @@ use crate::activation::{
 };
 use crate::host::config::{
     BlockGeometry, CaptureConfig, ConsoleAttachment, DiskCapture, NetworkConfig, NicConfig,
-    RootConfig, UpperConfig, VmConfig, fit_process_command_line, reject_disk_path,
+    RootConfig, UpperConfig, VmConfig, check_argument_nuls, check_endpoint, console_arguments,
+    fit_process_command_line, reject_disk_path, runtime_arguments,
 };
 use crate::host::filesystem;
 use crate::host::network;
 use crate::host::paths::absolute;
 use crate::host::platform;
 use crate::host::report::{self, Report};
+use crate::host::restore::ReadyListener;
 use crate::host::runtime::{Runtime, RuntimeIdentity};
-use crate::host::snapshot::{CaptureContext, Snapshot};
+use crate::host::snapshot::{CaptureContext, HostTime, Snapshot};
 use crate::host::spawn;
 use crate::host::transport::{self, HostConnection};
-use crate::host::vm_directory::{CONSOLE, CONTROL, io_error};
+use crate::host::vm_directory::{CONSOLE, CONTROL, RESTORE_READY, io_error};
 pub use crate::host::vm_directory::{VmDir, VmOutputs, create_private_dir};
 use crate::host::{
     platform::inherit::Inherited,
@@ -247,7 +249,7 @@ impl std::os::windows::io::AsHandle for InheritedHandle {
     }
 }
 
-/// A complete cold launch handed to the caller's launcher, with all its resources owned.
+/// A complete launch handed to the caller's launcher, with all its resources owned.
 ///
 /// The launcher supplies the capability on stdin through a pipe closed to writers before
 /// spawning, and uses the opened log for stdout and stderr. It allows only the standard streams
@@ -259,8 +261,9 @@ impl std::os::windows::io::AsHandle for InheritedHandle {
 /// refuse a taken or untrusted job name, and honor `breakaway_from_job`. Windows callers
 /// coordinate their other spawns with the inheritance window. If setup fails after spawning,
 /// terminate and reap only that child before returning an error. The caller journals recovery
-/// data and keeps the VM directory and runtime inputs stable; this value starts no process or
-/// listener.
+/// data and keeps the VM directory and runtime inputs stable; this value starts no process.
+/// A restore retains its already-bound ready listener in `ready`, outside the child
+/// inheritance allowlist.
 #[derive(Debug)]
 pub struct VmmCommand {
     /// The checked OpenVMM executable.
@@ -279,12 +282,15 @@ pub struct VmmCommand {
     pub log: File,
     /// Whether Windows leaves the caller's job, which must permit breakaway.
     pub breakaway_from_job: bool,
+    /// The same restore-ready listener bound during creation, absent for a cold launch.
+    pub ready: Option<ReadyListener>,
 }
 
-/// A checked cold launch, with its capability, chosen outputs, and already opened log.
+/// A checked launch, with its capability, chosen outputs, and already opened log.
 ///
-/// Creation starts no process and binds no listener. The caller keeps the VM directory and
-/// runtime inputs stable, and may journal the capability and outputs before a later spawn.
+/// Creation starts no process; a restore binds its ready listener. The caller keeps the VM
+/// directory and runtime inputs stable, and may journal the capability and outputs before a
+/// later spawn.
 /// Dropping a successful preparation closes its files but leaves its output paths to the caller.
 #[derive(Debug)]
 pub struct Prepared {
@@ -312,6 +318,8 @@ pub struct Prepared {
     inherit: Vec<InheritedHandle>,
     /// The checked context of a capture, absent for an ordinary cold launch.
     capture_context: Option<CaptureContext>,
+    /// The restore's listener, retained outside the child's inheritance allowlist.
+    ready: Option<ReadyListener>,
 }
 
 impl Prepared {
@@ -453,10 +461,11 @@ impl Prepared {
     /// Transfers the complete checked launch to the caller's launcher.
     ///
     /// Moves the same opened log and inherited resources, without cloning, reopening, rendering
-    /// arguments again or rediscovering paths. Starts no process or listener. The caller follows
-    /// [`VmmCommand`]'s launch contract and may retain its capability and outputs for recovery.
-    /// Read [`nic`](Self::nic) or [`capture_context`](Self::capture_context), or build an
-    /// [`activation_record`](Self::activation_record), before consuming the preparation.
+    /// arguments again or rediscovering paths. Moves a restore's same bound listener, without
+    /// putting it in the child's inheritance allowlist. Starts no process or new listener. The
+    /// caller follows [`VmmCommand`]'s launch contract and may retain its capability and outputs
+    /// for recovery. Read [`nic`](Self::nic) or [`capture_context`](Self::capture_context), or
+    /// build an [`activation_record`](Self::activation_record), before consuming the preparation.
     pub fn into_command(self) -> VmmCommand {
         VmmCommand {
             program: self.program,
@@ -467,13 +476,18 @@ impl Prepared {
             inherit: self.inherit,
             log: self.log,
             breakaway_from_job: self.windows_breakaway,
+            ready: self.ready,
         }
     }
 }
 
-/// Creates an inspectable cold launch in `dir`, without starting a process or binding endpoints.
+/// Creates an inspectable cold launch or snapshot restore in `dir`, without starting a process.
 ///
-/// A cold launch needs [`VmConfig::boot`]. Restoring `from` a [`Snapshot`] is not supported yet.
+/// A cold launch needs [`VmConfig::boot`]; a restore refuses it and calls [`Snapshot::accepts`]
+/// with this host's actual time. A restore hard-links only the snapshot's OpenVMM files into the
+/// new, fixed `openvmm/` view, requiring the same filesystem, and binds its ready listener before
+/// any spawn. Both launch paths retain that same listener. Nothing is copied or restored from a
+/// snapshot-parent fallback. The successful view and all output paths remain caller-owned.
 /// The caller keeps the directory and runtime inputs stable during creation and a later spawn.
 /// Caller-relative runtime and block-image paths become absolute during creation, without
 /// resolving links or `..` components; output paths come from `dir`.
@@ -487,7 +501,17 @@ impl Prepared {
 /// checked capture context. OpenVMM captures to `openvmm/` under this VM directory, with a
 /// configured NIC under deny-all. No key, description or context file is written.
 ///
-/// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a restore, a missing
+/// On Linux the caller holds its per-snapshot lock from this call, including adding the hard
+/// links, through a peer-verified restore-ready event or the VM's verified exit, and around
+/// removing `openvmm/`. NVX acquires no lock; Windows needs none. A restore whose caller dies
+/// before OpenVMM connects the restore-ready endpoint cannot complete: OpenVMM checks the
+/// snapshot's files before that one connection, which it does not retry, and the dead caller's
+/// endpoint no longer listens. After the connection OpenVMM no longer checks those files, so
+/// the caller needs no durable record of its in-flight restores; it keeps the VM's process as it
+/// does for any launch.
+///
+/// Fails as [`Snapshot::accepts`] does, or with
+/// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for Boot on a restore, a missing
 /// boot, a refused configuration, unrepresentable Linux socket names, or a complete Windows
 /// command line beyond the portable limit.
 /// The final check includes the actual runtime and output paths, with no reserve, on every host.
@@ -499,12 +523,14 @@ pub fn create(
     from: Option<&Snapshot>,
     dir: &VmDir,
 ) -> Result<Prepared> {
-    if from.is_some() {
-        return Err(Error::unsupported(
-            "creating a VM from a Snapshot is not supported yet",
-        ));
-    }
-    if config.boot.is_none() {
+    if let Some(snapshot) = from {
+        if config.boot.is_some() {
+            return Err(Error::unsupported(
+                "restoring a Snapshot does not take Boot",
+            ));
+        }
+        snapshot.accepts(config, runtime, &HostTime::now()?)?;
+    } else if config.boot.is_none() {
         return Err(Error::unsupported("creating a cold VM needs Boot"));
     }
     let capture = config.boot.as_ref().and_then(|boot| boot.capture.as_ref());
@@ -515,8 +541,16 @@ pub fn create(
     VmDir::open(dir.path())?;
     platform::check_working_dir(dir.path())?;
     let outputs = dir.outputs(config.console == ConsoleAttachment::Listener)?;
+    let ready_endpoint = if from.is_some() && !cfg!(windows) {
+        Some(dir.restore_ready_endpoint()?)
+    } else {
+        None
+    };
     if !cfg!(windows) {
-        for endpoint in std::iter::once(&outputs.endpoint).chain(outputs.console.as_ref()) {
+        for endpoint in std::iter::once(&outputs.endpoint)
+            .chain(outputs.console.as_ref())
+            .chain(ready_endpoint.as_ref())
+        {
             if endpoint.len() >= 108 || endpoint.contains([',', '=']) {
                 return Err(Error::unsupported(format!(
                     "the VM socket {endpoint} must be shorter than 108 bytes and hold no ',' or '='",
@@ -525,7 +559,10 @@ pub fn create(
         }
         let canonical = filesystem::canonicalize(dir.path())
             .map_err(|error| io_error("resolve", dir.path(), error))?;
-        for name in std::iter::once(CONTROL).chain(outputs.console.as_ref().map(|_| CONSOLE)) {
+        for name in std::iter::once(CONTROL)
+            .chain(outputs.console.as_ref().map(|_| CONSOLE))
+            .chain(ready_endpoint.as_ref().map(|_| RESTORE_READY))
+        {
             let endpoint = canonical.join(name);
             if endpoint.to_str().is_none() || endpoint.as_os_str().len() >= 108 {
                 return Err(Error::unsupported(format!(
@@ -569,6 +606,9 @@ pub fn create(
         .with_source(error)
     })?;
     let mut created = Vec::new();
+    let view = dir.path().join(OPENVMM);
+    let mut created_view = false;
+    let mut ready = None;
     let checked = (|| {
         #[cfg(unix)]
         {
@@ -591,6 +631,31 @@ pub fn create(
             }
         }
         let capability = Capability(crate::host::instance::generate_capability()?);
+        if let Some(snapshot) = from {
+            unused_output(&view)?;
+            if let Some(endpoint) = &ready_endpoint {
+                unused_output(Path::new(endpoint))?;
+            }
+            // The private directory stays caller-stable; setup can fail after creating it.
+            created_view = true;
+            create_private_dir(&view)?;
+            snapshot.link_restore_view(&view, &mut created)?;
+            // Binding can leave its new socket if later listener setup fails.
+            if let Some(endpoint) = &ready_endpoint {
+                created.push(PathBuf::from(endpoint));
+            }
+            let listener = ReadyListener::bind(dir)?;
+            let arguments = restore_arguments(
+                &runtime,
+                &config,
+                snapshot,
+                dir,
+                &outputs,
+                listener.endpoint(),
+            )?;
+            ready = Some(listener);
+            return Ok((capability, arguments, snapshot.nic(), None));
+        }
         let mut arguments = config.openvmm_arguments(
             &runtime,
             &outputs.endpoint,
@@ -659,9 +724,11 @@ pub fn create(
             nic,
             inherit: Vec::new(),
             capture_context,
+            ready,
         }),
         Err(mut error) => {
             drop(log);
+            drop(ready);
             for path in created.iter().rev() {
                 if let Err(cleanup) = fs::remove_file(path)
                     && cleanup.kind() != io::ErrorKind::NotFound
@@ -669,12 +736,25 @@ pub fn create(
                     error = Error::new(
                         error.kind(),
                         format!(
-                            "{error}; cannot remove created capture file {}: {cleanup}",
+                            "{error}; cannot remove created VM entry {}: {cleanup}",
                             path.display()
                         ),
                     )
                     .with_source(error);
                 }
+            }
+            if created_view
+                && let Err(cleanup) = fs::remove_dir(&view)
+                && cleanup.kind() != io::ErrorKind::NotFound
+            {
+                error = Error::new(
+                    error.kind(),
+                    format!(
+                        "{error}; cannot remove created restore view {}: {cleanup}",
+                        view.display()
+                    ),
+                )
+                .with_source(error);
             }
             match fs::remove_file(&outputs.log) {
                 Ok(()) => Err(error),
@@ -692,6 +772,73 @@ pub fn create(
     }
 }
 
+/// Renders a restore without cold-boot inputs or a store/lease dependency.
+fn restore_arguments(
+    runtime: &Runtime,
+    config: &VmConfig,
+    snapshot: &Snapshot,
+    dir: &VmDir,
+    outputs: &VmOutputs,
+    ready: &str,
+) -> Result<Vec<OsString>> {
+    check_endpoint(&outputs.endpoint, "endpoint")?;
+    check_endpoint(ready, "restore-ready endpoint")?;
+    for (name, path) in [
+        ("Runtime.openvmm", runtime.openvmm.as_path()),
+        ("report", outputs.outcome.as_path()),
+    ] {
+        if path.as_os_str().is_empty() || path.as_os_str().to_string_lossy().contains('\0') {
+            return Err(Error::unsupported(format!(
+                "{name} must name a path without a NUL"
+            )));
+        }
+    }
+    for endpoint in std::iter::once(&outputs.endpoint).chain(outputs.console.as_ref()) {
+        if endpoint == ready
+            || (runtime.hypervisor == crate::Hypervisor::Whp
+                && endpoint.eq_ignore_ascii_case(ready))
+        {
+            return Err(Error::unsupported(
+                "restore-ready and console endpoints must be distinct",
+            ));
+        }
+    }
+    let console = config.console_backend(runtime, &outputs.endpoint, outputs.console.as_deref())?;
+    let key = snapshot.key();
+    let mut arguments = config.restore_device_arguments(key.processors(), snapshot.nic())?;
+    arguments.extend([
+        "--single-process".into(),
+        "--hypervisor".into(),
+        key.hypervisor().as_str().into(),
+        "--restore-snapshot".into(),
+        dir.path().join(OPENVMM).into_os_string(),
+    ]);
+    if key.boot_processors() != 0 {
+        arguments.extend([
+            "--restore-processors".into(),
+            config.processors.to_string().into(),
+        ]);
+    }
+    arguments.extend([
+        "--restore-memory".into(),
+        format!("{}M", config.memory_mib).into(),
+        "--restore-ready-path".into(),
+        ready.into(),
+    ]);
+    arguments.extend(console_arguments(
+        &console,
+        &outputs.endpoint,
+        &outputs.outcome,
+    ));
+    arguments.extend(runtime_arguments(&Runtime {
+        cpu_profile: Some(key.cpu_profile()),
+        ..runtime.clone()
+    })?);
+    check_argument_nuls(&arguments)?;
+    fit_process_command_line(runtime.openvmm.as_os_str(), &arguments, 0)?;
+    Ok(arguments)
+}
+
 /// A detached VM owned by its caller.
 ///
 /// Dropping this value closes the process handle, not the VM. Its outputs remain caller-owned,
@@ -704,6 +851,8 @@ pub struct Launched {
     pub outputs: VmOutputs,
     /// The control credential, never written to disk.
     pub capability: Capability,
+    /// The preparation's same restore-ready listener, absent for a cold launch.
+    pub ready: Option<ReadyListener>,
     /// Retains only a foreground caller's child for status and control attachment.
     #[cfg(feature = "cli")]
     child: ForegroundChild,
@@ -742,7 +891,7 @@ impl Launched {
     }
 }
 
-/// Starts a prepared cold launch and returns its verified, detached process.
+/// Starts a prepared launch and returns its verified, detached process and any ready listener.
 ///
 /// The capability reaches OpenVMM only on standard input, followed by end-of-file. The opened
 /// log becomes standard output and error without reopening its path. Only the preparation's
@@ -861,6 +1010,7 @@ fn spawn_verified_with_cleanup(
         log,
         arguments,
         inherit,
+        ready,
         ..
     } = prepared;
     let command = spawn::VmmCommand {
@@ -915,6 +1065,7 @@ fn spawn_verified_with_cleanup(
         process,
         outputs,
         capability,
+        ready,
         #[cfg(feature = "cli")]
         child: ForegroundChild(child),
     })

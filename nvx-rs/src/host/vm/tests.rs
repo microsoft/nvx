@@ -824,6 +824,7 @@ fn cold_creation_is_inspectable_without_a_process_listener_or_capability_file() 
         };
         let prepared = create(&runtime, &config, None, &vm).unwrap();
         assert!(prepared.capture_context().is_none());
+        assert!(prepared.ready.is_none());
         let outputs = prepared.outputs();
         assert_eq!(outputs.log, vm.path().join("openvmm.log"));
         assert_eq!(
@@ -851,7 +852,7 @@ fn cold_creation_is_inspectable_without_a_process_listener_or_capability_file() 
 }
 
 #[test]
-fn a_missing_boot_and_a_snapshot_are_refused_before_any_output_is_created() {
+fn a_missing_boot_and_boot_with_a_snapshot_are_refused_before_any_output_is_created() {
     let (_directory, vm) = vm_dir();
     let runtime = cold_runtime();
     let mut config = cold_config();
@@ -866,6 +867,432 @@ fn a_missing_boot_and_a_snapshot_are_refused_before_any_output_is_created() {
         assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
         assert!(error.to_string().contains(expected), "{error}");
         assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn snapshot_creation_checks_eligibility_and_real_host_time_before_creating_outputs() {
+    use crate::host::snapshot::tests::RestoreFixture;
+
+    for refusal in [
+        "processors",
+        "memory",
+        "runtime",
+        "backend",
+        "profile",
+        "NIC",
+        "address",
+        "console",
+        "early",
+        "expired",
+    ] {
+        let mut fixture = RestoreFixture::current(true);
+        let mut kind = ErrorKind::Unsupported;
+        match refusal {
+            "processors" => fixture.config.processors = 8,
+            "memory" => fixture.config.memory_mib = 129,
+            "runtime" => {
+                fixture.runtime.identity.kernel = ArtifactIdentity::new("other-kernel").unwrap()
+            }
+            "backend" => fixture.runtime.hypervisor = Hypervisor::Mshv,
+            "profile" => fixture.runtime.cpu_profile = Some("different".to_owned()),
+            "NIC" => fixture.config.network = None,
+            "address" => {
+                fixture.config.network.as_mut().unwrap().guest_network =
+                    Some(Ipv4Cidr::parse("10.43.0.2/24").unwrap())
+            }
+            "console" => fixture.config.console = ConsoleAttachment::Listener,
+            "early" | "expired" => {
+                let mut time = HostTime::now().unwrap();
+                time.host_id[0] ^= 1;
+                let outside = crate::host::snapshot::MAX_DOWNTIME_NS + 1_000_000_000;
+                time.utc_ns = if refusal == "early" {
+                    time.utc_ns + outside
+                } else {
+                    time.utc_ns - outside
+                };
+                fixture.retime(time);
+                kind = ErrorKind::Unavailable;
+            }
+            _ => unreachable!(),
+        }
+        let snapshot = fixture.opened();
+        let (_directory, vm) = vm_dir();
+        let error = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap_err();
+        assert_eq!(error.kind(), kind, "{refusal}: {error}");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0, "{refusal}");
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn snapshot_creation_owns_the_fixed_view_and_uses_captured_nic_with_requested_policy() {
+    use crate::host::snapshot::tests::RestoreFixture;
+
+    let mut published = NetworkPolicy::new(Access::Allow);
+    published.ingress = Access::Allow;
+    for (policy, expected) in [
+        (
+            published,
+            Network {
+                dns: Some("10.42.0.1".parse().unwrap()),
+                publication: Publication::Published,
+                proxy: None,
+            },
+        ),
+        (
+            NetworkPolicy::new(Access::Deny),
+            Network {
+                dns: None,
+                publication: Publication::Unpublished,
+                proxy: None,
+            },
+        ),
+        (
+            NetworkPolicy::proxy_only(NetworkProxy::new(3128).with_scheme(ProxyScheme::Http)),
+            Network {
+                dns: None,
+                publication: Publication::Unpublished,
+                proxy: Some("http://10.42.0.1:3128".to_owned()),
+            },
+        ),
+    ] {
+        let mut fixture = RestoreFixture::current(true);
+        fixture.config.network.as_mut().unwrap().policy = policy;
+        let snapshot = fixture.opened();
+        let (_directory, vm) = vm_dir();
+        let input = vm.path().join("caller-input");
+        fs::write(&input, b"preserved").unwrap();
+        let prepared = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap();
+        assert_eq!(prepared.nic(), snapshot.nic());
+        assert!(prepared.capture_context().is_none());
+        assert!(prepared.ready.is_some());
+        let record = prepared
+            .activation_record(TransactionId::from_bytes([0x31; 16]))
+            .unwrap();
+        assert_eq!(record.configuration().network, Some(expected));
+        assert!(prepared.inherit.is_empty());
+        for name in crate::host::snapshot::SNAPSHOT_ARTIFACTS {
+            assert_eq!(
+                platform::file_identity(&snapshot.dir.join(OPENVMM).join(name)).unwrap(),
+                platform::file_identity(&vm.path().join(OPENVMM).join(name)).unwrap()
+            );
+        }
+        drop(prepared);
+        assert_eq!(fs::read_dir(vm.path().join(OPENVMM)).unwrap().count(), 3);
+        assert_eq!(fs::read(&input).unwrap(), b"preserved");
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn snapshot_creation_never_replaces_existing_outputs_views_or_listeners() {
+    use crate::host::snapshot::tests::RestoreFixture;
+
+    let mut names = vec![
+        crate::host::vm_directory::LOG,
+        crate::host::vm_directory::OUTCOME,
+        OPENVMM,
+    ];
+    if !cfg!(windows) {
+        names.extend([CONTROL, RESTORE_READY]);
+    }
+    for name in names {
+        let fixture = RestoreFixture::current(false);
+        let snapshot = fixture.opened();
+        let (_directory, vm) = vm_dir();
+        let path = vm.path().join(name);
+        let preserved = if name == OPENVMM {
+            fs::create_dir(&path).unwrap();
+            path.join("caller-file")
+        } else {
+            path
+        };
+        fs::write(&preserved, b"existing").unwrap();
+        let error = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Io, "{name}: {error}");
+        assert_eq!(fs::read(&preserved).unwrap(), b"existing");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn snapshot_creation_rolls_back_partial_links_and_a_render_failure_after_binding() {
+    use crate::host::snapshot::tests::RestoreFixture;
+    use std::error::Error as _;
+
+    for partial_link in [false, true] {
+        let mut fixture = RestoreFixture::current(false);
+        let snapshot = fixture.opened();
+        if partial_link {
+            fs::remove_file(snapshot.dir.join(OPENVMM).join("memory.bin")).unwrap();
+        } else {
+            fixture.runtime.openvmm = PathBuf::from("x".repeat(PROCESS_COMMAND_LINE_LIMIT));
+        }
+        let (_directory, vm) = vm_dir();
+        let input = vm.path().join("caller-input");
+        fs::write(&input, b"preserved").unwrap();
+        let error = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap_err();
+        if partial_link {
+            assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+            assert_eq!(
+                error
+                    .source()
+                    .unwrap()
+                    .downcast_ref::<io::Error>()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::NotFound
+            );
+        } else {
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+            assert!(
+                error.to_string().contains("Windows process command line"),
+                "{error}"
+            );
+        }
+        assert_eq!(fs::read(&input).unwrap(), b"preserved");
+        assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_same_prebound_listener_keeps_its_queue_through_both_launch_paths_without_inheritance() {
+    use crate::host::snapshot::tests::RestoreFixture;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    for external in [false, true] {
+        let fixture = RestoreFixture::current(false);
+        let snapshot = fixture.opened();
+        let (_directory, vm) = vm_dir();
+        let mut prepared = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap();
+        let endpoint = vm.path().join(RESTORE_READY);
+        let original = platform::file_identity(&endpoint).unwrap();
+        let queued = UnixStream::connect(&endpoint).unwrap();
+        let mut running = None;
+        let listener = if external {
+            let command = prepared.into_command();
+            assert!(command.inherit.is_empty());
+            command.ready.unwrap().into_std().unwrap()
+        } else {
+            (prepared.program, prepared.arguments) = stand_in_command();
+            running = Some(RunningVm(spawn(prepared).unwrap()));
+            running
+                .as_mut()
+                .unwrap()
+                .0
+                .ready
+                .take()
+                .unwrap()
+                .into_std()
+                .unwrap()
+        };
+        assert_eq!(platform::file_identity(&endpoint).unwrap(), original);
+        let (accepted, _) = listener
+            .accept()
+            .expect("the connection queued before handoff remains");
+        assert_eq!(
+            listener.local_addr().unwrap().as_pathname(),
+            Some(endpoint.as_path())
+        );
+        if let Some(running) = &running {
+            let socket = fs::read_link(format!("/proc/self/fd/{}", listener.as_raw_fd())).unwrap();
+            let descriptors = format!("/proc/{}/fd", running.0.process.reference().pid);
+            for entry in fs::read_dir(descriptors).unwrap() {
+                match fs::read_link(entry.unwrap().path()) {
+                    Ok(inherited) => assert_ne!(
+                        inherited, socket,
+                        "the caller's ready listener reached the child"
+                    ),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("cannot inspect the owned child descriptor: {error}"),
+                }
+            }
+        }
+        drop((accepted, queued, running));
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn snapshot_creation_keeps_captured_console_attachment_and_zero_boot_processor_rules() {
+    use crate::host::snapshot::tests::RestoreFixture;
+
+    for listener in [false, true] {
+        let mut fixture = RestoreFixture::current(false);
+        fixture.all_processors_online();
+        if listener {
+            fixture.console_listener();
+        }
+        let snapshot = fixture.opened();
+        let (_directory, vm) = vm_dir();
+        let prepared = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap();
+        assert!(
+            !prepared
+                .arguments()
+                .iter()
+                .any(|arg| arg == "--restore-processors")
+        );
+        let console = prepared
+            .arguments()
+            .windows(2)
+            .find(|pair| pair[0] == "--virtio-console")
+            .unwrap();
+        assert_eq!(
+            console[1],
+            if listener {
+                OsString::from(format!(
+                    "listen={}",
+                    prepared.outputs().console.as_ref().unwrap()
+                ))
+            } else {
+                OsString::from("none")
+            }
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+#[ignore = "requires an explicitly approved second filesystem in NVX_VM_TEST_OTHER_FILESYSTEM"]
+fn snapshot_creation_refuses_a_true_cross_filesystem_view_without_copying() {
+    use crate::host::snapshot::tests::RestoreFixture;
+    use std::error::Error as _;
+
+    let other = std::env::var_os("NVX_VM_TEST_OTHER_FILESYSTEM")
+        .expect("an explicitly approved second filesystem is required, not a skipped assertion");
+    let fixture = RestoreFixture::current(false);
+    let snapshot = fixture.opened();
+    let directory = tempfile::tempdir_in(other).unwrap();
+    let path = directory.path().join("vm");
+    create_private_dir(&path).unwrap();
+    let vm = VmDir::open(&path).unwrap();
+    let input = vm.path().join("caller-input");
+    fs::write(&input, b"preserved").unwrap();
+    assert_ne!(
+        platform::file_identity(&input).unwrap().0,
+        platform::file_identity(&snapshot.dir.join(OPENVMM).join("memory.bin"))
+            .unwrap()
+            .0,
+        "the test must actually cross filesystems"
+    );
+    let error = create(&fixture.runtime, &fixture.config, Some(&snapshot), &vm).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io, "{error}");
+    let source = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
+    eprintln!(
+        "strict cross-filesystem refusal: native={:?}; source_fs={}; destination_fs={}; {error}",
+        source.raw_os_error(),
+        platform::file_identity(&snapshot.dir.join(OPENVMM).join("memory.bin"))
+            .unwrap()
+            .0,
+        platform::file_identity(&input).unwrap().0,
+    );
+    #[cfg(target_os = "linux")]
+    assert_eq!(source.raw_os_error(), Some(nix::libc::EXDEV));
+    #[cfg(windows)]
+    assert_eq!(
+        source.raw_os_error(),
+        Some(windows_sys::Win32::Foundation::ERROR_NOT_SAME_DEVICE as i32)
+    );
+    assert_eq!(fs::read(&input).unwrap(), b"preserved");
+    assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn restore_arguments_use_snapshot_capacity_current_policy_and_no_cold_inputs() {
+    use crate::host::snapshot::tests::RestoreFixture;
+
+    for upper_in_ram in [false, true] {
+        for policy in [
+            NetworkPolicy::new(Access::Allow),
+            NetworkPolicy::new(Access::Deny),
+            NetworkPolicy::proxy_only(NetworkProxy::new(3128)),
+        ] {
+            let mut fixture = RestoreFixture::new(true);
+            fixture.config.network.as_mut().unwrap().policy = policy.clone();
+            fixture.config.processors = 4;
+            fixture.config.memory_mib = 768;
+            if upper_in_ram {
+                let RootConfig::Layered(root) = &mut fixture.config.root else {
+                    unreachable!()
+                };
+                root.upper = UpperConfig::Ram {
+                    max_memory_percent: 50,
+                };
+            }
+            let snapshot = fixture.opened();
+            let (_directory, vm) = vm_dir();
+            let outputs = vm.outputs(false).unwrap();
+            let ready = vm.restore_ready_endpoint().unwrap();
+            let arguments = restore_arguments(
+                &fixture.runtime,
+                &fixture.config,
+                &snapshot,
+                &vm,
+                &outputs,
+                &ready,
+            )
+            .unwrap();
+            let value = |name| {
+                arguments
+                    .windows(2)
+                    .find(|pair| pair[0] == name)
+                    .map(|pair| pair[1].clone())
+            };
+            assert_eq!(value("--processors"), Some("4".into()));
+            assert_eq!(value("--restore-processors"), Some("4".into()));
+            assert_eq!(value("--restore-memory"), Some("768M".into()));
+            assert_eq!(
+                value("--restore-snapshot"),
+                Some(vm.path().join(OPENVMM).into_os_string())
+            );
+            assert_eq!(value("--restore-ready-path"), Some(ready.into()));
+            assert_eq!(value("--virtio-console"), Some("none".into()));
+            assert_eq!(
+                value("--cpu-profile"),
+                Some(snapshot.key().cpu_profile().into())
+            );
+            assert_eq!(
+                arguments
+                    .iter()
+                    .filter(|arg| *arg == "--restore-network-policy")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                arguments
+                    .iter()
+                    .any(|arg| arg == "--restore-absent-scratch"),
+                upper_in_ram
+            );
+            assert_eq!(
+                arguments
+                    .iter()
+                    .filter(|arg| *arg == "--microvm-sandbox-block")
+                    .count(),
+                if upper_in_ram { 1 } else { 2 }
+            );
+            for forbidden in [
+                "--net",
+                "--kernel",
+                "--initrd",
+                "--cmdline",
+                "--memory",
+                "--snapshot-destination",
+            ] {
+                assert!(!arguments.iter().any(|arg| arg == forbidden), "{forbidden}");
+            }
+            let proxy = policy.proxy.is_some();
+            assert_eq!(
+                value("--network-proxy"),
+                proxy.then(|| "10.42.0.1:3128".into())
+            );
+            assert_eq!(fs::read_dir(vm.path()).unwrap().count(), 0);
+        }
     }
 }
 
@@ -1359,6 +1786,7 @@ fn spawn_returns_the_same_outputs_and_capability_with_a_verified_process() {
     let launched = RunningVm(spawn(prepared).unwrap());
     assert_eq!(launched.0.outputs, outputs);
     assert_eq!(launched.0.capability.as_bytes(), &capability);
+    assert!(launched.0.ready.is_none());
     let reference = launched.0.process.reference();
     assert_ne!(reference.pid, std::process::id());
     let Opened::Running(reopened) = Process::open(reference).unwrap() else {
@@ -1573,6 +2001,7 @@ fn a_library_vm_outlives_the_caller_that_spawned_it_without_retaining_its_output
         process,
         outputs: VmDir::open(&vm).unwrap().outputs(false).unwrap(),
         capability: Capability([0; CAPABILITY_LEN]),
+        ready: None,
         #[cfg(feature = "cli")]
         child: ForegroundChild(None),
     });

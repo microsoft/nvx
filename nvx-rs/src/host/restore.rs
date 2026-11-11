@@ -19,7 +19,7 @@ use std::{fmt, io};
 use super::platform;
 use super::process::{Process, ProcessRef};
 use super::report::Report;
-use super::vm::VmDir;
+use super::vm_directory::VmDir;
 use crate::activation::{ActivationRecord, ReadyActivation};
 use crate::protocol::restore_ready::parse_ready_event;
 use crate::protocol::status;
@@ -521,10 +521,6 @@ impl ReadyListener {
     /// Replaces a previous Linux endpoint. Fails with [`ErrorKind::Io`](crate::ErrorKind::Io)
     /// if binding fails or the directory is no longer private, and with
     /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) on unsupported hosts.
-    #[cfg_attr(
-        not(all(test, any(target_os = "linux", windows))),
-        expect(dead_code, reason = "SL2.16 binds a restore's endpoint (#1103)")
-    )]
     pub(crate) fn bind(directory: &VmDir) -> Result<Self> {
         let directory = VmDir::open(directory.path())?;
         let endpoint = directory.restore_ready_endpoint()?;
@@ -540,10 +536,6 @@ impl ReadyListener {
     }
 
     /// Returns the endpoint for OpenVMM's `--restore-ready-path`.
-    #[cfg_attr(
-        not(all(test, any(target_os = "linux", windows))),
-        expect(dead_code, reason = "SL2.16 renders the restore endpoint (#1103)")
-    )]
     pub(crate) fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -558,14 +550,7 @@ impl ReadyListener {
     /// Linux authenticates the original socket peer through `SO_PEERPIDFD` (Linux 6.5 or a
     /// backport), failing with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable)
     /// if the host cannot provide it, rather than falling back to a numeric PID.
-    #[cfg_attr(
-        not(all(test, any(target_os = "linux", windows))),
-        expect(
-            dead_code,
-            reason = "SL4.3's blocking driver receives the restore-ready event"
-        )
-    )]
-    pub(crate) fn receive(
+    pub fn receive(
         &mut self,
         process: &Process,
         received: &mut Vec<u8>,

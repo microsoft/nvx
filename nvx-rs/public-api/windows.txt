@@ -1073,6 +1073,7 @@ variant nvx::host::restore::Attribution::Snapshot
 variant nvx::host::restore::Attribution::Unknown
 struct nvx::host::restore::ReadyListener
 method nvx::host::restore::ReadyListener::into_std
+method nvx::host::restore::ReadyListener::receive
 enum nvx::host::restore::RestoreAction
 variant nvx::host::restore::RestoreAction::AwaitReadyEvent
 variant nvx::host::restore::RestoreAction::Connect
@@ -2373,6 +2374,7 @@ struct nvx::host::vm::Launched
 field nvx::host::vm::Launched::capability
 field nvx::host::vm::Launched::outputs
 field nvx::host::vm::Launched::process
+field nvx::host::vm::Launched::ready
 struct nvx::host::vm::Prepared
 method nvx::host::vm::Prepared::activation_record
 method nvx::host::vm::Prepared::arguments
@@ -2412,6 +2414,7 @@ field nvx::host::vm::VmmCommand::inherit
 field nvx::host::vm::VmmCommand::log
 field nvx::host::vm::VmmCommand::outputs
 field nvx::host::vm::VmmCommand::program
+field nvx::host::vm::VmmCommand::ready
 field nvx::host::vm::VmmCommand::working_dir
 fn nvx::host::vm::create
 fn nvx::host::vm::create_private_dir
