@@ -388,7 +388,7 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
         let mut received = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while listener
-            .receive(pid, &mut received, 64, Duration::from_millis(50))
+            .receive_verified(pid, &mut received, 64, Duration::from_millis(50))
             .unwrap()
         {
             assert!(Instant::now() < deadline, "the endpoint did not close");
@@ -413,7 +413,7 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
     let mut received = Vec::new();
     assert!(
         listener
-            .receive(pid, &mut received, 64, Duration::from_millis(50))
+            .receive_verified(pid, &mut received, 64, Duration::from_millis(50))
             .unwrap()
     );
     drop(client);
