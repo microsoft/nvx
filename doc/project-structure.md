@@ -74,6 +74,7 @@ nvx/
 |-- docker/
 |   `-- Dockerfile               Reproducible guest build environment
 |-- doc/                         User and contributor documentation
+|   |-- acceptance-case-matrix.md The fate of each adapter, CI and docs test, and microVM scenario
 |   |-- adversarial-testing.md   Copilot-driven adversarial testing
 |   |-- benchmarks.md            Benchmark commands and measurement methodology
 |   |-- build.md                 Guest and OpenVMM build workflows
