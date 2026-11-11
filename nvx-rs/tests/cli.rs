@@ -232,7 +232,7 @@ fn a_mapping_that_the_guest_refuses_leaves_no_usable_start() {
                 &fs::read_to_string(root.path.join(state).join("outcome.json")).unwrap(),
             )
             .unwrap();
-            assert_eq!(report["outcome"]["operation"], "managed");
+            assert_eq!(report["outcome"]["operation"], "run");
             assert_eq!(report["outcome"]["category"], "success");
         } else {
             assert_eq!(names, ["config.json", "openvmm.log", "sandbox.lock"]);
