@@ -3571,8 +3571,8 @@ python3 ../scripts/nvx.py test-guest-binaries \
 The
 [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml) action runs
 rustfmt, Clippy with warnings denied for all features, for the library
-with and without default features, and for the `cli` and `testing` features
-alone, the tests, a build and the tests of the library
+with and without default features, and for the `serde`, `cli` and `testing`
+features alone, the tests, a build and the tests of the library
 without default features, a synthetic-release `bundled` test, rustdoc with
 warnings denied, the minimum supported Rust version (1.89), and a macOS check.
 On Linux, it also lints, builds, and tests the guest binaries through `nvx.py`,
