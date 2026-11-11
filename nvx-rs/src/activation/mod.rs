@@ -17,8 +17,10 @@
 //! - [`ReadyActivation`]: what Ready reports about the activation: that it applied, which every
 //!   layered root reports, and the transaction ID, which only a clone reports.
 //!
-//! The [guest-agent guidelines] describe the init's ownership and restore order: applying this
-//! record, its own DNS and listener policy, runtime filesystems and helpers precedes Ready.
+//! The [guest-agent guidelines] give the order in which an init completes a restore before Ready:
+//! it applies the record, with this restore's own network policy, mounts the runtime's file
+//! systems, starts the announcer when the record publishes the workload's listeners, and switches
+//! into the root once.
 //!
 //! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
 //!

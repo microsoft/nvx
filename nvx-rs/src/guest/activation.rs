@@ -145,6 +145,12 @@
 //! and its [`ActivationCause`], and which every later call returns again. The activation never
 //! powers the VM off: the adapter reports the failure, and ends the VM.
 //!
+//! The [guest-agent guidelines] give the order of a restore around the activation, from
+//! [`Activation::new`] to Ready, with nvx-init as the worked example, and the obligations of
+//! its caller, which the activation enforces none of.
+//!
+//! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
+//!
 //! The activation's application, `apply` and its types, is NVX's internal reference code of the
 //! guest's space, hidden from this documentation and unstable: it becomes crate-private once
 //! nothing outside NVX uses it.

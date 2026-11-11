@@ -9,37 +9,55 @@ const CLI: &str = "nvx_identity=1000:1001 nvx_control_tty=hvc2";
 const EXPORT: &str =
     "virtfs_dir=/run/nvx/hostfs/root virtfs_tag=hostfs virtfs_mode=rw virtfs_aggregate=1";
 
-/// The steps of NVX's reference space, as nvx-init takes them and the guest-agent guidelines
-/// quote them, compile against the space's own interface. The test runs none of them: they would
-/// mount over and switch the test host's root.
+/// Compiles the steps of the private space that `doc/guest-agent-guidelines.md` quotes, without
+/// mounting anything or switching the developer host's root. A change here changes the quote too.
 #[test]
 fn the_reference_space_steps_compile() {
-    use crate::guest::{mappings, root, view};
+    use std::error::Error;
+    use std::net::IpAddr;
+    use std::path::Path;
+    use std::time::Instant;
 
-    // Compile the real private workflow without mounting or switching the developer host's root.
-    let _space = |assembly: &root::Assembly,
-                  configuration: &crate::activation::View,
-                  dns: Option<std::net::IpAddr>,
-                  export: &crate::protocol::export::HostExport,
-                  time_status: Option<&std::path::Path>|
-     -> Result<
-        (root::Root, mappings::Mapper, mappings::SourceRoot),
-        Box<dyn std::error::Error>,
-    > {
+    use crate::activation::{ActivationRecord, View};
+    use crate::guest::activation::{self, Applied, RootTemplate};
+    use crate::guest::mappings::{Mapper, Reserved, SourceRoot, TargetRoot};
+    use crate::guest::root::{self, Assembly, Root};
+    use crate::guest::view;
+    use crate::protocol::export::HostExport;
+
+    // A cold boot, as `boot::cold_boot` builds it.
+    let _cold = |assembly: &Assembly,
+                 export: &HostExport,
+                 vm_view: &View,
+                 dns: Option<IpAddr>|
+     -> Result<(Root, Mapper, SourceRoot), Box<dyn Error>> {
         let mut root = root::assemble(assembly)?;
-        root.mount_runtime(time_status)?;
-        view::apply(&mut root, configuration, dns)?;
         let source = root.mount_export(&export.tag, export.mode.into())?;
-        let mut target = mappings::TargetRoot::open(root.path())?;
+        root.mount_runtime(Some(Path::new("/run/nvx/time")))?;
+        let mut target = TargetRoot::open(root.path())?;
         target.add_mount(&root.path().join("run"))?;
-        let mapper = mappings::Mapper::new(target, mappings::Reserved::container_root());
+        let mapper = Mapper::new(target, Reserved::container_root());
+        view::apply(&mut root, vm_view, dns)?;
+        // Start the helpers and open the descriptors that later work needs before the switch.
+        root.switch()?;
         Ok((root, mapper, source))
     };
-    let _switch = |root: &mut root::Root| root.switch();
-    let _restored = |record: &crate::activation::ActivationRecord,
-                     template: &crate::guest::activation::RootTemplate,
-                     deadline: Option<std::time::Instant>| {
-        crate::guest::activation::apply(record, template, deadline)
+    // A restore, as `boot::Restored::apply` builds it from the accepted record.
+    let _restored = |record: &ActivationRecord,
+                     template: &RootTemplate,
+                     deadline: Option<Instant>|
+     -> Result<(Applied, Mapper, Option<SourceRoot>), Box<dyn Error>> {
+        let mut applied = activation::apply(record, template, deadline)?;
+        applied
+            .root_mut()
+            .mount_runtime(Some(Path::new("/run/nvx/time")))?;
+        let mut target = TargetRoot::open(applied.root().path())?;
+        target.add_mount(&applied.root().path().join("run"))?;
+        let mapper = Mapper::new(target, Reserved::container_root());
+        let source = applied.take_export();
+        // Start the announcer here when `applied.publication()` publishes the listeners.
+        applied.root_mut().switch()?;
+        Ok((applied, mapper, source))
     };
 }
 

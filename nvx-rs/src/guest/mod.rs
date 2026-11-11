@@ -17,8 +17,8 @@
 //! acknowledgement, and then takes its own configuration from the activation record that its
 //! restore packet carried, and reports its readiness on its control session.
 //!
-//! The [guest-agent guidelines] give the init-owned space, execution, capture and restore
-//! contract, with nvx-init as the worked example. The library enforces none of those obligations.
+//! The [guest-agent guidelines] give an init agent's contract for its space, its executions, a
+//! capture, and a restore, with nvx-init as the worked example; the library enforces none of it.
 //!
 //! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
 //!
@@ -35,8 +35,8 @@
 //! stay public: the mapping values and [`MappingTable`](mappings::MappingTable), and the tokens
 //! and records of [`protocol`](crate::protocol) and [`activation`](crate::activation).
 //!
-//! The guidelines' public mapping excerpt forwards mount failures and keeps admission closed
-//! until the table is complete; the mount callback belongs to the init:
+//! The guidelines quote this excerpt, in which an init applies one part of the host's mapping
+//! table through its own mapper, `mount`, and admits workloads only once the table is complete:
 //!
 //! ```no_run
 //! use nvx::guest::mappings::{Mapping, MappingTable, TableError};

@@ -18,20 +18,41 @@
 //! instant. A repair failure is always [`Disposition::MustEnd`], with [`RepairError::status`].
 //! Fresh restore network settings are explicitly refused.
 //!
-//! The [guest-agent guidelines] specify the caller's workspace, silence, failure and restore
-//! obligations. These public excerpts compile without implementing or running those operations:
+//! The [guest-agent guidelines] give the caller's obligations around this call: its
+//! workspaces, its silent transport, a failure's disposition, and the restore's order. They
+//! quote this excerpt of what the caller does once the call returns:
 //!
 //! ```no_run
 //! use std::time::{Duration, Instant};
-//! use nvx::guest::activation::Activation;
-//! use nvx::guest::snapshot::{self, CaptureFailure, Captured, Devices, Disks, Repaired};
 //!
-//! fn fresh_capture(devices: &Devices, deadline: Instant) -> Result<Captured, CaptureFailure> {
-//!     snapshot::capture(devices, Disks::Fresh, deadline)
+//! use nvx::guest::activation::Activation;
+//! use nvx::guest::snapshot::{self, Captured, Devices, Disks, Disposition};
+//!
+//! /// What the caller does next; it sent nothing on its transport while `capture` ran.
+//! enum Next {
+//!     /// Thaw the workspaces in reverse, where they exist, and report on the same session.
+//!     Report,
+//!     /// Take the session's reset and acknowledge it, then drive this activation to Ready.
+//!     Activate(Activation),
+//!     /// Start nothing, and power the VM off with this status.
+//!     PowerOff(u8),
 //! }
 //!
-//! fn begin_activation(repaired: &Repaired, timeout: Duration, now: Instant) -> Activation {
-//!     Activation::new(repaired, timeout, now)
+//! fn capture(devices: &Devices, deadline: Instant, timeout: Duration) -> Next {
+//!     match snapshot::capture(devices, Disks::Fresh, deadline) {
+//!         Ok(Captured::Continued) => Next::Report,
+//!         Ok(Captured::Restored(repaired)) => {
+//!             Next::Activate(Activation::new(&repaired, timeout, Instant::now()))
+//!         }
+//!         Err(failure) => match failure.disposition {
+//!             Disposition::Resumed => Next::Report,
+//!             Disposition::MustEnd { status } => Next::PowerOff(status),
+//!             // A disposition that a later version adds cannot be known to be safe.
+//!             _ => Next::PowerOff(125),
+//!         },
+//!         // Nor can an outcome that a later version adds.
+//!         Ok(_) => Next::PowerOff(125),
+//!     }
 //! }
 //! ```
 //!

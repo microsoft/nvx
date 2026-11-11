@@ -30,7 +30,7 @@ its own in turn.
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
 | [MicroVM scenarios](#microvm-scenarios) | 52 | 49 | 3 | 0 |
 | [CI](#ci) | 69 | 43 | 3 | 23 |
-| [Docs](#docs) | 34 | 33 | 1 | 0 |
+| [Docs](#docs) | 36 | 35 | 1 | 0 |
 
 ## The adapter's scenarios
 
@@ -412,17 +412,18 @@ their own. The tests that a step runs have rows of their own where they concern 
 ## Docs
 
 Rustdoc checks the code of the crate's documentation, which these rows name as rustdoc does, by
-file and line where this matrix was added: it compiles each, runs those that aren't `no_run`, and
-checks that those marked `compile_fail` don't compile. The examples compile with the crate's
-other targets; `host-workflows` and `guest-workflows`, which came with this matrix, are new, and
-have no row. The README's own code is no doctest.
+file and line: it compiles each, runs those that aren't `no_run`, and checks that those marked
+`compile_fail` don't compile. The examples compile with the crate's other targets;
+`host-workflows` and `guest-workflows`, which came with this matrix, are new, and have no row.
+The code of `guest` and `guest::snapshot`, which the guest-agent guidelines quote, came after
+this matrix. The README's own code is no doctest.
 
 | Code | Fate | Note |
 | --- | --- | --- |
-| `nvx-rs/src/activation/mod.rs - activation (line 123)` | kept |  |
+| `nvx-rs/src/activation/mod.rs - activation (line 130)` | kept |  |
 | `nvx-rs/src/exec/mod.rs - exec (line 113)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/gpt/mod.rs - gpt (line 43)` | kept |  |
-| `nvx-rs/src/guest/activation.rs - guest::activation (line 189)` | kept | Its capture preparation and admission fence leave (#1087), whose PR rewrites it on `guest::snapshot::capture` |
+| `nvx-rs/src/guest/activation.rs - guest::activation (line 195)` | kept | Its capture preparation and admission fence leave (#1087), whose PR rewrites it on `guest::snapshot::capture` |
 | `nvx-rs/src/guest/activation/state.rs - guest::activation::state::Activation (line 56)` | kept |  |
 | `nvx-rs/src/guest/cgroup.rs - guest::cgroup (line 36)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/entry.rs - guest::entry (line 90)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
@@ -431,11 +432,13 @@ have no row. The README's own code is no doctest.
 | `nvx-rs/src/guest/gpt.rs - guest::gpt (line 18)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/mapper.rs - guest::mappings::mapper (line 107)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
 | `nvx-rs/src/guest/mappings/table.rs - guest::mappings::table::MappingTable (line 47)` | kept |  |
+| `nvx-rs/src/guest/mod.rs - guest (line 41)` | kept | The guest-agent guidelines quote it |
 | `nvx-rs/src/guest/nvxs.rs - guest::nvxs (line 22)` | kept |  |
 | `nvx-rs/src/guest/process.rs - guest::process (line 12)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/process.rs - guest::process (line 39)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/reseed.rs - guest::reseed (line 17)` | kept |  |
 | `nvx-rs/src/guest/root.rs - guest::root (line 130)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
+| `nvx-rs/src/guest/snapshot.rs - guest::snapshot (line 25)` | kept | The guest-agent guidelines quote it |
 | `nvx-rs/src/guest/spawn.rs - guest::spawn (line 41)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/spawn.rs - guest::spawn::LaunchStage::from_code (line 201)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/terminal.rs - guest::terminal (line 10)` | kept |  |
