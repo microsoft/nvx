@@ -22,11 +22,11 @@
 //! its snapshot or its sandbox fixes, such as `--guest`, `--processors`, the shares, `--cmdline`,
 //! and `--dry-run`, and a cold boot the options of a restore.
 //!
-//! A cold boot takes `--net` and `--network-profile` together. A restore takes the addressing of
-//! its NIC from the snapshot, so it refuses `--net`. The network options of the restore of a
-//! snapshot with a NIC, which need `--network-profile`, are the restore's own network policy, with
-//! its DNS server, egress, forwards, and published listeners, as `sandbox` lowers them; those of a
-//! snapshot without a NIC, which `snapshot capture` captures, are refused.
+//! A cold boot takes `--net` and `--network-profile` together. A restore takes its NIC, with its
+//! addressing, from the snapshot, which `snapshot capture --net` gives one, so it refuses `--net`.
+//! The network options of the restore of a snapshot with a NIC, which need `--network-profile`,
+//! are the restore's own network policy, with its DNS server, egress, forwards, and published
+//! listeners, as `sandbox` lowers them; those of a snapshot without a NIC are refused.
 //!
 //! Its shares differ from those of `sandbox`. `--mount-deny`, `--mount-allow`, and `--mount-write`
 //! name host paths, which must be absolute with several shares or a shared file. A cold boot
@@ -114,7 +114,9 @@ options:
                         host identity of the share's file operations: vmm
                         (default) or caller, with guest root squashed to the
                         owner of the shared directory or file (Linux only)
-  --net IPV4/PREFIX
+  --net IPV4/PREFIX     a cold boot's NIC at this address; a restore takes its
+                        NIC from the snapshot, which snapshot capture --net
+                        gives one
   --network-profile {portable}
   --network-egress {allow,deny}
   --network-ingress {allow,deny}
@@ -489,8 +491,9 @@ fn restore(root: Option<&str>, options: Options) -> Result {
 }
 
 /// Returns the network options of the sandbox that restores a snapshot whose NIC is `nic`, which
-/// the snapshot fixes: `network`, the run's own, at the NIC's address, which need
+/// the snapshot fixes: `network`, the restore's own, at the NIC's address, which need
 /// `--network-profile`, as the policy of the restore's NIC, or none for a snapshot without a NIC.
+/// A restore of `run` and one of `snapshot restore` both take their network from it.
 pub(super) fn restored_network(
     mut network: NetworkOptions,
     nic: Option<NicConfig>,

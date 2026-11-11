@@ -598,9 +598,11 @@ grants it connectivity that it never had. OpenVMM rejects the option for a cold
 boot, for a snapshot without a NIC or whose NIC was captured with any other
 policy, and for a `workload-start` or `instance-checkpoint` snapshot. A
 [platform NIC template](#platform-nic-templates) takes the option too, and so
-does each restore of a named snapshot with a NIC through
+does each restore of a named snapshot whose NIC `nvx-rs snapshot capture --net`
+captured under the complete deny-all policy, through
 `nvx-rs run --restore-snapshot` or `nvx-rs snapshot restore`, which installs the
-policy of its network options; see [`run`](usage.md#run).
+policy of its network options; see
+[`snapshot capture`](usage.md#snapshot-capture) and [`run`](usage.md#run).
 
 ### Platform NIC templates
 

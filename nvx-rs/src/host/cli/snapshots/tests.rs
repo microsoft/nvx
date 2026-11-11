@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use super::*;
-use crate::host::snapshot::tests::SnapshotFixture;
+use crate::host::snapshot::tests::{RestoreFixture, SnapshotFixture};
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, MANIFEST_NAME, OPENVMM_DIR};
 use crate::host::tests::released;
 
@@ -406,6 +406,56 @@ fn a_restore_refuses_a_workload_that_is_not_a_valid_exec_request_before_it_provi
     }
     assert!(!store.exists());
     assert!(!state.exists());
+}
+
+#[test]
+fn a_restore_takes_its_network_at_the_nic_of_its_snapshot_before_it_provisions() {
+    let root = tempfile::tempdir().unwrap();
+    let store_dir = root.path().join("store");
+    let store = Store::create(&store_dir).unwrap();
+    for (snapshot, nic) in [("plain", false), ("networked", true)] {
+        let fixture = RestoreFixture::new(nic);
+        let opened = fixture.opened();
+        let held = store.lock(&name(snapshot), Deadline::after(0.0)).unwrap();
+        let staged = held.stage().unwrap();
+        for entry in [KEY_FILE, DESCRIPTION_FILE, OPENVMM_DIR] {
+            fs::rename(opened.dir.join(entry), staged.dir().join(entry)).unwrap();
+        }
+        held.publish(staged).unwrap();
+    }
+    let state = root.path().join("state");
+    let refusal = |snapshot: &str, network: &[&str]| {
+        let mut arguments = vec![
+            "restore",
+            snapshot,
+            "--store-dir",
+            store_dir.to_str().unwrap(),
+            "--state-dir",
+            state.to_str().unwrap(),
+            "--upper",
+            "ram",
+        ];
+        arguments.extend(network);
+        let Ok((Command::Restore(options), extras)) = command(&arguments) else {
+            panic!("{arguments:?} parses");
+        };
+        assert!(extras.is_empty());
+        let error = restore(None, *options).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+        assert!(!state.exists(), "{arguments:?}");
+        error.message().unwrap().to_owned()
+    };
+    // A snapshot without a NIC takes no network option, and one with a NIC needs the profile.
+    assert!(refusal("plain", &["--network-profile", "portable"]).contains("no NIC"));
+    assert!(refusal("networked", &[]).contains("needs --network-profile"));
+    // With the profile, the options take the address of the snapshot's NIC, which the restore does
+    // not name: the provision gets past its check of a network without one, and refuses the
+    // missing image.
+    let message = refusal(
+        "networked",
+        &["--network-profile", "portable", "--network-egress", "deny"],
+    );
+    assert!(message.contains("requires --layer"), "{message}");
 }
 
 /// Returns a store with the published snapshot `first`, and a VM directory with a view of it.
