@@ -31,7 +31,7 @@ use crate::host::cli::artifacts::{Located, locate};
 use crate::host::cli::deadline::RETRY_INTERVAL;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
-    Config, RecordedDistro, RecordedScratch, read_config, serialize_launch, write_json,
+    Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch, write_json,
 };
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
 use crate::host::cli::session::Session;
@@ -76,12 +76,14 @@ pub(crate) const REQUIRED_FEATURES: GuestFeatures = GuestFeatures::LAYERED_SANDB
 
 /// Records a launch and its distro layer, at the path at which it was verified, with the layer's
 /// binding, in a new state directory, as `provision` does, with the binding of its scratch image,
-/// if its upper is on scratch, at the path that it records for it.
+/// if its upper is on scratch, at the path that it records for it, and `source`, the named
+/// snapshot that each start of a sandbox of `snapshot restore` restores, or `None`.
 pub(crate) fn provision(
     state_path: &str,
     launch: &SandboxLaunch,
     distro: &RecordedDistro,
     config: &ProvisionConfig<'_>,
+    source: Option<&Source>,
     timeout: f64,
 ) -> Result {
     let state_dir = prepare_state_directory(state_path, true)?;
@@ -98,7 +100,7 @@ pub(crate) fn provision(
     let scratch = RecordedScratch::new(launch)?;
     write_json(
         &config_path,
-        &serialize_launch(launch, distro, scratch.as_ref(), config, None)?,
+        &serialize_launch(launch, distro, scratch.as_ref(), config, source)?,
     )
 }
 
