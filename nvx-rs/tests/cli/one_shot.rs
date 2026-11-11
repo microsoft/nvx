@@ -5,8 +5,7 @@
 
 use crate::harness::{Content, OPENVMM, Root, in_parallel, native};
 use crate::openvmm::{
-    DISCONNECTED_CONSOLE, NO_CONSOLE, NO_NETWORK, NetworkPolicy, Options, TERMINAL_CONSOLE,
-    assert_outcome_report, child, cold_boot, restore, share_token, snapshot,
+    NO_NETWORK, NetworkPolicy, Options, assert_outcome_report, child, cold_boot, share_token,
 };
 
 /// The outcome report that OpenVMM writes for a run that asks for one.
@@ -130,10 +129,6 @@ fn fails_a_cold_boot(case: &Launch) -> bool {
         .first()
         .is_some_and(|command| command == "run")
         && case.status != 0
-        && !case
-            .arguments
-            .iter()
-            .any(|argument| argument == "--restore-snapshot")
 }
 
 /// Returns `nvx-rs run OPTIONS`.
@@ -148,7 +143,6 @@ fn run(options: &[&str]) -> Vec<String> {
 /// Returns the runs of `nvx-rs run`.
 fn run_launches() -> Vec<Launch> {
     let booted = "openvmm: booted the microVM\n";
-    let restored = "openvmm: restored the microVM\n";
     vec![
         launch("run: boot", run(&[]), cold_boot(), 0, booted),
         launch(
@@ -199,65 +193,6 @@ fn run_launches() -> Vec<Launch> {
             0,
             booted,
         ),
-        // A restore records its command line next to its snapshot, since it has no kernel.
-        launch(
-            "run: restore",
-            run(&[
-                "--processors",
-                "4",
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--restore-processors",
-                "2",
-                "--restore-memory-mib",
-                "1024",
-                "--restore-ready-path",
-                "{root/ready.sock}",
-                "--cpu-profile",
-                "auto",
-            ]),
-            restore()
-                .with("--processors", ["4"])
-                .with("--restore-processors", ["2"])
-                .with("--restore-memory", ["1024M"])
-                .with("--restore-ready-path", ["{root/ready.sock}"])
-                .with("--cpu-profile", ["auto"]),
-            0,
-            restored,
-        )
-        .with_file(snapshot(&NO_CONSOLE))
-        .recorded_in(Some("fake-openvmm-.json")),
-        launch(
-            "run: restore without guest artifacts",
-            run(&["--restore-snapshot", "{root/snapshot}"]),
-            restore(),
-            0,
-            restored,
-        )
-        .with_file(snapshot(&NO_CONSOLE))
-        .without("build/vmlinux")
-        .without("build/initramfs.cpio.gz")
-        .recorded_in(Some("fake-openvmm-.json")),
-        // A restore attaches the boot console to the terminal again where its capture did, as
-        // OpenVMM requires, and leaves any other boot console as its snapshot records it.
-        launch(
-            "run: restore of a boot console on the terminal",
-            run(&["--restore-snapshot", "{root/snapshot}"]),
-            restore().with("--virtio-console", ["console"]),
-            0,
-            restored,
-        )
-        .with_file(snapshot(&TERMINAL_CONSOLE))
-        .recorded_in(Some("fake-openvmm-.json")),
-        launch(
-            "run: restore of a disconnected boot console",
-            run(&["--restore-snapshot", "{root/snapshot}"]),
-            restore(),
-            0,
-            restored,
-        )
-        .with_file(snapshot(&DISCONNECTED_CONSOLE))
-        .recorded_in(Some("fake-openvmm-.json")),
         launch(
             "run: outcome report",
             run(&["--outcome-report", "{root/reports/openvmm-run.json}"]),
@@ -271,108 +206,6 @@ fn run_launches() -> Vec<Launch> {
             category: "success",
             status: 0,
             network: NO_NETWORK,
-        }),
-        launch(
-            "run: restore outcome report",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--outcome-report",
-                "{root/reports/openvmm-run.json}",
-                "--cmdline",
-                "fake_exit_status=4",
-            ]),
-            restore()
-                .with("--microvm-report", ["{root/reports/openvmm-run.json}"])
-                .with("--cmdline", ["fake_exit_status=4"]),
-            4,
-            restored,
-        )
-        .with_file(snapshot(&NO_CONSOLE))
-        .recorded_in(Some("fake-openvmm-reports.json"))
-        .reporting(Report {
-            path: "reports/openvmm-run.json",
-            category: "guest-exit",
-            status: 4,
-            network: NO_NETWORK,
-        }),
-        // A restore passes the network profile and policy of a snapshot that has a NIC without
-        // `--net`, which OpenVMM refuses on a restore.
-        launch(
-            "run: restore of a networked snapshot",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--network-profile",
-                "portable",
-                "--network-egress",
-                "deny",
-                "--network-egress-allow",
-                "10.0.0.0/8:tcp:443",
-                "--host-loopback",
-                "deny",
-                "--outcome-report",
-                "{root/reports/openvmm-run.json}",
-            ]),
-            restore()
-                .with("--network-profile", ["portable"])
-                .with("--network-egress", ["deny"])
-                .with("--network-egress-allow", ["10.0.0.0/8:tcp:443"])
-                .with("--host-loopback", ["deny"])
-                .with("--microvm-report", ["{root/reports/openvmm-run.json}"]),
-            0,
-            restored,
-        )
-        .with_file(snapshot(&NO_CONSOLE))
-        .recorded_in(Some("fake-openvmm-reports.json"))
-        .reporting(Report {
-            path: "reports/openvmm-run.json",
-            category: "success",
-            status: 0,
-            network: ("applied", "rules", 1, 0, "deny"),
-        }),
-        // A restore that replaces the policy of a NIC template may publish the guest's listeners
-        // and forward host ports, which OpenVMM refuses at every other restore.
-        launch(
-            "run: restore that replaces the network policy",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--restore-network-policy",
-                "--network-profile",
-                "portable",
-                "--network-egress",
-                "deny",
-                "--network-egress-allow",
-                "10.0.0.1/32:udp:53",
-                "--network-ingress",
-                "allow",
-                "--host-loopback",
-                "allow",
-                "--host-loopback-forward",
-                "tcp:8080:80",
-                "--outcome-report",
-                "{root/reports/openvmm-run.json}",
-            ]),
-            restore()
-                .flag("--restore-network-policy")
-                .with("--network-profile", ["portable"])
-                .with("--network-egress", ["deny"])
-                .with("--network-egress-allow", ["10.0.0.1/32:udp:53"])
-                .with("--network-ingress", ["allow"])
-                .with("--host-loopback", ["allow"])
-                .with("--host-loopback-forward", ["tcp:8080:80"])
-                .with("--microvm-report", ["{root/reports/openvmm-run.json}"]),
-            0,
-            restored,
-        )
-        .with_file(snapshot(&NO_CONSOLE))
-        .recorded_in(Some("fake-openvmm-reports.json"))
-        .reporting(Report {
-            path: "reports/openvmm-run.json",
-            category: "success",
-            status: 0,
-            network: ("applied", "rules", 1, 0, "allow"),
         }),
         launch(
             "run: network outcome report",
@@ -516,11 +349,7 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
         let cold = case
             .arguments
             .first()
-            .is_some_and(|command| command == "run")
-            && !case
-                .arguments
-                .iter()
-                .any(|argument| argument == "--restore-snapshot");
+            .is_some_and(|command| command == "run");
         let before = case.refusal.map(|_| root.snapshot());
         let outcome = root.nvx_rs_with(&arguments, &environment);
         eprintln!("case: {}", case.name);

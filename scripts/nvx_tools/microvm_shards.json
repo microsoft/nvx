@@ -56,7 +56,6 @@
         "restore-downtime": 69.2,
         "restore-memory": 4.1,
         "restore-processors": 21.4,
-        "run-console-restore": 1.3,
         "sandbox-blocks": 0.7,
         "scratch-snapshot": 3.4,
         "smp": 21.2,
@@ -74,7 +73,7 @@
       },
       "shards": [
         {
-          "seconds": 269.1,
+          "seconds": 267.8,
           "scenarios": [
             "command-line-limit",
             "console-snapshot",
@@ -89,7 +88,6 @@
             "restore-downtime",
             "restore-memory",
             "restore-processors",
-            "run-console-restore",
             "smp-snapshot",
             "snapshot-core",
             "snapshot-tiers",
@@ -166,7 +164,6 @@
         "restore-downtime": 71.0,
         "restore-memory": 4.0,
         "restore-processors": 21.3,
-        "run-console-restore": 1.1,
         "sandbox-blocks": 0.6,
         "scratch-snapshot": 3.2,
         "smp": 22.6,
@@ -209,7 +206,7 @@
           ]
         },
         {
-          "seconds": 249.8,
+          "seconds": 248.7,
           "scenarios": [
             "console-exit",
             "cpu-profile-fallback",
@@ -231,7 +228,6 @@
             "platform-network-policy",
             "private-network-ingress",
             "restore-memory",
-            "run-console-restore",
             "sandbox-blocks",
             "structured-outcome",
             "time-abi-conformance",
@@ -276,7 +272,6 @@
         "restore-downtime": 84.7,
         "restore-memory": 12.5,
         "restore-processors": 28.8,
-        "run-console-restore": 5.8,
         "sandbox-blocks": 1.2,
         "scratch-snapshot": 8.8,
         "smp": 30.9,
@@ -294,22 +289,21 @@
       },
       "shards": [
         {
-          "seconds": 356.1,
+          "seconds": 354.1,
           "scenarios": [
             "denied-filesystem-paths",
             "directional-network-policy",
             "endpoint-policy-snapshot",
-            "filesystem-comma-paths",
             "filesystem-policy",
             "host-loopback-policy",
             "interrupt-map",
             "network-snapshot",
+            "platform-aggregate-export",
             "platform-filesystem",
             "platform-restore-processors",
             "restore-downtime",
             "restore-memory",
             "restore-processors",
-            "run-console-restore",
             "scratch-snapshot",
             "smp",
             "smp-snapshot",
@@ -318,12 +312,13 @@
           ]
         },
         {
-          "seconds": 357.5,
+          "seconds": 353.7,
           "scenarios": [
             "command-line-limit",
             "console-exit",
             "console-snapshot",
             "cpu-profile-fallback",
+            "filesystem-comma-paths",
             "filesystem-owner",
             "filesystem-shares",
             "filesystem-snapshot",
@@ -335,7 +330,6 @@
             "l3-l4-egress-protocols",
             "lifecycle",
             "managed-lifecycle",
-            "platform-aggregate-export",
             "platform-network-policy",
             "platform-zero-fill",
             "private-network-ingress",
