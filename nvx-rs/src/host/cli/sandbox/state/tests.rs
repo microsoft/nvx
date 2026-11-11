@@ -22,6 +22,7 @@ fn restored_sandbox_records_round_trip_only_their_own_source() {
         memory_mib: 128,
         cmdline: "",
         ram_upper_percent: None,
+        network: None,
     };
     for name in [None, Some("My.snapshot-1"), Some("other")] {
         let source = name.map(|name| Source {

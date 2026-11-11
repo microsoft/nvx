@@ -340,7 +340,7 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `sandbox-gpt-layer` | kept | The [cold cells](#cold-boots) of a GPT disk, over a scratch upper and over a RAM upper, through `run`, and `provision` and `start` |
 | `sandbox-lifecycle` | kept | A [cold cell](#cold-boots): the EROFS layer over a scratch upper, through `provision` and `start`, which also reattach to the VM from a new process for each command |
 | `sandbox-proxy-only` | kept | Its proxy-only network, over the EROFS layer and a scratch upper; it is no [cold cell](#cold-boots) of its own |
-| `sandbox-ram-upper` | kept | A [cold cell](#cold-boots): the EROFS layer over a RAM upper, through `run`, and `provision` and `start` |
+| `sandbox-ram-upper` | kept | A [cold cell](#cold-boots): the EROFS layer over a RAM upper, through `run`, and `provision` and `start`. Since SL3.10c, it checks that `provision` records the configuration's format 10 |
 | `scratch-snapshot` | kept |  |
 | `smp` | kept |  |
 | `smp-lapic` | kept | Runs only when a run names it |
@@ -447,7 +447,7 @@ their own. The tests that a step runs have rows of their own where they concern 
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run public managed sandbox acceptance on Linux and on Windows | kept | Runs `sandbox-gpt-layer` and `vm-lifecycle` too, since SL5.1b: see [Cold boots](#cold-boots); and `snapshot-core` and `snapshot-tiers`, since SL5.1c: see [Snapshots](#snapshots) |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run Ubuntu and Azure Linux guest smoke tests on Linux and on Windows | kept |  |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run extended Ubuntu guest tests on Linux/KVM | kept | No longer runs `snapshot-core`, which needs the Alpine control guest since SL5.1c rewrote it |
-| `.github/workflows/run-nvx-microvm-tests.yml` | Run the Ubuntu sandbox layer, live-share, managed live-share, caller-owned live-share, concurrent shares and share access policy tests on Linux and on Windows | kept | The layer smoke test is the `run` of a [cold cell](#cold-boots) |
+| `.github/workflows/run-nvx-microvm-tests.yml` | Run the Ubuntu sandbox layer, live-share, managed live-share, caller-owned live-share, concurrent shares and share access policy tests on Linux and on Windows | kept | The layer smoke test is the `run` of a [cold cell](#cold-boots). Since SL3.10c, the share tests check that `provision` records the configuration's format 10 |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Build the runtime adapter's guest agent on Linux; Download the runtime adapter's guest agent on Windows | retired | The adapter's guest agent |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run runtime adapter scenarios on Linux and on Windows | retired | The adapter's scenarios, whose fates are above |
 | `.github/workflows/run-platform.yml` | Run benchmark: the acceptance test, the performance suite, the multi-vCPU shell restore and the device operation rates | kept |  |

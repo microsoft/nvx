@@ -7,15 +7,17 @@ use crate::ErrorCode;
 use crate::host::cli::args::{Parser, Receiver, Spec, Syntax, choice, integer};
 use crate::host::cli::network::{NativeRules, NetworkOptions};
 use crate::host::cli::{Exit, Result};
+use crate::host::config::NetworkConfig;
 use crate::host::network::{
     Access, EgressRule, EgressRules, HostLoopback, LoopbackForward, NetworkPolicy, NetworkProxy,
+    openvmm_arguments,
 };
 use crate::host::paths;
 use crate::host::sandbox::distro::DistroFormat;
 use crate::host::sandbox::mount::{MountOwner, PolicyKind};
 use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
 use crate::host::sandbox::{
-    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, SandboxLayer, SandboxNetwork,
+    DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, SandboxLayer,
     parse_workload_identity,
 };
 use crate::net::{Ipv4Cidr, guest_gateway};
@@ -402,8 +404,8 @@ pub(crate) fn path_string(path: &Path) -> Result<String> {
 
 /// Returns the network that `network` describes, with `rules`, the egress
 /// rules that [`NetworkOptions::egress_rules`] resolved: the typed policy at the guest network of
-/// `--net`, which [`SandboxNetwork::new`] checks before any launch, or `None` without `--net`, which
-/// no other network option may then accompany.
+/// `--net`, which it checks before any launch, as OpenVMM lowers it, or `None` without `--net`,
+/// which no other network option may then accompany.
 ///
 /// Omitted options take OpenVMM's defaults: egress allowed, ingress denied, and host-loopback
 /// access from the guest alone, [`HostLoopback::Outbound`]. As OpenVMM does, the policy takes
@@ -413,7 +415,7 @@ pub(crate) fn path_string(path: &Path) -> Result<String> {
 pub(in crate::host::cli) fn sandbox_network(
     network: &NetworkOptions,
     rules: &NativeRules,
-) -> Result<Option<SandboxNetwork>> {
+) -> Result<Option<NetworkConfig>> {
     let Some(net) = &network.net else {
         let network_options = network.network_egress.is_some()
             || network.network_ingress.is_some()
@@ -433,7 +435,8 @@ pub(in crate::host::cli) fn sandbox_network(
     };
     // `Ipv4Cidr` gives a guest network's refusal, and one that it accepts has a gateway: its
     // network's first address.
-    Ipv4Cidr::parse(net).map_err(|message| Exit::error(ErrorCode::Unsupported, message))?;
+    let guest_network =
+        Ipv4Cidr::parse(net).map_err(|message| Exit::error(ErrorCode::Unsupported, message))?;
     let gateway = guest_gateway(net).expect("a guest network that parses has a gateway");
     if network.network_egress.is_none() && (!rules.allow.is_empty() || !rules.deny.is_empty()) {
         return Err(Exit::error(
@@ -478,5 +481,10 @@ pub(in crate::host::cli) fn sandbox_network(
             .map_err(|error| refused("--network-proxy", error))?;
         policy.proxy = Some(proxy);
     }
-    Ok(Some(SandboxNetwork::new(net, policy)?))
+    // A policy that OpenVMM's options cannot express is refused before anything launches.
+    openvmm_arguments(Some(&policy), net)?;
+    Ok(Some(NetworkConfig {
+        guest_network: Some(guest_network),
+        policy,
+    }))
 }

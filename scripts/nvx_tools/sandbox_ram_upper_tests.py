@@ -220,7 +220,7 @@ class RamUpperAcceptance(LifecycleAcceptance):
             name: config[name] for name in ("format", "upper", "scratch_binding")
         }
         if recorded != {
-            "format": 9,
+            "format": 10,
             "upper": {"kind": "ram", "max_memory_percent": 50},
             "scratch_binding": None,
         } or any(name in config for name in ("layers", "scratch")):

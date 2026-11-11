@@ -19,7 +19,6 @@ use crate::host::cli::sandbox::sandbox_network;
 use crate::host::cli::sandbox::state::{RecordedDistro, serialize_launch, write_json};
 use crate::host::cli::snapshots::{self, Name};
 use crate::host::cli::store::StateDir;
-use crate::host::config::NetworkConfig;
 use crate::host::filesystem::{Bind, ExportChild, ExportPlan, Owner};
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::paths::resolve;
@@ -31,7 +30,6 @@ use crate::host::sandbox::options::sandbox_mounts;
 use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
 use crate::host::snapshot::tests::RestoreFixture;
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR};
-use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootImage;
 use crate::protocol::{
     APP_ACTIVATE, APP_EXEC, APP_EXIT, APP_HEADER_LEN, APP_MAPS, APP_READY, APP_STDOUT, OUTER_DATA,
@@ -385,12 +383,8 @@ fn a_one_off_restore_installs_the_network_options_of_run_as_its_own_policy() {
         .nic();
     let network = run::restored_network(options.network, nic).unwrap();
     let rules = network.egress_rules().unwrap();
-    let network = sandbox_network(&network, &rules).unwrap().unwrap();
     let mut config = fixture.restore.config.clone();
-    config.network = Some(NetworkConfig {
-        guest_network: Some(Ipv4Cidr::parse(network.guest_network()).unwrap()),
-        policy: network.policy().clone(),
-    });
+    config.network = sandbox_network(&network, &rules).unwrap();
     fixture.start("state", config, "ready", 30.0).unwrap();
     // The guest learns the DNS server that the policy lets it reach, and announces its listeners,
     // which the policy publishes on host loopback.
@@ -691,6 +685,7 @@ fn deprovision_removes_a_restored_sandboxs_view_only_under_its_snapshots_lock() 
         memory_mib: 512,
         cmdline: "",
         ram_upper_percent: None,
+        network: None,
     };
     let distro = RecordedDistro::new(&launch, binding).unwrap();
     let text = serialize_launch(&launch, &distro, None, &options, Some(&source)).unwrap();
@@ -742,6 +737,7 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
         memory_mib: 512,
         cmdline: "",
         ram_upper_percent: None,
+        network: None,
     };
     let distro = RecordedDistro::new(&launch, binding).unwrap();
     let source = fixture.source();

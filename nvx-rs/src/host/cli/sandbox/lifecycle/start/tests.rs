@@ -56,6 +56,7 @@ fn run_checks_again_that_its_shares_do_not_overlap() {
         memory_mib: 256,
         cmdline: "",
         ram_upper_percent: None,
+        network: None,
     };
     record(&launch, &distro, &config).unwrap();
 

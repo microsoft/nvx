@@ -1640,25 +1640,25 @@ fn network_policy_files_compile_into_the_typed_policy() {
     );
 }
 
-/// The serde form of a valid proxy-only network, as a configuration records it.
+/// The record of a valid proxy-only network, as a configuration records its network options.
 fn recorded_proxy_only_network() -> Value {
     json!({
-        "guestNetwork": "10.0.0.2/24",
+        "net": "10.0.0.2/24",
         "egress": "deny",
-        "allow": {"name": "--network-egress-allow", "rules": []},
-        "deny": {"name": "--network-egress-deny", "rules": []},
         "ingress": "deny",
-        "hostLoopback": "deny",
-        "hostLoopbackForwards": [],
-        "proxy": {"port": 3128, "scheme": null},
+        "egress_allow": [],
+        "egress_deny": [],
+        "host_loopback": "deny",
+        "host_loopback_forwards": [],
+        "proxy": "10.0.0.1:3128",
     })
 }
 
 #[test]
 fn start_refuses_a_configuration_without_a_valid_network_policy() {
-    // A configuration records the typed network that provision checked, which start reads and
-    // checks again; no reader reads the network options that nvx.py and earlier releases
-    // recorded.
+    // A configuration records the network options that provision checked, from which start builds
+    // the network and checks it again; no reader reads the network options that nvx.py and
+    // earlier releases recorded.
     let root = Root::new();
     let malformed = "sandbox configuration is malformed".to_owned();
     let cases: [(&str, ConfigEdit, &str, String); 5] = [

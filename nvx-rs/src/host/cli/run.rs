@@ -63,9 +63,7 @@ use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
 use crate::activation::{MachineIdMode, View};
 use crate::host::artifacts::{ArtifactDir, Guest, require_artifact};
-use crate::host::config::{
-    Boot, ConsoleAttachment, NetworkConfig, NicConfig, RootConfig, VmConfig,
-};
+use crate::host::config::{Boot, ConsoleAttachment, NicConfig, RootConfig, VmConfig};
 use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
 };
@@ -643,17 +641,7 @@ fn cold_vm_config(
     rules: &NativeRules,
     filesystem: Option<ExportPlan>,
 ) -> Result<VmConfig> {
-    let network = sandbox_network(&options.network, rules)?
-        .map(|network| -> Result<NetworkConfig> {
-            Ok(NetworkConfig {
-                guest_network: Some(
-                    crate::net::Ipv4Cidr::parse(network.guest_network())
-                        .map_err(|error| Exit::error(ErrorCode::Unsupported, error.to_string()))?,
-                ),
-                policy: network.policy().clone(),
-            })
-        })
-        .transpose()?;
+    let network = sandbox_network(&options.network, rules)?;
     let config = VmConfig {
         processors: options.processors,
         memory_mib: memory_mib(options),

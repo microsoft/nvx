@@ -71,13 +71,13 @@ pub(crate) fn provision(state: &str, options: &[&str]) -> Vec<String> {
     sandbox("provision", state, &all)
 }
 
-/// Returns the configuration that provision records for the minimal sandbox, in format 9, with
+/// Returns the configuration that provision records for the minimal sandbox, in format 10, with
 /// placeholders, and without the bindings of its images, which [`assert_bindings`] checks.
 pub(crate) fn minimal_config() -> Value {
     json!({
         "cmdline": "",
         "export": null,
-        "format": 9,
+        "format": 10,
         "hostname": "nvx-sandbox",
         "hypervisor": HYPERVISOR,
         "image": {"path": "{root/distro.erofs}", "format": "erofs", "identity": UUID},
@@ -373,7 +373,8 @@ fn configurations() -> Vec<Configuration> {
     file.maps = Some(json!([mapped("0", "/etc/single.txt", true, false)]));
 
     // A managed sandbox runs the guest agent, whatever entrypoint and arguments provision gets,
-    // and records the policy file's rules in its typed network.
+    // and records its network options, with the policy file's rules in OpenVMM's form, from which
+    // each start builds the policy again.
     let mut network = configuration(
         "network and launch options",
         vec![
@@ -418,28 +419,13 @@ fn configurations() -> Vec<Configuration> {
                 (
                     "network",
                     json!({
-                        "allow": {
-                            "name": "--network-egress-allow",
-                            "rules": [{
-                                "ports": [{"endPort": null, "port": 443, "protocol": "tcp"}],
-                                "to": [{"cidr": "192.0.2.0/24", "except": []}],
-                            }],
-                        },
-                        "deny": {
-                            "name": "--network-egress-deny",
-                            "rules": [{
-                                "ports": [],
-                                "to": [{"cidr": "192.0.2.128/25", "except": []}],
-                            }],
-                        },
                         "egress": "allow",
-                        "guestNetwork": "10.0.0.2/24",
-                        "hostLoopback": "allow",
-                        "hostLoopbackForwards": [
-                            {"guestPort": 8080, "hostPort": 18080, "protocol": "tcp"},
-                            {"guestPort": 9090, "hostPort": 19090, "protocol": "udp"},
-                        ],
+                        "egress_allow": ["192.0.2.0/24:tcp:443"],
+                        "egress_deny": ["192.0.2.128/25"],
+                        "host_loopback": "allow",
+                        "host_loopback_forwards": ["tcp:18080:8080", "udp:19090:9090"],
                         "ingress": "deny",
+                        "net": "10.0.0.2/24",
                         "proxy": null,
                     }),
                 ),
@@ -491,14 +477,14 @@ fn configurations() -> Vec<Configuration> {
         {
             let mut config = minimal_config();
             config["network"] = json!({
-                "allow": {"name": "--network-egress-allow", "rules": []},
-                "deny": {"name": "--network-egress-deny", "rules": []},
                 "egress": "deny",
-                "guestNetwork": "10.0.0.2/24",
-                "hostLoopback": "deny",
-                "hostLoopbackForwards": [],
-                "ingress": "deny",
-                "proxy": {"port": 3128, "scheme": null},
+                "egress_allow": [],
+                "egress_deny": [],
+                "host_loopback": "deny",
+                "host_loopback_forwards": [],
+                "ingress": null,
+                "net": "10.0.0.2/24",
+                "proxy": "10.0.0.1:3128",
             });
             config
         },
@@ -1250,20 +1236,44 @@ fn malformed_configuration(root: &Root) {
     ram_with_binding["upper"] = json!({"kind": "ram", "max_memory_percent": 50});
     let mut format_1_with_export = without_upper.clone();
     format_1_with_export["format"] = json!(1);
+    // A network record requires each of its fields, and one whose options their parser or the
+    // network's own checks refuse is malformed, as the old plan's network was.
+    let mut network = config.clone();
+    network["network"] = json!({
+        "egress": "deny",
+        "egress_allow": [],
+        "egress_deny": [],
+        "host_loopback": null,
+        "host_loopback_forwards": [],
+        "ingress": null,
+        "net": "10.0.0.2/24",
+        "proxy": null,
+    });
+    let mut network_without_egress = network.clone();
+    network_without_egress["network"]
+        .as_object_mut()
+        .unwrap()
+        .remove("egress");
+    let mut network_of_a_gateway = network.clone();
+    network_of_a_gateway["network"]["net"] = json!("10.0.0.1/24");
+    let mut network_with_another_egress = network.clone();
+    network_with_another_egress["network"]["egress"] = json!("sometimes");
+    let mut network_with_a_broken_rule = network.clone();
+    network_with_a_broken_rule["network"]["egress_allow"] = json!(["192.0.2.0/33"]);
     let unsupported = &["unsupported format", "{root/state/config.json}"][..];
     let missing_export = &["sandbox configuration has no export plan"][..];
     let malformed = &["sandbox configuration is malformed"][..];
     for (text, code, fragments) in [
         (
-            r#"{"format": 10}"#.to_owned(),
+            r#"{"format": 11}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
         ("[]".to_owned(), "format-unsupported", unsupported),
-        // Only the integer 9 is a format, and the configuration is strict JSON, in
+        // Only the integer 10 is a format, and the configuration is strict JSON, in
         // which no object repeats a field.
         (
-            r#"{"format": 9.0}"#.to_owned(),
+            r#"{"format": 10.0}"#.to_owned(),
             "format-unsupported",
             unsupported,
         ),
@@ -1316,6 +1326,10 @@ fn malformed_configuration(root: &Root) {
             "format-unsupported",
             unsupported,
         ),
+        (network_without_egress.to_string(), "io", malformed),
+        (network_of_a_gateway.to_string(), "io", malformed),
+        (network_with_another_egress.to_string(), "io", malformed),
+        (network_with_a_broken_rule.to_string(), "io", malformed),
     ] {
         root.write("state/config.json", &text);
         let before = root.snapshot();
