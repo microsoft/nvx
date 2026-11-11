@@ -275,28 +275,36 @@ forward whose host port another socket holds, the option on a platform
 snapshot captured with plain deny-all egress, which leaves host loopback
 allowed, and the option on a cold boot, and no restore may change the
 template.
-The `untiered-network-policy` scenario covers a NIC template without a tier, a
-snapshot without sandbox blocks, as the non-sandbox mode captures one, whose
-NIC was captured with the complete deny-all policy. It restores the template
-with `--restore-network-policy` four times: under the template's own deny-all,
-under egress rules that admit DNS over IPv4 and one host service, with
-explicit host loopback and a forward under egress rules that admit DNS over
-IPv6 alone, and with private-network ingress and allowed egress. The
-template's guest learned no DNS server and runs no announcer of its listeners,
-so each restore's repair applies those of the restore's policy, which the
-restore packet's network settings carry, before it acknowledges the restore:
-the guest's resolver must name exactly the policy's DNS server, and no gateway
-without one, and the announcer must run exactly when the policy publishes
-the guest's listeners. Each restore must reach through its gateway exactly the
-host-loopback services that its policy admits, which must receive no other
-request, and the host must reach the guest's server through the forward and
-through the port that the policy publishes: on host loopback alone, which no
-other host address reaches, or to the host's private networks, through a host
-address other than loopback. It must find the server on no host loopback port
-without a publication. Before the guest runs, OpenVMM must refuse a restore
-that keeps the template's policy but passes another, and one that passes
-private-network ingress without the option, and no restore may change the
-template.
+The `untiered-network-policy` scenario, one of the public sandbox scenarios
+that the guest and sandbox jobs run (see below), covers a NIC template without
+a tier: a named snapshot that `nvx-rs snapshot capture --net` captures, of a
+blockless VM whose NIC has the complete deny-all policy. It restores the
+template four times, with the network options of a sandbox of the Ubuntu
+layer over a RAM upper, at the NIC's captured address, as the restore's own
+policy, and runs the scenario's checks as the restored workload: through
+`nvx-rs snapshot restore`, under the template's own deny-all and with
+private-network ingress and allowed egress, and through
+`nvx-rs run --restore-snapshot`, under egress rules that admit DNS over IPv4
+and one host service, and with explicit host loopback and a forward under
+egress rules that admit DNS over IPv6 alone. The template's guest learned no
+DNS server and runs no announcer of its listeners, so each restore's
+activation applies those of the restore's policy: the guest's resolver must
+name exactly the policy's DNS server, and no gateway without one, and the
+announcer must run exactly when the policy publishes the guest's listeners.
+Each restore must reach through its gateway exactly the host-loopback services
+that its policy admits, which must receive no other request, and the host must
+reach the guest's server through the forward and through the port that the
+policy publishes: on host loopback alone, which no other host address reaches,
+or to the host's private networks, through a host address other than loopback.
+It must find the server on no host loopback port without a publication, while
+the guest holds the server's port, which the host cannot release: it must
+check within two seconds of seeing the server listen, and see the six-second
+hold end at least two seconds after its check, so that a check that a late
+marker could have moved past the hold fails instead of passing. Before it
+provisions anything, the CLI must refuse a restore of the template without
+`--network-profile`, and one that names the NIC's address with `--net`. No
+restore may change the template, or leave its sandbox or an OpenVMM process
+behind; a failed run keeps the VM log of each sandbox that it leaves.
 The `platform-filesystem` scenario covers a share that a platform restore
 attaches to the filesystem slot that the capture left dormant, as a clone's
 export does. It captures a platform snapshot without `--mount` and restores it
@@ -565,7 +573,10 @@ a VM through the public API of `nvx`. The public `snapshot-core` and
 [Run](run.md#named-snapshots)): restores of each image format over each upper,
 repeated restores with fresh entropy and machine IDs, clocks that follow the
 host's across the downtime, concurrent restores that take turns at the
-snapshot's lock, failed restores, and snapshots that no restore changes.
+snapshot's lock, failed restores, and snapshots that no restore changes. The
+public `untiered-network-policy` scenario restores a named snapshot with a NIC,
+which `snapshot capture --net` captures, under four network policies, as
+described above.
 Their bounded evidence is part of the backend's failure logs. The same
 entrypoint then verifies a live virtio-fs
 share inside the container: a read-write `/workspace` share with a denied

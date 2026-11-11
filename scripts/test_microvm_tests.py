@@ -2660,11 +2660,6 @@ class GuestConsoleEchoTests(unittest.TestCase):
                 f"echo {microvm_tests.PLATFORM_NETWORK_LISTENING_MARKER.decode()}",
                 "read -r release exchange",
             ),
-            (
-                "untiered-network-policy.sh.in",
-                f"echo {microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER.decode()}",
-                "read -r release exchanges",
-            ),
         ):
             with self.subTest(name=name):
                 script = microvm_tests._read_script(name)
@@ -14238,19 +14233,20 @@ class MicrovmTests(unittest.TestCase):
                         Path(temporary), fingerprints=fingerprints
                     )
 
-    def test_untiered_network_policy_script_reports_the_repair_and_serves_the_host(
+    def test_untiered_network_policy_script_reports_the_policy_and_serves_the_host(
         self,
     ):
         script = microvm_tests.untiered_network_policy_script(
-            allowed_port=40001, other_port=40002, guest_port=50001
+            allowed_port=40001, other_port=40002, guest_port=50001, timeout=59.5
         )
         self.assertNotRegex(script, r"@[A-Z0-9_]+@")
-        # The guest reports the resolver and the announcer that its repair set
-        # up, and probes both host services.
+        # The workload takes the number of the host's exchanges.
+        self.assertIn("\nexchanges=$1\n", script)
+        # The workload reports the resolver and the announcer that its
+        # activation set up, and probes both host services.
         self.assertIn("' /etc/resolv.conf 2>/dev/null) ||\n    resolver=none", script)
-        self.assertIn("if pidof nvx-ingress >/dev/null; then", script)
-        self.assertIn('"http://192.0.2.1:$2/$1"', script)
-        self.assertIn("wget -T 2 -qO /tmp/nvx-untiered-network-probe", script)
+        self.assertIn("if busybox pidof nvx-ingress >/dev/null; then", script)
+        self.assertIn('wget -T 2 -qO- "http://192.0.2.1:$2/$1"', script)
         self.assertIn("\nprobe allowed 40001\n", script)
         self.assertIn("\nprobe other 40002\n", script)
         self.assertIn(
@@ -14259,28 +14255,31 @@ class MicrovmTests(unittest.TestCase):
             + 'resolver=$resolver announcer=$announcer allowed=$allowed other=$other"',
             script,
         )
-        # The guest's server answers the host, one client at a time, as many
-        # as a restore's host reaches it through.
+        # The workload's server answers each client that the host exchanges a
+        # line with, which it waits for up to the scenario's timeout, or
+        # without one, holds its port while the host checks that nothing
+        # publishes it.
         ack = microvm_tests.HOST_LOOPBACK_TCP_ACK.decode().removesuffix("\n")
-        self.assertIn('while [ "$client" -lt 2 ]; do', script)
-        self.assertIn(f"printf '{ack}\\n' |\n            nc -l -p 50001 -w 20", script)
-        self.assertIn("printf '%04X' 50001", script)
-        # Once released, the guest waits for each line that the host sent,
-        # which the release may overtake, before it stops its server.
-        request = microvm_tests.HOST_LOOPBACK_TCP_REQUEST.decode().strip()
-        self.assertIn("read -r release exchanges ||", script)
+        self.assertIn('while [ "$client" -lt "$exchanges" ]; do', script)
         self.assertIn(
-            f'grep -qx {request} \\\n        "/tmp/nvx-untiered-network-inbound-$client"',
+            f"printf '{ack}\\n' |\n                busybox nc -l -p 50001 -w 60 ",
             script,
         )
-        self.assertLess(
-            script.index("read -r release exchanges"), script.index('kill "$server"')
+        self.assertIn("busybox nc -l -p 50001 </dev/null >/dev/null 2>&1 &", script)
+        self.assertIn("printf '%04X' 50001", script)
+        self.assertIn(
+            f"\n    sleep {microvm_tests.UNTIERED_NETWORK_HOLD_SECONDS}\n", script
         )
-        for marker in (
-            microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER,
-            microvm_tests.UNTIERED_NETWORK_CHECKED,
-        ):
-            self.assertIn(marker.decode(), script)
+        # It checks each client's line once its server has served them all.
+        request = microvm_tests.HOST_LOOPBACK_TCP_REQUEST.decode().strip()
+        listening = microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER.decode()
+        self.assertLess(
+            script.index(f"echo {listening}"), script.index('wait "$server"')
+        )
+        self.assertLess(
+            script.index('wait "$server"'),
+            script.index(f'grep -qx {request} "$inbound/$client"'),
+        )
         self.assertTrue(
             script.endswith(
                 'echo "'
@@ -14292,6 +14291,17 @@ class MicrovmTests(unittest.TestCase):
             'echo "' + microvm_tests.UNTIERED_NETWORK_FAILURE_MARKER.decode() + ' $1"',
             script,
         )
+
+    def test_untiered_network_policy_script_fits_one_argument_of_an_exec_request(
+        self,
+    ):
+        # A restore sends its workload as an exec request, whose arguments
+        # hold at most 4096 bytes each, so the longest script that the
+        # scenario renders must fit one.
+        script = microvm_tests.untiered_network_policy_script(
+            allowed_port=65535, other_port=65535, guest_port=65535, timeout=3600
+        )
+        self.assertLessEqual(len(script.encode()), 4096)
 
     def test_untiered_network_restores_name_what_their_policies_give_the_guest(self):
         restores = microvm_tests.untiered_network_restores(
@@ -14308,7 +14318,7 @@ class MicrovmTests(unittest.TestCase):
                     restore.forward,
                     restore.publication,
                     restore.exchanges,
-                    restore.network_settings,
+                    restore.one_off,
                 )
                 for restore in restores
             ],
@@ -14335,7 +14345,7 @@ class MicrovmTests(unittest.TestCase):
                     False,
                     "private-networks",
                     1,
-                    True,
+                    False,
                 ),
             ],
         )
@@ -14544,10 +14554,13 @@ class MicrovmTests(unittest.TestCase):
     def _simulate_untiered_network_guest(
         self, command: list[str], ports: dict[str, int]
     ) -> list[bytes]:
-        """Return the lines of the guest that ``command`` restores before its
-        release, after it requests each host service in ``ports`` that its
-        policy admits."""
-        policy = command[command.index("--restore-network-policy") + 1 :]
+        """Return the lines that the workload of the restore that ``command``
+        runs prints before it listens, after it requests each host service in
+        ``ports`` that its policy, the network options between
+        `--network-profile portable` and its `--entrypoint`, admits."""
+        policy = command[
+            command.index("--network-profile") + 2 : command.index("--entrypoint")
+        ]
         dns_server, announces, allowed, other = self._untiered_network_settings(
             policy, ports["allowed"]
         )
@@ -14566,10 +14579,7 @@ class MicrovmTests(unittest.TestCase):
             self.assertTrue(
                 answer.endswith(f"\r\n\r\nNVX-PLATFORM-NETWORK-{name}".encode())
             )
-        lines: list[bytes] = []
-        if dns_server is not None or announces:
-            lines.append(microvm_tests.UNTIERED_POST_RESTORE_MARKER)
-        lines.append(
+        return [
             microvm_tests.UNTIERED_NETWORK_REPORT_PREFIX
             + (
                 f"resolver={dns_server or 'none'} "
@@ -14577,50 +14587,81 @@ class MicrovmTests(unittest.TestCase):
                 f"allowed={'reached' if allowed else 'denied'} "
                 f"other={'reached' if other else 'denied'}"
             ).encode()
-        )
-        return lines
+        ]
 
     def _run_untiered_network_policy(
         self,
-        output_dir: Path,
+        root: Path,
         *,
         guest: Callable[[list[str], dict[str, int]], list[bytes]] | None = None,
+        cli: Callable[[tuple[str, ...]], subprocess.CompletedProcess[bytes] | None]
+        | None = None,
         fingerprints: Sequence[tuple[str, str, str]] | None = None,
+        processes: Sequence[tuple[int, ...]] | None = None,
         host_addresses: Sequence[str] = ("192.0.2.10",),
         accepts_tcp: bool = False,
         exchange: Callable[[str, int, float], None] | None = None,
+        hold: Callable[..., None] | None = None,
+        record: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run the scenario with a simulated OpenVMM, whose restores request
-        the scenario's real host services as their policies admit, on a host
-        whose addresses other than loopback are ``host_addresses``, through
-        which a TCP connection completes if ``accepts_tcp``, and with
-        ``exchange`` standing for each exchange with the guest's server, and
-        return its calls."""
-        captures: list[tuple[list[str], dict[str, Any]]] = []
+        """Run the scenario in ``root``, with a simulated nvx-rs, whose
+        restores' workloads request the scenario's real host services as their
+        policies admit, and which ``cli`` may answer first, on a host whose
+        OpenVMM processes are ``processes``, whose addresses other than
+        loopback are ``host_addresses``, through which a TCP connection
+        completes if ``accepts_tcp``, with ``exchange`` standing for each
+        exchange with the workload's server, and ``hold`` for the check that
+        the host checked a port within the guest's hold of it, which passes
+        unless given; return its calls, which ``record`` also receives, even
+        when the scenario fails.
+
+        The scenario's sandboxes and logs go to ``root``'s `fixture` and
+        `logs`."""
+        calls: list[tuple[str, ...]] = []
         restores: list[list[str]] = []
-        releases: list[str] = []
+        awaited: list[tuple[str, bytes]] = []
         ports: dict[str, int] = {}
-
-        def capture(command: list[str], *_args: object, **kwargs: Any) -> None:
-            captures.append((command, kwargs))
-            script = kwargs["post_restore_script"]
-            for name in ("allowed", "other"):
-                match = re.search(rf"\nprobe {name} (\d+)\n", script)
-                assert match is not None
-                ports[name] = int(match[1])
-            match = re.search(r"nc -l -p (\d+) ", script)
-            assert match is not None
-            ports["guest"] = int(match[1])
-
+        fixture = root / "fixture"
+        output_dir = root / "logs"
         simulated_guest = guest or self._simulate_untiered_network_guest
+
+        def run_cli(
+            arguments: Sequence[str], *, timeout: float
+        ) -> subprocess.CompletedProcess[bytes]:
+            del timeout
+            call = tuple(arguments)
+            calls.append(call)
+            if cli is not None and (result := cli(call)) is not None:
+                return result
+            if call[:2] == ("snapshot", "capture"):
+                return subprocess.CompletedProcess(call, 0, b"Snapshot captured\n", b"")
+            if call[:2] == ("sandbox", "deprovision"):
+                shutil.rmtree(call[call.index("--state-dir") + 1])
+            if call[0] == "sandbox":
+                return subprocess.CompletedProcess(call, 0, b"", b"")
+            refusal = next(
+                message
+                for name, _, _, message in microvm_tests.UNTIERED_NETWORK_REJECTED
+                if os.fspath(fixture / name) in call
+            )
+            return subprocess.CompletedProcess(
+                call, 1, b"", f"error[unsupported]: {refusal}\n".encode()
+            )
 
         class FakeProcess:
             def __init__(self, command: list[str], log_path: Path) -> None:
                 restores.append(command)
+                script = command[command.index("--arg=-c") + 1].removeprefix("--arg=")
+                for name in ("allowed", "other"):
+                    match = re.search(rf"\nprobe {name} (\d+)\n", script)
+                    assert match is not None
+                    ports[name] = int(match[1])
+                match = re.search(r"nc -l -p (\d+) ", script)
+                assert match is not None
+                ports["guest"] = int(match[1])
                 self.command = command
                 self.log_path = log_path
                 self.lines: list[bytes] = []
-                self.exchanges: bytes | None = None
 
             def __enter__(self) -> "FakeProcess":
                 return self
@@ -14629,33 +14670,58 @@ class MicrovmTests(unittest.TestCase):
                 return None
 
             def wait_for_line(self, marker: bytes, _timeout: float) -> None:
-                assert marker == microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER
-                self.lines = simulated_guest(self.command, ports)
-
-            def send_line(self, line: str) -> None:
-                releases.append(line)
-                self.exchanges = line.split()[1].encode()
+                state = Path(self.command[self.command.index("--state-dir") + 1])
+                awaited.append((state.name, marker))
+                if marker != microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER:
+                    # Without a client, the guest holds its port until it
+                    # reports that it received no line.
+                    assert self.lines, marker
+                    assert (
+                        marker == microvm_tests.UNTIERED_NETWORK_INBOUND_PREFIX + b"0"
+                    )
+                    return
+                # The restore provisions its sandbox in its state directory.
+                state.mkdir()
+                self.lines = [*simulated_guest(self.command, ports), marker]
 
             def wait(self, _timeout: float) -> openvmm_process.OpenvmmProcessResult:
-                assert self.exchanges is not None
+                exchanges = self.command[-1].removeprefix("--arg=").encode()
                 lines = [
                     *self.lines,
-                    microvm_tests.UNTIERED_NETWORK_INBOUND_PREFIX + self.exchanges,
-                    benchmark.RESTORE_MARKER,
+                    microvm_tests.UNTIERED_NETWORK_INBOUND_PREFIX + exchanges,
                 ]
                 output = b"".join(line + b"\r\n" for line in lines)
                 self.log_path.write_bytes(output)
+                # `run --restore-snapshot` removes its sandbox once its workload
+                # has exited.
+                if "--restore-snapshot" in self.command:
+                    shutil.rmtree(self.command[self.command.index("--state-dir") + 1])
                 return openvmm_process.OpenvmmProcessResult(0, output)
 
         fingerprint = ("manifest", "state", "memory")
-        output_dir.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
+        observed: dict[str, Any] = {} if record is None else record
+        observed.update(
+            calls=calls,
+            restores=restores,
+            awaited=awaited,
+            ports=ports,
+            fixture=fixture,
+            output_dir=output_dir,
+        )
         with (
             patch.object(
                 microvm_tests,
-                "workload_boot_command",
-                return_value=["openvmm", "boot"],
-            ) as workload_boot_command,
-            patch.object(microvm_tests, "capture_snapshot", side_effect=capture),
+                "load_workload_artifacts",
+                return_value=managed_exec_tests.WorkloadArtifacts(
+                    Path("distro.erofs"),
+                    "11111111-1111-1111-1111-111111111111",
+                    Path("scratch.ext4"),
+                ),
+            ),
+            patch.object(microvm_tests.tempfile, "mkdtemp", return_value=str(fixture)),
+            patch.object(nvx_rs, "require_binary", return_value=_FAKE_NVX_RS),
+            patch.object(microvm_tests, "_untiered_network_cli", side_effect=run_cli),
             patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
             patch.object(
                 microvm_tests, "_host_loopback_tcp_exchange", side_effect=exchange
@@ -14671,105 +14737,205 @@ class MicrovmTests(unittest.TestCase):
                 microvm_tests, "_accepts_tcp", return_value=accepts_tcp
             ) as accepts_tcp_mock,
             patch.object(
+                microvm_tests, "_check_untiered_network_hold", side_effect=hold
+            ) as hold_check,
+            patch.object(
                 microvm_tests,
                 "_snapshot_fingerprint",
                 side_effect=fingerprints or itertools.repeat(fingerprint),
+            ) as snapshot_fingerprint,
+            patch.object(
+                microvm_tests,
+                "openvmm_processes",
+                side_effect=itertools.chain(processes or (), itertools.repeat(())),
             ),
-            patch.object(microvm_tests, "_expect_process_failure") as expect_failure,
+            patch.object(microvm_tests, "terminate_process") as terminate,
         ):
-            microvm_tests.run_untiered_network_policy(
-                Path("openvmm"),
-                Path("vmlinux"),
-                Path("initrd"),
-                "kvm",
-                memory_mib=128,
-                timeout=60,
-                output_dir=output_dir,
+            observed.update(
+                exchange=exchange_mock,
+                wait_until=wait_until,
+                holds_loopback=holds_loopback,
+                accepts_tcp=accepts_tcp_mock,
+                hold_check=hold_check,
+                snapshot_fingerprint=snapshot_fingerprint,
+                terminate=terminate,
             )
-        return {
-            "workload_boot_command": workload_boot_command,
-            "captures": captures,
-            "restores": restores,
-            "releases": releases,
-            "exchange": exchange_mock,
-            "wait_until": wait_until,
-            "holds_loopback": holds_loopback,
-            "accepts_tcp": accepts_tcp_mock,
-            "expect_failure": expect_failure,
-            "ports": ports,
-        }
+            fixture.mkdir()
+            microvm_tests.run_untiered_network_policy(
+                "kvm", timeout=60, output_dir=output_dir
+            )
+        return observed
 
-    def test_untiered_network_policy_restores_one_template_with_four_policies(self):
+    def test_untiered_network_policy_restores_one_named_template_with_four_policies(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temporary:
-            output_dir = Path(temporary) / "logs"
-            calls = self._run_untiered_network_policy(output_dir)
-            logs = sorted(path.name for path in output_dir.iterdir())
+            calls = self._run_untiered_network_policy(Path(temporary))
+            logs = sorted(path.name for path in calls["output_dir"].iterdir())
+            fixture_removed = not calls["fixture"].exists()
 
+        # A public scenario, which reads the Ubuntu layer, and which CI runs in
+        # its guest and sandbox jobs.
         self.assertIn("untiered-network-policy", microvm_tests.MICROVM_TEST_SCENARIOS)
-        # Every guest runs it: the non-sandbox mode captures the template.
-        self.assertNotIn(
+        self.assertIn("untiered-network-policy", microvm_tests.PUBLIC_SANDBOX_SCENARIOS)
+        self.assertIn(
             "untiered-network-policy", microvm_tests.SANDBOX_CONTROL_SCENARIOS
         )
-        self.assertNotIn(
-            "untiered-network-policy", microvm_tests.UBUNTU_UNSUPPORTED_SCENARIOS
-        )
-        boot_call = calls["workload_boot_command"].call_args
-        self.assertEqual(boot_call.args[5], "")
-        self.assertEqual(
-            boot_call.kwargs["network"], microvm_tests.UNTIERED_NETWORK_CIDR
-        )
+        self.assertNotIn("untiered-network-policy", microvm_tests.default_suite())
+        fixture: Path = calls["fixture"]
+        store = os.fspath(fixture / "store")
 
-        # The template is a snapshot without a tier or sandbox blocks, whose
-        # NIC has the complete deny-all policy.
-        ((template, template_kwargs),) = calls["captures"]
+        # The template is a named snapshot of a VM whose NIC the capture gives
+        # the complete deny-all policy.
+        capture, *rest = calls["calls"]
         self.assertEqual(
-            template[:-2],
-            [
-                "openvmm",
-                "boot",
-                *microvm_tests.PLATFORM_NETWORK_TEMPLATE_POLICY,
-            ],
-        )
-        self.assertEqual(template[-2], "--snapshot-destination")
-        self.assertNotIn("--snapshot-tier", template)
-        self.assertNotIn("--microvm-sandbox-block", template)
-        ports = calls["ports"]
-        self.assertEqual(
-            template_kwargs["post_restore_script"],
-            microvm_tests.untiered_network_policy_script(
-                allowed_port=ports["allowed"],
-                other_port=ports["other"],
-                guest_port=ports["guest"],
+            capture,
+            (
+                "snapshot",
+                "capture",
+                microvm_tests.UNTIERED_NETWORK_SNAPSHOT,
+                "--store-dir",
+                store,
+                "--hypervisor",
+                "kvm",
+                "--net",
+                microvm_tests.UNTIERED_NETWORK_CIDR,
+                "--timeout",
+                "60",
             ),
         )
-        self.assertEqual(template_kwargs["processors"], 1)
+        template = (
+            fixture
+            / "store"
+            / "snapshots"
+            / microvm_tests.UNTIERED_NETWORK_SNAPSHOT.encode().hex()
+            / "openvmm"
+        )
+        self.assertEqual(
+            {entry.args for entry in calls["snapshot_fingerprint"].call_args_list},
+            {(template,)},
+        )
 
-        # Each restore installs its own policy on the template.
-        restores = calls["restores"]
-        names = ("deny-all", "egress-dns", "host-loopback", "private-ingress")
+        def sandbox(state: str) -> list[str]:
+            return [
+                "--store-dir",
+                store,
+                "--state-dir",
+                os.fspath(fixture / state),
+                "--hypervisor",
+                "kvm",
+                "--layer",
+                "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+                "--upper",
+                "ram",
+                "--timeout",
+                "60",
+            ]
+
+        # Each restore installs its own policy on the template's NIC, without
+        # naming its address, through `snapshot restore` or a one-off `run`,
+        # and runs the scenario's checks as its workload.
+        ports = calls["ports"]
+        script = microvm_tests.untiered_network_policy_script(
+            allowed_port=ports["allowed"],
+            other_port=ports["other"],
+            guest_port=ports["guest"],
+            timeout=60,
+        )
+        restores = microvm_tests.untiered_network_restores(
+            allowed_port=ports["allowed"],
+            host_port=0,
+            guest_port=ports["guest"],
+        )
         forward_port = None
-        for command, name in zip(restores, names, strict=True):
-            with self.subTest(restore=name):
-                self.assertEqual(
-                    command[command.index("--restore-snapshot") + 1], template[-1]
+        for command, restore in zip(calls["restores"], restores, strict=True):
+            with self.subTest(restore=restore.name):
+                head = (
+                    ["run", "--restore-snapshot"]
+                    if restore.one_off
+                    else ["snapshot", "restore"]
                 )
                 self.assertEqual(
-                    command[command.index("--network-profile") + 1], "portable"
+                    command[:3],
+                    [os.fspath(_FAKE_NVX_RS), "--root", os.fspath(nvx_rs.ROOT)],
                 )
-                self.assertNotIn("--microvm-sandbox-block", command)
-                self.assertNotIn("--restore-absent-scratch", command)
-                self.assertIn("--restore-network-policy", command)
-                if "--host-loopback-forward" in command:
-                    forward = command[command.index("--host-loopback-forward") + 1]
+                policy = command[
+                    command.index("--network-profile") + 2 : command.index(
+                        "--entrypoint"
+                    )
+                ]
+                if "--host-loopback-forward" in policy:
+                    forward = policy[policy.index("--host-loopback-forward") + 1]
                     forward_port = int(forward.split(":")[1])
                     self.assertEqual(forward, f"tcp:{forward_port}:{ports['guest']}")
+                else:
+                    self.assertEqual(tuple(policy), restore.policy)
+                self.assertEqual(
+                    command[3:],
+                    [
+                        *head,
+                        microvm_tests.UNTIERED_NETWORK_SNAPSHOT,
+                        *sandbox(restore.name),
+                        "--network-profile",
+                        "portable",
+                        *policy,
+                        "--entrypoint",
+                        "/bin/sh",
+                        "--arg=-c",
+                        f"--arg={script}",
+                        "--arg=untiered-network-policy",
+                        f"--arg={restore.exchanges}",
+                    ],
+                )
+                self.assertNotIn("--net", command)
         self.assertIsNotNone(forward_port)
         self.assertNotEqual(forward_port, ports["guest"])
-        # The host reaches the guest's server through the forward and the port
-        # that a policy publishes, on host loopback alone, which no other host
-        # address reaches, or through another host address for private-network
-        # ingress, and finds it on no host loopback port when the policy
-        # publishes nothing.
+        # The scenario stops and deprovisions the sandboxes of `snapshot
+        # restore`, which run on once their workloads have exited, and then
+        # the CLI refuses a restore without the profile of a policy, and one
+        # that names an address for the NIC, before either provisions anything.
+        self.assertEqual(
+            rest,
+            [
+                *(
+                    (
+                        "sandbox",
+                        operation,
+                        "--state-dir",
+                        os.fspath(fixture / name),
+                        "--timeout",
+                        "60",
+                    )
+                    for name in ("deny-all", "private-ingress")
+                    for operation in ("stop", "deprovision")
+                ),
+                (
+                    "snapshot",
+                    "restore",
+                    microvm_tests.UNTIERED_NETWORK_SNAPSHOT,
+                    *sandbox("without-profile"),
+                    "--entrypoint",
+                    "/bin/true",
+                ),
+                (
+                    "run",
+                    "--restore-snapshot",
+                    microvm_tests.UNTIERED_NETWORK_SNAPSHOT,
+                    *sandbox("readdressed"),
+                    "--net",
+                    microvm_tests.UNTIERED_NETWORK_CIDR,
+                    "--network-profile",
+                    "portable",
+                    "--entrypoint",
+                    "/bin/true",
+                ),
+            ],
+        )
+        # The host reaches the workload's server through the forward and the
+        # port that a policy publishes, on host loopback alone, which no other
+        # host address reaches, or through another host address for
+        # private-network ingress, and finds it on no host loopback port when
+        # the policy publishes nothing.
         self.assertEqual(
             [entry.args for entry in calls["exchange"].call_args_list],
             [
@@ -14787,42 +14953,53 @@ class MicrovmTests(unittest.TestCase):
             [entry.args for entry in calls["holds_loopback"].call_args_list],
             [(socket.AF_INET, socket.SOCK_STREAM, ports["guest"])] * 2,
         )
+        # Without a client, the host waits for the end of the guest's hold of
+        # its port, and checks that its check of the port fell within it.
+        listening = microvm_tests.UNTIERED_NETWORK_LISTENING_MARKER
+        held = microvm_tests.UNTIERED_NETWORK_INBOUND_PREFIX + b"0"
         self.assertEqual(
-            calls["releases"],
+            calls["awaited"],
             [
-                "NVX-UNTIERED-NETWORK-CHECKED 0",
-                "NVX-UNTIERED-NETWORK-CHECKED 0",
-                "NVX-UNTIERED-NETWORK-CHECKED 2",
-                "NVX-UNTIERED-NETWORK-CHECKED 1",
+                ("deny-all", listening),
+                ("deny-all", held),
+                ("egress-dns", listening),
+                ("egress-dns", held),
+                ("host-loopback", listening),
+                ("private-ingress", listening),
             ],
         )
+        self.assertEqual(
+            [
+                (entry.args, sorted(entry.kwargs))
+                for entry in calls["hold_check"].call_args_list
+            ],
+            [((ports["guest"],), ["checked", "held", "listening"])] * 2,
+        )
+        for entry in calls["hold_check"].call_args_list:
+            times = entry.kwargs
+            self.assertLessEqual(times["listening"], times["checked"])
+            self.assertLessEqual(times["checked"], times["held"])
+        names = ("deny-all", "egress-dns", "host-loopback", "private-ingress")
         self.assertEqual(
             logs,
-            sorted(f"untiered-network-policy-{name}.log" for name in names),
+            sorted(
+                [
+                    "untiered-network-policy-capture.log",
+                    *(f"untiered-network-policy-{name}.log" for name in names),
+                    *(
+                        f"untiered-network-policy-{name}-{operation}.log"
+                        for name in ("deny-all", "private-ingress")
+                        for operation in ("stop", "deprovision")
+                    ),
+                    *(
+                        f"untiered-network-policy-rejected-{name}.log"
+                        for name, *_ in microvm_tests.UNTIERED_NETWORK_REJECTED
+                    ),
+                ]
+            ),
         )
-
-        # OpenVMM refuses the other restores before the guest runs.
-        failures = calls["expect_failure"].call_args_list
-        self.assertEqual(
-            [entry.args[3] for entry in failures],
-            [reason for _, reason in microvm_tests.UNTIERED_NETWORK_REJECTED],
-        )
-        for entry in failures:
-            self.assertEqual(
-                entry.kwargs["forbidden_markers"],
-                microvm_tests.UNTIERED_NETWORK_GUEST_MARKERS,
-            )
-            self.assertNotIn("--restore-network-policy", entry.args[0])
-        kept_policy, ingress = (entry.args[0] for entry in failures)
-        self.assertEqual(kept_policy[-2:], ["--network-egress", "allow"])
-        self.assertEqual(
-            ingress[-6:],
-            [
-                *microvm_tests.PLATFORM_NETWORK_TEMPLATE_POLICY,
-                "--network-ingress",
-                "allow",
-            ],
-        )
+        calls["terminate"].assert_not_called()
+        self.assertTrue(fixture_removed)
 
     def test_untiered_network_policy_requires_what_each_policy_gives_the_guest(self):
         def guest_reporting(
@@ -14836,50 +15013,18 @@ class MicrovmTests(unittest.TestCase):
 
             return guest
 
-        def guest_dropping(
-            dropped: bytes,
-        ) -> Callable[[list[str], dict[str, int]], list[bytes]]:
-            def guest(command: list[str], ports: dict[str, int]) -> list[bytes]:
-                return [
-                    line
-                    for line in self._simulate_untiered_network_guest(command, ports)
-                    if line != dropped
-                ]
-
-            return guest
-
-        def guest_reporting_completion(
-            command: list[str], ports: dict[str, int]
-        ) -> list[bytes]:
-            lines = self._simulate_untiered_network_guest(command, ports)
-            if microvm_tests.UNTIERED_POST_RESTORE_MARKER in lines:
-                return lines
-            return [microvm_tests.UNTIERED_POST_RESTORE_MARKER, *lines]
-
         for guest, message in (
-            # A guest whose repair did not name the policy's DNS server.
+            # A guest whose activation did not name the policy's DNS server.
             (
                 guest_reporting(b"resolver=192.0.2.1", b"resolver=none"),
                 r"^untiered network policy restore egress-dns: the guest's "
                 r"resolver names none, not 192\.0\.2\.1$",
             ),
-            # A guest whose repair started no announcer.
+            # A guest whose activation started no announcer.
             (
                 guest_reporting(b"announcer=running", b"announcer=none"),
                 "^untiered network policy restore host-loopback: the guest "
                 "reported announcer=none$",
-            ),
-            # A guest whose repair applied settings without reporting it.
-            (
-                guest_dropping(microvm_tests.UNTIERED_POST_RESTORE_MARKER),
-                "^untiered network policy restore egress-dns: the guest's repair "
-                "did not report 'NVX-POST-RESTORE-OK: tier=legacy'$",
-            ),
-            # A guest without settings whose repair did not finish quietly.
-            (
-                guest_reporting_completion,
-                "^untiered network policy restore deny-all: the guest's repair "
-                "reported 'NVX-POST-RESTORE-OK: tier=legacy'$",
             ),
         ):
             with (
@@ -14915,23 +15060,99 @@ class MicrovmTests(unittest.TestCase):
 
     def test_untiered_network_policy_reports_guest_failures(self):
         def failing_guest(_command: list[str], _ports: dict[str, int]) -> list[bytes]:
-            log_path = output_dir / "untiered-network-policy-deny-all.log"
+            log_path = root / "logs" / "untiered-network-policy-deny-all.log"
             log_path.write_bytes(
                 b"NVX-UNTIERED-NETWORK-FAIL the TCP server did not listen\r\n"
             )
             raise TimeoutError("line marker was not observed")
 
         with tempfile.TemporaryDirectory() as temporary:
-            output_dir = Path(temporary)
+            root = Path(temporary)
             with self.assertRaises(RuntimeError) as raised:
-                self._run_untiered_network_policy(output_dir, guest=failing_guest)
+                self._run_untiered_network_policy(root, guest=failing_guest)
+            log_path = root / "logs" / "untiered-network-policy-deny-all.log"
         self.assertEqual(
             str(raised.exception),
             "untiered network policy restore deny-all failed: "
-            "NVX-UNTIERED-NETWORK-FAIL the TCP server did not listen; see "
-            f"{output_dir / 'untiered-network-policy-deny-all.log'}",
+            "NVX-UNTIERED-NETWORK-FAIL the TCP server did not listen (line marker "
+            f"was not observed); see {log_path}",
         )
         self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+
+    def test_untiered_network_policy_stops_and_removes_what_a_failure_leaves(self):
+        def failing_guest(command: list[str], _ports: dict[str, int]) -> list[bytes]:
+            state = Path(command[command.index("--state-dir") + 1])
+            (state / "openvmm.log").write_bytes(b"the VM's log\n")
+            raise TimeoutError("line marker was not observed")
+
+        # The sandbox that the failed restore provisioned is stopped, the
+        # OpenVMM process that names the fixture ends, then the sandbox's VM
+        # log is kept and the sandbox is deprovisioned, and the fixture goes.
+        record: dict[str, Any] = {}
+        killed_before_deprovision: list[bool] = []
+
+        def deprovision(
+            arguments: tuple[str, ...],
+        ) -> subprocess.CompletedProcess[bytes] | None:
+            if arguments[:2] == ("sandbox", "deprovision"):
+                killed_before_deprovision.append(record["terminate"].called)
+            return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"^untiered network policy restore deny-all failed \(line marker "
+                r"was not observed\); see ",
+            ) as raised:
+                self._run_untiered_network_policy(
+                    root,
+                    guest=failing_guest,
+                    cli=deprovision,
+                    processes=[(), (4242,)],
+                    record=record,
+                )
+            fixture_exists = (root / "fixture").exists()
+            vm_log = (
+                root / "logs" / "untiered-network-policy-deny-all-openvmm.log"
+            ).read_bytes()
+        self.assertNotIn("cleanup", str(raised.exception))
+        state = os.fspath(root / "fixture" / "deny-all")
+        self.assertEqual(
+            record["calls"][1:],
+            [
+                ("sandbox", operation, "--state-dir", state, "--timeout", "60")
+                for operation in ("stop", "deprovision")
+            ],
+        )
+        record["terminate"].assert_called_once_with(4242)
+        self.assertEqual(killed_before_deprovision, [True])
+        self.assertEqual(vm_log, b"the VM's log\n")
+        self.assertFalse(fixture_exists)
+
+        # A sandbox that its deprovision cannot remove keeps the fixture,
+        # which the error names.
+        def refusing_deprovision(
+            arguments: tuple[str, ...],
+        ) -> subprocess.CompletedProcess[bytes] | None:
+            if arguments[:2] != ("sandbox", "deprovision"):
+                return None
+            return subprocess.CompletedProcess(
+                arguments, 1, b"", b"error[sandbox-running]: still running\n"
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"^untiered network policy restore deny-all failed \(.*\); see .*; "
+                "cleanup: .*cannot deprovision .*still running.*fixture preserved "
+                "for recovery",
+            ):
+                self._run_untiered_network_policy(
+                    root, guest=failing_guest, cli=refusing_deprovision
+                )
+            self.assertTrue((root / "fixture" / "deny-all").is_dir())
 
     def test_untiered_network_policy_checks_where_ingress_publishes_the_guest_port(
         self,
@@ -14972,10 +15193,80 @@ class MicrovmTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    f"^untiered network policy restore {restore} failed; see ",
+                    rf"^untiered network policy restore {restore} failed \(.+\); see ",
                 ) as raised:
                     self._run_untiered_network_policy(Path(temporary), **options)
                 self.assertRegex(str(raised.exception.__cause__), cause)
+
+    def test_untiered_network_exchanges_check_first_that_nothing_publishes_the_port(
+        self,
+    ):
+        deny_all, _, host_loopback, _ = microvm_tests.untiered_network_restores(
+            allowed_port=40001, host_port=40003, guest_port=50001
+        )
+
+        def exchanges(restore: microvm_tests.UntieredNetworkRestore) -> int:
+            return microvm_tests._untiered_network_exchanges(
+                restore, host_port=40003, guest_port=50001, timeout=60
+            )
+
+        with patch.object(microvm_tests, "_holds_loopback", return_value=False):
+            self.assertEqual(exchanges(deny_all), 0)
+        with patch.object(microvm_tests, "_holds_loopback", return_value=True):
+            with self.assertRaisesRegex(
+                RuntimeError, "^guest port 50001 was published without ingress$"
+            ):
+                exchanges(deny_all)
+        # A guest that the host reaches serves until the host's exchanges.
+        with (
+            patch.object(microvm_tests, "_host_loopback_tcp_exchange") as exchange,
+            patch.object(microvm_tests, "_wait_until"),
+            patch.object(microvm_tests, "_host_ipv4_addresses", return_value=[]),
+        ):
+            self.assertEqual(exchanges(host_loopback), 2)
+        self.assertEqual(exchange.call_count, 2)
+
+    def test_untiered_network_hold_must_cover_the_hosts_check(self):
+        hold = microvm_tests.UNTIERED_NETWORK_HOLD_SECONDS
+        third = hold / 3
+        # The host checked at once, and saw the hold end most of it later.
+        microvm_tests._check_untiered_network_hold(
+            50001, listening=10.0, checked=10.1, held=10.0 + hold
+        )
+        for times, message in (
+            # The host checked a third of the hold after it saw the guest
+            # listen, which it may have seen late too.
+            (
+                {"listening": 10.0, "checked": 10.1 + third, "held": 10.0 + 2 * hold},
+                f"the host checked guest port 50001 {third + 0.1:.1f}s after it "
+                "saw the guest listen, too late",
+            ),
+            # Both markers reached the host at once, as a late listening
+            # marker does, so the hold may have ended before the check.
+            (
+                {"listening": 10.0, "checked": 10.1, "held": 10.2},
+                "the host saw the guest's hold of port 50001 end 0.1s after its "
+                "check, too soon",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(RuntimeError, f"^{re.escape(message)}"),
+            ):
+                microvm_tests._check_untiered_network_hold(50001, **times)
+
+    def test_untiered_network_policy_fails_on_markers_that_reach_the_host_late(self):
+        # The simulated guest's markers reach the host at once, so the host
+        # cannot tell that its check fell within the guest's hold.
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"^untiered network policy restore deny-all failed \(the host saw "
+                r"the guest's hold of port \d+ end \d+\.\ds after its check, too soon ",
+            ):
+                self._run_untiered_network_policy(
+                    Path(temporary), hold=microvm_tests._check_untiered_network_hold
+                )
 
     def test_untiered_network_policy_keeps_the_template_intact(self):
         original = ("manifest", "state", "memory")
@@ -14997,6 +15288,78 @@ class MicrovmTests(unittest.TestCase):
                     self._run_untiered_network_policy(
                         Path(temporary), fingerprints=fingerprints
                     )
+
+    def test_untiered_network_policy_leaves_no_openvmm_process_or_sandbox(self):
+        # An OpenVMM process that outlives a restore.
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError, r"^OpenVMM processes \[4242\] outlived restore egress-dns"
+            ):
+                self._run_untiered_network_policy(
+                    Path(temporary), processes=[(), (), (4242,), ()]
+                )
+
+        # A sandbox that a deprovision reports removed, and keeps.
+        def keeping_deprovision(
+            arguments: tuple[str, ...],
+        ) -> subprocess.CompletedProcess[bytes] | None:
+            if arguments[:2] != ("sandbox", "deprovision"):
+                return None
+            return subprocess.CompletedProcess(arguments, 0, b"", b"")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError, "^restore deny-all left its sandbox .*deny-all"
+            ):
+                self._run_untiered_network_policy(
+                    Path(temporary), cli=keeping_deprovision
+                )
+
+    def test_untiered_network_policy_requires_the_clis_refusals(self):
+        # A restore without the profile of a policy that the CLI provisions.
+        def provisioning(
+            arguments: tuple[str, ...],
+        ) -> subprocess.CompletedProcess[bytes] | None:
+            if arguments[:2] != ("snapshot", "restore"):
+                return None
+            return subprocess.CompletedProcess(arguments, 0, b"", b"")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "^the CLI did not refuse restore without-profile with "
+                "'needs --network-profile': status 0; see ",
+            ):
+                self._run_untiered_network_policy(Path(temporary), cli=provisioning)
+
+    def test_runner_dispatches_public_untiered_network_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "mshv",
+                    "--scenario",
+                    "untiered-network-policy",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_untiered_network_policy") as run,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            run.assert_called_once_with(
+                "mshv", timeout=args.timeout, output_dir=output_dir
+            )
 
     def test_platform_filesystem_script_uses_the_share_that_the_restore_attaches(
         self,
