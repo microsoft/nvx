@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use super::launch::launch_reporting;
 use super::reattach::reattach_with;
 use super::vmm::{Stoppable, stop_process, terminate_process};
 use super::*;
@@ -602,9 +603,7 @@ fn a_launch_whose_caller_cannot_record_its_failure_keeps_its_journal_for_recover
         },
     )
     .unwrap_err();
-    assert!(!failure.spawned);
     let reason = "the test cannot record the failure";
-    assert_eq!(failure.unended.as_deref(), Some(reason));
     assert_eq!(failure.error.kind(), ErrorKind::Unsupported);
     assert_eq!(
         failure.error.message(),

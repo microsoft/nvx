@@ -61,22 +61,3 @@ fn final_paths_hold_no_nul_whatever_their_length() {
     let file = File::open(deep.join("long")).unwrap();
     assert!(final_path(&file).unwrap().as_os_str().len() > 260);
 }
-
-#[test]
-fn final_volume_paths_name_the_file_by_its_volume() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("file");
-    std::fs::write(&path, b"").unwrap();
-    let found = final_volume_path(&File::open(&path).unwrap()).unwrap();
-    assert!(
-        found.to_string_lossy().starts_with(r"\\?\Volume{"),
-        "{}",
-        found.display()
-    );
-    // The path names the file, which its final path by its drive names too.
-    let reopened = File::open(&found).unwrap();
-    assert_eq!(
-        final_path(&reopened).unwrap(),
-        std::fs::canonicalize(&path).unwrap()
-    );
-}

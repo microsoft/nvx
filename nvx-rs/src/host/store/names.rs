@@ -45,36 +45,25 @@ pub const CLONE_BINDING_NAME: &str = "clone.json";
 ///
 /// [removal]: crate::host::store#removal
 pub const CLONE_SCRATCH_NAME: &str = "clone-scratch.raw";
-/// Name of the activation record of a clone, in its canonical encoding, which the clone's launch,
-/// [`template::ClonePlan::launch`](crate::host::template::ClonePlan::launch), writes before it
-/// spawns the clone's VMM, so that the restore activates the clone with that record and its
-/// transaction whatever happens to the launch's caller, and which
+/// Name of the activation record of a clone, in its canonical encoding, which
 /// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
 /// has exited, as a [removal] of the sandbox does.
 ///
 /// [removal]: crate::host::store#removal
 pub const CLONE_ACTIVATION_NAME: &str = "clone-activation.bin";
-/// Name of the Linux socket at which the launch of a clone,
-/// [`template::ClonePlan::launch`](crate::host::template::ClonePlan::launch), listens for the
-/// restore-ready event of its VMM, which OpenVMM sends once it has prepared the restore, before
-/// the restored VM runs; on Windows, the endpoint is a named pipe, whose name each launch draws at
-/// random. [`template::Store::release`](crate::host::template::Store::release) removes it once the
-/// clone's VM has exited, as a [removal] of the sandbox does.
+/// Name of the Linux socket of the restore-ready event of a clone's VMM, which
+/// [`template::Store::release`](crate::host::template::Store::release) removes once the clone's VM
+/// has exited, as a [removal] of the sandbox does.
 ///
 /// [removal]: crate::host::store#removal
 pub const RESTORE_READY_NAME: &str = "restore.sock";
-/// Name of the progress log of a clone's launch, which the launch,
-/// [`template::ClonePlan::launch`](crate::host::template::ClonePlan::launch), creates, and to which
-/// it and the clone's restore sequence append a line for each step that the clone reaches, without
-/// syncing it, so that a reattach tells how far the clone got once the caller of its launch
-/// crashed, and which [`template::Store::release`](crate::host::template::Store::release) removes,
-/// as a [removal] of the sandbox does. No other launch writes it.
+/// Name of the progress log of a clone's launch, which
+/// [`template::Store::release`](crate::host::template::Store::release) removes, as a [removal] of
+/// the sandbox does.
 ///
 /// [removal]: crate::host::store#removal
 pub const CLONE_PROGRESS_NAME: &str = "clone-progress.log";
-/// Name of the record of a clone's failure, which a failure of the clone from its launch on
-/// writes before its teardown, and again once its teardown is known, as
-/// [`template::CloneFailure`](crate::host::template::CloneFailure) describes, and which
+/// Name of the record of a clone's failure, which
 /// [`template::Store::release`](crate::host::template::Store::release) removes, as a [removal] of
 /// the sandbox does.
 ///
