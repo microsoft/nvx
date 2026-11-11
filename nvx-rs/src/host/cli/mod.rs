@@ -42,6 +42,7 @@ mod cpu_profile;
 mod deadline;
 mod download;
 mod egress;
+mod exec_lock;
 mod json;
 mod network;
 mod output;

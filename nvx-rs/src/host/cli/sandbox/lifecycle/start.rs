@@ -10,7 +10,8 @@ use super::{
     CONFIG_NAME, Found, REQUIRED_FEATURES, connect, find_vm, mismatched, require_config,
     running_vm, runtime_for,
 };
-use crate::host::cli::deadline::Deadline;
+use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
+use crate::host::cli::exec_lock::ExecLock;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{Config, read_config};
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
@@ -208,18 +209,43 @@ fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Sessi
     Ok(session)
 }
 
-/// Runs a workload in a running sandbox, as `exec_workload` does. The lock is held only while the
-/// running VM is found, so a long workload cannot delay a stop.
+/// Runs a workload under exec admission. The lifecycle lock is released before connecting, so
+/// a long workload cannot delay a stop.
+///
+/// Admission tries the sandbox's exec lock once at least, and retries it only before `wait`
+/// seconds pass, even when a retry waited past them for the lifecycle lock, which
+/// `response_timeout` bounds.
 pub(crate) fn exec_workload(
     state_path: &str,
     artifacts: &Artifacts<'_>,
     request: &ExecRequest,
     response_timeout: f64,
+    wait: f64,
 ) -> Result<ExecResult> {
+    let busy = || {
+        Exit::error(
+            ErrorCode::SandboxBusy,
+            "another exec in the sandbox is still in progress",
+        )
+    };
     let state_dir = prepare_state_directory(state_path, false)?;
-    let running = {
+    let deadline = Deadline::after(wait);
+    let mut retry = false;
+    let (_exec, running) = loop {
         let mut lock = LifecycleLock::acquire(&state_dir, response_timeout, false)?;
-        running_vm(&state_dir, &mut lock, artifacts)?
+        require_config(&state_dir)?;
+        if retry && deadline.passed() {
+            return Err(busy());
+        }
+        if let Some(exec) = ExecLock::try_acquire(lock.locked())? {
+            let running = running_vm(&state_dir, &mut lock, artifacts)?;
+            break (exec, running);
+        }
+        drop(lock);
+        retry = true;
+        if !deadline.pause(RETRY_INTERVAL)? {
+            return Err(busy());
+        }
     };
     let mut session = connect(&running.saved, artifacts, response_timeout)?;
     session.exec(request, response_timeout)
