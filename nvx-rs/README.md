@@ -2942,15 +2942,16 @@ The state directory is the directory of the sandbox's
 sandbox shares, and `config.json` is the CLI's own record beside them. It also
 records the [distro binding](#distro-bindings) and the
 [scratch binding](#checked-handoff) of the sandbox, and its network as the
-typed `SandboxNetwork`, in the serde form of the plan's network. The typed
-configuration names one EROFS or GPT image by path and identity, and a scratch
-upper by path or a RAM upper with its cap from 1 through 90 percent, 50 by
-default. `nvx-rs` refuses earlier configuration formats rather than migrating
-them:
+network options from which each `start` builds the policy again, as `provision`
+built it. The typed configuration names one EROFS or GPT image by path and
+identity, and a scratch upper by path or a RAM upper with its cap from 1 through
+90 percent, 50 by default. `nvx-rs` refuses earlier configuration formats, such
+as format 9, rather than migrating them, and says to deprovision the sandbox and
+provision it again:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 9 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export and network are typed, `null` when absent. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
+| `config.json` | The provisioned sandbox, in format 10 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export is typed, `null` when absent. `network`, `null` without `--net`, holds `--net`, `--network-egress`, `--network-ingress`, `--host-loopback`, `--network-proxy`, each `null` when not given, and the `--host-loopback-forward` options, as given, with the egress rules in OpenVMM's form, from a policy file's compile if one was given. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `exec.lock` | The exec lock, which an `exec` holds from before it finds the running VM until its workload ends, so that one `exec` at a time runs in the sandbox; it stays from the first `exec` until `deprovision` |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |

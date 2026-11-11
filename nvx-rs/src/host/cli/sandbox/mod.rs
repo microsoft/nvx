@@ -45,8 +45,8 @@ pub(super) use self::options::{
     HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, OPTIONS, hypervisor, parse, path_text,
 };
 pub(crate) use self::options::{Options, path_string};
-use self::state::RecordedDistro;
 pub(crate) use self::state::Source;
+use self::state::{NetworkRecord, RecordedDistro};
 
 /// The artifacts of a sandbox, found when an operation first needs them.
 pub(crate) struct Artifacts<'a> {
@@ -293,8 +293,9 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
         // `provision` records its binding, which `start` checks without reading the layer again.
         let binding = validate_sandbox_systemd_policy(&launch)?;
         // The network's policy is checked before anything launches or is recorded.
-        let launch = launch.with_network(sandbox_network(&options.network, &rules)?);
-        Some((launch, binding))
+        sandbox_network(&options.network, &rules)?;
+        let network = NetworkRecord::new(&options.network, &rules);
+        Some((launch, binding, network))
     } else {
         None
     };
@@ -317,7 +318,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
         inherit_default_environment: options.inherit_default_environment,
     };
     match (operation, launch) {
-        (SandboxOperation::Provision, Some((launch, binding))) => {
+        (SandboxOperation::Provision, Some((launch, binding, network))) => {
             // `provision` records the layer at its resolved path, where `start` checks the
             // binding, with the manifest beside that path.
             let distro = RecordedDistro::new(&launch, binding)?;
@@ -339,6 +340,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
                     memory_mib: options.memory_mib,
                     cmdline: &options.cmdline,
                     ram_upper_percent: options.ram_upper_percent,
+                    network: network.as_ref(),
                 },
                 source,
                 options.timeout,
@@ -377,7 +379,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
         (SandboxOperation::Deprovision, _) => {
             lifecycle::deprovision(state_dir("deprovision")?, &artifacts, options.timeout)
         }
-        (SandboxOperation::Run, Some((launch, binding))) => {
+        (SandboxOperation::Run, Some((launch, binding, network))) => {
             if options.state_dir.is_some() {
                 return Err(Exit::error(
                     ErrorCode::Unsupported,
@@ -387,8 +389,15 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
             // A run launches the layer at the path that a provision would record.
             let distro = RecordedDistro::new(&launch, binding)?;
             let held = early.transpose()?.unwrap_or_else(Hold::none);
-            let Some(result) =
-                lifecycle::run(&launch, &distro, &artifacts, &options, &request, held)?
+            let Some(result) = lifecycle::run(
+                &launch,
+                &distro,
+                network.as_ref(),
+                &artifacts,
+                &options,
+                &request,
+                held,
+            )?
             else {
                 return Ok(());
             };
