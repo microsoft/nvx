@@ -99,17 +99,14 @@ pub struct CaptureContext {
     pub(crate) cpu_profile: Option<String>,
 }
 
-/// A checked snapshot directory and its verified metadata, for a future VM restore.
+/// A checked snapshot directory and its verified metadata, which
+/// [`vm::create`](crate::host::vm::create) restores a VM from.
 ///
 /// The caller must keep the directory and its entries private and immutable while using this
 /// value. Opening checks them once; it neither watches them nor holds their files open.
 #[derive(Debug)]
 pub struct Snapshot {
     /// The absolute directory path, with its components preserved rather than its links resolved.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "SL2.15 uses the snapshot directory (#1103)")
-    )]
     pub(crate) dir: PathBuf,
     /// The bounded canonical key checked against the manifest.
     key: SnapshotKey,
@@ -188,6 +185,31 @@ impl Snapshot {
     /// An unnamed restore address inherits this value. This accessor reads no snapshot entry.
     pub fn nic(&self) -> Option<NicConfig> {
         self.nic
+    }
+
+    /// Links the fixed snapshot inventory into a newly created restore view.
+    ///
+    /// The caller owns `destination` and records each successful link for rollback. Hard-link
+    /// errors, including a different filesystem, retain their source; nothing is copied.
+    pub(crate) fn link_restore_view(
+        &self,
+        destination: &Path,
+        created: &mut Vec<PathBuf>,
+    ) -> Result<()> {
+        for name in SNAPSHOT_ARTIFACTS {
+            let source = self.dir.join(OPENVMM_DIR).join(name);
+            let path = destination.join(name);
+            fs::hard_link(&source, &path).map_err(|error| {
+                Error::io(format!(
+                    "cannot hard-link snapshot artifact {} into restore view {}",
+                    source.display(),
+                    path.display()
+                ))
+                .with_source(error)
+            })?;
+            created.push(path);
+        }
+        Ok(())
     }
 
     /// Checks whether this snapshot can restore `config` under `runtime` at `now`.

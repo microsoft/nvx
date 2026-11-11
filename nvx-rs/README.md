@@ -124,7 +124,7 @@ changes only when the module's purpose does.
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
 | [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
-| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold and capture preparation, owned cold-launch command, verified detached launch, confirmed stop, and caller-saved reattachment |
+| [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold, capture and restore preparation, owned launch commands, verified detached launch, confirmed stop, and caller-saved reattachment |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshots, post-exit capture finishing, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
@@ -513,12 +513,37 @@ failure never hides confirmed exit.
 
 `vm::create(&runtime, &config, None, &dir)` creates an inspectable cold
 `Prepared` launch without starting a process or binding a listener. It requires
-`config.boot`, refuses a snapshot input, rechecks the directory's privacy, and
+`config.boot`, rechecks the directory's privacy, and
 creates a new private log. Existing log, outcome and Linux endpoint entries
 are refused rather than replaced. An ordinary cold boot creates only the log
 before a spawn; OpenVMM creates its remaining outputs when it runs. A failed preparation
 closes and removes only its new files, preserving all pre-existing entries and
 caller-owned inputs, and reports a cleanup failure with the original error.
+
+With `Some(snapshot)`, creation refuses `boot`, checks `Snapshot::accepts`
+at the real `HostTime::now`, and hard-links only the existing OpenVMM files
+into a new `<vm_dir>/openvmm/`. A different filesystem fails; there is no
+copy or snapshot-parent fallback. The restore's arguments follow the clone
+launch's rules: the devices at the snapshot's processor capacity,
+`--restore-network-policy` with the restore's own policy in place of `--net`
+and the guest's address, which OpenVMM takes from the snapshot,
+`--restore-absent-scratch` for an upper in RAM, `--restore-processors` only
+when the snapshot records its boot processors, `--restore-memory`, the
+console attachment that the snapshot allows, the snapshot's backend and CPU
+profile, and the launch options, with no kernel, initramfs, command line or
+`--memory`. Creation binds the restore-ready listener before any spawn and
+retains that same owned listener through `Launched::ready` or
+`VmmCommand::ready`, never in the child's inheritance allowlist.
+
+On Linux, the caller holds its per-snapshot lock from creation, including
+adding links, through a peer-verified restore-ready event or verified VM
+exit, and around view removal. NVX takes no lock; Windows needs none.
+A restore whose caller dies before OpenVMM connects the restore-ready
+endpoint cannot complete: OpenVMM checks the snapshot files before that one
+connection, which it does not retry, and the dead caller's endpoint no longer
+listens. After the connection OpenVMM no longer checks those files, so no
+durable in-flight restore record is needed; the caller keeps the VM's process
+as for any launch. A successful view remains caller-owned.
 
 With `boot.capture`, creation requires a blockless root and refuses every
 filesystem export. It creates private sparse `capture-image.raw` and
@@ -566,13 +591,14 @@ selects the network's presence and IPv4 and derived IPv6 gateways, while the
 launch's policy supplies DNS, publication and proxy. An omitted limit takes the
 record's maximum bound. It reads no host path and opens no snapshot. A
 blockless root or memory that cannot fit the record's byte count fails with
-`ErrorKind::Unsupported`. These projections do not enable the restore caller;
-`create` still accepts cold launches only.
+`ErrorKind::Unsupported`. A restore resolves these settings against the
+captured NIC and its own requested policy.
 
 `Prepared::into_command()` moves the complete launch into `VmmCommand`: its
 program, arguments, working directory, capability, outputs, inherited resources,
-opened log and Windows breakaway setting. It neither reopens nor duplicates
-resources, renders again nor rediscovers paths. `InheritedHandle` owns its
+opened log, Windows breakaway setting, and any already-bound ready listener.
+It neither reopens nor duplicates resources, renders again nor rediscovers
+paths. `InheritedHandle` owns its
 resource, converts from and back to `OwnedFd` on Unix or `OwnedHandle` on Windows,
 and also accepts an opened `File`. The command documents the caller's spawn
 contract, including standard streams, allowlisted inheritance, Linux detachment
@@ -589,9 +615,17 @@ outcome with complete teardown. Build with
 kernel, initramfs, new VM directory, and the three artifact SHA-256 digests from
 their installation metadata, in that order. Artifact paths may be relative to
 the caller's directory.
+Append a snapshot directory and EROFS image to run its restore-ready
+demonstration instead, using a snapshot captured with a disconnected boot
+console, as `nvx-rs snapshot capture` captures it. It uses the public
+peer-verified receiver, then intentionally stops and verifies the VM's exit
+without driving guest activation. Linux callers of the example coordinate on
+the snapshot's `key.bin` lock, taken before opening the snapshot and retained
+through view removal.
 
 `vm::spawn(prepared)` consumes that preparation and returns `Launched` with
-its verified `process`, the same `outputs`, and the same `capability`. The log
+its verified `process`, the same `outputs`, the same `capability`, and a
+restore's same bound `ready` listener. The log
 and inherited resources are passed as already opened objects, never reopened
 by name. The capability reaches OpenVMM only on standard input, then
 end-of-file, not in arguments, environment variables, or a file. A failure
@@ -673,9 +707,9 @@ the supplied `HostTime` is `Unavailable`.
 
 The caller keeps the directory and every entry private and immutable while
 using the snapshot; opening checks them once and retains no file handles
-or lock. `Snapshot` remains an opaque input of a future restore:
-`vm::create` still refuses `Some(snapshot)` with `ErrorKind::Unsupported`;
-only cold boots are supported.
+or lock. `vm::create(..., Some(snapshot), ...)` checks compatibility and
+current-time eligibility, then creates the fixed hard-linked view and
+binds the caller-owned ready listener described above.
 
 `CaptureContext` records a prepared capture's checked configuration and
 effective devices independently of runtime paths or network policy.
@@ -844,7 +878,7 @@ Start. Terminal results are offered once and absorb later inputs.
 
 `ReadyListener` owns a restore-ready endpoint: a mode-0600 Unix socket in the
 private VM directory on Linux, or a fresh first-instance named pipe with an
-owner-only protected access control list on Windows. The library's receiver
+owner-only protected access control list on Windows. Its public `receive`
 checks the connecting client's process ID against the held VM process. On
 Linux it also checks the socket's original peer through `SO_PEERPIDFD`, so
 a reaped client's queued event cannot impersonate a VM that reuses its ID.
@@ -861,8 +895,8 @@ socket peer through `SO_PEERPIDFD`, refuses an exited peer, and matches its
 credentials against the held VM process: opening a pidfd from the cached
 numeric PID is not authentication. On Windows it checks the named-pipe client
 process ID. After matching the peer, it checks `Process::has_exited` and
-refuses an exited VM. Listener construction remains internal until restore
-launch preparation supplies it.
+refuses an exited VM. Only `vm::create` constructs a listener, for a restore,
+and hands it over through `VmmCommand::ready` or `Launched::ready`.
 
 The Linux PID-reuse regression runs a separate helper in private PID and mount
 namespaces with Bash as its reaper. If the host refuses unprivileged user
