@@ -2621,6 +2621,7 @@ nvx-rs [-h] [--root PATH] egress compile PATH
 nvx-rs [-h] [--root PATH] run [OPTIONS]
 nvx-rs [-h] [--root PATH] sandbox [run|provision|start|exec|stop|deprovision] [OPTIONS]
 nvx-rs [-h] [--root PATH] snapshot capture NAME [OPTIONS]
+nvx-rs [-h] [--root PATH] snapshot restore NAME [OPTIONS]
 ```
 
 ```bash
@@ -2678,7 +2679,24 @@ exit before finishing and publishing exactly the strict snapshot's three
 entries. The next capture using that store ends an interrupted attempt through
 ordinary launch recovery, never resuming it. See
 [`snapshot capture`](../doc/usage.md#snapshot-capture) for its resource options
-and recovery behavior. Restore commands are separate follow-ups.
+and recovery behavior.
+
+`snapshot restore NAME --store-dir PATH --state-dir PATH` provisions a managed
+sandbox, with the options of `sandbox provision` that a restore takes, whose
+configuration also records the snapshot, its store, and the sandbox's workload,
+then starts it: that start, and each later one, creates the VM with
+`host::vm::create` from the snapshot, through the store's launch journal, and
+drives its restore with the blocking restore driver, which activates the guest
+with the start's own network policy, maps the sandbox's shares, and runs the
+workload, whose output the start forwards until it exits. A restore's guest
+accepts only a fresh upper, so a later start refuses a scratch image once an
+earlier start has created its view, as each start does before its guest can use
+the image. Each start holds the snapshot's exclusive lock from before it links
+the snapshot's files into the sandbox's `openvmm/` view until the start ends or
+the VM has exited, and `deprovision` holds it while it removes the view; a start
+whose command dies leaves a journal whose recovery ends the VM. No index of a
+snapshot's sandboxes or record of a restore in progress exists. See
+[`snapshot restore`](../doc/usage.md#snapshot-restore).
 
 ### Artifact root
 
@@ -2929,7 +2947,7 @@ them:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 9 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export and network are typed, `null` when absent. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
+| `config.json` | The provisioned sandbox, in format 9 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export and network are typed, `null` when absent. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `exec.lock` | The exec lock, which an `exec` holds from before it finds the running VM until its workload ends, so that one `exec` at a time runs in the sandbox; it stays from the first `exec` until `deprovision` |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
@@ -2938,6 +2956,8 @@ them:
 | `control.sock` | The control endpoint on POSIX hosts |
 | `openvmm.log` | OpenVMM's output, which each start replaces |
 | `outcome.json` | OpenVMM's outcome report of the last start |
+| `openvmm/` | A restored sandbox's view of its snapshot, hard links to the files of the snapshot's `openvmm/`, which a start creates and `deprovision` removes, each under the snapshot's lock |
+| `restore-ready.sock` | On Linux, the endpoint of a restore's restore-ready event, which the next start of a restored sandbox, or its `deprovision`, removes under the snapshot's lock |
 
 `provision`, `start`, `stop`, and `deprovision` hold the store's lock for their
 whole transition, and `exec` only while it finds the running VM, so that a long

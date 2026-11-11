@@ -237,6 +237,177 @@ fn shared_directory_acls_are_refused_before_publication() {
     assert!(!held.dir.exists());
 }
 
+/// Parses the `snapshot` command line `arguments`.
+fn command(arguments: &[&str]) -> Result<(Command, Vec<String>)> {
+    parse(
+        &arguments
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[test]
+fn the_snapshot_parser_selects_capture_or_a_restore_with_the_options_of_a_provision() {
+    let Ok((Command::Capture(_), extras)) = command(&["capture", "name", "--store-dir", "store"])
+    else {
+        panic!("capture parses");
+    };
+    assert!(extras.is_empty());
+    let layer = "distro,image.gpt,11111111-1111-1111-1111-111111111111";
+    let Ok((Command::Restore(options), extras)) = command(&[
+        "restore",
+        "name",
+        "--store-dir",
+        "store",
+        "--state-dir",
+        "state",
+        "--layer",
+        layer,
+        "--layer-format",
+        "gpt",
+        "--upper",
+        "ram",
+        "--ram-upper-percent",
+        "25",
+        "--entrypoint",
+        "/bin/echo",
+        "--arg",
+        "restored",
+        "--workload-user",
+        "1000:1001",
+    ]) else {
+        panic!("restore parses");
+    };
+    assert!(extras.is_empty());
+    assert_eq!(options.name, Some(name("name")));
+    assert_eq!(options.store_dir, "store");
+    let sandbox = options.sandbox;
+    assert_eq!(sandbox.operation, SandboxOperation::Provision);
+    assert_eq!(sandbox.state_dir.as_deref(), Some("state"));
+    assert_eq!(sandbox.layers.len(), 1);
+    // The restored sandbox's typed record takes provision's image format and RAM upper cap.
+    assert_eq!(
+        sandbox.layer_format,
+        Some(crate::host::sandbox::distro::DistroFormat::Gpt)
+    );
+    assert_eq!(sandbox.upper, Some(crate::protocol::root::RootUpper::Ram));
+    assert_eq!(sandbox.ram_upper_percent, Some(25));
+    assert_eq!(
+        (sandbox.entrypoint.as_str(), sandbox.args.as_slice()),
+        ("/bin/echo", ["restored".to_owned()].as_slice())
+    );
+    assert_eq!(sandbox.workload_user, (1000, 1001));
+    // A restore needs its snapshot, its store, and its sandbox's state directory.
+    for arguments in [
+        &["restore", "name", "--state-dir", "state"][..],
+        &["restore", "name", "--store-dir", "store"],
+        &["restore", "--store-dir", "store", "--state-dir", "state"],
+        &[
+            "restore",
+            "../escape",
+            "--store-dir",
+            "store",
+            "--state-dir",
+            "state",
+        ],
+        &["bogus"],
+    ] {
+        let Err(Exit::Usage { code, .. }) = command(arguments) else {
+            panic!("{arguments:?} is a usage error");
+        };
+        let expected = if arguments.contains(&"../escape") || arguments == ["bogus"] {
+            ErrorCode::ArgumentInvalid
+        } else {
+            ErrorCode::ArgumentMissing
+        };
+        assert_eq!(code, expected, "{arguments:?}");
+    }
+    // A restore's sandbox runs no execution and boots nothing cold, so it takes none of their
+    // options.
+    for option in NOT_RESTORED {
+        let Ok((_, extras)) = command(&[
+            "restore",
+            "name",
+            "--store-dir",
+            "store",
+            "--state-dir",
+            "state",
+            option,
+        ]) else {
+            panic!("{option} parses as an unrecognized argument");
+        };
+        assert_eq!(extras, [option], "{option}");
+    }
+    for arguments in [
+        &["--help"][..],
+        &["restore", "--help"],
+        &["capture", "--help"],
+    ] {
+        assert!(
+            matches!(command(arguments), Err(Exit::Help(_))),
+            "{arguments:?}"
+        );
+    }
+    RESTORE_SYNTAX.assert_lists(&restore_options());
+}
+
+#[test]
+fn a_restore_refuses_a_state_directory_in_its_snapshot_store_before_it_provisions() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("store");
+    let state = store.join("snapshots").join(hex(b"first"));
+    let Ok((Command::Restore(options), _)) = command(&[
+        "restore",
+        "first",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+    ]) else {
+        panic!("restore parses");
+    };
+    let error = restore(None, *options).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    assert!(!store.exists());
+}
+
+#[test]
+fn a_restore_refuses_a_workload_that_is_not_a_valid_exec_request_before_it_provisions() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("store");
+    let state = root.path().join("state");
+    let restore_of = [
+        "restore",
+        "first",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+    ];
+    for (workload, expected) in [
+        (
+            &["--entrypoint", "echo"][..],
+            "managed exec entrypoint must be absolute",
+        ),
+        (
+            &["--arg", "x"].repeat(64)[..],
+            "managed exec requires 1 through 64 arguments",
+        ),
+    ] {
+        let Ok((Command::Restore(options), _)) = command(&[&restore_of[..], workload].concat())
+        else {
+            panic!("restore parses");
+        };
+        let error = restore(None, *options).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+        let message = error.message().unwrap_or_default();
+        assert!(message.contains(expected), "{message}");
+    }
+    assert!(!store.exists());
+    assert!(!state.exists());
+}
+
 /// Returns a store with the published snapshot `first`, and a VM directory with a view of it.
 fn restored_view(root: &Path) -> (Store, VmDir) {
     fs::create_dir_all(root).unwrap();
