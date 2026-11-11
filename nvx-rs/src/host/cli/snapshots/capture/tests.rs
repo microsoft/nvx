@@ -1,5 +1,6 @@
 #![cfg(any(target_os = "linux", windows))]
 
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -9,6 +10,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::*;
+use crate::host::config::NicConfig;
 use crate::host::platform;
 use crate::host::process::{BootId, Opened, ProcessRef};
 use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, class};
@@ -238,7 +240,11 @@ fn write_recipe(root: &Path, prepared: &Prepared, behavior: &str) {
     );
     let context = prepared.capture_context().unwrap();
     let DiskCapture::Fresh { image, scratch } = context.capture.disks;
-    let mut manifest = ManifestSpec::template();
+    // The fake's manifest has a NIC, at 10.0.0.2/24, only for a VM that has one.
+    let mut manifest = match context.nic {
+        Some(_) => ManifestSpec::with_network(),
+        None => ManifestSpec::template(),
+    };
     let contract = manifest.contract();
     contract.source_hypervisor = runtime(root).hypervisor.to_string();
     contract.blocks[0].physical_block_size = image.physical_block_size;
@@ -316,6 +322,152 @@ fn capture_parser_refuses_bad_names_and_invalid_options() {
     }
     assert!(matches!(parse(&["--help".to_owned()]), Err(Exit::Help(_))));
     CAPTURE_SYNTAX.assert_lists(&OPTIONS);
+}
+
+#[test]
+fn the_capture_parser_takes_for_net_only_an_address_that_openvmm_accepts() {
+    let parsed = |extra: &[&str]| {
+        let arguments: Vec<String> = ["name", "--store-dir", "store"]
+            .iter()
+            .chain(extra)
+            .map(|value| (*value).to_owned())
+            .collect();
+        parse(&arguments)
+    };
+    assert_eq!(parsed(&[]).unwrap().0.net, None);
+    assert_eq!(
+        parsed(&["--net", "192.0.2.2/24"]).unwrap().0.net,
+        Some(Ipv4Cidr::parse("192.0.2.2/24").unwrap())
+    );
+    // The network's own, broadcast and gateway addresses, an address without a prefix, a prefix
+    // longer than /30, and IPv6.
+    for refused in [
+        "192.0.2.0/24",
+        "192.0.2.255/24",
+        "192.0.2.1/24",
+        "192.0.2.2",
+        "192.0.2.2/31",
+        "fd00::2/120",
+        "",
+    ] {
+        assert!(
+            matches!(
+                parsed(&["--net", refused]),
+                Err(Exit::Usage {
+                    code: ErrorCode::ArgumentInvalid,
+                    ..
+                })
+            ),
+            "{refused:?}"
+        );
+    }
+}
+
+#[test]
+fn a_capture_with_net_gives_its_vm_a_deny_all_nic_which_its_snapshot_keeps() {
+    let fixture = Fixture::new();
+    let store = fixture.root.path().join("store");
+    let arguments = [
+        "networked",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--processors",
+        "2",
+        "--memory-mib",
+        "512",
+        "--memory-capacity-mib",
+        "2048",
+        "--net",
+        "10.0.0.2/24",
+        "--timeout",
+        "20",
+    ]
+    .map(str::to_owned);
+    let (networked, extras) = parse(&arguments).unwrap();
+    assert!(extras.is_empty());
+    let address = Ipv4Cidr::parse("10.0.0.2/24").unwrap();
+    let mut launched = Vec::new();
+    capture(&networked, &runtime(fixture.root.path()), |prepared| {
+        assert_eq!(
+            prepared.capture_context().unwrap().nic,
+            Some(NicConfig {
+                guest_network: address
+            })
+        );
+        launched = prepared.arguments().to_vec();
+        Ok(fake_spawn(fixture.root.path(), prepared, "publish"))
+    })
+    .unwrap();
+    // OpenVMM attaches the NIC under the complete deny-all policy alone: no egress, ingress,
+    // host loopback, forward, proxy or DNS server.
+    let deny_all = [
+        "--net",
+        "10.0.0.2/24",
+        "--network-profile",
+        "portable",
+        "--network-egress",
+        "deny",
+        "--network-ingress",
+        "deny",
+        "--host-loopback",
+        "deny",
+    ]
+    .map(OsString::from);
+    assert_eq!(
+        launched
+            .windows(deny_all.len())
+            .filter(|window| *window == deny_all)
+            .count(),
+        1,
+        "{launched:?}"
+    );
+    for option in [
+        "--network-egress-allow",
+        "--network-egress-deny",
+        "--host-loopback-forward",
+        "--network-proxy",
+    ] {
+        assert!(
+            !launched.iter().any(|argument| argument == option),
+            "{option}"
+        );
+    }
+    let store = fixture.store();
+    let held = store
+        .lock(&name("networked"), Deadline::after(10.0))
+        .unwrap();
+    assert_eq!(
+        held.open().unwrap().nic(),
+        Some(NicConfig {
+            guest_network: address
+        })
+    );
+    let description: Value =
+        serde_json::from_slice(&fs::read(held.dir.join(DESCRIPTION_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        description["nic"],
+        json!({ "guest_network": "10.0.0.2/24" })
+    );
+    drop(held);
+    assert!(!fixture.vm_dir().exists());
+    // Without --net, a capture's VM has no NIC, and neither has its snapshot.
+    capture(
+        &fixture.options("plain"),
+        &runtime(fixture.root.path()),
+        |prepared| {
+            assert_eq!(prepared.capture_context().unwrap().nic, None);
+            assert!(
+                !prepared
+                    .arguments()
+                    .iter()
+                    .any(|argument| argument.to_str().unwrap().starts_with("--net"))
+            );
+            Ok(fake_spawn(fixture.root.path(), prepared, "publish"))
+        },
+    )
+    .unwrap();
+    let held = store.lock(&name("plain"), Deadline::after(10.0)).unwrap();
+    assert_eq!(held.open().unwrap().nic(), None);
 }
 
 #[test]

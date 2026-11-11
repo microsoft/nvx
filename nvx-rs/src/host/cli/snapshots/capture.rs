@@ -1,4 +1,8 @@
 //! A blockless capture, kept in the ordinary launch journal until it ends.
+//!
+//! With `--net`, the capture VM has a NIC under the complete deny-all policy, and the snapshot
+//! keeps the NIC and its address, without a policy: each restore installs a policy of its own on
+//! it.
 
 use std::fs;
 use std::path::Path;
@@ -16,14 +20,16 @@ use crate::host::cli::store::{LockedState, StateDir, StateFile};
 use crate::host::cli::{Exit, Result, check_interrupt, io_error, output};
 use crate::host::config::{
     BlockGeometry, Boot, Capacity, CaptureConfig, ConsoleAttachment, DiskCapture, Invariants,
-    RootConfig, VmConfig,
+    NetworkConfig, RootConfig, VmConfig,
 };
+use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::{Exited, KILL_TIMEOUT, Process};
 use crate::host::runtime::{LaunchOptions, Runtime};
 use crate::host::session::{ControlSession, SessionError};
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR, finish_capture};
 use crate::host::transport;
 use crate::host::vm::{self, Prepared, VmDir, VmOutputs};
+use crate::net::Ipv4Cidr;
 
 /// The capture command parser.
 const CAPTURE_SYNTAX: Syntax = Syntax {
@@ -50,12 +56,15 @@ options:
   --image-capacity-mib MIB
                         longest restore image (default: 1024)
   --scratch-mib MIB     dormant scratch length (default: 64)
+  --net IPV4/PREFIX     a NIC at this address, which the snapshot keeps for its
+                        restores, under a deny-all policy that each restore
+                        replaces with its own (default: none)
   --timeout SECONDS    positive whole seconds for launch, capture and exit,
                         and each lock wait (default: 60)",
 };
 
 /// Capture's small, fixed option set.
-const OPTIONS: [Spec; 10] = [
+const OPTIONS: [Spec; 11] = [
     Spec::one("--store-dir"),
     Spec::one("--hypervisor"),
     Spec::one("--cpu-profile"),
@@ -65,6 +74,7 @@ const OPTIONS: [Spec; 10] = [
     Spec::one("--memory-capacity-mib"),
     Spec::one("--image-capacity-mib"),
     Spec::one("--scratch-mib"),
+    Spec::one("--net"),
     Spec::one("--timeout"),
 ];
 
@@ -90,6 +100,8 @@ pub(in crate::host::cli) struct Options {
     image_mib: u64,
     /// Dormant scratch size.
     scratch_mib: u64,
+    /// The address of the VM's NIC, if it has one.
+    net: Option<Ipv4Cidr>,
     /// Bounded operation time.
     timeout: u32,
 }
@@ -107,6 +119,7 @@ impl Default for Options {
             memory_capacity_mib: None,
             image_mib: 1024,
             scratch_mib: 64,
+            net: None,
             timeout: 60,
         }
     }
@@ -139,6 +152,7 @@ impl Receiver for Options {
             }
             "--image-capacity-mib" => self.image_mib = integer(value, 1..=MAX_MEMORY_MIB)?,
             "--scratch-mib" => self.scratch_mib = integer(value, 1..=MAX_MEMORY_MIB)?,
+            "--net" => self.net = Some(Ipv4Cidr::parse(value)?),
             "--timeout" => self.timeout = integer(value, 1..=u32::MAX)?,
             _ => unreachable!("the capture parser has a fixed option set"),
         }
@@ -228,7 +242,11 @@ fn capture(
             hostname: b"nvx-capture".to_vec(),
             machine_id: MachineIdMode::Image,
         },
-        network: None,
+        // The complete deny-all policy is the one that a restore may replace with its own.
+        network: options.net.map(|address| NetworkConfig {
+            guest_network: Some(address),
+            policy: NetworkPolicy::new(Access::Deny),
+        }),
         filesystem: None,
         console: ConsoleAttachment::Disconnected,
         boot: Some(Boot {
