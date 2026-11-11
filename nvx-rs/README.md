@@ -3592,6 +3592,10 @@ compiles the examples with the rest of the crate's targets, and
 [`external-launch`](examples/external-launch.rs) runs a cold boot end to end,
 or a restore up to its restore-ready event.
 
+The [case matrix](../doc/acceptance-case-matrix.md) gives each test of the
+[runtime adapter](../tests/runtime-adapter/README.md), of CI, and of the docs,
+and each microVM scenario, a fate: kept, rewritten, or retired.
+
 The
 [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml) action runs
 rustfmt, Clippy with warnings denied for all features, for the library
