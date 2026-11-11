@@ -42,8 +42,9 @@ what Ubuntu userland needs on this machine:
   that the sandbox uses, and network namespaces for guest services.
 
 Its [patches](../../kernel/patches) add the xe9 early and interactive consoles
-and the shared virtio-mmio interrupt status, and keep the HVC console from
-losing input that its interrupt and its polling thread read concurrently. The
+and the shared virtio-mmio interrupt status, keep the HVC console from losing
+input that its interrupt and its polling thread read concurrently, and keep
+the scheduler from charging a running task a snapshot's downtime. The
 [kernel configuration](../../kernel/config-microvm) enables only what the
 [kernel feature inventory](../build.md#kernel-configuration) sets and what
 Kconfig derives from it: it omits PCI, user, IPC, and time namespaces,
