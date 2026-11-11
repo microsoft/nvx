@@ -13,10 +13,13 @@ use crate::host::artifacts::{
     ArtifactDir, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_PROVENANCE_NAME, OPENVMM_PROVENANCE_NAME,
 };
 use crate::host::cli::hex;
+use crate::host::cli::run;
 use crate::host::cli::sandbox::lifecycle::{ProvisionConfig, deprovision};
+use crate::host::cli::sandbox::sandbox_network;
 use crate::host::cli::sandbox::state::{RecordedDistro, serialize_launch, write_json};
 use crate::host::cli::snapshots::{self, Name};
 use crate::host::cli::store::StateDir;
+use crate::host::config::NetworkConfig;
 use crate::host::filesystem::{Bind, ExportChild, ExportPlan, Owner};
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::paths::resolve;
@@ -28,6 +31,7 @@ use crate::host::sandbox::options::sandbox_mounts;
 use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
 use crate::host::snapshot::tests::RestoreFixture;
 use crate::host::snapshot::{DESCRIPTION_FILE, KEY_FILE, OPENVMM_DIR};
+use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootImage;
 use crate::protocol::{
     APP_ACTIVATE, APP_EXEC, APP_EXIT, APP_HEADER_LEN, APP_MAPS, APP_READY, APP_STDOUT, OUTER_DATA,
@@ -106,12 +110,26 @@ impl Fixture {
     /// Restores the snapshot into the state directory `state`, whose fake VM does as `behavior`
     /// says, as a start of a sandbox restored from it does.
     fn start(&self, state: &str, config: VmConfig, behavior: &str, timeout: f64) -> Result {
+        self.start_with(state, config, behavior, timeout, false)
+    }
+
+    /// Restores the snapshot as [`start`](Self::start) does, forwarding the status of a workload
+    /// that does not exit with status 0 if `forward_status`, as `run --restore-snapshot` asks.
+    fn start_with(
+        &self,
+        state: &str,
+        config: VmConfig,
+        behavior: &str,
+        timeout: f64,
+        forward_status: bool,
+    ) -> Result {
         let state_dir = self.state(state);
         let mut lock = LifecycleLock::acquire(&state_dir, timeout, true).unwrap();
         let source = self.source();
         let restore = Restore {
             source: &source,
             identity: (1000, 1001),
+            forward_status,
         };
         launch_locked(
             &mut lock,
@@ -330,6 +348,145 @@ fn named_snapshots_restore_each_image_format_and_upper_with_their_own_policy_and
     }
 }
 
+/// Returns `run ARGUMENTS`, parsed.
+fn run_options(arguments: &[&str]) -> run::Options {
+    let arguments: Vec<String> = arguments
+        .iter()
+        .map(|&argument| argument.to_owned())
+        .collect();
+    run::parse(&arguments).unwrap().0
+}
+
+#[test]
+fn a_one_off_restore_installs_the_network_options_of_run_as_its_own_policy() {
+    let fixture = Fixture::new(true);
+    let options = run_options(&[
+        "--restore-snapshot",
+        "source",
+        "--network-profile",
+        "portable",
+        "--network-egress",
+        "deny",
+        "--network-egress-allow",
+        "10.42.0.1/32:udp:53",
+        "--host-loopback",
+        "allow",
+        "--host-loopback-forward",
+        "tcp:18080:8080",
+    ]);
+    // The run's options at the NIC of the snapshot, as `sandbox` lowers them and a start of the
+    // sandbox records them.
+    let nic = fixture
+        .store
+        .lock(&name(), Deadline::after(5.0))
+        .unwrap()
+        .open()
+        .unwrap()
+        .nic();
+    let network = run::restored_network(options.network, nic).unwrap();
+    let rules = network.egress_rules().unwrap();
+    let network = sandbox_network(&network, &rules).unwrap().unwrap();
+    let mut config = fixture.restore.config.clone();
+    config.network = Some(NetworkConfig {
+        guest_network: Some(Ipv4Cidr::parse(network.guest_network()).unwrap()),
+        policy: network.policy().clone(),
+    });
+    fixture.start("state", config, "ready", 30.0).unwrap();
+    // The guest learns the DNS server that the policy lets it reach, and announces its listeners,
+    // which the policy publishes on host loopback.
+    let requests = fixture.requests("state");
+    assert_eq!(requests[0].0, APP_ACTIVATE);
+    assert_eq!(
+        activation(&requests[0].1).0.configuration().network,
+        Some(Network {
+            dns: Some("10.42.0.1".parse().unwrap()),
+            publication: Publication::Published,
+            proxy: None,
+        })
+    );
+    // OpenVMM installs the policy, egress, forwards, and host loopback, in place of the
+    // snapshot's, at the NIC's address, which the restore does not name.
+    let [(_, arguments, _)] = &fixture.spawned()[..] else {
+        panic!("one VM restores");
+    };
+    for [option, value] in [
+        ["--network-egress", "deny"],
+        ["--network-egress-allow", "10.42.0.1/32:udp:53"],
+        ["--host-loopback", "allow"],
+        ["--host-loopback-forward", "tcp:18080:8080"],
+    ] {
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair[0] == option && pair[1] == value),
+            "{option} {value}: {arguments:?}"
+        );
+    }
+    assert!(
+        arguments
+            .iter()
+            .any(|argument| argument == "--restore-network-policy")
+    );
+    assert!(!arguments.iter().any(|argument| argument == "--net"));
+}
+
+#[test]
+fn a_one_off_restore_refuses_the_network_options_of_a_snapshot_without_a_nic_before_it_provisions()
+{
+    let fixture = Fixture::new(false);
+    let store = fixture.root.path().join("store");
+    let state = fixture.state("state");
+    let options = run_options(&[
+        "--restore-snapshot",
+        "source",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--layer",
+        "distro,distro.erofs,11111111-1111-1111-1111-111111111111",
+        "--upper",
+        "ram",
+        "--network-profile",
+        "portable",
+    ]);
+    let error = run::run(None, options).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    assert!(error.message().unwrap().contains("no NIC"), "{error:?}");
+    assert!(!state.exists());
+    assert!(fixture.spawned().is_empty());
+}
+
+#[test]
+fn a_one_off_restore_ends_with_the_status_of_its_workload_once_its_vm_and_launch_have_ended() {
+    let fixture = Fixture::new(false);
+    let config = &fixture.restore.config;
+    // A forwarded status changes nothing for a workload that exits with status 0.
+    fixture
+        .start_with("ready", config.clone(), "ready", 30.0, true)
+        .unwrap();
+    // Another status ends the start with that status, in place of the error of `snapshot
+    // restore`, once the VM and its launch have ended, before the snapshot goes free, and so does
+    // a signal's, 128 plus its number, as `sandbox run` ends.
+    for (index, (state, status)) in [("failing", 3), ("signaled", 143)].into_iter().enumerate() {
+        let error = fixture
+            .start_with(state, config.clone(), state, 30.0, true)
+            .unwrap_err();
+        assert!(
+            matches!(error, Exit::Status(found) if found == status),
+            "{error:?}"
+        );
+        assert!(fixture.exited(index + 1));
+        let locked = StateDir::open(&fixture.state(state))
+            .unwrap()
+            .lock(Deadline::after(5.0))
+            .unwrap();
+        assert!(locked.journal().unwrap().is_none());
+        assert!(locked.runtime().unwrap().is_none());
+        assert!(fixture.snapshot_free());
+    }
+}
+
 #[test]
 fn concurrent_restores_of_one_snapshot_wait_for_its_lock_until_the_first_vm_has_exited() {
     let fixture = Fixture::new(false);
@@ -402,6 +559,7 @@ fn a_restore_whose_spawn_cannot_confirm_that_its_vm_ended_recovers_it_before_its
     let restore = Restore {
         source: &source,
         identity: (1000, 1001),
+        forward_status: false,
     };
     let error = launch_locked(
         &mut lock,
@@ -593,7 +751,7 @@ fn a_restored_start_refuses_a_share_of_its_snapshot_store() {
     let artifacts = Artifacts {
         root: Some(root.to_str().unwrap()),
     };
-    let error = start(state_dir.to_str().unwrap(), &artifacts, 5.0).unwrap_err();
+    let error = start(state_dir.to_str().unwrap(), &artifacts, 5.0, false).unwrap_err();
     assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
     let message = error.message().unwrap_or_default();
     assert!(
@@ -700,6 +858,55 @@ fn snapshot_restore_records_its_source_and_starts_a_restore_of_it() {
     assert!(!state.exists());
 }
 
+/// `run --restore-snapshot` takes the workloads that `snapshot restore` takes, exec requests that
+/// may hold whitespace and quotes, which no boot token can: its one-off provisions the sandbox and
+/// starts a restore of the snapshot, which memory that the snapshot refuses ends before it
+/// launches or links anything, and then removes the sandbox.
+#[test]
+fn a_one_off_restore_takes_the_workloads_of_snapshot_restore() {
+    let fixture = Fixture::new(false);
+    let root = artifact_root(&fixture.state("checkout"));
+    let layer = fixture.state("distro.erofs");
+    fs::write(&layer, "distro").unwrap();
+    let layer = format!(
+        "distro,{},11111111-1111-1111-1111-111111111111",
+        layer.display()
+    );
+    let store = fixture.root.path().join("store");
+    let state = fixture.state("one-off");
+    let options = run_options(&[
+        "--restore-snapshot",
+        "source",
+        "--store-dir",
+        store.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--layer",
+        &layer,
+        "--upper",
+        "ram",
+        "--hypervisor",
+        if cfg!(windows) { "whp" } else { "kvm" },
+        "--memory-mib",
+        "2176",
+        "--entrypoint",
+        "/bin/echo",
+        "--arg",
+        "a \"restored\" sandbox",
+        "--timeout",
+        "10",
+    ]);
+    let error = run::run(Some(&root), options).unwrap_err();
+    assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+    let message = error.message().unwrap_or_default();
+    assert!(
+        message.contains("snapshot memory must be from boot"),
+        "{message}"
+    );
+    assert!(!state.exists());
+    assert!(fixture.snapshot_free());
+}
+
 /// Reads one record of the control endpoint, or `None` once the host has gone.
 fn read_record(stream: &mut impl Read) -> Option<(u8, Vec<u8>)> {
     let mut header = [0; OUTER_HEADER_LEN];
@@ -744,18 +951,15 @@ fn serve(stream: &mut (impl Read + Write), capability: &[u8], epoch: u64, recipe
                 vec![(APP_READY, 0, ready.encode())]
             }
             APP_MAPS => vec![(APP_READY, 0, Vec::new())],
-            // The workload writes its output, then exits, with status 3 if it fails.
+            // The workload writes its output, then exits, with status 3 if it fails, or SIGTERM
+            // ends it.
             _ => vec![
                 (APP_STDOUT, 0, b"restored\n".to_vec()),
-                (
-                    APP_EXIT,
-                    if recipe["behavior"] == "failing" {
-                        3
-                    } else {
-                        0
-                    },
-                    b"exit".to_vec(),
-                ),
+                match recipe["behavior"].as_str() {
+                    Some("failing") => (APP_EXIT, 3, b"exit".to_vec()),
+                    Some("signaled") => (APP_EXIT, 143, b"signal".to_vec()),
+                    _ => (APP_EXIT, 0, b"exit".to_vec()),
+                },
             ],
         };
         for (kind, status, payload) in replies {

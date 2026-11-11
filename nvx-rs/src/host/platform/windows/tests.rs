@@ -407,38 +407,6 @@ fn children_inherit_the_allowed_handles_while_they_are_created() {
     assert!(!allowed_inheritable && kept_inheritable);
 }
 
-#[cfg(feature = "cli")]
-#[test]
-fn foreground_children_inherit_only_the_allowed_handles_besides_their_standard_ones() {
-    // A handle that this process leaves inheritable, as its parent may have passed it, and
-    // that `std::process::Command` would pass on.
-    let (_other_reader, other) = io::pipe().unwrap();
-    make_inheritable(&other);
-    let (_allowed_reader, allowed) = io::pipe().unwrap();
-    let system = std::env::var_os("SystemRoot").unwrap();
-    let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    // The child shares this process's console and standard handles, so it writes nothing.
-    let child = spawn_foreground(
-        &cmd,
-        &["/c", "ping -n 30 127.0.0.1 >NUL"].map(OsString::from),
-        &[Inherited::new(&allowed)],
-    )
-    .unwrap();
-    let value = |handle: &io::PipeWriter| handle.as_raw_handle() as HANDLE;
-    let (allowed_held, other_held) = (
-        holds(&child.process, value(&allowed), &allowed),
-        holds(&child.process, value(&other), &other),
-    );
-    let allowed_inheritable = inheritable(&allowed);
-    assert!(child.terminate(Duration::from_secs(10)));
-    assert!(allowed_held, "an allowed handle was not inherited");
-    assert!(!other_held, "a handle that was not allowed was inherited");
-    assert!(
-        !allowed_inheritable,
-        "the spawn left the allowed handle inheritable"
-    );
-}
-
 #[test]
 fn batch_files_are_refused_before_cmd_could_read_their_arguments() {
     // Batch files that would leave a marker if they ran, with an argument that cmd.exe would
@@ -462,8 +430,6 @@ fn batch_files_are_refused_before_cmd_could_read_their_arguments() {
             let error = result.err().expect("a batch file started");
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
         };
-        #[cfg(feature = "cli")]
-        refused(spawn_foreground(&program, &arguments, &[]));
         let (stdin, _stdin_writer) = io::pipe().unwrap();
         let (_stdout_reader, stdout) = io::pipe().unwrap();
         let stderr = stdout.try_clone().unwrap();

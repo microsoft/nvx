@@ -51,11 +51,19 @@ use crate::protocol::workload::WorkloadIdentity;
 use crate::protocol::{self, ExitCategory, HostMap, WorkloadEnvironment};
 use crate::{ErrorCode, ErrorKind};
 
-/// Starts a provisioned sandbox, as `start` does.
-pub(crate) fn start(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
+/// Starts a provisioned sandbox, as `start` does. A workload of a restored sandbox that does not
+/// exit with status 0 fails the start with an error that names how it ended, or, if
+/// `forward_status`, as `run --restore-snapshot` asks, ends it with [`Exit::Status`] of its
+/// status, as `sandbox run` ends: 128 plus the signal's number for a workload that a signal ends.
+pub(crate) fn start(
+    state_path: &str,
+    artifacts: &Artifacts<'_>,
+    timeout: f64,
+    forward_status: bool,
+) -> Result {
     let state_dir = prepare_state_directory(state_path, false)?;
     let mut lock = LifecycleLock::acquire(&state_dir, timeout, false)?;
-    start_locked(&state_dir, &mut lock, artifacts, timeout)
+    start_locked(&state_dir, &mut lock, artifacts, timeout, forward_status)
 }
 
 /// Starts the sandbox of a locked state directory, as `_start` does, through the launch journal
@@ -65,6 +73,7 @@ fn start_locked(
     lock: &mut LifecycleLock,
     artifacts: &Artifacts<'_>,
     timeout: f64,
+    forward_status: bool,
 ) -> Result {
     let config_path = state_dir.join(CONFIG_NAME);
     require_config(state_dir)?;
@@ -122,6 +131,7 @@ fn start_locked(
     let restore = source.as_ref().map(|source| Restore {
         source,
         identity: launch.settings().workload_identity,
+        forward_status,
     });
     let config = config.vm_config(&launch)?;
     let started = launch_locked(lock, &runtime, config, restore, scratch, timeout, vm::spawn);
@@ -130,12 +140,16 @@ fn start_locked(
 }
 
 /// What a start restores in place of a cold boot: the named snapshot of a restored sandbox, and
-/// the identity of the workload that the restore runs.
+/// the identity of the workload that the restore runs, and how a workload that does not exit with
+/// status 0 ends it.
 struct Restore<'a> {
     /// The snapshot and the workload, as the sandbox's configuration records them.
     source: &'a Source,
     /// The workload's UID and GID.
     identity: (u32, u32),
+    /// Whether a workload that does not exit with status 0, such as one that a signal ends, ends
+    /// the start with [`Exit::Status`] of its status, rather than with an error that names it.
+    forward_status: bool,
 }
 
 /// Launches the VM of the sandbox of a locked state directory through the launch journal of its
@@ -374,7 +388,8 @@ fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Sessi
 /// Restores the guest of `launched` from its activation `record` and runs the workload of
 /// `restore` after the mapping table `maps`, through the blocking restore driver, within its own
 /// budgets, which `timeout` seconds and Ctrl-C cut short, then forwards the workload's output
-/// until it exits, which it must do with status 0 in those `timeout` seconds.
+/// until it exits, which it must do with status 0 in those `timeout` seconds. Another status ends
+/// the start with an error, or with [`Exit::Status`] of it if `restore` forwards it.
 fn restore_guest(
     launched: &mut Launched,
     record: &ActivationRecord,
@@ -431,6 +446,9 @@ fn restore_guest(
                     category: ExitCategory::Exit,
                     status: 0,
                 }) => return Ok(()),
+                Ok(ExecEvent::Exit { status, .. }) if restore.forward_status => {
+                    return Err(Exit::Status(status));
+                }
                 Ok(ExecEvent::Exit { category, status }) => {
                     return Err(Exit::error(
                         ErrorCode::Other,

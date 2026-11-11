@@ -17,7 +17,6 @@
 
 mod lifecycle;
 mod lock;
-mod one_shot;
 mod options;
 mod state;
 
@@ -41,7 +40,6 @@ use crate::protocol::root::RootUpper;
 
 pub(crate) use self::lifecycle::ProvisionConfig;
 pub(super) use self::lifecycle::{copy_openvmm_outcome, validate_outcome_destination};
-pub(super) use self::one_shot::run_openvmm;
 pub(super) use self::options::sandbox_network;
 pub(super) use self::options::{
     HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, OPTIONS, hypervisor, parse, path_text,
@@ -148,7 +146,46 @@ pub(super) fn restore(root: Option<&str>, options: Options, source: Source) -> R
             .expect("provision required --state-dir"),
         &Artifacts { root },
         timeout,
+        false,
     )
+}
+
+/// Restores `source` once, as `run --restore-snapshot` does: provisions the sandbox of `options`
+/// and starts it as [`restore`] does, but a workload that does not exit with status 0 ends the
+/// start with its status, stops the VM once the workload has exited with status 0, and
+/// deprovisions the sandbox once provisioned, whatever happened, so that the command ends as the
+/// workload or the restore did. A sandbox that `options` names already is never removed.
+///
+/// A command that dies before it deprovisions the sandbox leaves it, which `sandbox stop` and
+/// `sandbox deprovision` of its directory end and remove, and so does Ctrl-C while the stop waits
+/// for the VM, after which the deprovision refuses a VM that still runs.
+pub(super) fn restore_once(root: Option<&str>, options: Options, source: Source) -> Result {
+    let (state_dir, timeout) = (
+        options.state_dir.clone().unwrap_or_default(),
+        options.timeout,
+    );
+    run_from(root, options, Some(&source))?;
+    let artifacts = Artifacts { root };
+    let restored = lifecycle::start(&state_dir, &artifacts, timeout, true)
+        .and_then(|()| lifecycle::stop(&state_dir, &artifacts, timeout));
+    let removed = lifecycle::deprovision(&state_dir, &artifacts, timeout).map_err(|error| {
+        match error.message() {
+            Some(message) => Exit::error(
+                error.code().unwrap_or(ErrorCode::Io),
+                format!("cannot remove the restore's sandbox {state_dir}: {message}"),
+            ),
+            None => error,
+        }
+    });
+    match (restored, removed) {
+        (Err(error), Err(removal)) => {
+            if let Some(message) = removal.message() {
+                output::print_stderr(&format!("warning: {message}"));
+            }
+            Err(error)
+        }
+        (restored, removed) => restored.and(removed),
+    }
 }
 
 /// Runs the operation of `options`, recording `source` with the sandbox that it provisions.
@@ -308,7 +345,7 @@ fn run_from(root: Option<&str>, options: Options, source: Option<&Source>) -> Re
             )
         }
         (SandboxOperation::Start, _) => {
-            lifecycle::start(state_dir("start")?, &artifacts, options.timeout)
+            lifecycle::start(state_dir("start")?, &artifacts, options.timeout, false)
         }
         (SandboxOperation::Exec, _) => {
             let state_dir = state_dir("exec")?;

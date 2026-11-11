@@ -86,8 +86,6 @@ pub use self::clone::{
     READY_TO_START_TIMEOUT, RESTORE_READY_EVENT, RESTORE_TO_READY_TIMEOUT, ReattachedClone,
     RestoreDeadlines, Restoring, Stage, Started, Teardown, reattach_clone, status_evidence,
 };
-#[cfg(feature = "cli")]
-pub(crate) use self::manifest::read_attachments;
 pub use self::plan::{MEMORY_BLOCK_SIZE, SCRATCH_NAME, TemplatePlan, TemplateResources};
 pub use self::store::{
     Acquired, CAPTURE_RECORD_NAME, CAPTURES_NAME, Capture, Created, GENERATIONS_NAME, Generation,

@@ -26,6 +26,7 @@ use super::sandbox::{self, Source};
 use super::session::{ExecRequest, Session};
 use super::store::{LockedState, StateDir};
 use super::{Exit, Result, hex, io_error, temporary_path};
+use crate::host::config::NicConfig;
 use crate::host::sandbox::options::SandboxOperation;
 use crate::host::snapshot::{OPENVMM_DIR, SNAPSHOT_ARTIFACTS, Snapshot};
 use crate::host::vm::VmDir;
@@ -180,7 +181,7 @@ pub(super) fn parse(arguments: &[String]) -> Result<(Command, Vec<String>)> {
 
 /// Returns the options of `snapshot restore`: those of `sandbox`, but those that only an
 /// execution or a cold boot takes, and `--store-dir`.
-fn restore_options() -> Vec<Spec> {
+pub(super) fn restore_options() -> Vec<Spec> {
     sandbox::OPTIONS
         .into_iter()
         .filter(|spec| !NOT_RESTORED.contains(&spec.name))
@@ -196,13 +197,8 @@ pub(super) fn run(root: Option<&str>, command: Command) -> Result {
     }
 }
 
-/// Restores a new managed sandbox from a named snapshot, as `snapshot restore` does: opens the
-/// snapshot, so that a missing one provisions nothing, then provisions the sandbox with its
-/// source, whose workload is the sandbox's entrypoint and arguments, and starts it. Before it
-/// provisions anything, it refuses a state directory in the store, as each start and deprovision
-/// of the sandbox refuses one before it removes anything, and a workload that is not a valid exec
-/// request: each restored start sends the workload as one, not as boot tokens, so it may contain
-/// whitespace, which `sandbox provision` refuses.
+/// Restores a new managed sandbox from a named snapshot, as `snapshot restore` does: provisions
+/// the sandbox with the source that [`restore_source`] checks, and starts it.
 fn restore(root: Option<&str>, options: RestoreOptions) -> Result {
     let RestoreOptions {
         name,
@@ -210,7 +206,25 @@ fn restore(root: Option<&str>, options: RestoreOptions) -> Result {
         sandbox: options,
     } = options;
     let snapshot = name.expect("the parser requires a snapshot name");
-    let store = paths::resolve(Path::new(&store_dir)).map_err(Exit::from_os_error)?;
+    let (source, _) = restore_source(snapshot, &store_dir, &options)?;
+    sandbox::restore(root, options, source)
+}
+
+/// Returns the source of a sandbox that restores the snapshot `snapshot` of the store at
+/// `store_dir` with `options`, as `snapshot restore` and `run --restore-snapshot` provision one,
+/// and the snapshot's NIC. Its workload is the sandbox's entrypoint and arguments.
+///
+/// Before the caller provisions anything, it refuses a state directory in the store, as each start
+/// and deprovision of the sandbox refuses one before it removes anything, and a workload that is
+/// not a valid exec request: each restored start sends the workload as one, not as boot tokens, so
+/// it may contain whitespace, which `sandbox provision` refuses. It then opens the snapshot, so
+/// that a missing one provisions nothing.
+pub(super) fn restore_source(
+    snapshot: Name,
+    store_dir: &str,
+    options: &sandbox::Options,
+) -> Result<(Source, Option<NicConfig>)> {
+    let store = paths::resolve(Path::new(store_dir)).map_err(Exit::from_os_error)?;
     outside_store(
         &store,
         Path::new(options.state_dir.as_deref().unwrap_or_default()),
@@ -225,15 +239,16 @@ fn restore(root: Option<&str>, options: RestoreOptions) -> Result {
         environment: None,
         inherit_default_environment: false,
     })?;
-    Store::open(&store)?
+    let nic = Store::open(&store)?
         .lock(&snapshot, Deadline::after(options.timeout))?
-        .open()?;
+        .open()?
+        .nic();
     let source = Source {
         snapshot,
         store,
         workload,
     };
-    sandbox::restore(root, options, source)
+    Ok((source, nic))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

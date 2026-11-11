@@ -424,10 +424,16 @@ const USAGE_ERRORS: &[UsageError] = &[
         fragments: &["--memory-capacity-mib", "\"1e3\""],
     },
     UsageError {
-        name: "run: restore memory not an integer",
-        arguments: &["run", "--restore-memory-mib", ""],
-        code: "argument-invalid",
-        fragments: &["--restore-memory-mib", "\"\""],
+        name: "run: restore memory option removed",
+        arguments: &[
+            "run",
+            "--restore-snapshot",
+            "base",
+            "--restore-memory-mib",
+            "512",
+        ],
+        code: "argument-unrecognized",
+        fragments: &["--restore-memory-mib", "512"],
     },
     UsageError {
         name: "run: memory in other digits",
@@ -507,17 +513,62 @@ const USAGE_ERRORS: &[UsageError] = &[
         code: "argument-invalid",
         fragments: &["--processors", "\"-5\""],
     },
+    // A restore takes the processors that its snapshot had online, its own readiness endpoint,
+    // and always installs the network policy of its options, so these options are gone.
     UsageError {
-        name: "run: restore processors not an integer",
-        arguments: &["run", "--restore-processors", "x"],
-        code: "argument-invalid",
-        fragments: &["--restore-processors", "\"x\""],
+        name: "run: restore processors option removed",
+        arguments: &[
+            "run",
+            "--restore-snapshot",
+            "base",
+            "--restore-processors",
+            "2",
+        ],
+        code: "argument-unrecognized",
+        fragments: &["--restore-processors", "2"],
     },
     UsageError {
-        name: "run: restore processors not a choice",
-        arguments: &["run", "--restore-processors", "16"],
+        name: "run: restore ready path option removed",
+        arguments: &[
+            "run",
+            "--restore-snapshot",
+            "base",
+            "--restore-ready-path",
+            "ready.sock",
+        ],
+        code: "argument-unrecognized",
+        fragments: &["--restore-ready-path", "ready.sock"],
+    },
+    UsageError {
+        name: "run: restore network policy option removed",
+        arguments: &[
+            "run",
+            "--restore-snapshot",
+            "base",
+            "--restore-network-policy",
+        ],
+        code: "argument-unrecognized",
+        fragments: &["--restore-network-policy"],
+    },
+    // A restore takes no option that `snapshot restore` refuses, such as the exec-only `--wait`.
+    UsageError {
+        name: "run: restore wait option",
+        arguments: &["run", "--restore-snapshot", "base", "--wait", "5"],
+        code: "argument-unrecognized",
+        fragments: &["--wait", "5"],
+    },
+    // The restore options parse as `snapshot restore` parses them.
+    UsageError {
+        name: "run: restore upper not a choice",
+        arguments: &["run", "--restore-snapshot", "base", "--upper", "disk"],
         code: "argument-invalid",
-        fragments: &["--restore-processors", "\"16\""],
+        fragments: &["--upper", "\"disk\""],
+    },
+    UsageError {
+        name: "run: zero restore timeout",
+        arguments: &["run", "--restore-snapshot", "base", "--timeout", "0"],
+        code: "argument-invalid",
+        fragments: &["--timeout", "greater than 0"],
     },
     UsageError {
         name: "run: invalid mount owner",
@@ -556,7 +607,7 @@ const USAGE_ERRORS: &[UsageError] = &[
         fragments: &["--memory-mib", "one argument"],
     },
     UsageError {
-        name: "run: missing path",
+        name: "run: missing snapshot name",
         arguments: &["run", "--restore-snapshot"],
         code: "argument-missing",
         fragments: &["--restore-snapshot", "one argument"],
@@ -702,7 +753,10 @@ const HELP: [Help; 6] = [
         usage: "usage: nvx-rs run [OPTIONS]",
         options: &[
             "--guest {alpine,ubuntu,azurelinux}",
-            "--restore-snapshot",
+            "--restore-snapshot NAME",
+            "--store-dir PATH",
+            "--state-dir STATE_DIR",
+            "--layer ROLE,PATH,IMAGE_UUID",
             "--dry-run",
         ],
     },

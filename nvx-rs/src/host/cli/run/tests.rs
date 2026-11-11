@@ -1,5 +1,5 @@
-//! Cold-run shares stay kernel tokens through the checked VM configuration; restore keeps its
-//! existing policy-path lowering.
+//! Cold-run shares stay kernel tokens through the checked VM configuration; a restore takes the
+//! restore options of `snapshot restore` and the network of its snapshot's NIC.
 
 use proptest::prelude::*;
 
@@ -145,6 +145,88 @@ fn cold_preflight_defers_installable_sources_but_the_launch_checks_them() {
             filesystem::canonicalize(&source).unwrap()
         );
     }
+}
+
+/// Returns the options of `run ARGUMENTS`.
+fn run_options(arguments: &[&str]) -> Options {
+    let arguments: Vec<String> = arguments
+        .iter()
+        .map(|&argument| argument.to_owned())
+        .collect();
+    let (options, unrecognized) = parse(&arguments).unwrap();
+    assert!(unrecognized.is_empty(), "{unrecognized:?}");
+    options
+}
+
+#[test]
+fn restore_inputs_parse_as_those_of_snapshot_restore() {
+    let inputs = [
+        "--state-dir",
+        "state",
+        "--layer",
+        "distro,image.img,11111111-1111-1111-1111-111111111111",
+        "--layer-format",
+        "gpt",
+        "--upper",
+        "ram",
+        "--ram-upper-percent",
+        "30",
+        "--entrypoint",
+        "/bin/echo",
+        "--arg",
+        "restored",
+        "--hostname",
+        "restored",
+        "--workload-user",
+        "1000:1001",
+        "--timeout",
+        "5",
+    ];
+    let restore = run_options(&[&["--restore-snapshot", "base"][..], &inputs].concat()).restore;
+    let provision: Vec<String> = std::iter::once("provision")
+        .chain(inputs)
+        .map(str::to_owned)
+        .collect();
+    let (expected, unrecognized) = sandbox::parse(&provision).unwrap();
+    assert!(unrecognized.is_empty());
+    assert_eq!(restore, expected);
+}
+
+#[test]
+fn a_restore_takes_the_nic_of_its_snapshot_with_the_policy_of_its_options() {
+    let nic = NicConfig {
+        guest_network: crate::net::Ipv4Cidr::parse("10.42.0.2/24").unwrap(),
+    };
+    let network = |arguments: &[&str]| run_options(arguments).network;
+    // A snapshot without a NIC takes no network option, and one with a NIC needs the profile.
+    for (arguments, nic, refusal) in [
+        (&["--network-egress", "deny"][..], None, "no NIC"),
+        (&["--network-profile", "portable"][..], None, "no NIC"),
+        (&[][..], Some(nic), "needs --network-profile"),
+        (
+            &["--network-egress", "deny"][..],
+            Some(nic),
+            "needs --network-profile",
+        ),
+    ] {
+        let error = restored_network(network(arguments), nic).unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
+        assert!(error.message().unwrap().contains(refusal), "{error:?}");
+    }
+    assert_eq!(
+        restored_network(NetworkOptions::default(), None).unwrap(),
+        NetworkOptions::default()
+    );
+    // The NIC keeps the address of the snapshot, and its policy is the restore's own.
+    let options = network(&["--network-profile", "portable", "--network-egress", "deny"]);
+    let restored = restored_network(options.clone(), Some(nic)).unwrap();
+    assert_eq!(
+        restored,
+        NetworkOptions {
+            net: Some("10.42.0.2/24".to_owned()),
+            ..options
+        }
+    );
 }
 
 #[test]
@@ -596,52 +678,6 @@ proptest! {
                 .collect();
             prop_assert_eq!(read, line.split(' ').collect::<Vec<_>>());
             prop_assert_eq!(virtio_mmio_devices(line.as_bytes()).count(), 3);
-        }
-    }
-
-    #[test]
-    fn restore_policy_paths_attach_to_their_shares(
-        events in prop::collection::vec((any::<bool>(), 0_u8..3, any::<bool>()), 0..40),
-    ) {
-        let directory = tempfile::tempdir().unwrap();
-        let roots = [directory.path().join("first"), directory.path().join("second")];
-        for root in &roots {
-            std::fs::create_dir(root).unwrap();
-        }
-        let mut arguments = Vec::new();
-        let mut policies: [Vec<String>; 3] = Default::default();
-        for (sequence, (second, kind, mount_first)) in events.into_iter().enumerate() {
-            let root = &roots[usize::from(second)];
-            let path = root.join(format!("path-{sequence}")).to_str().unwrap().to_owned();
-            let option = ["--mount-deny", "--mount-allow", "--mount-write"][usize::from(kind)];
-            let mount = format!("/share-{sequence},{},rw", root.display());
-            let policy = [option.to_owned(), path.clone()];
-            let share = ["--mount".to_owned(), mount];
-            if mount_first {
-                arguments.extend(share);
-                arguments.extend(policy);
-            } else {
-                arguments.extend(policy);
-                arguments.extend(share);
-            }
-            policies[usize::from(kind)].push(path);
-        }
-        // Two fixed shares exercise aggregate attribution even with an empty event sequence.
-        // Restore avoids the unrelated cold-boot command-line budget.
-        arguments.extend([
-            "--mount".to_owned(), format!("/first,{},rw", roots[0].display()),
-            "--mount".to_owned(), format!("/second,{},rw", roots[1].display()),
-            "--restore-snapshot".to_owned(), "snapshot".to_owned(),
-        ]);
-        let (options, unrecognized) = parse(&arguments).unwrap();
-        prop_assert!(unrecognized.is_empty());
-        let rules = options.network.egress_rules().unwrap();
-        let mut command = Vec::new();
-        extend_shares_and_network(&mut command, &options, &rules).unwrap();
-        for (kind, expected) in ["--mount-deny", "--mount-allow", "--mount-write"].into_iter().zip(policies) {
-            let actual: Vec<_> = command.windows(2)
-                .filter(|pair| pair[0] == kind).map(|pair| pair[1].clone()).collect();
-            prop_assert_eq!(actual, expected);
         }
     }
 
