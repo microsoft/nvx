@@ -1515,7 +1515,11 @@ fn windows_terminal_ctrl_c_helper() {
             let mut mode = 0;
             // SAFETY: the helper retains its own console input handle while the CLI runs.
             assert_ne!(unsafe { GetConsoleMode(input, &mut mode) }, 0);
-            if mode & (ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT) == 0 {
+            // Raw mode clears processed input before the CLI enables interrupts again, so only
+            // a raw mode with processed input proves that Ctrl-C cancels.
+            if mode & (ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT) == 0
+                && mode & ENABLE_PROCESSED_INPUT != 0
+            {
                 break mode;
             }
             assert!(Instant::now() < deadline);
