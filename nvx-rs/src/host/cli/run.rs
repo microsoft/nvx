@@ -742,19 +742,69 @@ fn connect_before_exit<T>(
     }
 }
 
-struct TerminalGuard(bool);
+/// Keeps standard input, when it is a terminal, in raw mode with terminal interrupts, and restores
+/// the terminal's entry mode when dropped, on success and error paths alike.
+struct TerminalGuard(Option<EntryMode>);
+
+/// The console input mode on entry, which [`TerminalGuard`] restores exactly: on Windows,
+/// crossterm's `disable_raw_mode` sets line input, echo and processed input instead of restoring
+/// their entry values.
+#[cfg(windows)]
+type EntryMode = windows_sys::Win32::System::Console::CONSOLE_MODE;
+
+/// Nothing: crossterm saves the terminal's entry mode, which its `disable_raw_mode` restores.
+#[cfg(not(windows))]
+struct EntryMode;
 
 impl TerminalGuard {
     fn new() -> Result<Self> {
-        let terminal = io::stdin().is_terminal();
-        if terminal {
-            crossterm::terminal::enable_raw_mode().map_err(Exit::from_os_error)?;
+        if !io::stdin().is_terminal() {
+            return Ok(Self(None));
         }
-        let guard = Self(terminal);
-        if terminal {
-            Self::enable_interrupts().map_err(Exit::from_os_error)?;
-        }
+        let entry = Self::entry_mode().map_err(Exit::from_os_error)?;
+        crossterm::terminal::enable_raw_mode().map_err(Exit::from_os_error)?;
+        let guard = Self(Some(entry));
+        Self::enable_interrupts().map_err(Exit::from_os_error)?;
         Ok(guard)
+    }
+
+    /// Reads the console input mode that the guard restores.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn entry_mode() -> io::Result<EntryMode> {
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
+
+        let mut mode = 0;
+        // SAFETY: stdin is this process's console input, and `mode` outlives the call.
+        if unsafe { GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mut mode) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(mode)
+    }
+
+    /// Restores the console input mode that [`Self::entry_mode`] read.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn restore(entry: EntryMode) -> io::Result<()> {
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE, SetConsoleMode};
+
+        // SAFETY: stdin is this process's console input, whose entry mode the guard saved.
+        if unsafe { SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), entry) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Reads nothing: crossterm saves the terminal's entry mode when it enables raw mode.
+    #[cfg(not(windows))]
+    fn entry_mode() -> io::Result<EntryMode> {
+        Ok(EntryMode)
+    }
+
+    /// Restores the terminal mode that crossterm saved when it enabled raw mode.
+    #[cfg(not(windows))]
+    fn restore(_entry: EntryMode) -> io::Result<()> {
+        crossterm::terminal::disable_raw_mode()
     }
 
     #[cfg(unix)]
@@ -816,8 +866,8 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if self.0
-            && let Err(error) = crossterm::terminal::disable_raw_mode()
+        if let Some(entry) = self.0.take()
+            && let Err(error) = Self::restore(entry)
         {
             output::print_stderr(&format!("cannot restore terminal mode: {error}"));
         }
