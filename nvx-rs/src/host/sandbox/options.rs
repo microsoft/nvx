@@ -39,7 +39,8 @@ pub const MAX_EXEC_ENVIRONMENT_BYTES: usize = 4096;
 /// An operation of `nvx-rs sandbox`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SandboxOperation {
-    /// `run`: a one-shot sandbox, the default.
+    /// `run`: a sandbox that runs one managed execution and stops, without a state directory, the
+    /// default.
     Run,
     /// `provision`: record a managed sandbox's launch in its state directory.
     Provision,
@@ -69,6 +70,11 @@ impl SandboxOperation {
     /// Returns whether the operation launches a sandbox: `run` or `provision`.
     fn launches(self) -> bool {
         matches!(self, Self::Run | Self::Provision)
+    }
+
+    /// Returns whether the operation runs a managed execution: `run` or `exec`.
+    fn executes(self) -> bool {
+        matches!(self, Self::Run | Self::Exec)
     }
 }
 
@@ -157,10 +163,10 @@ impl SandboxOptions {
     }
 
     /// Applies the checks of `nvx-rs sandbox` that precede the launch, in its order, and
-    /// returns the managed exec environment of an `exec`, if one was given.
+    /// returns the managed exec environment of a `run` or `exec`, if one was given.
     ///
     /// It refuses `--dry-run` except for `run`, both `--environment` and `--environment-file`,
-    /// the managed exec options except for `exec`, an `exec` environment that
+    /// the managed exec options except for `run` and `exec`, an environment that
     /// [`exec_environment_from_file`] or [`validate_exec_environment`] refuses, network policy
     /// options except for `run` and `provision`, a systemd entrypoint for `run`, `provision`,
     /// and `exec`, `--outcome-report` except for `run` and `exec`, share options without a
@@ -180,18 +186,18 @@ impl SandboxOptions {
                 "--environment and --environment-file are mutually exclusive",
             ));
         }
-        if operation != SandboxOperation::Exec
+        if !operation.executes()
             && (self.cwd.is_some()
                 || !self.environment.is_empty()
                 || self.environment_file.is_some()
                 || self.inherit_default_environment)
         {
             return Err(refused(
-                "managed execution options require the sandbox exec operation",
+                "managed execution options are only valid for sandbox run or exec",
             ));
         }
         let mut environment = None;
-        if operation == SandboxOperation::Exec {
+        if operation.executes() {
             if let Some(file) = &self.environment_file {
                 environment = Some(exec_environment_from_file(file)?);
             } else if !self.environment.is_empty() {
@@ -210,11 +216,9 @@ impl SandboxOptions {
         ) {
             validate_sandbox_entrypoint(&self.entrypoint)?;
         }
-        if self.outcome_report
-            && !matches!(operation, SandboxOperation::Run | SandboxOperation::Exec)
-        {
+        if self.outcome_report && !operation.executes() {
             return Err(refused(
-                "--outcome-report is only valid for one-shot run or managed exec",
+                "--outcome-report is only valid for sandbox run or exec",
             ));
         }
         for kind in POLICY_KINDS {

@@ -33,16 +33,18 @@ options:
   -h, --help            show this help message and exit
   --layer ROLE,PATH,IMAGE_UUID
   --layer-format {erofs,gpt}
-                        provision's image format (default: erofs); IMAGE_UUID
-                        is the filesystem UUID or GPT disk GUID
+                        the image format of run and provision (default:
+                        erofs); IMAGE_UUID is the filesystem UUID or GPT disk
+                        GUID
   --scratch SCRATCH
   --upper {scratch,ram}
                         where the overlay keeps the sandbox's writes: scratch
                         (default), on the ext4 image of --scratch, or ram, on
                         a tmpfs in guest memory, without a scratch image
   --ram-upper-percent PERCENT
-                        provision's RAM upper cap, from 1 to 90 percent of
-                        guest memory (default: 50); requires --upper ram
+                        the RAM upper's cap of run and provision, from 1 to 90
+                        percent of guest memory (default: 50); requires
+                        --upper ram
   --state-dir STATE_DIR
   --entrypoint ENTRYPOINT
   --arg SANDBOX_ARG
@@ -59,17 +61,18 @@ options:
   --exec-timeout-ms EXEC_TIMEOUT_MS
                         guest workload timeout in milliseconds; zero disables
                         it
-  --cwd CWD             absolute guest working directory for managed exec
-                        (default: /)
+  --cwd CWD             absolute guest working directory of the workload of run
+                        or exec (default: /)
   --environment KEY=VALUE
-                        set the exact managed exec environment; repeat for
-                        multiple entries
+                        set the exact environment of the workload of run or
+                        exec; repeat for multiple entries
   --environment-file PATH
-                        read the exact managed exec environment from a JSON
-                        string array
+                        read the exact environment of the workload of run or
+                        exec from a JSON string array
   --inherit-default-environment
-                        layer the managed exec environment over the guest
-                        default environment instead of replacing it
+                        layer the environment of the workload of run or exec
+                        over the guest default environment instead of
+                        replacing it
   --hypervisor {auto,whp,kvm,mshv}
   --mount GUEST_TARGET,HOST_PATH[,ro|rw]
                         live-share a host directory, or a single regular host
@@ -119,14 +122,14 @@ options:
                         write a bounded local JSON outcome report for run or
                         exec
   --cmdline CMDLINE
-  --dry-run             print the one-shot run command without launching it",
+  --dry-run             print the OpenVMM command of run without launching it",
 };
 
 /// The operations, in the order in which usage messages list them.
 const OPERATIONS: [&str; 6] = ["run", "provision", "start", "exec", "stop", "deprovision"];
 /// The choices of `--upper`, the names of the uppers.
 const UPPERS: [&str; 2] = [RootUpper::Scratch.as_str(), RootUpper::Ram.as_str()];
-/// The image formats that provision accepts.
+/// The image formats that run and provision accept.
 const LAYER_FORMATS: [&str; 2] = ["erofs", "gpt"];
 /// The choices of `--hypervisor`.
 pub(in crate::host::cli) const HYPERVISORS: [&str; 4] = ["auto", "whp", "kvm", "mshv"];
@@ -195,7 +198,7 @@ pub(crate) struct Options {
     pub(crate) operation: SandboxOperation,
     /// `--layer`, parsed as `SandboxLayer.parse` parses it.
     pub(crate) layers: Vec<SandboxLayer>,
-    /// `--layer-format`, if given; provision defaults to EROFS.
+    /// `--layer-format`, if given; run and provision default to EROFS.
     pub(crate) layer_format: Option<DistroFormat>,
     /// `--scratch`, as given.
     pub(crate) scratch: Option<String>,

@@ -236,10 +236,6 @@ fn launch_arguments_follow_the_openvmm_contract() {
             ];
             assert_eq!(launch.plan().openvmm_arguments().unwrap(), expected);
             assert_eq!(
-                launch.plan().one_shot_openvmm_arguments().unwrap(),
-                expected
-            );
-            assert_eq!(
                 launch.plan().kernel_command_line("quiet").unwrap(),
                 format!(
                     "quiet nvx_sandbox=1 nvx_layer=distro,0xd0003000,{format}:{UUID} \
@@ -255,27 +251,24 @@ fn accepted_launch_shapes_keep_their_arguments_and_kernel_tokens() {
     let base = "nvx_sandbox=1 \
         nvx_layer=distro,0xd0003000,erofs:11111111-1111-1111-1111-111111111111 \
         nvx_scratch=0xd0006000,ext4 nvx_entrypoint=/bin/sh nvx_hostname=nvx-sandbox";
-    let workspace = "0-c52ddf65534b7b46035084358ab7902b";
-    let cache = "1-2a93e82e011c66d5c7dbd25da5f2e6c1";
-    let file = "0-3ddd35a70a0d7386a5451cd0d5dc3c39";
     let cases = [
-        (862, Vec::new(), String::new(), Vec::new()),
+        (Vec::new(), String::new(), Vec::new()),
         (
-            806,
             vec![(
                 "/workspace",
                 "/host",
                 MountAccess::ReadWrite,
                 MountKind::Directory,
             )],
-            String::new(),
+            " nvx_maps=1".to_owned(),
             vec![
-                "--mount".to_owned(),
-                format!("/workspace,{},rw", host_text("/host")),
+                "--mount-aggregate".to_owned(),
+                "/run/nvx/hostfs/root".to_owned(),
+                "--mount-child".to_owned(),
+                format!("0,{},rw", host_text("/host")),
             ],
         ),
         (
-            664,
             vec![
                 (
                     "/workspace",
@@ -290,34 +283,46 @@ fn accepted_launch_shapes_keep_their_arguments_and_kernel_tokens() {
                     MountKind::Directory,
                 ),
             ],
-            format!(" nvx_share={workspace},/workspace,rw nvx_share={cache},/srv/cache,ro"),
+            " nvx_maps=2".to_owned(),
             vec![
                 "--mount-aggregate".to_owned(),
-                "/run/nvx/shares".to_owned(),
+                "/run/nvx/hostfs/root".to_owned(),
                 "--mount-child".to_owned(),
-                format!("{workspace},{},rw", host_text("/host")),
+                format!("0,{},rw", host_text("/host")),
                 "--mount-child".to_owned(),
-                format!("{cache},{},ro", host_text("/cache")),
+                format!("1,{},ro", host_text("/cache")),
             ],
         ),
         (
-            706,
             vec![(
                 "/etc/app/settings.json",
                 "/settings.json",
                 MountAccess::ReadOnly,
                 MountKind::File,
             )],
-            format!(" nvx_share={file},/etc/app/settings.json,ro,file"),
+            " nvx_maps=1".to_owned(),
             vec![
                 "--mount-aggregate".to_owned(),
-                "/run/nvx/shares".to_owned(),
+                "/run/nvx/hostfs/root".to_owned(),
                 "--mount-child".to_owned(),
-                format!("{file},{},ro,file", host_text("/settings.json")),
+                format!("0,{},ro,file", host_text("/settings.json")),
             ],
         ),
     ];
-    for (padding, shares, suffix, tail) in cases {
+    for (shares, suffix, tail) in cases {
+        let fragment = if shares.is_empty() {
+            String::new()
+        } else {
+            let mode = if shares.iter().any(|share| share.2 == MountAccess::ReadWrite) {
+                "rw"
+            } else {
+                "ro"
+            };
+            format!(
+                " virtfs_dir=/run/nvx/hostfs/root virtfs_tag=microvm virtfs_mode={mode} virtfs_aggregate=1"
+            )
+        };
+        let padding = 1024 - base.len() - suffix.len() - fragment.len() - 2;
         let launch = SandboxLaunch::new(
             vec![SandboxLayer::new(
                 LayerRole::Distro,
@@ -343,22 +348,15 @@ fn accepted_launch_shapes_keep_their_arguments_and_kernel_tokens() {
         .map(str::to_owned)
         .to_vec();
         expected.extend(tail);
-        assert_eq!(
-            launch.plan().one_shot_openvmm_arguments().unwrap(),
-            expected
-        );
+        assert_eq!(launch.plan().openvmm_arguments().unwrap(), expected);
         assert_eq!(
             launch
                 .plan()
-                .one_shot_kernel_command_line(&"x".repeat(padding))
+                .kernel_command_line(&"x".repeat(padding))
                 .unwrap(),
             format!("{} {base}{suffix}", "x".repeat(padding)),
         );
-        refused(
-            launch
-                .plan()
-                .one_shot_kernel_command_line(&"x".repeat(padding + 1)),
-        );
+        refused(launch.plan().kernel_command_line(&"x".repeat(padding + 1)));
     }
 }
 
@@ -373,32 +371,27 @@ fn shares_follow_the_openvmm_and_guest_contracts() {
             let launch = launch(SandboxSettings::default())
                 .with_export(Some(export))
                 .unwrap();
-            let arguments = launch.plan().one_shot_openvmm_arguments().unwrap();
-            let command_line = launch.plan().one_shot_kernel_command_line("").unwrap();
-            if kind == MountKind::Directory {
-                assert_eq!(
-                    &arguments[8..],
-                    [
-                        "--mount",
-                        &format!("/workspace,{},{}", host_text("/host/share"), mode)
-                    ],
-                );
-                assert!(!command_line.contains("nvx_share="));
-            } else {
-                let name = "0-c52ddf65534b7b46035084358ab7902b";
-                assert_eq!(
-                    &arguments[8..],
-                    [
-                        "--mount-aggregate",
-                        "/run/nvx/shares",
-                        "--mount-child",
-                        &format!("{name},{},{mode},file", host_text("/host/share")),
-                    ],
-                );
-                assert!(
-                    command_line.ends_with(&format!(" nvx_share={name},/workspace,{mode},file"))
-                );
-            }
+            let arguments = launch.plan().openvmm_arguments().unwrap();
+            let command_line = launch.plan().kernel_command_line("").unwrap();
+            let file = if kind == MountKind::File { ",file" } else { "" };
+            assert_eq!(
+                &arguments[8..],
+                [
+                    "--mount-aggregate",
+                    "/run/nvx/hostfs/root",
+                    "--mount-child",
+                    &format!("0,{},{mode}{file}", host_text("/host/share")),
+                ],
+            );
+            assert!(!command_line.contains("nvx_share="));
+            let maps = launch.plan().mapping_table();
+            assert_eq!(maps[0].target, "/workspace");
+            assert_eq!(maps[0].read_only, access == MountAccess::ReadOnly);
+            assert_eq!(maps[0].source, "0");
+            assert_eq!(
+                launch.export().unwrap().children[0].file,
+                kind == MountKind::File
+            );
             assert!(
                 launch
                     .plan()
@@ -588,7 +581,6 @@ fn caller_parameters_follow_linux_and_guest_rules() {
         "value=\"unterminated",
     ] {
         refused(launch.plan().kernel_command_line(user));
-        refused(launch.plan().one_shot_kernel_command_line(user));
         refused(adapter.kernel_command_line(user));
     }
     for user in [
@@ -598,7 +590,6 @@ fn caller_parameters_follow_linux_and_guest_rules() {
         r#"extra="ignored nvx_pids_max=0 ignored""#,
     ] {
         refused(launch.plan().kernel_command_line(user));
-        refused(launch.plan().one_shot_kernel_command_line(user));
     }
     for user in [
         r#"a="b c" d"#,
@@ -607,7 +598,6 @@ fn caller_parameters_follow_linux_and_guest_rules() {
     ] {
         for command_line in [
             launch.plan().kernel_command_line(user).unwrap(),
-            launch.plan().one_shot_kernel_command_line(user).unwrap(),
             adapter.kernel_command_line(user).unwrap(),
         ] {
             assert!(command_line.starts_with(&format!("{user} ")));
@@ -626,7 +616,6 @@ fn the_reproduction_of_microsoft_nvx_723_is_refused() {
         r#""nvx_entrypoint=/bin/other""#,
     ] {
         refused(launch.plan().kernel_command_line(user));
-        refused(launch.plan().one_shot_kernel_command_line(user));
     }
     refused(SandboxLaunch::new(
         vec![SandboxLayer::new(LayerRole::Distro, "distro.erofs", UUID)],
@@ -755,12 +744,8 @@ proptest! {
             (!shares.is_empty()).then(|| exported(&shares)),
         ).unwrap();
         let user = "x".repeat(user_bytes);
-        for one_shot in [false, true] {
-            let render = |user: &str| if one_shot {
-                launch.plan().one_shot_kernel_command_line(user)
-            } else {
-                launch.plan().kernel_command_line(user)
-            };
+        {
+            let render = |user: &str| launch.plan().kernel_command_line(user);
             let mut tokens = vec![
                 "nvx_sandbox=1".to_owned(),
                 format!("nvx_layer=distro,0xd0003000,erofs:{UUID}"),
@@ -769,25 +754,15 @@ proptest! {
                 "nvx_hostname=nvx-sandbox".to_owned(),
                 format!("nvx_arg={argument}"),
             ];
-            if one_shot && share_count > 1 {
-                for (index, target) in targets.iter().enumerate() {
-                    let digest = format!("{:x}", Sha256::digest(target.as_bytes()));
-                    tokens.push(format!("nvx_share={index}-{},{target},{}", &digest[..32], access.as_str()));
-                }
-            } else if !one_shot && share_count != 0 {
+            if share_count != 0 {
                 tokens.push(format!("nvx_maps={share_count}"));
             }
             let base = tokens.join(" ");
             prop_assert_eq!(render("").unwrap(), base.clone());
-            let mode = access.as_str();
             let fragment = if share_count == 0 {
                 String::new()
-            } else if !one_shot {
-                " virtfs_dir=/run/nvx/hostfs/root virtfs_tag=microvm virtfs_mode=ro virtfs_aggregate=1".to_owned()
-            } else if share_count == 1 {
-                format!(" virtfs_dir=/share-0 virtfs_tag=microvm virtfs_mode={mode}")
             } else {
-                format!(" virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode={mode} virtfs_aggregate=1")
+                " virtfs_dir=/run/nvx/hostfs/root virtfs_tag=microvm virtfs_mode=ro virtfs_aggregate=1".to_owned()
             };
             let bytes = base.len() + user_bytes + usize::from(user_bytes != 0) + fragment.len() + 1;
             match render(&user) {
@@ -833,7 +808,6 @@ proptest! {
                 format!("quiet{separator}{token}")
             };
             refused(launch.plan().kernel_command_line(&user));
-            refused(launch.plan().one_shot_kernel_command_line(&user));
         }
     }
 
@@ -880,14 +854,10 @@ proptest! {
             .map(|(target, root)| (target.as_str(), root, MountAccess::ReadWrite, MountKind::Directory))
             .collect();
         let launch = launch.with_export(Some(exported(&shares))).unwrap();
-        for command_line in [
-            launch.plan().kernel_command_line("quiet").unwrap(),
-            launch.plan().one_shot_kernel_command_line("quiet").unwrap(),
-        ] {
-            let reading = model::read(command_line.as_bytes());
-            prop_assert_eq!(&reading.rest, &None);
-            let tokens: Vec<&[u8]> = command_line.split(' ').map(str::as_bytes).collect();
-            prop_assert_eq!(reading.lines(), tokens);
-        }
+        let command_line = launch.plan().kernel_command_line("quiet").unwrap();
+        let reading = model::read(command_line.as_bytes());
+        prop_assert_eq!(&reading.rest, &None);
+        let tokens: Vec<&[u8]> = command_line.split(' ').map(str::as_bytes).collect();
+        prop_assert_eq!(reading.lines(), tokens);
     }
 }

@@ -48,7 +48,9 @@
 //!
 //! Kernel command-line tokens adjust the emulation: `fake_exit_on_start=CODE` fails the launch,
 //! `fake_boot_delay_ms=MS` delays the control endpoint, `fake_crash_after_ms=MS` makes the VM
-//! die, `fake_ignore_stop=1` ignores stop requests, `fake_exit_delay_ms=MS` delays the exit after
+//! die, `fake_ignore_stop=1` ignores stop requests, `fake_drop_stop=1` closes the control
+//! connection on a stop request without acknowledging it, and then exits as after an
+//! acknowledged stop, `fake_exit_delay_ms=MS` delays the exit after
 //! an acknowledged stop, `fake_ignore_cancel=1` ignores cancellation,
 //! `fake_console_bytes=N` emits up to 16 MiB of `x` bytes on a run's console, and
 //! `fake_report_before_console=1` writes a run's report before console output or its boot delay.
@@ -431,6 +433,8 @@ struct Options {
     crash_after: Option<Duration>,
     /// Whether stop requests are deliberately left unanswered.
     ignore_stop: bool,
+    /// Whether a stop request closes the control connection without its acknowledgement.
+    drop_stop: bool,
     /// Artificial delay between the acknowledgement of a stop and the exit.
     exit_delay: Duration,
     /// Whether cancellation requests are deliberately ignored.
@@ -1912,6 +1916,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             .transpose()?,
         crash_after: millis("fake_crash_after_ms"),
         ignore_stop: knob("fake_ignore_stop") == Some("1"),
+        drop_stop: knob("fake_drop_stop") == Some("1"),
         exit_delay: millis("fake_exit_delay_ms").unwrap_or_default(),
         ignore_cancel: knob("fake_ignore_cancel") == Some("1"),
         legacy_guest: knob("fake_legacy_guest") == Some("1"),
@@ -2577,6 +2582,9 @@ enum Flow {
     Continue,
     /// Stop the fake VM after a successful stop request.
     Exit,
+    /// Stop the fake VM once the current session's connection has closed, as a guest that powers
+    /// off before its acknowledgement of a stop request leaves.
+    Drop,
 }
 
 /// Outcome of control traffic observed while a workload runs.
@@ -2734,6 +2742,7 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                 // The targeted workload already finished.
                 APP_CANCEL => {}
                 APP_STOP if options.ignore_stop => {}
+                APP_STOP if options.drop_stop => return Ok(Flow::Drop),
                 APP_STOP => {
                     let _ = self.send(APP_STOPPED, request_id, 0, &[]);
                     return Ok(Flow::Exit);
@@ -3050,12 +3059,19 @@ fn serve_client<S: Read + Write + Pending>(
     };
     match session.run(options, guest) {
         Ok(Flow::Exit) => {
-            write_report(options, options.managed_operation(), "success", 0);
-            thread::sleep(options.exit_delay);
+            stop(options);
             Flow::Exit
         }
+        Ok(Flow::Drop) => Flow::Drop,
         _ => Flow::Continue,
     }
+}
+
+/// Ends the fake VM's guest as a stop does: writes the outcome report of a successful stop, and
+/// waits for the exit delay.
+fn stop(options: &Options) {
+    write_report(options, options.managed_operation(), "success", 0);
+    thread::sleep(options.exit_delay);
 }
 
 /// Writes the synthetic OpenVMM outcome report of `operation` if a report was requested and its
@@ -3207,9 +3223,16 @@ fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()>
         let mut stream = stream?;
         epoch += 1;
         record_session(options);
-        if let Flow::Exit = serve_client(&mut stream, options, capability, epoch, &mut guest) {
-            let _ = fs::remove_file(&options.endpoint);
-            return Ok(());
+        match serve_client(&mut stream, options, capability, epoch, &mut guest) {
+            Flow::Continue => {}
+            flow => {
+                if let Flow::Drop = flow {
+                    drop(stream);
+                    stop(options);
+                }
+                let _ = fs::remove_file(&options.endpoint);
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -3305,8 +3328,13 @@ fn serve(options: &Options, capability: &[u8; CAPABILITY_LEN]) -> io::Result<()>
         let _ = file.sync_all();
         // SAFETY: the handle is a connected pipe server instance.
         unsafe { DisconnectNamedPipe(pipe) };
-        if let Flow::Exit = flow {
-            return Ok(());
+        match flow {
+            Flow::Continue => {}
+            Flow::Exit => return Ok(()),
+            Flow::Drop => {
+                stop(options);
+                return Ok(());
+            }
         }
     }
 }

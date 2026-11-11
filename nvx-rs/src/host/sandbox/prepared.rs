@@ -177,29 +177,7 @@ impl PreparedLaunch {
         )
     }
 
-    /// Prepares the one-shot launch of `plan`, as [`new`](Self::new) does, but with the shares as
-    /// the one-shot lifecycle delivers them, which
-    /// [`SandboxPlan::one_shot_openvmm_arguments`] and
-    /// [`SandboxPlan::one_shot_kernel_command_line`] render: as the guest's shell binds them at
-    /// boot.
-    #[cfg(feature = "cli")]
-    pub(crate) fn one_shot(
-        plan: SandboxPlan,
-        distro: CheckedDistro,
-        scratch: Option<CheckedScratch>,
-        user_command_line: &str,
-    ) -> Result<Self> {
-        Self::prepare(
-            plan,
-            distro,
-            scratch,
-            user_command_line,
-            Delivery::BootTokens,
-        )
-    }
-
-    /// Implements [`new`](Self::new) and [`one_shot`](Self::one_shot), with the shares as
-    /// `delivery` delivers them.
+    /// Implements [`new`](Self::new), with the shares as `delivery` delivers them.
     fn prepare(
         plan: SandboxPlan,
         distro: CheckedDistro,
@@ -288,8 +266,7 @@ impl PreparedLaunch {
     }
 
     /// Returns the OpenVMM arguments of the plan, as [`SandboxPlan::openvmm_arguments`] renders
-    /// them, or for the CLI's one-shot launch with the shares as the guest's shell binds them at
-    /// boot, except that each block device names its checked file: on Linux as `/proc/self/fd/N`,
+    /// them, except that each block device names its checked file: on Linux as `/proc/self/fd/N`,
     /// which [`inherited`](Self::inherited) passes the VMM under the number `N`, and on Windows by
     /// its final path.
     ///
@@ -299,8 +276,7 @@ impl PreparedLaunch {
     }
 
     /// Returns the kernel command line of the plan, with the user's command line given to
-    /// [`new`](Self::new), as [`SandboxPlan::kernel_command_line`] renders it, or for the CLI's
-    /// one-shot launch with the shares' boot tokens.
+    /// [`new`](Self::new), as [`SandboxPlan::kernel_command_line`] renders it.
     pub fn kernel_command_line(&self) -> &str {
         &self.kernel_command_line
     }

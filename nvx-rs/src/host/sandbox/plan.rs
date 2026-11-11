@@ -31,9 +31,8 @@
 //! at [`GUEST_EXPORT`](crate::host::filesystem::GUEST_EXPORT), where the guest mounts the export,
 //! the kernel command line announces the number of their mappings with `nvx_maps=`, and the host
 //! sends the plan's [`mapping_table`](SandboxPlan::mapping_table) in `MAPS` requests once the
-//! guest agent is ready, which maps each in order beneath the container's root. The CLI's
-//! one-shot lifecycle still renders them as boot tokens, from which the guest's shell binds them,
-//! as [`mount::boot_shares`] does. An adapter's plan renders its root and devices alone, and lets
+//! guest agent is ready, which maps each in order beneath the container's root. An adapter's plan
+//! renders its root and devices alone, and lets
 //! the adapter's own boot tokens through, as
 //! [`kernel_command_line`](SandboxPlan::kernel_command_line) says, and
 //! [`check_adapter_launch`](SandboxPlan::check_adapter_launch) checks, as the adapter plans its
@@ -141,10 +140,6 @@ pub(crate) enum Delivery {
     /// the number of their mappings, and the host sends the mapping table once the guest agent is
     /// ready.
     MappingTable,
-    /// The one-shot lifecycle's, which only the CLI launches: boot tokens, from which the guest's
-    /// shell binds the shares.
-    #[cfg(any(test, feature = "cli"))]
-    BootTokens,
 }
 
 /// The role of a block device of a plan, which fixes its MMIO base and its access.
@@ -572,8 +567,7 @@ impl SandboxPlan {
         }
     }
 
-    /// Returns the shares as `delivery` delivers them, which [`mount::boot_shares`] renders as
-    /// boot tokens; nothing without shares.
+    /// Returns the shares as `delivery` delivers them; nothing without shares.
     fn shares(&self, delivery: Delivery) -> Result<BootShares> {
         let Some(export) = &self.export else {
             return Ok(BootShares::default());
@@ -584,8 +578,6 @@ impl SandboxPlan {
                 tokens: vec![export.kernel_token()],
                 fragment: mount::export_command_line_fragment(export),
             },
-            #[cfg(any(test, feature = "cli"))]
-            Delivery::BootTokens => mount::boot_shares(export)?,
         })
     }
 
@@ -605,16 +597,6 @@ impl SandboxPlan {
             &|_, path| path.display().to_string(),
             Delivery::MappingTable,
         )
-    }
-
-    /// Returns the OpenVMM arguments of the plan as the one-shot lifecycle launches it: as
-    /// [`openvmm_arguments`](Self::openvmm_arguments) does, but with the arguments that attach
-    /// the shares as the guest's shell binds them at boot.
-    ///
-    /// Fails as [`mount::boot_shares`] and [`SandboxNetwork::openvmm_arguments`] do.
-    #[cfg(any(test, feature = "cli"))]
-    pub(crate) fn one_shot_openvmm_arguments(&self) -> Result<Vec<String>> {
-        self.render_arguments(&|_, path| path.display().to_string(), Delivery::BootTokens)
     }
 
     /// Renders the OpenVMM arguments of the plan, with `block` naming the file of each block
@@ -731,17 +713,6 @@ impl SandboxPlan {
         }
     }
 
-    /// Returns the kernel command line of the plan as the one-shot lifecycle boots it: as
-    /// [`kernel_command_line`](Self::kernel_command_line) does, but with the `nvx_share=` tokens
-    /// of an aggregate, which [`mount::boot_shares`] renders, instead of `nvx_maps=`.
-    ///
-    /// Fails as [`kernel_command_line`](Self::kernel_command_line) and [`mount::boot_shares`]
-    /// do.
-    #[cfg(any(test, feature = "cli"))]
-    pub(crate) fn one_shot_kernel_command_line(&self, user_command_line: &str) -> Result<String> {
-        self.command_line(user_command_line, Delivery::BootTokens)
-    }
-
     /// Returns the kernel command line of the plan, with the shares as `delivery` delivers them.
     pub(crate) fn command_line(
         &self,
@@ -795,13 +766,8 @@ impl SandboxPlan {
         // OpenVMM appends the shares' bootstrap tokens after this command line, so they consume
         // the same x86 budget.
         if command_line.len() + fragment.len() + 1 > SANDBOX_COMMAND_LINE_MAX_SIZE {
-            // Only boot tokens put the shares' targets on the command line.
             let advice = match delivery {
                 Delivery::MappingTable => "use shorter arguments and kernel parameters",
-                #[cfg(any(test, feature = "cli"))]
-                Delivery::BootTokens => {
-                    "attach fewer --mount shares or use shorter targets and arguments"
-                }
             };
             return Err(refused(format!(
                 "sandbox kernel command line exceeds its 1024-byte x86 budget; {advice}"

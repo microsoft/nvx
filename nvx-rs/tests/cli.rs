@@ -6,10 +6,12 @@
 //! directories and their records, parsed, POSIX file modes, and the arguments that OpenVMM
 //! receives. Their tables cover usage errors and help ([`usage`]), the checks that refuse a command
 //! line before anything changes ([`validation`]), dry runs and the splitting of their `>> ` lines
-//! ([`dry_run`]), one-shot runs ([`one_shot`]), the lifecycles of managed sandboxes, their
-//! executions, and the refusals of their operations ([`lifecycle`]), the configurations of every
-//! format ([`formats`]), `egress compile` ([`egress`]), `artifacts` ([`artifacts`]), and `download`
-//! and the download that `run` and `sandbox` start themselves, without a network ([`download`]).
+//! ([`dry_run`]), the runs of `nvx-rs run` ([`one_shot`]), the runs of `nvx-rs sandbox run`, each
+//! a sandbox without a state directory ([`sandbox_run`]), the lifecycles of managed sandboxes,
+//! their executions, and the refusals of their operations ([`lifecycle`]), the configurations of
+//! every format ([`formats`]), `egress compile` ([`egress`]), `artifacts` ([`artifacts`]), and
+//! `download` and the download that `run` and `sandbox` start themselves, without a network
+//! ([`download`]).
 //! They replaced the scenarios that scripts recorded from the Python implementations of
 //! `nvx.py sandbox` and `nvx.py run`, and that this test replayed until microsoft/nvx#728 retired
 //! them.
@@ -42,6 +44,8 @@ mod lifecycle;
 mod one_shot;
 #[path = "cli/openvmm.rs"]
 mod openvmm;
+#[path = "cli/sandbox_run.rs"]
+mod sandbox_run;
 #[path = "cli/usage.rs"]
 mod usage;
 #[path = "cli/validation.rs"]
@@ -563,10 +567,10 @@ fn symlink_file(target: &Path, link: &Path) -> bool {
 
 #[test]
 fn a_distro_manifest_path_whose_lookup_fails_refuses_provision_and_start() {
-    // Verification counts a manifest path whose lookup fails as no manifest, as nvx.py did, so a
-    // run's outcome is unchanged. A binding of the manifest's absence holds only while nothing is
-    // at its path: start refuses such a path, and provision refuses to record a binding that
-    // every start would refuse.
+    // Verification counts a manifest path whose lookup fails as no manifest, as nvx.py did. A
+    // binding of the manifest's absence holds only while nothing is at its path: start refuses
+    // such a path, and provision refuses to record a binding that every start would refuse, as a
+    // run does, which launches what provision would record, even as a dry run.
     let root = Root::new();
     let manifest = root.path.join("distro.erofs.manifest.json");
     provisioned(&root, "absent");
@@ -607,8 +611,7 @@ fn a_distro_manifest_path_whose_lookup_fails_refuses_provision_and_start() {
         path("scratch.ext4"),
         "--dry-run".into(),
     ];
-    let output = run(&root, &dry_run);
-    assert!(output.status.success(), "{}", text(&output.stderr));
+    failed(&run(&root, &dry_run));
 }
 
 #[test]
@@ -1532,7 +1535,7 @@ fn tcp_forwards_take_any_egress_policy() {
             &["--network-egress", "deny"][..],
             " --net 10.0.0.2/24 --network-profile portable --network-egress deny \
              --network-ingress deny --host-loopback allow --host-loopback-forward tcp:18080:8080 \
-             --microvm-lifecycle ",
+             --single-process ",
         ),
         (
             &[
@@ -1543,7 +1546,7 @@ fn tcp_forwards_take_any_egress_policy() {
             ][..],
             " --net 10.0.0.2/24 --network-profile portable --network-egress allow \
              --network-ingress deny --host-loopback allow --network-egress-deny 10.0.0.0/8 \
-             --host-loopback-forward tcp:18080:8080 --microvm-lifecycle ",
+             --host-loopback-forward tcp:18080:8080 --single-process ",
         ),
     ] {
         let mut arguments: Vec<String> = [
@@ -1630,7 +1633,7 @@ fn network_policy_files_compile_into_the_typed_policy() {
     assert!(
         text(&output.stdout).contains(
             " --net 10.0.0.2/24 --network-profile portable --network-egress deny \
-             --network-ingress deny --network-egress-allow 192.0.2.0/24 --microvm-lifecycle "
+             --network-ingress deny --network-egress-allow 192.0.2.0/24 --single-process "
         ),
         "{}",
         text(&output.stdout)
@@ -1855,7 +1858,7 @@ fn a_running_sandbox_claims_its_scratch_image() {
         state_entries(&root, "second"),
         ["config.json", "sandbox.lock"]
     );
-    let one_shot: Vec<String> = vec![
+    let sandbox_run: Vec<String> = vec![
         "sandbox".into(),
         "run".into(),
         "--layer".into(),
@@ -1866,9 +1869,9 @@ fn a_running_sandbox_claims_its_scratch_image() {
         "--scratch".into(),
         scratch.to_str().unwrap().to_owned(),
         "--entrypoint".into(),
-        "/bin/true".into(),
+        "/bin/echo".into(),
     ];
-    let output = run(&root, &one_shot);
+    let output = run(&root, &sandbox_run);
     assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
     assert_eq!(text(&output.stderr), claimed);
 
@@ -1876,7 +1879,7 @@ fn a_running_sandbox_claims_its_scratch_image() {
     let output = run(&root, &lifecycle("stop", &root, "first"));
     assert!(output.status.success(), "{}", text(&output.stderr));
     cycle(&root, "second");
-    let output = run(&root, &one_shot);
+    let output = run(&root, &sandbox_run);
     assert!(output.status.success(), "{}", text(&output.stderr));
     let output = run(&root, &lifecycle("deprovision", &root, "first"));
     assert!(output.status.success(), "{}", text(&output.stderr));
@@ -2209,6 +2212,8 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
     let (_reader, unrelated) = std::io::pipe().unwrap();
     let root = Root::new();
     let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
+    let started = root.path.join("started");
+    let script = format!("touch {}; sleep 60000", started.display());
     let mut command = Command::new(NVX_RS);
     command
         .arg("--root")
@@ -2224,9 +2229,10 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
             "--scratch",
             &path("scratch.ext4"),
             "--entrypoint",
-            "/bin/sleep",
+            "/bin/sh",
+            "--arg=-c",
             "--arg",
-            "60",
+            &script,
         ])
         .current_dir(&root.path)
         .env_remove("NVX_OPENVMM")
@@ -2238,8 +2244,8 @@ fn a_run_passes_openvmm_no_handle_of_its_caller() {
     set_inheritable(&unrelated, false);
     let mut cli = cli.unwrap();
 
-    // Once OpenVMM has started, the CLI holds the handle, and OpenVMM does not.
-    wait_for(&root.path.join("build").join("fake-openvmm-.json"));
+    // Once the workload runs, the CLI holds the handle, and OpenVMM does not.
+    wait_for(&started);
     let value = unrelated.as_raw_handle() as usize;
     let openvmm = children_named(cli.id(), "openvmm.exe");
     let cli_holds = holds(cli.id(), value);
@@ -2272,8 +2278,8 @@ fn batch_openvmm(root: &Root) -> (BTreeMap<String, String>, PathBuf, String) {
         wrapper.to_str().unwrap().to_owned(),
     )]);
     let refusal = format!(
-        "error[unsupported]: cannot start the batch file {}: Windows runs batch files through \
-         cmd.exe, which would read their arguments as shell syntax\n",
+        "error[io]: cannot spawn the VM: cannot start the batch file {}: Windows runs batch files \
+         through cmd.exe, which would read their arguments as shell syntax\n",
         wrapper.display()
     );
     (environment, marker, refusal)
@@ -2299,7 +2305,7 @@ fn a_run_refuses_a_batch_file_as_openvmm() {
         "--scratch",
         scratch.to_str().unwrap(),
         "--entrypoint",
-        "/bin/true",
+        "/bin/echo",
     ]
     .map(str::to_owned)
     .to_vec();
@@ -2758,8 +2764,8 @@ mod interrupts {
 
     use super::*;
 
-    /// Sends SIGINT once OpenVMM has started, to the CLI alone or, as a terminal's Ctrl-C does,
-    /// to its whole process group, which a run's OpenVMM shares, and returns the CLI's output.
+    /// Sends SIGINT once `started` exists, to the CLI alone or, as a terminal's Ctrl-C does, to
+    /// its whole process group, which a run's OpenVMM shares, and returns the CLI's output.
     fn interrupt(
         root: &Root,
         arguments: &[String],
@@ -2798,10 +2804,12 @@ mod interrupts {
         (output, interrupted.elapsed())
     }
 
-    /// Returns the arguments of a one-shot run of `/bin/sleep 60` in the fake OpenVMM, and the
-    /// file that the fake writes when it starts.
+    /// Returns the arguments of a run whose workload, once it starts, writes the file that this
+    /// returns too, and then sleeps for a minute in the fake OpenVMM.
     fn sleeping_run(root: &Root) -> (Vec<String>, PathBuf) {
         let path = |name: &str| root.path.join(name).to_str().unwrap().to_owned();
+        let started = root.path.join("started");
+        let script = format!("touch {}; sleep 60000", started.display());
         let arguments: Vec<String> = [
             "sandbox",
             "run",
@@ -2813,17 +2821,14 @@ mod interrupts {
             "--scratch",
             &path("scratch.ext4"),
             "--entrypoint",
-            "/bin/sleep",
+            "/bin/sh",
+            "--arg=-c",
             "--arg",
-            "60",
+            &script,
         ]
         .map(str::to_owned)
         .to_vec();
-        // The fake records its command line when it starts.
-        (
-            arguments,
-            root.path.join("build").join("fake-openvmm-.json"),
-        )
+        (arguments, started)
     }
 
     #[test]
@@ -2833,8 +2838,11 @@ mod interrupts {
         let (output, elapsed) = interrupt(&root, &arguments, &started, false);
         assert_eq!(output.status.code(), Some(130));
         assert_eq!(text(&output.stderr), "Interrupted\n");
-        assert!(text(&output.stdout).starts_with(">> "));
         assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+        // The run ended its VM, whose directory it then removed.
+        let outcome = harness::Outcome::new(arguments, output);
+        let (command, _) = outcome.command();
+        openvmm::Options::parse(&command[1..]).normalized_run_outputs();
     }
 
     #[test]
@@ -2926,8 +2934,9 @@ mod interrupts {
 
     #[test]
     fn interrupting_a_run_ends_it_as_interrupted_even_if_openvmm_exits_first() {
-        // A terminal's Ctrl-C reaches OpenVMM too, which the fake lets end it at once; Python's
-        // wait raises KeyboardInterrupt all the same, rather than return OpenVMM's status.
+        // A terminal's Ctrl-C reaches OpenVMM too, which a run keeps in its process group, and
+        // which the fake lets end it at once; the run ends as interrupted all the same, rather
+        // than as one whose VM ended.
         let root = Root::new();
         let (arguments, started) = sleeping_run(&root);
         let (output, elapsed) = interrupt(&root, &arguments, &started, true);

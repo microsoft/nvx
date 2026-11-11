@@ -243,13 +243,13 @@ fn configuration(
 }
 
 /// Returns the mapping table entry that maps the export's child `source` at `target`.
-fn mapped(source: &str, target: &str, read_only: bool, directory: bool) -> Value {
+pub(crate) fn mapped(source: &str, target: &str, read_only: bool, directory: bool) -> Value {
     json!({"source": source, "target": target, "read_only": read_only, "directory": directory})
 }
 
 /// Returns the options of a start of a sandbox whose aggregate exports `children`, as
 /// `--mount-child` values, which the guest maps from `/run/nvx/hostfs/root`.
-fn exported(options: Options, children: &[&str]) -> Options {
+pub(crate) fn exported(options: Options, children: &[&str]) -> Options {
     let mut tokens: Vec<String> = WORKLOAD.iter().map(|token| (*token).to_owned()).collect();
     tokens.push(format!("nvx_maps={}", children.len()));
     options
@@ -1559,11 +1559,11 @@ fn refusals_of_lifecycle_operations() {
     });
 }
 
-/// The host paths of shares of a sandbox's own files, which `provision` and `start` refuse, and
-/// which of its files each one reaches first: its state directory, image, scratch image, kernel,
-/// initramfs, and OpenVMM, a directory that holds one of them, and a directory inside its state
-/// directory.
-const OWN_FILES: [(&str, &str); 11] = [
+/// The host paths of shares of a sandbox's own files, which `provision` and `start` refuse, as
+/// `sandbox run` does all but those of the state directory, which it has none of, and which of its
+/// files each one reaches first: its state directory, image, scratch image, kernel, initramfs, and
+/// OpenVMM, a directory that holds one of them, and a directory inside its state directory.
+pub(crate) const OWN_FILES: [(&str, &str); 11] = [
     ("{root/control/state}", "state directory"),
     ("{root/control}", "state directory"),
     ("{root/control/state/inside}", "state directory"),
@@ -1578,7 +1578,7 @@ const OWN_FILES: [(&str, &str); 11] = [
 ];
 
 /// Returns a root whose image and scratch image are in directories of their own.
-fn own_files_root() -> Root {
+pub(crate) fn own_files_root() -> Root {
     let root = Root::new();
     root.write("images/distro.erofs", "distro\n");
     root.write("upper/scratch.ext4", "scratch\n");
@@ -1602,7 +1602,7 @@ fn own_files_provision(host: Option<&str>) -> Vec<String> {
 
 /// Returns `host`, with its placeholders replaced, and resolved if it is a link, as the root's
 /// OpenVMM is on POSIX hosts, since a share's host path must not be one.
-fn share_host(root: &Root, host: &str) -> String {
+pub(crate) fn share_host(root: &Root, host: &str) -> String {
     let host = root.expand(host);
     if Path::new(&host).is_symlink() {
         canonical(Path::new(&host)).to_str().unwrap().to_owned()

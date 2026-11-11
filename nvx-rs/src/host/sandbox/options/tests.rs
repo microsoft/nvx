@@ -11,7 +11,7 @@ use super::*;
 use crate::ErrorKind;
 use crate::host::paths::{self, resolve};
 use crate::host::sandbox::layer::LayerRole;
-use crate::host::sandbox::mount::{aggregate_child_name, plan_mounts, validate_mounts};
+use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::{SandboxLayer, SandboxSettings, SandboxUpper};
 
 fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
@@ -606,7 +606,7 @@ fn sandbox_exec_forwards_environment_inheritance() {
 }
 
 #[test]
-fn sandbox_exec_rejects_ambiguous_or_one_shot_environment() {
+fn sandbox_run_and_exec_alone_take_the_execution_options() {
     let both = SandboxOptions {
         environment: vec!["A=1".to_owned()],
         environment_file: Some("environment.json".to_owned()),
@@ -616,13 +616,26 @@ fn sandbox_exec_rejects_ambiguous_or_one_shot_environment() {
         message(both.check()),
         "--environment and --environment-file are mutually exclusive"
     );
-    let one_shot = SandboxOptions {
+    // A run executes its workload as exec does.
+    let run = SandboxOptions {
         environment: vec!["A=1".to_owned()],
-        ..SandboxOptions::new(SandboxOperation::Run)
+        cwd: Some("/tmp".to_owned()),
+        inherit_default_environment: true,
+        ..launching(SandboxOperation::Run)
     };
-    let exec_only = "managed execution options require the sandbox exec operation";
-    assert_eq!(message(one_shot.check()), exec_only);
-    for operation in [SandboxOperation::Run, SandboxOperation::Start] {
+    assert_eq!(run.check().unwrap(), Some(vec!["A=1".to_owned()]));
+    let exec_only = "managed execution options are only valid for sandbox run or exec";
+    for operation in [
+        SandboxOperation::Provision,
+        SandboxOperation::Start,
+        SandboxOperation::Stop,
+        SandboxOperation::Deprovision,
+    ] {
+        let environment = SandboxOptions {
+            environment: vec!["A=1".to_owned()],
+            ..SandboxOptions::new(operation)
+        };
+        assert_eq!(message(environment.check()), exec_only);
         let inheriting = SandboxOptions {
             inherit_default_environment: true,
             ..SandboxOptions::new(operation)
@@ -784,7 +797,7 @@ fn managed_non_launch_operations_reject_network_policy_options() {
     };
     assert_eq!(
         message(report.check()),
-        "--outcome-report is only valid for one-shot run or managed exec"
+        "--outcome-report is only valid for sandbox run or exec"
     );
 }
 
@@ -920,8 +933,9 @@ impl Shares {
         path
     }
 
-    /// Runs the steps of `nvx-rs sandbox --dry-run` that build the OpenVMM arguments and the
-    /// kernel command line of these shares.
+    /// Runs the steps of `nvx-rs sandbox --dry-run` that build the launch of these shares, and
+    /// returns the OpenVMM arguments and the kernel command line of its plan, which exports the
+    /// shares for the mapping table that the host sends once the guest is ready.
     fn run(
         &self,
         mounts: &[String],
@@ -959,10 +973,9 @@ impl Shares {
         launch.validated()?;
         let launch = launch.with_export(plan_mounts(&mounts)?)?;
         validate_sandbox_systemd_policy(&launch)?;
-        // The command runs one-shot, which renders the shares as boot tokens.
         Ok((
-            launch.plan().one_shot_openvmm_arguments()?,
-            launch.plan().one_shot_kernel_command_line("")?,
+            launch.plan().openvmm_arguments()?,
+            launch.plan().kernel_command_line("")?,
         ))
     }
 }
@@ -989,8 +1002,8 @@ fn sandbox_command_forwards_mount_to_openvmm() {
         )
         .unwrap();
     assert_eq!(
-        values(&arguments, "--mount"),
-        [format!("/workspace,{share},rw")]
+        values(&arguments, "--mount-child"),
+        [format!("0,{share},rw")]
     );
     // The plan resolves each policy path, which must exist.
     assert_eq!(values(&arguments, "--mount-deny"), [secrets]);
@@ -1023,15 +1036,15 @@ fn sandbox_command_shares_a_file() {
             None,
         )
         .unwrap();
-    let name = aggregate_child_name(0, "/etc/app/settings.json");
     // The regular file is a child of its own, without its directory, which OpenVMM must find to
-    // be a regular file.
+    // be a regular file, and the guest maps it from the table that the command line counts.
     assert!(!arguments.contains(&"--mount".to_owned()));
     assert_eq!(
         values(&arguments, "--mount-child"),
-        [format!("{name},{settings},ro,file")]
+        [format!("0,{settings},ro,file")]
     );
-    assert!(command_line.contains(&format!("nvx_share={name},/etc/app/settings.json,ro,file")));
+    assert!(command_line.ends_with(" nvx_maps=1"), "{command_line}");
+    assert!(!command_line.contains("nvx_share="), "{command_line}");
     let error = shares
         .run(
             &[format!("/etc/app/settings.json,{settings},rw")],
@@ -1056,7 +1069,10 @@ fn sandbox_command_shares_host_paths_with_commas() {
             None,
         )
         .unwrap();
-    assert_eq!(values(&arguments, "--mount"), [format!("/work,{alpha},rw")]);
+    assert_eq!(
+        values(&arguments, "--mount-child"),
+        [format!("0,{alpha},rw")]
+    );
     assert_eq!(
         values(&arguments, "--mount-deny"),
         [shares.path("alpha,beta/secret")]
@@ -1074,11 +1090,8 @@ fn sandbox_command_shares_host_paths_with_commas() {
             None,
         )
         .unwrap();
-    // The children follow their resolved host paths.
-    let (report, work) = (
-        aggregate_child_name(0, "/reports"),
-        aggregate_child_name(1, "/work"),
-    );
+    // The children follow their resolved host paths, and are named by their positions.
+    let (report, work) = ("0", "1");
     let pairs: Vec<(String, String)> = arguments
         .windows(2)
         .filter(|pair| pair[0] == "--mount-child" || pair[0] == "--mount-deny")
@@ -1125,7 +1138,7 @@ fn sandbox_command_forwards_mount_owner() {
         let (arguments, _) = result.unwrap();
         assert_eq!(values(&arguments, "--mount-owner"), ["caller"]);
         let position = |option: &str| arguments.iter().position(|argument| argument == option);
-        assert!(position("--mount") < position("--mount-owner"));
+        assert!(position("--mount-aggregate") < position("--mount-owner"));
     }
 }
 
@@ -1252,10 +1265,7 @@ fn sandbox_command_hides_a_share_root_behind_its_allowed_paths() {
         )
         .unwrap();
     // OpenVMM hides the workspace's root behind its one allowed path.
-    let (toolcache, workspace) = (
-        aggregate_child_name(0, "/opt/hostedtoolcache"),
-        aggregate_child_name(1, "/workspace"),
-    );
+    let (toolcache, workspace) = ("0", "1");
     assert_eq!(
         values(&arguments, "--mount-child"),
         [
@@ -1285,13 +1295,14 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
         (PolicyKind::Denied, Some(1), "logs"),
     ];
     let (arguments, command_line) = shares.run(&mounts, &policy, None).unwrap();
-    // The children follow their resolved host paths, each with its own denied paths.
-    let (toolcache, workspace) = (
-        aggregate_child_name(0, "/opt/hostedtoolcache"),
-        aggregate_child_name(1, "/workspace"),
-    );
+    // The children follow their resolved host paths, each with its own denied paths, and the
+    // command line counts their mappings rather than naming their targets.
+    let (toolcache, workspace) = ("0", "1");
     assert!(!arguments.contains(&"--mount".to_owned()));
-    assert_eq!(values(&arguments, "--mount-aggregate"), ["/run/nvx/shares"]);
+    assert_eq!(
+        values(&arguments, "--mount-aggregate"),
+        [crate::host::filesystem::GUEST_EXPORT]
+    );
     assert_eq!(
         values(&arguments, "--mount-child"),
         [
@@ -1307,9 +1318,8 @@ fn sandbox_command_attributes_mount_deny_to_the_preceding_mount() {
             shares.path("work/secrets"),
         ]
     );
-    assert!(command_line.contains(&format!(
-        "nvx_share={toolcache},/opt/hostedtoolcache,ro nvx_share={workspace},/workspace,rw"
-    )));
+    assert!(command_line.ends_with(" nvx_maps=2"), "{command_line}");
+    assert!(!command_line.contains("nvx_share="), "{command_line}");
 
     // With one share, a --mount-deny may come first; with several, it must follow the share
     // whose directory it hides.
