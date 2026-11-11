@@ -3343,7 +3343,9 @@ acknowledgement. It applies the restore's root and network, mounts the runtime,
 starts and retains an announcer only for published listeners, switches once,
 then completes and reports Ready. The host supplies the complete mapping table
 before the first valid EXEC starts the restored workload; later executions and
-byte-identical activation retries reuse the retained state.
+byte-identical activation retries, also those that arrive while a workload
+runs, reuse the retained state, and an activation with other bytes ends the VM
+as a failure.
 The accepted proxy replaces the four HTTP(S) proxy defaults, or clears them when
 the restore has no proxy. Per-EXEC layered entries still win, and exact
 environments still replace every default.
