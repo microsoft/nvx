@@ -6073,10 +6073,6 @@ class CiConfigurationTests(unittest.TestCase):
             "setup-cross-os-cache": set[str](),
             "verify": set[str](),
             "test-openvmm": kernel_alpine,
-            # The runtime adapter's VM scenarios boot what nvx finds, and its
-            # layered scenarios boot the Ubuntu layer over a copy of the
-            # scratch template (tests/runtime-adapter/tests/common/mod.rs).
-            "test-runtime-adapter": kernel_alpine | workload,
             # A sandbox boots the Alpine control initramfs under its layers.
             "sandbox": kernel_alpine,
         }
@@ -6575,61 +6571,6 @@ class CiConfigurationTests(unittest.TestCase):
             'python3 ../scripts/nvx.py test-guest-binaries --binaries "${directory}"',
             build,
         )
-
-    def test_nvx_rs_checks_the_runtime_adapter_in_each_configuration(self):
-        # The runtime adapter builds on the nvx crate as an independent adapter
-        # does, with a lockfile of its own and default features off. Each
-        # configuration is linted, built, tested, documented with warnings
-        # denied, and checked with the minimum Rust version of nvx; the
-        # guest-only one builds the static musl executable that guests run, so
-        # it needs Linux.
-        root = BuildConstants.REPO_ROOT
-        action = (
-            root / ".github" / "actions" / "check-nvx-rs" / "action.yml"
-        ).read_text(encoding="utf-8")
-        adapter = root / "tests" / "runtime-adapter"
-        manifest = (adapter / "Cargo.toml").read_text(encoding="utf-8")
-        self.assertIn(
-            'nvx = { path = "../../nvx-rs", default-features = false }\n', manifest
-        )
-        self.assertIn("\ndefault = []\n", manifest)
-        self.assertTrue((adapter / "Cargo.lock").is_file())
-        toolchain = '"+${{ steps.toolchains.outputs.toolchain }}"'
-        msrv = '"+${{ steps.toolchains.outputs.msrv }}"'
-        musl = "x86_64-unknown-linux-musl"
-        for configuration, options in (
-            ("protocol-only", ""),
-            ("host-only", " --features host"),
-            ("guest-only", f" --features guest --target {musl}"),
-        ):
-            with self.subTest(configuration=configuration):
-                name = f"Check the runtime adapter's {configuration} configuration"
-                step = _composite_action_step(action, name)
-                self.assertIn("      working-directory: tests/runtime-adapter\n", step)
-                self.assertEqual(
-                    "      if: runner.os == 'Linux'\n" in step,
-                    configuration == "guest-only",
-                )
-                script = " ".join(
-                    _composite_action_script(action, name).replace("\\\n", " ").split()
-                )
-                self.assertTrue(script.startswith("set -euo pipefail "))
-                for command in (
-                    f"cargo {toolchain} clippy --locked --all-targets{options} "
-                    "-- -D warnings",
-                    f"cargo {toolchain} build --locked{options}",
-                    f"cargo {toolchain} test --locked{options}",
-                    f'RUSTDOCFLAGS="-D warnings" cargo {toolchain} doc --locked '
-                    f"--no-deps{options}",
-                    f"cargo {msrv} check --locked --all-targets{options}",
-                ):
-                    self.assertIn(command, script)
-                if configuration == "protocol-only":
-                    self.assertIn(f"cargo {toolchain} fmt --all --check", script)
-                if configuration == "guest-only":
-                    self.assertIn(
-                        f'rustup target add --toolchain "${{toolchain}}" {musl}', script
-                    )
 
     def test_required_ci_result_policy(self):
         always_successful = {
@@ -7523,7 +7464,7 @@ class CiConfigurationTests(unittest.TestCase):
             (("doc/ci.md", "README.md", "DOC/Guide.MD"), select(), None),
             # Documentation selects no suite, even in a suite's directory.
             (("scripts/setup/README.md",), select(), None),
-            (("nvx-rs/README.md", "tests/runtime-adapter/README.md"), select(), None),
+            (("nvx-rs/README.md",), select(), None),
             (
                 ("scripts/setup/README.md", "scripts/test_nvx_tools.py"),
                 select(),
@@ -7617,11 +7558,6 @@ class CiConfigurationTests(unittest.TestCase):
             (("nvx-rs/tests/cli.rs",), microvm_and_benchmarks, None),
             # Inputs of the microVM tests alone, such as the planner of their
             # shards (#691).
-            (
-                ("tests/runtime-adapter/src/lib.rs",),
-                microvm_only,
-                microvm_and_benchmarks,
-            ),
             (
                 ("scripts/nvx_tools/microvm_tests.py",),
                 microvm_only,
@@ -7805,165 +7741,6 @@ class CiConfigurationTests(unittest.TestCase):
                             changes.run_microvm_tests or changes.run_benchmarks,
                         )
 
-    def test_ci_change_classification_runs_microvm_tests_for_the_runtime_adapter(self):
-        # The microVM jobs run the runtime adapter's suite on every backend, so
-        # a change to the adapter, its suite, or the command that runs it alone
-        # runs them. The OpenVMM CI check reads none of them, and neither the
-        # benchmarks nor the packages use the adapter, so a pull request skips
-        # the platform and package jobs.
-        workflow = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "workflows"
-            / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-        for system in ("Linux", "Windows"):
-            with self.subTest(system=system):
-                hook = _workflow_step(
-                    workflow, "test", f"Run runtime adapter scenarios on {system}"
-                )
-                self.assertIn("!inputs.debug-kernel", hook)
-                self.assertIn("nvx.py test-runtime-adapter\n", hook)
-                self.assertIn('--backend "${{ inputs.backend }}"\n', hook)
-        adapter = (
-            "tests/runtime-adapter/Cargo.toml",
-            "tests/runtime-adapter/Cargo.lock",
-            "tests/runtime-adapter/src/lib.rs",
-            "tests/runtime-adapter/src/bin/runtime-adapter-guest.rs",
-            "tests/runtime-adapter/tests/independent_build.rs",
-            "tests/runtime-adapter/scenarios.txt",
-        )
-        for changed_files in (
-            *((path,) for path in adapter),
-            adapter,
-            ("scripts/nvx_tools/runtime_adapter_tests.py",),
-        ):
-            with self.subTest(changed_files=changed_files):
-                changes = ci.classify_ci_changes("pull_request", changed_files)
-                self.assertEqual(changes, ci.CiChanges(True, True, False, True, False))
-                self.assertEqual(
-                    ci.classify_ci_changes("push", changed_files),
-                    ci.CiChanges(True, True, False, True, True),
-                )
-                expected = ci.required_ci_expected_results(
-                    "pull_request", same_repository=True, changes=changes
-                )
-                for job in (
-                    *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
-                    *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
-                ):
-                    self.assertEqual(expected[job], "success", job)
-                for job in (
-                    ci.REQUIRED_CI_OPENVMM_CI_JOB,
-                    *ci.REQUIRED_CI_PLATFORM_JOBS,
-                    *ci.REQUIRED_CI_PACKAGE_JOBS,
-                    "performance-gate",
-                ):
-                    self.assertEqual(expected[job], "skipped", job)
-        summary = ci.describe_ci_changes(
-            "pull_request",
-            adapter,
-            ci.classify_ci_changes("pull_request", adapter),
-        )
-        self.assertIn(
-            "### NVX microVM tests: run\nInputs changed: "
-            "`tests/runtime-adapter/Cargo.toml`, `tests/runtime-adapter/Cargo.lock`, "
-            "`tests/runtime-adapter/src/lib.rs`, and 3 more.\n",
-            summary,
-        )
-        self.assertIn(
-            "### Platform benchmarks and packages: skip\nNo input changed.\n",
-            summary,
-        )
-
-    def test_runtime_adapter_scenarios_take_a_guest_agent_that_linux_builds(self):
-        # The scenarios boot VMs of the artifacts that the microVM jobs that
-        # run them download into the checkout, with the adapter's guest agent,
-        # a static musl executable. The Linux jobs build it before the
-        # scenarios run, and the WHP job takes the one that distro-artifacts
-        # builds on Linux, as the WHP guest and sandbox job takes the Ubuntu
-        # and Azure Linux images. The default suites neither build nor
-        # download it.
-        github = BuildConstants.REPO_ROOT / ".github"
-        workflow = (github / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        microvm_workflow = (
-            github / "workflows" / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-        build = (
-            "cargo build --locked --release --features guest "
-            "--target x86_64-unknown-linux-musl --bin runtime-adapter-guest"
-        )
-        agent = (
-            "tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/"
-            "runtime-adapter-guest"
-        )
-
-        def step(job: str, name: str) -> str:
-            return _workflow_step(
-                microvm_workflow if job == "test" else workflow, job, name
-            )
-
-        linux_build = step("test", "Build the runtime adapter's guest agent on Linux")
-        self.assertIn(
-            "if: runner.os != 'Windows' && inputs.runtime-adapter "
-            "&& !inputs.debug-kernel\n",
-            linux_build,
-        )
-        self.assertIn("working-directory: tests/runtime-adapter\n", linux_build)
-        self.assertIn(build, " ".join(linux_build.split()))
-        download = step("test", "Download the runtime adapter's guest agent on Windows")
-        self.assertIn(
-            "if: runner.os == 'Windows' && inputs.runtime-adapter "
-            "&& !inputs.debug-kernel\n",
-            download,
-        )
-        self.assertIn("uses: actions/download-artifact@v8\n", download)
-        self.assertIn("name: runtime-adapter-guest\n", download)
-        self.assertIn("path: build/runtime-adapter\n", download)
-        for system, setup, guest_agent in (
-            ("Linux", linux_build, agent),
-            (
-                "Windows",
-                download,
-                "build\\runtime-adapter\\runtime-adapter-guest",
-            ),
-        ):
-            with self.subTest(system=system):
-                name = f"Run runtime adapter scenarios on {system}"
-                hook = step("test", name)
-                # The command takes NVX's artifacts from the checkout, into which
-                # the job downloaded them.
-                self.assertNotIn("NVX_ARTIFACTS_DIR", hook)
-                self.assertIn(f"--guest-agent {guest_agent}\n", hook)
-                self.assertLess(
-                    microvm_workflow.index(setup),
-                    microvm_workflow.index(f"      - name: {name}\n"),
-                )
-
-        shared = " ".join(
-            step("distro-artifacts", "Build the runtime adapter's guest agent")
-            .replace("\\\n", " ")
-            .split()
-        )
-        self.assertIn("working-directory: tests/runtime-adapter", shared)
-        self.assertIn(
-            'rustup toolchain install "${toolchain}" --profile minimal '
-            "--no-self-update --target x86_64-unknown-linux-musl",
-            shared,
-        )
-        self.assertIn(
-            build.replace("cargo build", 'cargo "+${toolchain}" build'), shared
-        )
-        upload = step("distro-artifacts", "Upload the runtime adapter's guest agent")
-        self.assertIn("uses: actions/upload-artifact@v7\n", upload)
-        self.assertIn("name: runtime-adapter-guest\n", upload)
-        self.assertIn(f"path: {agent}\n", upload)
-        self.assertIn(
-            "needs: [artifacts, distro-artifacts, build-openvmm-windows-msvc, "
-            "build-nvx-rs-windows-msvc, openvmm-changes]",
-            _workflow_job(workflow, "nvx-microvm-adapter-whp"),
-        )
-
     def test_ci_change_classification_covers_each_suite_input(self):
         github = BuildConstants.REPO_ROOT / ".github"
         tools = BuildConstants.REPO_ROOT / "scripts" / "nvx_tools"
@@ -8142,10 +7919,6 @@ class CiConfigurationTests(unittest.TestCase):
         all_guest_inputs = (
             set[str]().union(*guest_inputs.values()) | guest_binary_inputs
         )
-        microvm_workflow = (
-            github / "workflows" / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("working-directory: tests/runtime-adapter\n", microvm_workflow)
         microvm_inputs = (
             job_inputs(
                 *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
@@ -8158,7 +7931,6 @@ class CiConfigurationTests(unittest.TestCase):
             )
             | nvx_rs_inputs
             | all_guest_inputs
-            | {"tests/runtime-adapter/example"}
         )
         # The platform jobs check their history's expected host in data/, the
         # package jobs name their packages with VERSION and ship LICENSE, and
@@ -9119,11 +8891,6 @@ python3() {
                 "openvmm-windows-msvc",
                 "run-nvx-microvm-tests.yml",
             ),
-            "nvx-microvm-adapter-whp": (
-                "build-openvmm-windows-msvc",
-                "openvmm-windows-msvc",
-                "run-nvx-microvm-tests.yml",
-            ),
             "nvx-microvm-debug-kvm": (
                 "build-openvmm-linux-gnu",
                 "openvmm-linux-gnu",
@@ -9231,13 +8998,12 @@ python3() {
         self.assertEqual(build_workflow.count("retention-days: 1"), 2)
         # The microVM workflow also downloads nvx-rs, which the benchmarks
         # don't run, the debug kernel, which neither the platform nor package
-        # jobs read, the Ubuntu distro layer in two more steps, for an
-        # unsharded default run and for the runtime adapter scenarios alone,
-        # and on Windows the runtime adapter's guest agent. The platform jobs
-        # download only what they boot, and the package jobs every image that
-        # a package ships; their action downloads nvx-rs.
+        # jobs read, and the Ubuntu distro layer a second time for an
+        # unsharded default run. The platform jobs download only what they
+        # boot, and the package jobs every image that a package ships; their
+        # action downloads nvx-rs.
         for consumer_workflow, download_count in (
-            (microvm_workflow, 12),
+            (microvm_workflow, 10),
             (platform_workflow, 4),
             (package_workflow, 7),
         ):
@@ -10018,14 +9784,9 @@ python3() {
         # second job beside the suite, on the same runner pool and with the
         # same OpenVMM and nvx-rs builds. Of the two, only that job reads the
         # Ubuntu and Azure Linux artifacts, so only it downloads and waits for
-        # them. #982: the runtime adapter scenarios, which that job runs last,
-        # take about twice as long on WHP as on KVM and MSHV, and WHP's job
-        # then ended last in most runs, so WHP runs them in a third job beside
-        # the other two, which waits for the same artifacts as the second but
-        # downloads, of the Ubuntu and Azure Linux ones, only the Ubuntu
-        # distro layer. Together, each backend's jobs run every step of the
-        # former single job exactly once, and the debug-kernel jobs, which
-        # never set a selector, run as before.
+        # them. Together, the two jobs run every step of the former single job
+        # exactly once, and the debug-kernel jobs, which never set the
+        # selector, run as before.
         workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
         jobs = yaml.safe_load((workflows / "ci.yml").read_text(encoding="utf-8"))[
             "jobs"
@@ -10034,19 +9795,14 @@ python3() {
             (workflows / "run-nvx-microvm-tests.yml").read_text(encoding="utf-8")
         )
         # PyYAML reads the `on` key as true.
-        declared = microvm[True]["workflow_call"]["inputs"]
-        for selector in ("guests-and-sandboxes", "runtime-adapter"):
-            with self.subTest(selector=selector):
-                self.assertEqual(declared[selector]["type"], "boolean")
-                self.assertIs(declared[selector]["default"], False)
+        selector = microvm[True]["workflow_call"]["inputs"]["guests-and-sandboxes"]
+        self.assertEqual(selector["type"], "boolean")
+        self.assertIs(selector["default"], False)
         backends = {
             "kvm": "Linux / KVM",
             "mshv": "Linux / MSHV",
             "whp": "Windows / WHP",
         }
-        # The backends that run the runtime adapter scenarios in a job of
-        # their own.
-        separate = {"whp"}
         self.assertEqual(
             {
                 name
@@ -10057,8 +9813,7 @@ python3() {
                 f"nvx-microvm-{kind}-{backend}"
                 for kind in ("tests", "guests", "debug")
                 for backend in backends
-            }
-            | {f"nvx-microvm-adapter-{backend}" for backend in separate},
+            },
         )
         for backend, label in backends.items():
             suite = jobs[f"nvx-microvm-tests-{backend}"]
@@ -10074,7 +9829,7 @@ python3() {
                 self.assertNotIn("distro-artifacts", suite["needs"])
                 # The guest and sandbox job also waits for the Ubuntu and Azure
                 # Linux artifacts, and otherwise equals the suite's job but for
-                # its name, the selectors, and the suite's shards
+                # its name, the selector, and the suite's shards
                 # (test_ci_runs_each_default_microvm_suite_in_its_shards).
                 conjuncts = _expression_conjuncts(suite["if"])
                 after = conjuncts.index("needs.artifacts.result == 'success'") + 1
@@ -10098,26 +9853,11 @@ python3() {
                             *conjuncts[after:],
                         ],
                         "with": inputs
-                        | {"display-name": name, "guests-and-sandboxes": True}
-                        | ({} if backend in separate else {"runtime-adapter": True}),
+                        | {"display-name": name, "guests-and-sandboxes": True},
                     },
                 )
-                if backend in separate:
-                    # The runtime adapter job equals the guest and sandbox job
-                    # but for its name and selector.
-                    adapter = f"{label} / Runtime adapter"
-                    self.assertEqual(
-                        jobs[f"nvx-microvm-adapter-{backend}"],
-                        guests
-                        | {
-                            "name": f"NVX microVM tests / {adapter}",
-                            "with": inputs
-                            | {"display-name": adapter, "runtime-adapter": True},
-                        },
-                    )
-                for selector in ("guests-and-sandboxes", "runtime-adapter"):
-                    self.assertNotIn(selector, suite["with"])
-                    self.assertNotIn(selector, debug["with"])
+                self.assertNotIn("guests-and-sandboxes", suite["with"])
+                self.assertNotIn("guests-and-sandboxes", debug["with"])
                 self.assertIs(debug["with"]["debug-kernel"], True)
 
         steps = microvm["jobs"]["test"]["steps"]
@@ -10135,29 +9875,21 @@ python3() {
             if str(step.get("uses", "")).startswith("actions/upload-artifact@")
         ]
 
-        def selected(
-            backend: str, *, debug: bool, parts: tuple[bool, bool] | None
-        ) -> list[str]:
-            # The steps of a job that sets the guests-and-sandboxes and
-            # runtime-adapter selectors to `parts`. None stands for the single
-            # job that ran every step before the splits: it ignores the
-            # selectors' conjuncts. Only the default-suite jobs run a shard;
-            # the single job, the jobs that set a selector, and the
-            # debug-kernel jobs pass none.
+        def selected(backend: str, *, debug: bool, guests: bool | None) -> list[str]:
+            # A selector of None stands for the single job that ran every step
+            # before the split: it ignores the guests-and-sandboxes conjuncts.
+            # Only the default-suite jobs run a shard; the single job, the
+            # guest and sandbox jobs, and the debug-kernel jobs pass none.
             windows = backend == "whp"
-            single = parts is None
-            guests, adapter = parts or (True, True)
-            sharded = not single and not guests and not adapter and not debug
+            sharded = guests is False and not debug
             values = {
                 "runner.os != 'Windows'": not windows,
                 "runner.os == 'Windows'": windows,
                 "inputs.backend == 'kvm'": backend == "kvm",
                 "inputs.debug-kernel": debug,
                 "!inputs.debug-kernel": not debug,
-                "inputs.guests-and-sandboxes": guests,
-                "!inputs.guests-and-sandboxes": single or not guests,
-                "inputs.runtime-adapter": adapter,
-                "!inputs.runtime-adapter": single or not adapter,
+                "inputs.guests-and-sandboxes": guests is not False,
+                "!inputs.guests-and-sandboxes": guests is not True,
                 "!inputs.shard": not sharded,
             }
             chosen: list[str] = []
@@ -10179,45 +9911,30 @@ python3() {
 
         for backend in backends:
             system = "Windows" if backend == "whp" else "Linux"
-            single = selected(backend, debug=False, parts=None)
-            suite_steps = selected(backend, debug=False, parts=(False, False))
-            if backend in separate:
-                guest_steps = selected(backend, debug=False, parts=(True, False))
-                adapter_steps = selected(backend, debug=False, parts=(False, True))
-                split = [suite_steps, guest_steps, adapter_steps]
-            else:
-                guest_steps = selected(backend, debug=False, parts=(True, True))
-                adapter_steps = []
-                split = [suite_steps, guest_steps]
+            single = selected(backend, debug=False, guests=None)
+            suite_steps = selected(backend, debug=False, guests=False)
+            guest_steps = selected(backend, debug=False, guests=True)
             with self.subTest(backend=backend):
-                # The jobs take the same builds and validate the runner the
+                # Both jobs take the same builds and validate the runner the
                 # same way, and every other step of the single job runs in
                 # exactly one of them. Each downloads the guest artifacts that
                 # its steps read (test_ci_jobs_download_exactly_the_guest_
                 # artifacts_that_they_read): the default suite only the kernel
-                # and the Alpine initramfs, the guest and sandbox steps every
-                # guest artifact that the single job downloaded, and the
-                # runtime adapter scenarios alone those two and the Ubuntu
-                # distro layer.
+                # and the Alpine initramfs, and the guest and sandbox steps
+                # every guest artifact that the single job downloaded.
                 for step_name in setup:
                     if step_name in downloads:
                         continue
-                    for job_steps in split:
-                        self.assertEqual(step_name in job_steps, step_name in single)
+                    self.assertEqual(step_name in suite_steps, step_name in single)
+                    self.assertEqual(step_name in guest_steps, step_name in single)
                 self.assertEqual(
                     downloaded(suite_steps), {"guest-kernel", "guest-alpine"}
                 )
                 self.assertEqual(downloaded(guest_steps), downloaded(single))
-                if adapter_steps:
-                    self.assertEqual(
-                        downloaded(adapter_steps),
-                        {"guest-kernel", "guest-alpine", "guest-ubuntu-distro"},
-                    )
                 self.assertEqual(
                     sorted(
                         step_name
-                        for job_steps in split
-                        for step_name in job_steps
+                        for step_name in suite_steps + guest_steps
                         if step_name not in setup
                     ),
                     sorted(step_name for step_name in single if step_name not in setup),
@@ -10233,36 +9950,21 @@ python3() {
                     f"Run Ubuntu sandbox layer smoke test on {system}",
                 ):
                     self.assertIn(step_name, guest_steps)
-                scenarios = f"Run runtime adapter scenarios on {system}"
-                self.assertEqual(scenarios in guest_steps, backend not in separate)
-                if adapter_steps:
-                    self.assertEqual(
-                        [
-                            step_name
-                            for step_name in adapter_steps
-                            if step_name not in setup
-                        ],
-                        [
-                            "Download the runtime adapter's guest agent on Windows",
-                            scenarios,
-                        ],
-                    )
                 self.assertEqual(
                     "Run extended Ubuntu guest tests on Linux/KVM" in guest_steps,
                     backend == "kvm",
                 )
                 self.assertEqual(
-                    selected(backend, debug=True, parts=(False, False)),
-                    selected(backend, debug=True, parts=None),
+                    selected(backend, debug=True, guests=False),
+                    selected(backend, debug=True, guests=None),
                 )
 
         # A second upload of an artifact name in a run fails, so each shard of
         # the default suite, the guest and sandbox job, and the debug-kernel
-        # job of every backend upload under names of their own. A job that
-        # runs the runtime adapter scenarios alone runs no test-microvm step,
-        # so it has nothing to upload and uploads nothing.
+        # job of every backend upload under names of their own.
         defaults = {
-            name: definition.get("default") for name, definition in declared.items()
+            name: definition.get("default")
+            for name, definition in microvm[True]["workflow_call"]["inputs"].items()
         }
         legs = [
             {**defaults, **leg}
@@ -10270,31 +9972,12 @@ python3() {
             if job.get("uses") == "./.github/workflows/run-nvx-microvm-tests.yml"
             for leg in _matrix_legs(job)
         ]
-        statuses = {"always": lambda: True, "failure": lambda: True}
-
-        def uploads_in(upload: Mapping[str, Any], leg: Mapping[str, Any]) -> bool:
-            return _expression_truthy(
-                _evaluate_expression(str(upload["if"]), {"inputs": leg}, statuses)
-            )
-
         self.assertTrue(uploads)
         for upload in uploads:
-            uploaded = [
-                _resolve_inputs(upload["with"]["name"], leg)
-                for leg in legs
-                if uploads_in(upload, leg)
-            ]
+            uploaded = [_resolve_inputs(upload["with"]["name"], leg) for leg in legs]
             with self.subTest(upload=upload["name"]):
                 self.assertNotIn("inputs.", " ".join(uploaded))
                 self.assertEqual(len(set(uploaded)), len(uploaded), uploaded)
-                self.assertEqual(
-                    [
-                        leg["display-name"]
-                        for leg in legs
-                        if not uploads_in(upload, leg)
-                    ],
-                    [f"{backends[backend]} / Runtime adapter" for backend in separate],
-                )
         failure_logs = next(
             step
             for step in uploads
@@ -12840,9 +12523,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
         # Each microVM job, the guest and sandbox and debug-kernel ones and
         # each shard of a default suite too, keeps the duration report of
         # every test-microvm step whether it passes, fails, or is cancelled,
-        # under a name of its own in each attempt (#694, #695, #696). A job
-        # that runs the runtime adapter scenarios alone runs no test-microvm
-        # step, so it keeps no report, and no failure logs either (#982).
+        # under a name of its own in each attempt (#694, #695, #696).
         workflows = BuildConstants.REPO_ROOT / ".github" / "workflows"
         steps = {
             step["name"]: step
@@ -12851,8 +12532,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
             )["jobs"]["test"]["steps"]
         }
         upload = steps["Upload NVX microVM scenario durations"]
-        runs_test_microvm = "(inputs.guests-and-sandboxes || !inputs.runtime-adapter)"
-        self.assertEqual(upload["if"], f"always() && {runs_test_microvm}")
+        self.assertEqual(upload["if"], "always()")
         self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
         self.assertEqual(
             upload["with"]["path"],
@@ -12872,10 +12552,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
                     1,
                 )
         # The failure logs keep their upload, only when a step fails.
-        self.assertEqual(
-            steps["Upload NVX microVM failure logs"]["if"],
-            f"failure() && {runs_test_microvm}",
-        )
+        self.assertEqual(steps["Upload NVX microVM failure logs"]["if"], "failure()")
 
         kernel = "${{ inputs.debug-kernel && 'debug' || 'default' }}"
         part = "${{ inputs.guests-and-sandboxes && '-guests' || '' }}"
@@ -12909,14 +12586,12 @@ Write-Output (Get-BenchmarkScratchDirectory)
         for job_name, job in jobs.items():
             # Each shard of a default suite is a leg of its job's matrix.
             for inputs in _matrix_legs(job):
-                guests = inputs.get("guests-and-sandboxes", False) is True
-                if inputs.get("runtime-adapter", False) is True and not guests:
-                    continue
                 legs += 1
                 system = (
                     "Windows" if "windows" in json.loads(inputs["runner"]) else "Linux"
                 )
                 debug = inputs.get("debug-kernel", False) is True
+                guests = inputs.get("guests-and-sandboxes", False) is True
                 index = inputs.get("shard", 0)
                 for attempt in (1, 2):
                     artifact = (
@@ -21506,19 +21181,6 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
         self.assertFalse(args.check_only)
         self.assertEqual(args.guest_agent, runtime_adapter_tests.GUEST_AGENT)
         self.assertIs(args.handler, runtime_adapter_tests.command_test_runtime_adapter)
-
-    def test_ci_runs_the_suite_by_name_on_each_backend(self):
-        workflow = (
-            BuildConstants.REPO_ROOT
-            / ".github"
-            / "workflows"
-            / "run-nvx-microvm-tests.yml"
-        ).read_text(encoding="utf-8")
-
-        self.assertEqual(workflow.count("nvx.py test-runtime-adapter"), 2)
-        self.assertIn("python3 scripts/nvx.py test-runtime-adapter", workflow)
-        self.assertIn("python scripts\\nvx.py test-runtime-adapter", workflow)
-        self.assertNotIn("cargo test --locked --features host -- --ignored", workflow)
 
     def test_scenarios_name_targets_and_tests_in_the_order_of_their_lines(self):
         path = self._scenarios("# The suite.\n\nvm_a b  # last\nunit x\nvm_a a\n")
