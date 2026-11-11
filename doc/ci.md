@@ -597,8 +597,8 @@ such an execution: the fixed identity, empty capability sets and
 overlay root over read-only image layers with its upper directory on scratch.
 The live-share runs below repeat the profile checks. Each
 backend also runs the public `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, and `sandbox-ram-upper` scenarios of `test-microvm`,
-which drive `nvx-rs sandbox run`, `provision`, `start`,
+`sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer` scenarios
+of `test-microvm`, which drive `nvx-rs sandbox run`, `provision`, `start`,
 `exec`, `stop`, and `deprovision` as subprocesses (see
 [Run](run.md#managed-lifecycle)): request-scoped working directories and
 environments, timeouts, nonzero exits, stdout and stderr, bounded output and
@@ -607,8 +607,10 @@ refusal, fail-closed lifecycle transitions, a crashed OpenVMM's stale runtime
 state, teardown that leaves no OpenVMM process, control endpoint,
 capability, or runtime record while the layer and scratch artifacts survive,
 a proxy-only network, whose guest reaches a test proxy on host loopback at
-its gateway and no other destination, and sandboxes whose overlay upper is a
-tmpfs in guest memory, with no scratch image.
+its gateway and no other destination, sandboxes whose overlay upper is a
+tmpfs in guest memory, with no scratch image, and sandboxes whose root is a
+GPT disk, over either upper, so that the three backends run the CLI's twelve
+cold cells (see the [case matrix](acceptance-case-matrix.md#cold-boots)).
 Their bounded evidence is part of the backend's failure logs. The same
 entrypoint then verifies a live virtio-fs
 share inside the container: a read-write `/workspace` share with a denied
