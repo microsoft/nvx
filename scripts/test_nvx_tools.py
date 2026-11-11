@@ -14390,32 +14390,44 @@ class BuildConstantsTests(unittest.TestCase):
     def test_nvx_rs_third_party_notices_cover_every_linked_crate(self):
         # The crates of `cargo tree --locked --features cli -e normal` for the
         # release targets, x86_64-unknown-linux-musl and x86_64-pc-windows-msvc:
-        # what bin/nvx-rs[.exe] links, and serde_derive with the crates that it
-        # runs on while nvx-rs builds.
+        # what bin/nvx-rs[.exe] links, and serde_derive/document-features with
+        # the crates that they run on while nvx-rs builds.
         shipped = {
             "bitflags",
             "block-buffer",
             "cfg-if",
             "cpufeatures",
+            "crossterm",
+            "crossterm_winapi",
             "crypto-common",
             "digest",
+            "document-features",
             "generic-array",
             "getrandom",
             "itoa",
             "libc",
+            "linux-raw-sys",
+            "litrs",
+            "lock_api",
             "memchr",
             "memoffset",
             "nix",
+            "parking_lot",
+            "parking_lot_core",
             "proc-macro2",
             "quote",
+            "rustix",
+            "scopeguard",
             "serde",
             "serde_core",
             "serde_derive",
             "serde_json",
             "sha2",
+            "smallvec",
             "syn",
             "typenum",
             "unicode-ident",
+            "winapi",
             "windows-link",
             "windows-sys",
             "zmij",
@@ -14429,7 +14441,6 @@ class BuildConstantsTests(unittest.TestCase):
             "core_detect",
             "errno",
             "fastrand",
-            "linux-raw-sys",
             "num-traits",
             "once_cell",
             "proptest",
@@ -14437,11 +14448,13 @@ class BuildConstantsTests(unittest.TestCase):
             "rand",
             "rand_core",
             "rand_xorshift",
+            "redox_syscall",
             "regex-syntax",
-            "rustix",
             "tempfile",
             "unarray",
             "version_check",
+            "winapi-i686-pc-windows-gnu",
+            "winapi-x86_64-pc-windows-gnu",
         }
         # Versions of shipped crates that only the tests use: proptest's
         # chacha20 takes cpufeatures 0.3, and sha2 the cpufeatures that ships.
