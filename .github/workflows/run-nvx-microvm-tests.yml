@@ -452,25 +452,21 @@ jobs:
           nvx-rs/target/release/nvx-rs sandbox exec \
             --state-dir "${state}" \
             --entrypoint /sbin/nvx-sandbox-smoke \
+            --arg init \
             --arg /workspace \
             --arg rw
           nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}"
-          # A clean ext4 journal shows that stop unmounted the share, overlay,
-          # and scratch in order instead of powering off with them mounted.
-          python3 - "${state}/outcome.json" "${scratch}" <<'EOF'
+          # nvx-init owns the sandbox VM's lifecycle, so OpenVMM, which starts
+          # it without a lifecycle option, reports a run.
+          python3 - "${state}/outcome.json" <<'EOF'
           import json
-          import struct
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as report:
               outcome = json.load(report)["outcome"]
-          expected = {"operation": "managed", "category": "success", "status_code": 0}
+          expected = {"operation": "run", "category": "success", "status_code": 0}
           if outcome != expected:
               sys.exit(f"managed sandbox outcome is invalid: {outcome}")
-          with open(sys.argv[2], "rb") as image:
-              image.seek(1024 + 0x60)
-              if struct.unpack("<I", image.read(4))[0] & 0x4:
-                  sys.exit("managed stop left the scratch filesystem mounted")
           EOF
           test "$(cat "${share}/nvx-guest-marker")" = guest-to-host
           test -d "${share}/nvx-guest-directory"
@@ -550,13 +546,18 @@ jobs:
           if config["format"] != 8 or config["export"]["owner"] != "caller":
               sys.exit(f"managed sandbox did not persist caller ownership: {config}")
           EOF
-          if nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"; then
+          errors=$(mktemp)
+          if nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}" 2>"${errors}"; then
             echo "the caller-owned managed sandbox reached its share as the runner" >&2
             exit 1
           fi
+          cat "${errors}" >&2
           grep -q 'virtio-fs request cannot run as its caller; failing it with EPERM' \
             "${state}/openvmm.log"
-          grep -q 'NVX-MANAGED-ERROR: stage=host-mappings' "${state}/openvmm.log"
+          # The guest refuses to map the share with EPERM, 1, which start
+          # reports.
+          grep -q 'could not mount a mapped host path (error 1)' "${errors}"
+          rm -f "${errors}"
           test ! -e "${state}/runtime.json"
           test "$(ls -A "${share}")" = nvx-host-marker
           nvx-rs/target/release/nvx-rs sandbox deprovision --state-dir "${state}"
@@ -690,24 +691,17 @@ jobs:
           EOF
           nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"
           nvx-rs/target/release/nvx-rs sandbox exec --state-dir "${state}" \
-            "${smoke_arguments[@]}"
+            --arg init "${smoke_arguments[@]}"
           nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}"
-          # A clean ext4 journal shows that stop unmounted every share, the
-          # overlay, and scratch in order.
-          python3 - "${state}/outcome.json" "${scratch}" <<'EOF'
+          python3 - "${state}/outcome.json" <<'EOF'
           import json
-          import struct
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as report:
               outcome = json.load(report)["outcome"]
-          expected = {"operation": "managed", "category": "success", "status_code": 0}
+          expected = {"operation": "run", "category": "success", "status_code": 0}
           if outcome != expected:
               sys.exit(f"managed sandbox outcome is invalid: {outcome}")
-          with open(sys.argv[2], "rb") as image:
-              image.seek(1024 + 0x60)
-              if struct.unpack("<I", image.read(4))[0] & 0x4:
-                  sys.exit("managed stop left the scratch filesystem mounted")
           EOF
           check_shares
           nvx-rs/target/release/nvx-rs sandbox deprovision --state-dir "${state}"
@@ -826,24 +820,17 @@ jobs:
           EOF
           nvx-rs/target/release/nvx-rs sandbox start --state-dir "${state}"
           nvx-rs/target/release/nvx-rs sandbox exec --state-dir "${state}" \
-            "${smoke_arguments[@]}"
+            --arg init "${smoke_arguments[@]}"
           nvx-rs/target/release/nvx-rs sandbox stop --state-dir "${state}"
-          # A clean ext4 journal shows that stop unmounted the share, the
-          # overlay, and scratch in order.
-          python3 - "${state}/outcome.json" "${scratch}" <<'EOF'
+          python3 - "${state}/outcome.json" <<'EOF'
           import json
-          import struct
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as report:
               outcome = json.load(report)["outcome"]
-          expected = {"operation": "managed", "category": "success", "status_code": 0}
+          expected = {"operation": "run", "category": "success", "status_code": 0}
           if outcome != expected:
               sys.exit(f"managed sandbox outcome is invalid: {outcome}")
-          with open(sys.argv[2], "rb") as image:
-              image.seek(1024 + 0x60)
-              if struct.unpack("<I", image.read(4))[0] & 0x4:
-                  sys.exit("managed stop left the scratch filesystem mounted")
           EOF
           check_share
           nvx-rs/target/release/nvx-rs sandbox deprovision --state-dir "${state}"
@@ -982,6 +969,7 @@ jobs:
               Invoke-Nvx sandbox exec `
                 --state-dir $state `
                 --entrypoint /sbin/nvx-sandbox-smoke `
+                --arg init `
                 --arg /workspace `
                 --arg rw
               Invoke-Nvx sandbox stop --state-dir $state
@@ -993,22 +981,11 @@ jobs:
               $log = Join-Path $state "openvmm.log"
               if (Test-Path $log) { Copy-Item -Force $log (Join-Path $logs "managed-share-openvmm.log") }
           }
+          # nvx-init owns the sandbox VM's lifecycle, so OpenVMM, which starts
+          # it without a lifecycle option, reports a run.
           $outcome = (Get-Content -Raw (Join-Path $state "outcome.json") | ConvertFrom-Json).outcome
-          if ($outcome.operation -ne "managed" -or $outcome.category -ne "success" -or $outcome.status_code -ne 0) {
+          if ($outcome.operation -ne "run" -or $outcome.category -ne "success" -or $outcome.status_code -ne 0) {
               throw "managed sandbox outcome is invalid: $($outcome | ConvertTo-Json -Compress)"
-          }
-          # A clean ext4 journal shows that stop unmounted the share, overlay,
-          # and scratch in order instead of powering off with them mounted.
-          $image = [IO.File]::OpenRead($scratch)
-          try {
-              $null = $image.Seek(1024 + 0x60, [IO.SeekOrigin]::Begin)
-              $incompat = New-Object byte[] 4
-              if ($image.Read($incompat, 0, 4) -ne 4) { throw "scratch superblock is truncated" }
-          } finally {
-              $image.Dispose()
-          }
-          if ([BitConverter]::ToUInt32($incompat, 0) -band 4) {
-              throw "managed stop left the scratch filesystem mounted"
           }
           $marker = [IO.File]::ReadAllText((Join-Path $share "nvx-guest-marker"))
           if ($marker -ne "guest-to-host`n") { throw "managed guest write did not reach the host" }
@@ -1145,7 +1122,7 @@ jobs:
           }
           try {
               Invoke-Nvx sandbox start --state-dir $state
-              Invoke-Nvx sandbox exec --state-dir $state @smokeArguments
+              Invoke-Nvx sandbox exec --state-dir $state --arg init @smokeArguments
               Invoke-Nvx sandbox stop --state-dir $state
           } finally {
               if (Test-Path (Join-Path $state "runtime.json")) {
@@ -1156,21 +1133,8 @@ jobs:
               if (Test-Path $log) { Copy-Item -Force $log (Join-Path $logs "shares-openvmm.log") }
           }
           $outcome = (Get-Content -Raw (Join-Path $state "outcome.json") | ConvertFrom-Json).outcome
-          if ($outcome.operation -ne "managed" -or $outcome.category -ne "success" -or $outcome.status_code -ne 0) {
+          if ($outcome.operation -ne "run" -or $outcome.category -ne "success" -or $outcome.status_code -ne 0) {
               throw "managed sandbox outcome is invalid: $($outcome | ConvertTo-Json -Compress)"
-          }
-          # A clean ext4 journal shows that stop unmounted every share, the
-          # overlay, and scratch in order.
-          $image = [IO.File]::OpenRead($scratch)
-          try {
-              $null = $image.Seek(1024 + 0x60, [IO.SeekOrigin]::Begin)
-              $incompat = New-Object byte[] 4
-              if ($image.Read($incompat, 0, 4) -ne 4) { throw "scratch superblock is truncated" }
-          } finally {
-              $image.Dispose()
-          }
-          if ([BitConverter]::ToUInt32($incompat, 0) -band 4) {
-              throw "managed stop left the scratch filesystem mounted"
           }
           Test-Shares
           Invoke-Nvx sandbox deprovision --state-dir $state
@@ -1256,7 +1220,7 @@ jobs:
           }
           try {
               Invoke-Nvx sandbox start --state-dir $state
-              Invoke-Nvx sandbox exec --state-dir $state @smokeArguments
+              Invoke-Nvx sandbox exec --state-dir $state --arg init @smokeArguments
               Invoke-Nvx sandbox stop --state-dir $state
           } finally {
               if (Test-Path (Join-Path $state "runtime.json")) {
@@ -1267,21 +1231,8 @@ jobs:
               if (Test-Path $log) { Copy-Item -Force $log (Join-Path $logs "policy-openvmm.log") }
           }
           $outcome = (Get-Content -Raw (Join-Path $state "outcome.json") | ConvertFrom-Json).outcome
-          if ($outcome.operation -ne "managed" -or $outcome.category -ne "success" -or $outcome.status_code -ne 0) {
+          if ($outcome.operation -ne "run" -or $outcome.category -ne "success" -or $outcome.status_code -ne 0) {
               throw "managed sandbox outcome is invalid: $($outcome | ConvertTo-Json -Compress)"
-          }
-          # A clean ext4 journal shows that stop unmounted the share, the
-          # overlay, and scratch in order.
-          $image = [IO.File]::OpenRead($scratch)
-          try {
-              $null = $image.Seek(1024 + 0x60, [IO.SeekOrigin]::Begin)
-              $incompat = New-Object byte[] 4
-              if ($image.Read($incompat, 0, 4) -ne 4) { throw "scratch superblock is truncated" }
-          } finally {
-              $image.Dispose()
-          }
-          if ([BitConverter]::ToUInt32($incompat, 0) -band 4) {
-              throw "managed stop left the scratch filesystem mounted"
           }
           Test-Share
           Invoke-Nvx sandbox deprovision --state-dir $state

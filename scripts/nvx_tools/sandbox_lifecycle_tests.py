@@ -20,7 +20,6 @@ import json
 import os
 import shutil
 import signal
-import struct
 import subprocess
 import sys
 import tempfile
@@ -66,14 +65,14 @@ FOREIGN_NAME = "operator-note.txt"
 FOREIGN_CONTENT = "operator data\n"
 EVIDENCE_PREFIX = "sandbox-lifecycle-"
 EVIDENCE_LIMIT = 64 * 1024
-# ext4 sets this incompatible feature while its journal needs recovery.
-EXT4_INCOMPAT_RECOVER = 0x4
-MANAGED_SUCCESS = {"operation": "managed", "category": "success", "status_code": 0}
+# A sandbox's VM starts without an OpenVMM lifecycle option, since nvx-init
+# owns its lifecycle, so OpenVMM reports its operation as a run.
+MANAGED_SUCCESS = {"operation": "run", "category": "success", "status_code": 0}
 # The guest powers off with status 125 when it refuses the workload identity,
 # and a managed start reports the status from OpenVMM's outcome report.
 REFUSAL_CATEGORY = "guest-exit"
 MANAGED_REFUSAL = {
-    "operation": "managed",
+    "operation": "run",
     "category": REFUSAL_CATEGORY,
     "status_code": 125,
 }
@@ -283,15 +282,6 @@ def kill_openvmm(runtime: dict[str, Any], timeout: float, marker: str) -> None:
                 f"OpenVMM process {recorded_pid(runtime)} survived its kill"
             )
         time.sleep(0.05)
-
-
-def scratch_journal_clean(path: Path) -> bool:
-    with path.open("rb") as image:
-        image.seek(1024 + 0x60)
-        incompatible = image.read(4)
-    if len(incompatible) != 4:
-        raise RuntimeError(f"scratch superblock is truncated: {path}")
-    return not struct.unpack("<I", incompatible)[0] & EXT4_INCOMPAT_RECOVER
 
 
 def state_entries(state: Path) -> list[str] | None:
@@ -810,10 +800,10 @@ class LifecycleAcceptance:
         self.require_output(result, STATE_CONTENT, "the state-reading request")
 
     def check_security_profile(self) -> None:
-        # The earlier requests already entered their own namespaces, so the
-        # probe's check that each container mount appears once also shows
-        # that they did not mount into the agent's namespace.
-        result = self.exec(PROBE, "--arg=entry")
+        # nvx-init runs each request as a plain process in the VM's root, so
+        # the probe's check that each mount appears once also shows that the
+        # earlier requests mounted nothing there.
+        result = self.exec(PROBE, "--arg=init", "--arg=entry")
         self.save_evidence("probe.log", result.stdout + result.stderr)
         for marker in (
             b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
@@ -888,6 +878,8 @@ class LifecycleAcceptance:
         )
 
     def stop(self, runtime: dict[str, Any], layer_digest: str) -> None:
+        # nvx-init syncs the file systems and powers the VM off with them
+        # mounted, so the restart that reads the state back checks the stop.
         self.invoke("stop", state=self.state)
         self.require_entries(self.state, STOPPED_ENTRIES, "after stop")
         if openvmm_running(runtime, self.root.name):
@@ -897,10 +889,6 @@ class LifecycleAcceptance:
         self.require_processes((), "after stop")
         self.copy_evidence(self.state / OUTCOME, "outcome.json")
         check_managed_report(managed_report(self.state), self.backend)
-        # A clean journal shows that stop unmounted the overlay and scratch
-        # before the VM powered off.
-        if not scratch_journal_clean(self.scratch):
-            raise RuntimeError("stop left the scratch file system mounted")
         if sha256_file(self.artifacts.distro) != layer_digest:
             raise RuntimeError("the running sandbox modified the EROFS layer")
         for operation in ("exec", "stop"):
