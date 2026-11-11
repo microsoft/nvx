@@ -100,7 +100,7 @@ class Refusal:
         return f"error {self.code!r}{named}"
 
 
-# A start that OpenVMM ended names the category of its outcome report.
+# A start or a run that OpenVMM ended names the category of its outcome report.
 REFUSED_START = Refusal("exited", (REFUSAL_CATEGORY,))
 
 # The files of a state directory, as nvx-rs sandbox documents them.
@@ -628,8 +628,9 @@ class LifecycleAcceptance:
         if self.state.exists():
             raise RuntimeError("a rejected root identity created sandbox state")
 
-        # The guest refuses an identity that the image lacks before it starts
-        # the workload.
+        # The guest refuses an identity that the image lacks before it runs any
+        # workload, so a run fails as a managed start does, below, with the
+        # guest's status from the outcome report that OpenVMM publishes.
         run_scratch = self.root / "run-scratch.ext4"
         shutil.copyfile(self.artifacts.scratch_template, run_scratch)
         result = self.invoke(
@@ -639,16 +640,15 @@ class LifecycleAcceptance:
             UNAVAILABLE_IDENTITY,
             "--entrypoint",
             PROBE,
+            "--arg=init",
             state=None,
-            expected=125,
+            expected=1,
+            refusal=REFUSED_START,
         )
         console = result.stdout + result.stderr
         self.save_evidence("identity-run.log", console)
-        if (
-            b"configured workload UID is unavailable" not in console
-            or b"NVX-UBUNTU-SANDBOX-PROFILE-OK" in console
-        ):
-            raise RuntimeError("an unavailable one-shot identity was not refused")
+        if b"NVX-UBUNTU-SANDBOX-PROFILE-OK" in console:
+            raise RuntimeError("a run of an unavailable identity ran its workload")
 
         # A managed start with that identity fails closed. OpenVMM exits on its
         # own and publishes the guest's status, which the start reports, and

@@ -4,13 +4,14 @@ The scenario runs `nvx-rs sandbox --upper ram` as subprocesses against the
 real kernel, the Alpine control initramfs, and the Ubuntu EROFS layer, with no
 scratch image. It checks that the planner refuses `--upper ram` beside
 `--scratch`, and `--upper` outside `run` and `provision`, before it creates
-any state. A one-shot run attaches the distro layer alone, declares the RAM
-upper on the kernel command line, passes the smoke probe, which requires the
-overlay's upper on a tmpfs, and reports its success. A managed sandbox records
-the RAM upper without a scratch image, and passes the probe's managed checks.
-Its guest has one virtio block device and declares the RAM upper, and a later
-request reads a file that an earlier one wrote. Once the sandbox stops and
-starts again, the file is gone.
+any state. A run, which keeps no state, attaches the distro layer alone,
+declares the RAM upper and its default cap on the kernel command line of a VM
+that nvx-init manages, runs the smoke probe once over NVXC, which requires the
+overlay's upper on a tmpfs, and forwards the report of the VM's graceful stop.
+A managed sandbox records the RAM upper without a scratch image, and passes the
+probe's managed checks. Its guest has one virtio block device and declares the
+RAM upper, and a later request reads a file that an earlier one wrote. Once the
+sandbox stops and starts again, the file is gone.
 """
 
 from __future__ import annotations
@@ -36,8 +37,15 @@ from .sandbox_lifecycle_tests import (
 
 MEMORY_MIB = 256
 RAM_UPPER_TOKEN = "nvx_overlay_upper=ramfs"
+# The cap of a RAM upper whose run gives none: half of the guest's RAM.
+DEFAULT_CAP_TOKEN = "nvx_ram_upper_percent=50"
 SCRATCH_TOKEN = "nvx_scratch="
-# The outcome that OpenVMM reports for a one-shot run whose workload succeeded.
+# The tokens with which a run's VM boots its layered root through nvx-init,
+# which owns the VM's lifecycle, so that the run passes OpenVMM no lifecycle.
+MANAGED_TOKENS = ("nvx_sandbox=1", "nvx_mode=managed")
+LIFECYCLE_OPTION = "--microvm-lifecycle"
+# The outcome that OpenVMM reports for a run whose guest stopped its VM, as it
+# does for a managed sandbox's stop.
 RUN_SUCCESS = {"operation": "run", "category": "success", "status_code": 0}
 STATE_PATH = "/tmp/nvx-ram-upper-state"
 STATE_CONTENT = b"kept in RAM\n"
@@ -68,20 +76,18 @@ def check_ram_tokens(command_line: str, context: str) -> None:
 
 
 def check_run_report(path: Path, backend: str) -> None:
-    """Checks the outcome report of a one-shot run whose workload succeeded and
-    whose VM was torn down."""
+    """Checks the outcome report that a run forwards, of a VM that its guest
+    stopped and that was torn down."""
     try:
         report: object = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        raise RuntimeError("the one-shot run published no outcome report") from error
+        raise RuntimeError("the run forwarded no outcome report") from error
     if not isinstance(report, dict):
-        raise RuntimeError(f"the one-shot run's outcome report is {report!r}")
+        raise RuntimeError(f"the run's outcome report is {report!r}")
     fields = cast(dict[str, object], report)
     outcome = fields.get("outcome")
     if outcome != RUN_SUCCESS or fields.get("backend") != backend:
-        raise RuntimeError(
-            f"the one-shot run reported {outcome!r} on {fields.get('backend')!r}"
-        )
+        raise RuntimeError(f"the run reported {outcome!r} on {fields.get('backend')!r}")
     # microvm_tests, which runs this scenario, imports this module.
     from .microvm_tests import OUTCOME_TEARDOWN_FIELDS
 
@@ -93,7 +99,7 @@ def check_run_report(path: Path, backend: str) -> None:
             value is True for value in cast(dict[str, object], teardown).values()
         )
     ):
-        raise RuntimeError(f"the one-shot run's teardown is {teardown!r}")
+        raise RuntimeError(f"the run's teardown is {teardown!r}")
 
 
 class RamUpperAcceptance(LifecycleAcceptance):
@@ -113,7 +119,7 @@ class RamUpperAcceptance(LifecycleAcceptance):
 
     def run(self) -> None:
         self.check_refusals()
-        self.check_one_shot()
+        self.check_run()
         self.check_managed()
         self.require_processes((), "after the RAM-upper sandboxes")
 
@@ -141,20 +147,28 @@ class RamUpperAcceptance(LifecycleAcceptance):
         if self.state.exists():
             raise RuntimeError("a refused RAM-upper request created sandbox state")
 
-    def check_one_shot(self) -> None:
-        """A one-shot run attaches the distro layer alone, declares the RAM
-        upper, passes the smoke probe, and reports its success."""
-        # The report's path, under the fixture, also names the run's OpenVMM to
-        # the process checks and to cleanup, as no other argument does: the
-        # distro layer is the build's, and the run has no scratch image.
+    def check_run(self) -> None:
+        """A run, which keeps no state, attaches the distro layer alone,
+        declares the RAM upper and its default cap in the VM that nvx-init
+        manages, passes the probe's managed checks once, and forwards the
+        report of the VM's graceful stop."""
+        # The report's path lies under the fixture, and the kernel command line
+        # names the fixture, which names the run's OpenVMM to the process checks
+        # and to cleanup, as no other argument does: the distro layer is the
+        # build's, the run has no scratch image, and its VM directory and the
+        # report that OpenVMM writes there are the run's own.
         report = self.root / "run-outcome.json"
         result = self.invoke(
             "run",
             *self.ram_options(),
             "--outcome-report",
             str(report),
+            "--cmdline",
+            f"sandbox_fixture={self.root.name}",
             "--entrypoint",
             PROBE,
+            "--arg=init",
+            "--arg=entry",
             state=None,
         )
         console = result.stdout + result.stderr
@@ -168,22 +182,33 @@ class RamUpperAcceptance(LifecycleAcceptance):
             or "scratch:file:" in command
         ):
             raise RuntimeError(
-                f"the one-shot run did not attach its distro layer alone: {command!r}"
+                f"the run did not attach its distro layer alone: {command!r}"
             )
         if self.root.name not in command:
             raise RuntimeError(
-                f"the one-shot run's OpenVMM command does not name the fixture: "
-                f"{command!r}"
+                f"the run's OpenVMM command does not name the fixture: {command!r}"
             )
-        check_ram_tokens(command, "the one-shot run's OpenVMM command")
-        for marker in probe_markers(entry=False):
+        check_ram_tokens(command, "the run's OpenVMM command")
+        tokens = [token.strip("'\"") for token in command.split()]
+        if (
+            LIFECYCLE_OPTION in tokens
+            or DEFAULT_CAP_TOKEN not in tokens
+            or not all(token in tokens for token in MANAGED_TOKENS)
+        ):
+            raise RuntimeError(
+                f"the run's VM is not one that nvx-init manages with the RAM "
+                f"upper's default cap: {command!r}"
+            )
+        for marker in probe_markers(entry=True):
             if marker not in result.stdout:
                 raise RuntimeError(
-                    f"the one-shot RAM-upper probe did not report {marker.decode()}"
+                    f"the run's RAM-upper probe did not report {marker.decode()}"
                 )
         self.copy_evidence(report, "run-outcome.json")
         check_run_report(report, self.backend)
-        self.require_processes((), "after the one-shot run")
+        if self.state.exists():
+            raise RuntimeError("the run created sandbox state")
+        self.require_processes((), "after the run")
 
     def check_managed(self) -> None:
         """A managed sandbox records the RAM upper without a scratch image, and
