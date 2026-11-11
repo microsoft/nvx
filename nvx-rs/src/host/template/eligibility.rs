@@ -15,9 +15,18 @@ use crate::host::platform;
 use crate::host::process::BootId;
 
 /// The longest interval by which a restore advances a clone's VM time, from the cut of the
-/// captured VM's time to the restoring host's time, in nanoseconds: 30 days, as version
-/// [`TIME_ABI_VERSION`](crate::contract::TIME_ABI_VERSION) of OpenVMM's time ABI selects
-/// downtimes.
+/// captured VM's time to the restoring host's time, in nanoseconds: 30 days, the bound that every
+/// runtime of version [`TIME_ABI_VERSION`](crate::contract::TIME_ABI_VERSION) of OpenVMM's time
+/// ABI accepts.
+///
+/// Later releases of OpenVMM and of the guest accept 365 days under the same version, but this
+/// window cannot tell their captures from those of a runtime whose OpenVMM or guest predates
+/// them, to which a template's key binds its clones, and which restores a capture only within
+/// 30 days: such an OpenVMM refuses a later restore with `E_DOWNTIME_EXCESSIVE`, and such a
+/// guest, which the snapshot holds, with `G_REPAIR_PACKET`. Neither failure quarantines the
+/// generation, so a longer window would keep the store selecting a generation that no clone can
+/// restore, instead of capturing a replacement. The window therefore keeps the bound that every
+/// runtime accepts.
 pub const MAX_DOWNTIME_NS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
 
 /// The time of a host as a restore samples it: the identities of the host and of its boot, its

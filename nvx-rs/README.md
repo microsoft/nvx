@@ -775,7 +775,12 @@ may restore a capture at a host's time, a `HostTime`, which `HostTime::now`
 samples as OpenVMM does: within the boot of the capture, by the host's monotonic
 clock, and otherwise by UTC, the downtime must not be negative, and the interval
 by which a restore advances the clone's VM time at most `MAX_DOWNTIME_NS`, 30
-days.
+days, the bound that every runtime of the time ABI's version accepts. Later
+releases of OpenVMM and the guest accept 365 days under the same version, but
+the window cannot tell their captures from those of a runtime whose OpenVMM or
+guest predates them, which restores a capture only within 30 days. Its refusal
+quarantines no generation, so a longer window would keep the store selecting a
+generation that no clone can restore, instead of capturing a replacement.
 
 `Store::select` selects the latest eligible generation of a key that no
 tombstone quarantines.
