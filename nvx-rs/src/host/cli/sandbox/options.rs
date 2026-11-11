@@ -14,11 +14,11 @@ use crate::host::paths;
 use crate::host::sandbox::distro::DistroFormat;
 use crate::host::sandbox::mount::{MountOwner, PolicyKind};
 use crate::host::sandbox::options::{PolicyPathOption, SandboxOperation};
-use crate::host::sandbox::plan::guest_gateway;
 use crate::host::sandbox::{
     DEFAULT_ENTRYPOINT, DEFAULT_HOSTNAME, DEFAULT_WORKLOAD_IDENTITY, SandboxLayer, SandboxNetwork,
     parse_workload_identity,
 };
+use crate::net::{Ipv4Cidr, guest_gateway};
 use crate::protocol::root::RootUpper;
 
 /// The usage and help of the parser.
@@ -431,7 +431,10 @@ pub(in crate::host::cli) fn sandbox_network(
         }
         return Ok(None);
     };
-    let gateway = guest_gateway(net)?;
+    // `Ipv4Cidr` gives a guest network's refusal, and one that it accepts has a gateway: its
+    // network's first address.
+    Ipv4Cidr::parse(net).map_err(|message| Exit::error(ErrorCode::Unsupported, message))?;
+    let gateway = guest_gateway(net).expect("a guest network that parses has a gateway");
     if network.network_egress.is_none() && (!rules.allow.is_empty() || !rules.deny.is_empty()) {
         return Err(Exit::error(
             ErrorCode::Unsupported,
