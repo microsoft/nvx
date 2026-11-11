@@ -1469,6 +1469,10 @@ fn windows_terminal_ctrl_c_helper() {
     let directory = std::path::PathBuf::from(
         std::env::var_os("NVX_TEST_RAW_TERMINAL_DIR").expect("private pseudoconsole required"),
     );
+    // A parent that ignores Ctrl-C, as one created with CREATE_NEW_PROCESS_GROUP does, passes
+    // that on to this helper and to the CLI that it starts, which then never cancels.
+    // SAFETY: this changes only the Ctrl-C processing of this helper and its later children.
+    assert_ne!(unsafe { SetConsoleCtrlHandler(None, 0) }, 0);
     // SAFETY: this callback affects only this helper, not its children or any other console.
     assert_ne!(unsafe { SetConsoleCtrlHandler(Some(keep_helper), 1) }, 0);
     let mut members = [0; 8];

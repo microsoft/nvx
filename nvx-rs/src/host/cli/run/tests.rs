@@ -301,8 +301,8 @@ fn windows_console_output_helper() {
     use windows_sys::Win32::System::Console::{
         CONSOLE_TEXTMODE_BUFFER, COORD, CTRL_C_EVENT, CreateConsoleScreenBuffer,
         GenerateConsoleCtrlEvent, GetConsoleOutputCP, GetConsoleProcessList, GetStdHandle,
-        ReadConsoleOutputCharacterW, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCursorPosition,
-        SetConsoleOutputCP, SetStdHandle,
+        ReadConsoleOutputCharacterW, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetConsoleCtrlHandler,
+        SetConsoleCursorPosition, SetConsoleOutputCP, SetStdHandle,
     };
 
     /// Restores the helper's private console and its original redirected standard streams.
@@ -493,6 +493,10 @@ fn windows_console_output_helper() {
     assert_eq!(read as usize, expected.len());
     assert_eq!(actual, expected);
 
+    // A parent that ignores Ctrl-C, as one created with CREATE_NEW_PROCESS_GROUP does, passes
+    // that on to this helper, whose handlers would then never see the event below.
+    // SAFETY: this changes only the Ctrl-C processing of this helper, alone in its console.
+    assert_ne!(unsafe { SetConsoleCtrlHandler(None, 0) }, 0);
     platform::watch_interrupts().unwrap();
     // SAFETY: verify the event can reach only this helper in its private console.
     let count = unsafe { GetConsoleProcessList(members.as_mut_ptr(), members.len() as u32) };
