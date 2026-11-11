@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import queue
 import random
@@ -666,6 +667,66 @@ RESTORE_DOWNTIME_PATH = "/tmp/nvx-restore-downtime"
 # Gives the RCU stall detector time to report a stall that the release of
 # the stall suppression exposed.
 RESTORE_DOWNTIME_SETTLE_SECONDS = 2
+# The time ABI's longest downtime (doc/design/3.2-clock-and-time.md): 365
+# days, the fixed duration of 31,536,000 s.
+MAX_DOWNTIME_SECONDS = 365 * 24 * 60 * 60
+# The restore-downtime scenario's simulated one-year restores (doc/ci.md):
+# OpenVMM's downtime-add-s hook adds what brings the real downtime, which the
+# harness bounds by the time since it started the capture, to this much below
+# the bound, which covers the restore's own time to its anchor. Their sources
+# alternate between the same boot's monotonic clock and, through the
+# boot-id-mismatch hook, which simulates a reboot or another host, UTC.
+RESTORE_YEAR_MARGIN_SECONDS = 60
+RESTORE_YEAR_PATH = "/tmp/nvx-restore-year"
+RESTORE_YEAR_COMPLETION_MARKER = b"NVX-RESTORE-YEAR-OK"
+RESTORE_YEAR_REPORT_PREFIX = "NVX-RESTORE-YEAR "
+# How far, in seconds, the guest's raw monotonic clock may advance from the
+# real downtime plus the simulated one, against its realtime clock, at the
+# declared TSC rate as the kernel counts it, to the kHz, beyond the ppb by
+# which the kernel's clocksource multiplier, rounded to the nearest for its
+# 600 s range, counts cycles off that rate at any plausible rate up to 10 GHz;
+# how far, in ppm of the simulated downtime, its frequency-corrected
+# monotonic and boot-time clocks may advance beyond that rate times the
+# frequency correction that it held before the capture, by the phase slew
+# that its discipline ran then; and how far its realtime clock may stand
+# from host UTC once the report arrives.
+RESTORE_YEAR_CLOCK_TOLERANCE_SECONDS = 1
+RESTORE_YEAR_MULTIPLIER_PPB = 500
+RESTORE_YEAR_SLEW_PPM = 5
+RESTORE_YEAR_REALTIME_TOLERANCE_SECONDS = 10
+# The timer that the simulated downtime expires: one hour, armed before the
+# capture, which must fire within this many seconds of the restore's clock
+# step, before or after it: the kernel expires it at its first tick after the
+# restore, which can come seconds before the guest's repair steps realtime.
+RESTORE_YEAR_TIMER_SECONDS = 3600
+RESTORE_YEAR_TIMER_DELAY_SECONDS = 10
+# How long, in seconds, the capture of each restore-downtime snapshot gives the
+# year's pre-capture preparation beyond the scenario's timeout: a second of its
+# workload, up to 5 s for the freeze, and the wait for the time daemon's next
+# discipline poll, which comes 16 s after the last one at first and 64 s after
+# it once the daemon has settled, and which the preparation gives up on after
+# 700 sleeps of 0.1 s.
+RESTORE_YEAR_PREPARATION_SECONDS = 90
+# How much longer, in seconds, a simulated one-year restore may take to print
+# the restore marker than the restore of the same snapshot after the real
+# downtime: Linux accumulates the year's TSC advance at its first tick, 128
+# ticks per step, with interrupts off.
+RESTORE_YEAR_READY_ALLOWANCE_SECONDS = 10
+# The most CPU time, in clock ticks (USER_HZ, 100 Hz) and in microseconds,
+# that the frozen workload may gain while it stays frozen across the
+# restore, and the least and most that it must gain in the second that it
+# runs afterwards.
+RESTORE_YEAR_FROZEN_TICKS = 1
+RESTORE_YEAR_FROZEN_USAGE_USEC = 10_000
+RESTORE_YEAR_THAWED_MIN_USAGE_USEC = 100_000
+RESTORE_YEAR_THAWED_MAX_USAGE_USEC = 3_000_000
+RESTORE_YEAR_THAWED_MIN_TICKS = 10
+RESTORE_YEAR_THAWED_MAX_TICKS = 300
+# The most CPU time, in clock ticks, that the console shell's reaped
+# children, among them the capture's requester, which ran at the capture,
+# may have used in all: ten minutes, where the 8-vCPU warp probes use about
+# half a minute, and a requester charged the downtime would have used a year.
+RESTORE_YEAR_REAPED_MAX_TICKS = 60_000
 # The guest's exhaustive CI check reports each check on each online CPU.
 TIME_ABI_EXHAUSTIVE_COMMAND = "/sbin/nvx-time exhaustive"
 TIME_ABI_EXHAUSTIVE_PREFIX = "NVX-TIME-ABI-EXHAUSTIVE: "
@@ -887,6 +948,8 @@ def capture_snapshot(
     smp_ioapic_irq: int | None = None,
     snapshot_profile: bool = False,
     profile_sink: list[dict[str, object]] | None = None,
+    pre_capture_script: str | None = None,
+    pre_capture_seconds: float = 0.0,
     post_restore_script: str | None = None,
     log_path: Path | None = None,
     log_filter: str = CAPTURE_LOG_FILTER,
@@ -902,6 +965,8 @@ def capture_snapshot(
         smp_ioapic_irq=smp_ioapic_irq,
         snapshot_profile=snapshot_profile,
         profile_sink=profile_sink,
+        pre_capture_script=pre_capture_script,
+        pre_capture_seconds=pre_capture_seconds,
         post_restore_script=post_restore_script,
         log_path=log_path,
         boot_marker=BOOT_MARKER,
@@ -8041,11 +8106,17 @@ def run_restore_downtime(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    """Restore snapshots after a downtime longer than the RCU stall timeout.
+    """Restore snapshots after a downtime longer than the RCU stall timeout,
+    and again after a simulated year.
 
     Every snapshot is captured first, so one shared downtime window covers
     them all. The restored guest must finish its time ABI restore, report no
-    RCU stall, and show that monotonic time advanced by the downtime.
+    RCU stall, and show that monotonic time advanced by the downtime. Each
+    snapshot is then restored once more with OpenVMM's downtime-add-s hook,
+    whose downtime ends just below the time ABI's 365-day bound, as
+    :func:`check_simulated_year` checks, and the first once with the bound
+    plus one second, which OpenVMM must refuse with E_DOWNTIME_EXCESSIVE
+    before the guest runs.
     """
     cases = [
         (processors, expedited)
@@ -8057,9 +8128,13 @@ def run_restore_downtime(
         SETTLE_SECONDS=str(RESTORE_DOWNTIME_SETTLE_SECONDS),
         MIN_UPTIME_SECONDS=str(int(RESTORE_DOWNTIME_SECONDS)),
     )
+    year_preparation = _read_script("restore-year-capture.sh")
+    year_report = _render_script(
+        "restore-year.sh.in", SETTLE_SECONDS=str(RESTORE_DOWNTIME_SETTLE_SECONDS)
+    )
     environment = {"OPENVMM_LOG": TIME_ABI_RESTORE_LOG_FILTER}
     with tempfile.TemporaryDirectory(prefix="nvx-restore-downtime-") as temporary:
-        snapshots: list[tuple[str, int, Path]] = []
+        snapshots: list[tuple[str, int, bool, Path, float]] = []
         for processors, expedited in cases:
             name = f"{processors}-vcpu" + ("-expedited" if expedited else "")
             cmdline = "quiet loglevel=0" + (
@@ -8075,6 +8150,8 @@ def run_restore_downtime(
                 cmdline,
                 processors=processors,
             )
+            # The real downtime of a restore is at most the time since this.
+            started = time.monotonic()
             # The restored guest keeps running after the restore marker so the
             # harness can stage its downtime check; the post-restore status
             # query waits for the restore to finish first.
@@ -8084,14 +8161,18 @@ def run_restore_downtime(
                 timeout=timeout,
                 processors=processors,
                 teardown_mode="host-terminate",
+                pre_capture_script=year_preparation,
+                pre_capture_seconds=RESTORE_YEAR_PREPARATION_SECONDS,
                 post_restore_script=post_restore_checks(),
                 log_path=output_dir / f"restore-downtime-{name}-capture.log",
             )
-            snapshots.append((name, processors, snapshot_path))
+            snapshots.append((name, processors, expedited, snapshot_path, started))
         restore_after = time.monotonic() + RESTORE_DOWNTIME_SECONDS
-        for name, processors, snapshot_path in snapshots:
+        ready: dict[str, float] = {}
+        for name, processors, _, snapshot_path, _ in snapshots:
             time.sleep(max(0.0, restore_after - time.monotonic()))
             context = f"{name} restore after a {RESTORE_DOWNTIME_SECONDS:g} s downtime"
+            launched = time.monotonic()
             with OpenvmmProcess(
                 snapshot_restore_command(
                     executable,
@@ -8103,6 +8184,7 @@ def run_restore_downtime(
                 environment=environment,
             ) as process:
                 process.wait_for_line(RESTORE_MARKER, timeout)
+                ready[name] = time.monotonic() - launched
                 process.wait_for_time_abi("restore", TIME_ABI_RESTORE_FINISH_SECONDS)
                 _stage_script(
                     process, RESTORE_DOWNTIME_PATH, "NVX_RESTORE_DOWNTIME", check
@@ -8120,6 +8202,286 @@ def run_restore_downtime(
                 )
             except TimeAbiFailure as error:
                 raise RuntimeError(f"{context}: {error}") from error
+        # The expedited cases simulate a reboot, so that the downtime comes
+        # from UTC, at both processor counts.
+        for name, processors, expedited, snapshot_path, started in snapshots:
+            _restore_simulated_year(
+                executable,
+                backend,
+                snapshot_path,
+                name=name,
+                processors=processors,
+                utc=expedited,
+                started=started,
+                baseline_ready=ready[name],
+                report=year_report,
+                timeout=timeout,
+                output_dir=output_dir,
+            )
+        name, processors, _, snapshot_path, _ = snapshots[0]
+        _expect_process_failure(
+            [
+                *snapshot_restore_command(
+                    executable, backend, snapshot_path, processors=processors
+                ),
+                "--x-time-abi-test-hook",
+                f"downtime-add-s={MAX_DOWNTIME_SECONDS + 1}",
+            ],
+            output_dir / f"restore-downtime-{name}-excessive.log",
+            timeout,
+            b"fatal error: [E_DOWNTIME_EXCESSIVE]",
+            forbidden_markers=(RESTORE_MARKER,),
+        )
+
+
+def _restore_simulated_year(
+    executable: Path,
+    backend: str,
+    snapshot_path: Path,
+    *,
+    name: str,
+    processors: int,
+    utc: bool,
+    started: float,
+    baseline_ready: float,
+    report: str,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Restore ``snapshot_path``, whose capture started at ``started``, after a
+    simulated downtime just below the time ABI's bound, from UTC with ``utc``
+    and otherwise from the same boot's monotonic clock, and check the guest's
+    report as :func:`check_simulated_year` does, and that the restore printed
+    its marker at most RESTORE_YEAR_READY_ALLOWANCE_SECONDS later than its
+    restore after the real downtime did, ``baseline_ready`` seconds after it
+    started."""
+    simulated = (
+        MAX_DOWNTIME_SECONDS
+        - math.ceil(time.monotonic() - started)
+        - RESTORE_YEAR_MARGIN_SECONDS
+    )
+    source = "utc" if utc else "monotonic"
+    context = f"{name} restore after a simulated {simulated} s downtime from {source}"
+    command = [
+        *snapshot_restore_command(
+            executable, backend, snapshot_path, processors=processors
+        ),
+        "--x-time-abi-test-hook",
+        f"downtime-add-s={simulated}",
+    ]
+    if utc:
+        command.extend(("--x-time-abi-test-hook", "boot-id-mismatch"))
+    launched = time.monotonic()
+    with OpenvmmProcess(
+        command,
+        output_dir / f"restore-downtime-{name}-year.log",
+        environment={"OPENVMM_LOG": TIME_ABI_RESTORE_LOG_FILTER},
+    ) as process:
+        process.wait_for_line(RESTORE_MARKER, timeout)
+        ready = time.monotonic() - launched
+        process.wait_for_time_abi("restore", TIME_ABI_RESTORE_FINISH_SECONDS)
+        _stage_script(process, RESTORE_YEAR_PATH, "NVX_RESTORE_YEAR", report)
+        process.wait_for_line(RESTORE_YEAR_COMPLETION_MARKER, timeout)
+        host_utc_ns = time.time_ns()
+        result = process.wait(timeout)
+    if result.returncode != 0:
+        error = process.time_abi.exit_error(result.returncode)
+        raise RuntimeError(f"{context}: {error}")
+    _check_restore_warp(result.output, processors=processors, context=context)
+    try:
+        process.time_abi.require_status(context)
+        process.time_abi.require_restore(
+            context, online_cpus=processors, generation=RESTORED_GENERATION
+        )
+        summary = check_simulated_year(
+            simulated_year_report(result.output),
+            simulated_seconds=simulated,
+            source=source,
+            host_utc_ns=host_utc_ns,
+        )
+    except (TimeAbiFailure, RuntimeError) as error:
+        raise RuntimeError(f"{context}: {error}") from error
+    print(
+        f"{context}: {summary}; ready {ready:.1f} s after its start, "
+        f"{baseline_ready:.1f} s after a {RESTORE_DOWNTIME_SECONDS:g} s downtime",
+        flush=True,
+    )
+    if ready > baseline_ready + RESTORE_YEAR_READY_ALLOWANCE_SECONDS:
+        raise RuntimeError(
+            f"{context}: the restore printed its marker {ready:.1f} s after its "
+            f"start, {ready - baseline_ready:.1f} s later than after a "
+            f"{RESTORE_DOWNTIME_SECONDS:g} s downtime"
+        )
+
+
+def simulated_year_report(output: bytes) -> dict[str, str]:
+    """Return the fields of the simulated one-year restore's report line."""
+    for line in _output_lines(output):
+        text = line.decode("utf-8", "replace")
+        if text.startswith(RESTORE_YEAR_REPORT_PREFIX):
+            try:
+                return parse_fields(text.removeprefix(RESTORE_YEAR_REPORT_PREFIX))
+            except ValueError as error:
+                raise RuntimeError(
+                    f"the simulated one-year restore's report is malformed: {error}"
+                ) from error
+    raise RuntimeError("the guest printed no simulated one-year restore report")
+
+
+def _clock_ns(value: str) -> int:
+    """Return a clock reading of whole and fractional seconds in nanoseconds."""
+    seconds, _, fraction = value.partition(".")
+    if not seconds.isdecimal() or not fraction.isdecimal() or len(fraction) > 9:
+        raise ValueError(f"malformed clock reading {value!r}")
+    return int(seconds) * 1_000_000_000 + int(fraction.ljust(9, "0"))
+
+
+def check_simulated_year(
+    report: dict[str, str],
+    *,
+    simulated_seconds: int,
+    source: str,
+    host_utc_ns: int,
+) -> str:
+    """Check the report of a restore after a simulated year (doc/ci.md), and
+    return a summary of its downtime, clocks, timer, and frozen workload.
+
+    The guest must report no RCU stall and no kernel warning since the
+    capture; a downtime from ``source`` of at least the ``simulated_seconds``
+    that the hook added and at most the time ABI's bound; clocks that
+    advanced by the simulated downtime more than its realtime clock, which
+    stands on host UTC, ``host_utc_ns`` once the report arrived: its raw
+    monotonic clock by the TSC's advance at the declared rate, as the kernel
+    counts it to the kHz, and its monotonic and boot-time clocks by that
+    advance at the frequency correction that it held before the capture; the
+    one-hour timer that it armed before the capture fired within
+    RESTORE_YEAR_TIMER_DELAY_SECONDS of the restore's clock step, before or
+    after it; a frozen workload that gained no CPU time or cgroup usage while
+    it stayed frozen across the restore, and about a second's when it ran for
+    one; and a requester that the kernel did not charge the downtime either.
+    """
+    second = 1_000_000_000
+    simulated = simulated_seconds * second
+    problems: list[str] = []
+    summary: list[str] = []
+    try:
+        if report["stalls"] != "0":
+            problems.append(f"rcu_stall_count is {report['stalls']}")
+        if report["kernel_warnings"] != "0":
+            problems.append(
+                f"the kernel logged {report['kernel_warnings']} warnings since "
+                "the capture"
+            )
+        if report["downtime_source"] != source:
+            problems.append(
+                f"the downtime came from {report['downtime_source']}, not {source}"
+            )
+        downtime = int(report["downtime_ns"])
+        if not simulated <= downtime <= MAX_DOWNTIME_SECONDS * second:
+            problems.append(
+                f"the downtime is {downtime} ns, not from the simulated "
+                f"{simulated} ns to the {MAX_DOWNTIME_SECONDS} s bound"
+            )
+        summary.append(f"downtime {downtime} ns")
+        clocks = ("realtime", "monotonic", "monotonic_raw", "boottime")
+        before = {clock: _clock_ns(report[f"{clock}_before"]) for clock in clocks}
+        after = {clock: _clock_ns(report[f"{clock}_after"]) for clock in clocks}
+        real = after["realtime"] - before["realtime"]
+        # The restore advanced the TSC by the downtime at the declared rate,
+        # which the kernel counts to the kHz, raw and at its frequency
+        # correction.
+        tsc_hz = int(report["tsc_hz"])
+        kernel_hz = tsc_hz // 1000 * 1000
+        frequency_ppb = int(report["frequency_ppb"])
+        raw = simulated * tsc_hz // kernel_hz
+        corrected = raw + raw * frequency_ppb // second
+        multiplier = simulated * RESTORE_YEAR_MULTIPLIER_PPB // second
+        allowances = {
+            "monotonic_raw": RESTORE_YEAR_CLOCK_TOLERANCE_SECONDS * second + multiplier,
+            "monotonic": RESTORE_YEAR_CLOCK_TOLERANCE_SECONDS * second
+            + multiplier
+            + simulated * RESTORE_YEAR_SLEW_PPM // 1_000_000,
+        }
+        allowances["boottime"] = allowances["monotonic"]
+        gains: list[str] = []
+        for clock, expected in (
+            ("monotonic_raw", raw),
+            ("monotonic", corrected),
+            ("boottime", corrected),
+        ):
+            gained = after[clock] - before[clock] - real
+            gains.append(f"{clock} {gained - simulated:+d} ns")
+            if abs(gained - expected) > allowances[clock]:
+                problems.append(
+                    f"{clock} time advanced {gained} ns more than realtime, not "
+                    f"the {expected} ns that the simulated downtime gives it"
+                )
+        summary.append(
+            "beyond the simulated downtime, "
+            + ", ".join(gains)
+            + f" at {tsc_hz} Hz and {frequency_ppb} ppb"
+        )
+        lag = host_utc_ns - after["realtime"]
+        if abs(lag) > RESTORE_YEAR_REALTIME_TOLERANCE_SECONDS * second:
+            problems.append(f"realtime stands {lag} ns behind host UTC")
+        if report["timer_s"] == "none":
+            problems.append("the timer armed before the capture never fired")
+        else:
+            fired = _clock_ns(report["timer_s"])
+            stepped = after["boottime"] - (
+                after["realtime"] - int(report["step_realtime_ns"])
+            )
+            delay = fired - stepped
+            summary.append(f"timer {delay:+d} ns after the step")
+            if abs(delay) > RESTORE_YEAR_TIMER_DELAY_SECONDS * second:
+                when = "after" if delay > 0 else "before"
+                problems.append(
+                    f"the timer fired {abs(delay)} ns {when} the restore's step"
+                )
+        frozen_ticks = int(report["ticks_frozen"]) - int(report["ticks_before"])
+        frozen_usage = int(report["usage_frozen"]) - int(report["usage_before"])
+        if (
+            frozen_ticks > RESTORE_YEAR_FROZEN_TICKS
+            or frozen_usage > RESTORE_YEAR_FROZEN_USAGE_USEC
+        ):
+            problems.append(
+                f"the frozen workload gained {frozen_ticks} ticks of CPU time and "
+                f"{frozen_usage} us of cgroup usage across the restore"
+            )
+        ran_ticks = int(report["ticks_thawed"]) - int(report["ticks_frozen"])
+        ran_usage = int(report["usage_thawed"]) - int(report["usage_frozen"])
+        if not (
+            RESTORE_YEAR_THAWED_MIN_TICKS <= ran_ticks <= RESTORE_YEAR_THAWED_MAX_TICKS
+            and RESTORE_YEAR_THAWED_MIN_USAGE_USEC
+            <= ran_usage
+            <= RESTORE_YEAR_THAWED_MAX_USAGE_USEC
+        ):
+            problems.append(
+                f"the thawed workload gained {ran_ticks} ticks of CPU time and "
+                f"{ran_usage} us of cgroup usage in a second"
+            )
+        summary.append(
+            f"frozen workload +{frozen_ticks} ticks and +{frozen_usage} us, then "
+            f"+{ran_ticks} ticks and +{ran_usage} us in a second"
+        )
+        # The guest kernel charges a running task at most a second of one
+        # runtime update, so the requester, which ran at the capture, is not
+        # charged the downtime either.
+        reaped = int(report["reaped_ticks"])
+        summary.append(
+            f"the console shell's reaped children, among them the capture's "
+            f"requester, {reaped} ticks"
+        )
+        if reaped > RESTORE_YEAR_REAPED_MAX_TICKS:
+            problems.append(
+                f"the console shell's reaped children, among them the capture's "
+                f"requester, used {reaped} ticks of CPU time"
+            )
+    except (KeyError, ValueError) as error:
+        problems.append(f"the report is malformed: {error}")
+    if problems:
+        raise RuntimeError("simulated one-year restore failed: " + "; ".join(problems))
+    return "; ".join(summary)
 
 
 def run_restore_memory(

@@ -14936,9 +14936,13 @@ class MicrovmTests(unittest.TestCase):
                         refused=refused_then(change),
                     )
 
-    def test_restore_downtime_shares_one_window_and_waits_for_the_restore_marker(
-        self,
-    ):
+    def _run_restore_downtime(
+        self, results: list[openvmm_process.OpenvmmProcessResult]
+    ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock, list[float]]:
+        """Run the restore-downtime scenario on a fake clock, with the restores'
+        `results` in order, and return the mocks of the boot command, the
+        capture, OpenvmmProcess, and the simulated-year check, and the
+        scenario's sleeps."""
         clock = [100.0]
         sleeps: list[float] = []
 
@@ -14949,12 +14953,8 @@ class MicrovmTests(unittest.TestCase):
         fake_time = MagicMock()
         fake_time.monotonic.side_effect = lambda: clock[0]
         fake_time.sleep.side_effect = sleep
-        results = [
-            openvmm_process.OpenvmmProcessResult(0, _warp_probe_output(processors))
-            for processors in (1, 1, 8, 8)
-        ]
+        fake_time.time_ns.return_value = 7
         with tempfile.TemporaryDirectory() as temporary:
-            output_dir = Path(temporary)
             with (
                 patch.object(
                     microvm_tests,
@@ -14963,7 +14963,14 @@ class MicrovmTests(unittest.TestCase):
                 ) as boot_command,
                 patch.object(microvm_tests, "capture_snapshot") as capture,
                 patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(
+                    microvm_tests, "simulated_year_report", return_value={"k": "v"}
+                ),
+                patch.object(
+                    microvm_tests, "check_simulated_year", return_value="summary"
+                ) as check,
                 patch.object(microvm_tests, "time", fake_time),
+                redirect_stdout(io.StringIO()),
             ):
                 active = process.return_value.__enter__.return_value
                 active.wait.side_effect = results
@@ -14974,8 +14981,30 @@ class MicrovmTests(unittest.TestCase):
                     "kvm",
                     memory_mib=128,
                     timeout=60,
-                    output_dir=output_dir,
+                    output_dir=Path(temporary),
                 )
+        return boot_command, capture, process, check, sleeps
+
+    @staticmethod
+    def _restore_downtime_results() -> list[openvmm_process.OpenvmmProcessResult]:
+        """Return the results of the restores after the real downtime and after
+        the simulated year, then the refused restore beyond the bound."""
+        return [
+            openvmm_process.OpenvmmProcessResult(0, _warp_probe_output(processors))
+            for processors in (1, 1, 8, 8, 1, 1, 8, 8)
+        ] + [
+            openvmm_process.OpenvmmProcessResult(
+                1, b"fatal error: [E_DOWNTIME_EXCESSIVE] downtime too long\r\n"
+            )
+        ]
+
+    def test_restore_downtime_shares_one_window_and_waits_for_the_restore_marker(
+        self,
+    ):
+        boot_command, capture, process, _, sleeps = self._run_restore_downtime(
+            self._restore_downtime_results()
+        )
+        active = process.return_value.__enter__.return_value
 
         self.assertEqual(
             [
@@ -14995,18 +15024,26 @@ class MicrovmTests(unittest.TestCase):
                 call.kwargs["post_restore_script"],
                 time_abi.warp_probe_script() + time_abi.status_script(),
             )
+            self.assertEqual(
+                call.kwargs["pre_capture_script"],
+                microvm_tests._read_script("restore-year-capture.sh"),
+            )
+            self.assertEqual(
+                call.kwargs["pre_capture_seconds"],
+                microvm_tests.RESTORE_YEAR_PREPARATION_SECONDS,
+            )
         self.assertEqual(
             [
                 (call.kwargs["online_cpus"], call.kwargs["generation"])
                 for call in active.time_abi.require_restore.call_args_list
             ],
-            [(1, 1), (1, 1), (8, 1), (8, 1)],
+            [(1, 1), (1, 1), (8, 1), (8, 1)] * 2,
         )
-        self.assertEqual(active.time_abi.require_status.call_count, 4)
+        self.assertEqual(active.time_abi.require_status.call_count, 8)
         # Every capture precedes one shared 30 s window.
         self.assertEqual(sleeps, [30.0, 0.0, 0.0, 0.0])
         self.assertEqual(
-            [call.args[1].name for call in process.call_args_list],
+            [call.args[1].name for call in process.call_args_list[:4]],
             [
                 "restore-downtime-1-vcpu.log",
                 "restore-downtime-1-vcpu-expedited.log",
@@ -15014,7 +15051,7 @@ class MicrovmTests(unittest.TestCase):
                 "restore-downtime-8-vcpu-expedited.log",
             ],
         )
-        for call in process.call_args_list:
+        for call in process.call_args_list[:8]:
             self.assertEqual(
                 call.kwargs["environment"],
                 {"OPENVMM_LOG": "off,openvmm_core::worker::dispatch::time_abi=info"},
@@ -15030,6 +15067,139 @@ class MicrovmTests(unittest.TestCase):
         staged = active.send_bytes.call_args_list[0].args[0].decode()
         self.assertIn("sleep 2\n", staged)
         self.assertIn("minimum=30\n", staged)
+
+    def test_restore_downtime_restores_each_snapshot_after_a_simulated_year(self):
+        _, _, process, check, _ = self._run_restore_downtime(
+            self._restore_downtime_results()
+        )
+        active = process.return_value.__enter__.return_value
+
+        # The restores after the simulated year follow those after the real
+        # downtime, 30 s after the captures started, so the hook leaves the
+        # margin below the bound; the expedited cases simulate a reboot.
+        simulated = 365 * 86_400 - 30 - 60
+        year_calls = process.call_args_list[4:8]
+        self.assertEqual(
+            [call.args[1].name for call in year_calls],
+            [
+                "restore-downtime-1-vcpu-year.log",
+                "restore-downtime-1-vcpu-expedited-year.log",
+                "restore-downtime-8-vcpu-year.log",
+                "restore-downtime-8-vcpu-expedited-year.log",
+            ],
+        )
+        for call, utc in zip(year_calls, (False, True, False, True), strict=True):
+            hooks = [
+                call.args[0][index + 1]
+                for index, argument in enumerate(call.args[0])
+                if argument == "--x-time-abi-test-hook"
+            ]
+            self.assertEqual(
+                hooks,
+                [f"downtime-add-s={simulated}"] + (["boot-id-mismatch"] if utc else []),
+            )
+        self.assertEqual(
+            [call.args[0] for call in active.wait_for_line.call_args_list[8:10]],
+            [benchmark.RESTORE_MARKER, b"NVX-RESTORE-YEAR-OK"],
+        )
+        staged = active.send_bytes.call_args_list[4].args[0].decode()
+        self.assertTrue(
+            staged.startswith("cat >/tmp/nvx-restore-year <<'NVX_RESTORE_YEAR'\n")
+        )
+        self.assertIn("sleep 2\n", staged)
+        self.assertEqual(
+            [
+                (
+                    call.kwargs["simulated_seconds"],
+                    call.kwargs["source"],
+                    call.kwargs["host_utc_ns"],
+                )
+                for call in check.call_args_list
+            ],
+            [
+                (simulated, "monotonic", 7),
+                (simulated, "utc", 7),
+                (simulated, "monotonic", 7),
+                (simulated, "utc", 7),
+            ],
+        )
+        # Then OpenVMM refuses the bound plus one second before the guest runs.
+        refused = process.call_args_list[8]
+        self.assertEqual(refused.args[1].name, "restore-downtime-1-vcpu-excessive.log")
+        self.assertEqual(
+            refused.args[0][-2:],
+            ["--x-time-abi-test-hook", "downtime-add-s=31536001"],
+        )
+
+    def test_restore_downtime_requires_the_refusal_beyond_the_bound(self):
+        results = self._restore_downtime_results()
+        for refusal, message in (
+            (
+                openvmm_process.OpenvmmProcessResult(0, b""),
+                "OpenVMM unexpectedly accepted invalid restore",
+            ),
+            (
+                openvmm_process.OpenvmmProcessResult(1, b"fatal error: [E_TEST_HOOK]"),
+                "did not contain",
+            ),
+            (
+                openvmm_process.OpenvmmProcessResult(
+                    1,
+                    b"OPENVMM-SNAPSHOT-RESTORE-OK\r\n"
+                    b"fatal error: [E_DOWNTIME_EXCESSIVE] downtime too long\r\n",
+                ),
+                "entered the guest",
+            ),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._run_restore_downtime([*results[:-1], refusal])
+
+    def test_restore_downtime_bounds_the_simulated_year_restore_s_readiness(self):
+        clock = [100.0]
+        restore_markers = [0]
+
+        def wait_for_line(marker: bytes, timeout: float) -> None:
+            # The year's restores, after the four of the real downtime, reach
+            # their marker 11 s after they start.
+            if marker == benchmark.RESTORE_MARKER:
+                restore_markers[0] += 1
+                if restore_markers[0] > 4:
+                    clock[0] += 11.0
+
+        fake_time = MagicMock()
+        fake_time.monotonic.side_effect = lambda: clock[0]
+        fake_time.sleep.return_value = None
+        fake_time.time_ns.return_value = 0
+        with tempfile.TemporaryDirectory() as temporary:
+            with (
+                patch.object(microvm_tests, "workload_boot_command", return_value=[]),
+                patch.object(microvm_tests, "capture_snapshot"),
+                patch.object(microvm_tests, "OpenvmmProcess") as process,
+                patch.object(microvm_tests, "simulated_year_report", return_value={}),
+                patch.object(microvm_tests, "check_simulated_year", return_value="ok"),
+                patch.object(microvm_tests, "time", fake_time),
+                redirect_stdout(io.StringIO()) as printed,
+            ):
+                active = process.return_value.__enter__.return_value
+                active.wait.side_effect = self._restore_downtime_results()
+                active.wait_for_line.side_effect = wait_for_line
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "^1-vcpu restore after a simulated .* s downtime from monotonic: "
+                    "the restore printed its marker 11.0 s after its start, 11.0 s "
+                    "later than after a 30 s downtime$",
+                ):
+                    microvm_tests.run_restore_downtime(
+                        Path("openvmm"),
+                        Path("vmlinux"),
+                        Path("initrd"),
+                        "kvm",
+                        memory_mib=128,
+                        timeout=60,
+                        output_dir=Path(temporary),
+                    )
+        self.assertIn("ok; ready 11.0 s after its start", printed.getvalue())
 
     def test_restore_downtime_rejects_a_failed_check_or_warp_probe(self):
         fatal = "[E_TSC_SYNC_UNSUPPORTED] failed to launch vm worker"
@@ -15120,6 +15290,403 @@ class MicrovmTests(unittest.TestCase):
                     "NVX-RESTORE-DOWNTIME-OK" in result.stdout.splitlines(),
                     expected == 0,
                 )
+
+    # A restore after a simulated year: the hook's seconds, a TSC rate whose kHz
+    # truncate 476 Hz, and the frequency correction that the guest held.
+    _YEAR_SIMULATED = 31_535_910
+    _YEAR_TSC_HZ = 2_299_999_476
+    _YEAR_FREQUENCY_PPB = -44_500
+
+    @staticmethod
+    def _seconds(nanoseconds: int) -> str:
+        return f"{nanoseconds // 1_000_000_000}.{nanoseconds % 1_000_000_000:09d}"
+
+    def _year_report(self) -> tuple[dict[str, str], int]:
+        """Return a consistent simulated-year report, as restore-year.sh.in
+        prints it, and the host's UTC once it arrived."""
+        second = 1_000_000_000
+        simulated = self._YEAR_SIMULATED * second
+        raw = simulated * self._YEAR_TSC_HZ // 2_299_999_000
+        corrected = raw + raw * self._YEAR_FREQUENCY_PPB // second
+        real = 73 * second
+        realtime = 1_794_375_529_848_200_279
+        monotonic = 1_683_905_063
+        boottime = 1_683_910_779
+        raw_before = 1_500_000_000
+        step_realtime = realtime + real - 2_280_000_000
+        boottime_after = boottime + real + corrected
+        stepped = boottime_after - (realtime + real - step_realtime)
+        report = {
+            "stalls": "0",
+            "timer_s": f"{(stepped + 5_000_000) // 10_000_000 / 100:.2f}",
+            "uptime_s": f"{(boottime_after + 999_999_999) // second}.00",
+            "realtime_before": self._seconds(realtime),
+            "monotonic_before": self._seconds(monotonic),
+            "monotonic_raw_before": self._seconds(raw_before),
+            "boottime_before": self._seconds(boottime),
+            "realtime_after": self._seconds(realtime + real),
+            "monotonic_after": self._seconds(monotonic + real + corrected),
+            "monotonic_raw_after": self._seconds(raw_before + real + raw),
+            "boottime_after": self._seconds(boottime_after),
+            "ticks_before": "100",
+            "ticks_frozen": "100",
+            "ticks_thawed": "201",
+            "usage_before": "1008498",
+            "usage_frozen": "1008498",
+            "usage_thawed": "2015162",
+            "downtime_ns": str(simulated + 70 * second),
+            "downtime_source": "monotonic",
+            "step_realtime_ns": str(step_realtime),
+            "tsc_hz": str(self._YEAR_TSC_HZ),
+            "frequency_ppb": str(self._YEAR_FREQUENCY_PPB),
+            "reaped_ticks": "212",
+            "kernel_warnings": "0",
+        }
+        return report, realtime + real + 2 * second
+
+    def _check_year(self, report: dict[str, str], host_utc_ns: int) -> str:
+        return microvm_tests.check_simulated_year(
+            report,
+            simulated_seconds=self._YEAR_SIMULATED,
+            source="monotonic",
+            host_utc_ns=host_utc_ns,
+        )
+
+    def test_simulated_year_check_accepts_clocks_at_their_rates(self):
+        report, host_utc_ns = self._year_report()
+        summary = self._check_year(report, host_utc_ns)
+        # Raw time counts the TSC at the declared rate to the kHz, 476 Hz slow,
+        # and corrected time at the guest's -44.5 ppm correction besides.
+        self.assertTrue(
+            summary.startswith(
+                "downtime 31535980000000000 ns; beyond the simulated downtime, "
+                "monotonic_raw +6526565081 ns, monotonic -1396821720352 ns, "
+                "boottime -1396821720352 ns at 2299999476 Hz and -44500 ppb; "
+                "timer "
+            ),
+            summary,
+        )
+        self.assertTrue(
+            summary.endswith(
+                "frozen workload +0 ticks and +0 us, then +101 ticks and "
+                "+1006664 us in a second; the console shell's reaped children, "
+                "among them the capture's requester, 212 ticks"
+            ),
+            summary,
+        )
+
+    def test_simulated_year_check_names_every_failure(self):
+        second = 1_000_000_000
+        report, host_utc_ns = self._year_report()
+        simulated = self._YEAR_SIMULATED * second
+        before = microvm_tests._clock_ns(report["monotonic_before"])
+        realtime = microvm_tests._clock_ns(report["realtime_after"])
+        stepped = microvm_tests._clock_ns(report["timer_s"])
+        cases: list[tuple[dict[str, str], int, str]] = [
+            ({"stalls": "1"}, host_utc_ns, "rcu_stall_count is 1"),
+            (
+                {"kernel_warnings": "2"},
+                host_utc_ns,
+                "the kernel logged 2 warnings since the capture",
+            ),
+            (
+                {"downtime_source": "utc"},
+                host_utc_ns,
+                "the downtime came from utc, not monotonic",
+            ),
+            ({"downtime_ns": str(simulated - 1)}, host_utc_ns, "the downtime is "),
+            (
+                {"downtime_ns": str(365 * 86_400 * second + 1)},
+                host_utc_ns,
+                "the downtime is ",
+            ),
+            # Monotonic time that advanced by the downtime exactly, not at the
+            # guest's frequency correction.
+            (
+                {"monotonic_after": self._seconds(before + 73 * second + simulated)},
+                host_utc_ns,
+                "monotonic time advanced ",
+            ),
+            (
+                {
+                    "monotonic_raw_after": self._seconds(
+                        microvm_tests._clock_ns(report["monotonic_raw_after"])
+                        + 20 * second
+                    )
+                },
+                host_utc_ns,
+                "monotonic_raw time advanced ",
+            ),
+            (
+                {
+                    "boottime_after": self._seconds(
+                        microvm_tests._clock_ns(report["boottime_after"]) - 200 * second
+                    )
+                },
+                host_utc_ns,
+                "boottime time advanced ",
+            ),
+            # Realtime a simulated year ahead of host UTC, unrepaired.
+            ({}, realtime - simulated, "realtime stands "),
+            ({"timer_s": "none"}, host_utc_ns, "the timer armed before the capture"),
+            (
+                {"timer_s": self._seconds(stepped + 11 * second)},
+                host_utc_ns,
+                "the timer fired 1",
+            ),
+            (
+                {"timer_s": self._seconds(stepped - 11 * second)},
+                host_utc_ns,
+                "ns before the restore's step",
+            ),
+            # A timer that fired before the capture, an hour too soon.
+            ({"timer_s": "1.00"}, host_utc_ns, "ns before the restore's step"),
+            (
+                {"usage_frozen": str(1008498 + simulated // 1000)},
+                host_utc_ns,
+                "the frozen workload gained 0 ticks of CPU time and 31535910000000 us",
+            ),
+            (
+                {"ticks_frozen": "102", "ticks_thawed": "203"},
+                host_utc_ns,
+                "the frozen workload gained 2 ticks",
+            ),
+            (
+                {"usage_thawed": "1008498"},
+                host_utc_ns,
+                "the thawed workload gained 101 ticks of CPU time and 0 us",
+            ),
+            # A requester that the kernel charged the downtime.
+            (
+                {"reaped_ticks": str(212 + simulated // 10_000_000)},
+                host_utc_ns,
+                "the console shell's reaped children, among them the capture's "
+                "requester, used 3153591212 ticks",
+            ),
+            ({"tsc_hz": "fast"}, host_utc_ns, "the report is malformed"),
+        ]
+        for changes, utc, message in cases:
+            with self.subTest(changes=changes, message=message):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "^simulated one-year restore failed: .*" + re.escape(message),
+                ):
+                    self._check_year({**report, **changes}, utc)
+        missing = dict(report)
+        del missing["usage_thawed"]
+        with self.assertRaisesRegex(RuntimeError, "malformed: 'usage_thawed'"):
+            self._check_year(missing, host_utc_ns)
+
+    def test_simulated_year_report_reads_the_report_line(self):
+        output = (
+            b'echo "NVX-RESTORE-YEAR stalls=$stalls"\r\n'
+            b"NVX-RESTORE-YEAR stalls=0  timer_s=none\r\n"
+        )
+        self.assertEqual(
+            microvm_tests.simulated_year_report(output),
+            {"stalls": "0", "timer_s": "none"},
+        )
+        with self.assertRaisesRegex(RuntimeError, "printed no simulated one-year"):
+            microvm_tests.simulated_year_report(b"NVX-RESTORE-YEAR-OK\r\n")
+        with self.assertRaisesRegex(RuntimeError, "report is malformed"):
+            microvm_tests.simulated_year_report(b"NVX-RESTORE-YEAR stalls\r\n")
+        self.assertEqual(microvm_tests._clock_ns("12.5"), 12_500_000_000)
+        self.assertEqual(microvm_tests._clock_ns("1.000000001"), 1_000_000_001)
+        for malformed in ("12", "1.0000000001", "-1.5", "x.1"):
+            with self.assertRaises(ValueError):
+                microvm_tests._clock_ns(malformed)
+
+    def test_simulated_year_report_script_reports_what_the_check_reads(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        report, host_utc_ns = self._year_report()
+        for warning, warnings in (("", 0), ("WARNING: CPU: 0 at timer.c\n", 1)):
+            with self.subTest(warnings=warnings):
+                with tempfile.TemporaryDirectory() as temporary:
+                    output = self._run_year_report_script(
+                        shell, Path(temporary), report, warning
+                    )
+                self.assertEqual(
+                    f"NVX-RESTORE-YEAR-KERNEL: [ 9.0] {warning.strip()}"
+                    in output.splitlines(),
+                    warnings == 1,
+                    output,
+                )
+                self.assertIn("NVX-RESTORE-DOWNTIME stalls=0 uptime_s=", output)
+                self.assertIn("NVX-EXIT 0", output)
+                printed = microvm_tests.simulated_year_report(output.encode())
+                self.assertEqual(printed, {**report, "kernel_warnings": str(warnings)})
+                if not warnings:
+                    self._check_year(printed, host_utc_ns)
+
+    def _run_year_report_script(
+        self, shell: str, root: Path, report: dict[str, str], warning: str
+    ) -> str:
+        """Run restore-year.sh.in in a host shell over files under `root` that
+        hold what a restored guest's would to print `report`, with the kernel
+        log `warning` since the capture, and return what it printed."""
+        year = root / "year"
+        workload = root / "workload"
+        for directory in (year, workload, root / "proc" / "42", root / "proc" / "7"):
+            directory.mkdir(parents=True)
+
+        def clock_report(suffix: str) -> str:
+            return (
+                "nvx-time-probe 1.1 clock\n== clocks\n"
+                + "".join(
+                    f"CLOCK_{clock.upper():<14} {report[f'{clock}_{suffix}']}\n"
+                    for clock in ("realtime", "monotonic", "monotonic_raw", "boottime")
+                )
+                + "TSC                  1 on cpu 0\n"
+            )
+
+        ticks = int(report["ticks_before"])
+        files = {
+            year / "busy.pid": "42\n",
+            year / "ticks": f"{ticks - 1} 1\n",
+            year / "usage": f"{report['usage_before']}\n",
+            year / "dmesg": "2\n",
+            year / "frequency": f"{report['frequency_ppb']}\n",
+            year / "clock": clock_report("before"),
+            year / "timer": f"{report['timer_s']}\n",
+            root / "clock-after": clock_report("after"),
+            workload / "cpu.stat": f"usage_usec {report['usage_frozen']}\n",
+            root / "proc" / "42" / "stat": f"42 (sh) R {'0 ' * 10}"
+            f"{int(report['ticks_frozen']) - 3} 3 0\n",
+            # The console shell, whose reaped children ran the capture's request.
+            root / "proc" / "7" / "stat": f"7 (sh) S {'0 ' * 10}0 0 "
+            f"{int(report['reaped_ticks']) - 5} 5 0\n",
+            root / "rcu_stall_count": f"{report['stalls']}\n",
+            root / "uptime": f"{report['uptime_s']} 1.0\n",
+            root / "state": "generation=1\n"
+            f"tsc_hz={report['tsc_hz']}\n"
+            f"last_step_realtime_ns={report['step_realtime_ns']}\n"
+            f"last_downtime_ns={report['downtime_ns']}\n"
+            f"last_downtime_source={report['downtime_source']}\n",
+        }
+        for path, text in files.items():
+            path.write_bytes(text.encode())
+        posix = root.as_posix()
+        script = microvm_tests._render_script("restore-year.sh.in", SETTLE_SECONDS="0")
+        for guest, host in (
+            ("/run/nvx-year", f"{posix}/year"),
+            ("/sys/fs/cgroup/nvx-year-workload", f"{posix}/workload"),
+            ("/run/nvx/time/state", f"{posix}/state"),
+            ("/sys/kernel/rcu_stall_count", f"{posix}/rcu_stall_count"),
+            ('"/proc/$1/stat"', f'"{posix}/proc/$1/stat"'),
+            ('children "$PPID"', "children 7"),
+            ("/proc/uptime", f"{posix}/uptime"),
+            ("/sbin/nvx-time-probe clock --measure-ms 0", "nvx_time_probe"),
+            ("nvx-exit", "nvx_exit"),
+        ):
+            self.assertIn(guest, script)
+            script = script.replace(guest, host)
+        thawed = f"42 (sh) R {'0 ' * 10}{int(report['ticks_thawed']) - 3} 3 0"
+        prelude = (
+            # The second's run of the thawed workload.
+            'sleep() { [ "$1" != 1 ] || {\n'
+            f"    printf '%s\\n' '{thawed}' >'{posix}/proc/42/stat'\n"
+            f"    printf 'usage_usec %s\\n' '{report['usage_thawed']}' "
+            f">'{posix}/workload/cpu.stat'\n"
+            "}; }\n"
+            "kill() { :; }\n"
+            f"nvx_time_probe() {{ cat '{posix}/clock-after'; }}\n"
+            # Two lines before the capture, then one of the time ABI's own
+            # records, which the scan skips, and the warning, if any.
+            "dmesg() { printf '%s' '[ 1.0] boot\n[ 2.0] rcu: stall suppressed\n"
+            "[ 9.0] NVX-TIME-ABI: rcu stall release\n"
+            + "".join(f"[ 9.0] {line}\n" for line in warning.splitlines())
+            + "'; }\n"
+            'nvx_exit() { printf "NVX-EXIT %s\\n" "$1"; }\n'
+        )
+        result = subprocess.run(
+            [shell],
+            input=prelude + script,
+            text=True,
+            capture_output=True,
+            # Each of the script's few dozen subprocesses forks slowly in
+            # Windows' POSIX shells.
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    def test_simulated_year_capture_records_the_correction_after_the_next_poll(self):
+        # The time daemon changes the frequency correction only at its polls,
+        # so the capture's preparation waits for the next one before it records
+        # the correction that the capture then holds: here at its third pause,
+        # as at the daemon's first cadence, or at its 640th, 64 s on, as at the
+        # settled daemon's.
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        # A poll counts an accepted sample, or a rejected one.
+        for poll_at, polled in (
+            (3, "samples=2\\nrejected_samples=0"),
+            (640, "samples=1\\nrejected_samples=1"),
+        ):
+            with (
+                self.subTest(poll_at=poll_at),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                year = root / "year"
+                year.mkdir()
+                (year / "stat").write_bytes(f"42 (sh) R {'0 ' * 10}97 3 0\n".encode())
+                state = root / "state"
+                state.write_bytes(
+                    b"generation=0\nsamples=1\nrejected_samples=0\n"
+                    b"frequency_ppb=-13553\n"
+                )
+                posix = root.as_posix()
+                script = microvm_tests._read_script("restore-year-capture.sh")
+                for guest, host in (
+                    ("/run/nvx-year", f"{posix}/year"),
+                    ("/sys/fs/cgroup/nvx-year-workload", f"{posix}/workload"),
+                    (
+                        'mkdir "$workload"',
+                        "mkdir \"$workload\" && printf 'frozen 1\\n' "
+                        '>"$workload/cgroup.events" && '
+                        "printf 'usage_usec 1008498\\n' >\"$workload/cpu.stat\"",
+                    ),
+                    ("sh -c 'while :; do :; done' &", ": &"),
+                    ('"/proc/$(cat "$year/busy.pid")/stat"', '"$year/stat"'),
+                    ("/run/nvx/time/state", f"{posix}/state"),
+                    ("/sbin/nvx-time-probe clock --measure-ms 0", "nvx_time_probe"),
+                    ("nvx-exit", "nvx_exit"),
+                ):
+                    self.assertIn(guest, script)
+                    script = script.replace(guest, host)
+                prelude = (
+                    "waited=0\n"
+                    "mountpoint() { :; }\n"
+                    'sleep() { case "$1" in\n'
+                    "    3600) return 1 ;;\n"
+                    "    0.1) waited=$((waited + 1))\n"
+                    f'        [ "$waited" -ne {poll_at} ] || printf '
+                    f"'generation=0\\n{polled}\\n"
+                    f"frequency_ppb=-21000\\n' >'{posix}/state' ;;\n"
+                    "esac; }\n"
+                    "dmesg() { printf '[ 1.0] boot\\n[ 2.0] clocksource: tsc\\n'; }\n"
+                    "nvx_time_probe() { printf 'nvx-time-probe 1.1 clock\\n'; }\n"
+                    'nvx_exit() { printf "NVX-EXIT %s\\n" "$1"; }\n'
+                )
+                result = subprocess.run(
+                    [shell],
+                    input=prelude + script,
+                    text=True,
+                    capture_output=True,
+                    timeout=300,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("NVX-RESTORE-YEAR-FAIL", result.stdout)
+                self.assertEqual((year / "frequency").read_bytes(), b"-21000\n")
+                self.assertEqual((year / "ticks").read_bytes(), b"97 3\n")
+                self.assertEqual((year / "usage").read_bytes(), b"1008498\n")
+                self.assertEqual((year / "dmesg").read_bytes().strip(), b"2")
 
     @staticmethod
     def _exhaustive_report(

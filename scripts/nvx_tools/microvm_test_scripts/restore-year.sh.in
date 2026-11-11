@@ -1,0 +1,77 @@
+# The simulated one-year restore's report (doc/ci.md): the RCU stall count,
+# the uptime at which the timer that the downtime expired fired, the clocks
+# before the capture and now, the frozen workload's CPU time and cgroup usage
+# before the capture, still frozen now, and after it ran for a second, the
+# downtime, the repair's step, the declared TSC rate, and the frequency
+# correction before the capture that the guest recorded, the CPU time of the
+# console shell's reaped children, among them the capture's requester, which
+# ran at the capture, and the kernel's warnings since the capture, which the
+# harness checks.
+set -eu
+year=/run/nvx-year
+workload=/sys/fs/cgroup/nvx-year-workload
+trap 'status=$?; [ "$status" -eq 0 ] || { echo "NVX-RESTORE-YEAR-FAIL report status=$status"; nvx-exit 89; }' EXIT
+# Prints the user and system clock ticks of process $1.
+ticks() {
+    # shellcheck disable=SC2046
+    set -- $(cut -d' ' -f14,15 "/proc/$1/stat")
+    echo $(($1 + $2))
+}
+# Prints the user and system clock ticks of the reaped children of process
+# $1.
+children() {
+    # shellcheck disable=SC2046
+    set -- $(cut -d' ' -f16,17 "/proc/$1/stat")
+    echo $(($1 + $2))
+}
+# Prints the workload cgroup's CPU usage in microseconds.
+usage() {
+    sed -n 's/^usage_usec //p' "$workload/cpu.stat"
+}
+# Prints the realtime, monotonic, raw monotonic, and boot-time clocks of
+# nvx-time-probe's report $1 as fields with the suffix $2.
+clocks() {
+    awk -v suffix="$2" '$1 == "CLOCK_REALTIME" || $1 == "CLOCK_MONOTONIC" ||
+        $1 == "CLOCK_MONOTONIC_RAW" || $1 == "CLOCK_BOOTTIME" {
+        printf "%s_%s=%s ", tolower(substr($1, 7)), suffix, $2
+    }' "$1"
+}
+# Prints the value of key $1 of the guest's time state.
+state() {
+    sed -n "s/^$1=//p" /run/nvx/time/state
+}
+sleep @SETTLE_SECONDS@
+stalls=$(cat /sys/kernel/rcu_stall_count)
+/sbin/nvx-time-probe clock --measure-ms 0 >"$year/clock-after"
+busy=$(cat "$year/busy.pid")
+ticks_frozen=$(ticks "$busy")
+usage_frozen=$(usage)
+echo 0 >"$workload/cgroup.freeze"
+sleep 1
+ticks_thawed=$(ticks "$busy")
+usage_thawed=$(usage)
+kill "$busy"
+timer=$(cat "$year/timer" 2>/dev/null || echo none)
+uptime=$(cut -d' ' -f1 /proc/uptime)
+dmesg | tail -n "+$(($(cat "$year/dmesg") + 1))" | grep -v 'NVX-' |
+    grep -E 'WARNING|BUG|Oops|Call Trace|hrtimer: interrupt took|lockup|blocked for more than|stall' \
+        >"$year/warnings" || true
+while IFS= read -r warning; do
+    echo "NVX-RESTORE-YEAR-KERNEL: $warning"
+done <"$year/warnings"
+# shellcheck disable=SC2046
+set -- $(cat "$year/ticks")
+echo "NVX-RESTORE-DOWNTIME stalls=$stalls uptime_s=${uptime%.*}"
+echo "NVX-RESTORE-YEAR stalls=$stalls timer_s=$timer uptime_s=$uptime" \
+    "$(clocks "$year/clock" before)$(clocks "$year/clock-after" after)" \
+    "ticks_before=$(($1 + $2)) ticks_frozen=$ticks_frozen" \
+    "ticks_thawed=$ticks_thawed usage_before=$(cat "$year/usage")" \
+    "usage_frozen=$usage_frozen usage_thawed=$usage_thawed" \
+    "downtime_ns=$(state last_downtime_ns)" \
+    "downtime_source=$(state last_downtime_source)" \
+    "step_realtime_ns=$(state last_step_realtime_ns)" \
+    "tsc_hz=$(state tsc_hz) frequency_ppb=$(cat "$year/frequency")" \
+    "reaped_ticks=$(children "$PPID")" \
+    "kernel_warnings=$(grep -c . "$year/warnings" || true)"
+echo NVX-RESTORE-YEAR-OK
+nvx-exit 0

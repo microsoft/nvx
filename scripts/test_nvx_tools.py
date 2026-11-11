@@ -24025,6 +24025,46 @@ class BenchmarkTests(unittest.TestCase):
             )
         )
 
+    def test_prepare_snapshot_capture_runs_a_pre_capture_script_after_the_trigger(
+        self,
+    ):
+        script = benchmark.prepare_snapshot_capture_script(
+            1,
+            teardown_mode="guest-exit",
+            pre_capture_script="echo prepare\n",
+            post_restore_script="echo repair\n",
+        )
+
+        controller = script.split("<<'NVX_SNAPSHOT_CAPTURE_SCRIPT'\n", 1)[1]
+        controller = controller.split("NVX_SNAPSHOT_CAPTURE_SCRIPT\n", 1)[0]
+        self.assertIn(
+            "IFS= read -r trigger\n"
+            'if [ "$trigger" != nvx-snapshot ]; then\n'
+            "  /sbin/nvx-exit 90\n"
+            "  exit 90\n"
+            "fi\n"
+            f"{benchmark.SNAPSHOT_PRE_CAPTURE_PATH}\n"
+            "echo NVX-SNAPSHOT-DISPATCHED\n"
+            "/sbin/nvx-snapshot\n"
+            f"{benchmark.SNAPSHOT_POST_RESTORE_PATH}\n"
+            "echo OPENVMM-SNAPSHOT-RESTORE-OK\n",
+            controller,
+        )
+        self.assertTrue(
+            script.endswith(
+                f"cat >{benchmark.SNAPSHOT_PRE_CAPTURE_PATH} "
+                "<<'NVX_PRE_CAPTURE_SCRIPT'\n"
+                "echo prepare\nNVX_PRE_CAPTURE_SCRIPT\n"
+                f"chmod +x {benchmark.SNAPSHOT_PRE_CAPTURE_PATH}\n"
+                f"cat >{benchmark.SNAPSHOT_POST_RESTORE_PATH} "
+                "<<'NVX_POST_RESTORE_SCRIPT'\n"
+                "echo repair\nNVX_POST_RESTORE_SCRIPT\n"
+                f"chmod +x {benchmark.SNAPSHOT_POST_RESTORE_PATH}\n"
+                f"{benchmark.SNAPSHOT_CAPTURE_PATH}\n"
+            ),
+            script,
+        )
+
     def test_capture_does_not_wait_for_a_clocksource(self):
         # The time ABI registers the tsc clocksource at device_initcall on
         # every backend, so no capture waits for Linux to leave tsc-early.
