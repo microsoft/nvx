@@ -1087,6 +1087,32 @@ bounded command observations, the runtime record, the output of the run, of
 the probe, and of the guest's view, and the outcome reports of the run and of
 both stops.
 
+The `sandbox-gpt-layer` scenario of `test-microvm --backend BACKEND` is the
+acceptance for a GPT disk, over either upper. It writes a GPT disk in its
+temporary directory, whose first partition holds a few bytes and whose second,
+its one layer, a guest of the Alpine control initramfs formats as ext4 and
+fills with a copy of the tree of the Ubuntu EROFS layer. Then, over a scratch
+upper and then a RAM upper, a run of `/sbin/nvx-sandbox-smoke` with
+`--layer-format gpt` must print an OpenVMM command with the disk as its
+read-only distro block device, and a scratch block device for a scratch upper
+alone, whose kernel command line names the disk's GUID,
+`nvx_layer=distro,0xd0003000,gpt:GUID`, the upper's token alone,
+`nvx_sandbox=1`, and `nvx_mode=managed`. The probe must pass its checks of an
+execution of nvx-init, and the run's `--outcome-report` must report the
+success of the VM's stop and a complete teardown. A managed sandbox must record
+the disk's format and GUID and the upper, pass the probe's managed checks, and
+show its guest the same tokens, one virtio block device more for a scratch
+upper, and the disk's layer partition as the lower directory of its root,
+`/run/nvx/layers/p2`, before it stops with a successful outcome report and a
+complete teardown and is deprovisioned. The disk keeps its digest throughout.
+The scenario's evidence, with a `sandbox-gpt-layer-` prefix, holds the console
+of the guest that wrote the disk, the bounded command observations, the runtime
+record, the output of each run, probe, and view of the guest, and the outcome
+reports of each run and stop. With `sandbox-lifecycle` and
+`managed-exec-config`, which boot the EROFS layer over a scratch upper, and
+`sandbox-ram-upper`, CI runs it on KVM, MSHV, and WHP: the CLI's twelve cold
+cells, which the [case matrix](acceptance-case-matrix.md#cold-boots) lists.
+
 ### Live host shares
 
 `sandbox run` and `sandbox provision` accept repeatable

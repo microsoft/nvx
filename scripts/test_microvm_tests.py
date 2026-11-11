@@ -17,12 +17,15 @@ import re
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import uuid
+import zlib
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import ExitStack, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -2963,6 +2966,374 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
                 self.assertTrue(
                     (root / "results" / "sandbox-ram-upper-checks.json").is_file()
                 )
+
+
+class _FakeGptLayerSandboxCli(_FakeSandboxCli):
+    """Emulates `nvx-rs sandbox --layer-format gpt` and its guest, over a
+    scratch upper and a RAM upper: the disk's layer token and the upper's on
+    the kernel command line, the disk's layer partition as the lower
+    directory of the root's overlay, and a scratch block device for a scratch
+    upper alone.
+
+    Each fault names a regression of the planner, the guest, or the record
+    that the acceptance must detect.
+    """
+
+    @staticmethod
+    def _upper(values: dict[str, str]) -> str:
+        return "ram" if values.get("--upper") == "ram" else "scratch"
+
+    def _command_line(self, guid: str, upper: str) -> str:
+        image = "erofs" if "boots-erofs" in self.faults else "gpt"
+        tokens = [f"nvx_layer=distro,0xd0003000,{image}:{guid}"]
+        if "declares-both-uppers" in self.faults:
+            tokens += [microvm_tests.SCRATCH_UPPER_TOKEN, microvm_tests.RAM_UPPER_TOKEN]
+        elif upper == "ram":
+            tokens += [microvm_tests.RAM_UPPER_TOKEN, "nvx_ram_upper_percent=50"]
+        else:
+            tokens += [microvm_tests.SCRATCH_UPPER_TOKEN, "nvx_scratch_journal=allowed"]
+        return " ".join(
+            (*tokens, "nvx_sandbox=1", "nvx_mode=managed", "nvx_identity=65534:65534")
+        )
+
+    def _run(
+        self, state: Path | None, values: dict[str, str], arguments: list[str]
+    ) -> _CliResult:
+        assert state is None
+        assert values["--layer-format"] == "gpt"
+        assert values["--entrypoint"] == sandbox_lifecycle_tests.PROBE
+        assert arguments == ["init", "entry"]
+        _role, disk, guid = values["--layer"].split(",")
+        upper = self._upper(values)
+        blocks = f"--microvm-sandbox-block distro:file:{disk}"
+        if "attaches-disk-writable" not in self.faults:
+            blocks += ",ro"
+        if upper == "scratch" or "attaches-scratch" in self.faults:
+            scratch = values.get("--scratch", "scratch.ext4")
+            blocks += f" --microvm-sandbox-block scratch:file:{scratch}"
+        if "writes-disk" in self.faults:
+            with Path(disk).open("r+b") as image:
+                image.seek(microvm_tests.GPT_ALIGNMENT * microvm_tests.GPT_SECTOR)
+                image.write(b"written")
+        outcome = (
+            {"operation": "run", "category": "guest-exit", "status_code": 1}
+            if "run-reports-failure" in self.faults
+            else sandbox_ram_upper_tests.RUN_SUCCESS
+        )
+        Path(values["--outcome-report"]).write_text(
+            json.dumps(
+                {
+                    "backend": values["--hypervisor"],
+                    "outcome": outcome,
+                    "teardown": dict.fromkeys(
+                        microvm_tests.OUTCOME_TEARDOWN_FIELDS, True
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+        command = (
+            f">> openvmm {blocks} --cmdline '{self._command_line(guid, upper)}' "
+            "--microvm-report /tmp/nvx-sandbox-run-0/outcome.json\n"
+        )
+        output = (
+            b"" if "probe-fails" in self.faults else _FakeRamUpperSandboxCli.SMOKE_RUN
+        )
+        return 0, command.encode() + output, b""
+
+    def _provision(
+        self, state: Path | None, values: dict[str, str], _: list[str]
+    ) -> _CliResult:
+        result = super()._provision(state, values, _)
+        if result[0] == 0:
+            assert state is not None
+            path = state / "config.json"
+            config = json.loads(path.read_text(encoding="utf-8"))
+            _role, disk, guid = values["--layer"].split(",")
+            upper = self._upper(values)
+            if "records-other-upper" in self.faults:
+                upper = "ram" if upper == "scratch" else "scratch"
+            image = "erofs" if "records-erofs" in self.faults else "gpt"
+            config.update(
+                format=9,
+                image={"format": image, "path": disk, "identity": guid},
+                upper=(
+                    {"kind": "ram", "max_memory_percent": 50}
+                    if upper == "ram"
+                    else {"kind": "scratch", "path": values.get("--scratch", "")}
+                ),
+            )
+            path.write_text(json.dumps(config), encoding="utf-8")
+        return result
+
+    def _exec(
+        self, state: Path | None, values: dict[str, str], arguments: list[str]
+    ) -> _CliResult:
+        assert state is not None
+        if values["--entrypoint"] != "/bin/sh":
+            return super()._exec(state, values, arguments)
+        _, refusal = self._running(state)
+        if refusal is not None:
+            return refusal
+        assert arguments == ["-c", microvm_tests.GPT_VIEW_SCRIPT]
+        config = json.loads((state / "config.json").read_text(encoding="utf-8"))
+        upper = config["upper"]["kind"]
+        devices = (
+            "vda\nvdb\n"
+            if upper == "scratch" or "has-scratch-device" in self.faults
+            else "vda\n"
+        )
+        layer = "distro" if "lower-is-distro" in self.faults else "p2"
+        view = (
+            f"loop0\n{devices}lowerdir=/run/nvx/layers/{layer}\n"
+            f"{self._command_line(config['image']['identity'], upper)}\n"
+        )
+        return 0, view.encode(), b""
+
+
+class PublicSandboxGptLayerTests(unittest.TestCase):
+    # A run of each upper, then a managed sandbox: the probe and the guest's
+    # view.
+    EXPECTED_OPERATIONS = [
+        "run",
+        "provision",
+        "start",
+        "exec",
+        "exec",
+        "stop",
+        "deprovision",
+    ] * 2
+
+    def _run(self, root: Path, fake: _FakeGptLayerSandboxCli) -> tuple[Path, MagicMock]:
+        distro = root / "ubuntu-distro.erofs"
+        distro.write_bytes(b"distro")
+        template = root / "ubuntu-smoke-scratch.ext4"
+        template.write_bytes(bytes(4096))
+        artifacts = managed_exec_tests.WorkloadArtifacts(
+            distro, "12345678-1234-1234-1234-123456789abc", template
+        )
+        output_dir = root / "results"
+        mkdtemp = tempfile.mkdtemp
+
+        def fixture(prefix: str) -> str:
+            return mkdtemp(prefix=prefix, dir=root)
+
+        with (
+            patch.object(
+                microvm_tests, "load_workload_artifacts", return_value=artifacts
+            ),
+            patch.object(microvm_tests, "GPT_LAYER_MIN_BYTES", 1 << 20),
+            patch.object(microvm_tests, "run_guest_script") as guest,
+            patch.object(microvm_tests.tempfile, "mkdtemp", side_effect=fixture),
+            patch.object(sandbox_lifecycle_tests.subprocess, "run", side_effect=fake),
+            patch.object(
+                sandbox_lifecycle_tests.nvx_rs,
+                "require_binary",
+                return_value=Path("nvx-rs"),
+            ),
+            patch.object(
+                sandbox_lifecycle_tests,
+                "openvmm_processes",
+                side_effect=fake.processes,
+            ),
+            patch.object(
+                sandbox_lifecycle_tests,
+                "control_endpoint_present",
+                side_effect=fake.endpoint_present,
+            ),
+            patch.object(
+                sandbox_lifecycle_tests,
+                "terminate_process",
+                side_effect=fake.terminate,
+            ),
+            patch.object(
+                sandbox_lifecycle_tests, "openvmm_threads_remain", return_value=False
+            ),
+        ):
+            microvm_tests.run_sandbox_gpt_layer(
+                Path("openvmm"),
+                Path("vmlinux"),
+                Path("initramfs.cpio.gz"),
+                "kvm",
+                timeout=2,
+                output_dir=output_dir,
+            )
+        return output_dir, guest
+
+    def test_acceptance_runs_the_cold_cells_of_a_gpt_disk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = _FakeGptLayerSandboxCli()
+            output_dir, guest = self._run(root, fake)
+            checks = json.loads(
+                (output_dir / "sandbox-gpt-layer-checks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            evidence = {path.name for path in output_dir.iterdir()}
+            fixtures = list(root.glob("nvx-public-gpt-layer-*"))
+
+        self.assertEqual(fake.operations, self.EXPECTED_OPERATIONS)
+        self.assertEqual(fixtures, [])
+        self.assertFalse(any(fake.running.values()))
+        self.assertEqual(
+            evidence,
+            {
+                f"sandbox-gpt-layer-{name}"
+                for upper in ("scratch", "ram")
+                for name in (
+                    f"run-{upper}.log",
+                    f"run-{upper}-outcome.json",
+                    f"{upper}-probe.log",
+                    f"{upper}-view.log",
+                    f"{upper}-outcome.json",
+                )
+            }
+            | {"sandbox-gpt-layer-checks.json", "sandbox-gpt-layer-runtime.json"},
+        )
+        # A guest of the control initramfs writes the layer, with the EROFS
+        # layer as its distro block device and the disk as its scratch.
+        guest.assert_called_once()
+        command = guest.call_args.args[0]
+        disk = next(
+            argument.removeprefix("scratch:file:")
+            for argument in command
+            if argument.startswith("scratch:file:")
+        )
+        self.assertEqual(Path(disk).name, "distro.gpt")
+        self.assertIn(f"distro:file:{root / 'ubuntu-distro.erofs'},ro", command)
+        self.assertEqual(
+            guest.call_args.args[1:],
+            (
+                microvm_tests.GPT_LAYER_SCRIPT,
+                microvm_tests.GPT_LAYER_READY_MARKER,
+            ),
+        )
+        # Each upper's run and provision name the disk's GUID in its format,
+        # and a scratch image for a scratch upper alone.
+        launches = [
+            record["argv"]
+            for record in checks
+            if record["operation"] in {"run", "provision"}
+        ]
+        guids: set[str] = set()
+        for argv, upper in zip(
+            launches, ("scratch", "scratch", "ram", "ram"), strict=True
+        ):
+            role, path, guid = argv[argv.index("--layer") + 1].split(",")
+            guids.add(guid)
+            self.assertEqual((role, path), ("distro", disk))
+            self.assertEqual(argv[argv.index("--layer-format") + 1], "gpt")
+            self.assertEqual("--scratch" in argv, upper == "scratch")
+            self.assertEqual("--upper" in argv, upper == "ram")
+        self.assertEqual(len(guids), 1)
+
+    def test_acceptance_detects_gpt_layer_regressions(self):
+        regressions = {
+            "boots-erofs": "the GPT/scratch run's OpenVMM command does not boot",
+            "attaches-disk-writable": "the GPT/scratch run did not attach its disk",
+            "declares-both-uppers": "does not boot the GPT disk over the scratch upper",
+            "probe-fails": "the GPT/scratch run's probe did not report",
+            "run-reports-failure": "the run reported",
+            "records-erofs": "provision recorded the GPT/scratch root as",
+            "records-other-upper": "provision recorded the GPT/scratch root as",
+            "lower-is-distro": "and the root's 'lowerdir=/run/nvx/layers/distro'",
+            "stop-reports-incomplete-teardown": "the managed report has incomplete",
+            "attaches-scratch": "the GPT/ram run did not attach its disk and upper",
+            "has-scratch-device": "of GPT/ram has the virtio block devices ['vda', 'vdb']",
+            "writes-disk": "the GPT sandboxes modified their disk",
+        }
+        for fault, message in regressions.items():
+            with (
+                self.subTest(fault=fault),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                fake = _FakeGptLayerSandboxCli(fault)
+                with self.assertRaisesRegex(RuntimeError, re.escape(message)):
+                    self._run(root, fake)
+                # Cleanup ends every OpenVMM process and removes the fixture.
+                self.assertFalse(any(fake.running.values()))
+                self.assertEqual(list(root.glob("nvx-public-gpt-layer-*")), [])
+                self.assertTrue(
+                    (root / "results" / "sandbox-gpt-layer-checks.json").is_file()
+                )
+
+    def test_the_disk_is_laid_out_as_uefi_lays_out_a_gpt_disk(self):
+        sector = microvm_tests.GPT_SECTOR
+        layer_bytes = 3 << 20
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "distro.gpt"
+            guid = uuid.UUID(microvm_tests.write_gpt_disk(path, layer_bytes))
+            disk = path.read_bytes()
+        sectors = len(disk) // sector
+        self.assertEqual(len(disk) % sector, 0)
+
+        def block(lba: int, count: int = 1) -> bytes:
+            return disk[lba * sector : (lba + count) * sector]
+
+        # The protective MBR: one record of type 0xEE from LBA 1.
+        mbr = block(0)
+        self.assertEqual(mbr[510:], b"\x55\xaa")
+        self.assertEqual(mbr[446 + 4], 0xEE)
+        self.assertEqual(struct.unpack_from("<II", mbr, 446 + 8), (1, sectors - 1))
+        self.assertEqual(mbr[446 + 16 : 510], bytes(48))
+
+        def header(lba: int) -> tuple[Any, ...]:
+            data = block(lba)
+            fields = struct.unpack_from("<8sIIIIQQQQ16sQIII", data)
+            checked = bytearray(data[:92])
+            checked[16:20] = bytes(4)
+            self.assertEqual(zlib.crc32(checked), fields[3])
+            self.assertEqual(data[92:], bytes(sector - 92))
+            return fields
+
+        primary, backup = header(1), header(sectors - 1)
+        self.assertEqual(primary[:3], (b"EFI PART", 0x0001_0000, 92))
+        self.assertEqual(primary[4:9], (0, 1, sectors - 1, 34, sectors - 34))
+        self.assertEqual(
+            (uuid.UUID(bytes_le=primary[9]), primary[10:13]), (guid, (2, 128, 128))
+        )
+        self.assertEqual(backup[4:7], (0, sectors - 1, 1))
+        self.assertEqual((backup[7:10], backup[10]), (primary[7:10], sectors - 33))
+        entries = block(2, 32)
+        self.assertEqual(block(sectors - 33, 32), entries)
+        self.assertEqual(zlib.crc32(entries), primary[13])
+        self.assertEqual(primary[13], backup[13])
+
+        # Two partitions of Linux's filesystem data, each of its own GUID, on
+        # 1 MiB boundaries in the usable blocks, and nothing after them.
+        partitions = [
+            struct.unpack_from("<16s16sQQQ", entries, index * 128) for index in range(2)
+        ]
+        self.assertEqual(entries[256:], bytes(126 * 128))
+        linux_data = uuid.UUID("0fc63daf-8483-4772-8e79-3d69d8477de4")
+        self.assertEqual(
+            [uuid.UUID(bytes_le=kind) for kind, *_ in partitions], [linux_data] * 2
+        )
+        unique = {uuid.UUID(bytes_le=partition[1]) for partition in partitions}
+        self.assertEqual(len(unique | {guid}), 3)
+        self.assertEqual(
+            [partition[2:] for partition in partitions],
+            [(2048, 2055, 0), (4096, 4096 + layer_bytes // sector - 1, 0)],
+        )
+        self.assertLessEqual(partitions[1][3], sectors - 34)
+        # The first partition holds its bytes, and the layer nothing yet.
+        self.assertEqual(
+            block(2048, 8).rstrip(b"\0"), microvm_tests.GPT_FIRST_PARTITION
+        )
+        self.assertEqual(block(4096, layer_bytes // sector), bytes(layer_bytes))
+
+    def test_a_layer_of_part_of_a_sector_is_refused_before_the_disk_is_written(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "distro.gpt"
+            for layer_bytes in (0, 1000):
+                with (
+                    self.subTest(layer_bytes=layer_bytes),
+                    self.assertRaisesRegex(common.ScriptError, "whole sectors"),
+                ):
+                    microvm_tests.write_gpt_disk(path, layer_bytes)
+                self.assertFalse(path.exists())
 
 
 class GuestIdentityScriptTests(unittest.TestCase):
@@ -15243,6 +15614,42 @@ class MicrovmTests(unittest.TestCase):
                 "whp", timeout=args.timeout, output_dir=output_dir
             )
             lifecycle.assert_not_called()
+
+    def test_runner_dispatches_public_sandbox_gpt_layer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "kvm",
+                    "--scenario",
+                    "sandbox-gpt-layer",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(microvm_tests, "run_sandbox_gpt_layer") as run,
+                patch.object(microvm_tests, "run_sandbox_ram_upper") as ram_upper,
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            # The guest that writes the GPT disk boots the run's artifacts.
+            run.assert_called_once_with(
+                microvm_tests.openvmm_binary_path(),
+                microvm_tests.artifact_path("vmlinux"),
+                microvm_tests.artifact_path("initramfs.cpio.gz"),
+                "kvm",
+                timeout=args.timeout,
+                output_dir=output_dir,
+            )
+            ram_upper.assert_not_called()
 
     def test_a_default_run_runs_the_public_sandbox_scenarios(self):
         def require(path: Path, _description: str) -> Path:
