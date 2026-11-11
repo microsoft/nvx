@@ -8,13 +8,12 @@
 //! mounts, and its account of a host's mapping table; [`exec`], which drives each program as one
 //! execution, with its launch, its bounded output and input, its ending, and its outcome; and,
 //! on x86-64, [`snapshot`], which composes a strictly checked Fresh capture by one caller deadline,
-//! without execution control; and `activation`, through which a template's guest prepares for and requests a snapshot's
-//! capture before its root's assembly, behind the caller's fence of workload admission, with
-//! nothing mounted from the devices that its clones replace, and through which each clone that a
-//! restore of the snapshot starts repairs its restore: it activates the restore's memory target,
-//! reseeds the kernel's random number generator, and finishes the restore, with its
-//! acknowledgement, and then takes its own configuration from the activation record that its
-//! restore packet carried, and reports its readiness on its control session.
+//! without execution control, with nothing mounted from the devices that a template's clones
+//! replace, and which repairs each clone that a restore of the snapshot starts before it returns:
+//! it activates the restore's memory target, reseeds the kernel's random number generator, and
+//! finishes the restore, with its acknowledgement; and `activation`, through which each repaired
+//! clone then takes its own configuration from the host, in one Activate on a restricted control
+//! session.
 //!
 //! The [guest-agent guidelines] give an init agent's contract for its space, its executions, a
 //! capture, and a restore, with nvx-init as the worked example; the library enforces none of it.
@@ -128,7 +127,7 @@ pub use generation::GenerationId;
 #[cfg(target_arch = "x86_64")]
 pub mod activation;
 pub mod cgroup;
-/// Compatibility name for the guest's activation and legacy capture interface.
+/// Compatibility name for the guest's activation.
 #[cfg(target_arch = "x86_64")]
 pub use activation as clone;
 #[doc(hidden)]

@@ -68,10 +68,6 @@ impl System for CaptureSystem {
         panic!("this fixture has no block-backed mounts");
     }
 
-    fn pre_capture(&mut self) -> Result<(), PreCaptureError> {
-        panic!("the single-call capture must use the strict bounded preparation");
-    }
-
     fn pre_capture_until(&mut self, deadline: Instant) -> Result<(), (PreCaptureError, bool)> {
         assert_eq!(self.deadline, Some(deadline));
         self.calls.push("prepare");
@@ -221,6 +217,67 @@ fn a_pre_request_failure_resumes_only_after_its_detector_restoration_succeeds() 
         }
         assert_eq!(system.calls.last(), Some(&"release"));
         assert!(!system.calls.contains(&"request"));
+    }
+}
+
+#[test]
+fn a_failed_time_preparation_names_its_stage_and_restores_the_detectors_that_it_holds() {
+    // Each failure, its stage, the error number of its cause, and whether the time ABI holds the
+    // detectors' suppression.
+    let cases = [
+        (
+            PreCaptureError::BootChecks(TimeError::PortAccess(Errno::EPERM.into())),
+            CaptureStage::BootChecks,
+            None,
+            false,
+        ),
+        (
+            PreCaptureError::CaptureChecks(TimeError::StateUnavailable),
+            CaptureStage::CaptureChecks,
+            None,
+            false,
+        ),
+        (
+            PreCaptureError::Pending,
+            CaptureStage::Suppression,
+            None,
+            false,
+        ),
+        (
+            PreCaptureError::Suppression(Errno::EROFS),
+            CaptureStage::Suppression,
+            Some(Errno::EROFS),
+            false,
+        ),
+        (
+            PreCaptureError::Unrestored(Errno::EIO),
+            CaptureStage::Suppression,
+            Some(Errno::EIO),
+            true,
+        ),
+    ];
+    for (error, stage, errno, held) in cases {
+        let case = format!("{error:?}");
+        let pending = matches!(error, PreCaptureError::Pending);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut system = CaptureSystem::new(deadline);
+        system.preparation = Some(Err((error, held)));
+        let failure = capture_with(&mut system, &capture_devices(), deadline).unwrap_err();
+        assert_eq!(failure.stage, stage, "{case}");
+        match (&failure.cause, errno) {
+            (CaptureCause::Pending, None) if pending => {}
+            (CaptureCause::Time(_), None) if !pending => {}
+            (CaptureCause::Io(cause), Some(errno))
+                if cause.raw_os_error() == Some(errno as i32) => {}
+            _ => panic!("{case}: {failure:?}"),
+        }
+        assert_eq!(failure.disposition, Disposition::Resumed, "{case}");
+        // The capture restores the detectors' settings that the time ABI holds, or nothing.
+        let mut expected = vec!["mounts", "window", "window", "prepare"];
+        if held {
+            expected.push("release");
+        }
+        assert_eq!(system.calls, expected, "{case}");
     }
 }
 
