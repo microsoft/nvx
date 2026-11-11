@@ -239,6 +239,8 @@ jobs:
           --scenario sandbox-ram-upper
           --scenario sandbox-gpt-layer
           --scenario vm-lifecycle
+          --scenario snapshot-core
+          --scenario snapshot-tiers
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
 
       - name: Run public managed sandbox acceptance on Windows
@@ -253,6 +255,8 @@ jobs:
           --scenario sandbox-ram-upper
           --scenario sandbox-gpt-layer
           --scenario vm-lifecycle
+          --scenario snapshot-core
+          --scenario snapshot-tiers
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
 
       - name: Run Ubuntu guest smoke tests on Linux
@@ -331,7 +335,6 @@ jobs:
           --scenario managed-lifecycle
           --scenario network-snapshot
           --scenario smp
-          --scenario snapshot-core
           --scenario workload-identity
           --output-dir "build/test-results/ubuntu-kvm-extended"
 

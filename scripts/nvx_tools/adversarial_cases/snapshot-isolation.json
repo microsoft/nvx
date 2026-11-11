@@ -124,11 +124,11 @@
     {
       "id": "snapshot-tier-boundary",
       "scenario": "snapshot-tiers",
-      "description": "Exercise policy-tier dispatch and cross-instance state isolation across restores.",
+      "description": "Restore one platform-tier snapshot into sandboxes of each image format over each upper, each with a root of its own.",
       "coverage": [
         "snapshot-tiers",
-        "cross-instance-isolation",
-        "tier-validation"
+        "image-formats",
+        "cross-instance-isolation"
       ],
       "repetitions": 1,
       "timeout_multiplier": 6
