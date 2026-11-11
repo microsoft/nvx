@@ -1205,7 +1205,10 @@ fn terminal_quit_and_suspend_keys_remain_guest_console_input() {
     foreground_exits_promptly(&mut process, &native);
     let output = process.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(130), "{output:?}");
-    for key in [SpecialCharacterIndices::VQUIT, SpecialCharacterIndices::VSUSP] {
+    for key in [
+        SpecialCharacterIndices::VQUIT,
+        SpecialCharacterIndices::VSUSP,
+    ] {
         assert_eq!(raw.control_chars[key as usize], nix::libc::_POSIX_VDISABLE);
     }
     let restored = tcgetattr(&terminal.slave).unwrap();
