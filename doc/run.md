@@ -1128,6 +1128,86 @@ reports of each run and stop. With `sandbox-lifecycle` and
 `sandbox-ram-upper`, CI runs it on KVM, MSHV, and WHP: the CLI's twelve cold
 cells, which the [case matrix](acceptance-case-matrix.md#cold-boots) lists.
 
+### Named snapshots
+
+`nvx-rs snapshot capture` captures a VM that nvx-init runs, before any
+workload, with a placeholder image, a dormant scratch, and no NIC, into a named
+snapshot of a store, which `nvx-rs snapshot restore` and
+`nvx-rs run --restore-snapshot` restore under the snapshot's lock, with an
+image and an upper of their own; see
+[`snapshot capture`](usage.md#snapshot-capture) and
+[`snapshot restore`](usage.md#snapshot-restore). The public `snapshot-core` and
+`snapshot-tiers` scenarios of `test-microvm --backend BACKEND` are their
+acceptance, with the Ubuntu layer and the scratch template that
+`nvx-rs download` installs. The workload of each restore is a probe, a
+script that `/bin/sh -c` runs, which reports the guest's clock and uptime,
+fresh random values, its machine ID, host name, and identity, the lower and
+upper directories of its root's overlay, its block devices and network
+interfaces, the distribution of its image, and the marker file of its host
+share at `/data`, if it has one.
+
+The `snapshot-core` scenario captures one snapshot, whose directory must hold
+exactly `key.bin`, `snapshot.json`, and `openvmm/`, each file with one link,
+while no directory or OpenVMM process of the capture's VM remains. After a
+downtime longer than the capture, two `run --restore-snapshot` restores of the
+Ubuntu EROFS layer, in RAM as `65534:65534` and over a fresh copy of the
+scratch template as `1:1`, each with a host name of its own, must run as the
+restore's identity with its host name, the layer as the root's lower directory
+over the upper, the snapshot's two block devices, and no NIC, with a clock
+that reads the host's time and an uptime that kept the time before the capture
+and counts the downtime, and must report different random values, kernel
+UUIDs, machine IDs, and temporary file names. A `snapshot restore` over a
+scratch image of half the dormant scratch's length is refused before any VM
+starts: its error names the lengths of the requested scratch and of the
+dormant one, which attributes the failure to the request, and its sandbox,
+which a failed start keeps provisioned, must hold `config.json` and
+`sandbox.lock` alone, where a launch leaves OpenVMM's log and outcome report
+and the view of the snapshot, until `sandbox deprovision` removes it. A
+`run --restore-snapshot` over a zeroed scratch image of the dormant scratch's
+length, which the guest cannot mount as its upper, ends its VM before its
+workload runs and frees the snapshot's lock, which the restores that follow
+take, and the run reports the guest's exit:
+`OpenVMM exited during startup: guest-exit status 125`.
+
+Then three `snapshot restore` restores start at once, each with a host name
+and a read-only host share of its own, the last over a scratch upper and the
+others in RAM, and a workload that ends only once the scenario creates a
+`release` file in its share, which the guest reads live. While the first holds
+the snapshot's lock, a `run --restore-snapshot` restore that may wait one
+second for the lock fails with `sandbox-busy` before its workload runs, and
+neither of the other two may link its view of the snapshot, which a restore
+does only once it holds the lock. Once the scenario releases the first, one of
+the other two takes the lock, and the last may link its view only once the
+scenario releases that one. The three sandboxes then run at once: each guest
+must read the marker of its own share, and a file that a `sandbox exec` writes
+in one sandbox's `/tmp`, in its upper, must appear in no other. Each must stop with an outcome report of a successful restored VM
+without a network policy and a complete teardown, and be deprovisioned. No
+restore may change the snapshot's files, leave a link to them, or leave an
+OpenVMM process.
+
+The `snapshot-tiers` scenario captures one snapshot of the platform tier, the
+one tier that `snapshot capture` captures, and restores it with
+`snapshot restore` into a managed sandbox of each image format over each
+upper: the Ubuntu EROFS layer, and a GPT disk of its tree that a guest of the
+Alpine control initramfs writes, as `sandbox-gpt-layer` does, each over a
+fresh copy of the scratch template and in RAM. Each guest must have its image
+as its root's lower directory, `/run/nvx/layers/distro` or
+`/run/nvx/layers/p2`, over its upper, and a `sandbox exec` in its sandbox must
+see the same root of the same guest. Each sandbox must stop cleanly and be
+deprovisioned, and the restores change neither image nor the snapshot.
+
+Both scenarios journal the OpenVMM processes of their managed restores, as
+the other scenarios of the `snapshot-isolation`
+[adversarial campaign](adversarial-testing.md) journal theirs. Their evidence,
+with a `snapshot-core-` or `snapshot-tiers-` prefix, holds the bounded command
+observations, the output of each command, and the outcome reports of the
+managed sandboxes, and that of `snapshot-tiers` the console of the guest that
+wrote its GPT disk. CI runs them on KVM, MSHV, and WHP with the public sandbox
+scenarios. A snapshot that `snapshot capture` captures has no NIC, so its
+restores take no network option, and the raw `untiered-network-policy`
+scenario keeps the coverage of a restore's DNS, egress, forwards, and listener
+publication until a capture can keep a NIC.
+
 ### Live host shares
 
 `sandbox run` and `sandbox provision` accept repeatable

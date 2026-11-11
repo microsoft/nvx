@@ -23,7 +23,8 @@ import threading
 import time
 import uuid
 import zlib
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,7 @@ from .benchmark import (
     parse_snapshot_profile_line,
     positive_float,
     positive_int,
+    record_adversarial_openvmm_pid,
     smp_probe_script,
     snapshot_restore_command,
     workload_boot_command,
@@ -69,6 +71,7 @@ from .common import (
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .managed_exec_tests import (
     WorkloadArtifacts,
+    bounded_text,
     load_workload_artifacts,
     run_managed_exec_configuration,
     workload_artifact_paths,
@@ -85,12 +88,16 @@ from .sandbox_lifecycle_tests import (
     OUTCOME,
     PROBE,
     PROVISIONED_ENTRIES,
+    RUNTIME,
     STOPPED_ENTRIES,
     LifecycleAcceptance,
     bounded_evidence,
     check_managed_report,
+    kill_openvmm,
     managed_report,
     openvmm_processes,
+    read_runtime,
+    recorded_pid,
     run_acceptance,
     run_sandbox_lifecycle,
     terminate_process,
@@ -196,16 +203,17 @@ SANDBOX_CONTROL_SCENARIOS = frozenset(
         "sandbox-proxy-only",
         "sandbox-ram-upper",
         "scratch-snapshot",
+        "snapshot-core",
         "snapshot-tiers",
         "virtio-features",
         "vm-lifecycle",
     )
 )
-# The public scenarios, of `nvx-rs sandbox` and of the public API's VM
-# lifecycle, which also read the Ubuntu distro layer and the sandbox scratch
-# template that `nvx-rs download` installs. A default run runs them, but CI
-# runs them in its guest and sandbox jobs, which take those Ubuntu artifacts,
-# rather than in the shards of the default suite.
+# The public scenarios, of `nvx-rs sandbox`, of its named snapshots, and of
+# the public API's VM lifecycle, which also read the Ubuntu distro layer and
+# the sandbox scratch template that `nvx-rs download` installs. A default run
+# runs them, but CI runs them in its guest and sandbox jobs, which take those
+# Ubuntu artifacts, rather than in the shards of the default suite.
 PUBLIC_SANDBOX_SCENARIOS = frozenset(
     (
         "managed-exec-config",
@@ -213,6 +221,8 @@ PUBLIC_SANDBOX_SCENARIOS = frozenset(
         "sandbox-lifecycle",
         "sandbox-proxy-only",
         "sandbox-ram-upper",
+        "snapshot-core",
+        "snapshot-tiers",
         "vm-lifecycle",
     )
 )
@@ -224,7 +234,6 @@ DEBUG_KERNEL_SCENARIOS = (
     "smp-snapshot",
     "restore-processors",
     "restore-downtime",
-    "snapshot-tiers",
 )
 # Scenarios that run only when named, never in a default suite. The time ABI
 # hides TSC-deadline on every backend, so `smp` already runs on the one-shot
@@ -386,8 +395,6 @@ PRIVATE_INGRESS_TCP_REPLY = b"NVX-PRIVATE-INGRESS-TCP-REPLY\n"
 PRIVATE_INGRESS_UDP_REQUEST = b"NVX-PRIVATE-INGRESS-UDP-REQUEST\n"
 PRIVATE_INGRESS_UDP_REPLY = b"NVX-PRIVATE-INGRESS-UDP-REPLY\n"
 SANDBOX_BLOCK_SIZE = 8 * 1024 * 1024
-SNAPSHOT_CORE_CONTINUED_MARKER = b"NVX-SNAPSHOT-CORE-CONTINUED"
-SNAPSHOT_CORE_COMPLETION_MARKER = b"NVX-SNAPSHOT-CORE-OK"
 CONSOLE_BINARY_MARKER = b"\0\r\n\x7f\xffNVX-CONSOLE-BINARY"
 CONSOLE_RX_READY_MARKER = b"NVX-CONSOLE-RX-READY"
 CONSOLE_RX_QUEUED_MARKER = b"NVX-CONSOLE-RX-QUEUED"
@@ -1156,17 +1163,6 @@ def _single_framed_marker_value(output: bytes, prefix: bytes, suffix: bytes) -> 
     return values[0]
 
 
-def _parse_marker_pair(output: bytes, prefix: bytes) -> tuple[int, int]:
-    value = _single_marker_value(output, prefix)
-    parts = value.split(b"-")
-    if len(parts) != 2:
-        raise RuntimeError(f"malformed {prefix!r} marker: {value!r}")
-    try:
-        return int(parts[0]), int(parts[1])
-    except ValueError as error:
-        raise RuntimeError(f"malformed {prefix!r} marker: {value!r}") from error
-
-
 def _available_tcp_address() -> tuple[str, int]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -1898,6 +1894,56 @@ def write_gpt_disk(path: Path, layer_bytes: int) -> str:
     return str(guid)
 
 
+def write_gpt_layer(
+    disk: Path,
+    distro: Path,
+    *,
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    timeout: float,
+    log_path: Path,
+) -> str:
+    """Write a new GPT disk at ``disk`` whose layer partition holds an ext4
+    copy of the tree of the EROFS layer ``distro``, and return its GUID.
+
+    The layer partition takes GPT_LAYER_EXPANSION times the compressed EROFS
+    layer, at least GPT_LAYER_MIN_BYTES, in whole MiB. A guest of the control
+    initramfs, which ``executable``, ``kernel``, and ``initrd`` boot on
+    ``backend``, formats it and copies the tree, with the EROFS layer as its
+    distro block device and the disk as its scratch, and its console goes to
+    ``log_path``.
+    """
+    layer_bytes = max(GPT_LAYER_MIN_BYTES, GPT_LAYER_EXPANSION * distro.stat().st_size)
+    layer_bytes += -layer_bytes % (1 << 20)
+    guid = write_gpt_disk(disk, layer_bytes)
+    command = workload_boot_command(
+        executable,
+        backend,
+        kernel,
+        initrd,
+        GPT_LAYER_MEMORY_MIB,
+        "quiet loglevel=0",
+    )
+    command.extend(
+        (
+            "--microvm-sandbox-block",
+            _block_arg("distro", distro, read_only=True),
+            "--microvm-sandbox-block",
+            _block_arg("scratch", disk, read_only=False),
+        )
+    )
+    run_guest_script(
+        command,
+        GPT_LAYER_SCRIPT,
+        GPT_LAYER_READY_MARKER,
+        timeout=timeout,
+        log_path=log_path,
+    )
+    return guid
+
+
 class GptLayerAcceptance(LifecycleAcceptance):
     """The CLI's cold cells of a GPT disk on the selected backend: over a
     scratch upper and a RAM upper, a `sandbox run`, and a managed sandbox's
@@ -1941,35 +1987,15 @@ class GptLayerAcceptance(LifecycleAcceptance):
         self.require_processes((), "after the GPT sandboxes")
 
     def write_disk(self) -> None:
-        """Writes the GPT disk, then has a guest of the control initramfs
-        format its layer partition as ext4 and copy the EROFS layer's tree
-        into it."""
-        layer_bytes = max(
-            GPT_LAYER_MIN_BYTES,
-            GPT_LAYER_EXPANSION * self.artifacts.distro.stat().st_size,
-        )
-        layer_bytes += -layer_bytes % (1 << 20)
-        self.guid = write_gpt_disk(self.disk, layer_bytes)
-        command = workload_boot_command(
-            self.executable,
-            self.backend,
-            self.kernel,
-            self.initrd,
-            GPT_LAYER_MEMORY_MIB,
-            "quiet loglevel=0",
-        )
-        command.extend(
-            (
-                "--microvm-sandbox-block",
-                _block_arg("distro", self.artifacts.distro, read_only=True),
-                "--microvm-sandbox-block",
-                _block_arg("scratch", self.disk, read_only=False),
-            )
-        )
-        run_guest_script(
-            command,
-            GPT_LAYER_SCRIPT,
-            GPT_LAYER_READY_MARKER,
+        """Writes the GPT disk, whose layer partition a guest of the control
+        initramfs fills with the tree of the EROFS layer."""
+        self.guid = write_gpt_layer(
+            self.disk,
+            self.artifacts.distro,
+            executable=self.executable,
+            kernel=self.kernel,
+            initrd=self.initrd,
+            backend=self.backend,
             timeout=self.timeout,
             log_path=self.output_dir / f"{self.evidence_prefix}disk.log",
         )
@@ -2141,6 +2167,1184 @@ def run_sandbox_gpt_layer(
     root = Path(tempfile.mkdtemp(prefix="nvx-public-gpt-layer-"))
     run_acceptance(
         GptLayerAcceptance(
+            backend,
+            timeout=timeout,
+            output_dir=output_dir,
+            artifacts=artifacts,
+            root=root,
+            executable=executable,
+            kernel=kernel,
+            initrd=initrd,
+        )
+    )
+
+
+# The public snapshot scenarios, snapshot-core and snapshot-tiers, capture a
+# named snapshot with `nvx-rs snapshot capture`, whose VM nvx-init runs without
+# a NIC, and restore it with `snapshot restore` and `run --restore-snapshot`,
+# under the CLI's lock of the snapshot (#1118). The workload of each restore is
+# the snapshot probe, which reports on one line what the restored guest sees:
+# its clock and uptime, fresh random values, its machine ID, host name and
+# identity, the lower and upper directories of its root's overlay, its block
+# devices and network interfaces, the distribution of its image, and the
+# marker of the host share at SNAPSHOT_SHARE_TARGET, or none without one.
+SNAPSHOT_PROBE_PREFIX = b"NVX-SNAPSHOT-PROBE "
+SNAPSHOT_PROBE_FIELDS: frozenset[str] = frozenset(
+    (
+        "label",
+        "wall",
+        "uptime",
+        "uuid",
+        "rng",
+        "machine",
+        "host",
+        "id",
+        "temp",
+        "lower",
+        "upper",
+        "devices",
+        "net",
+        "release",
+        "share",
+    )
+)
+SNAPSHOT_SHARE_TARGET = "/data"
+# The file whose creation in its share ends the workload of a restore that
+# holds the snapshot's lock until the scenario releases it.
+SNAPSHOT_RELEASE = "release"
+SNAPSHOT_PROBE_SCRIPT = r"""set -eu
+line=NVX-SNAPSHOT-PROBE
+report() {
+    line="$line $1=$2"
+}
+report label @LABEL@
+report wall "$(date +%s.%N)"
+report uptime "$(cut -d' ' -f1 /proc/uptime)"
+report uuid "$(cat /proc/sys/kernel/random/uuid)"
+report rng "$(head -c 32 /dev/urandom | od -An -v -tx1 | tr -d ' \n')"
+report machine "$(cat /etc/machine-id)"
+report host "$(cat /proc/sys/kernel/hostname)"
+report id "$(id -u):$(id -g)"
+temp=$(mktemp)
+rm -f "$temp"
+report temp "${temp##*/}"
+root=$(grep ' / / ' /proc/self/mountinfo)
+report lower "$(printf '%s\n' "$root" | grep -o 'lowerdir=[^,]*' | cut -d= -f2)"
+report upper "$(printf '%s\n' "$root" | grep -o 'upperdir=[^,]*' | cut -d= -f2)"
+report devices "$(ls /sys/block | grep '^vd' | paste -sd, -)"
+report net "$(ls /sys/class/net | paste -sd, -)"
+. /etc/os-release
+report release "$ID"
+share=none
+if [ -r @SHARE@/marker ]; then
+    share=$(cat @SHARE@/marker)
+fi
+report share "$share"
+printf '%s\n' "$line"
+"""
+# What a probe that holds its restore runs after its report: it waits until
+# the host creates SNAPSHOT_RELEASE in its share, which the guest reads live.
+SNAPSHOT_PROBE_HOLD = r"""while [ ! -e @SHARE@/@RELEASE@ ]; do
+    sleep 0.1
+done
+"""
+# What a sandbox's root holds, in the marker of its share and in the files
+# that execs wrote in its upper, while the restored sandboxes run at once.
+SNAPSHOT_VIEW_SCRIPT = (
+    r"""printf 'share=%s\n' "$(cat @SHARE@/marker)"
+for name in /tmp/nvx-upper-*; do
+    printf 'file=%s\n' "${name##*/}"
+done
+"""
+).replace("@SHARE@", SNAPSHOT_SHARE_TARGET)
+# The entries of a named snapshot's directory, which `snapshot capture`
+# publishes.
+SNAPSHOT_ENTRIES: frozenset[str] = frozenset(("key.bin", "snapshot.json", "openvmm"))
+# The block devices of a VM that a snapshot of `snapshot capture` restores,
+# which the snapshot fixes: its image, in place of the placeholder, and its
+# dormant scratch, which a scratch upper's image takes, whatever the upper.
+SNAPSHOT_DEVICES = "vda,vdb"
+# The upper directory of a restored root's overlay, by its upper.
+SNAPSHOT_UPPERS = {"ram": "/run/nvx/tmpfs/upper", "scratch": "/run/nvx/scratch/upper"}
+# The guest memory of a restore: the boot memory of `snapshot capture`, which
+# is its capacity too.
+SNAPSHOT_MEMORY_MIB = 256
+# The host name and the workload identity of a restored sandbox by default.
+SNAPSHOT_HOSTNAME = "nvx-sandbox"
+SNAPSHOT_IDENTITY = "65534:65534"
+# How far the clock of a restored guest may be from the host's.
+SNAPSHOT_CLOCK_TOLERANCE_SECONDS = 2.0
+# The outcome of a restored VM that `sandbox stop` stopped.
+RESTORED_SUCCESS = {"operation": "restore", "category": "success", "status_code": 0}
+# The launch journal of the VM of a capture, in the store's `capture`
+# directory until the capture ends.
+CAPTURE_JOURNAL = "launch.json"
+
+
+def snapshot_probe_script(label: str, *, hold: bool = False) -> str:
+    """Return the snapshot probe, which reports as ``label``, and with
+    ``hold`` then waits until the host creates SNAPSHOT_RELEASE in its share.
+    """
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", label):
+        raise ValueError(f"invalid snapshot probe label {label!r}")
+    script = SNAPSHOT_PROBE_SCRIPT + (SNAPSHOT_PROBE_HOLD if hold else "")
+    return (
+        script.replace("@LABEL@", label)
+        .replace("@SHARE@", SNAPSHOT_SHARE_TARGET)
+        .replace("@RELEASE@", SNAPSHOT_RELEASE)
+    )
+
+
+def snapshot_probe_workload(label: str, *, hold: bool = False) -> list[str]:
+    """Return the workload options of a restore whose shell runs the snapshot
+    probe, as snapshot_probe_script describes it."""
+    return [
+        "--entrypoint",
+        "/bin/sh",
+        "--arg=-c",
+        f"--arg={snapshot_probe_script(label, hold=hold)}",
+    ]
+
+
+def snapshot_probe_report(output: bytes, label: str) -> dict[str, str]:
+    """Return the fields of the one report in ``output`` of the snapshot
+    probe that ran as ``label``."""
+    prefix = SNAPSHOT_PROBE_PREFIX
+    reports: list[dict[str, str]] = []
+    for line in _output_lines(output):
+        if not line.startswith(prefix):
+            continue
+        malformed = RuntimeError(
+            f"the snapshot probe printed a malformed report: {line!r}"
+        )
+        fields: dict[str, str] = {}
+        for field in line[len(prefix) :].decode("ascii", "replace").split(" "):
+            key, separator, value = field.partition("=")
+            if not separator or key in fields:
+                raise malformed
+            fields[key] = value
+        if frozenset(fields) != SNAPSHOT_PROBE_FIELDS:
+            raise malformed
+        if fields["label"] == label:
+            reports.append(fields)
+    if len(reports) != 1:
+        raise RuntimeError(
+            f"the snapshot probe {label} printed {len(reports)} reports, not 1"
+        )
+    return reports[0]
+
+
+def require_distinct_restores(reports: Sequence[dict[str, str]], context: str) -> None:
+    """Require each of the restores of one snapshot whose probes printed
+    ``reports`` to have taken fresh random values and a machine ID of its own:
+    the kernel's random UUID, bytes of /dev/urandom, the machine ID, and the
+    name of a temporary file."""
+    for key, what in (
+        ("uuid", "a kernel random UUID"),
+        ("rng", "random bytes"),
+        ("machine", "a machine ID"),
+        ("temp", "a temporary file name"),
+    ):
+        values = [report[key] for report in reports]
+        if len(set(values)) != len(values):
+            raise RuntimeError(f"{context} reused {what}: {values}")
+
+
+def snapshot_directory(store: Path, name: str) -> Path:
+    """Return the directory of the snapshot ``name`` in the named snapshot
+    store ``store``, which spells the name in lowercase hexadecimal."""
+    return store / "snapshots" / name.encode("ascii").hex()
+
+
+def named_snapshot_files(directory: Path) -> dict[str, tuple[str, int]]:
+    """Return the digest and the link count of each file of the named
+    snapshot in ``directory``, by its path there, once the directory holds
+    exactly SNAPSHOT_ENTRIES."""
+    entries = sorted(path.name for path in directory.iterdir())
+    if frozenset(entries) != SNAPSHOT_ENTRIES:
+        raise RuntimeError(
+            f"the named snapshot holds {entries}, expected {sorted(SNAPSHOT_ENTRIES)}"
+        )
+    return {
+        path.relative_to(directory).as_posix(): (
+            sha256_file(path),
+            path.stat().st_nlink,
+        )
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+def check_restored_report(report: dict[str, Any], backend: str, context: str) -> None:
+    """Check the outcome report of a restored sandbox that `sandbox stop`
+    stopped: a successful restored VM of ``backend``, without a network policy,
+    since the snapshot has no NIC, and a complete teardown."""
+    if report["outcome"] != RESTORED_SUCCESS:
+        raise RuntimeError(f"{context} reported the outcome {report['outcome']!r}")
+    if report["backend"] != backend:
+        raise RuntimeError(f"{context} reported the backend {report['backend']!r}")
+    if report["network_policy"]["status"] != "not-requested":
+        raise RuntimeError(
+            f"{context} reported the network policy {report['network_policy']!r}"
+        )
+    if not all(report["teardown"].values()):
+        raise RuntimeError(
+            f"{context} reported an incomplete teardown: {report['teardown']!r}"
+        )
+
+
+class SnapshotAcceptance(LifecycleAcceptance):
+    """A public snapshot scenario's fixture: a named snapshot store, in which
+    `nvx-rs snapshot capture` captures ``snapshot_name`` with nvx-init as the
+    guest, and the restores of that snapshot, each in a state directory of its
+    own in ``self.state``, which cleanup stops and deprovisions."""
+
+    snapshot_name = "snapshot"
+
+    def __init__(
+        self,
+        backend: str,
+        *,
+        timeout: float,
+        output_dir: Path,
+        artifacts: WorkloadArtifacts,
+        root: Path,
+    ) -> None:
+        super().__init__(
+            backend,
+            timeout=timeout,
+            output_dir=output_dir,
+            artifacts=artifacts,
+            root=root,
+        )
+        self.store = root / "store"
+        # run_acceptance keeps the fixture if cleanup leaves this directory,
+        # which cleanup removes once it has deprovisioned every sandbox in it.
+        self.state = root / "sandboxes"
+        # When the capture ran, by the host's clock.
+        self.captured = (0.0, 0.0)
+        # The files of the named snapshot that the capture published.
+        self.files: dict[str, tuple[str, int]] = {}
+        # When each command ran, by its label.
+        self.timings: dict[str, tuple[float, float]] = {}
+
+    @property
+    def snapshot(self) -> Path:
+        return snapshot_directory(self.store, self.snapshot_name)
+
+    def nvx(
+        self,
+        label: str,
+        *arguments: str,
+        state: Path | None = None,
+        expected: int = 0,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """Runs `nvx-rs ARGUMENTS`, records its bounded observations, its
+        output, and when it ran, as ``label``, and requires the status
+        ``expected``, and the error ``code`` whose message holds ``message``,
+        when given."""
+        started = time.time()
+        result = subprocess.run(
+            nvx_rs.command_line(arguments),
+            cwd=BuildConstants.REPO_ROOT,
+            capture_output=True,
+            timeout=2 * self.timeout + 30,
+        )
+        self.timings[label] = (started, time.time())
+        self.record(label, result, state=state, expected=expected)
+        self.save_evidence(f"{label}.log", result.stdout + result.stderr)
+        reported = nvx_rs.reported_error(result.stderr)
+        if (
+            result.returncode != expected
+            or (
+                code is not None
+                and (
+                    reported is None
+                    or reported.code != code
+                    or (message is not None and message not in reported.message)
+                )
+            )
+            or (code is None and expected == 0 and reported is not None)
+        ):
+            wanted = "" if code is None else f" with error[{code}]"
+            raise RuntimeError(
+                f"{label}: nvx-rs {' '.join(arguments[:2])} returned "
+                f"{result.returncode}, expected {expected}{wanted}; "
+                f"stdout={bounded_text(result.stdout)!r}; "
+                f"stderr={bounded_text(result.stderr)!r}"
+            )
+        return result
+
+    def capture(self) -> None:
+        """Captures the named snapshot, with a dormant scratch as long as the
+        scratch template, and requires the store to hold exactly the
+        snapshot's SNAPSHOT_ENTRIES, each of whose files has one link, and no
+        directory or OpenVMM process of the capture's VM."""
+        scratch_bytes = self.artifacts.scratch_template.stat().st_size
+        if not scratch_bytes or scratch_bytes % (1 << 20):
+            raise RuntimeError("the scratch template is not a whole number of MiB")
+        result = self.nvx(
+            "capture",
+            "snapshot",
+            "capture",
+            self.snapshot_name,
+            "--store-dir",
+            str(self.store),
+            "--hypervisor",
+            self.backend,
+            "--scratch-mib",
+            str(scratch_bytes >> 20),
+            "--timeout",
+            str(math.ceil(self.timeout)),
+        )
+        self.captured = self.timings["capture"]
+        if _output_lines(result.stdout) != [b"Snapshot captured"]:
+            raise RuntimeError(
+                f"the capture printed {bounded_text(result.stdout)!r}, not that "
+                "it captured the snapshot"
+            )
+        if (self.store / "capture").exists():
+            raise RuntimeError("the capture left its VM's directory in the store")
+        self.files = named_snapshot_files(self.snapshot)
+        if any(links != 1 for _, links in self.files.values()):
+            raise RuntimeError(
+                f"the captured snapshot's files are linked: {self.files}"
+            )
+        self.require_processes((), "after the capture")
+
+    def check_snapshot_unchanged(self, context: str) -> None:
+        """Requires the named snapshot's files to be as the capture published
+        them, each with one link, once no view of a restore holds them."""
+        if named_snapshot_files(self.snapshot) != self.files:
+            raise RuntimeError(
+                f"{context} changed the named snapshot, or left links to its files"
+            )
+
+    def restore_options(
+        self,
+        label: str,
+        image: Path,
+        identity: str,
+        *,
+        image_format: str,
+        upper: str,
+    ) -> list[str]:
+        """Returns the options of a restore of ``image``, whose identity is
+        ``identity``, in the format ``image_format``, over ``upper``: with a
+        new copy of the scratch template, whose upper no root wrote, for a
+        scratch upper."""
+        options = [
+            "--hypervisor",
+            self.backend,
+            "--layer",
+            f"distro,{image},{identity}",
+            "--memory-mib",
+            str(SNAPSHOT_MEMORY_MIB),
+        ]
+        if image_format != "erofs":
+            options += ["--layer-format", image_format]
+        if upper == "ram":
+            return [*options, "--upper", "ram"]
+        scratch = self.root / f"{label}-scratch.ext4"
+        shutil.copyfile(self.artifacts.scratch_template, scratch)
+        return [*options, "--scratch", str(scratch)]
+
+    def one_off(
+        self,
+        label: str,
+        *options: str,
+        timeout: float | None = None,
+        expected: int = 0,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        """Restores the snapshot once with `run --restore-snapshot`, whose
+        sandbox's state directory the run must remove, also after a failure."""
+        state = self.state / label
+        result = self.nvx(
+            label,
+            "run",
+            "--restore-snapshot",
+            self.snapshot_name,
+            "--store-dir",
+            str(self.store),
+            "--state-dir",
+            str(state),
+            "--timeout",
+            str(self.timeout if timeout is None else timeout),
+            *options,
+            state=state,
+            expected=expected,
+            code=code,
+            message=message,
+        )
+        if state.exists():
+            raise RuntimeError(f"the {label} run left its sandbox's state directory")
+        return result
+
+    def restore(
+        self, label: str, *options: str
+    ) -> tuple[Path, subprocess.CompletedProcess[bytes]]:
+        """Restores the snapshot into a new managed sandbox with `snapshot
+        restore`, which leaves it running once its workload has exited with
+        status 0, and records its OpenVMM process for an adversarial
+        campaign."""
+        state = self.state / label
+        result = self.nvx(
+            label,
+            "snapshot",
+            "restore",
+            self.snapshot_name,
+            "--store-dir",
+            str(self.store),
+            "--state-dir",
+            str(state),
+            "--timeout",
+            str(self.timeout),
+            *options,
+            state=state,
+        )
+        record_adversarial_openvmm_pid(
+            recorded_pid(read_runtime(state)), dict(os.environ)
+        )
+        return state, result
+
+    def stop_and_deprovision(self, state: Path) -> None:
+        """Stops a restored sandbox, which must stop cleanly, and deprovisions
+        it, which removes its state and its view of the snapshot."""
+        label = state.name
+        self.nvx(
+            f"{label}-stop",
+            "sandbox",
+            "stop",
+            "--state-dir",
+            str(state),
+            "--timeout",
+            str(self.timeout),
+            state=state,
+        )
+        self.copy_evidence(state / OUTCOME, f"{label}-outcome.json")
+        check_restored_report(
+            _read_outcome_report(state / OUTCOME),
+            self.backend,
+            f"the {label} sandbox",
+        )
+        self.nvx(
+            f"{label}-deprovision",
+            "sandbox",
+            "deprovision",
+            "--state-dir",
+            str(state),
+            "--timeout",
+            str(self.timeout),
+            state=state,
+        )
+        if state.exists():
+            raise RuntimeError(f"deprovision kept the {label} sandbox's state")
+
+    def check_guest(
+        self,
+        report: dict[str, str],
+        label: str,
+        *,
+        host: str,
+        identity: str,
+        layer: str,
+        upper: str,
+        share: str = "none",
+    ) -> None:
+        """Checks what the probe of the restore ``label`` reports: the host
+        name and the identity of the restore, the image's layer ``layer`` as
+        its root's lower directory over ``upper``, the snapshot's block devices,
+        no NIC, the Ubuntu image, and the marker ``share`` of its host share; a
+        clock that reads the host's time while the restore ran; and an uptime
+        that kept the time before the capture and counts the time since, so
+        that the guest booted while the capture ran, by its clock and uptime."""
+        context = f"the {label} restore"
+        expected = {
+            "host": host,
+            "id": identity,
+            "lower": f"/run/nvx/layers/{layer}",
+            "upper": SNAPSHOT_UPPERS[upper],
+            "devices": SNAPSHOT_DEVICES,
+            "net": "lo",
+            "release": "ubuntu",
+            "share": share,
+        }
+        for key, value in expected.items():
+            if report[key] != value:
+                raise RuntimeError(
+                    f"{context}'s guest reports {key}={report[key]}, expected {value}"
+                )
+        try:
+            wall, uptime = float(report["wall"]), float(report["uptime"])
+        except ValueError as error:
+            raise RuntimeError(
+                f"{context}'s guest reports a malformed clock"
+            ) from error
+        tolerance = SNAPSHOT_CLOCK_TOLERANCE_SECONDS
+        before, after = self.timings[label]
+        if not before - tolerance <= wall <= after + tolerance:
+            raise RuntimeError(
+                f"{context}'s guest clock reads {wall}, while the restore ran "
+                f"from {before} to {after}"
+            )
+        captured_before, captured_after = self.captured
+        if (
+            not captured_before - tolerance
+            <= wall - uptime
+            <= captured_after + tolerance
+        ):
+            raise RuntimeError(
+                f"{context}'s guest booted at {wall - uptime} by its clock and "
+                f"uptime, which the capture from {captured_before} to "
+                f"{captured_after} does not hold"
+            )
+
+    def clean_up(self) -> list[Exception]:
+        """Stops and deprovisions the sandboxes that a failed scenario left,
+        ends the capture's VM and every other OpenVMM process of the fixture,
+        and then, unless any of that failed, removes the directory of the
+        sandboxes once it is empty, so that run_acceptance keeps the fixture,
+        with the store's recovery records, for a VM that may have survived."""
+        errors: list[Exception] = []
+        sandboxes = sorted(self.state.iterdir()) if self.state.is_dir() else []
+        for state in sandboxes:
+            try:
+                if (state / RUNTIME).is_file():
+                    runtime = read_runtime(state)
+                    self.run_cli("stop", state=state)
+                    kill_openvmm(runtime, self.timeout, self.root.name)
+            except Exception as error:
+                errors.append(error)
+        # The launch journal of a capture that has not ended names its VM by
+        # the identity that a sandbox's runtime record has, which tells when
+        # its last thread has exited too.
+        journal = self.store / "capture" / CAPTURE_JOURNAL
+        try:
+            if journal.is_file():
+                record = json.loads(journal.read_text(encoding="utf-8"))
+                if record.get("process") is not None:
+                    kill_openvmm(record, self.timeout, self.root.name)
+        except Exception as error:
+            errors.append(error)
+        # Every OpenVMM process whose arguments name the fixture is the
+        # scenario's own, the capture's VM among them.
+        try:
+            for pid in openvmm_processes(self.root.name):
+                with suppress(OSError):
+                    terminate_process(pid)
+            deadline = time.monotonic() + self.timeout
+            while strays := openvmm_processes(self.root.name):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"OpenVMM processes {list(strays)} survived")
+                time.sleep(0.05)
+        except Exception as error:
+            errors.append(error)
+        for state in sandboxes:
+            if not state.exists():
+                continue
+            try:
+                self.copy_evidence(state / LOG, f"{state.name}-openvmm.log")
+                # Deprovision ends a start that was interrupted, and removes a
+                # restore's view of the snapshot under the snapshot's lock.
+                result = self.run_cli("deprovision", state=state)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"cannot deprovision {state}: "
+                        f"{bounded_text(result.stderr).strip()}"
+                    )
+            except Exception as error:
+                errors.append(error)
+        if not errors:
+            with suppress(OSError):
+                self.state.rmdir()
+        return errors
+
+
+# The seconds for which a one-off restore that cannot have the snapshot's lock
+# may wait for it, and for which snapshot-core watches, while one restore holds
+# the lock, for the view of the snapshot of another that must wait for it.
+SNAPSHOT_CORE_BUSY_TIMEOUT_SECONDS = 1
+SNAPSHOT_CORE_EXCLUSION_SECONDS = 2.0
+# How much longer than the capture, with the clocks' tolerance on either side,
+# the downtime before snapshot-core's first restore is.
+SNAPSHOT_CORE_DOWNTIME_MARGIN_SECONDS = 1.0
+
+
+class SnapshotCoreAcceptance(SnapshotAcceptance):
+    """snapshot-core: a named snapshot that nvx-init's VM captured, restored
+    again and again.
+
+    The capture publishes exactly the snapshot's entries. Two one-off restores
+    of the EROFS layer, in RAM and over a scratch image, with host names and
+    identities of their own, show a guest whose clock reads the host's time,
+    whose uptime counts the time since the capture, and which took fresh
+    random values and a machine ID of its own. A scratch image that the
+    snapshot cannot serve is refused before any VM starts, which leaves the
+    managed sandbox of the restore as provisioned, with an error that names
+    the requested scratch, which attributes the failure to the request;
+    a zeroed scratch image, which the guest cannot mount as its upper, ends
+    its VM before its workload runs, and the CLI reports the guest's exit.
+    Three managed restores at once, each with a host share of its own, take
+    turns at the snapshot's lock, and a one-off restore that cannot wait for it
+    fails; the three then run at once, each with its own share, machine ID, and
+    upper. No restore changes the snapshot or leaves an OpenVMM process or a
+    link to the snapshot's files.
+    """
+
+    evidence_prefix = "snapshot-core-"
+    snapshot_name = "core"
+
+    def run(self) -> None:
+        self.state.mkdir()
+        self.capture()
+        # A downtime longer than the capture, with the clocks' tolerance on
+        # either side, tells an uptime that counts it from one that does not.
+        before, after = self.captured
+        time.sleep(
+            max(
+                0.0,
+                2 * after
+                - before
+                + 2 * SNAPSHOT_CLOCK_TOLERANCE_SECONDS
+                + SNAPSHOT_CORE_DOWNTIME_MARGIN_SECONDS
+                - time.time(),
+            )
+        )
+        repeated = [
+            self.check_repeated_restore(
+                "repeat-ram", upper="ram", host="core-one", identity="65534:65534"
+            ),
+            self.check_repeated_restore(
+                "repeat-scratch", upper="scratch", host="core-two", identity="1:1"
+            ),
+        ]
+        require_distinct_restores(repeated, "the repeated restores")
+        self.check_failed_restores()
+        concurrent = self.check_concurrent_restores()
+        require_distinct_restores([*repeated, *concurrent], "the restores")
+        self.check_snapshot_unchanged("the restores")
+        self.require_processes((), "after the restores")
+
+    def check_repeated_restore(
+        self, label: str, *, upper: str, host: str, identity: str
+    ) -> dict[str, str]:
+        """Restores the snapshot once with `run --restore-snapshot`, over
+        ``upper``, as ``identity``, with the host name ``host``, and checks
+        what its guest reports."""
+        options = self.restore_options(
+            label,
+            self.artifacts.distro,
+            self.artifacts.layer_uuid,
+            image_format="erofs",
+            upper=upper,
+        )
+        result = self.one_off(
+            label,
+            *options,
+            "--hostname",
+            host,
+            "--workload-user",
+            identity,
+            *snapshot_probe_workload(label),
+        )
+        report = snapshot_probe_report(result.stdout, label)
+        self.check_guest(
+            report, label, host=host, identity=identity, layer="distro", upper=upper
+        )
+        self.check_snapshot_unchanged(f"the {label} restore")
+        self.require_processes((), f"after the {label} restore")
+        return report
+
+    def check_failed_restores(self) -> None:
+        """Checks the failed restores of the snapshot.
+
+        A managed restore over a scratch image of half the dormant scratch's
+        length, which the snapshot cannot serve, is refused before any VM
+        starts: its error names the lengths of the requested scratch and of
+        the dormant one, which attributes the failure to the request, and its
+        sandbox, which a failed start keeps provisioned, holds its
+        configuration and its lock alone, where a launch leaves OpenVMM's log
+        and outcome report and the view of the snapshot. A one-off restore
+        over a zeroed scratch image of the dormant scratch's length, which the
+        guest cannot mount as its upper, ends its VM before its workload runs,
+        which the CLI reports as the guest's exit with status 125; the
+        restores that follow take the snapshot's lock, which it freed.
+        """
+        size = self.artifacts.scratch_template.stat().st_size
+        short, zeroed = "short-scratch", "zeroed-scratch"
+
+        def options(label: str, length: int) -> list[str]:
+            scratch = self.root / f"{label}.raw"
+            with scratch.open("xb") as image:
+                image.truncate(length)
+            return [
+                "--hypervisor",
+                self.backend,
+                "--layer",
+                f"distro,{self.artifacts.distro},{self.artifacts.layer_uuid}",
+                "--memory-mib",
+                str(SNAPSHOT_MEMORY_MIB),
+                "--scratch",
+                str(scratch),
+                *snapshot_probe_workload(label),
+            ]
+
+        state = self.state / short
+        refused = self.nvx(
+            short,
+            "snapshot",
+            "restore",
+            self.snapshot_name,
+            "--store-dir",
+            str(self.store),
+            "--state-dir",
+            str(state),
+            "--timeout",
+            str(self.timeout),
+            *options(short, size // 2),
+            state=state,
+            expected=1,
+            code="unsupported",
+            message="differs from the dormant scratch's",
+        )
+        if SNAPSHOT_PROBE_PREFIX in refused.stdout:
+            raise RuntimeError(f"the {short} restore ran its workload")
+        reported = nvx_rs.reported_error(refused.stderr)
+        assert reported is not None
+        if not all(
+            text in reported.message
+            for text in (
+                "snapshot scratch geometry",
+                f"length: {size // 2},",
+                f"length: {size},",
+            )
+        ):
+            raise RuntimeError(
+                "the refusal of the short scratch image does not name the "
+                f"lengths of both scratches: {reported.message!r}"
+            )
+        entries = frozenset(path.name for path in state.iterdir())
+        if entries != PROVISIONED_ENTRIES:
+            raise RuntimeError(
+                f"the {short} restore left {sorted(entries)} in its sandbox's "
+                "state, not its configuration and its lock alone: it launched "
+                "a VM before it refused the scratch image"
+            )
+        self.require_processes((), f"after the {short} restore")
+        self.nvx(
+            f"{short}-deprovision",
+            "sandbox",
+            "deprovision",
+            "--state-dir",
+            str(state),
+            "--timeout",
+            str(self.timeout),
+            state=state,
+        )
+        if state.exists():
+            raise RuntimeError(f"deprovision kept the {short} sandbox's state")
+        failed = self.one_off(
+            zeroed,
+            *options(zeroed, size),
+            expected=1,
+            code="exited",
+            message="OpenVMM exited during startup: guest-exit status 125",
+        )
+        if SNAPSHOT_PROBE_PREFIX in failed.stdout:
+            raise RuntimeError(f"the {zeroed} restore ran its workload")
+        self.require_processes((), f"after the {zeroed} restore")
+
+    def check_concurrent_restores(self) -> list[dict[str, str]]:
+        """Restores the snapshot into three managed sandboxes at once, which
+        take turns at the snapshot's lock, and refuses a one-off restore that
+        cannot wait for it; returns what the three guests reported.
+
+        A restore takes the lock before it links the snapshot's files into its
+        view, and keeps it until its workload has ended, which the workload of
+        each of these restores does only once the scenario creates
+        SNAPSHOT_RELEASE in its share. While the first restore holds the lock,
+        a one-off restore that may wait SNAPSHOT_CORE_BUSY_TIMEOUT_SECONDS for
+        it fails with the CLI's error of a busy snapshot before its workload
+        runs, and neither of the two other restores, which wait for the lock,
+        may link its view. Once the scenario releases the first, one of them
+        takes the lock, and the other may link its view only once the scenario
+        releases that one. Each sandbox has a host share of its own, and the
+        last a scratch upper where the others have theirs in RAM. The three
+        restored sandboxes then run at once, each with its own share, machine
+        ID, and upper, until each stops cleanly and is deprovisioned.
+        """
+        holder = "hold"
+        waiters = ("wait-one", "wait-two")
+        labels = (holder, *waiters)
+        uppers = {holder: "ram", "wait-one": "ram", "wait-two": "scratch"}
+        shares = {label: self.root / f"{label}-share" for label in labels}
+        for label, share in shares.items():
+            share.mkdir()
+            (share / "marker").write_text(label, encoding="ascii")
+
+        def release(label: str) -> None:
+            (shares[label] / SNAPSHOT_RELEASE).touch()
+
+        futures: dict[str, Future[tuple[Path, subprocess.CompletedProcess[bytes]]]]
+        futures = {}
+        with ThreadPoolExecutor(max_workers=len(labels)) as pool:
+            try:
+                for label in labels:
+                    futures[label] = pool.submit(
+                        self.restore,
+                        label,
+                        *self.restore_options(
+                            label,
+                            self.artifacts.distro,
+                            self.artifacts.layer_uuid,
+                            image_format="erofs",
+                            upper=uppers[label],
+                        ),
+                        "--hostname",
+                        label,
+                        "--mount",
+                        f"{SNAPSHOT_SHARE_TARGET},{shares[label]},ro",
+                        *snapshot_probe_workload(label, hold=True),
+                    )
+                    if label == holder:
+                        self.wait_for_view((holder,), futures)
+                # A one-off restore takes no share.
+                try:
+                    refused = self.one_off(
+                        "busy",
+                        *self.restore_options(
+                            "busy",
+                            self.artifacts.distro,
+                            self.artifacts.layer_uuid,
+                            image_format="erofs",
+                            upper="ram",
+                        ),
+                        *snapshot_probe_workload("busy"),
+                        timeout=SNAPSHOT_CORE_BUSY_TIMEOUT_SECONDS,
+                        expected=1,
+                        code="sandbox-busy",
+                        message=(
+                            "another command still holds the lock of the snapshot "
+                            f"{self.snapshot_name}"
+                        ),
+                    )
+                except RuntimeError:
+                    require_holding(holder, futures[holder])
+                    raise
+                if SNAPSHOT_PROBE_PREFIX in refused.stdout:
+                    raise RuntimeError("the busy restore ran its workload")
+                self.require_no_views(waiters, holder, futures[holder])
+                release(holder)
+                first = self.wait_for_view(waiters, futures)
+                (second,) = (label for label in waiters if label != first)
+                self.require_no_views((second,), first, futures[first])
+                release(first)
+                self.wait_for_view((second,), futures)
+                release(second)
+                restored = {label: futures[label].result() for label in labels}
+            finally:
+                # No restore's workload waits for the scenario any longer.
+                for label in labels:
+                    with suppress(OSError):
+                        release(label)
+        reports: dict[str, dict[str, str]] = {}
+        for label, (_, result) in restored.items():
+            reports[label] = snapshot_probe_report(result.stdout, label)
+            self.check_guest(
+                reports[label],
+                label,
+                host=label,
+                identity=SNAPSHOT_IDENTITY,
+                layer="distro",
+                upper=uppers[label],
+                share=label,
+            )
+        pids = tuple(
+            sorted(recorded_pid(read_runtime(state)) for state, _ in restored.values())
+        )
+        self.require_processes(pids, "while the restored sandboxes run")
+        self.check_isolation({label: state for label, (state, _) in restored.items()})
+        for state, _ in restored.values():
+            self.stop_and_deprovision(state)
+        return [reports[label] for label in labels]
+
+    def wait_for_view(
+        self,
+        labels: Sequence[str],
+        futures: Mapping[str, Future[tuple[Path, subprocess.CompletedProcess[bytes]]]],
+    ) -> str:
+        """Waits until one of the restores ``labels``, whose ``futures`` run
+        them, has linked its view of the snapshot, which it does only once it
+        holds the snapshot's lock, and returns its label; fails with the
+        failure of a restore that ends without one, or once each could have
+        failed by itself."""
+        limit = 2 * self.timeout + 30
+        deadline = time.monotonic() + limit
+        while True:
+            for label in labels:
+                if (self.state / label / "openvmm").is_dir():
+                    return label
+                if futures[label].done():
+                    futures[label].result()
+                    if not (self.state / label / "openvmm").is_dir():
+                        raise RuntimeError(
+                            f"the {label} restore ended without a view of the snapshot"
+                        )
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"no restore of {list(labels)} linked a view of the snapshot "
+                    f"within {limit} seconds"
+                )
+            time.sleep(0.05)
+
+    def require_no_views(
+        self,
+        labels: Sequence[str],
+        holder: str,
+        holding: Future[tuple[Path, subprocess.CompletedProcess[bytes]]],
+    ) -> None:
+        """Requires none of the restores ``labels``, which wait for the
+        snapshot's lock, to link its view of the snapshot for
+        SNAPSHOT_CORE_EXCLUSION_SECONDS, while the restore ``holder``, which
+        ``holding`` runs, holds the lock."""
+        deadline = time.monotonic() + SNAPSHOT_CORE_EXCLUSION_SECONDS
+        while True:
+            require_holding(holder, holding)
+            for label in labels:
+                if (self.state / label / "openvmm").exists():
+                    raise RuntimeError(
+                        f"the {label} restore linked its view of the snapshot "
+                        f"while the {holder} restore held the snapshot's lock"
+                    )
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.05)
+
+    def check_isolation(self, sandboxes: dict[str, Path]) -> None:
+        """Has an exec in each of the running ``sandboxes`` write a file of its
+        own in the root's /tmp, in its upper, and then requires each to read
+        the marker of its own share and to find its own file there and no
+        other's."""
+        for label, state in sandboxes.items():
+            self.nvx(
+                f"{label}-write",
+                "sandbox",
+                "exec",
+                "--state-dir",
+                str(state),
+                "--timeout",
+                str(self.timeout),
+                "--entrypoint",
+                "/bin/touch",
+                f"--arg=/tmp/nvx-upper-{label}",
+                state=state,
+            )
+        for label, state in sandboxes.items():
+            viewed = self.nvx(
+                f"{label}-view",
+                "sandbox",
+                "exec",
+                "--state-dir",
+                str(state),
+                "--timeout",
+                str(self.timeout),
+                "--entrypoint",
+                "/bin/sh",
+                "--arg=-c",
+                f"--arg={SNAPSHOT_VIEW_SCRIPT}",
+                state=state,
+            )
+            lines = [
+                line.decode("ascii", "replace") for line in _output_lines(viewed.stdout)
+            ]
+            share = [line[6:] for line in lines if line.startswith("share=")]
+            if share != [label]:
+                raise RuntimeError(
+                    f"the {label} sandbox reads the share markers {share} while the "
+                    "restored sandboxes run, not its own"
+                )
+            found = sorted(line[5:] for line in lines if line.startswith("file="))
+            if found != [f"nvx-upper-{label}"]:
+                raise RuntimeError(
+                    f"the {label} sandbox finds {found} in its upper, not its own "
+                    "file alone"
+                )
+
+
+def require_holding(
+    label: str, future: Future[tuple[Path, subprocess.CompletedProcess[bytes]]]
+) -> None:
+    """Requires the restore ``label``, which ``future`` runs and whose
+    workload waits until the scenario releases it, to be still running, and
+    raises its failure otherwise."""
+    if future.done():
+        future.result()
+        raise RuntimeError(f"the {label} restore ended before the scenario released it")
+
+
+def run_snapshot_core(backend: str, *, timeout: float, output_dir: Path) -> None:
+    """Capture a named snapshot with nvx-init as the guest and restore it, as
+    SnapshotCoreAcceptance describes."""
+    artifacts = load_workload_artifacts()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="nvx-snapshot-core-"))
+    run_acceptance(
+        SnapshotCoreAcceptance(
+            backend,
+            timeout=timeout,
+            output_dir=output_dir,
+            artifacts=artifacts,
+            root=root,
+        )
+    )
+
+
+class SnapshotTiersAcceptance(SnapshotAcceptance):
+    """snapshot-tiers: a named snapshot of the platform tier, whose
+    placeholder image and dormant scratch nvx-init's capture VM had, restored
+    into a managed sandbox of each image format over each upper: the EROFS
+    layer and a GPT disk of its tree, each over a fresh scratch image and in
+    RAM.
+
+    Each restored guest must have the restore's image as its root's lower
+    directory over the upper, and an exec in its sandbox the same root; each
+    sandbox must stop cleanly and be deprovisioned. The restores change
+    neither image nor the snapshot.
+    """
+
+    evidence_prefix = "snapshot-tiers-"
+    snapshot_name = "tiers"
+
+    def __init__(
+        self,
+        backend: str,
+        *,
+        timeout: float,
+        output_dir: Path,
+        artifacts: WorkloadArtifacts,
+        root: Path,
+        executable: Path,
+        kernel: Path,
+        initrd: Path,
+    ) -> None:
+        super().__init__(
+            backend,
+            timeout=timeout,
+            output_dir=output_dir,
+            artifacts=artifacts,
+            root=root,
+        )
+        self.executable = executable
+        self.kernel = kernel
+        self.initrd = initrd
+        self.disk = root / "distro.gpt"
+
+    def run(self) -> None:
+        self.state.mkdir()
+        guid = write_gpt_layer(
+            self.disk,
+            self.artifacts.distro,
+            executable=self.executable,
+            kernel=self.kernel,
+            initrd=self.initrd,
+            backend=self.backend,
+            timeout=self.timeout,
+            log_path=self.output_dir / f"{self.evidence_prefix}disk.log",
+        )
+        # Each image format, with its image, its identity, and the layer of
+        # the image that the guest's root has as its lower directory.
+        images = {
+            "erofs": (self.artifacts.distro, self.artifacts.layer_uuid, "distro"),
+            "gpt": (self.disk, guid, "p2"),
+        }
+        digests = {name: sha256_file(image) for name, (image, _, _) in images.items()}
+        self.capture()
+        for name, (image, identity, layer) in images.items():
+            for upper in ("scratch", "ram"):
+                self.check_restore(name, image, identity, layer=layer, upper=upper)
+        for name, (image, _, _) in images.items():
+            if sha256_file(image) != digests[name]:
+                raise RuntimeError(f"the restores modified the {name} image")
+        self.check_snapshot_unchanged("the restores")
+        self.require_processes((), "after the restores")
+
+    def check_restore(
+        self,
+        image_format: str,
+        image: Path,
+        identity: str,
+        *,
+        layer: str,
+        upper: str,
+    ) -> None:
+        """Restores the snapshot into a managed sandbox of ``image``, in the
+        format ``image_format``, over ``upper``, checks what its guest and an
+        exec in it report, and stops and deprovisions it."""
+        label = f"{image_format}-{upper}"
+        state, result = self.restore(
+            label,
+            *self.restore_options(
+                label, image, identity, image_format=image_format, upper=upper
+            ),
+            *snapshot_probe_workload(label),
+        )
+        report = snapshot_probe_report(result.stdout, label)
+        self.check_guest(
+            report,
+            label,
+            host=SNAPSHOT_HOSTNAME,
+            identity=SNAPSHOT_IDENTITY,
+            layer=layer,
+            upper=upper,
+        )
+        # The restored sandbox runs as a started one does: an exec runs in the
+        # root of the same guest.
+        executed = self.nvx(
+            f"{label}-exec",
+            "sandbox",
+            "exec",
+            "--state-dir",
+            str(state),
+            "--timeout",
+            str(self.timeout),
+            "--entrypoint",
+            "/bin/sh",
+            "--arg=-c",
+            f"--arg={snapshot_probe_script(f'{label}-exec')}",
+            state=state,
+        )
+        view = snapshot_probe_report(executed.stdout, f"{label}-exec")
+        for key in ("machine", "host", "id", "lower", "upper", "devices", "net"):
+            if view[key] != report[key]:
+                raise RuntimeError(
+                    f"an exec in the {label} sandbox reports {key}={view[key]}, "
+                    f"but its restore's workload {key}={report[key]}"
+                )
+        self.stop_and_deprovision(state)
+
+
+def run_snapshot_tiers(
+    executable: Path,
+    kernel: Path,
+    initrd: Path,
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+) -> None:
+    """Restore a named snapshot of each image format over each upper, as
+    SnapshotTiersAcceptance describes, with a GPT disk that a guest of
+    ``executable``, ``kernel``, and ``initrd`` writes from the Ubuntu EROFS
+    layer."""
+    artifacts = load_workload_artifacts()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="nvx-snapshot-tiers-"))
+    run_acceptance(
+        SnapshotTiersAcceptance(
             backend,
             timeout=timeout,
             output_dir=output_dir,
@@ -9163,192 +10367,6 @@ def check_canceled_capture(
         )
 
 
-def run_snapshot_core(
-    executable: Path,
-    kernel: Path,
-    initrd: Path,
-    backend: str,
-    *,
-    memory_mib: int,
-    timeout: float,
-    output_dir: Path,
-) -> None:
-    no_destination_command = workload_boot_command(
-        executable,
-        backend,
-        kernel,
-        initrd,
-        memory_mib,
-        "quiet loglevel=0",
-    )
-    no_destination_marker = b"NVX-SNAPSHOT-NO-DESTINATION-OK"
-    with OpenvmmProcess(
-        no_destination_command,
-        output_dir / "snapshot-core-no-destination.log",
-    ) as process:
-        process.wait_for(BOOT_MARKER, timeout)
-        process.send_line("nvx-snapshot; echo NVX-SNAPSHOT-NO-DESTINATION-OK")
-        process.wait_for_line(no_destination_marker, timeout)
-        checks_start = len(process.output)
-        process.send_bytes(canceled_capture_checks().encode())
-        process.wait_for_line(
-            CANCELED_CAPTURE_DONE_MARKER, max(timeout, STATUS_TIMEOUT_SECONDS)
-        )
-        check_canceled_capture(process.output[checks_start:], no_destination_command)
-        process.send_line("nvx-exit 0")
-        result = process.wait(timeout)
-    if result.returncode != 0:
-        raise RuntimeError(f"no-destination OpenVMM exited with {result.returncode}")
-    if _output_lines(result.output).count(no_destination_marker) != 1:
-        raise RuntimeError(
-            "snapshot request without a destination did not continue once"
-        )
-
-    with tempfile.TemporaryDirectory(prefix="nvx-snapshot-core-") as temporary:
-        snapshot_path = Path(temporary) / "snapshot"
-        capture_command = [
-            *workload_boot_command(
-                executable,
-                backend,
-                kernel,
-                initrd,
-                memory_mib,
-                "quiet loglevel=0",
-            ),
-            "--snapshot-destination",
-            str(snapshot_path),
-        ]
-        with OpenvmmProcess(
-            capture_command,
-            output_dir / "snapshot-core-capture.log",
-        ) as process:
-            process.wait_for(BOOT_MARKER, timeout)
-            _stage_script(
-                process,
-                "/tmp/nvx-snapshot-core",
-                "NVX_SNAPSHOT_CORE",
-                _read_script("snapshot-core.sh"),
-            )
-            source = process.wait(timeout)
-        if source.returncode != 0:
-            raise RuntimeError(
-                f"snapshot source OpenVMM exited with {source.returncode}"
-            )
-        if SNAPSHOT_CORE_CONTINUED_MARKER in _output_lines(source.output):
-            raise RuntimeError("snapshot source crossed its terminal capture boundary")
-        fingerprint = _snapshot_fingerprint(snapshot_path)
-        capture_wall_time = time.time()
-        rng_hashes: list[bytes] = []
-        generation_ids: list[bytes] = []
-        uuids: list[bytes] = []
-        temp_ids: list[bytes] = []
-
-        for restore_index in range(2):
-            time.sleep(5)
-            minimum_downtime_centiseconds = int((time.time() - capture_wall_time) * 100)
-            with OpenvmmProcess(
-                snapshot_restore_command(executable, backend, snapshot_path),
-                output_dir / f"snapshot-core-restore-{restore_index}.log",
-            ) as process:
-                process.wait_for(SNAPSHOT_CORE_COMPLETION_MARKER, timeout)
-                restored = process.wait(timeout)
-            if restored.returncode != 0:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} exited with {restored.returncode}"
-                )
-            lines = _output_lines(restored.output)
-            if lines.count(SNAPSHOT_CORE_CONTINUED_MARKER) != 1:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} did not continue exactly once"
-                )
-            timer_wait = int(
-                _single_marker_value(restored.output, b"NVX-SNAPSHOT-TIMER-WAIT-")
-            )
-            if timer_wait > 1:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} waited {timer_wait}s for an expired timer"
-                )
-            wall_delta, uptime_delta = _parse_marker_pair(
-                restored.output,
-                b"NVX-SNAPSHOT-DOWNTIME-",
-            )
-            if max(wall_delta, uptime_delta) < 4 or abs(wall_delta - uptime_delta) > 1:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} clock mismatch: "
-                    f"wall={wall_delta}s uptime={uptime_delta}s"
-                )
-            uptime_centiseconds = int(
-                _single_marker_value(restored.output, b"NVX-SNAPSHOT-UPTIME-CS-")
-            )
-            if uptime_centiseconds + 5 < minimum_downtime_centiseconds:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} discarded captured uptime: "
-                    f"guest={uptime_centiseconds}cs host={minimum_downtime_centiseconds}cs"
-                )
-            process_cpu, thread_cpu = _parse_marker_pair(
-                restored.output,
-                b"NVX-SNAPSHOT-CPU-",
-            )
-            if process_cpu != 0 or thread_cpu != 0:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} advanced sleeping-task CPU clocks"
-                )
-            rng_hash = _single_marker_value(restored.output, b"NVX-SNAPSHOT-RNG-")
-            if len(rng_hash) != 64 or not all(
-                byte in b"0123456789abcdefABCDEF" for byte in rng_hash
-            ):
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} emitted a malformed RNG digest"
-                )
-            rng_hashes.append(rng_hash)
-            generation_id = _single_marker_value(
-                restored.output, b"NVX-SNAPSHOT-GENERATION-ID-"
-            )
-            if len(generation_id) != 32 or not all(
-                byte in b"0123456789abcdefABCDEF" for byte in generation_id
-            ):
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} emitted a malformed generation ID"
-                )
-            generation_ids.append(generation_id)
-            restored_uuid = _single_marker_value(restored.output, b"NVX-SNAPSHOT-UUID-")
-            try:
-                uuid.UUID(restored_uuid.decode("ascii"))
-            except (UnicodeDecodeError, ValueError) as error:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} emitted a malformed UUID"
-                ) from error
-            uuids.append(restored_uuid)
-            temp_id = _single_marker_value(restored.output, b"NVX-SNAPSHOT-TEMP-ID-")
-            if not temp_id or any(byte in b" \t\r\n/" for byte in temp_id):
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} emitted a malformed temp ID"
-                )
-            temp_ids.append(temp_id)
-            port_access = _single_marker_value(
-                restored.output, b"NVX-SNAPSHOT-PORT-ACCESS-"
-            )
-            if port_access != b"denied":
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} started a process that reached "
-                    f"OpenVMM's ports: {port_access.decode(errors='replace')}"
-                )
-            if _snapshot_fingerprint(snapshot_path) != fingerprint:
-                raise RuntimeError(
-                    f"snapshot restore {restore_index} modified snapshot artifacts"
-                )
-        if rng_hashes[0] == rng_hashes[1]:
-            raise RuntimeError(
-                "fresh restore entropy did not diversify guest RNG output"
-            )
-        if generation_ids[0] == generation_ids[1]:
-            raise RuntimeError("restored clones reused the VM generation ID")
-        if uuids[0] == uuids[1]:
-            raise RuntimeError("restored clones reused a kernel UUID")
-        if temp_ids[0] == temp_ids[1]:
-            raise RuntimeError("restored clones reused a temporary-file ID")
-
-
 SNAPSHOT_ROLLBACK_STATUS_PREFIX = b"NVX-SNAPSHOT-ROLLBACK-STATUS-"
 SNAPSHOT_ROLLBACK_CONTINUED_MARKER = b"NVX-SNAPSHOT-ROLLBACK-CONTINUED"
 SNAPSHOT_ROLLBACK_RESTORED_STATUS_PREFIX = b"NVX-SNAPSHOT-ROLLBACK-RESTORED-STATUS-"
@@ -9399,8 +10417,8 @@ def run_snapshot_rollback(
 
     The snapshot destination's parent disappears after boot, so the capture
     quiesces and saves the VM, and then fails to publish, which rolls it back:
-    the guest's request returns in the source, as for a request that OpenVMM
-    releases (``snapshot-core``), and the capture's profile records show the
+    the guest's request returns in the source, as one that OpenVMM releases
+    for want of a destination does, and the capture's profile records show the
     quiesce and the save, but no publication. Once the parent is back, a
     second request of the same source publishes a snapshot, whose restore
     continues past that request.
@@ -11302,471 +12320,6 @@ def run_scratch_snapshot(
         )
 
 
-def _snapshot_tier_kinds(tier: str) -> tuple[bool, bool, bool]:
-    if tier not in ("platform", "workload-start", "instance-checkpoint"):
-        raise ValueError(f"unsupported snapshot tier {tier!r}")
-    return tier == "platform", tier == "workload-start", tier == "instance-checkpoint"
-
-
-def _snapshot_tier_script(tier: str) -> str:
-    platform, workload_start, instance_checkpoint = _snapshot_tier_kinds(tier)
-    prefix = f"NVX-TIER-{tier.upper()}"
-    workload_marker = f"{prefix}-WORKLOAD-RAN"
-    paired_setup = ""
-    if not platform:
-        paired_setup = f"""mkdir -p /run/nvx/scratch /sys/fs/cgroup
-mountpoint -q /sys/fs/cgroup || mount -t cgroup2 none /sys/fs/cgroup
-mkdir -p /sys/fs/cgroup/container
-mkfs.ext4 -F /dev/vdb >/dev/null
-mount -t ext4 /dev/vdb /run/nvx/scratch
-printf 'captured-workload-id\\n' >/run/nvx/workload-machine-id
-barrier=/run/nvx/test-container-start
-mkfifo "$barrier"
-(IFS= read -r start <"$barrier"
-[ "$start" = start ]
-exec unshare --mount --uts --fork --kill-child sh -c 'mount --make-rprivate /; mkdir -p /etc; : >/etc/machine-id; mount --bind /run/nvx/workload-machine-id /etc/machine-id; hostname captured-workload; while [ ! -e /run/nvx/restore-active ]; do sleep 0.01; done; echo {workload_marker}; : >/run/nvx/workload-ran; while :; do sleep 60; done') &
-workload_pid=$!
-echo "$workload_pid" >/sys/fs/cgroup/container/cgroup.procs
-printf 'start\\n' >"$barrier"
-rm -f "$barrier"
-echo "$workload_pid" >/run/nvx/container.pid
-tries=0
-while [ "$(nsenter -t "$workload_pid" -u hostname 2>/dev/null || true)" != captured-workload ] && [ "$tries" -lt 200 ]; do
-    sleep 0.01
-    tries=$((tries + 1))
-done
-[ "$tries" -lt 200 ] || {{ nvx-exit 67; exit 67; }}"""
-
-    repair_marker = f"{prefix}-REPAIR"
-    premature_marker = f"{prefix}-PREMATURE-INPUT"
-    runtime_hook = ":"
-    if platform:
-        runtime_hook = f"""cat >/run/nvx/runtime-post-restore <<'NVX_TIER_HOOK'
-#!/bin/sh
-set -eu
-case "${{NVX_VM_GENERATION_ID:-}}" in
-    '' | *[!0-9a-f]*) exit 71 ;;
-esac
-[ "${{#NVX_VM_GENERATION_ID}}" -eq 32 ] || exit 71
-echo {repair_marker}
-sleep 1
-[ "$(date -u +%Y)" -ge 2025 ]
-grep -Eq '^[0-9a-f]{{32}}$' /etc/machine-id
-[ "$(hostname)" = nvx-sandbox ]
-if ! kill -0 "$(cat /run/nvx/gate-reader.pid)" 2>/dev/null; then
-    echo {premature_marker}
-    exit 1
-fi
-NVX_TIER_HOOK
-chmod +x /run/nvx/runtime-post-restore"""
-    elif workload_start:
-        runtime_hook = f"""cat >/run/nvx/runtime-post-restore <<'NVX_TIER_HOOK'
-#!/bin/sh
-set -eu
-case "${{NVX_VM_GENERATION_ID:-}}" in
-    '' | *[!0-9a-f]*) exit 71 ;;
-esac
-[ "${{#NVX_VM_GENERATION_ID}}" -eq 32 ] || exit 71
-: >/run/nvx/restore-active
-echo {repair_marker}
-sleep 1
-grep -Eq '^[0-9a-f]{{32}}$' /etc/machine-id
-[ "$(cat /run/nvx/workload-machine-id)" = "$(cat /etc/machine-id)" ]
-[ "$(nsenter -t "$(cat /run/nvx/container.pid)" -m -r cat /etc/machine-id)" = "$(cat /etc/machine-id)" ]
-[ "$(nsenter -t "$(cat /run/nvx/container.pid)" -u hostname)" = restored-workload-start ]
-if ! kill -0 "$(cat /run/nvx/gate-reader.pid)" 2>/dev/null; then
-    echo {premature_marker}
-    exit 1
-fi
-NVX_TIER_HOOK
-chmod +x /run/nvx/runtime-post-restore"""
-
-    repair_action = ":"
-    if workload_start:
-        repair_action = """tries=0
-while [ ! -e /run/nvx/workload-ran ] && [ "$tries" -lt 200 ]; do
-    sleep 0.01
-    tries=$((tries + 1))
-done
-[ -e /run/nvx/workload-ran ] || { nvx-exit 70; exit 70; }"""
-    elif instance_checkpoint:
-        repair_action = f"""[ "$(cat /etc/machine-id)" = captured-machine-id ]
-[ "$(cat /run/nvx/workload-machine-id)" = captured-workload-id ]
-[ "$(nsenter -t "$(cat /run/nvx/container.pid)" -m -r cat /etc/machine-id)" = captured-workload-id ]
-[ "$(nsenter -t "$(cat /run/nvx/container.pid)" -u hostname)" = captured-workload ]
-printf 'restored-direct-claimed\\n' >/run/nvx/scratch/direct-claimed
-sync
-echo {repair_marker}"""
-
-    pre_capture_action = (
-        "date -u -s 200001010000.00 >/dev/null\n"
-        "printf 'captured-machine-id\\n' >/etc/machine-id"
-        if platform
-        else "hostname captured-host\nprintf 'captured-machine-id\\n' >/etc/machine-id"
-    )
-    capture_action = (
-        "/sbin/nvx-snapshot"
-        if instance_checkpoint
-        else f"/sbin/nvx-snapshot --tier {tier}"
-    )
-    return _render_script(
-        "snapshot-tier.sh.in",
-        MISMATCHED_TIER="workload-start" if platform else "platform",
-        MISMATCH_MARKER=f"{prefix}-MISMATCH-REJECTED",
-        PAIRED_SETUP=paired_setup,
-        SETUP_MARKER=f"{prefix}-SETUP-READY",
-        RUNTIME_HOOK=runtime_hook,
-        HOOK_MARKER=f"{prefix}-HOOK-READY",
-        PRE_CAPTURE_ACTION=pre_capture_action,
-        INPUT_MARKER=f"{prefix}-INPUT",
-        CAPTURE_MARKER=f"{prefix}-CAPTURE",
-        CAPTURE_ACTION=capture_action,
-        REPAIR_ACTION=repair_action,
-        RELEASED_MARKER=f"{prefix}-RELEASED",
-        LAYER_MARKER=f"{prefix}-LAYER-",
-        # After the tier's assertions, the restored guest asks nvx-time status,
-        # which waits for the restore's deferred checks, the debug kernel's
-        # watchdogs among them, and prints the restore line; the script turns
-        # off set -e first, so a failing status still reports its exit status.
-        # It then waits for one byte from the host before nvx-exit, so the
-        # query's lines reach the virtio console before the VM stops.
-        STATUS_QUERY=status_script().rstrip("\n"),
-    )
-
-
-def _snapshot_storage_generation(tier: str) -> str | None:
-    """Return the storage generation to which a capture of ``tier`` binds its
-    sandbox blocks, and which its restore states again: none of the platform
-    tier, which binds no block."""
-    generations = {
-        "platform": None,
-        "workload-start": "00112233445566778899aabbccddee01",
-        "instance-checkpoint": "00112233445566778899aabbccddee02",
-    }
-    if tier not in generations:
-        raise ValueError(f"unsupported snapshot tier {tier!r}")
-    return generations[tier]
-
-
-def _snapshot_storage_policy(tier: str) -> tuple[str, ...]:
-    generation = _snapshot_storage_generation(tier)
-    if generation is None:
-        return ()
-    restore_mode = "private-copy" if tier == "workload-start" else "direct-claimed"
-    return (
-        "--snapshot-generation-id",
-        generation,
-        "--snapshot-scratch-restore-mode",
-        restore_mode,
-    )
-
-
-def _snapshot_restore_policy(tier: str) -> tuple[str, ...]:
-    generation = _snapshot_storage_generation(tier)
-    return () if generation is None else ("--restore-generation-id", generation)
-
-
-def _run_snapshot_tier(
-    tier: str,
-    executable: Path,
-    kernel: Path,
-    initrd: Path,
-    backend: str,
-    *,
-    memory_mib: int,
-    timeout: float,
-    output_dir: Path,
-) -> None:
-    platform, workload_start, instance_checkpoint = _snapshot_tier_kinds(tier)
-
-    prefix = f"NVX-TIER-{tier.upper()}"
-    capture_marker = f"{prefix}-CAPTURE".encode()
-    repair_marker = f"{prefix}-REPAIR".encode()
-    input_marker = f"{prefix}-INPUT".encode()
-    released_marker = f"{prefix}-RELEASED".encode()
-    premature_marker = f"{prefix}-PREMATURE-INPUT".encode()
-    mismatch_marker = f"{prefix}-MISMATCH-REJECTED".encode()
-    workload_marker = f"{prefix}-WORKLOAD-RAN".encode()
-    layer_marker = f"{prefix}-LAYER-".encode()
-
-    with tempfile.TemporaryDirectory(prefix=f"nvx-snapshot-tier-{tier}-") as temporary:
-        root = Path(temporary)
-        snapshot = root / "snapshot"
-        source_layer = root / "source.erofs"
-        replacement_layer = root / "replacement.erofs"
-        source_scratch = root / "source-scratch.raw"
-        restore_scratch = root / "restore-scratch.raw"
-        _write_pattern(source_layer, 1024 * 1024, 0x3C)
-        _write_pattern(replacement_layer, 1024 * 1024, 0xC3)
-        _write_pattern(source_scratch, 1024 * 1024, 0xA5)
-        _write_pattern(restore_scratch, 1024 * 1024, 0x5A)
-        # A listener's socket is beside the snapshot that records it.
-        endpoint = _console_endpoint(root)
-
-        capture_command = workload_boot_command(
-            executable,
-            backend,
-            kernel,
-            initrd,
-            memory_mib,
-            "" if platform else f"nvx_hostname=restored-{tier}",
-            network="10.0.0.2/24",
-            boot_console=False,
-        )
-        capture_command.extend(
-            (
-                "--allow-host",
-                "10.0.0.1",
-                "--virtio-console",
-                f"listen={endpoint}",
-                "--snapshot-destination",
-                str(snapshot),
-                "--snapshot-tier",
-                tier,
-                *_snapshot_storage_policy(tier),
-                "--microvm-sandbox-block",
-                _block_arg("distro", source_layer, read_only=True),
-                "--microvm-sandbox-block",
-                _block_arg("scratch", source_scratch, read_only=False),
-            )
-        )
-
-        source_console_path = output_dir / f"snapshot-tier-{tier}-capture-console.log"
-        source_console = b""
-        console: BootConsole | None = None
-        with OpenvmmProcess(
-            capture_command,
-            output_dir / f"snapshot-tier-{tier}-capture-process.log",
-        ) as process:
-            try:
-                # The guest's shell is on this virtio console, so it answers
-                # the cold boot's status query there.
-                console = BootConsole.connect(
-                    endpoint,
-                    timeout,
-                    monitor=TimeAbiMonitor(capture_command),
-                    time_abi_status=True,
-                )
-                console.wait_for(BOOT_MARKER, timeout)
-                script = _snapshot_tier_script(tier)
-                console.send_bytes(
-                    b"cat >/tmp/nvx-snapshot-tier <<'NVX_SNAPSHOT_TIER'\n"
-                    + script.encode()
-                    + b"NVX_SNAPSHOT_TIER\nsh /tmp/nvx-snapshot-tier\n"
-                )
-                console.wait_for(capture_marker, timeout)
-                source = process.wait(timeout)
-                source_console = console.finish()
-                console = None
-            finally:
-                source_console = _persist_console_log(
-                    console,
-                    source_console,
-                    source_console_path,
-                )
-        if source.returncode != 0:
-            raise RuntimeError(
-                f"{tier} snapshot capture exited with {source.returncode}"
-            )
-        source_lines = _output_lines(source_console)
-        if source_lines.count(mismatch_marker) != 1 or any(
-            marker in source_lines
-            for marker in (repair_marker, input_marker, released_marker)
-        ):
-            raise RuntimeError(f"{tier} source crossed its terminal capture boundary")
-        fingerprint = _scratch_snapshot_fingerprint(snapshot)
-
-        restore_layer = replacement_layer if platform else source_layer
-        restore_command = snapshot_restore_command(
-            executable,
-            backend,
-            snapshot,
-            network_profile="portable",
-            boot_console=False,
-        )
-        restore_command.extend(
-            (
-                "--allow-host",
-                "10.0.0.1",
-                *_snapshot_restore_policy(tier),
-                "--microvm-sandbox-block",
-                _block_arg("distro", restore_layer, read_only=True),
-            )
-        )
-        if platform:
-            restore_command.extend(
-                (
-                    "--microvm-sandbox-block",
-                    _block_arg("scratch", restore_scratch, read_only=False),
-                )
-            )
-
-        if instance_checkpoint:
-            wrong_profile = [
-                str(executable),
-                "--single-process",
-                "--hypervisor",
-                backend,
-                "--restore-snapshot",
-                str(snapshot),
-            ]
-            _expect_process_failure(
-                wrong_profile,
-                output_dir / f"snapshot-tier-{tier}-wrong-profile.log",
-                timeout,
-                b"microVM snapshot restore requires --machine microvm",
-            )
-            if (snapshot / "resume.claim").exists():
-                raise RuntimeError("wrong-profile restore consumed instance checkpoint")
-            # A restore of storage of another generation fails before it
-            # claims the checkpoint.
-            wrong_generation = list(restore_command)
-            wrong_generation[wrong_generation.index("--restore-generation-id") + 1] = (
-                "00112233445566778899aabbccddee0f"
-            )
-            _expect_process_failure(
-                wrong_generation,
-                output_dir / f"snapshot-tier-{tier}-wrong-generation.log",
-                timeout,
-                b"the snapshot binds its sandbox blocks to storage generation",
-            )
-            if (snapshot / "resume.claim").exists():
-                raise RuntimeError(
-                    "wrong-generation restore consumed instance checkpoint"
-                )
-
-        expected_layer = layer_marker + (b"195" if platform else b"60")
-        restore_console_path = output_dir / f"snapshot-tier-{tier}-restore-console.log"
-        restore_console = b""
-        console = None
-        with OpenvmmProcess(
-            restore_command,
-            output_dir / f"snapshot-tier-{tier}-restore-process.log",
-        ) as process:
-            try:
-                console = BootConsole.connect(
-                    endpoint, timeout, monitor=TimeAbiMonitor(restore_command)
-                )
-                # A status query that one of the milestone reads below consumes
-                # must still count for the wait after them.
-                status_baseline = console.status_queries
-                console.send_bytes(b"Z")
-                console.wait_for(repair_marker, timeout)
-                if workload_start:
-                    console.wait_for(workload_marker, timeout)
-                console.wait_for(released_marker, timeout)
-                console.wait_for(expected_layer, timeout)
-                # The guest's status query waits for the restore's deferred
-                # checks. It then waits for one byte from here before nvx-exit,
-                # so the query's lines reach the console before the VM stops.
-                console.wait_for_time_abi_status(
-                    STATUS_TIMEOUT_SECONDS, since=status_baseline
-                )
-                console.send_bytes(b"Z")
-                restored = process.wait(timeout)
-                restore_console = console.finish()
-                console = None
-            finally:
-                restore_console = _persist_console_log(
-                    console,
-                    restore_console,
-                    restore_console_path,
-                )
-        if restored.returncode != 0:
-            raise RuntimeError(f"{tier} restore exited with {restored.returncode}")
-        restore_lines = _output_lines(restore_console)
-        if restore_lines.count(input_marker) != 1 or premature_marker in restore_lines:
-            raise RuntimeError(f"{tier} input crossed the restore gate")
-        if restore_lines.count(expected_layer) != 1:
-            raise RuntimeError(f"{tier} restore observed the wrong layer binding")
-        # The restored guest's status query, after the tier's assertions, must
-        # report a passing restore line, so the deferred restore checks ran.
-        _check_restore_status(
-            restore_console,
-            restore_command,
-            processors=int(restore_command[restore_command.index("--processors") + 1]),
-            context=f"{tier} restore",
-        )
-        restored_fingerprint = _scratch_snapshot_fingerprint(snapshot)
-        if restored_fingerprint[:3] != fingerprint[:3]:
-            raise RuntimeError(f"{tier} restore modified snapshot payloads")
-        if instance_checkpoint:
-            if restored_fingerprint[3] == fingerprint[3]:
-                raise RuntimeError(
-                    "instance-checkpoint restore did not modify direct-claimed scratch"
-                )
-        elif restored_fingerprint != fingerprint:
-            raise RuntimeError(f"{tier} restore modified reusable snapshot scratch")
-
-        if workload_start:
-            timeout_command = [
-                *restore_command,
-                "--restore-gate-timeout-ms",
-                "500",
-            ]
-            timeout_console: BootConsole | None = None
-            timeout_console_path = (
-                output_dir / f"snapshot-tier-{tier}-timeout-console.log"
-            )
-            timeout_output = b""
-            with OpenvmmProcess(
-                timeout_command,
-                output_dir / f"snapshot-tier-{tier}-timeout-process.log",
-            ) as process:
-                try:
-                    timeout_console = BootConsole.connect(
-                        endpoint, timeout, monitor=TimeAbiMonitor(timeout_command)
-                    )
-                    timeout_console.send_bytes(b"Z")
-                    timed_out = process.wait(timeout)
-                    timeout_output = timeout_console.finish()
-                    timeout_console = None
-                finally:
-                    timeout_output = _persist_console_log(
-                        timeout_console,
-                        timeout_output,
-                        timeout_console_path,
-                    )
-            timeout_lines = _output_lines(timeout_output)
-            if timed_out.returncode == 0 or any(
-                marker in timeout_lines
-                for marker in (input_marker, released_marker, workload_marker)
-            ):
-                raise RuntimeError("workload-start timeout released gated guest state")
-
-        if instance_checkpoint:
-            _expect_process_failure(
-                restore_command,
-                output_dir / f"snapshot-tier-{tier}-duplicate.log",
-                timeout,
-                b"resume snapshot has already been claimed",
-            )
-
-
-def run_snapshot_tiers(
-    executable: Path,
-    kernel: Path,
-    initrd: Path,
-    backend: str,
-    *,
-    memory_mib: int,
-    timeout: float,
-    output_dir: Path,
-    tiers: tuple[str, ...] = ("platform", "workload-start", "instance-checkpoint"),
-) -> None:
-    for tier in tiers:
-        _run_snapshot_tier(
-            tier,
-            executable,
-            kernel,
-            initrd,
-            backend,
-            memory_mib=memory_mib,
-            timeout=timeout,
-            output_dir=output_dir,
-        )
-
-
 def require_debug_kernel(config: Path) -> None:
     """Fail unless a kernel config enables the debug kernel's detectors.
 
@@ -12514,17 +13067,9 @@ def _run_scenarios(
     if "snapshot-core" in scenarios:
         report.start(
             "snapshot-core",
-            f"Running microVM snapshot-core correctness on OpenVMM/{args.backend}",
+            f"Running public named snapshot restores on OpenVMM/{args.backend}",
         )
-        run_snapshot_core(
-            executable,
-            kernel,
-            initrd,
-            args.backend,
-            memory_mib=args.memory_mib,
-            timeout=args.timeout,
-            output_dir=output_dir,
-        )
+        run_snapshot_core(args.backend, timeout=args.timeout, output_dir=output_dir)
     if "snapshot-rollback" in scenarios:
         report.start(
             "snapshot-rollback",
@@ -12542,14 +13087,14 @@ def _run_scenarios(
     if "snapshot-tiers" in scenarios:
         report.start(
             "snapshot-tiers",
-            f"Running microVM snapshot-tier correctness on OpenVMM/{args.backend}",
+            "Running public named snapshot restores of each image and upper "
+            f"on OpenVMM/{args.backend}",
         )
         run_snapshot_tiers(
             executable,
             kernel,
             initrd,
             args.backend,
-            memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
         )
