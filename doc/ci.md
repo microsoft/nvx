@@ -2319,6 +2319,9 @@ with warnings denied, the minimum Rust version check, and the macOS cross-check.
 Clippy checks `serde`, `cli` and `testing` alone so that the compiler checks the
 code that each of them builds, which the code of other features may
 otherwise use; the musl check of the guest binaries checks `guest` alone.
+Clippy's checks of all targets compile the crate's examples, among them the
+compile-only `host-workflows` and, in the musl check, `guest-workflows`, so
+that the documented workflows keep compiling against the public API.
 It also validates bundled artifact staging with a fixture package. The action
 sets `NVX_BUNDLE=skip` for `--all-features` builds, so that `bundled` stages
 nothing instead of downloading the pinned release.
