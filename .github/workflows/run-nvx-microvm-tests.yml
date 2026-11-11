@@ -222,6 +222,7 @@ jobs:
           --scenario vm-lifecycle
           --scenario snapshot-core
           --scenario snapshot-tiers
+          --scenario untiered-network-policy
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
 
       - name: Run public managed sandbox acceptance on Windows
@@ -238,6 +239,7 @@ jobs:
           --scenario vm-lifecycle
           --scenario snapshot-core
           --scenario snapshot-tiers
+          --scenario untiered-network-policy
           --output-dir "build/test-results/public-exec-${{ inputs.backend }}"
 
       - name: Run Ubuntu guest smoke tests on Linux
