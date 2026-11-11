@@ -344,9 +344,7 @@ impl Store {
     /// Returns the path of the Linux socket at which the VMM of the clone that holds `lease`
     /// listens, its control endpoint: `<launch>.sock`, after the launch that the lease reserves,
     /// in the payload of the leased generation, beside the snapshot that the VMM restores in
-    /// place, since OpenVMM requires a restore's control socket in the snapshot's parent. The
-    /// clone's launch refuses a path that a Unix socket, or OpenVMM's option `listen=<path>`,
-    /// cannot take.
+    /// place, since OpenVMM requires a restore's control socket in the snapshot's parent.
     ///
     /// A payload holds the sockets of the clones of its generation only while they lease it: the
     /// VMM removes its socket as it exits, a stop or a recovery removes what an abrupt exit

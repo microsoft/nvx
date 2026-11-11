@@ -12,9 +12,6 @@ use crate::host::template::MANIFEST_NAME;
 use crate::host::template::key::CaptureClass;
 use crate::host::template::manifest::TemplateManifest;
 
-#[cfg(any(target_os = "linux", windows))]
-pub(in crate::host::template) use crate::host::snapshot::SNAPSHOT_ARTIFACTS;
-
 impl Store {
     /// Publishes a generation of a template, whose fixed time contract names a host and boot of
     /// its own, for the tests of other modules, and returns it.
@@ -24,18 +21,6 @@ impl Store {
             &crate::host::snapshot::tests::ManifestSpec::template(),
             tests::storage(1),
         )
-    }
-
-    /// Publishes a capture of `class` whose manifest `spec` encodes, as
-    /// [`publish_for_tests`](Self::publish_for_tests) does, for the tests of the other modules of
-    /// templates, and returns it.
-    #[cfg(any(target_os = "linux", windows))]
-    pub(in crate::host::template) fn publish_spec_for_tests(
-        &self,
-        class: &crate::host::template::CaptureClass,
-        spec: &crate::host::snapshot::tests::ManifestSpec,
-    ) -> Generation {
-        tests::publish_with(self, class, spec, tests::storage(1))
     }
 }
 

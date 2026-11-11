@@ -226,8 +226,7 @@ impl CheckedDistro {
     /// It reads the file's metadata alone. A restore of a template presents its `distro` at the
     /// geometry that the template recorded, the capacity of every clone's image, over an image
     /// that may be shorter, so the image of a clone must be no longer than the template's
-    /// `distro`, with the same logical and physical block sizes, as
-    /// [`ClonePlan`](crate::host::template::ClonePlan) checks before the clone's launch.
+    /// `distro`, with the same logical and physical block sizes.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a
     /// physical block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io)
@@ -338,12 +337,6 @@ impl DistroBinding {
     /// Returns the policy verdict.
     pub fn policy(&self) -> PolicyVerdict {
         self.policy
-    }
-
-    /// Returns the binding's version, which a [check](Self::check) requires to be
-    /// [`BINDING_VERSION`].
-    pub(crate) fn version(&self) -> u32 {
-        self.version
     }
 
     /// Returns the binding of `layer`, with the seals of its image and manifest and `policy`.
