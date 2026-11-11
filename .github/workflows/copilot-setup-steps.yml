@@ -104,8 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           rust_toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)
-          # The minimum supported Rust version of the nvx crate, with which
-          # check-nvx-rs also checks the runtime adapter.
+          # The minimum supported Rust version of the nvx crate, which
+          # check-nvx-rs checks.
           crate_msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' nvx-rs/Cargo.toml)
           nextest=$(sed -n 's/^cargo_nextest\.version=//p' scripts/setup/tool-versions.conf)
           {
