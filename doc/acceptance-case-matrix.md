@@ -13,9 +13,10 @@ docs, and each microVM scenario, one fate, by name:
 SL5.1b (#1118) added the smoke tests on real VMs of a cold boot: `test-microvm --scenario
 vm-lifecycle` creates, spawns, reattaches to and stops a VM through the public API, and the CLI's
 12 cold cells, EROFS and GPT images, each over a scratch or a RAM upper, run on KVM, MSHV and WHP,
-as [Cold boots](#cold-boots) lists. The later slice is SL5.1c (#1118), whose smoke tests capture a
+as [Cold boots](#cold-boots) lists. SL5.1c (#1118) added those of snapshots, which capture a
 snapshot, open it and restore it with nvx-init as the guest, run concurrent restores of one
-snapshot under the CLI's lock, and check that a failed restore reports its attribution.
+snapshot under the CLI's lock, and check that a failed restore reports its attribution, as
+[Snapshots](#snapshots) lists.
 
 The inventory is fixed: it lists the tests as they are where this matrix was added, from
 `tests/runtime-adapter/scenarios.txt` and the adapter's sources, `MICROVM_TEST_SCENARIOS` and
@@ -29,7 +30,7 @@ its own in turn.
 | --- | ---: | ---: | ---: | ---: |
 | [The adapter's scenarios](#the-adapters-scenarios) | 157 | 0 | 114 | 43 |
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
-| [MicroVM scenarios](#microvm-scenarios) | 54 | 50 | 3 | 1 |
+| [MicroVM scenarios](#microvm-scenarios) | 54 | 51 | 2 | 1 |
 | [CI](#ci) | 69 | 43 | 3 | 23 |
 | [Docs](#docs) | 36 | 35 | 1 | 0 |
 
@@ -211,13 +212,13 @@ The adapter's README says what each proves.
 | `a_removal_reports_busy_while_leases_keep_the_generation` | retired | Removals, leases, tombstones and generations leave with the old clone path (#1121) |
 | `a_template_whose_processors_are_all_online_at_boot_limits_none` | rewritten | `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_treats_zero_boot_processors_as_all_capacity_online`; `nvx-rs/src/host/config/tests.rs::fresh_captures_pass_with_supported_processors_and_aligned_memory`; `test-microvm --scenario smp-snapshot` |
 | `a_template_without_a_network_has_no_nic` | rewritten | `nvx-rs/src/host/vm/tests.rs::capture_creation_records_sparse_disks_devices_and_a_complete_serde_context`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_refuses_both_nic_presence_mismatches_and_each_named_address_mismatch`. A store that serves it again retires (#1121) |
-| `the_networks_of_every_policy_at_one_guest_s_address_share_one_template` | rewritten | `nvx-rs/src/host/network/tests.rs::templates_attach_their_nic_under_the_complete_deny_all_policy`; `test-microvm --scenario untiered-network-policy`, which SL5.1c rewrites. A cached template retires (#1121) |
+| `the_networks_of_every_policy_at_one_guest_s_address_share_one_template` | rewritten | `nvx-rs/src/host/network/tests.rs::templates_attach_their_nic_under_the_complete_deny_all_policy`; `test-microvm --scenario untiered-network-policy`, which SL3.7c (#1114) rewrites on a strict snapshot with a NIC. A cached template retires (#1121) |
 
 ### `vm_clone` (36)
 
 | Scenario | Fate | Coverage, or why it retires |
 | --- | --- | --- |
-| `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | rewritten | `test-microvm --scenario untiered-network-policy`, which SL5.1c rewrites; `test-microvm --scenario network-snapshot`; `nvx-rs/src/guest/root/tests/view.rs::actual_resolver_failures_keep_the_network_class_and_root_owned_bind` |
+| `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | rewritten | `test-microvm --scenario untiered-network-policy`, which SL3.7c (#1114) rewrites on a strict snapshot with a NIC; `test-microvm --scenario network-snapshot`; `nvx-rs/src/guest/root/tests/view.rs::actual_resolver_failures_keep_the_network_class_and_root_owned_bind` |
 | `a_clone_maps_an_aggregate_of_directories_and_files_beneath_its_root_before_its_sandbox_starts` | rewritten | `test-microvm --scenario platform-aggregate-export`; `nvx-rs/src/guest/mappings/table/tests.rs::mappings_keep_the_paths_and_the_access_of_their_entries` |
 | `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | rewritten | `nvx-rs/src/guest/activation/state/apply/tests.rs::the_record_s_view_is_applied_once_with_its_own_dns_and_returned_machine_id`; `test-microvm --scenario filesystem-snapshot` |
 | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | rewritten | A restore reads no content of its disks or snapshot: `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_never_reopens_snapshot_paths_or_reads_runtime_artifacts`; `nvx-rs/src/host/sandbox/distro/tests.rs::the_staged_check_reads_no_content`; `nvx-rs/src/host/sandbox/scratch/tests.rs::checks_claim_the_image_without_reading_it`. The adapter's in-guest read statistics retire |
@@ -225,7 +226,7 @@ The adapter's README says what each proves.
 | `a_clone_runs_the_executions_that_name_their_identity_once_it_is_ready` | retired | Executions that name their identities leave with the exec engine (#1087) |
 | `a_clone_s_executions_find_the_proxy_of_its_policy` | rewritten | `nvx-rs/src/guest/managed_agent/launch/tests.rs::restored_proxy_defaults_replace_template_values_before_exec_overrides`; `test-microvm --scenario platform-network-policy` |
 | `a_clone_s_time_settles_after_it_is_ready` | rewritten | `test-microvm --scenario time-host-correction`; `test-microvm --scenario restore-downtime` |
-| `a_clone_whose_activation_fails_ends_before_it_is_ready` | rewritten | `nvx-rs/src/host/restore/tests.rs::restore_failures_attribute_the_existing_policy_free_evidence_classes`; `nvx-rs/src/host/restore/tests.rs::restore_exit_reports_keep_guest_status_classification_and_actual_details`; SL5.1c's failed restore. Quarantine and leases retire (#1121) |
+| `a_clone_whose_activation_fails_ends_before_it_is_ready` | rewritten | `nvx-rs/src/host/restore/tests.rs::restore_failures_attribute_the_existing_policy_free_evidence_classes`; `nvx-rs/src/host/restore/tests.rs::restore_exit_reports_keep_guest_status_classification_and_actual_details`; `test-microvm --scenario snapshot-core`, whose restore over a zeroed scratch image ends its VM before its workload runs. Quarantine and leases retire (#1121) |
 | `a_clone_whose_mapping_fails_ends_before_its_sandbox_starts` | rewritten | `nvx-rs/src/guest/mappings/mapper/tests.rs::a_failure_at_any_step_leaves_nothing_mounted`; `nvx-rs/src/guest/mappings/table/tests.rs::a_failed_mapping_keeps_those_before_it_and_latches_the_table` |
 | `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | rewritten | `nvx-rs/src/guest/activation/state/apply/tests.rs::the_record_s_view_is_applied_once_with_its_own_dns_and_returned_machine_id`; `nvx-rs/src/guest/root/tests/view.rs::a_later_bind_failure_stays_owned_and_its_teardown_removes_the_earlier_bind` |
 | `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | retired | Clone records and leases leave with the old clone path (#1121). A stop that finds an exit: `nvx-rs/src/host/vm/tests.rs::stop_preserves_report_results_after_a_real_self_exit` |
@@ -233,8 +234,8 @@ The adapter's README says what each proves.
 | `a_generation_is_eligible_by_the_clock_of_its_capture` | rewritten | `nvx-rs/src/host/snapshot/eligibility/tests.rs::within_one_boot_the_downtime_is_the_host_monotonic_clocks`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_reports_early_and_expired_time_as_unavailable` |
 | `a_generation_refuses_clones_of_fewer_processors_than_its_template_booted_with` | rewritten | `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_refuses_a_blockless_root_and_each_processor_mismatch`; `test-microvm --scenario restore-processors` |
 | `a_host_program_of_another_runtime_ends_the_clone_through_its_verified_identity` | rewritten | `nvx-rs/tests/security_checklist.rs::a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal`; `nvx-rs/src/host/vm/tests.rs::stop_forces_only_its_verified_process_after_grace`. Leases retire (#1121) |
-| `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | rewritten | `test-microvm --scenario platform-network-policy`; SL5.1c's restore smoke tests. The template's `run` retires (#1121) |
-| `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | rewritten | SL5.1c's restore smoke tests. The template's `run` and leases retire (#1121) |
+| `a_run_in_a_template_of_a_network_finds_its_policy_s_proxy` | rewritten | `test-microvm --scenario platform-network-policy`; `test-microvm --scenario snapshot-core`, whose runs restore a snapshot without a NIC until SL3.7c (#1114). The template's `run` retires (#1121) |
+| `a_run_runs_one_execution_in_its_clone_then_tears_the_clone_down` | rewritten | `test-microvm --scenario snapshot-core`, whose `run --restore-snapshot` runs one workload in its restored VM and removes its sandbox. The template's `run` and leases retire (#1121) |
 | `a_run_s_execution_finds_its_shares_beneath_the_root` | rewritten | `test-microvm --scenario platform-aggregate-export` |
 | `a_run_whose_clone_does_not_start_runs_nothing` | retired | Template selections and the template's `run` leave with the old clone path (#1121) |
 | `a_run_whose_clone_s_vm_exits_during_its_execution_ends_with_the_clone_s_failure` | retired | The template's `run`, clone records and leases leave with the old clone path (#1121) |
@@ -243,15 +244,15 @@ The adapter's README says what each proves.
 | `a_start_refuses_what_the_template_cannot_serve_before_any_vmm_starts` | rewritten | `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_refuses_an_image_longer_than_its_placeholder`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_refuses_each_scratch_geometry_mismatch`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_refuses_each_memory_mismatch_without_rounding_or_overflow` |
 | `a_template_without_a_nic_serves_clones_without_a_network` | rewritten | `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_refuses_both_nic_presence_mismatches_and_each_named_address_mismatch` |
 | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | retired | Tombstones, generations and leases leave with the old clone path (#1121) |
-| `clones_at_once_keep_their_own_uppers_and_machine_ids` | rewritten | SL5.1c's concurrent restores of one snapshot; `test-microvm --scenario scratch-snapshot` |
-| `clones_at_once_see_only_their_own_exports` | rewritten | SL5.1c's concurrent restores of one snapshot; `test-microvm --scenario platform-aggregate-export` |
+| `clones_at_once_keep_their_own_uppers_and_machine_ids` | rewritten | `test-microvm --scenario snapshot-core`, whose concurrent restores of one snapshot each keep their own upper and machine ID; `test-microvm --scenario scratch-snapshot` |
+| `clones_at_once_see_only_their_own_exports` | rewritten | `test-microvm --scenario snapshot-core`, whose concurrent restores of one snapshot each see their own share alone; `test-microvm --scenario platform-aggregate-export` |
 | `each_command_reattaches_to_the_clone_from_a_new_process` | rewritten | `nvx-rs/src/host/vm/tests/reattach.rs::reattaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped`. The adapter's probes retire |
 | `one_generation_serves_clones_of_each_processor_count_from_its_boot_online_count_to_its_capacity` | rewritten | `test-microvm --scenario restore-processors`; `test-microvm --scenario platform-restore-processors` |
 | `one_generation_serves_clones_of_each_upper_and_memory_target` | rewritten | `test-microvm --scenario scratch-snapshot`; `test-microvm --scenario restore-memory`. Leases retire (#1121) |
-| `one_generation_serves_clones_of_either_format_over_either_upper` | rewritten | `test-microvm --scenario snapshot-tiers`, which SL5.1c rewrites; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_matching_real_disk_geometry_and_every_resource_boundary` |
-| `one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address` | rewritten | `test-microvm --scenario untiered-network-policy`, which SL5.1c rewrites; `test-microvm --scenario platform-network-policy` |
+| `one_generation_serves_clones_of_either_format_over_either_upper` | rewritten | `test-microvm --scenario snapshot-tiers`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_matching_real_disk_geometry_and_every_resource_boundary` |
+| `one_template_serves_the_clones_of_every_network_policy_at_its_guest_s_address` | rewritten | `test-microvm --scenario untiered-network-policy`, which SL3.7c (#1114) rewrites on a strict snapshot with a NIC; `test-microvm --scenario platform-network-policy` |
 | `openvmm_reads_none_of_the_host_s_input_until_the_repair_acknowledges_the_restore` | retired | It watches OpenVMM's own gating of the host's input through the repair delay of the adapter's templates, which leaves with them. NVX's side stays: `nvx-rs/src/guest/activation/state/tests.rs::the_deadline_starts_at_the_acknowledgement_and_retries_never_extend_it`; `nvx-rs/src/guest/init/boot/tests.rs::restored_sessions_keep_the_deadline_of_the_actual_repair_acknowledgement` |
-| `restore_exclusion::hard_linked_restore_views_obey_the_callers_exclusion` (linux) | rewritten | SL5.1c's concurrent restores of one snapshot under the CLI's lock. The view that a restore hard-links, which `vm::create` documents: `nvx-rs/src/host/snapshot/tests.rs::a_restore_view_hard_links_only_the_fixed_openvmm_inventory`; `nvx-rs/src/host/vm/tests.rs::snapshot_creation_owns_the_fixed_view_and_uses_captured_nic_with_requested_policy`; `nvx-rs/src/host/vm/tests.rs::snapshot_creation_refuses_a_true_cross_filesystem_view_without_copying`; `nvx-rs/src/host/vm/tests.rs::snapshot_creation_never_replaces_existing_outputs_views_or_listeners`; `nvx-rs/src/host/vm/tests.rs::the_same_prebound_listener_keeps_its_queue_through_both_launch_paths_without_inheritance`. OpenVMM's own checks before its restore-ready connection, which fail a restore whose view changed or whose caller died, and which `vm::create` documents too, leave NVX's tests |
+| `restore_exclusion::hard_linked_restore_views_obey_the_callers_exclusion` (linux) | rewritten | `test-microvm --scenario snapshot-core`, whose concurrent restores of one snapshot take turns at the CLI's lock and leave no link to its files. The view that a restore hard-links, which `vm::create` documents: `nvx-rs/src/host/snapshot/tests.rs::a_restore_view_hard_links_only_the_fixed_openvmm_inventory`; `nvx-rs/src/host/vm/tests.rs::snapshot_creation_owns_the_fixed_view_and_uses_captured_nic_with_requested_policy`; `nvx-rs/src/host/vm/tests.rs::snapshot_creation_refuses_a_true_cross_filesystem_view_without_copying`; `nvx-rs/src/host/vm/tests.rs::snapshot_creation_never_replaces_existing_outputs_views_or_listeners`; `nvx-rs/src/host/vm/tests.rs::the_same_prebound_listener_keeps_its_queue_through_both_launch_paths_without_inheritance`. OpenVMM's own checks before its restore-ready connection, which fail a restore whose view changed or whose caller died, and which `vm::create` documents too, leave NVX's tests |
 | `the_lease_of_a_start_that_ended_before_its_record_is_released_through_its_template_store` | retired | Leases and clone records leave with the old clone path (#1121) |
 
 ## The adapter's other tests
@@ -296,7 +297,8 @@ check the adapter's own code, and CI runs in its configurations of the adapter.
 `nvx.py test-microvm` runs these scenarios, which use no adapter: CI runs those of the default
 suite in its shards, and the public sandbox scenarios in its guest and sandbox jobs. The public
 `sandbox-gpt-layer` and `vm-lifecycle` scenarios came with SL5.1b, after this matrix;
-[Cold boots](#cold-boots) says what they check.
+[Cold boots](#cold-boots) says what they check. SL5.1c rewrote `snapshot-core` and
+`snapshot-tiers` as public scenarios; [Snapshots](#snapshots) says what they check.
 
 | Scenario | Fate | Note |
 | --- | --- | --- |
@@ -343,13 +345,13 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `smp` | kept |  |
 | `smp-lapic` | kept | Runs only when a run names it |
 | `smp-snapshot` | kept |  |
-| `snapshot-core` | rewritten | SL5.1c rewrites it on strict snapshots, keeping its DNS, egress, forwards and publication; only its raw-snapshot parts retire |
+| `snapshot-core` | rewritten | On a named snapshot, as [Snapshots](#snapshots) says. Its checks of raw snapshots retire: the guest's capture with `nvx-snapshot` and its terminal boundary; a snapshot request without a destination, which OpenVMM releases, and which no scenario sends any longer, though `snapshot-rollback` keeps the checks of the source after a released request, which follows the capture that it rolls back; the CPU clocks of a sleeping task, an armed timer's wait, the restore packet's entropy file and `nvx-reseed`, the VM generation ID, and the time ABI's port access. It had no network |
 | `snapshot-rollback` | kept |  |
-| `snapshot-tiers` | rewritten | SL5.1c rewrites it on strict snapshots, keeping its DNS, egress, forwards and publication; only its raw-snapshot parts retire |
+| `snapshot-tiers` | rewritten | On a named snapshot of the platform tier, as [Snapshots](#snapshots) says. Its checks of raw snapshots retire: the workload-start and instance-checkpoint tiers, a restore of the wrong tier, the restore's input gate and its timeout, a restore of an instance checkpoint without `--machine microvm`, and a second claim of one, and its run on the debug kernel. It checked nothing of its NIC |
 | `structured-outcome` | kept |  |
 | `time-abi-conformance` | kept |  |
 | `time-host-correction` | kept |  |
-| `untiered-network-policy` | rewritten | SL5.1c rewrites it on strict snapshots, keeping its DNS, egress, forwards and publication; only its raw-snapshot parts retire |
+| `untiered-network-policy` | kept | On a raw snapshot, until a strict snapshot can carry a NIC: SL3.7c (#1114) rewrites it on one. It keeps the coverage of a restore's DNS, egress, forwards and listener publication until then |
 | `virtio-features` | kept |  |
 | `virtio-net` | kept |  |
 | `vm-lifecycle` | kept | A [cold boot](#cold-boots) through the public API: `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped` |
@@ -378,8 +380,29 @@ directory. `test-microvm --scenario vm-lifecycle` cold-boots a VM through the pu
 `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped` creates and
 spawns it, with nvx-init over the EROFS layer and a scratch upper, lets the launch go, reattaches
 to it twice from the values that it saved, and stops it through its guest, which must exit without
-a forced termination and report a complete teardown. No cell or smoke test captures or restores a
-snapshot: SL5.1c adds those.
+a forced termination and report a complete teardown. No cell captures or restores a snapshot:
+[Snapshots](#snapshots) lists the smoke tests that do.
+
+### Snapshots
+
+`test-microvm --scenario snapshot-core` and `test-microvm --scenario snapshot-tiers`, which CI's
+guest and sandbox job of each backend runs, capture a named snapshot with `nvx-rs snapshot
+capture`, whose VM nvx-init runs, and restore it with `nvx-rs snapshot restore` and `nvx-rs run
+--restore-snapshot`, which open it as a strict snapshot under the CLI's lock of the snapshot, as
+[Run](run.md#named-snapshots) describes.
+
+| Smoke test | Where |
+| --- | --- |
+| A real VM is captured, opened as a strict snapshot and restored with nvx-init | `snapshot-core`: two one-off restores and three managed ones, whose guests keep the snapshot's uptime, read the host's clock, and take fresh random values and machine IDs. `snapshot-tiers`: a managed restore of each image format, EROFS and GPT, over each upper, scratch and RAM |
+| Concurrent restores of one snapshot are serialized by the CLI's lock | `snapshot-core`: three restores at once, whose workloads end only when the scenario releases them. While one holds the lock, no other links its view of the snapshot, and a restore that cannot wait for the lock fails with `sandbox-busy` before its workload runs. The three then run at once, each with its own share, upper and machine ID |
+| The selected failed restore reports its attribution | `snapshot-core`: a scratch image that the snapshot cannot serve is refused before any VM starts, with an error that names the lengths of the requested scratch and of the snapshot's, which attributes the failure to the request; the managed sandbox of the refused restore holds its configuration and its lock alone, with no trace of a launch. A restore that fails in its guest ends its VM, frees the lock, and reports `guest-exit status 125` |
+
+The CLI prints no attribution of a restore that fails in its guest beyond the guest's exit
+status: nvx-init's status for each class of failure, and the CLI's report of the restore's
+attribution, are a follow-up on #1118. A snapshot that `snapshot capture` captures has no NIC, so
+its restores take no network option: `untiered-network-policy` keeps the coverage of a restore's
+DNS, egress, forwards and listener publication on raw snapshots until SL3.7c (#1114) lets a
+capture keep a NIC.
 
 ## CI
 
@@ -421,9 +444,9 @@ their own. The tests that a step runs have rows of their own where they concern 
 | `.github/workflows/ci.yml` | crate-release: Check the nvx package | kept |  |
 | `.github/workflows/ci.yml` | nvx-microvm-adapter-whp: the runtime adapter's job on WHP | retired | The adapter's scenarios, whose fates are above |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run NVX microVM tests on Linux and on Windows | kept | The default suite's scenarios, by shard and on the debug kernel |
-| `.github/workflows/run-nvx-microvm-tests.yml` | Run public managed sandbox acceptance on Linux and on Windows | kept | Runs `sandbox-gpt-layer` and `vm-lifecycle` too, since SL5.1b: see [Cold boots](#cold-boots) |
+| `.github/workflows/run-nvx-microvm-tests.yml` | Run public managed sandbox acceptance on Linux and on Windows | kept | Runs `sandbox-gpt-layer` and `vm-lifecycle` too, since SL5.1b: see [Cold boots](#cold-boots); and `snapshot-core` and `snapshot-tiers`, since SL5.1c: see [Snapshots](#snapshots) |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run Ubuntu and Azure Linux guest smoke tests on Linux and on Windows | kept |  |
-| `.github/workflows/run-nvx-microvm-tests.yml` | Run extended Ubuntu guest tests on Linux/KVM | kept |  |
+| `.github/workflows/run-nvx-microvm-tests.yml` | Run extended Ubuntu guest tests on Linux/KVM | kept | No longer runs `snapshot-core`, which needs the Alpine control guest since SL5.1c rewrote it |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run the Ubuntu sandbox layer, live-share, managed live-share, caller-owned live-share, concurrent shares and share access policy tests on Linux and on Windows | kept | The layer smoke test is the `run` of a [cold cell](#cold-boots) |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Build the runtime adapter's guest agent on Linux; Download the runtime adapter's guest agent on Windows | retired | The adapter's guest agent |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run runtime adapter scenarios on Linux and on Windows | retired | The adapter's scenarios, whose fates are above |
