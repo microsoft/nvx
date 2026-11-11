@@ -20,7 +20,6 @@ are build products or caches and are not part of the tracked source tree. The
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
 | `nvx-rs` | Rust crate `nvx`: the NVX mechanics |
-| `tests/runtime-adapter` | Rust crate `runtime-adapter`: an independent adapter that CI builds against `nvx` through its public API |
 | `openvmm` | Public OpenVMM Git submodule from `microsoft/openvmm`, tracking its `feature/microvm/dev` branch |
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Implementation of the `nvx.py` commands |
@@ -178,10 +177,6 @@ nvx/
 |   |-- publish_nvx_crate.py     nvx crate publisher run by CI's full runs of dev
 |   |-- test-layout-allowlist.json The test hooks that production files may hold
 |   `-- test_*.py                Python tooling unit tests
-|-- tests/                       Tests that build on the repository's crates from outside them
-|   `-- runtime-adapter/         Rust crate `runtime-adapter`, an independent adapter of nvx
-|       |-- src/                 Its framing, its host program, and its guest agent
-|       `-- tests/               Its independent build, and its guest agent against a test broker
 |-- SECURITY.md                 Microsoft security vulnerability reporting policy
 |-- .dockerignore                Docker build-context exclusions
 |-- .gitattributes               Git path attributes
@@ -369,23 +364,6 @@ see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
 draw the module diagrams that `doc/modules` publishes (see
 [Module diagrams](ci.md#module-diagrams)).
 
-### `tests/`
-
-Tests that build on the repository's crates from outside them.
-`runtime-adapter/` is an independent adapter of the NVX runtime: a standalone
-crate with its own `Cargo.lock` that depends on `nvx` with default features
-off and uses its public API only. Its protocol-only, host-only, and guest-only
-configurations build in CI, and its tests check that each one builds as an
-independent adapter's does. Its host program and its guest agent exchange the
-adapter's own framing over the control session between the host and the
-guest, and its tests check each of them against a test broker. Its host
-program also runs the guest agent in VMs of NVX's artifacts through NVX's
-supervisor, and reattaches to them from other processes. In VMs with a
-layered root, the guest agent's worker assembles the root through
-`nvx::guest::root`, outside PID 1, and the host program checks it with probes,
-in a table of scenarios. Its ignored tests check the VMs on each backend in CI.
-See its [README](../tests/runtime-adapter/README.md).
-
 ## Root files
 
 | Path | Responsibility |
@@ -415,7 +393,6 @@ See its [README](../tests/runtime-adapter/README.md).
 | `dist/` | Staged binary and source release archives |
 | `openvmm/target/` | Rust build output produced inside the OpenVMM submodule |
 | `nvx-rs/target/` | Rust build output of the `nvx` crate |
-| `tests/runtime-adapter/target/` | Rust build output of the runtime adapter |
 | `.ruff_cache/` | Ruff's local lint cache |
 | `__pycache__/` | Python bytecode caches that may appear below Python source directories |
 

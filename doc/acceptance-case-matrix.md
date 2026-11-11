@@ -1,7 +1,7 @@
 # Case matrix
 
-NVX deletes its runtime adapter, `tests/runtime-adapter`, once the acceptance that replaces it
-passes (#1086, #1119). Before then, this matrix gives each test of the adapter, of CI and of the
+NVX deleted its runtime adapter, `tests/runtime-adapter`, once the acceptance that replaces it
+passed (#1086, #1119). Before then, this matrix gave each test of the adapter, of CI and of the
 docs, and each microVM scenario, one fate, by name:
 
 - **kept**: the test stays as it is, and runs without the adapter.
@@ -36,12 +36,12 @@ its own in turn.
 
 ## The adapter's scenarios
 
-`scenarios.txt` names 157 scenarios, which CI's runtime adapter step runs on KVM, MSHV
+`scenarios.txt` named 157 scenarios, which CI's runtime adapter step ran on KVM, MSHV
 and WHP: the 154 of the adapter's stage, the two that `dev` added since,
 `template_capture::the_host_program_refuses_a_repair_delay_that_it_cannot_read` and
 `vm_clone::openvmm_reads_none_of_the_host_s_input_until_the_repair_acknowledges_the_restore`, and
 the Linux-only `vm_clone::restore_exclusion::hard_linked_restore_views_obey_the_callers_exclusion`.
-The adapter's README says what each proves.
+The adapter's README said what each proved.
 
 ### `template_capture` (3)
 
@@ -257,8 +257,8 @@ The adapter's README says what each proves.
 
 ## The adapter's other tests
 
-The adapter's library and its targets that `scenarios.txt` doesn't name hold these tests, which
-check the adapter's own code, and CI runs in its configurations of the adapter.
+The adapter's library and its targets that `scenarios.txt` didn't name held these tests, which
+checked the adapter's own code, and CI ran in its configurations of the adapter.
 
 | File | Tests | Fate | Coverage, or why it retires |
 | --- | --- | --- | --- |
@@ -407,7 +407,7 @@ capture keep a NIC.
 ## CI
 
 These are the steps of CI's workflows and actions that check something, and the Python tests of
-CI's wiring that name the adapter. Builds, downloads, uploads and publications check nothing of
+CI's wiring that named the adapter. Builds, downloads, uploads and publications check nothing of
 their own. The tests that a step runs have rows of their own where they concern the adapter.
 
 | Where | Case | Fate | Note |
