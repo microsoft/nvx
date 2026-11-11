@@ -29,13 +29,13 @@ use super::{Exit, Result, io_error, output};
 use crate::ErrorCode;
 use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
 use crate::host::paths;
+use crate::host::runtime::RuntimeIdentity;
 use crate::host::sandbox::distro::DistroFormat;
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::options::{
     SandboxOperation, SandboxOptions, sandbox_mounts, validate_sandbox_systemd_policy,
 };
 use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
-use crate::host::store::RuntimeIdentity;
 use crate::protocol::root::RootUpper;
 
 pub(crate) use self::lifecycle::ProvisionConfig;
