@@ -53,8 +53,11 @@ runs:
           -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --no-default-features \
           -- -D warnings
-        # The cli and testing features alone, so that the compiler checks the private code that
-        # each feature set builds, which other features' code may otherwise use.
+        # The serde, cli and testing features alone, so that the compiler checks the code that each
+        # feature set builds, which other features' code may otherwise use. The guest feature
+        # alone is checked with the guest binaries, below, for the guests' target.
+        cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib \
+          --no-default-features --features serde -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
           --features cli -- -D warnings
         cargo "+${{ steps.toolchains.outputs.toolchain }}" clippy --locked --lib --bins \
