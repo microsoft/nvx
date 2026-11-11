@@ -10,9 +10,10 @@ docs, and each microVM scenario, one fate, by name:
   of #1076. Where only a part of what it checks leaves NVX, the row says which.
 - **retired**: what it checks leaves NVX, as the row says, so nothing replaces it.
 
-The later slices are SL5.1b (#1118), whose smoke tests on real VMs create, spawn, reattach and
-stop a VM through the public API, and run the CLI's 12 cold cells, EROFS and GPT images, each over
-a scratch or a RAM upper, on KVM, MSHV and WHP; and SL5.1c (#1118), whose smoke tests capture a
+SL5.1b (#1118) added the smoke tests on real VMs of a cold boot: `test-microvm --scenario
+vm-lifecycle` creates, spawns, reattaches to and stops a VM through the public API, and the CLI's
+12 cold cells, EROFS and GPT images, each over a scratch or a RAM upper, run on KVM, MSHV and WHP,
+as [Cold boots](#cold-boots) lists. The later slice is SL5.1c (#1118), whose smoke tests capture a
 snapshot, open it and restore it with nvx-init as the guest, run concurrent restores of one
 snapshot under the CLI's lock, and check that a failed restore reports its attribution.
 
@@ -28,7 +29,7 @@ its own in turn.
 | --- | ---: | ---: | ---: | ---: |
 | [The adapter's scenarios](#the-adapters-scenarios) | 157 | 0 | 114 | 43 |
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
-| [MicroVM scenarios](#microvm-scenarios) | 52 | 48 | 3 | 1 |
+| [MicroVM scenarios](#microvm-scenarios) | 54 | 50 | 3 | 1 |
 | [CI](#ci) | 69 | 43 | 3 | 23 |
 | [Docs](#docs) | 36 | 35 | 1 | 0 |
 
@@ -141,7 +142,7 @@ The adapter's README says what each proves.
 | --- | --- | --- |
 | `a_host_program_of_another_runtime_finds_the_vm_mismatched_and_signals_nothing` | rewritten | `nvx-rs/tests/security_checklist.rs::a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal`; `nvx-rs/src/host/vm/tests/reattach.rs::verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint` |
 | `a_launch_tears_down_a_vm_whose_guest_agent_is_of_another_build` | retired | The adapter's guest agent and the build that its Ready reports |
-| `a_restarted_host_program_reattaches_to_the_vm_and_stops_it` | rewritten | SL5.1b's lifecycle smoke test; `nvx-rs/src/host/vm/tests/reattach.rs::reattaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/src/host/vm/tests.rs::stop_forces_only_its_verified_process_after_grace` |
+| `a_restarted_host_program_reattaches_to_the_vm_and_stops_it` | rewritten | `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped`, which `test-microvm --scenario vm-lifecycle` runs; `nvx-rs/src/host/vm/tests/reattach.rs::reattaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/src/host/vm/tests.rs::stop_forces_only_its_verified_process_after_grace` |
 
 ### `vm_steps` (3)
 
@@ -171,10 +172,10 @@ The adapter's README says what each proves.
 | `busy_root_fails_the_teardown` | rewritten | `nvx-rs/src/guest/mappings/mapper/tests/privileged.rs::a_teardown_unmounts_each_mapping_and_reports_a_busy_one`; `nvx-rs/src/guest/root/tests.rs::a_teardown_unmounts_the_layers_top_first_and_reports_every_failure` |
 | `corrupt_layer_fails_the_assembly` | rewritten | `nvx-rs/src/guest/root/tests.rs::a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_any_mount` |
 | `cyclic_journal_is_not_loaded` | rewritten | `nvx-rs/src/guest/root/block/tests.rs::the_superblock_tells_whether_an_ext4_journal_exists_and_needs_a_recovery`; `nvx-rs/src/guest/root/tests.rs::a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first` |
-| `erofs_over_ram` | rewritten | SL5.1b's cold cells; `nvx-rs/src/guest/root/tests.rs::a_tmpfs_upper_needs_no_scratch_device` |
+| `erofs_over_ram` | rewritten | `test-microvm --scenario sandbox-ram-upper`, among the [cold cells](#cold-boots); `nvx-rs/src/guest/root/tests.rs::a_tmpfs_upper_needs_no_scratch_device` |
 | `erofs_over_ram_maps_the_table` | rewritten | `nvx-rs/src/guest/mappings/table/tests.rs::mappings_keep_the_paths_and_the_access_of_their_entries`; `nvx-rs/src/guest/init/boot/tests.rs::layered_cold_boot_maps_through_handles_opened_before_its_only_switch` |
 | `erofs_over_ram_with_untrusted_lowers` | rewritten | `nvx-rs/src/guest/root/tests.rs::both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets` |
-| `erofs_over_scratch` | rewritten | SL5.1b's cold cells; `nvx-rs/src/guest/root/tests.rs::assembly_mounts_the_image_and_the_scratch_under_the_overlay`. The adapter's cgroups retire with the exec engine (#1087) |
+| `erofs_over_scratch` | rewritten | `test-microvm --scenario sandbox-lifecycle`, among the [cold cells](#cold-boots); `nvx-rs/src/guest/root/tests.rs::assembly_mounts_the_image_and_the_scratch_under_the_overlay`. The adapter's cgroups retire with the exec engine (#1087) |
 | `erofs_over_scratch_maps_the_table` | rewritten | `nvx-rs/src/guest/mappings/mapper/tests.rs::mappings_are_restricted_copies_attached_in_order`; `nvx-rs/src/guest/init/boot/tests.rs::layered_cold_boot_maps_through_handles_opened_before_its_only_switch` |
 | `erofs_over_scratch_with_untrusted_lowers` | rewritten | `nvx-rs/src/guest/root/tests.rs::both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets` |
 | `executions_run_as_the_workload_identity` | rewritten | `test-microvm --scenario workload-identity`; `test-microvm --scenario managed-exec-config`. An execution's own identity, which the adapter refused, retires with the exec engine (#1087) |
@@ -184,10 +185,10 @@ The adapter's README says what each proves.
 | `forbidden_journal_fails_the_assembly` | rewritten | `nvx-rs/src/guest/root/tests.rs::the_journal_policy_is_checked_in_the_scratch_s_superblock_before_any_mount` |
 | `full_ram_upper_refuses_writes` | rewritten | The tmpfs takes its cap as its size, which the kernel enforces: `nvx-rs/src/guest/root/tests.rs::both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets`; `nvx-rs/src/host/config/tests.rs::a_ram_upper_holds_1_to_90_percent_of_the_memory_and_half_by_default` |
 | `full_scratch_refuses_writes` | retired | ext4 refuses writes to a full scratch; NVX sets nothing of it |
-| `gpt_over_ram` | rewritten | SL5.1b's cold cells; `nvx-rs/src/guest/root/tests.rs::a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first` |
+| `gpt_over_ram` | rewritten | `test-microvm --scenario sandbox-gpt-layer`, among the [cold cells](#cold-boots); `nvx-rs/src/guest/root/tests.rs::a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first` |
 | `gpt_over_ram_maps_the_table` | rewritten | `nvx-rs/src/guest/mappings/table/tests.rs::mappings_keep_the_paths_and_the_access_of_their_entries`; `nvx-rs/src/guest/init/boot/tests.rs::layered_cold_boot_maps_through_handles_opened_before_its_only_switch` |
 | `gpt_over_ram_with_untrusted_lowers` | rewritten | `nvx-rs/src/guest/root/tests.rs::both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets` |
-| `gpt_over_scratch` | rewritten | SL5.1b's cold cells; `nvx-rs/src/guest/root/tests.rs::the_first_partition_is_returned_as_opaque_bytes_within_its_bound`; `nvx-rs/src/guest/root/tests.rs::a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first` |
+| `gpt_over_scratch` | rewritten | `test-microvm --scenario sandbox-gpt-layer`, among the [cold cells](#cold-boots); `nvx-rs/src/guest/root/tests.rs::the_first_partition_is_returned_as_opaque_bytes_within_its_bound`; `nvx-rs/src/guest/root/tests.rs::a_gpt_disk_s_layers_are_mounted_under_the_overlay_top_first` |
 | `gpt_over_scratch_maps_the_table` | rewritten | `nvx-rs/src/guest/mappings/mapper/tests.rs::targets_are_created_only_on_the_root_s_own_mounts`; `nvx-rs/src/guest/init/boot/tests.rs::layered_cold_boot_maps_through_handles_opened_before_its_only_switch` |
 | `gpt_over_scratch_with_untrusted_lowers` | rewritten | `nvx-rs/src/guest/root/tests.rs::both_overlay_modes_assemble_on_both_uppers_with_their_own_option_sets` |
 | `invalid_configuration_fails_its_stage` | retired | The adapter's configuration stage and its status |
@@ -244,7 +245,7 @@ The adapter's README says what each proves.
 | `a_tombstone_leaves_the_running_clone_of_its_generation_to_its_lease` | retired | Tombstones, generations and leases leave with the old clone path (#1121) |
 | `clones_at_once_keep_their_own_uppers_and_machine_ids` | rewritten | SL5.1c's concurrent restores of one snapshot; `test-microvm --scenario scratch-snapshot` |
 | `clones_at_once_see_only_their_own_exports` | rewritten | SL5.1c's concurrent restores of one snapshot; `test-microvm --scenario platform-aggregate-export` |
-| `each_command_reattaches_to_the_clone_from_a_new_process` | rewritten | `nvx-rs/src/host/vm/tests/reattach.rs::reattaching_returns_the_held_owned_child_and_authenticated_connection`; SL5.1b's lifecycle smoke test. The adapter's probes retire |
+| `each_command_reattaches_to_the_clone_from_a_new_process` | rewritten | `nvx-rs/src/host/vm/tests/reattach.rs::reattaching_returns_the_held_owned_child_and_authenticated_connection`; `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped`. The adapter's probes retire |
 | `one_generation_serves_clones_of_each_processor_count_from_its_boot_online_count_to_its_capacity` | rewritten | `test-microvm --scenario restore-processors`; `test-microvm --scenario platform-restore-processors` |
 | `one_generation_serves_clones_of_each_upper_and_memory_target` | rewritten | `test-microvm --scenario scratch-snapshot`; `test-microvm --scenario restore-memory`. Leases retire (#1121) |
 | `one_generation_serves_clones_of_either_format_over_either_upper` | rewritten | `test-microvm --scenario snapshot-tiers`, which SL5.1c rewrites; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_matching_real_disk_geometry_and_every_resource_boundary` |
@@ -293,7 +294,9 @@ check the adapter's own code, and CI runs in its configurations of the adapter.
 ## MicroVM scenarios
 
 `nvx.py test-microvm` runs these scenarios, which use no adapter: CI runs those of the default
-suite in its shards, and the public sandbox scenarios in its guest and sandbox jobs.
+suite in its shards, and the public sandbox scenarios in its guest and sandbox jobs. The public
+`sandbox-gpt-layer` and `vm-lifecycle` scenarios came with SL5.1b, after this matrix;
+[Cold boots](#cold-boots) says what they check.
 
 | Scenario | Fate | Note |
 | --- | --- | --- |
@@ -318,7 +321,7 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `l3-l4-egress-port-ranges` | kept |  |
 | `l3-l4-egress-protocols` | kept |  |
 | `lifecycle` | kept |  |
-| `managed-exec-config` | kept | SL5.1b keeps it running, or gives it its fate |
+| `managed-exec-config` | kept | A [cold cell](#cold-boots): the EROFS layer over a scratch upper, through `provision` and `start` |
 | `managed-lifecycle` | kept |  |
 | `network-snapshot` | kept |  |
 | `platform-aggregate-export` | kept |  |
@@ -332,9 +335,10 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `restore-processors` | kept |  |
 | `run-console-restore` | retired | SL3.8b removes `nvx-rs run`'s restore of a raw OpenVMM snapshot and the boot console that it reattached on the terminal: `run --restore-snapshot` restores a named snapshot through `snapshot restore`'s path |
 | `sandbox-blocks` | kept |  |
-| `sandbox-lifecycle` | kept | SL5.1b keeps it running, or gives it its fate |
-| `sandbox-proxy-only` | kept | SL5.1b keeps it running, or gives it its fate |
-| `sandbox-ram-upper` | kept | SL5.1b keeps it running, or gives it its fate |
+| `sandbox-gpt-layer` | kept | The [cold cells](#cold-boots) of a GPT disk, over a scratch upper and over a RAM upper, through `run`, and `provision` and `start` |
+| `sandbox-lifecycle` | kept | A [cold cell](#cold-boots): the EROFS layer over a scratch upper, through `provision` and `start`, which also reattach to the VM from a new process for each command |
+| `sandbox-proxy-only` | kept | Its proxy-only network, over the EROFS layer and a scratch upper; it is no [cold cell](#cold-boots) of its own |
+| `sandbox-ram-upper` | kept | A [cold cell](#cold-boots): the EROFS layer over a RAM upper, through `run`, and `provision` and `start` |
 | `scratch-snapshot` | kept |  |
 | `smp` | kept |  |
 | `smp-lapic` | kept | Runs only when a run names it |
@@ -348,7 +352,34 @@ suite in its shards, and the public sandbox scenarios in its guest and sandbox j
 | `untiered-network-policy` | rewritten | SL5.1c rewrites it on strict snapshots, keeping its DNS, egress, forwards and publication; only its raw-snapshot parts retire |
 | `virtio-features` | kept |  |
 | `virtio-net` | kept |  |
+| `vm-lifecycle` | kept | A [cold boot](#cold-boots) through the public API: `nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped` |
 | `workload-identity` | kept |  |
+
+### Cold boots
+
+The CLI's twelve cold cells are the two image formats, an EROFS layer and a GPT disk, each over
+each upper, a scratch image and RAM, on each of KVM, MSHV and WHP: CI's guest and sandbox job of
+each backend runs the public scenarios and the steps that the table names. A cell passes once
+`sandbox run`, and a managed sandbox's `provision` and `start`, each boot its image over its upper
+in a VM that nvx-init manages, and `/sbin/nvx-sandbox-smoke` passes its checks there. The
+scenarios also check that each of their VMs stops with a successful outcome report and a complete
+teardown; CI's layer smoke test checks the status of the probe that its run runs.
+
+| Image | Upper | `run` | `provision` and `start` |
+| --- | --- | --- | --- |
+| EROFS | scratch | CI's "Run Ubuntu sandbox layer smoke test" step, on Linux and on Windows | `test-microvm --scenario sandbox-lifecycle`; `test-microvm --scenario managed-exec-config` |
+| EROFS | RAM | `test-microvm --scenario sandbox-ram-upper` | `test-microvm --scenario sandbox-ram-upper` |
+| GPT | scratch | `test-microvm --scenario sandbox-gpt-layer` | `test-microvm --scenario sandbox-gpt-layer` |
+| GPT | RAM | `test-microvm --scenario sandbox-gpt-layer` | `test-microvm --scenario sandbox-gpt-layer` |
+
+`sandbox-gpt-layer` writes its own GPT disk, whose layer partition a guest fills with an ext4 copy
+of the tree of the EROFS layer, and checks that the guest's root has that partition as its lower
+directory. `test-microvm --scenario vm-lifecycle` cold-boots a VM through the public API instead:
+`nvx-rs/tests/vm_lifecycle.rs::a_cold_vm_is_reattached_from_saved_values_and_stopped` creates and
+spawns it, with nvx-init over the EROFS layer and a scratch upper, lets the launch go, reattaches
+to it twice from the values that it saved, and stops it through its guest, which must exit without
+a forced termination and report a complete teardown. No cell or smoke test captures or restores a
+snapshot: SL5.1c adds those.
 
 ## CI
 
@@ -390,10 +421,10 @@ their own. The tests that a step runs have rows of their own where they concern 
 | `.github/workflows/ci.yml` | crate-release: Check the nvx package | kept |  |
 | `.github/workflows/ci.yml` | nvx-microvm-adapter-whp: the runtime adapter's job on WHP | retired | The adapter's scenarios, whose fates are above |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run NVX microVM tests on Linux and on Windows | kept | The default suite's scenarios, by shard and on the debug kernel |
-| `.github/workflows/run-nvx-microvm-tests.yml` | Run public managed sandbox acceptance on Linux and on Windows | kept |  |
+| `.github/workflows/run-nvx-microvm-tests.yml` | Run public managed sandbox acceptance on Linux and on Windows | kept | Runs `sandbox-gpt-layer` and `vm-lifecycle` too, since SL5.1b: see [Cold boots](#cold-boots) |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run Ubuntu and Azure Linux guest smoke tests on Linux and on Windows | kept |  |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run extended Ubuntu guest tests on Linux/KVM | kept |  |
-| `.github/workflows/run-nvx-microvm-tests.yml` | Run the Ubuntu sandbox layer, live-share, managed live-share, caller-owned live-share, concurrent shares and share access policy tests on Linux and on Windows | kept |  |
+| `.github/workflows/run-nvx-microvm-tests.yml` | Run the Ubuntu sandbox layer, live-share, managed live-share, caller-owned live-share, concurrent shares and share access policy tests on Linux and on Windows | kept | The layer smoke test is the `run` of a [cold cell](#cold-boots) |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Build the runtime adapter's guest agent on Linux; Download the runtime adapter's guest agent on Windows | retired | The adapter's guest agent |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run runtime adapter scenarios on Linux and on Windows | retired | The adapter's scenarios, whose fates are above |
 | `.github/workflows/run-platform.yml` | Run benchmark: the acceptance test, the performance suite, the multi-vCPU shell restore and the device operation rates | kept |  |
