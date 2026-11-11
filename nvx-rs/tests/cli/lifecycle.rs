@@ -611,7 +611,7 @@ fn check_lifecycle(case: &Configuration) {
         assert_outcome_report(
             &json(&state.join("outcome.json")),
             HYPERVISOR,
-            ("managed", "success", 0),
+            ("run", "success", 0),
             case.network,
         );
     }
@@ -702,7 +702,7 @@ fn lifecycle_of_a_sandbox_whose_upper_is_in_ram() {
         assert_outcome_report(
             &json(&state.join("outcome.json")),
             HYPERVISOR,
-            ("managed", "success", 0),
+            ("run", "success", 0),
             NO_NETWORK,
         );
     }
@@ -752,7 +752,7 @@ fn stops_keep_an_outcome_report_that_the_caller_reads_whatever_its_umask() {
         assert_outcome_report(
             &json(&report),
             HYPERVISOR,
-            ("managed", "success", 0),
+            ("run", "success", 0),
             NO_NETWORK,
         );
         step("deprovision", &[]).assert_silent_success();
