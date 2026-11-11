@@ -5,12 +5,14 @@ use std::io;
 use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::ptr;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
     ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_OBJECT_0,
+    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_EVENT, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ALL_ACCESS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
@@ -27,6 +29,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::private::{CurrentUser, with_owner_only_attributes};
+use super::process::wait_step;
 use super::{last_error, owned, raw, wide};
 use crate::host::platform::{Transport, TransportHandle, time_left};
 
@@ -137,7 +140,7 @@ impl ReadyListener {
             // A wait that times out cancels the connection's operation, and the next wait issues
             // it again, which a client that connected meanwhile completes at once.
             // SAFETY: the operation's `OVERLAPPED` outlives it, as `overlapped` guarantees.
-            let connection = overlapped(pipe, event, Some(timeout), |pipe, overlapped| unsafe {
+            let connection = overlapped(pipe, event, Some(deadline), |pipe, overlapped| unsafe {
                 ConnectNamedPipe(pipe, overlapped)
             });
             match connection {
@@ -168,10 +171,9 @@ impl ReadyListener {
             return Ok(true);
         }
         let (data, length) = (buffer.as_mut_ptr(), room as u32);
-        let left = deadline.saturating_duration_since(Instant::now());
         // SAFETY: `data` is valid for `length` bytes until the operation completes, which
         // `overlapped` guarantees before it returns.
-        let read = overlapped(pipe, event, Some(left), |pipe, overlapped| unsafe {
+        let read = overlapped(pipe, event, Some(deadline), |pipe, overlapped| unsafe {
             ReadFile(pipe, data, length, ptr::null_mut(), overlapped)
         });
         match read {
@@ -328,27 +330,28 @@ struct PipeTransport {
 }
 
 impl PipeTransport {
-    /// Runs one overlapped operation on the pipe to completion or timeout, as [`overlapped`]
+    /// Runs one overlapped operation on the pipe to completion or `deadline`, as [`overlapped`]
     /// runs it.
     fn overlapped(
         &mut self,
-        timeout: Option<Duration>,
+        deadline: Option<Instant>,
         start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
     ) -> io::Result<usize> {
-        overlapped(raw(&self.pipe), raw(&self.event), timeout, start)
+        overlapped(raw(&self.pipe), raw(&self.event), deadline, start)
     }
 }
 
-/// Runs one overlapped operation on `pipe` to completion or timeout, waiting on `event`, a
-/// manual-reset event that no other operation uses meanwhile, and which the operation resets to
-/// nonsignaled before it starts, as ReadFile and WriteFile do.
+/// Runs one overlapped operation on `pipe` to completion or `deadline`, or without a time limit,
+/// waiting on `event`, a manual-reset event that no other operation uses meanwhile, and which the
+/// operation resets to nonsignaled before it starts, as ReadFile and WriteFile do.
 ///
 /// `start` issues the operation. The function always waits for the operation to finish,
-/// cancelling it on timeout, so the `OVERLAPPED` and the caller's buffer outlive it.
+/// cancelling it once `deadline` passes, as [`wait_until`] tells, so the `OVERLAPPED` and the
+/// caller's buffer outlive it.
 fn overlapped(
     pipe: HANDLE,
     event: HANDLE,
-    timeout: Option<Duration>,
+    deadline: Option<Instant>,
     start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
 ) -> io::Result<usize> {
     // SAFETY: OVERLAPPED is plain data for which all-zero bytes are a valid initial state.
@@ -360,13 +363,10 @@ fn overlapped(
             return completion_error(error, 0, false);
         }
     }
-    let wait = timeout.map_or(INFINITE, |timeout| {
-        u32::try_from(timeout.as_millis())
-            .unwrap_or(INFINITE - 1)
-            .min(INFINITE - 1)
+    let signaled = wait_until(deadline, |milliseconds| {
+        // SAFETY: the event belongs to the caller.
+        unsafe { WaitForSingleObject(event, milliseconds) }
     });
-    // SAFETY: the event belongs to the caller.
-    let signaled = unsafe { WaitForSingleObject(overlapped.hEvent, wait) } == WAIT_OBJECT_0;
     if !signaled {
         // SAFETY: cancels only the operation that uses this OVERLAPPED.
         unsafe { CancelIoEx(pipe, &overlapped) };
@@ -377,6 +377,32 @@ fn overlapped(
         return Ok(transferred as usize);
     }
     completion_error(last_error(), transferred as usize, !signaled)
+}
+
+/// Waits with `wait`, which waits for an event for at most the milliseconds that it is given and
+/// returns what `WaitForSingleObject` returns, until the event is signaled or `deadline` passes,
+/// or without a time limit, and returns whether the event was signaled.
+///
+/// `WaitForSingleObject` counts whole milliseconds by the ticks of the system timer, of up to
+/// about 16 ms, so it can time out before as long has passed by [`Instant`], the clock of the
+/// caller's deadline. A wait that times out before the deadline therefore waits again for what is
+/// left, and sleeps a remainder below a millisecond before a last check, as [`wait_step`]
+/// describes, so that it never times out before its deadline.
+fn wait_until(deadline: Option<Instant>, mut wait: impl FnMut(u32) -> WAIT_EVENT) -> bool {
+    let Some(deadline) = deadline else {
+        return wait(INFINITE) == WAIT_OBJECT_0;
+    };
+    loop {
+        let (milliseconds, sleep) = wait_step(deadline.saturating_duration_since(Instant::now()));
+        if !sleep.is_zero() {
+            thread::sleep(sleep);
+        }
+        match wait(milliseconds) {
+            WAIT_OBJECT_0 => return true,
+            WAIT_TIMEOUT if Instant::now() < deadline => {}
+            _ => return false,
+        }
+    }
 }
 
 /// Maps a completed pipe operation's Win32 status to Rust I/O semantics.
@@ -397,7 +423,9 @@ impl Transport for PipeTransport {
     fn read(&mut self, buffer: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
         let length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
         let data = buffer.as_mut_ptr();
-        self.overlapped(timeout, |pipe, overlapped| {
+        // A timeout beyond the clock's range has no deadline.
+        let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+        self.overlapped(deadline, |pipe, overlapped| {
             // SAFETY: `data` is valid for `length` bytes until the operation completes, which
             // `overlapped` guarantees before returning.
             unsafe { ReadFile(pipe, data, length, ptr::null_mut(), overlapped) }
@@ -408,10 +436,10 @@ impl Transport for PipeTransport {
         // One deadline bounds the whole write, however the endpoint splits it.
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         while !data.is_empty() {
-            let left = time_left(deadline)?;
+            time_left(deadline)?;
             let length = u32::try_from(data.len()).unwrap_or(u32::MAX);
             let pointer = data.as_ptr();
-            let written = self.overlapped(left, |pipe, overlapped| {
+            let written = self.overlapped(deadline, |pipe, overlapped| {
                 // SAFETY: as for reads, the buffer outlives the operation.
                 unsafe { WriteFile(pipe, pointer, length, ptr::null_mut(), overlapped) }
             })?;
