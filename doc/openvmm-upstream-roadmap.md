@@ -8,10 +8,12 @@
   reorganization kept it there; see [Upstream status](#upstream-status).
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131, the PR09 fixups at positions
-  241-243, the PR13 fixup at position 247, and the PR18 fixup at position 248.
-- NVX's pinned OpenVMM revision: `58d3c3b1d9b17920fd18d08d63a0ddf58b61b142`, position 248, the
-  head of microsoft/openvmm#5026, whose commit follows position 247, `61cdd6397`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5022 merged after position 246, `cd5cd3814`,
+  241-243, the PR13 fixup at position 247, the PR18 fixup at position 248, and the PR20 fixup at
+  position 249.
+- NVX's pinned OpenVMM revision: `fb4f341268d1b5c68bfe5f8b1c7e08a9b7ee2364`, position 249, the
+  head of microsoft/openvmm#5038, whose commit follows position 248, `58d3c3b1d`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5026 merged after position 247, `61cdd6397`,
+  which microsoft/openvmm#5022 merged after position 246, `cd5cd3814`,
   which microsoft/openvmm#5016 merged after position 245, `a8a0e3517`, which
   microsoft/openvmm#5013 merged with positions 243 and 244 after position 242, `6ddd6ca50`, which
   microsoft/openvmm#5012 merged with position 241 after position 240, `4c2697aef`, which
@@ -37,10 +39,11 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 117 commits past
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 118 commits past
   the mapped tip on the same first-parent chain. Positions 132-240 and 244-246 are not yet
-  assigned to PRs, positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, and position
-  248 is a PR18 fixup; see [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  assigned to PRs, positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248
+  is a PR18 fixup, and position 249 is a PR20 fixup; see
+  [Commits after the mapped tip](#commits-after-the-mapped-tip).
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -886,7 +889,7 @@ flowchart TB
         P17["PR17<br/>Capture + authoritative restore<br/>P - 11 commits"]
         P18["PR18<br/>Host attachments<br/>P - 10 commits + 1 fixup"]
         P19["PR19<br/>Block roles + tiers<br/>N/P - 3 commits"]
-        P20["PR20<br/>Restore activation<br/>P - 7 commits"]
+        P20["PR20<br/>Restore activation<br/>P - 7 commits + 1 fixup"]
         P21["PR21<br/>Network egress policy<br/>P/N - 6 commits"]
         P22["PR22<br/>Filesystem deny policy<br/>P - 2 commits"]
         P23["PR23<br/>Authenticated control console<br/>N - 10 commits"]
@@ -1013,7 +1016,8 @@ ba105dd7f
   -> PCI restore tests before the first start [246]
   -> PR13 fixup [247]
   -> PR18 fixup [248]
-  -> 58d3c3b1d (NVX pin)
+  -> PR20 fixup [249]
+  -> fb4f34126 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1040,18 +1044,21 @@ sentence of the snapshot guide into PR20's position 095, which adds the post-res
 position 248 into PR18's position 083 before submission, which adds the network identity, the
 range of prefixes that its parser accepts, and the command-line check that derives its netmask;
 its test's virtio-fs device folds into position 202, which reserves the virtio-fs slot on every
-command line.
+command line. Fold position 249 into PR20's position 098 before submission, which adds the
+snapshot and restore RAM ranges, the check that they have a RAM capacity, and the merge of
+adjacent ranges at load; its test's time ABI parameters fold into position 147, which makes the
+microVM profile require them.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 117 later commits,
+The NVX pin extends the chain past position 131 without merges. Of the 118 later commits,
 positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248 is a PR18 fixup,
-and the others are not yet classified or assigned to PRs.
+position 249 is a PR20 fixup, and the others are not yet classified or assigned to PRs.
 Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-248 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-249 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1177,6 +1184,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 246 | `cd5cd3814` | - | - | - | - | virtio: test PCI re-save before start and missing queue progress (microsoft/openvmm#5016) |
 | 247 | `61cdd6397` | - | - | - | - | virtio: keep a held input gate across a device reset (microsoft/openvmm#5022); fold into 043 and 048, its virtio-fs change into 088 |
 | 248 | `58d3c3b1d` | - | - | - | - | microVM: refuse a decoded network prefix outside /1 to /30 (microsoft/openvmm#5026); fold into 083, its test's virtio-fs device into 202 |
+| 249 | `fb4f34126` | - | - | - | - | microVM: refuse an unaligned or reversed decoded snapshot RAM range (microsoft/openvmm#5038); fold into 098, its test's time ABI parameters into 147 |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1366,7 +1374,10 @@ those of PR13's positions 043 and 048, PR18's positions 088 and 090, PR23's posi
 position 172, and a new module of console tests. Position 248 checks the prefix of the network
 identity that PR18's position 083 adds in `validate_machine_config`, which PR15's position 062
 adds, before the command-line check of position 083 derives the identity's netmask, and gives
-that position's parser the same range.
+that position's parser the same range. Position 249 checks the snapshot and restore RAM ranges
+that PR20's position 098 adds, in `validate_machine_config`, which PR15's position 062 adds,
+against the alignment and order that `MemoryRange::new` asserts when position 098's load merges
+them.
 Assigning the later commits therefore means revisiting those PRs, not only appending new ones.
 
 Position 177, by contrast, changes only `disk_blob`, which upstream main and the fork base
@@ -1708,6 +1719,18 @@ main conflicts in its only file: upstream main lacks the microVM module of posit
 network identity of position 083, so it follows PR18 upstream, folded into position 083, and its
 test's virtio-fs device into position 202.
 
+Position 249 changes only the snapshot RAM ranges of the microVM machine contract module of
+`openvmm_defs`, which PR15's position 055 adds and 38 other positions also change: it checks the
+snapshot and restore RAM ranges that PR20's position 098 adds and that `validate_machine_config`,
+which PR15's position 062 adds, receives, after position 098's check that they have a RAM
+capacity, against what `MemoryRange::new` asserts when position 098's load merges them. Its test
+completes the configuration of position 248's test into one that `validate_machine_config`
+accepts, with the chipset devices of position 062 and PR17's position 076, and the time ABI
+parameters that position 147 requires. Replaying it on upstream main conflicts in its only file:
+upstream main lacks the microVM module of position 055 and the snapshot RAM ranges of position
+098, so it follows PR20 upstream, folded into position 098, and its test's time ABI parameters
+into position 147.
+
 ## PR summary
 
 Each count is of v6.0 commits, which include the fixups that the v3.0, v4.0, v5.0, and v6.0
@@ -1737,7 +1760,7 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 | PR17 | P | microVM snapshot capture and authoritative restore | 070-080 | `fc16b2991..8fa1c8ccf` | 11 | PR16 |
 | PR18 | P | microVM host attachments and device persistence | 081-090; 248 (fixup) | `0150d6240..9e845e726`; `58d3c3b1d` | 11 | PR17 |
 | PR19 | N/P | Sandbox block roles and snapshot tiers | 091-093 | `ec3f530b8..65f8b0d31` | 3 | PR18 |
-| PR20 | P | Restore-time processor and memory activation | 094-100 | `7ea7ff8e6..e9e56474b` | 7 | PR19 |
+| PR20 | P | Restore-time processor and memory activation | 094-100; 249 (fixup) | `7ea7ff8e6..e9e56474b`; `fb4f34126` | 8 | PR19 |
 | PR21 | P/N | Network egress policy | 101-106 | `3ca445754..4eb910e1b` | 6 | PR20; core can start after PR13 |
 | PR22 | P | Filesystem deny policy | 107-108 | `df424a368..c43e201c1` | 2 | PR21 |
 | PR23 | N | Authenticated control console | 109-118 | `88b9f18f5..c3e6e68cc` | 10 | PR22; protocol/broker can start after PR03 + PR04 + PR13 |
@@ -1751,8 +1774,8 @@ reorganizations folded into them; see [The v6.0 reorganization](#the-v60-reorgan
 
 Each entry, at the position that the commit had in v5.0 and v5.1 too, names the v4.0 position of the
 commit, the v3.0 and v2.4 positions that v4.0 recorded, and the v2.4 and v5.1 fixups that it folds;
-"(part)" marks a fixup that split across commits. Positions 241-243, 247, and 248, which followed
-the v6.0 reorganization, name their OpenVMM pull request instead. A
+"(part)" marks a fixup that split across commits. Positions 241-243, 247, 248, and 249, which
+followed the v6.0 reorganization, name their OpenVMM pull request instead. A
 v4.0 position counts in `feature/microvm/dev` at `e1ca353eb`, whose first 210 commits are those of
 `feature/microvm/release/v4.0`. Landed entries name the commits and positions of the branch that
 the rebase started from, `microvm/v2.1`, `feature/microvm/release/v2.2`,
@@ -2079,7 +2102,7 @@ Landed upstream and dropped from the chain:
 </details>
 
 <details>
-<summary><strong>PR20 - Restore-time processor and memory activation (P)</strong> - 7 commits</summary>
+<summary><strong>PR20 - Restore-time processor and memory activation (P)</strong> - 8 commits</summary>
 
 - 094 `7ea7ff8e6` - chipset: expose a stable generation ID and restore entropy on portb (v4.0 098, v3.0 107, v2.4 107)
 - 095 `b15e7593c` - openvmm: gate external input until post-restore repair completes (v4.0 099, v3.0 108, v2.4 108; folds v2.4 335 (part))
@@ -2088,6 +2111,7 @@ Landed upstream and dropped from the chain:
 - 098 `c8b18180a` - openvmm_core: back expandable restore RAM with fresh private memory (v4.0 102, v3.0 111, v2.4 111)
 - 099 `1564f0c13` - openvmm: add bounded restore-time memory expansion (v4.0 103, v3.0 112, v2.4 112; folds v2.4 320 (part))
 - 100 `e9e56474b` - openvmm_entry: pre-expand the Linux descriptor table at startup (v4.0 104, v3.0 113, v2.4 113)
+- 249 `fb4f34126` - microVM: refuse an unaligned or reversed decoded snapshot RAM range (microsoft/openvmm#5038; **fold into 098**, its test's time ABI parameters into 147)
 
 </details>
 
