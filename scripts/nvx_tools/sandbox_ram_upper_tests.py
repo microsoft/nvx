@@ -203,7 +203,7 @@ class RamUpperAcceptance(LifecycleAcceptance):
         }:
             raise RuntimeError(f"provision recorded the RAM upper as {recorded!r}")
         self.start(description="first start")
-        result = self.exec(PROBE, "--arg=entry")
+        result = self.exec(PROBE, "--arg=init", "--arg=entry")
         self.save_evidence("probe.log", result.stdout + result.stderr)
         for marker in probe_markers(entry=True):
             if marker not in result.stdout:
