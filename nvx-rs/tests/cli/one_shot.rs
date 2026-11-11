@@ -1085,9 +1085,10 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
         let deadline = Instant::now() + Duration::from_secs(2);
         let raw = loop {
             let mode = tcgetattr(&terminal.slave).unwrap();
-            if !mode
-                .local_flags
-                .intersects(LocalFlags::ICANON | LocalFlags::ECHO)
+            if mode.local_flags.contains(LocalFlags::ISIG)
+                && !mode
+                    .local_flags
+                    .intersects(LocalFlags::ICANON | LocalFlags::ECHO)
             {
                 break mode;
             }
@@ -1117,6 +1118,112 @@ fn terminal_ctrl_c_cancels_boot_and_handshake_and_restores_the_terminal() {
             })
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(unsafe_code)]
+fn terminal_quit_and_suspend_keys_remain_guest_console_input() {
+    use nix::pty::openpty;
+    use nix::sys::termios::{LocalFlags, SpecialCharacterIndices, tcgetattr};
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let root = Root::new();
+    let gate = root.below("build/foreground-gate");
+    std::fs::create_dir(&gate).unwrap();
+    let temporary = tempfile::Builder::new().prefix("nf3-").tempdir().unwrap();
+    let terminal = openpty(None, None).unwrap();
+    let original = tcgetattr(&terminal.slave).unwrap();
+    let mut command = root.command(&["run", "--cmdline", "fake_foreground_gate=keys"]);
+    command
+        .env("NVX_TEST_FOREGROUND_GATE_DIR", &gate)
+        .env("TMPDIR", temporary.path())
+        .stdin(Stdio::from(terminal.slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: the isolated child's pre-exec hook uses only session/terminal syscalls.
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid()?;
+            if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut process = command.spawn().unwrap();
+    let mut stdout = BufReader::new(process.stdout.take().unwrap());
+    let mut invocation = String::new();
+    stdout.read_line(&mut invocation).unwrap();
+    assert!(invocation.starts_with(">> "), "{invocation}");
+    let native = gated_native(&mut process, &gate);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let raw = loop {
+        let mode = tcgetattr(&terminal.slave).unwrap();
+        if mode.local_flags.contains(LocalFlags::ISIG)
+            && !mode
+                .local_flags
+                .intersects(LocalFlags::ICANON | LocalFlags::ECHO)
+        {
+            break mode;
+        }
+        assert!(Instant::now() < deadline, "the terminal never became raw");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut keys = [0; 2];
+        let result = stdout.read_exact(&mut keys).map(|()| keys);
+        sent.send(result).unwrap();
+        stdout
+    });
+    let mut keyboard = File::from(terminal.master);
+    keyboard.write_all(b"\x1c\x1a").unwrap();
+    let echoed = received.recv_timeout(Duration::from_secs(2));
+    if !matches!(echoed, Ok(Ok([0x1c, 0x1a]))) {
+        native.kill().unwrap();
+        assert!(
+            native
+                .wait(Instant::now() + Duration::from_secs(2))
+                .unwrap()
+                .is_some()
+        );
+        if process.try_wait().unwrap().is_none() {
+            process.kill().unwrap();
+        }
+        process.wait().unwrap();
+        reader.join().unwrap();
+        panic!("signal keys did not reach the guest console: {echoed:?}");
+    }
+    let _stdout = reader.join().unwrap();
+    assert!(process.try_wait().unwrap().is_none());
+    keyboard.write_all(b"\x03").unwrap();
+    foreground_exits_promptly(&mut process, &native);
+    let output = process.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(130), "{output:?}");
+    for key in [SpecialCharacterIndices::VQUIT, SpecialCharacterIndices::VSUSP] {
+        assert_eq!(raw.control_chars[key as usize], nix::libc::_POSIX_VDISABLE);
+    }
+    let restored = tcgetattr(&terminal.slave).unwrap();
+    assert_eq!(restored.input_flags, original.input_flags);
+    assert_eq!(restored.output_flags, original.output_flags);
+    assert_eq!(restored.local_flags, original.local_flags);
+    assert_eq!(restored.control_flags, original.control_flags);
+    assert_eq!(restored.control_chars, original.control_chars);
+    assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+    println!(
+        "NVX-TERMINAL-SIGNAL-KEYS {}",
+        serde_json::json!({
+            "native":native.reference(), "terminal_keyboard_bytes":[28,26],
+            "guest_console_echo":[28,26], "cli_kept_running":true, "raw_isig":true,
+            "terminal_restored":true, "ctrl_c_status":130,
+            "held_native_exited":true, "private_directory_removed":true,
+        })
+    );
 }
 
 #[test]

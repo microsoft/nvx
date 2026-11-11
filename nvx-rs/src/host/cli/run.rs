@@ -759,11 +759,31 @@ impl TerminalGuard {
 
     #[cfg(unix)]
     fn enable_interrupts() -> io::Result<()> {
-        use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
+        use nix::sys::termios::{
+            LocalFlags, SetArg, SpecialCharacterIndices, tcgetattr, tcsetattr,
+        };
 
         let stdin = io::stdin();
         let mut mode = tcgetattr(&stdin)?;
         mode.local_flags.insert(LocalFlags::ISIG);
+        // Only the interrupt key is a host signal; quit/suspend remain guest input.
+        for key in [
+            SpecialCharacterIndices::VQUIT,
+            SpecialCharacterIndices::VSUSP,
+            #[cfg(any(
+                target_vendor = "apple",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "netbsd",
+                target_os = "openbsd",
+                target_os = "solaris",
+                target_os = "illumos",
+                target_os = "aix"
+            ))]
+            SpecialCharacterIndices::VDSUSP,
+        ] {
+            mode.control_chars[key as usize] = nix::libc::_POSIX_VDISABLE as _;
+        }
         tcsetattr(&stdin, SetArg::TCSANOW, &mode)?;
         Ok(())
     }

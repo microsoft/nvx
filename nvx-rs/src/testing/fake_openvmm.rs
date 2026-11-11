@@ -54,7 +54,7 @@
 //! `fake_report_before_console=1` writes a run's report before console output or its boot delay.
 //! `fake_boot_diagnostics=1` emits console output and a binary log before control attachment.
 //! `fake_refuse_attach=1` refuses attachment after the endpoint has accepted its client.
-//! `fake_foreground_gate=console|connect|handshake` synchronizes foreground wait regressions.
+//! `fake_foreground_gate=console|connect|handshake|keys` synchronizes foreground regressions.
 //! `fake_guest_features=MASK` advertises the decimal feature mask `MASK` instead of the current
 //! guest's, `fake_legacy_guest=1` refuses the features request like a guest agent that
 //! predates it, and `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot
@@ -558,6 +558,10 @@ pub fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if let Err(error) = foreground_gate(&options, "keys") {
+        eprintln!("{program}: {error}");
+        return ExitCode::from(1);
+    }
     if options.boot_diagnostics {
         let written = console
             .write_all(b"boot-console before control\n")
@@ -1845,9 +1849,9 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         refuse_attach: knob("fake_refuse_attach") == Some("1"),
         foreground_gate: knob("fake_foreground_gate")
             .map(|phase| {
-                if !matches!(phase, "console" | "connect" | "handshake") {
+                if !matches!(phase, "console" | "connect" | "handshake" | "keys") {
                     return Err(
-                        "fake_foreground_gate must be console, connect or handshake".to_owned()
+                        "fake_foreground_gate must be console, connect, handshake or keys".to_owned()
                     );
                 }
                 std::env::var_os("NVX_TEST_FOREGROUND_GATE_DIR")
@@ -3070,7 +3074,10 @@ fn boot_console(options: &Options) -> io::Result<Box<dyn Write + Send>> {
 
         let listener = UnixListener::bind(endpoint)?;
         fs::set_permissions(endpoint, fs::Permissions::from_mode(0o600))?;
-        Ok(Box::new(listener.accept()?.0))
+        let console = listener.accept()?.0;
+        #[cfg(target_os = "linux")]
+        echo_signal_keys(options, &console)?;
+        Ok(Box::new(console))
     }
     #[cfg(windows)]
     {
@@ -3083,6 +3090,33 @@ fn boot_console(options: &Options) -> io::Result<Box<dyn Write + Send>> {
         io::ErrorKind::Unsupported,
         "no boot-console listener on this host",
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn echo_signal_keys(
+    options: &Options,
+    console: &std::os::unix::net::UnixStream,
+) -> io::Result<()> {
+    if options
+        .foreground_gate
+        .as_ref()
+        .is_some_and(|(phase, _)| phase == "keys")
+    {
+        let mut console = console.try_clone()?;
+        thread::Builder::new()
+            .name("fake-console-key-echo".to_owned())
+            .spawn(move || {
+                let mut keys = [0; 2];
+                if let Err(error) = console
+                    .read_exact(&mut keys)
+                    .and_then(|()| console.write_all(&keys))
+                    .and_then(|()| console.flush())
+                {
+                    eprintln!("gated console key echo failed: {error}");
+                }
+            })?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
