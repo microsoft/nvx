@@ -1060,6 +1060,14 @@ class _FakeSandboxCli:
                 values[command[index]] = command[index + 1]
                 index += 2
         state = Path(values["--state-dir"]) if "--state-dir" in values else None
+        if (
+            operation == "exec"
+            and state is not None
+            and (state / "config.json").is_file()
+            and "exec-skips-lock" not in self.faults
+        ):
+            # Admission creates the exec lock before the exec finds the VM.
+            (state / "exec.lock").touch()
         handlers: dict[
             str,
             Callable[[Path | None, dict[str, str], list[str]], _CliResult],
@@ -1451,6 +1459,7 @@ class _FakeSandboxCli:
             "openvmm.log",
             "config.json",
             "sandbox.lock",
+            "exec.lock",
         ):
             (state / name).unlink(missing_ok=True)
         # The store owns the file in which OpenVMM stages its outcome report.
@@ -1762,6 +1771,11 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             ),
             "crash-keeps-runtime": (
                 "after exec of a crashed sandbox: the state directory holds"
+            ),
+            "exec-skips-lock": (
+                "after exec before start: the state directory holds "
+                "['config.json', 'sandbox.lock'], expected "
+                "['config.json', 'exec.lock', 'sandbox.lock']"
             ),
             "deprovision-removes-foreign": "deprovision returned 0, expected 1",
         }

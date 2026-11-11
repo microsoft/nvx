@@ -284,6 +284,7 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
                     inherit_default_environment: options.inherit_default_environment,
                 },
                 options.timeout,
+                options.wait,
             )?;
             output::write_stdout(&result.stdout)
                 .and_then(|()| output::write_stderr(&result.stderr))

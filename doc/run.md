@@ -1543,8 +1543,14 @@ of one sandbox take effect one at a time: each waits up to `--timeout` seconds
 for any other in progress, and of two overlapping starts, exactly one launches
 OpenVMM while the other then fails because the sandbox is already running.
 `exec` holds the lock only while it finds the running OpenVMM, so a long
-workload does not delay `stop`. A provisioned state directory keeps
-`sandbox.lock`, and `deprovision` removes it with NVX's other files. A
+workload does not delay `stop`. One `exec` at a time runs in a sandbox, across
+processes: an `exec` takes the sandbox's exec lock, `exec.lock` in the state
+directory, before it finds the running OpenVMM, and holds it until the workload
+ends. An `exec` that finds it held tries again until `--wait` seconds, 60 by
+default, have passed, and then fails with `sandbox-busy`. `stop` takes no exec
+lock, so it proceeds while a workload runs. A provisioned state directory keeps
+`sandbox.lock`, and `exec.lock` from its first `exec` on, and `deprovision`
+removes them with NVX's other files. A
 transition that leaves a state directory without `config.json`, such as one of
 a sandbox that was never provisioned, removes `sandbox.lock` as it releases the
 lock. These are the rules of the sandbox store, which other orchestrators of
@@ -1648,7 +1654,8 @@ template, so it has the same artifact requirements. It checks that:
   capability, control socket, report staging file, or OpenVMM process;
 - every operation fails on a state directory that was never provisioned, a
   repeated `provision` leaves the configuration unchanged, and `exec` and
-  `stop` fail before `start`;
+  `stop` fail before `start`, though the `exec` leaves the `exec.lock` that the
+  state directory keeps from then on;
 - a repeated `start` and a `deprovision` of a running sandbox fail without
   changing its runtime record, capability, or OpenVMM process, and the
   sandbox keeps serving requests;
@@ -1664,7 +1671,7 @@ template, so it has the same artifact requirements. It checks that:
   `--outcome-report` path exists fails before its workload runs and leaves the
   file intact;
 - `stop` ends OpenVMM and its control socket or pipe, leaves only
-  `config.json`, `sandbox.lock`, `openvmm.log`, and a successful
+  `config.json`, `sandbox.lock`, `exec.lock`, `openvmm.log`, and a successful
   `outcome.json`, and leaves a cleanly unmounted scratch file system, after
   which `exec` and `stop` fail;
 - two overlapping `start` calls then launch a single OpenVMM process: one
@@ -1677,12 +1684,13 @@ template, so it has the same artifact requirements. It checks that:
   changing the runtime record or OpenVMM process, while the checkout's CLI
   still serves requests. Its `stop` then terminates OpenVMM without a guest
   shutdown and warns that it did, and leaves only `config.json`,
-  `sandbox.lock`, and `openvmm.log`, without a control socket or pipe, after
-  which its `stop` finds the sandbox not running, and the sandbox starts again;
+  `sandbox.lock`, `exec.lock`, and `openvmm.log`, without a control socket or
+  pipe, after which its `stop` finds the sandbox not running, and the sandbox
+  starts again;
 - after OpenVMM exits without a `stop`, `exec` reports the stale runtime state
   once and clears it, after which `stop` finds the sandbox not running, and the
-  state directory holds only `config.json`, `sandbox.lock`, and `openvmm.log`,
-  without a control socket or pipe; and
+  state directory holds only `config.json`, `sandbox.lock`, `exec.lock`, and
+  `openvmm.log`, without a control socket or pipe; and
 - `deprovision` removes only NVX's files: it fails and keeps a foreign file in
   the state directory, and once that file is gone, it removes the directory,
   which a later `exec` does not recreate.

@@ -6,6 +6,7 @@
 //! STATE/                  one sandbox, private to the current user
 //!   config.json           the configuration of the provisioned sandbox
 //!   sandbox.lock          the lock that serializes its lifecycle transitions
+//!   exec.lock             the admission lock held through each managed exec
 //!   launch.json           the journal of a start in progress, or of one that was interrupted
 //!   runtime.json          the runtime record of its running VM
 //!   control.capability    the control capability of its VM
@@ -46,7 +47,7 @@ mod record;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub(crate) use self::locked::LockedState;
+pub(crate) use self::locked::{LockedState, open_lock};
 pub(crate) use self::names::StateFile;
 use crate::ErrorCode;
 use crate::host::cli::{Exit, Result};
