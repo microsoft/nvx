@@ -1851,7 +1851,8 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
             .map(|phase| {
                 if !matches!(phase, "console" | "connect" | "handshake" | "keys") {
                     return Err(
-                        "fake_foreground_gate must be console, connect, handshake or keys".to_owned()
+                        "fake_foreground_gate must be console, connect, handshake or keys"
+                            .to_owned(),
                     );
                 }
                 std::env::var_os("NVX_TEST_FOREGROUND_GATE_DIR")
@@ -3093,10 +3094,7 @@ fn boot_console(options: &Options) -> io::Result<Box<dyn Write + Send>> {
 }
 
 #[cfg(target_os = "linux")]
-fn echo_signal_keys(
-    options: &Options,
-    console: &std::os::unix::net::UnixStream,
-) -> io::Result<()> {
+fn echo_signal_keys(options: &Options, console: &std::os::unix::net::UnixStream) -> io::Result<()> {
     if options
         .foreground_gate
         .as_ref()
