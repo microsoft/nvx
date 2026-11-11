@@ -82,6 +82,7 @@ nvx/
 |   |-- contribute.md            Contribution guidelines
 |   |-- design/                  Architecture of the microVM and its guest runtime
 |   |-- distribution.md          Packaging and source delivery
+|   |-- guest-agent-guidelines.md Contract of a guest's init agent, with nvx-init as its example
 |   |-- guests/                  Guest userland chapters (Ubuntu and Azure Linux)
 |   |-- modules/                 Module diagrams of the nvx crate
 |   |-- openvmm-upstream-roadmap.md Plan for upstreaming the OpenVMM fork's microVM commits
