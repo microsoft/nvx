@@ -111,6 +111,9 @@ LOG = "openvmm.log"
 SOCKET = "control.sock"
 OUTCOME = "outcome.json"
 LOCK = "sandbox.lock"
+# The first exec of a provisioned sandbox creates its exec lock, even an exec
+# that finds no VM, and the lock stays until deprovision removes the sandbox.
+EXEC_LOCK = "exec.lock"
 # The fields of the store's runtime record.
 RUNTIME_FIELDS = frozenset({"capability", "endpoint", "process", "runtime", "vmDir"})
 PROVISIONED_ENTRIES = frozenset({CONFIG, LOCK})
@@ -428,6 +431,8 @@ class LifecycleAcceptance:
         # An artifact root whose runtime identity differs in the initramfs.
         self.other_root = root / "other-runtime"
         self.checks: list[dict[str, object]] = []
+        # The state directories that hold the exec lock of an earlier exec.
+        self.exec_locks: set[Path] = set()
 
     def launch_options(self, scratch: Path) -> list[str]:
         return [
@@ -498,7 +503,14 @@ class LifecycleAcceptance:
         `refusal` on standard error when given. With `root`, the operation runs
         under that artifact root.
         """
+        provisioned = state is not None and (state / CONFIG).is_file()
         result = self.run_cli(operation, *arguments, state=state, root=root)
+        if state is not None:
+            if operation == "exec" and provisioned:
+                self.exec_locks.add(state)
+            elif not (state / CONFIG).exists():
+                # Deprovision removes the exec lock with the configuration.
+                self.exec_locks.discard(state)
         self.record(operation, result, state=state, expected=expected)
         if (expected is not None and result.returncode != expected) or (
             refusal is not None and not refusal.matches(result.stderr)
@@ -531,6 +543,8 @@ class LifecycleAcceptance:
     def require_entries(
         self, state: Path, expected: frozenset[str], description: str
     ) -> None:
+        if state in self.exec_locks:
+            expected |= {EXEC_LOCK}
         entries = state_entries(state)
         if entries is None or frozenset(entries) != expected:
             raise RuntimeError(

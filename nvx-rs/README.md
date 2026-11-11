@@ -2931,6 +2931,7 @@ them:
 | --- | --- |
 | `config.json` | The provisioned sandbox, in format 9 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export and network are typed, `null` when absent. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
+| `exec.lock` | The exec lock, which an `exec` holds from before it finds the running VM until its workload ends, so that one `exec` at a time runs in the sandbox; it stays from the first `exec` until `deprovision` |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
 | `runtime.json` | The store's runtime record of the running VM, in its format 4: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |
 | `control.capability` | The 32-byte capability of the running OpenVMM, with mode 0600 |
@@ -2940,7 +2941,10 @@ them:
 
 `provision`, `start`, `stop`, and `deprovision` hold the store's lock for their
 whole transition, and `exec` only while it finds the running VM, so that a long
-workload cannot delay a `stop`. The CLI takes the store's
+workload cannot delay a `stop`. An `exec` that finds another holding
+`exec.lock` releases the store's lock and tries again until `--wait` seconds,
+60 by default, have passed, and then fails with `sandbox-busy`; `stop` takes no
+exec lock. The CLI takes the store's
 [lifecycle locks](src/host/store/mod.rs) with `config.json` as its
 configuration record: a transition that leaves the state directory without it,
 such as one of a sandbox that was never provisioned, removes the lock file as
@@ -3103,7 +3107,9 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
 - The state directory holds the store's files: `sandbox.lock` replaces the
   `lifecycle.lock` of `nvx.py`, `runtime.json` has the store's format, and each
   start replaces `openvmm.log`, which `nvx.py` appended to. `exec` holds the
-  lock while it finds the running VM, which `nvx.py` did not. A runtime record
+  lock while it finds the running VM, which `nvx.py` did not, and holds
+  `exec.lock` until its workload ends, so that one `exec` at a time runs in a
+  sandbox, where `nvx.py` ran them at once and had no `--wait`. A runtime record
   of an OpenVMM that exited is cleared by the first transition that finds it,
   so that `start` launches the sandbox again, where `nvx.py` refused to.
 - `provision` refuses an existing state directory that is not private to the
@@ -3362,7 +3368,7 @@ usage errors, which no library error has.
 | `sandbox-not-running` | `Other` | The operation needs the sandbox's VM, which is not running |
 | `sandbox-running` | `Other` | The operation needs a stopped sandbox, but its VM, or a launch of it, may still run |
 | `sandbox-exited` | `Exited` | The sandbox's VM exited without a stop: the transition that finds it clears its runtime record, and a start launches it again |
-| `sandbox-busy` | `TimedOut` | Another lifecycle transition of the sandbox held its lock until the deadline passed |
+| `sandbox-busy` | `TimedOut` | Another lifecycle transition, or `exec`, of the sandbox held its lock until the deadline passed |
 | `runtime-mismatch` | `RuntimeMismatch` | The sandbox's VM runs under another runtime identity than the artifacts', whose differing parts the message names, so only a stop, which terminates it, applies |
 | `vmm-indeterminate` | `Other` | Whether the OpenVMM process of the sandbox runs cannot be determined, so its records remain for a later attempt |
 | `format-unsupported` | `Io` | A record or report has a format or schema version that this build does not read, such as the state of a sandbox that another build provisioned or started |

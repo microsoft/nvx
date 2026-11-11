@@ -690,7 +690,11 @@ const HELP: [Help; 6] = [
         name: "sandbox after an operation",
         arguments: &["sandbox", "exec", "--help"],
         usage: "usage: nvx-rs sandbox [{run,provision,start,exec,stop,deprovision}] [OPTIONS]",
-        options: &["--environment KEY=VALUE", "--outcome-report OUTCOME_REPORT"],
+        options: &[
+            "--environment KEY=VALUE",
+            "--outcome-report OUTCOME_REPORT",
+            "--wait WAIT",
+        ],
     },
     Help {
         name: "run",
