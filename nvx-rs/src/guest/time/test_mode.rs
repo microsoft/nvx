@@ -718,7 +718,7 @@ fn test_promote(out: &mut dyn Write) -> Result<(), CommandError> {
     let start = clock_ns(sys::Clock::Monotonic);
     let promoter = start_promoter(start, CANCELLED_PROMOTION_DELAY_NS)?;
     let _idle = sys::IdlePriority::enter();
-    promoter.stop();
+    drop(promoter);
     let _ = writeln!(
         out,
         "stopped caller={} stop_ms={}",

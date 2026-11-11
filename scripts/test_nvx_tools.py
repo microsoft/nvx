@@ -15686,10 +15686,13 @@ class BuildTests(unittest.TestCase):
             config = root / "kernel" / "config-microvm"
             patch_path = root / "kernel" / "patches" / "example.patch"
             stale_patch = root / "kernel" / "patches" / "stale.patch"
+            arm_patch = root / "kernel" / "patches" / "arm64" / "arm.patch"
             config.parent.mkdir(parents=True)
             patch_path.parent.mkdir()
             config.write_bytes(b"CONFIG_EXAMPLE=y\n")
             patch_path.write_bytes(b"patch\n")
+            arm_patch.parent.mkdir()
+            arm_patch.write_bytes(b"ARM patch\n")
             (root / ".gitattributes").write_text(
                 "\n".join(
                     (
@@ -15725,6 +15728,7 @@ class BuildTests(unittest.TestCase):
                     ".gitattributes",
                     "kernel/config-microvm",
                     "kernel/patches/example.patch",
+                    "kernel/patches/arm64/arm.patch",
                 ],
                 cwd=root,
                 env=git_environment,
@@ -15759,6 +15763,7 @@ class BuildTests(unittest.TestCase):
             config.write_bytes(b"CONFIG_EXAMPLE=y\r\n")
             patch_path.write_bytes(b"patch\r\n")
             stale_patch.write_bytes(b"stale\r\n")
+            arm_patch.write_bytes(b"preserve ARM worktree patch\n")
             subprocess.run(
                 [
                     "git",
@@ -15798,6 +15803,7 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(config.read_bytes(), b"CONFIG_EXAMPLE=y\n")
             self.assertEqual(patch_path.read_bytes(), b"patch\n")
             self.assertFalse(stale_patch.exists())
+            self.assertEqual(arm_patch.read_bytes(), b"preserve ARM worktree patch\n")
 
     def test_manifest_tracks_every_kernel_patch(self):
         manifest = json.loads(
@@ -17024,7 +17030,10 @@ class BuildTests(unittest.TestCase):
                 )
                 manifests.append(path)
 
-            requirements = collect_ubuntu_sources._source_requirements(manifests)
+            architecture, requirements = collect_ubuntu_sources._source_requirements(
+                manifests
+            )
+            self.assertEqual(architecture, "amd64")
 
         self.assertEqual(
             requirements,
@@ -18002,6 +18011,55 @@ class BuildTests(unittest.TestCase):
                 )[0]
                 self.assertIn(copy, section)
 
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell is unavailable")
+    def test_alpine_container_entry_uses_its_fixed_control_isa_loader(self):
+        source = (
+            BuildConstants.REPO_ROOT / "guest" / "alpine" / "nvx-container-enter"
+        ).read_text(encoding="utf-8")
+        selection = (
+            "case $(uname -m) in\n"
+            + source.split("case $(uname -m) in\n", 1)[1].split("\nesac\n", 1)[0]
+            + "\nesac\n"
+        )
+        for architecture, expected in (
+            ("x86_64", "ld-musl-x86_64.so.1"),
+            ("aarch64", "ld-musl-aarch64.so.1"),
+            ("riscv64", None),
+        ):
+            with self.subTest(architecture=architecture):
+                result = subprocess.run(
+                    [
+                        "sh",
+                        "-c",
+                        f"uname() {{ printf '%s\\n' {architecture}; }}\n"
+                        + selection
+                        + 'printf "%s\\n" "$loader"',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if expected is None:
+                    self.assertEqual(result.returncode, 125)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn(
+                        "unsupported control guest architecture", result.stderr
+                    )
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected + "\n")
+                    self.assertEqual(result.stderr, "")
+        self.assertIn('cp "/lib/$loader" "$tools/$loader"', source)
+        self.assertIn('exec chroot "$rootfs" "/.nvx-agent/$loader"', source)
+        for option in (
+            "--clear-groups",
+            "--no-new-privs",
+            "--bounding-set=-all",
+            "--inh-caps=-all",
+            "--ambient-caps=-all",
+        ):
+            self.assertIn(option, source)
+
     def test_azurelinux_initramfs_uses_locked_busybox_applets(self):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
             encoding="utf-8"
@@ -18977,6 +19035,74 @@ class SandboxShareAgentTests(unittest.TestCase):
         "mount_live_shares",
         "mount_host_export",
     )
+
+    def _run_arm_role_query(
+        self, scenario: str, action: str = "resolve", address: str = "0xd0003000"
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        log = self.root / "role-query.log"
+        log.unlink(missing_ok=True)
+        functions = "".join(
+            _shell_function(self.source, name)
+            for name in ("resolve_block_device", "refuse_scratch_device")
+        )
+        script = (
+            "set -eu\nscenario=$1\nprobe_log=$2\naction=$3\naddress=$4\n"
+            "uname() { printf 'aarch64\\n'; }\n"
+            "sleep() { :; }\n"
+            'fatal() { printf "%s\\n" "$*" >&2; exit 125; }\n'
+            "root_device_query() {\n"
+            '  printf "%s\\n" "$1" >>"$probe_log"\n'
+            '  if [ "$scenario" = fatal ]; then echo "malformed fixed OF role" >&2; return 2; fi\n'
+            '  if [ "$1" = no-scratch ]; then [ "$scenario" = absent ]; return; fi\n'
+            '  [ "$scenario" != absent ] || return 1\n'
+            '  if [ "$scenario" = pending ] && [ "$(wc -l <"$probe_log")" -eq 1 ]; then return 1; fi\n'
+            "  printf '/dev/vdz\\n'\n"
+            "}\n"
+            f"{functions}"
+            'if [ "$action" = resolve ]; then resolve_block_device "$address"; '
+            "else refuse_scratch_device; fi\n"
+        )
+        result = subprocess.run(
+            [self.shell, "-s", "--", scenario, log.as_posix(), action, address],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result, log.read_text().splitlines() if log.exists() else []
+
+    def test_arm_launcher_uses_the_packaged_rust_fixed_role_query(self):
+        wrapper = _shell_function(self.source, "root_device_query")
+        self.assertIn('/sbin/nvx-init --root-device "$1"', wrapper)
+        for address, role in (("0xd0003000", "distro"), ("0xd0006000", "scratch")):
+            result, calls = self._run_arm_role_query("ready", address=address)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "/dev/vdz\n")
+            self.assertEqual(calls, [role])
+        result, calls = self._run_arm_role_query("pending")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, ["distro", "distro"])
+
+    def test_arm_role_lookup_retries_absence_but_never_fatal_discovery(self):
+        result, calls = self._run_arm_role_query("fatal")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("malformed fixed OF role", result.stderr)
+        self.assertEqual(calls, ["distro"])
+        result, calls = self._run_arm_role_query("ready", address="0xd0004000")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(calls, [])
+        result, calls = self._run_arm_role_query("absent")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(calls), 600)
+
+    def test_arm_ram_upper_rejects_an_unbound_or_invalid_scratch_transport(self):
+        result, calls = self._run_arm_role_query("absent", action="no-scratch")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, ["no-scratch"])
+        for scenario in ("ready", "pending", "fatal"):
+            result, calls = self._run_arm_role_query(scenario, action="no-scratch")
+            self.assertEqual(result.returncode, 125)
+            self.assertEqual(calls, ["no-scratch"])
 
     def _aggregate(self, *children: str, mode: str = "rw") -> str:
         """Returns the bootstrap of an aggregate whose children the
@@ -23361,6 +23487,50 @@ class BenchmarkTests(unittest.TestCase):
                 boot
                 + b"NVX-GUEST-SCRIPT-START\r\n\x00\r\nNVX-LIFECYCLE-OK\r\n\x7f\xff\n",
             )
+
+    def test_guest_runner_exact_status_keeps_default_and_time_failure_enforcement(self):
+        steps: list[tuple[benchmark.OutputStream, bytes | None]] = [
+            ("console", b"DONE\n"),
+            ("console", None),
+            ("stderr", b"tail-before-eof\n"),
+            ("stderr", None),
+        ]
+        for status, expected, passes in [
+            (42, 42, True),
+            (42, 0, False),
+            (194, 194, False),
+        ]:
+            with self.subTest(status=status, expected=expected):
+                interaction = _TwoStreamInteraction(steps, status, separate_stderr=True)
+                stderr = bytearray()
+                with (
+                    patch.object(
+                        benchmark, "InteractiveProcess", return_value=interaction
+                    ),
+                    patch.object(benchmark, "_try_peak_rss", return_value=1024),
+                    patch.object(benchmark, "terminate"),
+                ):
+                    if passes:
+                        result = benchmark.run_guest_script(
+                            ["openvmm"],
+                            "true\n",
+                            b"DONE",
+                            timeout=5,
+                            expected_exit_status=expected,
+                            on_stderr=stderr.extend,
+                        )
+                        self.assertIn("DONE\n", result["text"])
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            benchmark.run_guest_script(
+                                ["openvmm"],
+                                "true\n",
+                                b"DONE",
+                                timeout=5,
+                                expected_exit_status=expected,
+                                on_stderr=stderr.extend,
+                            )
+                self.assertEqual(stderr, b"tail-before-eof\n")
 
     def test_guest_runner_reads_a_separate_stderr_to_its_end(self):
         # OpenVMM writes a fatal error to stderr after its console has ended.

@@ -45,6 +45,83 @@ impl MemoryMapping {
         })
     }
 
+    /// Performs one ordered byte read from a checked device-memory mapping.
+    #[cfg(target_arch = "aarch64")]
+    pub(super) fn device_read_u8(&self, offset: usize) -> Result<u8, Errno> {
+        if offset >= self.length.get() {
+            return Err(Errno::EINVAL);
+        }
+        let address = self.address.expect("mapping is owned");
+        // SAFETY: the byte lies within the owned mapping; the ARM device transaction is ordered.
+        let value = unsafe {
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            let value = std::ptr::read_volatile(address.as_ptr().cast::<u8>().add(offset));
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            value
+        };
+        Ok(value)
+    }
+
+    /// Performs one naturally aligned, ordered 16-bit little-endian device read.
+    #[cfg(target_arch = "aarch64")]
+    pub(super) fn device_read_u16(&self, offset: usize) -> Result<u16, Errno> {
+        if !offset.is_multiple_of(2)
+            || offset
+                .checked_add(2)
+                .is_none_or(|end| end > self.length.get())
+        {
+            return Err(Errno::EINVAL);
+        }
+        let address = self.address.expect("mapping is owned");
+        // SAFETY: the aligned two-byte range lies within the owned device mapping.
+        let value = unsafe {
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            let value =
+                std::ptr::read_volatile(address.as_ptr().cast::<u8>().add(offset).cast::<u16>());
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            value
+        };
+        Ok(u16::from_le(value))
+    }
+
+    /// Performs one naturally aligned, ordered 32-bit little-endian device read.
+    #[cfg(target_arch = "aarch64")]
+    pub(super) fn device_read_u32(&self, offset: usize) -> Result<u32, Errno> {
+        if !offset.is_multiple_of(4)
+            || offset
+                .checked_add(4)
+                .is_none_or(|end| end > self.length.get())
+        {
+            return Err(Errno::EINVAL);
+        }
+        let address = self.address.expect("mapping is owned");
+        // SAFETY: the aligned four-byte range lies within the owned device mapping.
+        let value = unsafe {
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            let value =
+                std::ptr::read_volatile(address.as_ptr().cast::<u8>().add(offset).cast::<u32>());
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            value
+        };
+        Ok(u32::from_le(value))
+    }
+
+    /// Performs one ordered byte store to a checked device-memory mapping.
+    #[cfg(target_arch = "aarch64")]
+    pub(super) fn device_write_u8(&self, offset: usize, value: u8) -> Result<(), Errno> {
+        if offset >= self.length.get() {
+            return Err(Errno::EINVAL);
+        }
+        let address = self.address.expect("mapping is owned");
+        // SAFETY: the byte lies within the writable mapping; barriers keep the store synchronous.
+        unsafe {
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+            std::ptr::write_volatile(address.as_ptr().cast::<u8>().add(offset), value);
+            core::arch::asm!("dmb osh", options(nostack, preserves_flags));
+        }
+        Ok(())
+    }
+
     /// Stores a native-endian 32-bit value at `offset`, even when it is unaligned.
     ///
     /// Returns `false` without writing unless all four bytes lie inside the mapping. The mapping

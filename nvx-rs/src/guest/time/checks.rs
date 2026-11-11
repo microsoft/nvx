@@ -9,24 +9,18 @@ use super::Phase;
 use super::cpu_mask::CpuMask;
 use super::decoders::{self, CpuInfo, ZERO_HYPERV_LEAVES};
 use super::events::{CheckId, DETAIL_MAX, ViolationCode, escape_text};
-use super::state::{CheckState, CheckStatus, TimeState};
+use super::state::CheckState;
 use super::system::{
     DAEMON_NAME, DAEMON_PID_PATH, DEFAULT_STALL_TIMEOUT_S, MsrDescriptor, Runtime, msr_error,
-    rates_load, state_apply, state_load,
+    rates_load, state_load,
 };
 use crate::guest::status::CommandError;
 use crate::guest::sys::x86::cpuid::{self, Register};
 use crate::guest::sys::x86::{CpuidResult, msr};
 use crate::guest::sys::{self, Errno, MsrAccess, MsrFile, ProcessId, kernel};
 
-/// Maximum timer-list convergence wait during boot and restore.
-pub(crate) const TIMER_LIST_WAIT: Duration = Duration::from_millis(200);
-/// Poll interval while the timer list converges.
-const TIMER_LIST_POLL: Duration = Duration::from_millis(10);
-/// Maximum wait for persisted phase checks to complete.
-const STATUS_WAIT: Duration = Duration::from_secs(30);
-/// Poll interval while waiting for persisted checks.
-const STATUS_POLL: Duration = Duration::from_millis(10);
+use super::deferred::TIMER_LIST_POLL;
+pub(crate) use super::deferred::TIMER_LIST_WAIT;
 /// Hz in a kHz, which `/proc/cpuinfo`'s rates use.
 const HZ_PER_KHZ: u64 = 1000;
 /// The process ID of init, which never runs the daemon.
@@ -306,39 +300,13 @@ pub(crate) fn record_check(
     tsc_hz: u64,
     lapic_hz: u64,
 ) -> Result<(), Errno> {
-    let phase = checks.phase;
-    if phase.check_index().is_none() {
-        return Err(Errno::EINVAL);
-    }
     let failures = runtime.report_only().then_some(checks.failures as u64);
-    let status = if failures.is_some_and(|failures| failures > 0) {
-        CheckStatus::Fail
-    } else {
-        CheckStatus::Ok
-    };
-    state_apply(|state| {
-        let generation = if phase == Phase::Boot {
-            0
-        } else {
-            state.generation
-        };
-        if let Some(check) = state.check_mut(phase) {
-            *check = CheckState {
-                status: Some(status),
-                cpus: checks.online.len() as u64,
-                elapsed_us,
-                cpu_us,
-                generation,
-                failures,
-            };
-        }
-        if tsc_hz != 0 {
-            state.tsc_hz = tsc_hz;
-        }
-        if lapic_hz != 0 {
-            state.lapic_hz = lapic_hz;
-        }
-    })
+    super::system::record_check(
+        checks.phase,
+        CheckState::completed(checks.online.len() as u64, elapsed_us, cpu_us, failures),
+        tsc_hz,
+        lapic_hz,
+    )
 }
 
 /// Validates the Hyper-V CPUID identity leaves on one CPU, of `possible` possible CPUs.
@@ -678,29 +646,7 @@ fn check_daemon() -> Verdict {
 
 /// Validates the soft-lockup and hung-task detectors when the kernel has either.
 fn check_debug_watchdogs() -> Verdict {
-    // A missing or unreadable setting prints as -1, as in the C program.
-    let setting =
-        |path| sys::path_exists(path).then(|| sys::read_number::<i64>(path).unwrap_or(-1));
-    let (soft, hung) = (
-        setting(kernel::SOFT_WATCHDOG),
-        setting(kernel::HUNG_TASK_TIMEOUT),
-    );
-    if soft.is_none() && hung.is_none() {
-        return Ok(());
-    }
-    if soft != Some(1) {
-        return Err(Failure::new(
-            CheckId::C11,
-            format!("soft_watchdog is {}", soft.unwrap_or(-1)),
-        ));
-    }
-    match hung {
-        Some(timeout) if timeout != 0 => Ok(()),
-        _ => Err(Failure::new(
-            CheckId::C11,
-            format!("hung_task_timeout_secs is {}", hung.unwrap_or(-1)),
-        )),
-    }
+    super::system::check_debug_watchdogs().map_err(|detail| Failure::new(CheckId::C11, detail))
 }
 
 /// Runs selected identity and MSR checks on one pinned CPU.
@@ -959,19 +905,7 @@ pub(crate) fn run_restore_checks(runtime: &Runtime<'_>, checks: &mut Checks, new
 }
 
 /// Waits for boot-only or all persisted checks and returns completion state.
-pub(crate) fn wait_for_checks(boot_only: bool) -> (TimeState, bool) {
-    let deadline = Instant::now() + STATUS_WAIT;
-    loop {
-        let state = state_load().unwrap_or_default();
-        if !state.pending(boot_only) {
-            return (state, true);
-        }
-        if Instant::now() >= deadline {
-            return (state, false);
-        }
-        thread::sleep(STATUS_POLL);
-    }
-}
+pub(crate) use super::state::wait_for_checks;
 
 /// Aggregate counters and rates for the exhaustive CI-only report.
 struct Exhaustive {

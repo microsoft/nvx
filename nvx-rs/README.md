@@ -144,7 +144,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::cgroup`](#nvxguestcgroup) | Cgroup v2 handles through which a guest init or agent places, accounts, kills, and settles its executions |
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
 | [`nvx::guest::exec::binding`](#nvxguestexecbinding) | `Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest adapter would otherwise write |
-| [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
+| [`nvx::guest::time`](#nvxguesttime) | shared cold-boot time synchronization and daemon calls for x86_64 and ARM64, with capture and restore on x86_64 |
 | [`nvx::guest::clone`](#nvxguestclone) | x86_64: the preparation of a template's guest for a capture, and the repair and activation of each clone |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 | [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its bootstrap, assembly, shares, export, mappings, and teardown |
@@ -401,6 +401,18 @@ images and their package manifests, and the Ubuntu distro layer and its
 manifest, in a checkout's `build/` and `openvmm/target/release/` or a release's
 `guest/` and `bin/`, checked in the order and with the messages of `nvx.py`.
 `ArtifactPaths` lists them all and serializes as JSON.
+
+`Architecture` makes the guest ISA explicit:
+`ArtifactDir::with_architecture(Architecture::Aarch64)` selects a checkout's
+`build/aarch64/Image` and matching Alpine or Ubuntu initramfs and package
+manifest, without changing its OpenVMM location. The default remains x86-64.
+ARM kernel headers and each distribution's package architecture are checked;
+ARM release layouts, bundles, Azure Linux and managed sandbox artifacts are
+not yet qualified and are rejected rather than resolved as x86 artifacts.
+Standalone `download` still selects the legacy x86-64 packages for the host OS
+and requested backend, including when the downloading CLI runs on ARM.
+Downloading those files does not admit their execution on a different ISA;
+an ARM runtime's request for ARM release artifacts is still rejected.
 
 `ArtifactDir::runtime_identity` reads the `RuntimeIdentity` of the OpenVMM
 executable, kernel, and Alpine initramfs from the install metadata, a release's
@@ -1374,11 +1386,35 @@ binding could not read the launch report.
 
 ### `nvx::guest::time`
 
-x86_64: `TimeAbi`, the steps of NVX time ABI v1 as typed calls in the caller's
-process, for any guest init or agent: the cold-boot time step and, separately,
-the start of the time daemon in a child process that the caller supervises, the
-VM generation ID, a `CaptureRequest` that repairs a `Restore`, and a
-`RestoreFinish`.
+`TimeAbi` exposes the same cold-boot time step, supervised daemon startup and VM
+generation-ID calls on x86_64 and ARM64 Linux. `/sbin/nvx-time` uses one command
+dispatcher and these same calls on both architectures. The initial UTC step
+and frequency hold finish before `boot` returns; architectural conformance
+checks run later in the child, before it publishes its daemon PID and completed
+boot status.
+
+The daemon shares kernel-log watching, violation delivery and accounting,
+bounded sample selection, step/slew/frequency-hold policy, state publication,
+and polling cadence. A failed runtime clock adjustment rejects the sample on
+either architecture; a failed check remains a failed check in report-only
+mode, with its actual failure count. The initial synchronization is not counted
+as a runtime discontinuity.
+Unreadable or malformed state is an explicit failure, not a synthetic pending
+record. Loss of the watcher, state publisher or discipline timer is a daemon
+failure, rather than a silently inactive service. A private daemon-file lock
+keeps ownership independent of the root assembler's runtime-directory lock.
+
+Only the hardware adapter and conformance checks depend on the ISA. x86 uses
+PIO, the TSC and Linux's kHz-rounded conversion. ARM uses the restricted
+platform device, CNTVCT and actual CNTFRQ, with the selected a8 profile identity
+and full-Hz frequency. No vendor name, MIDR value or observed host frequency
+selects the guest's time policy. The a6 identity, a7 sample and a8 binding
+formats are unchanged.
+
+Capture and restore remain x86_64-only: a `CaptureRequest` repairs a `Restore`,
+and `RestoreFinish` completes it. ARM cold boot does not accept or acknowledge
+restore requests; sharing the invocation and daemon does not add ARM snapshot
+support or qualify a new CPU or host.
 
 The request's mode selects how a restore hands over its fresh entropy: the file
 mode, which `nvx-time` keeps, writes it to a file, and the in-memory mode
@@ -1390,11 +1426,10 @@ that owns the VM's exit status and shutdown selects, the call fails with the
 `Violation`, whose `status` is the one with which enforcing mode stops the VM,
 and the time daemon and a capture's preparation enforce the ABI all the same.
 
-A call takes the permission for OpenVMM's ports on the calling thread for each
-port transaction alone, and fails with `TimeError::PortRelease` if the thread
-may still hold some of it, which a process that it started would inherit, and
-from which `nvx::guest::spawn` starts none. No call waits for a child that it
-did not start.
+A call takes hardware authority only for its transaction: x86's port permission
+or ARM's restricted device mapping or descriptor. A release failure is explicit,
+and `nvx::guest::spawn` refuses to inherit retained authority. No call waits for
+a child that it did not start.
 
 `nvx-time` runs its steps through them.
 
@@ -2757,18 +2792,37 @@ disk's block device.
 | `nvx-console-pending DEVICE` | Prints the number of bytes waiting to be read from a device, such as a console |
 | `nvx-mmio-write ADDRESS VALUE` | Stores a 32-bit value at a physical address through `/dev/mem` (x86_64) |
 | `nvx-reseed [--generation-only] SEED_FILE [PREVIOUS]`, `nvx-reseed --sample` | Reseeds the kernel's random number generator from a seed file and checks its VM generation ID, or prints a random sample |
-| `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 (x86_64) |
+| `nvx-exit [CODE]` | Stops the VM with an 8-bit exit code through OpenVMM's control port 0x604 on x86_64 or the restricted platform device's shutdown register on aarch64 |
 | `nvx-device-io file ...`, `nvx-device-io network ...`, `nvx-device-io map PATH TEXT` | The benchmark helper that measures file and UDP round-trip I/O and prints one JSON line, and reports a file benchmark's progress on stderr; `map` writes TEXT at the start of a file through a shared mapping and holds the dirty mapping until its standard input ends, for the microVM scenarios (x86_64) |
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is the direct agent's internal launch helper |
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
-| `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1: runs its conformance checks, repairs the wall clock after a restore, publishes the time state, and runs the discipline and violation-watcher daemon; `test NAME ...` runs its decoder and process test hooks (x86_64) |
+| `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1 through shared cold-boot checks, time-state publication, and the discipline and violation-watcher daemon on x86_64 and aarch64; capture/restore and the `test NAME ...` decoder and process hooks remain x86_64-only |
 | `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
-| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends or 0 on `SIGTERM`; elsewhere it exits with 2 (x86_64) |
+| `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends or 0 on `SIGTERM`; elsewhere it exits with 2 (x86_64, aarch64) |
+
+The init agent also uses the private, read-only
+`nvx-init --root-device distro|scratch|no-scratch` query on ARM. It resolves
+only the fixed distro and scratch protocol roles through root-child OF
+`reg` properties, their declared big-endian address/size cells, and the
+virtio-MMIO driver and block-child identities; it does not depend on a
+generic platform `resource` file or `/dev/vdX` probe order. Unsupported
+translated buses, malformed or ambiguous resources, and wrong drivers are
+errors. The query never prepares a root, mounts a filesystem, changes a
+partition, or enters PID 1 supervision.
+
+Status 0 prints a ready device, or confirms transport absence for
+`no-scratch`; status 1 means not yet ready, or a present scratch transport
+for `no-scratch`; status 2 reports invalid arguments or a fatal lookup error.
+An unbound transport or one without a block child is still present. The ARM
+shell launcher retries only status 1, for its existing bounded probe
+interval; its x86 command-line discovery is unchanged.
 
 Each binary's command line, exit statuses, and byte output are compatibility
 contracts; the [`nvx::guest`](src/guest/mod.rs) documentation describes each
-program. Guests run them as static `x86_64-unknown-linux-musl` executables. On
-Linux, with the musl target and a C compiler driver, `cc`, `nvx.py` builds them:
+program. Guest builds default to static `x86_64-unknown-linux-musl`
+executables; `--architecture aarch64` selects `aarch64-unknown-linux-musl`
+for the supported ARM programs. On Linux, with the musl target and a C compiler
+driver, `cc`, `nvx.py` builds them:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
@@ -2777,8 +2831,9 @@ python3 scripts/nvx.py build-guest-binaries \
 ```
 
 Native guest builds, the digest-pinned Docker Rust stage, and CI all call this
-routine. Docker builds the set once and installs identical bytes in all three
-guest images; Ubuntu determinism checks rebuild from fresh targets.
+routine. The default Docker build compiles the set once and installs identical
+bytes in all three guest images; Ubuntu determinism checks rebuild from fresh
+targets.
 
 Of this crate, the guest images depend only on the files that this build reads:
 `Cargo.toml`, `Cargo.lock`, `build.rs`, any Cargo configuration in `.cargo/`,

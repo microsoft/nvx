@@ -61,8 +61,38 @@ cmdline_value() {
     return 1
 }
 
+# This existing Rust helper shares the maintained fixed-role discovery with root assembly.
+root_device_query() {
+    /sbin/nvx-init --root-device "$1"
+}
+
 resolve_block_device() {
     address=$(printf '%d' "$1") || return 1
+    case "$(uname -m)" in
+        aarch64 | arm64)
+            if [ "$address" -eq "$(printf '%d' 0xd0003000)" ]; then
+                role=distro
+            elif [ "$address" -eq "$(printf '%d' 0xd0006000)" ]; then
+                role=scratch
+            else
+                echo "NVX-SANDBOX-ERROR: no fixed block role at $1" >&2
+                return 2
+            fi
+            attempts=0
+            while [ "$attempts" -lt 600 ]; do
+                if device=$(root_device_query "$role"); then
+                    printf '%s\n' "$device"
+                    return 0
+                else
+                    query_status=$?
+                    [ "$query_status" -eq 1 ] || return "$query_status"
+                fi
+                attempts=$((attempts + 1))
+                sleep 0.05
+            done
+            return 1
+            ;;
+    esac
     attempts=0
     while [ "$attempts" -lt 600 ]; do
         while IFS=' ' read -r range separator platform _; do
@@ -272,9 +302,16 @@ read_root_tokens() {
 # MMIO base, 0xd0006000, which a RAM upper must not have. nvx::protocol::root
 # reads the devices from the virtio_mmio.device= parameters of the command
 # line, with the kernel's rules; this init asks the kernel instead, which lists
-# the window of each device that it added in /proc/iomem, where
-# resolve_block_device finds them too.
+# the window of each device that it added in /proc/iomem on x86. ARM uses the
+# same pure Rust OF lookup as root assembly, including transports still probing.
 refuse_scratch_device() {
+    case "$(uname -m)" in
+        aarch64 | arm64)
+            root_device_query no-scratch ||
+                fatal "a RAM upper requires an absent, unambiguous fixed scratch transport"
+            return 0
+            ;;
+    esac
     scratch_address=$(printf '%d' 0xd0006000)
     while IFS=' ' read -r range separator platform _; do
         [ "$separator" = : ] || continue

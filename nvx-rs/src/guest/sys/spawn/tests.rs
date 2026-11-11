@@ -23,11 +23,9 @@ pub(crate) const CAP_SYS_CHROOT: u32 = 18;
 pub(crate) const CAP_SYS_ADMIN: u32 = 21;
 
 /// Capability to lower nice values.
-#[cfg(target_arch = "x86_64")]
 pub(crate) const CAP_SYS_NICE: u32 = 23;
 
 /// Capability to override resource limits, and to lower an out-of-memory score adjustment.
-#[cfg(target_arch = "x86_64")]
 pub(crate) const CAP_SYS_RESOURCE: u32 = 24;
 
 /// Returns whether the calling thread's effective set holds `capability`, because tests whose
@@ -265,8 +263,10 @@ fn the_report_writer_is_raised_above_the_standard_streams() {
     }
     // With standard input and output closed, the report's pipe takes their numbers, and
     // placing the child's standard output would replace a writer that kept number 1.
+    let temporary = tempfile::tempdir().unwrap();
+    let missing = crate::guest::sys::path_c_string(&temporary.path().join("nonexistent")).unwrap();
     let streams = ClosedStreams::new(&[0, 1]);
-    let mut spec = ChildSpec::new(c"/nonexistent".to_owned(), vec![c"nonexistent".to_owned()]);
+    let mut spec = ChildSpec::new(missing, vec![c"nonexistent".to_owned()]);
     spec.streams[1] = Some(descriptor());
     let outcome = run(spec);
     drop(streams);

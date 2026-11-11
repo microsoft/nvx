@@ -1,9 +1,12 @@
 //! The kernel's clocks: reading them and sleeping on them.
 
+#[cfg(any(target_arch = "x86_64", test))]
 use std::time::Duration;
 
-use nix::sys::time::{TimeSpec, TimeValLike};
-use nix::time::{ClockId, ClockNanosleepFlags, clock_gettime, clock_nanosleep};
+use nix::sys::time::TimeSpec;
+use nix::sys::time::TimeValLike;
+use nix::time::{ClockId, clock_gettime};
+use nix::time::{ClockNanosleepFlags, clock_nanosleep};
 
 use super::Errno;
 
@@ -21,9 +24,11 @@ pub(crate) enum Clock {
     /// The time since boot, without suspend, which the wall clock's discipline slews.
     Monotonic,
     /// The time since boot, without suspend or discipline.
+    #[cfg(any(target_arch = "x86_64", test))]
     MonotonicRaw,
     /// The monotonic clock as the kernel saved it at the last scheduler tick, which a read
     /// returns without reading the clocksource, so that it advances once per tick.
+    #[cfg(any(target_arch = "x86_64", test))]
     MonotonicCoarse,
     /// The time since boot, with suspend.
     Boottime,
@@ -37,7 +42,9 @@ impl Clock {
         match self {
             Self::Realtime => ClockId::CLOCK_REALTIME,
             Self::Monotonic => ClockId::CLOCK_MONOTONIC,
+            #[cfg(any(target_arch = "x86_64", test))]
             Self::MonotonicRaw => ClockId::CLOCK_MONOTONIC_RAW,
+            #[cfg(any(target_arch = "x86_64", test))]
             Self::MonotonicCoarse => ClockId::CLOCK_MONOTONIC_COARSE,
             Self::Boottime => ClockId::CLOCK_BOOTTIME,
             Self::ProcessCpuTime => ClockId::CLOCK_PROCESS_CPUTIME_ID,
@@ -85,6 +92,7 @@ pub(crate) fn sleep_until_monotonic(deadline_ns: i64) {
 }
 
 /// Sleeps for `duration` on the monotonic clock with one call, which a signal ends early.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn sleep_once(duration: Duration) {
     let _ = clock_nanosleep(
         ClockId::CLOCK_MONOTONIC,

@@ -13,7 +13,7 @@ from .build_constants import (
     OpenVMMBuildConstants,
     UbuntuBuildConstants,
 )
-from .common import artifact_path, cache_root, openvmm_binary_path
+from .common import ScriptError, artifact_path, cache_root, openvmm_binary_path
 from .guests import GUEST_NAMES, guest_descriptor
 
 OpenVmmBackend = Literal["kvm", "mshv", "whp"]
@@ -31,6 +31,28 @@ class DockerBuildConfig:
     linux_source_destination: Path = (
         BuildConstants.SOURCE_DIR / KernelBuildConstants.SOURCE_DIRECTORY_NAME
     )
+    architecture: str = "x86_64"
+
+    def __post_init__(self) -> None:
+        if self.architecture not in ("x86_64", "aarch64"):
+            raise ScriptError(
+                f"unsupported Docker artifact architecture: {self.architecture}"
+            )
+
+    @staticmethod
+    def for_architecture(architecture: str) -> DockerBuildConfig:
+        if architecture == "x86_64":
+            return DockerBuildConfig()
+        if architecture != "aarch64":
+            raise ScriptError(
+                f"unsupported Docker artifact architecture: {architecture}"
+            )
+        root = BuildConstants.BUILD_DIR / architecture
+        return DockerBuildConfig(
+            architecture=architecture,
+            artifact_destination=root,
+            linux_source_destination=root / "sources" / "linux",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +65,18 @@ class InitramfsBuildConfig:
         )
     )
     output: Path | None = None
+    architecture: str = "x86_64"
+
+    def __post_init__(self) -> None:
+        if self.architecture not in ("x86_64", "aarch64"):
+            raise ScriptError(
+                f"unsupported initramfs architecture: {self.architecture}"
+            )
+        if self.architecture == "aarch64" and self.guest not in ("alpine", "ubuntu"):
+            raise ScriptError(
+                f"ARM64 {self.guest} initramfs inputs are not integrated; "
+                "refusing to use x86 userland or package locks"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +104,48 @@ class KernelBuildConfig:
     output: Path = artifact_path(KernelBuildConstants.BINARY_NAME)
     cache_directory: Path = field(default_factory=_default_cache_directory)
     debug: bool = False
+    architecture: str = "x86_64"
+
+    def __post_init__(self) -> None:
+        if self.architecture not in ("x86_64", "aarch64"):
+            raise ScriptError(f"unsupported kernel architecture: {self.architecture}")
+
+    @staticmethod
+    def for_architecture(
+        architecture: str, *, debug: bool = False
+    ) -> KernelBuildConfig:
+        """Select a namespaced kernel producer without changing x86 paths or defaults."""
+        if architecture == "x86_64":
+            return KernelBuildConfig.debug_variant() if debug else KernelBuildConfig()
+        if architecture != "aarch64":
+            raise ScriptError(f"unsupported kernel architecture: {architecture}")
+        suffix = "-debug" if debug else ""
+        return KernelBuildConfig(
+            architecture=architecture,
+            work=BuildConstants.BUILD_DIR / architecture / f"linux{suffix}",
+            output=BuildConstants.BUILD_DIR / architecture / f"Image{suffix}",
+            debug=debug,
+        )
+
+    @property
+    def input_config(self) -> Path:
+        return (
+            KernelBuildConstants.ARM_INPUT_CONFIG
+            if self.architecture == "aarch64"
+            else KernelBuildConstants.INPUT_CONFIG
+        )
+
+    @property
+    def derived_config(self) -> Path:
+        return (
+            KernelBuildConstants.ARM_DERIVED_CONFIG
+            if self.architecture == "aarch64"
+            else KernelBuildConstants.DERIVED_CONFIG
+        )
+
+    @property
+    def make_architecture(self) -> tuple[str, ...]:
+        return ("ARCH=arm64",) if self.architecture == "aarch64" else ()
 
     @staticmethod
     def debug_variant() -> KernelBuildConfig:
@@ -83,6 +159,8 @@ class KernelBuildConfig:
 
     @property
     def provenance_name(self) -> str:
+        if self.architecture == "aarch64":
+            return f"{self.output.name}.provenance.json"
         return (
             KernelBuildConstants.DEBUG_PROVENANCE_NAME
             if self.debug
@@ -133,17 +211,23 @@ class BuildConfig:
         return (guest_descriptor(self.guest).name,)
 
     @staticmethod
-    def initramfs_config(guest: str) -> InitramfsBuildConfig:
+    def initramfs_config(
+        guest: str, architecture: str = "x86_64"
+    ) -> InitramfsBuildConfig:
         descriptor = guest_descriptor(guest)
+        directory = BuildConstants.BUILD_DIR
+        if architecture != "x86_64":
+            directory /= architecture
         return InitramfsBuildConfig(
             guest=descriptor.name,
             work=(
-                BuildConstants.BUILD_DIR
+                directory
                 / InitramfsBuildConstants.WORK_DIRECTORY_TEMPLATE.format(
                     guest=descriptor.name
                 )
             ),
-            output=artifact_path(descriptor.initramfs_name),
+            output=directory / descriptor.initramfs_name,
+            architecture=architecture,
         )
 
     @staticmethod

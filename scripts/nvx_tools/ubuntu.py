@@ -113,9 +113,30 @@ def _required_string(
     return value
 
 
+def package_architecture(architecture: str = "x86_64") -> str:
+    """Select an explicit Ubuntu package ISA without host inference."""
+    if architecture == "x86_64":
+        return UbuntuBuildConstants.ARCHITECTURE
+    if architecture == "aarch64":
+        return "arm64"
+    raise ScriptError(f"unsupported Ubuntu architecture: {architecture}")
+
+
+def package_lock_path(architecture: str = "x86_64") -> Path:
+    """Keep the original lock and the ARM lock distinct."""
+    package_architecture(architecture)
+    return (
+        UbuntuBuildConstants.ARM_PACKAGE_LOCK
+        if architecture == "aarch64"
+        else UbuntuBuildConstants.PACKAGE_LOCK
+    )
+
+
 def load_package_lock(
-    path: Path = UbuntuBuildConstants.PACKAGE_LOCK,
+    path: Path | None = None, *, architecture: str = "x86_64"
 ) -> tuple[UbuntuLockedPackage, ...]:
+    path = path if path is not None else package_lock_path(architecture)
+    selected_architecture = package_architecture(architecture)
     try:
         raw_document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -127,7 +148,7 @@ def load_package_lock(
         "format": UbuntuBuildConstants.PACKAGE_LOCK_FORMAT,
         "release": UbuntuBuildConstants.VERSION,
         "codename": UbuntuBuildConstants.CODENAME,
-        "architecture": UbuntuBuildConstants.ARCHITECTURE,
+        "architecture": selected_architecture,
     }
     for field, expected in expected_header.items():
         if document.get(field) != expected:
@@ -186,7 +207,7 @@ def load_package_lock(
                 "pre_depends": str(package_document.get("pre_depends", "")),
             },
         )
-        if package["architecture"] not in (UbuntuBuildConstants.ARCHITECTURE, "all"):
+        if package["architecture"] not in (selected_architecture, "all"):
             raise ScriptError(
                 f"{path} package {name} has unsupported architecture "
                 f"{package['architecture']}"
@@ -691,13 +712,15 @@ def _validate_accounts(root: Path) -> None:
         raise ScriptError("Ubuntu Base must contain the expected nogroup")
 
 
-def _validate_usr_merge(root: Path) -> None:
+def _validate_usr_merge(root: Path, *, architecture: str = "x86_64") -> None:
+    package_architecture(architecture)
     expected = {
         "bin": "usr/bin",
         "sbin": "usr/sbin",
         "lib": "usr/lib",
-        "lib64": "usr/lib64",
     }
+    if architecture == "x86_64":
+        expected["lib64"] = "usr/lib64"
     for name, target in expected.items():
         path = root / name
         if not path.is_symlink() or os.readlink(path) != target:
@@ -710,7 +733,7 @@ def _validate_usr_merge(root: Path) -> None:
             raise ScriptError(f"Ubuntu Base usr-merge target is invalid: /{name}")
 
 
-def _customize_root(root: Path) -> None:
+def _customize_root(root: Path, *, architecture: str = "x86_64") -> None:
     for relative, mode in (
         ("root", 0o700),
         ("tmp", 0o1777),
@@ -752,7 +775,10 @@ def _customize_root(root: Path) -> None:
     if path_exists(root / "usr" / "bin" / "python3"):
         _ensure_symlink(root, "usr/bin/python", "python3")
     _validate_accounts(root)
-    _validate_usr_merge(root)
+    if architecture == "x86_64":
+        _validate_usr_merge(root)
+    else:
+        _validate_usr_merge(root, architecture=architecture)
 
 
 def _validate_ubuntu_identity(root: Path) -> None:
@@ -873,16 +899,29 @@ def require_posix_permissions(work: Path) -> None:
                 )
 
 
-def prepare_root(work: Path) -> Path:
+def prepare_root(work: Path, *, architecture: str = "x86_64") -> Path:
+    package_architecture(architecture)
     work.mkdir(parents=True, exist_ok=True)
     require_posix_permissions(work)
     downloads = cache_root() / BuildConstants.DOWNLOAD_DIRECTORY_NAME
     downloads.mkdir(parents=True, exist_ok=True)
-    archive = downloads / UbuntuBuildConstants.BASE_ARCHIVE_NAME
+    archive = downloads / (
+        UbuntuBuildConstants.ARM_BASE_ARCHIVE_NAME
+        if architecture == "aarch64"
+        else UbuntuBuildConstants.BASE_ARCHIVE_NAME
+    )
     download_verified(
-        UbuntuBuildConstants.BASE_URL,
+        (
+            UbuntuBuildConstants.ARM_BASE_URL
+            if architecture == "aarch64"
+            else UbuntuBuildConstants.BASE_URL
+        ),
         archive,
-        UbuntuBuildConstants.BASE_SHA256,
+        (
+            UbuntuBuildConstants.ARM_BASE_SHA256
+            if architecture == "aarch64"
+            else UbuntuBuildConstants.BASE_SHA256
+        ),
     )
     root = work / InitramfsBuildConstants.ROOT_DIRECTORY_NAME
     if root.exists():
@@ -892,7 +931,11 @@ def prepare_root(work: Path) -> Path:
     safe_extract_tar(archive, root, label="Ubuntu Base archive")
     _validate_ubuntu_identity(root)
 
-    packages = load_package_lock()
+    packages = (
+        load_package_lock()
+        if architecture == "x86_64"
+        else load_package_lock(architecture=architecture)
+    )
     base_records = parse_deb822(
         (root / "var" / "lib" / "dpkg" / "status").read_text(encoding="utf-8")
     )
@@ -917,7 +960,10 @@ def prepare_root(work: Path) -> Path:
         download_verified(package["url"], package_path, package["sha256"])
         _install_deb(root, package, package_path)
     precompile_python(root)
-    _customize_root(root)
+    if architecture == "x86_64":
+        _customize_root(root)
+    else:
+        _customize_root(root, architecture=architecture)
     return root
 
 
@@ -1018,8 +1064,16 @@ def _license_path(root: Path, package_name: str, declared: str | None) -> str:
     return f"/{relative}"
 
 
-def package_records(root: Path) -> list[UbuntuPackageRecord]:
-    locked = {package["name"]: package for package in load_package_lock()}
+def package_records(
+    root: Path, *, architecture: str = "x86_64"
+) -> list[UbuntuPackageRecord]:
+    selected_architecture = package_architecture(architecture)
+    lock = (
+        load_package_lock()
+        if architecture == "x86_64"
+        else load_package_lock(architecture=architecture)
+    )
+    locked = {package["name"]: package for package in lock}
     records = parse_deb822(
         (root / "var" / "lib" / "dpkg" / "status").read_text(encoding="utf-8")
     )
@@ -1030,13 +1084,13 @@ def package_records(root: Path) -> list[UbuntuPackageRecord]:
             continue
         name = record.get("Package")
         version = record.get("Version")
-        architecture = record.get("Architecture")
+        installed_architecture = record.get("Architecture")
         if (
             not name
             or not version
-            or architecture
+            or installed_architecture
             not in (
-                UbuntuBuildConstants.ARCHITECTURE,
+                selected_architecture,
                 "all",
             )
         ):
@@ -1057,7 +1111,7 @@ def package_records(root: Path) -> list[UbuntuPackageRecord]:
             {
                 "name": name,
                 "version": version,
-                "architecture": architecture,
+                "architecture": installed_architecture,
                 "source_name": source_name,
                 "source_version": source_version,
                 "installed": True,
@@ -1083,19 +1137,25 @@ def package_records(root: Path) -> list[UbuntuPackageRecord]:
 def package_manifest(
     root: Path,
     helpers: HelperProvenance,
+    *,
+    architecture: str = "x86_64",
 ) -> dict[str, object]:
     return {
         "format": UbuntuBuildConstants.PACKAGE_MANIFEST_VERSION,
         "guest": UbuntuBuildConstants.GUEST_NAME,
         "release": UbuntuBuildConstants.VERSION,
-        "architecture": UbuntuBuildConstants.ARCHITECTURE,
+        "architecture": package_architecture(architecture),
         "rootfs_sha256": rootfs_sha256(root),
-        "packages": package_records(root),
+        "packages": (
+            package_records(root)
+            if architecture == "x86_64"
+            else package_records(root, architecture=architecture)
+        ),
         "helpers": helpers,
     }
 
 
-def customization_files() -> tuple[Path, ...]:
+def customization_files(architecture: str = "x86_64") -> tuple[Path, ...]:
     return (
         *(
             path
@@ -1115,19 +1175,29 @@ def customization_files() -> tuple[Path, ...]:
             )
             if path.is_file()
         ),
-        UbuntuBuildConstants.PACKAGE_LOCK,
+        package_lock_path(architecture),
         *guest_binary_source_files(),
     )
 
 
-def converter_input_sha256(customization_files: Sequence[Path]) -> str:
-    lock = load_package_lock()
+def converter_input_sha256(
+    customization_files: Sequence[Path], *, architecture: str = "x86_64"
+) -> str:
+    lock = (
+        load_package_lock()
+        if architecture == "x86_64"
+        else load_package_lock(architecture=architecture)
+    )
     document = {
         "domain": UbuntuBuildConstants.EROFS_DIGEST_DOMAIN,
         "format": UbuntuBuildConstants.EROFS_FORMAT,
         "release": UbuntuBuildConstants.VERSION,
-        "architecture": UbuntuBuildConstants.ARCHITECTURE,
-        "base_sha256": UbuntuBuildConstants.BASE_SHA256,
+        "architecture": package_architecture(architecture),
+        "base_sha256": (
+            UbuntuBuildConstants.ARM_BASE_SHA256
+            if architecture == "aarch64"
+            else UbuntuBuildConstants.BASE_SHA256
+        ),
         "supplemental_packages": [
             {"name": package["name"], "sha256": package["sha256"]} for package in lock
         ],

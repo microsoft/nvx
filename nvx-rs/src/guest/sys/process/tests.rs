@@ -39,6 +39,15 @@ fn process_group_exists(process: ProcessId) -> bool {
     signal_process_group(process, 0) != Err(Errno::ESRCH)
 }
 
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_diagnostics_write_console_bytes_without_x86_port_offsets() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let descriptor = FileDescriptor::from_owned(file.reopen().unwrap().into());
+    write_port_diagnostic(&descriptor, b"ARM diagnostic\n").unwrap();
+    assert_eq!(std::fs::read(file.path()).unwrap(), b"ARM diagnostic\n");
+}
+
 /// Forks a test's process, which the harness's threads keep [`fork`] from forking, for a test
 /// that the process runs alone, as `isolate_process_test` starts one. The child has only the
 /// calling thread, so [`fork`] works in it.

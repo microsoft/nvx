@@ -1,38 +1,43 @@
 //! The time daemon: deferred work, violation watching, the wall clock's discipline, and repair
 //! step 7.
 
+#[cfg(target_arch = "x86_64")]
 use std::ffi::CStr;
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
 use super::api::ColdBoot;
-use super::checks::{self, BootLog, Checks};
+#[cfg(target_arch = "x86_64")]
+use super::checks::BootLog;
+use super::checks::{self, Checks};
+#[cfg(target_arch = "x86_64")]
 use super::cpu_mask::CpuMask;
+#[cfg(target_arch = "x86_64")]
 use super::decoders;
+pub(crate) use super::deferred::Promoter;
 use super::events::{CheckId, EventSource, ViolationCode};
+use super::sample;
+use super::sample::{FAST_PERIOD, FAST_POLLS, SLOW_PERIOD, SYNCHRONIZED_AGE_NS};
 use super::state::{Discontinuity, SampleRejection, TimeState};
 use super::system::{
-    self, BestSample, DAEMON_NAME, DAEMON_PID_PATH, DAEMON_PID_TEMP_PATH, DEFAULT_STALL_TIMEOUT_S,
-    PowerOffStatus, RCU_SYNC_PATH, RESTORE_PATH, Runtime, SAMPLE_ATTEMPTS, SAMPLE_BOUND_NS,
-    SNAPSHOT_ACKNOWLEDGE, SampleError, SampleResult, SpawnError, clock_ns, cpu_time_ns,
-    fork_process, state_apply, state_load, suppression_restore,
+    self, BestSample, DAEMON_NAME, DAEMON_PID_PATH, DAEMON_PID_TEMP_PATH, PowerOffStatus, Runtime,
+    SampleError, SampleResult, clock_ns, cpu_time_ns, state_apply,
 };
-use super::{DEFERRED_START_NS, IDLE_BOUND_NS, NSEC_PER_MSEC, NSEC_PER_SEC, NSEC_PER_USEC, Phase};
+#[cfg(target_arch = "x86_64")]
+use super::system::{
+    DEFAULT_STALL_TIMEOUT_S, RCU_SYNC_PATH, RESTORE_PATH, SNAPSHOT_ACKNOWLEDGE, SpawnError,
+    fork_process, state_load, suppression_restore,
+};
+use super::{DEFERRED_START_NS, NSEC_PER_USEC, Phase};
+#[cfg(target_arch = "x86_64")]
+use super::{IDLE_BOUND_NS, NSEC_PER_MSEC, NSEC_PER_SEC};
 use crate::guest::kernel_text::KmsgRecord;
 use crate::guest::sys::{
-    self, ChildStatus, Errno, FileDescriptor, ForkResult, Mode, OpenFlags, Pollable, Port,
-    PortAccess, PortError, ProcessId, Signal, SignalDescriptor, Timer, kernel,
+    self, Errno, FileDescriptor, Mode, OpenFlags, Pollable, Signal, SignalDescriptor, Timer, kernel,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::{ChildStatus, ForkResult, Port, PortAccess, PortError, ProcessId};
 
-/// Maximum age of the latest accepted sample while synchronized.
-const SYNCHRONIZED_AGE_NS: i64 = 128 * NSEC_PER_SEC;
-/// Poll interval during initial convergence.
-const FAST_PERIOD: Duration = Duration::from_secs(16);
-/// Poll interval after initial convergence.
-const SLOW_PERIOD: Duration = Duration::from_secs(64);
-/// Number of initial fast polls.
-const FAST_POLLS: i32 = 4;
 /// Pause before the daemon polls again after `poll` failed for a reason other than a signal.
 const POLL_RETRY: Duration = Duration::from_secs(1);
 /// The largest structured kernel log record, the kernel's `CONSOLE_EXT_LOG_MAX`.
@@ -44,70 +49,22 @@ const WATCHED_MESSAGE_LIMIT: usize = 400;
 const OOM_SCORE_ADJUSTMENT: &[u8] = b"-1000";
 /// The signals that the daemon reads from its signal descriptor: a queued restore, a stop, and
 /// the end of a restore worker.
+#[cfg(target_arch = "x86_64")]
 const DAEMON_SIGNALS: [Signal; 3] = [Signal::SIGUSR1, Signal::SIGTERM, Signal::SIGCHLD];
+/// Cold-boot ARM never acknowledges or schedules a restore.
+#[cfg(target_arch = "aarch64")]
+const DAEMON_SIGNALS: [Signal; 2] = [Signal::SIGUSR1, Signal::SIGTERM];
 /// The signals that the daemon ignores: the hangup of its session, and writes to a closed pipe.
 const IGNORED_SIGNALS: [Signal; 2] = [Signal::SIGHUP, Signal::SIGPIPE];
 /// The source name of the tmpfs that forces an RCU grace period.
+#[cfg(target_arch = "x86_64")]
 const RCU_SYNC_SOURCE: &CStr = c"nvx-rcu-sync";
 /// The mount options of that tmpfs: the smallest size, one page.
+#[cfg(target_arch = "x86_64")]
 const RCU_SYNC_OPTIONS: &CStr = c"size=4k";
 /// The value of `rcu_normal` that forces normal, rather than expedited, grace periods.
+#[cfg(target_arch = "x86_64")]
 const RCU_NORMAL_FORCED: i64 = 1;
-
-/// Join-on-drop owner of the thread that moves the process's threads from idle to normal
-/// scheduling once deferred work has run for `IDLE_BOUND_NS`.
-///
-/// Dropping it before then cancels the promotion, and the caller keeps its policy.
-pub(crate) struct Promoter {
-    /// The channel whose disconnection cancels the promotion; it carries nothing.
-    cancel: Option<mpsc::Sender<()>>,
-    /// Running promoter thread, until it is joined.
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl Promoter {
-    /// Starts a promoter whose deadline is `IDLE_BOUND_NS` after the monotonic `start_ns`,
-    /// unless the calling thread may hold port permission, which the promoter would inherit.
-    pub(crate) fn start(start_ns: i64) -> Option<Self> {
-        sys::check_released().ok()?;
-        let (cancel, cancelled) = mpsc::channel();
-        let deadline = start_ns.wrapping_add(IDLE_BOUND_NS);
-        let thread = thread::Builder::new()
-            .name("nvx-time-promote".to_owned())
-            .spawn(move || {
-                let remaining = deadline.wrapping_sub(clock_ns(sys::Clock::Monotonic));
-                let timeout = Duration::from_nanos(remaining.max(0) as u64);
-                if cancelled.recv_timeout(timeout) == Err(RecvTimeoutError::Timeout) {
-                    sys::promote_all_threads();
-                }
-            })
-            .ok()?;
-        Some(Self {
-            cancel: Some(cancel),
-            thread: Some(thread),
-        })
-    }
-
-    /// Waits for the promoter to promote the threads at its deadline.
-    pub(crate) fn finish(mut self) {
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-
-    /// Cancels a pending promotion and joins the thread, as dropping the promoter does.
-    pub(crate) fn stop(self) {}
-}
-
-impl Drop for Promoter {
-    /// Cancels a promotion that is still pending and joins the thread.
-    fn drop(&mut self) {
-        drop(self.cancel.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
 
 /// Drains structured kernel log records and supplies each one's message.
 ///
@@ -122,9 +79,8 @@ fn kmsg_drain(log: &FileDescriptor, mut consume: impl FnMut(&[u8])) -> Result<()
             Err(Errno::EINTR) => continue,
             Err(error) => return Err(error),
         };
-        if let Some(record) = KmsgRecord::parse(&buffer[..count]) {
-            consume(record.message);
-        }
+        let record = KmsgRecord::parse(&buffer[..count]).ok_or(Errno::EPROTO)?;
+        consume(record.message);
     }
 }
 
@@ -173,6 +129,7 @@ fn apply_poll(state: &mut TimeState, outcome: &PollOutcome, synchronized: bool) 
 
 /// Repair step 7 work that a queued signal scheduled, which starts once it is due.
 #[derive(Clone, Copy, Debug)]
+#[cfg(target_arch = "x86_64")]
 struct PendingRestore {
     /// Monotonic time at which the work may start.
     due_ns: i64,
@@ -182,6 +139,7 @@ struct PendingRestore {
 
 /// The child that runs repair step 7, and its outstanding deadlines on the monotonic clock.
 #[derive(Clone, Copy, Debug)]
+#[cfg(target_arch = "x86_64")]
 struct RestoreWorker {
     /// The worker process.
     process: ProcessId,
@@ -204,8 +162,10 @@ pub(crate) struct Daemon {
     /// Monotonic time of the latest accepted sample, if any.
     last_accepted_ns: Option<i64>,
     /// Restore work that awaits its start.
+    #[cfg(target_arch = "x86_64")]
     restore: Option<PendingRestore>,
     /// The running restore worker.
+    #[cfg(target_arch = "x86_64")]
     worker: Option<RestoreWorker>,
 }
 
@@ -221,7 +181,7 @@ fn arm_timer(daemon: &Daemon) -> Result<(), Errno> {
 /// Drains new kernel messages and raises matching runtime violations.
 fn watch_kernel_log(runtime: &Runtime<'_>, daemon: &Daemon) {
     let result = kmsg_drain(&daemon.kmsg, |message| {
-        if let Some(code) = decoders::match_watch_rule(message) {
+        if let Some(code) = super::events::match_watch_rule(message) {
             runtime.fail_fatal(
                 PowerOffStatus::Violation,
                 code,
@@ -231,20 +191,78 @@ fn watch_kernel_log(runtime: &Runtime<'_>, daemon: &Daemon) {
             );
         }
     });
-    if result == Err(Errno::EPIPE) {
+    if let Err(error) = result {
+        let (code, detail) = if error == Errno::EPIPE {
+            (
+                ViolationCode::KmsgOverrun,
+                "kernel log records were lost (EPIPE)".into(),
+            )
+        } else {
+            (
+                ViolationCode::Conformance(CheckId::C4),
+                format!("read kernel watcher: {error}"),
+            )
+        };
         runtime.fail_fatal(
             PowerOffStatus::Violation,
-            ViolationCode::KmsgOverrun,
+            code,
             EventSource::Watcher,
             Phase::Runtime,
-            b"kernel log records were lost (EPIPE)",
+            detail.as_bytes(),
+        );
+    }
+}
+
+/// Reads ARM's historical structured boot log through the same drain and event policy.
+#[cfg(target_arch = "aarch64")]
+fn check_boot_log(runtime: &Runtime<'_>, checks: &mut Checks) {
+    let mut read = || -> Result<(), Errno> {
+        let log = sys::open(
+            kernel::KERNEL_LOG_DEVICE,
+            OpenFlags::O_RDONLY | OpenFlags::O_NONBLOCK | OpenFlags::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        kmsg_drain(&log, |message| {
+            if message.starts_with(b"NVX-TIME-") {
+                return;
+            }
+            let code =
+                if crate::guest::kernel_text::contains(message, b"Found insecure W+X mapping") {
+                    Some(ViolationCode::KernelWx)
+                } else {
+                    super::events::match_watch_rule(message)
+                        .filter(|code| *code != ViolationCode::ClocksourceSwitch)
+                };
+            if let Some(code) = code {
+                checks.failures += 1;
+                runtime.conformance_failure(code, Phase::Boot, message);
+            }
+        })
+    };
+    if let Err(error) = read() {
+        checks.fail(
+            runtime,
+            CheckId::C4,
+            format!("read historical boot log: {error}"),
         );
     }
 }
 
 /// Takes one host sample and updates Linux clock discipline and state.
 fn discipline_poll(runtime: &Runtime<'_>, daemon: &mut Daemon) {
-    let stalls = sys::read_number::<i64>(kernel::RCU_STALL_COUNT).unwrap_or(0);
+    let stalls = match sys::read_number::<i64>(kernel::RCU_STALL_COUNT) {
+        Ok(stalls) => stalls,
+        Err(error) => {
+            runtime.fail_fatal(
+                PowerOffStatus::Violation,
+                ViolationCode::Conformance(CheckId::C8),
+                EventSource::Watcher,
+                Phase::Runtime,
+                format!("RCU stall count: {error}").as_bytes(),
+            );
+            return;
+        }
+    };
     if stalls != 0 {
         runtime.fail_fatal(
             PowerOffStatus::Violation,
@@ -258,28 +276,45 @@ fn discipline_poll(runtime: &Runtime<'_>, daemon: &mut Daemon) {
     daemon.polls += 1;
     // The port-B lock serializes the sample with the other port transactions, and the state
     // update with the sample.
-    let lock = system::lock_portb().ok();
-    let mut outcome = PollOutcome::Rejected(SampleRejection::Invalid);
-    if lock.is_some() {
-        let sample = system::best_sample(
-            runtime,
-            SAMPLE_ATTEMPTS,
-            SAMPLE_BOUND_NS,
-            runtime.generation(),
-        );
-        outcome = match sample {
-            Ok((SampleResult::Accepted, sample)) => correct_clock(runtime, sample, fast),
-            Ok((SampleResult::Wide, _)) => PollOutcome::Rejected(SampleRejection::Uncertain),
-            Err(SampleError::Generation { .. }) => return,
-            Err(error) => {
-                // Nothing else would report it, and the daemon goes on without the sample.
-                if let SampleError::Ports(error @ PortError::Revoke(_)) = error {
-                    runtime.log_release_failure(error);
-                }
-                PollOutcome::Rejected(error.rejection())
+    let (selected, lock) = system::discipline_sample(runtime);
+    let outcome = match selected {
+        Ok((SampleResult::Accepted, sample)) => correct_clock(runtime, sample, fast),
+        Ok((SampleResult::Wide, _)) => PollOutcome::Rejected(SampleRejection::Uncertain),
+        #[cfg(target_arch = "x86_64")]
+        Err(SampleError::Generation { .. }) => return,
+        #[cfg(target_arch = "aarch64")]
+        Err(
+            error @ (SampleError::Generation { .. }
+            | SampleError::Arm(
+                sample::arm64::Error::Frequency { .. }
+                | sample::arm64::Error::Clocksource(_)
+                | sample::arm64::Error::Binding(_),
+            )),
+        ) => {
+            let id = match &error {
+                SampleError::Arm(sample::arm64::Error::Clocksource(_)) => CheckId::C6,
+                SampleError::Generation { .. } => CheckId::C10,
+                _ => CheckId::C3,
+            };
+            runtime.fail_fatal(
+                PowerOffStatus::Violation,
+                ViolationCode::Conformance(id),
+                EventSource::Watcher,
+                Phase::Runtime,
+                error.to_string().as_bytes(),
+            );
+            PollOutcome::Rejected(error.rejection())
+        }
+        Err(error) => {
+            // Nothing else would report it, and the daemon goes on without the sample.
+            #[cfg(target_arch = "x86_64")]
+            if let SampleError::Ports(error @ PortError::Revoke(_)) = error {
+                runtime.log_release_failure(error);
             }
-        };
-    }
+            runtime.log_sample_failure(&error);
+            PollOutcome::Rejected(error.rejection())
+        }
+    };
     if matches!(outcome, PollOutcome::Accepted { .. }) {
         daemon.last_accepted_ns = Some(clock_ns(sys::Clock::Monotonic));
     }
@@ -287,7 +322,15 @@ fn discipline_poll(runtime: &Runtime<'_>, daemon: &mut Daemon) {
         clock_ns(sys::Clock::Monotonic).wrapping_sub(accepted_ns) <= SYNCHRONIZED_AGE_NS
     });
     let mut disrupted = false;
-    let _ = state_apply(|state| disrupted = apply_poll(state, &outcome, synchronized));
+    if let Err(error) = state_apply(|state| disrupted = apply_poll(state, &outcome, synchronized)) {
+        runtime.fail_fatal(
+            PowerOffStatus::Violation,
+            ViolationCode::Conformance(CheckId::C10),
+            EventSource::Watcher,
+            Phase::Runtime,
+            format!("publish discipline state: {error}").as_bytes(),
+        );
+    }
     // A disruption restarts the discipline at the fast cadence, as a restore does.
     if disrupted {
         daemon.polls = 0;
@@ -300,7 +343,7 @@ fn discipline_poll(runtime: &Runtime<'_>, daemon: &mut Daemon) {
 /// clock correction asks for, or slews it while holding that frequency.
 fn correct_clock(runtime: &Runtime<'_>, sample: BestSample, fast: bool) -> PollOutcome {
     let host_error_us = sample.host.error_us();
-    let correction = decoders::plan_correction(
+    let correction = sample::plan_correction(
         sample.theta,
         sample.epsilon,
         fast,
@@ -308,10 +351,16 @@ fn correct_clock(runtime: &Runtime<'_>, sample: BestSample, fast: bool) -> PollO
         host_error_us,
     );
     let stepped = matches!(correction, sys::ClockAdjustment::Step { .. });
-    let hold = decoders::frequency_hold(0, sample.epsilon, sample.frequency, host_error_us);
-    let applied = runtime.ops.adjust_clock(correction).is_ok()
-        && (!stepped || system::hold_frequency(runtime, hold).is_ok());
-    if !applied {
+    let hold = sample::frequency_hold(0, sample.epsilon, sample.frequency, host_error_us);
+    let applied = runtime.ops.adjust_clock(correction).and_then(|_| {
+        if stepped {
+            system::hold_frequency(runtime, hold)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = applied {
+        runtime.log_sample_failure(&format!("adjtimex: {error}"));
         return PollOutcome::Rejected(SampleRejection::Invalid);
     }
     PollOutcome::Accepted {
@@ -322,6 +371,7 @@ fn correct_clock(runtime: &Runtime<'_>, sample: BestSample, fast: bool) -> PollO
 
 /// A kernel setting forced to a value while the owner lives. Dropping the owner restores the
 /// setting's saved value, best effort, unless [`restore`](Self::restore) did.
+#[cfg(target_arch = "x86_64")]
 struct ForcedSetting {
     /// The setting's file.
     path: &'static CStr,
@@ -329,6 +379,7 @@ struct ForcedSetting {
     saved: Option<i64>,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl ForcedSetting {
     /// Saves the setting at `path` and forces it to `value`, or returns `None` when either
     /// fails, which leaves the setting unchanged.
@@ -349,6 +400,7 @@ impl ForcedSetting {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Drop for ForcedSetting {
     /// Restores the saved value, best effort, unless `restore` did.
     fn drop(&mut self) {
@@ -360,6 +412,7 @@ impl Drop for ForcedSetting {
 
 /// Forces an RCU grace period with a tmpfs mount and unmount in a private mount namespace,
 /// under normal grace periods, and returns whether every step succeeded.
+#[cfg(target_arch = "x86_64")]
 fn grace_period_release() -> bool {
     let Some(normal) = ForcedSetting::force(kernel::RCU_NORMAL, RCU_NORMAL_FORCED) else {
         return false;
@@ -375,6 +428,7 @@ fn grace_period_release() -> bool {
 
 /// Runs the grace-period release with a deadline of `timeout_s` seconds, after which the
 /// release counts as done, so that a stalled release cannot hold the suppression back.
+#[cfg(target_arch = "x86_64")]
 fn release_with_deadline(timeout_s: i64) -> bool {
     run_with_deadline(timeout_s, grace_period_release)
 }
@@ -389,6 +443,7 @@ fn release_with_deadline(timeout_s: i64) -> bool {
 /// passes to init, or to the nearest subreaper, as when the caller is `nvx-time restore-finish`
 /// and exits. The work holds none of the caller's descriptors, which it would keep open after
 /// the call, and has the null device as its standard streams.
+#[cfg(target_arch = "x86_64")]
 fn run_with_deadline(timeout_s: i64, work: fn() -> bool) -> bool {
     let Ok((reader, writer)) = sys::create_pipe() else {
         return false;
@@ -412,6 +467,7 @@ fn run_with_deadline(timeout_s: i64, work: fn() -> bool) -> bool {
 /// The waiter of [`run_with_deadline`]: restores the default disposition of `SIGCHLD`, so that
 /// it reaps the work itself, runs `work` in a child, waits for it for at most `timeout_s`
 /// seconds, after which it counts as done, and writes whether it succeeded to `verdict`.
+#[cfg(target_arch = "x86_64")]
 fn run_waiter(timeout_s: i64, work: fn() -> bool, verdict: FileDescriptor) -> ! {
     sys::reset_child_signal();
     let deadline = clock_ns(sys::Clock::Monotonic).wrapping_add(timeout_s * NSEC_PER_SEC);
@@ -436,6 +492,7 @@ fn run_waiter(timeout_s: i64, work: fn() -> bool, verdict: FileDescriptor) -> ! 
 
 /// Waits for the work `process` until the monotonic `deadline`, after which it counts as done,
 /// and returns whether it succeeded.
+#[cfg(target_arch = "x86_64")]
 fn await_work(process: ProcessId, deadline: i64, wait: &sys::ChildSignalWait) -> bool {
     loop {
         let remaining = deadline.wrapping_sub(clock_ns(sys::Clock::Monotonic));
@@ -457,6 +514,7 @@ fn await_work(process: ProcessId, deadline: i64, wait: &sys::ChildSignalWait) ->
 /// alone: this process's since `cpu_base_ns`, plus the daemon's preparation, `prior_cpu_ns` up
 /// to the fork, and the fork's own share, which the daemon writes to `fork_reader` once the
 /// fork returns.
+#[cfg(target_arch = "x86_64")]
 pub(crate) struct RestoreTiming {
     /// Monotonic start used for elapsed accounting.
     pub(crate) start_ns: i64,
@@ -472,6 +530,7 @@ pub(crate) struct RestoreTiming {
 
 /// Repair step 7's CPU time so far, in a process that `timing` describes. The read waits for
 /// the daemon's fork share if the daemon has not yet written it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn deferred_restore_cpu_ns(timing: &RestoreTiming) -> i64 {
     let mut cpu = timing
         .prior_cpu_ns
@@ -494,6 +553,7 @@ pub(crate) fn deferred_restore_cpu_ns(timing: &RestoreTiming) -> i64 {
 /// returns to normal priority as soon as the fork does, after `at_fork`, which stands for a
 /// `pthread_atfork` parent handler. The fork costs the parent CPU time after the child's copy
 /// of `timing` was taken, so the parent writes that share to a pipe that the child reads.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn fork_deferred_restore(
     cpu_start_ns: i64,
     timing: &mut RestoreTiming,
@@ -535,6 +595,7 @@ pub(crate) fn fork_deferred_restore(
 /// timeout. `restore-finish` runs it inline, with its own deadline (`with_deadline`), in
 /// report-only mode when no daemon runs. Neither recorded time counts the grace period wait or
 /// C7. Returns whether the grace period was released.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn restore_work(
     runtime: &Runtime<'_>,
     new_cpus: CpuMask,
@@ -589,6 +650,7 @@ pub(crate) fn restore_work(
 
 /// Reads the private restore record, and returns the CPUs that the restore brought online, none
 /// for a missing record or one of another generation, and the recorded generation.
+#[cfg(target_arch = "x86_64")]
 fn parse_restore_state() -> Result<(CpuMask, u64), Vec<u8>> {
     let state = state_load().map_err(|_| b"the time state is unreadable".to_vec())?;
     let Ok(text) = sys::read_file(RESTORE_PATH) else {
@@ -608,6 +670,7 @@ fn parse_restore_state() -> Result<(CpuMask, u64), Vec<u8>> {
 /// acknowledgement, in a child at `SCHED_IDLE`, so the watcher and the discipline keep normal
 /// priority; the fork itself also runs at `SCHED_IDLE`. The readiness path's wall time came
 /// with the signal.
+#[cfg(target_arch = "x86_64")]
 fn start_restore(runtime: &Runtime<'_>, daemon: &mut Daemon, restore: PendingRestore) {
     let cpu_start = cpu_time_ns();
     let (new_cpus, generation) = match parse_restore_state() {
@@ -650,6 +713,7 @@ fn start_restore(runtime: &Runtime<'_>, daemon: &mut Daemon, restore: PendingRes
 
 /// Restores the saved stall-detector settings when repair step 7 ends, or when its worker passes
 /// its deadline or fails, and reports a repair failure if it cannot.
+#[cfg(target_arch = "x86_64")]
 fn release_suppression(runtime: &Runtime<'_>) {
     if let Err(detail) = suppression_restore(true) {
         runtime.repair_failure(ViolationCode::RepairSuppression, &detail);
@@ -657,6 +721,7 @@ fn release_suppression(runtime: &Runtime<'_>) {
 }
 
 /// Reaps every available child and handles the active restore worker.
+#[cfg(target_arch = "x86_64")]
 fn reap_children(runtime: &Runtime<'_>, daemon: &mut Daemon) {
     while let Some(child) = sys::reap_any_nonblocking() {
         if daemon.worker.map(|worker| worker.process) != Some(child.process) {
@@ -688,20 +753,35 @@ fn handle_signals(runtime: &Runtime<'_>, daemon: &mut Daemon) {
             // `sigqueue` carries the readiness path's wall time. Step 7 is due
             // `DEFERRED_START_NS` later; the repair stepped the clock to a time sample now.
             Some(Signal::SIGUSR1) => {
-                let now = clock_ns(sys::Clock::Monotonic);
-                daemon.last_accepted_ns = Some(now);
-                daemon.restore = Some(PendingRestore {
-                    due_ns: now.wrapping_add(DEFERRED_START_NS),
-                    readiness_us: if event.queued {
-                        i64::from(event.value)
-                    } else {
-                        0
-                    },
-                });
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let now = clock_ns(sys::Clock::Monotonic);
+                    daemon.last_accepted_ns = Some(now);
+                    daemon.restore = Some(PendingRestore {
+                        due_ns: now.wrapping_add(DEFERRED_START_NS),
+                        readiness_us: if event.queued {
+                            i64::from(event.value)
+                        } else {
+                            0
+                        },
+                    });
+                }
+                #[cfg(target_arch = "aarch64")]
+                {
+                    runtime.fail_fatal(
+                        PowerOffStatus::Violation,
+                        ViolationCode::Conformance(CheckId::C10),
+                        EventSource::Watcher,
+                        Phase::Runtime,
+                        b"ARM cold boot does not support restore repair",
+                    );
+                    sys::exit_immediately(1);
+                }
             }
             _ => {}
         }
     }
+    #[cfg(target_arch = "x86_64")]
     reap_children(runtime, daemon);
 }
 
@@ -716,7 +796,9 @@ fn setup_daemon(kmsg: FileDescriptor, last_accepted_ns: Option<i64>) -> Result<D
         timer,
         polls: 0,
         last_accepted_ns,
+        #[cfg(target_arch = "x86_64")]
         restore: None,
+        #[cfg(target_arch = "x86_64")]
         worker: None,
     };
     sys::write_file(kernel::OOM_SCORE_ADJUSTMENT, OOM_SCORE_ADJUSTMENT)?;
@@ -755,21 +837,38 @@ fn deferred_boot_checks(
     start_ns: i64,
     c12_failures: usize,
 ) -> (Checks, Option<FileDescriptor>) {
-    let _promoter = Promoter::start(start_ns);
+    let _promoter = match Promoter::start(start_ns) {
+        Some(promoter) => promoter,
+        None => {
+            runtime.conformance_failure(
+                ViolationCode::Conformance(CheckId::C10),
+                Phase::Boot,
+                b"cannot start deferred priority promoter",
+            );
+            sys::exit_immediately(1);
+        }
+    };
     let _idle = sys::IdlePriority::enter();
     sys::sleep_until_monotonic(start_ns);
     let mut checks = match Checks::load(Phase::Boot) {
         Ok(checks) => checks,
         Err(_) => {
             let mut checks = Checks::empty(Phase::Boot);
-            checks.fail(runtime, CheckId::C1, "cannot read the CPU sets");
+            #[cfg(target_arch = "x86_64")]
+            let id = CheckId::C1;
+            #[cfg(target_arch = "aarch64")]
+            let id = CheckId::C6;
+            checks.fail(runtime, id, "cannot read the CPU sets");
             sys::exit_immediately(1);
         }
     };
     checks.failures = c12_failures;
     // The buffer is allocated before the checks start their threads, as the C program did.
+    #[cfg(target_arch = "x86_64")]
     let log_size = sys::kernel::kernel_log_size();
+    #[cfg(target_arch = "x86_64")]
     let mut log_buffer = Vec::new();
+    #[cfg(target_arch = "x86_64")]
     let buffer = match log_size {
         Ok(size) if size > 0 && log_buffer.try_reserve_exact(size).is_ok() => {
             log_buffer.resize(size, 0);
@@ -778,12 +877,19 @@ fn deferred_boot_checks(
         _ => None,
     };
     let kmsg = open_kernel_log(runtime, &mut checks);
+    #[cfg(target_arch = "x86_64")]
     let log = kmsg.is_some().then_some(BootLog {
         // A size that `klogctl` could not report is its failure result, -1.
         size: log_size.map_or(-1, |size| size as i64),
         buffer,
     });
+    #[cfg(target_arch = "x86_64")]
     checks::run_boot_checks(runtime, &mut checks, log);
+    #[cfg(target_arch = "aarch64")]
+    {
+        checks::run_boot_checks(runtime, &mut checks);
+        check_boot_log(runtime, &mut checks);
+    }
     (checks, kmsg)
 }
 
@@ -797,12 +903,28 @@ pub(crate) fn boot_checker(runtime: &Runtime<'_>, boot: &ColdBoot) -> ! {
     runtime.set_async_output(true);
     let detached = {
         let flags = OpenFlags::O_RDWR | OpenFlags::O_CLOEXEC;
-        let null = sys::open(kernel::NULL_DEVICE, flags, Mode::empty()).ok();
-        sys::detach(null.as_ref())
+        sys::open(kernel::NULL_DEVICE, flags, Mode::empty())
+            .and_then(|null| sys::detach(Some(&null)))
     };
-    if detached.is_err() {
+    if let Err(error) = detached {
+        runtime.conformance_failure(
+            ViolationCode::Conformance(CheckId::C10),
+            Phase::Boot,
+            format!("detach time daemon: {error}").as_bytes(),
+        );
         sys::exit_immediately(1);
     }
+    let _exclusive = match sys::try_lock_file(system::DAEMON_LOCK_PATH, system::PRIVATE_FILE_MODE) {
+        Ok(owner) => owner,
+        Err(error) => {
+            runtime.conformance_failure(
+                ViolationCode::Conformance(CheckId::C10),
+                Phase::Boot,
+                format!("time daemon ownership: {error}").as_bytes(),
+            );
+            sys::exit_immediately(1);
+        }
+    };
     let (mut checks, kmsg) = deferred_boot_checks(runtime, start, boot.failures);
     let daemon = kmsg.and_then(|kmsg| match become_daemon(kmsg, boot.accepted_ns) {
         Ok(daemon) => Some(daemon),
@@ -857,6 +979,7 @@ pub(crate) fn become_daemon(
 
 /// Converts an absolute monotonic nanosecond deadline to a poll timeout, rounded up to whole
 /// milliseconds, the unit of `poll`, so that the daemon does not wake before it.
+#[cfg(target_arch = "x86_64")]
 fn timeout_until(deadline_ns: i64) -> Duration {
     /// The longest timeout that `poll` takes, in milliseconds.
     const POLL_TIMEOUT_MAX_MS: u64 = i32::MAX as u64;
@@ -872,8 +995,11 @@ fn timeout_until(deadline_ns: i64) -> Duration {
 /// Runs the kernel watcher, discipline poller, and restore-worker coordinator.
 pub(crate) fn daemon_loop(runtime: &Runtime<'_>, mut daemon: Daemon) -> ! {
     loop {
+        #[cfg(target_arch = "x86_64")]
         let worker = daemon.worker;
+        #[cfg(target_arch = "x86_64")]
         let due = daemon.restore.filter(|_| worker.is_none());
+        #[cfg(target_arch = "x86_64")]
         let timeout = [
             worker.and_then(|worker| worker.promote_ns),
             worker.and_then(|worker| worker.release_ns),
@@ -883,6 +1009,8 @@ pub(crate) fn daemon_loop(runtime: &Runtime<'_>, mut daemon: Daemon) -> ! {
         .flatten()
         .min()
         .map(timeout_until);
+        #[cfg(target_arch = "aarch64")]
+        let timeout = None;
         let events = match sys::poll(
             [
                 Pollable::File(&daemon.kmsg),
@@ -899,6 +1027,16 @@ pub(crate) fn daemon_loop(runtime: &Runtime<'_>, mut daemon: Daemon) -> ! {
             }
         };
         let [log, signals, timer] = events;
+        if signals.error || timer.error {
+            runtime.fail_fatal(
+                PowerOffStatus::Violation,
+                ViolationCode::Conformance(CheckId::C10),
+                EventSource::Watcher,
+                Phase::Runtime,
+                b"time-daemon signal or timer descriptor failed",
+            );
+            sys::exit_immediately(1);
+        }
         if log.readable || log.error {
             watch_kernel_log(runtime, &daemon);
         }
@@ -908,44 +1046,58 @@ pub(crate) fn daemon_loop(runtime: &Runtime<'_>, mut daemon: Daemon) -> ! {
         if timer.readable {
             daemon.timer.consume();
             discipline_poll(runtime, &mut daemon);
-            let _ = arm_timer(&daemon);
-        }
-        let mut now = clock_ns(sys::Clock::Monotonic);
-        // Step 7 starts `DEFERRED_START_NS` after the acknowledgement, and continues at normal
-        // priority `IDLE_BOUND_NS` after it starts.
-        if daemon.worker.is_none()
-            && let Some(restore) = daemon.restore.filter(|restore| now >= restore.due_ns)
-        {
-            daemon.restore = None;
-            start_restore(runtime, &mut daemon, restore);
-            now = clock_ns(sys::Clock::Monotonic);
-        }
-        if let Some(worker) = &mut daemon.worker {
-            if worker
-                .promote_ns
-                .is_some_and(|promote_ns| now >= promote_ns)
-            {
-                worker.promote_ns = None;
-                sys::set_scheduling_policy(Some(worker.process), sys::SchedulingPolicy::Normal);
+            if let Err(error) = arm_timer(&daemon) {
+                runtime.fail_fatal(
+                    PowerOffStatus::Violation,
+                    ViolationCode::Conformance(CheckId::C10),
+                    EventSource::Watcher,
+                    Phase::Runtime,
+                    format!("arm discipline timer: {error}").as_bytes(),
+                );
+                sys::exit_immediately(1);
             }
-            if worker
-                .release_ns
-                .is_some_and(|release_ns| now >= release_ns)
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut now = clock_ns(sys::Clock::Monotonic);
+            // Step 7 starts `DEFERRED_START_NS` after the acknowledgement, and continues at normal
+            // priority `IDLE_BOUND_NS` after it starts.
+            if daemon.worker.is_none()
+                && let Some(restore) = daemon.restore.filter(|restore| now >= restore.due_ns)
             {
-                worker.release_ns = None;
-                release_suppression(runtime);
+                daemon.restore = None;
+                start_restore(runtime, &mut daemon, restore);
+                now = clock_ns(sys::Clock::Monotonic);
+            }
+            if let Some(worker) = &mut daemon.worker {
+                if worker
+                    .promote_ns
+                    .is_some_and(|promote_ns| now >= promote_ns)
+                {
+                    worker.promote_ns = None;
+                    sys::set_scheduling_policy(Some(worker.process), sys::SchedulingPolicy::Normal);
+                }
+                if worker
+                    .release_ns
+                    .is_some_and(|release_ns| now >= release_ns)
+                {
+                    worker.release_ns = None;
+                    release_suppression(runtime);
+                }
             }
         }
     }
 }
 
 /// Returns the recorded `daemon` while it runs.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn running_daemon(daemon: Option<ProcessId>) -> Option<ProcessId> {
     daemon.filter(|&process| sys::process_exists(process))
 }
 
 /// Repair step 6: acknowledges the restore through the snapshot port, when the host gated its
 /// input, and ends the port transaction.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn acknowledge_restore(ports: PortAccess<'_>) {
     ports.write_u8(Port::Snapshot, SNAPSHOT_ACKNOWLEDGE);
 }
@@ -954,6 +1106,7 @@ pub(crate) fn acknowledge_restore(ports: PortAccess<'_>) {
 /// The `sigqueue` value is the readiness path's wall time since `start_ns`, on the monotonic
 /// clock, in microseconds clamped to 32 bits, read after the acknowledgement so that the read
 /// does not delay it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn queue_restore(daemon: ProcessId, start_ns: i64) -> Result<(), Errno> {
     let elapsed = clock_ns(sys::Clock::Monotonic).wrapping_sub(start_ns) / NSEC_PER_USEC;
     let value = elapsed.clamp(0, i64::from(u32::MAX)) as u32;
@@ -969,6 +1122,7 @@ pub(crate) fn queue_restore(daemon: ProcessId, start_ns: i64) -> Result<(), Errn
 /// takes the permission again, and reports a failure. A handoff that fails after the
 /// acknowledgement fails check C10, which stops the VM unless report-only, and the restore
 /// still counts as finished, so that the caller does not acknowledge it again.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn finish_restore(
     runtime: &Runtime<'_>,
     daemon: ProcessId,
@@ -989,6 +1143,7 @@ pub(crate) fn finish_restore(
 }
 
 /// Constructs accounting for an inline report-only restore.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn inline_restore_timing(start_ns: i64) -> RestoreTiming {
     let now = clock_ns(sys::Clock::Monotonic);
     RestoreTiming {
@@ -1002,6 +1157,7 @@ pub(crate) fn inline_restore_timing(start_ns: i64) -> RestoreTiming {
 
 /// Returns the accounting that a test of `fork_deferred_restore` starts from, which the fork
 /// completes.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn empty_restore_timing() -> RestoreTiming {
     RestoreTiming {
         start_ns: 0,

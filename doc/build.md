@@ -47,6 +47,169 @@ Cargo invocation builds all ten programs, and every result must pass
 one digest over the `nvx` crate, the shared Python build recipe, and
 `rust-toolchain.toml`, and each binary SHA-256.
 
+The guest-binary commands also accept `--architecture aarch64` to select
+`aarch64-unknown-linux-musl` explicitly; omitting it preserves the x86 target
+and manifest. Use a separate output directory, such as
+`build/aarch64/guest-binaries`: a rebuild refuses an output owned by another
+architecture. The ARM manifest records `architecture` and its target, and
+staging and inspection verify each executable's ELF machine identity as well
+as its static linkage and stack permissions. `check-guest-binaries` and
+`test-guest-binaries` take the same architecture option; their tests require
+a host capable of running the selected Linux target. Target selection alone
+does not establish ARM guest-platform support or native microVM qualification.
+
+The existing Docker `guest-binaries` stage accepts
+`--build-arg NVX_ARCHITECTURE=aarch64`. Its `guest-binary-artifacts`
+target uses BuildKit's existing local output. Select `--platform linux/arm64`
+and a separate output directory for ARM builds. The seven-helper cold-boot
+inventory includes the real ARM `nvx-time` entry point; missing required
+helpers and stale diagnostic exports fail source/manifest inspection.
+Compilation and ELF identity do not establish native product qualification.
+The architecture argument is not a CPU-profile
+selector. An ARM platform flag on an x86 engine may use emulation and is not
+native build evidence.
+
+The ARM cold-boot inventory uses that same producer without the
+snapshot-only MMIO kick helper, device-I/O benchmark helper, or x86 time
+probe. It still requires real `nvx-time` before normal `/init` can announce
+readiness. Omitting unrelated diagnostics neither omits boot-time enforcement
+nor qualifies ARM counter/timer probes. The default x86 inventory remains all
+ten executables.
+
+Existing x86-only production helpers remain available to shared unit tests
+on ARM through their architecture-or-test compilation guards. The exact
+guards are recorded in the test-layout allowlist as non-movable seams; test
+implementations still live in separate test modules, and neither lint
+warnings nor tests are disabled.
+
+The ARM time helper uses only the ISA, Linux interfaces and existing machine
+binding: a6/a7/a8, the shared wire-v1 decoder, full-Hz counter pairing, and the
+same clock-discipline policy, state format and watcher rules. It performs the
+initial bounded UTC step before boot returns, then runs operational per-CPU
+counter/timer checks at deferred idle priority with the existing promotion
+deadline. It has no hypervisor-vendor, host-provider or feature-bank branches.
+The VMM still owns pre-entry CPU-profile admission; these guest checks neither
+admit an unapproved profile nor prove privileged raw cache registers.
+Snapshot/restore commands are not exposed by the ARM cold-boot helper.
+
+The ARM kernel enables `ARM64_PTR_AUTH` for ordinary userspace pointer
+authentication when the selected CPU profile exposes it. Linux initializes
+process keys at exec and handles context switches through its existing PAC
+support; no NVX key broker or new guest ABI is needed. Kernel return signing
+(`ARM64_PTR_AUTH_KERNEL`) remains disabled, stack protection stays enabled,
+and guest Rust helper branch-protection/instrumentation policy is unchanged.
+Native PAC capability and a successful build alone do not prove guest PAC
+execution or future snapshot key preservation.
+`nvx-rs run --architecture aarch64 --cpu-profile auto|host` forwards the
+selection to OpenVMM's common CPU/time admission path. `auto` selects the
+approved built-in profile for a supported CPU; `host` derives a separate
+canonical policy-filtered native profile, not a renamed built-in profile.
+The guest consumes the selected ID/digest and actual counter frequency
+through the same machine binding; it embeds neither profile's constants
+and does not select a hypervisor-specific path.
+The unchanged persisted time-state/boot-marker field `tsc_hz` holds the
+actual architected-counter Hz on ARM; `lapic_hz=0` means no LAPIC. The ARM
+sample command names `counter_hz` explicitly and reports the ID/digest read
+from a8. The shared harness selects ISA-specific counter validation from
+the normal CLI architecture option, never from a hypervisor-specific rate.
+Every time-helper invocation resolves the kernel's
+`nvx_time_abi=report-only` token before command dispatch, so a later plain
+`status` cannot relabel a report-only boot as enforcing. The shared
+qualification monitor rejects report-only mode even when its checks pass.
+
+ARM64 development kernel builds use the same stages and source pin:
+`kernel-config --architecture aarch64` generates
+`kernel/config-microvm-arm64` and its source-backed derived record;
+`arm64-kernel-artifacts`, with `NVX_ARCHITECTURE=aarch64` and
+`--platform linux/arm64`, exports `Image`, its configuration and provenance
+under a separate output directory. The ARM inventory retains common product
+capabilities and checks the actual resolved configuration for x86 leakage,
+unnecessary explicit additions and unowned derived symbols. The NVX HVC
+frontend selects the generic serial-core/early-console infrastructure, not
+a PL011 or 8250 device.
+
+The actual ARM configuration retains `EFI_PARTITION` as the common GPT disk
+parser, not firmware boot. Pinned Linux's ARM64 Kconfig unconditionally selects
+the hidden `HAS_IOPORT` capability; with PCI disabled, `NO_IOPORT_MAP=y` and
+`HAS_IOPORT_MAP` remains disabled. These names do not enable x86 boot or active
+PIO devices. The source-backed audit rejects unknown enabled symbols rather
+than treating them as hidden defaults.
+
+The shared initramfs producer also selects the pinned AArch64 Alpine archive,
+native musl loader and package identities with
+`build-initramfs --architecture aarch64`. Its work, output and provenance stay
+under `build/aarch64`; the `arm64-artifacts` BuildKit export pairs it with
+`Image`. `--guest ubuntu` uses the pinned ARM64 Ubuntu Base archive and the
+separate `ubuntu/packages-arm64.lock.json`, preserving supplemental source
+versions while checking ARM-specific binary hashes and dependencies.
+`arm64-ubuntu-artifacts` exports that pair. Required guest-helper inventory,
+ISA, digest and source checks still reject incomplete or stale inputs; these producers do
+not add qualified ARM releases or relax runtime admission.
+The normal `build-guest --architecture aarch64 --guest alpine|ubuntu`
+command selects these same producers and namespaces, adding `--native` on
+Linux to avoid Docker. ARM rejects the x86 debug-kernel and all-guests
+distro-layer modes instead of mixing their outputs.
+The existing Alpine one-shot container entry selects its control guest's
+fixed x86-64 or AArch64 musl loader; it keeps the same namespace and
+privilege-drop policy and refuses other control ISAs.
+
+For a normal local ARM cold boot, `nvx-rs run` defaults to the native host
+ISA; `--architecture aarch64` remains an explicit override. It resolves
+`build/aarch64/Image` and the matching initramfs/package manifest, without
+falling back to x86 files or downloading an unqualified ARM release. It
+rejects snapshot, memory-activation and Azure Linux modes. The approved ARM
+microVM profile has a 36-bit GPA address space, not 64 GiB of RAM: the fixed
+3-4 GiB MMIO aperture leaves at most 63 GiB of logical RAM, before other
+reservations. This does not select or approve the remaining CPU-profile
+values. On Windows, ARM runs also require an ARM64 PE OpenVMM executable
+before any process is launched. Existing x86 paths and default selection
+remain unchanged.
+This native runtime default does not change the build commands' x86-64
+default or the existing artifact API's explicit architecture selection.
+
+**Deferred ARM cacheinfo metadata.** Phase 1 defers complete Linux sysfs
+cache geometry and sharing metadata, an existing upstream Standard ARM
+direct-boot gap. This supersedes only the complete-cacheinfo acceptance
+requirement, not functional CPU/ISA/address checks, clock/counter/timer
+checks, cache-operation/coherency checks, readiness or teardown.
+
+The pinned Linux ARM cacheinfo code discovers levels and types through
+CLIDR; geometry and explicit sharing/LLC identity depend on standard OF
+cache descriptions that the current product DT does not supply. Retries
+can expose partial `indexN` nodes with missing numeric attributes. Linux's
+generic higher-level all-shared fallback is not a measured sharing graph
+or proof of valid LLC identity. The optional OpenVMM DT cache helper stays
+unused: no informational geometry or virtual-sharing policy is selected.
+Do not fabricate descriptors or introduce a raw-register ABI to fill this
+metadata gap.
+
+Existing upstream startup logs in
+[microsoft/openvmm#1399](https://github.com/microsoft/openvmm/issues/1399)
+contain `cacheinfo: Unable to detect cache hierarchy for CPU 0`, then
+`Run /init as init process`: the
+[Linux 6.1 log](https://github.com/microsoft/openvmm/issues/1399#issuecomment-2903459559)
+warns at 0.004064 and 1.098314 seconds and reaches `/init` at 1.284990;
+the [Linux 6.15 log](https://github.com/microsoft/openvmm/issues/1399#issuecomment-2938965914)
+warns at 0.006713 seconds and reaches `/init` at 2.103507. These are upstream
+observations, not NVX product qualification or evidence that functional
+cache/coherency checks passed.
+
+When native NVX qualification is admitted, preserve the unfiltered boot
+warnings and each online CPU's actual cache `indexN` fields: level, type,
+line size, size, sets, ways, ID and shared CPU list, including missing or
+zero fields and read errors. Do not blanket-suppress errors or report
+fallback metadata as complete. Missing cacheinfo metadata alone no longer
+blocks acceptance; all retained functional checks and CPU/time admission
+still apply. No native NVX cacheinfo observations are claimed here.
+
+ARM CPU and time configuration share OpenVMM's **same `ProtoPartitionConfig`
+and existing optional `time_abi` contract/backend-interface path**, with an
+ARM-specific payload consumed through `Partition::time_abi`. There is no
+parallel CPU-only configuration or time service. The development machine
+binding does not freeze a CPU profile, waive admission/readback requirements
+or qualify native execution; incomplete ARM time helpers are not product
+artifacts.
+
 The native build keeps the Linux archive, the Ubuntu Base archive, and the
 supplemental Ubuntu packages under `downloads/` in the cache directory,
 `.cache/` or `$NVX_CACHE_DIR`. It reuses a file there whose SHA-256 matches its

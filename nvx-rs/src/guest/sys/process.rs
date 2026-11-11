@@ -1,14 +1,18 @@
 //! Safe process, signal, inherited-descriptor, and standard-stream operations.
 
 use std::ffi::{CStr, CString};
-use std::io::{self, Read, Write};
+#[cfg(target_arch = "x86_64")]
+use std::io::Read;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::sys::signal::{SigHandler, Signal, kill};
 use nix::unistd::Pid;
 
-use super::{Errno, FileDescriptor, Port};
+#[cfg(target_arch = "x86_64")]
+use super::Port;
+use super::{Errno, FileDescriptor};
 use crate::guest::parse::parse_decimal;
 
 /// Whether this process inherited an ignored SIGPIPE across `exec`.
@@ -129,6 +133,8 @@ pub(crate) enum ForkResult {
 /// children do. Only the calling thread could start another thread between the check and the
 /// fork, so the check holds at the fork.
 pub(crate) fn fork() -> Result<ForkResult, Errno> {
+    #[cfg(target_arch = "aarch64")]
+    super::check_released()?;
     if super::thread_count()? != 1 {
         return Err(Errno::EBUSY);
     }
@@ -166,11 +172,13 @@ pub(crate) fn syscall_process_id() -> u64 {
 }
 
 /// Returns whether `process` exists, which includes a zombie, by sending it no signal.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn process_exists(process: ProcessId) -> bool {
     kill(process.0, None).is_ok()
 }
 
 /// Returns the command name of `process`, which its procfs `comm` file holds with a newline.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn process_name(process: ProcessId) -> Result<Vec<u8>, Errno> {
     let path = super::c_string(format!("/proc/{}/comm", process.0.as_raw()).as_bytes())?;
     let mut descriptor = super::open(
@@ -275,6 +283,7 @@ pub(crate) fn reap_any_nonblocking() -> Option<ReapedChild> {
 /// Waits for `process`, retrying interruptions.
 ///
 /// libc is used for the same real-time signals as [`reap_any_nonblocking`].
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn wait(process: ProcessId) -> Option<ChildStatus> {
     loop {
         let mut status = 0;
@@ -506,6 +515,10 @@ pub(crate) fn signal_through_pidfd(
 /// Replaces the process image with `path` and `arguments`, and with `environment`, or without
 /// one, the current environment. It returns only the error of a failed `exec`.
 pub(crate) fn exec(path: &CStr, arguments: &[CString], environment: Option<&[CString]>) -> Errno {
+    #[cfg(target_arch = "aarch64")]
+    if let Err(error) = super::check_released() {
+        return error;
+    }
     let result = match environment {
         Some(environment) => nix::unistd::execve(path, arguments, environment),
         None => nix::unistd::execv(path, arguments),
@@ -529,19 +542,27 @@ pub(crate) fn write_standard_error(bytes: &[u8]) {
     }
 }
 
-/// Writes `message` to a diagnostic I/O port through a descriptor.
+/// Writes through the machine's diagnostic descriptor: positional x86 port I/O, or the Linux
+/// console stream on other ISAs.
 ///
 /// A write that stores no byte is `EIO`, the status that the agent reports for it.
 pub(crate) fn write_port_diagnostic(
     descriptor: &FileDescriptor,
     message: &[u8],
 ) -> Result<(), Errno> {
-    for byte in message {
-        if descriptor.pwrite(std::slice::from_ref(byte), Port::PortbData.offset())? != 1 {
-            return Err(Errno::EIO);
+    #[cfg(target_arch = "x86_64")]
+    {
+        for byte in message {
+            if descriptor.pwrite(std::slice::from_ref(byte), Port::PortbData.offset())? != 1 {
+                return Err(Errno::EIO);
+            }
         }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        descriptor.write_all(message)
+    }
 }
 
 /// Standard output with the error behavior of C stdio.
@@ -586,8 +607,10 @@ impl Write for Stdout {
 /// `nvx-device-io`'s C program wrote its result with its own `write` loop rather than stdio. The
 /// loop retried only `EINTR`, and failed on any other error or on a write that wrote nothing.
 /// [`Write::write_all`] over this adapter does the same.
+#[cfg(target_arch = "x86_64")]
 pub(crate) struct DirectStdout;
 
+#[cfg(target_arch = "x86_64")]
 impl Write for DirectStdout {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         nix::unistd::write(io::stdout(), bytes).map_err(io::Error::from)
