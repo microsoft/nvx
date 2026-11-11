@@ -412,6 +412,9 @@ def run_managed_exec_configuration(
                 )
                 expect_rejection(rejected, "argument-invalid")
 
+            # The guest agent refuses a workload whose working directory it cannot
+            # enter before the workload runs, and nvx-rs reports that refusal with
+            # its `exec-refused` code and the agent's `cwd-failed` category.
             for cwd in ("/does-not-exist", "/etc/passwd", "/root"):
                 failed = workload(
                     "/bin/sh",
@@ -419,11 +422,14 @@ def run_managed_exec_configuration(
                     "--arg=printf workload-must-not-run",
                     "--cwd",
                     cwd,
-                    expected=125,
+                    expected=1,
                 )
+                refusal = nvx_rs.reported_error(failed.stderr)
                 if (
                     failed.stdout
-                    or b"cannot use working directory" not in failed.stderr
+                    or refusal is None
+                    or refusal.code != "exec-refused"
+                    or "category=cwd-failed" not in refusal.message
                 ):
                     raise RuntimeError(
                         "invalid CWD did not fail before workload execution"
