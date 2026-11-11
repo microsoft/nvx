@@ -174,11 +174,13 @@ one-shot workload, the Alpine
 [container entry helper](../../guest/alpine/nvx-container-enter) injects its
 musl loader, `setpriv`, and libraries into `/.nvx-agent`, so glibc Ubuntu
 binaries run while the trusted agent stays musl-based. A managed sandbox's
-agent, a static binary, enters each execution itself and runs the workload
-without them. The workload gets private mount, PID, and UTS namespaces and
-shares the guest's network namespace. It runs as a fixed non-root identity, by
-default `65534:65534`, the Ubuntu `nobody` account whose home the builder
-creates, with no supplementary groups, no capabilities, and `no_new_privs`.
+init, nvx-init, a static binary, runs each execution itself, as a plain
+process in the VM's root, without them. A one-shot workload gets private
+mount, PID, and UTS namespaces, a managed sandbox's executions share
+nvx-init's, and every workload shares the guest's network namespace. It runs
+as a fixed non-root identity, by default `65534:65534`, the Ubuntu `nobody`
+account whose home the builder creates, with no supplementary groups, no
+capabilities, and `no_new_privs`.
 
 The sandbox rejects systemd entrypoints, and it rejects a distro layer whose
 manifest lists the `systemd` package. Systemd needs a separate compatibility

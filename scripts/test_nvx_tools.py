@@ -20819,7 +20819,7 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 + " esac; }\n"
             )
             return self._run(
-                ("status_field", "check_namespaces"),
+                ("status_field", "check_hostname", "check_namespaces"),
                 f"{readlink}check_namespaces\necho checked",
                 {
                     "/proc/1/status": self._fixture("init-status", init_status),
@@ -20873,6 +20873,30 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         result = run(private, hostname="nvx-sandbox")
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("expected nvx-lifecycle", result.stderr)
+
+    def test_init_hostname_check_reads_the_encoded_command_line(self):
+        def run(command_line: str, hostname: str) -> subprocess.CompletedProcess[str]:
+            return self._run(
+                ("check_hostname",),
+                "nvx_init=true\ncheck_hostname\necho checked",
+                {
+                    "/proc/cmdline": self._fixture("cmdline", command_line + "\n"),
+                    "/proc/sys/kernel/hostname": self._fixture(
+                        "hostname", hostname + "\n"
+                    ),
+                },
+            )
+
+        # nvx-lifecycle, as nvx-init's command line encodes it.
+        encoded = "nvx_hostname=6e76782d6c6966656379636c65"
+        result = run(
+            f"console=hvc0 {encoded} nvx_machine_id=generated", "nvx-lifecycle"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "checked\n")
+        result = run(f"console=hvc0 {encoded}", "nvx-sandbox")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("expected 6e76782d6c6966656379636c65", result.stderr)
 
     def _check_mounts(
         self, mountinfo: str, command_line: str
@@ -21176,6 +21200,7 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                 "check_identity",
                 "check_capabilities",
                 "check_namespaces",
+                "check_hostname",
                 "check_mounts",
                 "check_devices",
                 "check_device_creation",
@@ -21232,6 +21257,28 @@ class SandboxSmokeProfileTests(unittest.TestCase):
         result = run("/workspace")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("check_entry ", result.stdout.splitlines())
+        # An execution of nvx-init shares its namespaces and cgroup, so the
+        # profile checks only its host name of them.
+        result = run("init", "entry", "/workspace", "rw")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "check_identity ",
+                "check_capabilities ",
+                "check_hostname ",
+                "check_mounts ",
+                "check_devices ",
+                "check_device_creation ",
+                "check_machine_id ",
+                "check_ports ",
+                "check_image ",
+                "NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534",
+                "check_entry ",
+                "check_share /workspace rw",
+                "NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534",
+            ],
+        )
         result = run("limits", "33554432")
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("limits requires MEMORY_MAX and PIDS_MAX", result.stderr)

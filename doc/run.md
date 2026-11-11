@@ -930,9 +930,14 @@ check, it requires:
 
 A managed workload that mounted into the agent's namespace would stack its
 runtime mounts on those of earlier requests, so the single-mount check also
-covers repeated managed execs. With `--arg entry`, for a managed execution, it
-also requires every mount other than `/dev` and its devpts instance to be
-`nodev`, as the managed agent's execution entry makes them. With
+covers repeated managed execs. With `--arg init` as its first argument, for an
+execution in a sandbox that `sandbox start` started, which nvx-init runs as a
+plain process in the VM's root, it checks the host name, which nvx-init's kernel
+command line encodes in hexadecimal, instead of the namespaces, and no cgroup:
+such an execution shares nvx-init's mount, PID, and UTS namespaces and its
+cgroup. With `--arg entry`, for a managed execution, it also requires every
+mount other than `/dev` and its devpts instance to be `nodev`, as the managed
+agent's execution entry and nvx-init's root make them. With
 `--arg limits --arg MEMORY_MAX --arg PIDS_MAX`, for a workload whose cgroup has
 those limits, it also requires the memory controller to kill an allocation of
 twice `MEMORY_MAX` with `SIGKILL` while a 1 MiB allocation succeeds, and the
@@ -1582,14 +1587,14 @@ the supplied entries over that default environment instead of replacing it,
 each entry replacing the default variable of the same name; without supplied
 entries it has no effect. Inline values are visible in host process arguments
 and should not be used for secrets. These options apply only to managed
-`sandbox exec`; one-shot execution rejects them. Each managed exec enters
-private mount, PID, and UTS namespaces of its own, as the first process of its
-PID namespace, through the guest agent's execution entry, which also makes
-every mount but `/dev` and its devpts instance `nodev`. The workload sees one
-machine ID for the life of the VM. On `stop`, the guest agent unmounts the
-mappings of the live shares, and the guest then unmounts the host export,
-overlay, layers, and upper in dependency order before the VM powers off, as
-it unmounts the shares when a one-shot workload exits. The legacy
+`sandbox exec`; one-shot execution rejects them. nvx-init, the VM's init, runs
+each managed exec as a plain process in a process group of its own, in the VM's
+root and in nvx-init's mount, PID, and UTS namespaces and cgroup: the VM is the
+boundary of its workloads. Every mount of the root but `/dev` and its devpts
+instance is `nodev`. The workload sees one machine ID for the life of the VM.
+On `stop`, nvx-init syncs the file systems and powers the VM off with them
+mounted, and the next `start` replays the journal of the scratch file system.
+The legacy
 operation-less `sandbox`
 form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
 request to retain VM state.
