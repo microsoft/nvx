@@ -1,8 +1,10 @@
+use serde_json::json;
+
 use super::*;
 use crate::host::sandbox::layer::LayerRole;
 
 #[test]
-fn restored_sandbox_records_round_trip_only_their_own_snapshot_name() {
+fn restored_sandbox_records_round_trip_only_their_own_source() {
     let directory = tempfile::tempdir().unwrap();
     let image = directory.path().join("distro.erofs");
     std::fs::write(&image, b"distro layer\n").unwrap();
@@ -21,16 +23,45 @@ fn restored_sandbox_records_round_trip_only_their_own_snapshot_name() {
         cmdline: "",
         ram_upper_percent: None,
     };
-    for source in [None, Some("My.snapshot-1"), Some("other")] {
-        let name = source.map(|name| SnapshotName::try_from(name.to_owned()).unwrap());
-        let text = serialize_launch_with_snapshot(&launch, &distro, None, &options, name.as_ref())
-            .unwrap();
+    for name in [None, Some("My.snapshot-1"), Some("other")] {
+        let source = name.map(|name| Source {
+            snapshot: SnapshotName::try_from(name.to_owned()).unwrap(),
+            store: directory.path().join("store"),
+            workload: vec!["/bin/echo".to_owned(), name.to_owned()],
+        });
+        let text = serialize_launch(&launch, &distro, None, &options, source.as_ref()).unwrap();
         let object: Object = serde_json::from_str(&text).unwrap();
-        assert_eq!(object.contains_key("source_snapshot"), source.is_some());
-        let record = Config::new(object.clone()).unwrap();
-        assert_eq!(record.source_snapshot(), name.as_ref());
-        let mut malformed = object;
-        malformed.insert("source_snapshot".to_owned(), Value::from("../other"));
-        assert!(Config::new(malformed).is_err());
+        for key in ["source_snapshot", "source_store", "workload"] {
+            assert_eq!(object.contains_key(key), name.is_some(), "{key}");
+        }
+        assert_eq!(
+            Config::new(object.clone()).unwrap().source().unwrap(),
+            source
+        );
+        if source.is_none() {
+            continue;
+        }
+        // A name that escapes its store, a part of a source, a relative store, and an empty
+        // workload are refused.
+        for (key, value) in [
+            ("source_snapshot", Some(json!("../other"))),
+            ("source_snapshot", None),
+            ("source_store", None),
+            ("source_store", Some(json!("relative"))),
+            ("workload", None),
+            ("workload", Some(json!([]))),
+        ] {
+            let mut malformed = object.clone();
+            match value {
+                Some(value) => malformed.insert(key.to_owned(), value),
+                None => malformed.remove(key),
+            };
+            assert!(
+                Config::new(malformed)
+                    .and_then(|config| config.source())
+                    .is_err(),
+                "{key}"
+            );
+        }
     }
 }

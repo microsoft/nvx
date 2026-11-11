@@ -9,6 +9,11 @@ use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::options::{sandbox_mounts, validate_sandbox_systemd_policy};
 use crate::host::sandbox::{SandboxSettings, SandboxUpper};
 
+/// The starts of restored sandboxes, with a fake OpenVMM and guest in place of OpenVMM's restore,
+/// which the tests fake on Linux and Windows.
+#[cfg(any(target_os = "linux", windows))]
+mod restore;
+
 #[test]
 fn run_checks_again_that_its_shares_do_not_overlap() {
     let directory = tempfile::tempdir().unwrap();

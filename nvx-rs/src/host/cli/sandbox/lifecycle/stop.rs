@@ -1,20 +1,24 @@
 //! Stopping a managed sandbox and removing a stopped sandbox's state.
 
+use std::fs;
 use std::time::{Duration, Instant};
 
 use super::directory::prepare_state_directory;
 use super::outcome::read_openvmm_outcome;
-use super::{Found, Running, connect, differing_parts, found_vm, running};
+use super::{CONFIG_NAME, Found, Running, connect, differing_parts, found_vm, running};
 use crate::ErrorCode;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::sandbox::lock::LifecycleLock;
+use crate::host::cli::sandbox::state::{Config, read_config};
 use crate::host::cli::sandbox::{Artifacts, error_with_cause};
+use crate::host::cli::snapshots::Store;
 use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result, check_interrupt, output};
 use crate::host::process::Process;
 use crate::host::runtime::IdentityPart;
+use crate::host::snapshot::OPENVMM_DIR;
 use crate::host::supervisor::StopOutcome;
-use crate::host::vm::{self, SavedVm, VmOutputs};
+use crate::host::vm::{self, SavedVm, VmDir, VmOutputs};
 
 /// Stops a running sandbox, and checks the outcome report that its OpenVMM wrote, unless another
 /// runtime identity than the artifacts' started the VM.
@@ -183,6 +187,9 @@ pub(super) fn wait_for_exit(process: &Process, deadline: Deadline) -> Result<boo
 }
 
 /// Removes a stopped sandbox and its state directory, as `deprovision` does.
+///
+/// A restored sandbox's view of its snapshot goes first, under the snapshot's lock, since its
+/// removal changes the links of the snapshot's files.
 pub(crate) fn deprovision(state_path: &str, artifacts: &Artifacts<'_>, timeout: f64) -> Result {
     let state_dir = prepare_state_directory(state_path, false)?;
     let mut lock = LifecycleLock::acquire(&state_dir, timeout, false)?;
@@ -194,6 +201,16 @@ pub(crate) fn deprovision(state_path: &str, artifacts: &Artifacts<'_>, timeout: 
                 "sandbox must be stopped before deprovision",
             ));
         }
+    }
+    // The store accepts a state directory that a VM directory would not, such as an earlier
+    // release's, so deprovision requires a VM directory only to remove a view from one.
+    if fs::symlink_metadata(state_dir.join(OPENVMM_DIR)).is_ok()
+        && let Some(source) = Config::new(read_config(&state_dir.join(CONFIG_NAME))?)?.source()?
+    {
+        let vm = VmDir::open(&state_dir).map_err(error_with_cause)?;
+        Store::open(&source.store)?
+            .lock(&source.snapshot, Deadline::after(timeout))?
+            .remove_view(&vm)?;
     }
     // No OpenVMM of the sandbox runs, and a start that was interrupted is over, so the store
     // removes the sandbox: its files and the configuration, then refuses files that are not

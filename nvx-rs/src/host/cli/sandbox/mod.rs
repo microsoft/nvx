@@ -346,11 +346,11 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
 }
 
 /// Refuses a share of the sandbox's own files: one whose host path equals, contains, or lies
-/// inside `directory`, if the sandbox has one, with its name, its state directory or a run's VM
-/// directory; the image or scratch image of `launch`; or, if known, the OpenVMM, kernel, or Alpine
-/// initramfs of the artifact root of `artifacts`, or the OpenVMM that `NVX_OPENVMM` names instead,
-/// which a run runs. Through it, the guest could read or change the sandbox's records, its
-/// storage, or what the host runs.
+/// inside `directory`, if the sandbox has one, with its name, its state directory, a run's VM
+/// directory, or a restored sandbox's snapshot store; the image or scratch image of `launch`; or,
+/// if known, the OpenVMM, kernel, or Alpine initramfs of the artifact root of `artifacts`, or the
+/// OpenVMM that `NVX_OPENVMM` names instead, which a run runs. Through it, the guest could read or
+/// change the sandbox's records, its storage, its snapshot, or what the host runs.
 ///
 /// The paths are compared once [`paths::resolve`] has resolved them, without a Windows verbatim
 /// prefix. Resolution follows symbolic links and junctions, but not hard links or bind mounts.

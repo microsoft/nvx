@@ -4,6 +4,9 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -14,28 +17,38 @@ use super::{
     CONFIG_NAME, Found, ProvisionConfig, REQUIRED_FEATURES, connect, find_vm, mismatched,
     require_config, running_vm, runtime_for,
 };
+use crate::activation::{ActivationRecord, TransactionId};
 use crate::host::cli::artifacts::locate;
 use crate::host::cli::deadline::{Deadline, RETRY_INTERVAL};
 use crate::host::cli::download::Hold;
 use crate::host::cli::exec_lock::ExecLock;
 use crate::host::cli::sandbox::lock::LifecycleLock;
 use crate::host::cli::sandbox::state::{
-    Config, RecordedDistro, RecordedScratch, read_config, serialize_launch,
+    Config, RecordedDistro, RecordedScratch, Source, read_config, serialize_launch,
 };
 use crate::host::cli::sandbox::{
     Artifacts, Options, error_with_cause, hypervisor, path_string, refuse_own_files,
 };
 use crate::host::cli::session::{ExecRequest, ExecResult, Session};
 use crate::host::cli::shell::format_command;
+use crate::host::cli::snapshots::Store;
 use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result, hex, io_error, output, random_bytes};
+use crate::host::config::{RootConfig, UpperConfig, VmConfig};
+use crate::host::platform;
 use crate::host::process::KILL_TIMEOUT;
 use crate::host::report::Report;
+use crate::host::restore::RestoreEvidence;
+use crate::host::restore_driver::{self, Cancel, ControlRestoreError, Workload};
 use crate::host::runtime::{ArtifactIdentity, Runtime, RuntimeIdentity};
 use crate::host::sandbox::SandboxLaunch;
 use crate::host::sandbox::distro::DISTRO_POLICY_REVISION;
-use crate::host::sandbox::scratch::CLAIM_RELEASE_WAIT;
-use crate::host::vm::{self, SavedVm, VmDir};
+use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, CheckedScratch};
+use crate::host::session::{ExecEvent, SessionError};
+use crate::host::snapshot::OPENVMM_DIR;
+use crate::host::vm::{self, Launched, Prepared, SavedVm, VmDir};
+use crate::protocol::workload::WorkloadIdentity;
+use crate::protocol::{self, ExitCategory, HostMap, WorkloadEnvironment};
 use crate::{ErrorCode, ErrorKind};
 
 /// Starts a provisioned sandbox, as `start` does.
@@ -77,11 +90,17 @@ fn start_locked(
     }
     let config = Config::new(config)?;
     let launch = config.launch()?;
+    let source = config.source()?;
     refuse_own_files(
         Some(("state directory", state_dir)),
         &launch,
         Some(&locate(artifacts.root)?),
     )?;
+    // The view of each restore links the snapshot's files, which a share of the store would
+    // give the guest to change.
+    if let Some(source) = &source {
+        refuse_own_files(Some(("snapshot store", &source.store)), &launch, None)?;
+    }
     let binding = config.distro_binding();
     let scratch_binding = config.scratch_binding()?;
     let distro = binding
@@ -100,21 +119,134 @@ fn start_locked(
     plan.kernel_command_line(config.cmdline())?;
     artifacts.require()?;
     let runtime = runtime_for(artifacts, &config, artifacts.launch_identity()?)?;
+    let restore = source.as_ref().map(|source| Restore {
+        source,
+        identity: launch.settings().workload_identity,
+    });
     let config = config.vm_config(&launch)?;
-    let dir = VmDir::open(state_dir).map_err(error_with_cause)?;
+    let started = launch_locked(lock, &runtime, config, restore, scratch, timeout, vm::spawn);
+    drop(distro);
+    started
+}
+
+/// What a start restores in place of a cold boot: the named snapshot of a restored sandbox, and
+/// the identity of the workload that the restore runs.
+struct Restore<'a> {
+    /// The snapshot and the workload, as the sandbox's configuration records them.
+    source: &'a Source,
+    /// The workload's UID and GID.
+    identity: (u32, u32),
+}
+
+/// Launches the VM of the sandbox of a locked state directory through the launch journal of its
+/// store, with `spawn`: a cold boot of `config`, or a restore of `restore`, and commits it once
+/// its guest is ready.
+///
+/// A restore holds its snapshot's lock from before it creates its view, which links the
+/// snapshot's files into the state directory, until the start ends, past the restore-ready event
+/// of the verified VM, or until the VM has verifiably exited: the lock first lets it remove the
+/// view of an earlier start. It restores the snapshot's online processors and runs the restored
+/// workload until it exits. A command that dies before the guest is ready leaves its journal,
+/// whose recovery ends the VM, as for an interrupted cold boot. A start that cannot confirm that
+/// its VM ended leaves the journal to the next command's recovery as well, and its lock goes with
+/// the command.
+///
+/// A restore's guest accepts only a fresh upper, so a restore with a scratch image refuses to
+/// start once an earlier start left its view, which each start creates before its guest can use
+/// the image, even if that start failed before its guest did.
+fn launch_locked(
+    lock: &mut LifecycleLock,
+    runtime: &Runtime,
+    mut config: VmConfig,
+    restore: Option<Restore<'_>>,
+    scratch: Option<CheckedScratch>,
+    timeout: f64,
+    spawn: impl FnOnce(Prepared) -> crate::Result<Launched>,
+) -> Result {
+    let dir = VmDir::open(lock.locked().dir()).map_err(error_with_cause)?;
+    if restore.is_some()
+        && matches!(&config.root, RootConfig::Layered(root)
+            if matches!(root.upper, UpperConfig::Scratch { .. }))
+        && fs::symlink_metadata(dir.path().join(OPENVMM_DIR)).is_ok()
+    {
+        return Err(Exit::error(
+            ErrorCode::Unsupported,
+            "an earlier start of this restored sandbox may have given its scratch image to a \
+             guest, and a restore needs a fresh one; deprovision the sandbox and restore the \
+             snapshot again with a fresh scratch image",
+        ));
+    }
+    let store = restore
+        .as_ref()
+        .map(|restore| Store::open(&restore.source.store))
+        .transpose()?;
+    let held = match (&store, &restore) {
+        (Some(store), Some(restore)) => {
+            Some(store.lock(&restore.source.snapshot, Deadline::after(timeout))?)
+        }
+        _ => None,
+    };
+    let mut snapshot = None;
+    if let Some(held) = &held {
+        held.remove_view(&dir)?;
+        let opened = held.open()?;
+        let key = opened.key();
+        config.boot = None;
+        config.processors = match key.boot_processors() {
+            0 => key.processors(),
+            online => online,
+        };
+        snapshot = Some(opened);
+    }
     lock.clear_outputs()?;
-    let mut prepared = vm::create(&runtime, &config, None, &dir).map_err(error_with_cause)?;
+    let mut prepared =
+        vm::create(runtime, &config, snapshot.as_ref(), &dir).map_err(error_with_cause)?;
+    let activation = match &snapshot {
+        Some(_) => Some(
+            prepared
+                .activation_record(TransactionId::from_bytes(random_bytes()?))
+                .map_err(error_with_cause)?,
+        ),
+        None => None,
+    };
+    // OpenVMM opens a restore's scratch on Windows only while no other handle may write it, so
+    // the claim's handle closes there, and the guard that OpenVMM inherits keeps the claim.
+    #[cfg(windows)]
+    let (scratch, guard) = match scratch {
+        Some(scratch) if snapshot.is_some() => (None, Some(scratch.into_file())),
+        scratch => (scratch, None),
+    };
+    #[cfg(windows)]
+    for file in scratch
+        .as_ref()
+        .map(CheckedScratch::claim)
+        .into_iter()
+        .chain(&guard)
+    {
+        prepared.inherit(file.try_clone().map_err(Exit::from_os_error)?);
+    }
+    #[cfg(not(windows))]
     if let Some(scratch) = &scratch {
-        #[cfg(not(windows))]
         prepared.inherit(scratch.file().try_clone().map_err(Exit::from_os_error)?);
-        #[cfg(windows)]
-        prepared.inherit(scratch.claim().try_clone().map_err(Exit::from_os_error)?);
     }
     let mut starting = lock
         .locked()
         .begin_launch(&prepared, &runtime.identity)
         .map_err(error_with_cause)?;
-    let launched = vm::spawn(prepared).map_err(error_with_cause)?;
+    let mut launched = match spawn(prepared) {
+        Ok(launched) => launched,
+        Err(error) => {
+            drop(starting);
+            // A spawn that could not confirm the end of its VM leaves it to the journal, whose
+            // recovery ends the VM of a restore before the snapshot's lock goes.
+            if held.is_some() {
+                lock.locked()
+                    .recover(Instant::now() + KILL_TIMEOUT)
+                    .map_err(error_with_cause)?;
+            }
+            return Err(error_with_cause(error));
+        }
+    };
     let saved = SavedVm {
         vm_dir: dir,
         endpoint: launched.outputs.endpoint.clone(),
@@ -122,26 +254,30 @@ fn start_locked(
         process: launched.process.reference().clone(),
         runtime: runtime.identity.clone(),
     };
+    let maps = config.mapping_table();
     let mut stopping = false;
     let ready = starting
         .record_process(&saved.process)
         .map_err(error_with_cause)
-        .and_then(|()| check_ready(&saved, &runtime, timeout))
-        .and_then(|mut session| {
-            let maps = config.mapping_table();
-            if maps.is_empty() {
-                return Ok(());
+        .and_then(|()| match (&activation, &restore) {
+            (Some(record), Some(restore)) => {
+                restore_guest(&mut launched, record, restore, &maps, timeout)
             }
-            session.map_host_paths(&maps, timeout).inspect_err(|error| {
-                if !matches!(error, Exit::Interrupted) {
-                    match session.stop(timeout) {
-                        Ok(()) => stopping = true,
-                        Err(error) => output::print_stderr(&format!(
-                            "warning: startup guest shutdown failed: {error:?}"
-                        )),
-                    }
+            _ => check_ready(&saved, runtime, timeout).and_then(|mut session| {
+                if maps.is_empty() {
+                    return Ok(());
                 }
-            })
+                session.map_host_paths(&maps, timeout).inspect_err(|error| {
+                    if !matches!(error, Exit::Interrupted) {
+                        match session.stop(timeout) {
+                            Ok(()) => stopping = true,
+                            Err(error) => output::print_stderr(&format!(
+                                "warning: startup guest shutdown failed: {error:?}"
+                            )),
+                        }
+                    }
+                })
+            }),
         });
     let Err(mut error) = ready else {
         return starting.commit(&saved).map_err(error_with_cause);
@@ -171,7 +307,8 @@ fn start_locked(
         .recover(Instant::now() + KILL_TIMEOUT)
         .map_err(error_with_cause)?;
     lock.clear_runtime()?;
-    drop((distro, scratch));
+    // The VM has exited, which ends its claim of the scratch image and its use of the snapshot.
+    drop((scratch, held));
     let report = stopped.report.map_err(error_with_cause)?;
     if stopped.self_exited && !stopping && !matches!(error, Exit::Interrupted) {
         return Err(exited_during_startup(report));
@@ -232,6 +369,109 @@ fn check_ready(saved: &SavedVm, runtime: &Runtime, timeout: f64) -> Result<Sessi
         ));
     }
     Ok(session)
+}
+
+/// Restores the guest of `launched` from its activation `record` and runs the workload of
+/// `restore` after the mapping table `maps`, through the blocking restore driver, within its own
+/// budgets, which `timeout` seconds and Ctrl-C cut short, then forwards the workload's output
+/// until it exits, which it must do with status 0 in those `timeout` seconds.
+fn restore_guest(
+    launched: &mut Launched,
+    record: &ActivationRecord,
+    restore: &Restore<'_>,
+    maps: &[HostMap],
+    timeout: f64,
+) -> Result {
+    let (uid, gid) = restore.identity;
+    let workload = Workload {
+        identity: WorkloadIdentity {
+            uid,
+            gid,
+            create_account: false,
+        },
+        exec: protocol::Workload {
+            argv: restore.source.workload.clone(),
+            timeout_ms: 0,
+            cwd: None,
+            environment: WorkloadEnvironment::Default,
+        },
+        request_id: 1,
+    };
+    let deadline = Deadline::after(timeout);
+    let cancel = Cancel::new(false);
+    let restored = thread::scope(|scope| {
+        // Dropping the sender, also as a panic unwinds, ends the watcher.
+        let (_restoring, ended) = mpsc::channel::<()>();
+        scope.spawn(|| {
+            let ended = ended;
+            while let Err(RecvTimeoutError::Timeout) = ended.recv_timeout(RETRY_INTERVAL) {
+                if platform::interrupted() || deadline.passed() {
+                    cancel.store(true, Ordering::Release);
+                }
+            }
+        });
+        restore_driver::restore(launched, record, &workload, maps, &cancel)
+    });
+    // Closing the session at once can lose the workload's Start, so the start keeps the session
+    // until the workload ends, reading its events in slices that let Ctrl-C through.
+    let error = match restored {
+        Ok(mut session) => loop {
+            if platform::interrupted() {
+                return Err(Exit::Interrupted);
+            }
+            let slice = deadline.instant().min(Instant::now() + RETRY_INTERVAL);
+            match session.next_exec_event(workload.request_id, Some(slice)) {
+                Ok(ExecEvent::Stdout(data)) => {
+                    output::write_stdout(&data).map_err(Exit::from_os_error)?;
+                }
+                Ok(ExecEvent::Stderr(data)) => {
+                    output::write_stderr(&data).map_err(Exit::from_os_error)?;
+                }
+                Ok(ExecEvent::Exit {
+                    category: ExitCategory::Exit,
+                    status: 0,
+                }) => return Ok(()),
+                Ok(ExecEvent::Exit { category, status }) => {
+                    return Err(Exit::error(
+                        ErrorCode::Other,
+                        format!("the restored workload ended with {category:?} status {status}"),
+                    ));
+                }
+                Ok(ExecEvent::Rejected { status, category }) => {
+                    return Err(Exit::error(
+                        ErrorCode::ExecRefused,
+                        format!("the guest refused the restored workload: {category} ({status})"),
+                    ));
+                }
+                Err(SessionError::TimedOut) if !deadline.passed() => {}
+                Err(_) if platform::interrupted() => return Err(Exit::Interrupted),
+                Err(error) => break ControlRestoreError::Start(error),
+            }
+        },
+        Err(_) if platform::interrupted() => return Err(Exit::Interrupted),
+        Err(error) => error,
+    };
+    let code = match &error {
+        _ if deadline.passed() => ErrorCode::TimedOut,
+        ControlRestoreError::Machine(error) => match error.evidence {
+            RestoreEvidence::Expired => ErrorCode::TimedOut,
+            RestoreEvidence::Exited => ErrorCode::Exited,
+            RestoreEvidence::Io | RestoreEvidence::HostFailure => ErrorCode::Io,
+            _ => ErrorCode::Protocol,
+        },
+        ControlRestoreError::Maps(error) | ControlRestoreError::Start(error) => match error {
+            SessionError::TimedOut => ErrorCode::TimedOut,
+            // As for a cold start, a closed endpoint proves no exit, and gives OpenVMM its grace
+            // to exit by itself before the start ends it.
+            SessionError::ProcessExited | SessionError::Closed => return Err(Exit::EndpointClosed),
+            SessionError::Io(_) => ErrorCode::Io,
+            _ => ErrorCode::Protocol,
+        },
+    };
+    Err(Exit::error(
+        code,
+        format!("snapshot restore failed: {error}"),
+    ))
 }
 
 /// Runs a workload under exec admission. The lifecycle lock is released before connecting, so
@@ -497,7 +737,7 @@ fn record(
     config: &ProvisionConfig<'_>,
 ) -> Result<(Config, SandboxLaunch)> {
     let scratch = RecordedScratch::new(launch)?;
-    let record = serialize_launch(launch, distro, scratch.as_ref(), config)?;
+    let record = serialize_launch(launch, distro, scratch.as_ref(), config, None)?;
     let config = Config::new(
         serde_json::from_str(&record)
             .map_err(|error| Exit::error(ErrorCode::Other, error.to_string()))?,

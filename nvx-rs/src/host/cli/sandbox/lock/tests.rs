@@ -96,6 +96,23 @@ fn provision_refuses_an_inherited_vm_directory_without_changing_it() {
     assert_eq!(entries, [std::ffi::OsString::from("foreign.txt")]);
 }
 
+/// A deprovision requires a VM directory only of a restored sandbox, to remove its view, and
+/// removes a cold sandbox whose state directory the store accepts but a VM directory would not.
+#[cfg(windows)]
+#[test]
+fn deprovision_removes_a_cold_sandbox_whose_state_directory_is_no_vm_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = directory.path().join("private-parent");
+    StateDir::create(&parent).unwrap();
+    let state = parent.join("inherited");
+    std::fs::create_dir(&state).unwrap();
+    VmDir::open(&state).unwrap_err();
+    std::fs::write(state.join(CONFIG_NAME), "{}").unwrap();
+    let artifacts = super::super::Artifacts { root: None };
+    super::super::lifecycle::deprovision(state.to_str().unwrap(), &artifacts, 5.0).unwrap();
+    assert!(!state.exists());
+}
+
 #[test]
 fn removals_refuse_live_records_and_keep_foreign_files() {
     let directory = tempfile::tempdir().unwrap();

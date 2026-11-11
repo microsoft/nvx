@@ -49,6 +49,17 @@ impl Launched {
     }
 }
 
+#[cfg(all(feature = "cli", any(target_os = "linux", windows)))]
+impl Prepared {
+    /// Runs `program` with `arguments` in place of OpenVMM, with the rest of the checked launch:
+    /// its capability, outputs, log, inherited resources, and restore-ready listener.
+    pub(crate) fn run_instead(mut self, program: PathBuf, arguments: Vec<OsString>) -> Self {
+        self.program = program;
+        self.arguments = arguments;
+        self
+    }
+}
+
 #[test]
 fn the_reserved_names_are_the_documented_ones_and_leave_the_openvmm_prefix_to_openvmm() {
     let names = [
