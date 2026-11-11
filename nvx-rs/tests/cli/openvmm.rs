@@ -224,7 +224,7 @@ impl Options {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         ));
-        kernel.push("nvx_machine_id=image".to_owned());
+        kernel.push("nvx_machine_id=generated".to_owned());
         kernel.extend(
             tokens
                 .iter()

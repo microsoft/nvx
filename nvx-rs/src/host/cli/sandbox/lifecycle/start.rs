@@ -216,7 +216,8 @@ fn vm_config(config: &Config, launch: &SandboxLaunch, plan: &SandboxPlan) -> Res
         }),
         view: View {
             hostname: launch.settings().hostname.as_bytes().to_vec(),
-            machine_id: MachineIdMode::Image,
+            // As the sandbox agent did, nvx-init gives the workload a machine ID of the VM's own.
+            machine_id: MachineIdMode::Generated,
         },
         network,
         filesystem: launch.export().cloned(),
