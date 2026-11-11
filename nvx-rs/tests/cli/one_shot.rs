@@ -1459,7 +1459,7 @@ fn windows_terminal_ctrl_c_helper() {
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::Console::{
         CTRL_C_EVENT, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, GetConsoleMode,
-        GetConsoleProcessList, SetConsoleCtrlHandler,
+        GetConsoleProcessList, SetConsoleCtrlHandler, SetConsoleMode,
     };
 
     unsafe extern "system" fn keep_helper(control: u32) -> windows_sys::core::BOOL {
@@ -1487,6 +1487,24 @@ fn windows_terminal_ctrl_c_helper() {
         let gate = root.below("build/foreground-gate");
         std::fs::create_dir(&gate).unwrap();
         let temporary = tempfile::Builder::new().prefix("nf3-").tempdir().unwrap();
+        let mut entry = 0;
+        // SAFETY: this opened console input belongs to the parent's verified private pseudoconsole.
+        assert_ne!(
+            unsafe { GetConsoleMode(input, &mut entry) },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        // Enter with echo and processed input off, so that only an exact restore of the entry
+        // mode, not one that sets the flags that raw mode clears, matches it after the CLI exits.
+        let disabled = ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT;
+        // SAFETY: the helper alone uses its private pseudoconsole before it starts the CLI.
+        assert_ne!(
+            unsafe { SetConsoleMode(input, (entry & !disabled) | ENABLE_LINE_INPUT) },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
         let mut original = 0;
         // SAFETY: this opened console input belongs to the parent's verified private pseudoconsole.
         assert_ne!(
@@ -1495,6 +1513,8 @@ fn windows_terminal_ctrl_c_helper() {
             "{}",
             std::io::Error::last_os_error()
         );
+        assert_eq!(original & disabled, 0);
+        assert_ne!(original & ENABLE_LINE_INPUT, 0);
         let mut process = root
             .command(&[
                 "run",
