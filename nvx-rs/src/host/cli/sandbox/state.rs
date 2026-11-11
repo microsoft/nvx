@@ -1,10 +1,14 @@
-//! The CLI's typed `config.json`, in format 9 only: one EROFS or GPT image by path,
+//! The CLI's typed `config.json`, in format 10 only: one EROFS or GPT image by path,
 //! a scratch upper by path or a RAM upper with its explicit cap, the image bindings,
 //! and the workload's view, network and export.
 //!
-//! Provision checks the same [`VmConfig`] that start reconstructs. Older records are
-//! refused, not migrated. Bindings still check the recorded caller-owned paths before
-//! launch, and the caller keeps those paths stable while the VM uses them.
+//! Provision checks the same [`VmConfig`] that start reconstructs. Older records, those of format
+//! 9 among them, are refused, not migrated, with the advice to deprovision the sandbox and
+//! provision it again. Bindings still check the recorded caller-owned paths before launch, and the
+//! caller keeps those paths stable while the VM uses them.
+//!
+//! The network is the [`NetworkRecord`] of the sandbox's network options, from which each start
+//! builds the network's policy again, as provision built it.
 //!
 //! The configuration of a restored sandbox also records its [`Source`]: the name of its snapshot
 //! under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and
@@ -20,10 +24,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::lifecycle::ProvisionConfig;
-use super::{MAX_MEMORY_MIB, path_string};
+use super::{MAX_MEMORY_MIB, path_string, sandbox_network};
 use crate::ErrorCode;
 use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::cli::json::{Object, pretty_serde, read_object};
+use crate::host::cli::network::{NativeRules, NetworkOptions};
 use crate::host::cli::output::LINE_SEPARATOR;
 use crate::host::cli::snapshots::Name as SnapshotName;
 use crate::host::cli::{Exit, Result, io_error, io_message};
@@ -35,8 +40,7 @@ use crate::host::paths;
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::scratch::ScratchBinding;
-use crate::host::sandbox::{SandboxLaunch, SandboxNetwork, SandboxSettings, SandboxUpper};
-use crate::net::Ipv4Cidr;
+use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
 use crate::protocol::root::{RAM_UPPER_CAPS, RootImage};
 use crate::uuid::Uuid;
 
@@ -46,7 +50,7 @@ pub(crate) use crate::host::cli::{hex, random_bytes, temporary_path};
 mod tests;
 
 /// The typed image and upper configuration that provision writes and start reads.
-pub(crate) const CONFIG_FORMAT: u64 = 9;
+pub(crate) const CONFIG_FORMAT: u64 = 10;
 /// Every configuration format that `start` reads.
 pub(crate) const CONFIG_FORMATS: [u64; 1] = [CONFIG_FORMAT];
 /// What messages call a configuration.
@@ -210,6 +214,87 @@ pub(crate) struct Source {
     pub(crate) workload: Vec<String>,
 }
 
+/// The network options of a sandbox that `provision` records, from which each `start` builds the
+/// network again with [`sandbox_network`], as `provision` built it: `--net`, `--network-egress`,
+/// `--network-ingress`, `--host-loopback`, `--network-proxy`, and the `--host-loopback-forward`
+/// options, as given, and the egress rules in OpenVMM's form, as
+/// [`NetworkOptions::egress_rules`] resolved them, from a policy file's compile if one was given,
+/// which no start reads again. The record requires every field, an option that was not given as
+/// `null`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NetworkRecord {
+    /// `--net`: the guest's address and prefix.
+    net: String,
+    /// `--network-egress`, if given.
+    #[serde(deserialize_with = "Option::deserialize")]
+    egress: Option<String>,
+    /// `--network-ingress`, if given.
+    #[serde(deserialize_with = "Option::deserialize")]
+    ingress: Option<String>,
+    /// The rules that permit destinations.
+    egress_allow: Vec<String>,
+    /// The rules that block destinations.
+    egress_deny: Vec<String>,
+    /// `--host-loopback`, if given.
+    #[serde(deserialize_with = "Option::deserialize")]
+    host_loopback: Option<String>,
+    /// The `--host-loopback-forward` options.
+    host_loopback_forwards: Vec<String>,
+    /// `--network-proxy`, if given.
+    #[serde(deserialize_with = "Option::deserialize")]
+    proxy: Option<String>,
+}
+
+impl NetworkRecord {
+    /// Returns the record of the network that `network` describes with `rules`, the egress rules
+    /// that [`NetworkOptions::egress_rules`] resolved, or `None` without `--net`. The caller
+    /// checks the network with [`sandbox_network`] first.
+    pub(crate) fn new(network: &NetworkOptions, rules: &NativeRules) -> Option<Self> {
+        Some(Self {
+            net: network.net.clone()?,
+            egress: network.network_egress.map(str::to_owned),
+            ingress: network.network_ingress.map(str::to_owned),
+            egress_allow: rules.allow.clone(),
+            egress_deny: rules.deny.clone(),
+            host_loopback: network.host_loopback.map(str::to_owned),
+            host_loopback_forwards: network.host_loopback_forward.clone(),
+            proxy: network.network_proxy.clone(),
+        })
+    }
+
+    /// Returns the network that the record describes, as [`sandbox_network`] builds it from the
+    /// options that it holds. A record whose options their parser or [`sandbox_network`] refuses
+    /// fails as `sandbox configuration is malformed`, as the old plan's network did when read.
+    fn config(&self) -> Result<NetworkConfig> {
+        let mut network = NetworkOptions::default();
+        let options = [
+            ("--net", Some(&self.net)),
+            ("--network-egress", self.egress.as_ref()),
+            ("--network-ingress", self.ingress.as_ref()),
+            ("--host-loopback", self.host_loopback.as_ref()),
+            ("--network-proxy", self.proxy.as_ref()),
+        ];
+        let forwards = self
+            .host_loopback_forwards
+            .iter()
+            .map(|forward| ("--host-loopback-forward", Some(forward)));
+        for (name, value) in options.into_iter().chain(forwards) {
+            if let Some(value) = value {
+                network.take(name, value).map_err(|_| malformed())?;
+            }
+        }
+        let rules = NativeRules {
+            allow: self.egress_allow.clone(),
+            deny: self.egress_deny.clone(),
+        };
+        sandbox_network(&network, &rules)
+            .ok()
+            .flatten()
+            .ok_or_else(malformed)
+    }
+}
+
 /// Returns the JSON text of the configuration that `provision` records for `launch` and the other
 /// options, with `distro`, the launch's distro layer at the path that `provision` verified and
 /// records, and its binding, and `scratch`, the launch's scratch image at the path that
@@ -243,7 +328,7 @@ pub(crate) fn serialize_launch(
         workload_gid,
         hypervisor: config.hypervisor.to_owned(),
         memory_mib: config.memory_mib,
-        network: launch.network().cloned(),
+        network: config.network.cloned(),
         cmdline: config.cmdline.to_owned(),
         distro_binding: distro.binding.clone(),
         scratch_binding: scratch.map(|scratch| scratch.binding.clone()),
@@ -262,9 +347,19 @@ pub(crate) fn serialize_launch(
 }
 
 /// Reads the configuration at `path`, which must be an object of one of the
-/// [`CONFIG_FORMATS`], as [`read_object`] reads it, and fails as it does.
+/// [`CONFIG_FORMATS`], as [`read_object`] reads it, and fails as it does; a configuration of
+/// another format, such as an older one, also says to deprovision the sandbox and provision it
+/// again.
 pub(crate) fn read_config(path: &Path) -> Result<Object> {
-    read_object(path, DESCRIPTION, "format", &CONFIG_FORMATS)
+    read_object(path, DESCRIPTION, "format", &CONFIG_FORMATS).map_err(|error| {
+        match (error.code(), error.message()) {
+            (Some(ErrorCode::FormatUnsupported), Some(message)) => Exit::error(
+                ErrorCode::FormatUnsupported,
+                format!("{message}; deprovision the sandbox and provision it again"),
+            ),
+            _ => error,
+        }
+    })
 }
 
 /// The sole configuration form, shared by provision's writer and start's reader.
@@ -293,7 +388,7 @@ pub(crate) struct Config {
     #[serde(deserialize_with = "Option::deserialize")]
     scratch_binding: Option<ScratchBinding>,
     #[serde(deserialize_with = "Option::deserialize")]
-    network: Option<SandboxNetwork>,
+    network: Option<NetworkRecord>,
     /// The immutable named snapshot that supplies a restored sandbox's view, absent for a cold
     /// launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,8 +423,8 @@ impl Config {
     }
 
     /// Returns the fields of `object`, a configuration that [`read_config`] read, which fails as
-    /// `sandbox configuration is malformed` without a field that it requires, or with a value of
-    /// another type.
+    /// `sandbox configuration is malformed` without a field that it requires, with a value of
+    /// another type, or with a network that its record cannot build again.
     ///
     /// Guest RAM that is a number, but not an integer from 1 to [`MAX_MEMORY_MIB`], the range of
     /// `--memory-mib`, fails as `sandbox configuration records N MiB of guest RAM`, which names
@@ -369,7 +464,13 @@ impl Config {
             ));
         }
 
-        serde_json::from_value(Value::Object(object)).map_err(|_| malformed())
+        let config: Self =
+            serde_json::from_value(Value::Object(object)).map_err(|_| malformed())?;
+        // The network is checked as it is read, as the old plan's network was.
+        if let Some(network) = &config.network {
+            network.config()?;
+        }
+        Ok(config)
     }
 
     /// Returns the hypervisor that OpenVMM uses.
@@ -400,9 +501,7 @@ impl Config {
                 ..SandboxSettings::default()
             },
         )?;
-        let launch = launch
-            .with_export(self.export.clone())?
-            .with_network(self.network.clone());
+        let launch = launch.with_export(self.export.clone())?;
         launch.validated()?;
         Ok(launch)
     }
@@ -450,18 +549,11 @@ impl Config {
             command_line.push(' ');
             command_line.push_str(&self.cmdline);
         }
-        let network =
-            launch
-                .network()
-                .map(|network| -> Result<NetworkConfig> {
-                    Ok(NetworkConfig {
-                        guest_network: Some(Ipv4Cidr::parse(network.guest_network()).map_err(
-                            |error| Exit::error(ErrorCode::Unsupported, error.to_string()),
-                        )?),
-                        policy: network.policy().clone(),
-                    })
-                })
-                .transpose()?;
+        let network = self
+            .network
+            .as_ref()
+            .map(NetworkRecord::config)
+            .transpose()?;
         Ok(VmConfig {
             processors: 1,
             memory_mib: self.memory_mib,

@@ -27,7 +27,7 @@ fn configurations_of_every_format_start_and_exec() {
             root.nvx_rs(&sandbox("provision", "{root/state}", &options))
                 .assert_silent_success();
             let record = json(&root.below("state/config.json"));
-            assert_eq!(record["format"], 9, "{context}");
+            assert_eq!(record["format"], 10, "{context}");
             assert_eq!(
                 record["image"],
                 root.expand_json(&json!({
@@ -110,6 +110,8 @@ fn old_configuration_formats_are_refused_without_migration() {
         include_str!("../fixtures/state/format-7.json"),
         include_str!("../fixtures/state/format-7-without-shares.json"),
         r#"{"format":8}"#,
+        // The format before the CLI recorded its own network options.
+        r#"{"format":9}"#,
     ] {
         let root = Root::new();
         root.nvx_rs(&provision("{root/state}", &[]))
@@ -117,7 +119,13 @@ fn old_configuration_formats_are_refused_without_migration() {
         root.write("state/config.json", text);
         let before = root.snapshot();
         root.nvx_rs(&sandbox::<&str>("start", "{root/state}", &[]))
-            .assert_error("format-unsupported", &["unsupported format"]);
+            .assert_error(
+                "format-unsupported",
+                &[
+                    "unsupported format",
+                    "deprovision the sandbox and provision it again",
+                ],
+            );
         assert_eq!(root.snapshot(), before);
         assert_eq!(entries(&root.below("state")), PROVISIONED);
         root.nvx_rs(&sandbox::<&str>("deprovision", "{root/state}", &[]))
