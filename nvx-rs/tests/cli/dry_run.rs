@@ -6,9 +6,10 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
 use crate::harness::{Content, Hosts, LAYER, OPENVMM, Outcome, Root, SCRATCH, in_parallel, native};
+use crate::lifecycle::exported;
 use crate::openvmm::{
-    DISCONNECTED_CONSOLE, NO_CONSOLE, Options, TERMINAL_CONSOLE, WORKLOAD, child, cold_boot,
-    one_shot, restore, share_token, snapshot,
+    DISCONNECTED_CONSOLE, NO_CONSOLE, Options, TERMINAL_CONSOLE, child, cold_boot, managed_run,
+    restore, share_token, snapshot,
 };
 
 /// An egress policy file with an allowed range, an exclusion, a port, and a denied protocol, which
@@ -119,30 +120,22 @@ fn run(options: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Returns the default workload tokens of a sandbox, then `tokens`.
-fn workload(tokens: &[String]) -> Vec<String> {
-    WORKLOAD
-        .iter()
-        .map(|token| (*token).to_owned())
-        .chain(tokens.iter().cloned())
-        .collect()
-}
-
 /// Returns the `--mount-child` value of the aggregate child at `index`, which the guest binds at
 /// `target`, of the host path `host`, with the access and kind `mode`, such as `ro` or `ro,file`.
 fn mount_child(index: usize, target: &str, host: &str, mode: &str) -> String {
     format!("{},{host},{mode}", child(index, target))
 }
 
-/// Returns the dry runs of `nvx-rs sandbox run`.
+/// Returns the dry runs of `nvx-rs sandbox run`, with the options of their OpenVMM commands in the
+/// form that [`Options::persistent_expected`] projects: those of a start of the same sandbox.
 fn sandbox_dry_runs() -> Vec<DryRun> {
     let network = || {
-        one_shot()
+        managed_run()
             .with("--net", ["10.0.0.2/24"])
             .with("--network-profile", ["portable"])
     };
     vec![
-        dry_run("minimal", sandbox_run(&[]), one_shot()),
+        dry_run("minimal", sandbox_run(&[]), managed_run()),
         dry_run(
             "balanced disk path brackets",
             [
@@ -154,7 +147,7 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 "--scratch",
                 "{root/scratch[][1].ext4}",
             ],
-            one_shot().with(
+            managed_run().with(
                 "--microvm-sandbox-block",
                 [
                     "distro:file:{root/distro[[1][2]].erofs},ro",
@@ -167,9 +160,10 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
         dry_run(
             "explicit scratch upper",
             sandbox_run(&["--upper", "scratch"]),
-            one_shot(),
+            managed_run(),
         ),
-        // An upper in RAM attaches the distro layer alone, and asks the guest for a tmpfs upper.
+        // An upper in RAM attaches the distro layer alone, and asks the guest for a tmpfs upper of
+        // at most half of its RAM by default.
         dry_run(
             "RAM upper",
             [
@@ -181,8 +175,11 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 "ram",
                 "--dry-run",
             ],
-            one_shot().in_ram(),
+            managed_run().in_ram(),
         ),
+        // The workload's entrypoint and arguments are its execution's, which neither OpenVMM nor
+        // the kernel command line receives, and the outcome report is OpenVMM's, which the run
+        // forwards.
         dry_run(
             "every layer and option",
             sandbox_run(&[
@@ -204,68 +201,45 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 "--outcome-report",
                 "{root/reports/openvmm-run.json}",
             ]),
-            one_shot()
+            managed_run()
                 .with("--microvm-workload-identity", ["1000:1000"])
                 .with("--hypervisor", ["mshv"])
                 .with("--memory", ["512M"])
-                .with("--microvm-report", ["{root/reports/openvmm-run.json}"])
-                .sandbox_kernel(
-                    "quiet loglevel=3",
-                    &[
-                        "nvx_entrypoint=/bin/server",
-                        "nvx_hostname=worker",
-                        "nvx_arg=--port",
-                        "nvx_arg=8080",
-                    ],
-                ),
+                .sandbox_kernel("quiet loglevel=3", &["nvx_hostname=worker"]),
         ),
         dry_run(
             "explicit hypervisor",
             sandbox_run(&["--hypervisor", "kvm"]),
-            one_shot().with("--hypervisor", ["kvm"]),
+            managed_run().with("--hypervisor", ["kvm"]),
         ),
         // `--memory-mib` takes from 1 MiB to the most whose count of bytes fits in 64 bits, as
         // OpenVMM reads a size of RAM.
         dry_run(
             "least memory",
             sandbox_run(&["--memory-mib", "1"]),
-            one_shot().with("--memory", ["1M"]),
+            managed_run().with("--memory", ["1M"]),
         ),
         dry_run(
             "most memory",
             sandbox_run(&["--memory-mib", "17592186044415"]),
-            one_shot().with("--memory", ["17592186044415M"]),
+            managed_run().with("--memory", ["17592186044415M"]),
         ),
-        // One directory is OpenVMM's own share, read-only by default.
+        // Every share, read-only by default, is a child of the aggregate whose mapping table the
+        // guest receives once it is ready.
         dry_run(
             "one share",
             sandbox_run(&["--mount", "/data,{root/share}"]),
-            one_shot().with("--mount", ["/data,{root/share},ro"]),
+            exported(managed_run(), &["0,{root/share},ro"]),
         ),
         dry_run(
             "writable share",
             sandbox_run(&["--mount", "/data,{root/share},rw"]),
-            one_shot().with("--mount", ["/data,{root/share},rw"]),
+            exported(managed_run(), &["0,{root/share},rw"]),
         ),
-        // A file is a child of the aggregate, which a boot token binds at its target.
         dry_run(
             "file share",
             sandbox_run(&["--mount", "/etc/single.txt,{root/single.txt},ro"]),
-            one_shot()
-                .with("--mount-aggregate", ["/run/nvx/shares"])
-                .with(
-                    "--mount-child",
-                    [mount_child(
-                        0,
-                        "/etc/single.txt",
-                        "{root/single.txt}",
-                        "ro,file",
-                    )],
-                )
-                .sandbox_kernel(
-                    "",
-                    &workload(&[share_token(0, "/etc/single.txt", "ro", true)]),
-                ),
+            exported(managed_run(), &["0,{root/single.txt},ro,file"]),
         ),
         dry_run(
             "several shares with policies",
@@ -281,25 +255,10 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 "--mount",
                 "/other,{root/share2}",
             ]),
-            one_shot()
-                .with("--mount-aggregate", ["/run/nvx/shares"])
-                .with(
-                    "--mount-child",
-                    [
-                        mount_child(0, "/data", "{root/share}", "rw"),
-                        mount_child(1, "/other", "{root/share2}", "ro"),
-                    ],
-                )
+            exported(managed_run(), &["0,{root/share},rw", "1,{root/share2},ro"])
                 .with("--mount-deny", ["{root/share/hidden}"])
                 .with("--mount-allow", ["{root/share/hidden/shown}"])
-                .with("--mount-write", ["{root/share/writable}"])
-                .sandbox_kernel(
-                    "",
-                    &workload(&[
-                        share_token(0, "/data", "rw", false),
-                        share_token(1, "/other", "ro", false),
-                    ]),
-                ),
+                .with("--mount-write", ["{root/share/writable}"]),
         ),
         dry_run(
             "network",
@@ -366,17 +325,18 @@ fn sandbox_dry_runs() -> Vec<DryRun> {
                 .with("--network-egress-deny", COMPILED_DENY),
         )
         .with_file("policy.json", POLICY),
+        // A double quote of the kernel command line would end the options of the control
+        // endpoint, as it does a start's.
         dry_run(
             "quoted arguments",
             sandbox_run(&["--cmdline", "a=\"b c\" d"]),
-            one_shot().sandbox_kernel("a=\"b c\" d", &WORKLOAD),
-        ),
+            managed_run(),
+        )
+        .refusing("double quotes"),
         dry_run(
             "caller-owned share",
             sandbox_run(&["--mount", "/data,{root/share}", "--mount-owner", "caller"]),
-            one_shot()
-                .with("--mount", ["/data,{root/share},ro"])
-                .with("--mount-owner", ["caller"]),
+            exported(managed_run(), &["0,{root/share},ro"]).with("--mount-owner", ["caller"]),
         )
         .on(Hosts::Posix),
     ]
@@ -1324,6 +1284,10 @@ fn dry_runs_print_the_openvmm_command_and_launch_nothing() {
         }
         let before = root.snapshot();
         let arguments: Vec<&str> = case.arguments.iter().map(String::as_str).collect();
+        let sandbox = case
+            .arguments
+            .first()
+            .is_some_and(|command| command == "sandbox");
         let cold = case
             .arguments
             .first()
@@ -1350,6 +1314,8 @@ fn dry_runs_print_the_openvmm_command_and_launch_nothing() {
             case.options
                 .cold_run_expected(&root, "one-shot")
                 .unwrap_or_else(|error| panic!("{} unexpectedly refused: {error}", case.name))
+        } else if sandbox {
+            case.options.clone().persistent_expected()
         } else {
             case.options.expanded(&root)
         };
@@ -1366,6 +1332,8 @@ fn dry_runs_print_the_openvmm_command_and_launch_nothing() {
         let actual = Options::parse(arguments);
         let actual = if cold {
             actual.normalized_cold_outputs(true)
+        } else if sandbox {
+            actual.normalized_run_outputs()
         } else {
             actual
         };

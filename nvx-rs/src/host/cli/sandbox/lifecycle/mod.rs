@@ -8,6 +8,9 @@
 //! Exec and stop reattach with runtime and process verification. Stop requests NVXC shutdown,
 //! waits for exit, then forces only the verified process. Deprovision removes only this stopped
 //! sandbox's owned files. No running sandbox from the old runtime store is migrated.
+//!
+//! A run launches the VM that a provision and a start would launch, in a temporary VM directory,
+//! without a state directory, executes one workload over NVXC, and stops it the way stop does.
 
 mod directory;
 mod outcome;
@@ -39,7 +42,7 @@ pub(crate) use self::directory::{create_state_directory, prepare_state_directory
 pub(crate) use self::outcome::{
     copy_openvmm_outcome, validate_outcome_destination, write_exec_outcome,
 };
-pub(crate) use self::start::{exec_workload, start};
+pub(crate) use self::start::{exec_workload, run, start};
 pub(crate) use self::stop::{deprovision, stop};
 
 /// The launch configuration, the CLI's own record beside those of the store.

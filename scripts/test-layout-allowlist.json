@@ -15,7 +15,6 @@
     "nvx-rs/src/host/network/address.rs": 2,
     "nvx-rs/src/host/platform/windows/spawn.rs": 1,
     "nvx-rs/src/host/restore_driver.rs": 1,
-    "nvx-rs/src/host/sandbox/plan.rs": 5,
     "nvx-rs/src/host/session.rs": 1,
     "nvx-rs/src/host/vm.rs": 2,
     "nvx-rs/src/protocol/app.rs": 6

@@ -1110,16 +1110,22 @@ class _FakeSandboxCli:
         )
 
     def _run(
-        self, state: Path | None, values: dict[str, str], _: list[str]
+        self, state: Path | None, values: dict[str, str], arguments: list[str]
     ) -> _CliResult:
         assert state is None
         assert values["--workload-user"] == sandbox_lifecycle_tests.UNAVAILABLE_IDENTITY
+        assert arguments == ["init"]
         if "run-starts-workload" in self.faults:
-            return 0, b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534\n", b""
+            return (
+                0,
+                b">> openvmm\nNVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534\n",
+                b"",
+            )
+        # The guest refuses the identity before it is ready, as at a start.
         return (
-            125,
-            b">> openvmm\nNVX-SANDBOX-ERROR: configured workload UID is unavailable\n",
-            b"",
+            1,
+            b">> openvmm\n",
+            b"error[exited]: OpenVMM exited during startup: guest-exit status 125\n",
         )
 
     def _provision(
@@ -1688,7 +1694,7 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
 
     def test_acceptance_detects_lifecycle_regressions(self):
         regressions = {
-            "run-starts-workload": "run returned 0, expected 125",
+            "run-starts-workload": "run returned 0, expected 1",
             "failed-start-keeps-runtime": (
                 "after a refused managed start: the state directory holds "
                 "['config.json', 'openvmm.log', 'outcome.json', 'runtime.json', "
@@ -2676,6 +2682,7 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
 
     SMOKE_RUN = (
         b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534\n"
+        + b"NVX-UBUNTU-SANDBOX-ENTRY-OK\n"
         + b"NVX-UBUNTU-SANDBOX-OK uid=65534 gid=65534\n"
     )
 
@@ -2688,29 +2695,33 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
         return f"nvx_sandbox=1 nvx_layer=distro,0xd0003000,erofs {upper}"
 
     def _run(
-        self, state: Path | None, values: dict[str, str], _: list[str]
+        self, state: Path | None, values: dict[str, str], arguments: list[str]
     ) -> _CliResult:
         assert state is None
         assert values["--upper"] == "ram"
         assert values["--entrypoint"] == sandbox_lifecycle_tests.PROBE
-        assert _ == []
+        assert arguments == ["init", "entry"]
         blocks = f"--microvm-sandbox-block distro:file:{values['--layer']},ro"
         if "attaches-scratch" in self.faults:
             blocks += " --microvm-sandbox-block scratch:file:scratch.ext4"
         command = f">> openvmm {blocks}"
+        if "uses-lifecycle" in self.faults:
+            command += " --microvm-lifecycle managed"
+        # OpenVMM writes its report in the run's own VM directory, and the run
+        # forwards it.
+        command += " --microvm-report /tmp/nvx-sandbox-run-0/outcome.json"
+        report = Path(values["--outcome-report"])
+        outcome = (
+            {"operation": "run", "category": "guest-exit", "status_code": 1}
+            if "run-reports-failure" in self.faults
+            else sandbox_ram_upper_tests.RUN_SUCCESS
+        )
+        teardown = dict.fromkeys(microvm_tests.OUTCOME_TEARDOWN_FIELDS, True)
+        if "partial-teardown" in self.faults:
+            del teardown["virtiofs_released"]
+        if "incomplete-teardown" in self.faults:
+            teardown["openvmm_process_terminated"] = False
         if "drops-report" not in self.faults:
-            report = Path(values["--outcome-report"])
-            command += f" --microvm-report {report}"
-            outcome = (
-                {"operation": "run", "category": "guest-exit", "status_code": 1}
-                if "run-reports-failure" in self.faults
-                else sandbox_ram_upper_tests.RUN_SUCCESS
-            )
-            teardown = dict.fromkeys(microvm_tests.OUTCOME_TEARDOWN_FIELDS, True)
-            if "partial-teardown" in self.faults:
-                del teardown["virtiofs_released"]
-            if "incomplete-teardown" in self.faults:
-                teardown["openvmm_process_terminated"] = False
             report.write_text(
                 json.dumps(
                     {
@@ -2721,7 +2732,12 @@ class _FakeRamUpperSandboxCli(_FakeSandboxCli):
                 ),
                 encoding="utf-8",
             )
-        command += f" --cmdline '{self._command_line()}'\n"
+        cap = 51 if "other-cap" in self.faults else 50
+        user = "" if "drops-fixture" in self.faults else f" {values['--cmdline']}"
+        command += (
+            f" --cmdline '{self._command_line()} nvx_ram_upper_percent={cap}"
+            f" nvx_sandbox=1 nvx_mode=managed nvx_identity=65534:65534{user}'\n"
+        )
         output = b"" if "probe-fails" in self.faults else self.SMOKE_RUN
         return 0, command.encode() + output, b""
 
@@ -2796,7 +2812,7 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
         # outside run and provision.
         "provision",
         "start",
-        # A one-shot run.
+        # A run, which keeps no state.
         "run",
         # A managed sandbox: the probe, the guest's view, and a written and a
         # read file.
@@ -2918,11 +2934,14 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
             "start-takes-upper": "with error 'unsupported'",
             "attaches-scratch": "did not attach its distro layer alone",
             "declares-scratch": "does not declare the RAM upper alone",
-            "probe-fails": "the one-shot RAM-upper probe did not report",
-            "drops-report": "the one-shot run's OpenVMM command does not name",
-            "run-reports-failure": "the one-shot run reported",
-            "partial-teardown": "the one-shot run's teardown is",
-            "incomplete-teardown": "the one-shot run's teardown is",
+            "drops-fixture": "the run's OpenVMM command does not name the fixture",
+            "uses-lifecycle": "is not one that nvx-init manages",
+            "other-cap": "is not one that nvx-init manages",
+            "probe-fails": "the run's RAM-upper probe did not report",
+            "drops-report": "the run forwarded no outcome report",
+            "run-reports-failure": "the run reported",
+            "partial-teardown": "the run's teardown is",
+            "incomplete-teardown": "the run's teardown is",
             "records-scratch": "provision recorded the RAM upper as",
             "records-old-format": "provision recorded the RAM upper as",
             "records-other-cap": "provision recorded the RAM upper as",

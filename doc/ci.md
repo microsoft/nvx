@@ -537,13 +537,13 @@ that read it as a workflow artifact of its own, under its build filenames (see
 [Guest artifact handoff](#guest-artifact-handoff)). Each
 backend also boots the Ubuntu initramfs and runs
 `/sbin/nvx-sandbox-smoke` from the Ubuntu EROFS layer as UID/GID 65534 over a
-fresh ext4 scratch copy. The probe verifies the
-[sandbox security profile](run.md#experimental-single-workload-sandbox): the
-fixed identity, empty capability sets and `no_new_privs`, private mount, PID,
-and UTS namespaces, the private device view and read-only sysfs, the
-container cgroup, and the overlay root over read-only image layers with its
-upper directory on scratch. The live-share runs below repeat the profile
-checks. Each
+fresh ext4 scratch copy, as the one workload of an `nvx-rs sandbox run`, which
+nvx-init executes. The probe verifies the
+[sandbox security profile](run.md#experimental-single-workload-sandbox) of
+such an execution: the fixed identity, empty capability sets and
+`no_new_privs`, the host name, the device view and read-only sysfs, and the
+overlay root over read-only image layers with its upper directory on scratch.
+The live-share runs below repeat the profile checks. Each
 backend also runs the public `managed-exec-config`, `sandbox-lifecycle`,
 `sandbox-proxy-only`, and `sandbox-ram-upper` scenarios of `test-microvm`,
 which drive `nvx-rs sandbox run`, `provision`, `start`,
@@ -587,7 +587,7 @@ read-write file but neither remove nor rename either one. The host requires
 the guest's writes in the workspace and the read-write file, an unchanged tool
 cache, read-only file, and denied files, and unchanged files beside the shared
 files, both for a
-one-shot run and for a managed sandbox whose format-6 configuration must
+run and for a managed sandbox whose format-6 configuration must
 persist every share and its kind and whose `stop` must leave a cleanly
 unmounted scratch
 filesystem. Each backend then attaches a read-write `/workspace` share whose
@@ -599,8 +599,8 @@ writes to succeed only in `nvx-writable` and to fail with `EROFS` everywhere
 else, a hard link of a read-only file into `nvx-writable` to fail, and
 `nvx-denied` to list only `nvx-allowed`, whose file stays readable while
 `nvx-denied/secret` stays hidden. The host requires the guest's writes in
-`nvx-writable` and no other change to the share, both for a one-shot run and
-for a managed sandbox whose format-5 configuration must persist the denied,
+`nvx-writable` and no other change to the share, both for a run and for a
+managed sandbox whose format-5 configuration must persist the denied,
 allowed, and writable paths and whose `stop` must leave a cleanly unmounted
 scratch filesystem. The default `filesystem-policy` scenario of `test-microvm`
 covers the same policy as guest root, whose permission checks mode bits never
@@ -612,13 +612,14 @@ writable handle open across the capture. On Linux, a
 world-writable share then runs with `--mount-owner caller`. The runners grant
 OpenVMM neither `CAP_SETUID` nor `CAP_SETGID`, so it can neither assume the
 65534 workload identity nor drop the backend group through which it opens
-`/dev/kvm` or `/dev/mshv`. The smoke script's `eperm` mode therefore
-requires reading and listing the share to fail with `EPERM` and writes to
-fail, and the host requires the share to be unchanged, both for a one-shot
-run and for a managed sandbox whose configuration must persist the mode. The `filesystem-owner` scenario of
-`test-microvm` likewise requires guest root and a foreign guest identity to
-fail with `EPERM` on the runners, and a root-owned export to be rejected
-before boot; on Windows, `--mount-owner caller` must be rejected before boot.
+`/dev/kvm` or `/dev/mshv`. The guest agent of a run, and of a managed
+sandbox whose configuration must persist the mode, therefore fails to map the
+share with `EPERM` before any workload runs, which fails the run and the
+start, and the host requires the share to be unchanged. The `filesystem-owner`
+scenario of `test-microvm` likewise requires guest root and a foreign guest
+identity to fail with `EPERM` on the runners, and a root-owned export to be
+rejected before boot; on Windows, `--mount-owner caller` must be rejected
+before boot.
 OpenVMM's unit tests, which its own CI runs (see [OpenVMM CI](#openvmm-ci)),
 check the host identity that each request runs as,
 including guest root squashed to an export owner other than OpenVMM. Where

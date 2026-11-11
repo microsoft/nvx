@@ -135,7 +135,7 @@ fn shares(count: usize) -> Vec<String> {
 fn sandbox_refusals() -> Vec<Refusal> {
     let network_outside =
         &["network policy options are only valid for sandbox run or provision"][..];
-    let exec_options = &["managed execution options", "sandbox exec"][..];
+    let exec_options = &["managed execution options", "sandbox run or exec"][..];
     vec![
         refusal(
             "dry run outside run",
@@ -158,19 +158,19 @@ fn sandbox_refusals() -> Vec<Refusal> {
         )
         .with_file("env.json", ENVIRONMENT),
         refusal(
-            "cwd outside exec",
+            "cwd outside run or exec",
             "unsupported",
-            ["sandbox", "run", "--cwd", "/"],
+            ["sandbox", "deprovision", "--cwd", "/"],
             exec_options,
         ),
         refusal(
-            "environment outside exec",
+            "environment outside run or exec",
             "unsupported",
             ["sandbox", "start", "--environment", "A=1"],
             exec_options,
         ),
         refusal(
-            "environment file outside exec",
+            "environment file outside run or exec",
             "unsupported",
             [
                 "sandbox",
@@ -182,10 +182,23 @@ fn sandbox_refusals() -> Vec<Refusal> {
         )
         .with_file("env.json", ENVIRONMENT),
         refusal(
-            "inherited environment outside exec",
+            "inherited environment outside run or exec",
             "unsupported",
             ["sandbox", "stop", "--inherit-default-environment"],
             exec_options,
+        ),
+        // A run checks the execution of its workload, as exec does, before it launches anything.
+        refusal(
+            "relative working directory of run",
+            "unsupported",
+            sandbox_run(&["--cwd", "tmp"]),
+            &["working directory", "absolute"],
+        ),
+        refusal(
+            "environment entry without name of run",
+            "unsupported",
+            sandbox_run(&["--environment", "=x"]),
+            &["KEY=VALUE"],
         ),
         refusal(
             "environment file too large",
@@ -559,10 +572,12 @@ fn sandbox_refusals() -> Vec<Refusal> {
             sandbox_run(&["--hostname", "bad host"]),
             &["hostname", "RFC 1123"],
         ),
+        // A provision checks the arguments, though a run executes them over NVXC, where they may
+        // hold whitespace.
         refusal(
             "argument with space",
             "unsupported",
-            sandbox_run(&["--arg", "a b"]),
+            provision("{root/state}", &["--arg", "a b"]),
             &["arguments", "whitespace"],
         ),
         refusal(

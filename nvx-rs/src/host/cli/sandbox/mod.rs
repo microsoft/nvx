@@ -2,13 +2,12 @@
 //! `sandbox` parser of `scripts/nvx.py`, with its options, defaults, checks, outputs, and exit
 //! statuses.
 //!
-//! - `run`, the default, boots a one-shot sandbox: it prints the OpenVMM command as `>> COMMAND`,
-//!   then runs it on the terminal, unless `--dry-run`, and exits with OpenVMM's status. It runs
-//!   OpenVMM through a [`PreparedLaunch`] of the distro layer that it verified and, for an upper
-//!   on scratch, of the scratch image, which it claims, so the command names their checked files:
-//!   on Linux as `/proc/self/fd/N`, and on Windows by their final paths. A dry run, which launches
-//!   nothing, names their paths. `--upper ram` keeps the upper in RAM, on a tmpfs that the guest
-//!   mounts, and attaches no scratch image.
+//! - `run`, the default, runs one workload in a sandbox of its own, without a state directory: it
+//!   launches the VM that a `provision` and a `start` of the same options would launch, in a
+//!   temporary VM directory, prints its OpenVMM command as `>> COMMAND`, executes the workload
+//!   once over NVXC, as `exec` would, with `exec`'s options, stops the VM, and exits with the
+//!   workload's status, after its output. A dry run prints the command and launches nothing. See
+//!   [`lifecycle::run`].
 //! - `provision`, `start`, `exec`, `stop`, and `deprovision` manage a persistent sandbox in its
 //!   `--state-dir`; see [`lifecycle`].
 //!
@@ -23,24 +22,20 @@ mod options;
 mod state;
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use super::artifacts::{Located, OPENVMM_VARIABLE, locate};
 use super::download::{self, Hold};
-use super::shell::format_command;
+use super::session::ExecRequest;
 use super::{Exit, Result, io_error, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{ArtifactDir, Guest, KERNEL_NAME, require_artifact};
+use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
 use crate::host::paths;
-use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
+use crate::host::sandbox::distro::DistroFormat;
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::options::{
     SandboxOperation, SandboxOptions, sandbox_mounts, validate_sandbox_systemd_policy,
 };
-use crate::host::sandbox::scratch::{CLAIM_RELEASE_WAIT, ScratchBinding};
-use crate::host::sandbox::{
-    PreparedLaunch, SandboxLaunch, SandboxPlan, SandboxSettings, SandboxUpper,
-};
+use crate::host::sandbox::{SandboxLaunch, SandboxSettings, SandboxUpper};
 use crate::host::store::RuntimeIdentity;
 use crate::protocol::root::RootUpper;
 
@@ -139,12 +134,14 @@ pub(crate) fn error_with_cause(error: crate::Error) -> Exit {
 /// Runs the operation of `options`, as `command_sandbox` did.
 pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     let operation = options.operation;
-    if !matches!(operation, SandboxOperation::Provision)
-        && (options.layer_format.is_some() || options.ram_upper_percent.is_some())
+    if !matches!(
+        operation,
+        SandboxOperation::Run | SandboxOperation::Provision
+    ) && (options.layer_format.is_some() || options.ram_upper_percent.is_some())
     {
         return Err(Exit::error(
             ErrorCode::Unsupported,
-            "--layer-format and --ram-upper-percent are only supported by provision",
+            "--layer-format and --ram-upper-percent are only valid for sandbox run or provision",
         ));
     }
     if options.ram_upper_percent.is_some() && options.upper != Some(RootUpper::Ram) {
@@ -174,12 +171,12 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     };
     let environment = checks.check()?;
     let artifacts = Artifacts { root };
-    // A one-shot run holds the lock of the downloads into a checkout from before it reads the
-    // distro layer, which may be a release's, until it has launched OpenVMM, so that no download
-    // replaces the layer or the artifacts meanwhile. It reports a failure to take it where it
-    // decides to download, after its options. A provision holds it while it reads the layer and
-    // records the sandbox, where it can take it: it runs no artifact, so it needs no artifact root.
-    // Ctrl-C ends the wait for a download, and the command with it.
+    // A run holds the lock of the downloads into a checkout from before it reads the distro
+    // layer, which may be a release's, until its VM is ready, so that no download replaces the
+    // layer or the artifacts meanwhile. It reports a failure to take it where it decides to
+    // download, after its options. A provision holds it while it reads the layer and records the
+    // sandbox, where it can take it: it runs no artifact, so it needs no artifact root. Ctrl-C
+    // ends the wait for a download, and the command with it.
     let early = match operation {
         SandboxOperation::Run | SandboxOperation::Provision => match artifacts.hold() {
             Err(Exit::Interrupted) => return Err(Exit::Interrupted),
@@ -194,13 +191,19 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
     ) {
         let rules = options.network.egress_rules()?;
         let mounts = sandbox_mounts(&options.mounts, &options.policy_paths, options.mount_owner)?;
-        let settings = SandboxSettings {
+        let mut settings = SandboxSettings {
             entrypoint: options.entrypoint.clone(),
             args: options.args.clone(),
             hostname: options.hostname.clone(),
             workload_identity: options.workload_user,
             ..SandboxSettings::default()
         };
+        // A run's workload is its exec request, which no boot token carries, and which its control
+        // session checks.
+        if operation == SandboxOperation::Run {
+            let workload = SandboxSettings::default();
+            (settings.entrypoint, settings.args) = (workload.entrypoint, workload.args);
+        }
         // The checks above require --scratch for an upper on scratch, and refuse it for one in
         // RAM.
         let upper = match options.upper.unwrap_or(RootUpper::Scratch) {
@@ -246,6 +249,16 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             )
         })
     };
+    // The workload that `exec` runs, or the one that `run` runs once.
+    let mut arguments = vec![options.entrypoint.clone()];
+    arguments.extend(options.args.iter().cloned());
+    let request = ExecRequest {
+        arguments,
+        timeout_ms: options.exec_timeout_ms,
+        cwd: options.cwd.clone(),
+        environment,
+        inherit_default_environment: options.inherit_default_environment,
+    };
     match (operation, launch) {
         (SandboxOperation::Provision, Some((launch, binding))) => {
             // `provision` records the layer at its resolved path, where `start` checks the
@@ -256,9 +269,9 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             // checks the shares against the artifacts that it runs.
             let located = locate(root).ok();
             refuse_own_files(
-                Path::new(state_dir),
+                Some(("state directory", Path::new(state_dir))),
                 &launch,
-                located.as_ref().map(|located| &located.dir),
+                located.as_ref(),
             )?;
             lifecycle::provision(
                 state_dir,
@@ -281,18 +294,10 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             if let Some(report) = &options.outcome_report {
                 lifecycle::validate_outcome_destination(report)?;
             }
-            let mut arguments = vec![options.entrypoint.clone()];
-            arguments.extend(options.args.iter().cloned());
             let result = lifecycle::exec_workload(
                 state_dir,
                 &artifacts,
-                &super::session::ExecRequest {
-                    arguments,
-                    timeout_ms: options.exec_timeout_ms,
-                    cwd: options.cwd.clone(),
-                    environment,
-                    inherit_default_environment: options.inherit_default_environment,
-                },
+                &request,
                 options.timeout,
                 options.wait,
             )?;
@@ -318,77 +323,21 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
             if options.state_dir.is_some() {
                 return Err(Exit::error(
                     ErrorCode::Unsupported,
-                    "one-shot sandbox execution rejects persistent --state-dir settings",
+                    "sandbox run keeps no state: it rejects --state-dir",
                 ));
             }
-            let plan = run_plan(&launch, &binding)?;
-            // The shares and the command line depend on the options alone, and a missing artifact
-            // is reported before them, as before, but a run that they refuse downloads nothing.
-            let refused = plan.one_shot_openvmm_arguments().is_err()
-                || plan.one_shot_kernel_command_line(&options.cmdline).is_err();
+            // A run launches the layer at the path that a provision would record.
+            let distro = RecordedDistro::new(&launch, binding)?;
             let held = early.transpose()?.unwrap_or_else(Hold::none);
-            let hold = if refused {
-                held
-            } else {
-                artifacts.ensure_under(held, hypervisor(options.hypervisor))?
-            };
-            let [openvmm, kernel, initrd] = artifacts.require()?;
-            // A one-shot run delivers the shares as boot tokens. A dry run launches nothing, so it
-            // shows the plan's own paths; a run launches through the checked files, which it holds
-            // until OpenVMM exits.
-            let (arguments, command_line, prepared) = if options.dry_run {
-                (
-                    plan.one_shot_openvmm_arguments()?,
-                    plan.one_shot_kernel_command_line(&options.cmdline)?,
-                    None,
-                )
-            } else {
-                let prepared = prepare_run(&launch, &binding, plan, &options.cmdline)?;
-                (
-                    prepared.openvmm_arguments().to_vec(),
-                    prepared.kernel_command_line().to_owned(),
-                    Some(prepared),
-                )
-            };
-            let mut command = vec![openvmm];
-            command.extend(arguments);
-            // The boot console carries the guest's console, with the workload's output, to the
-            // terminal.
-            command.extend(
-                [
-                    "--microvm-lifecycle",
-                    "one-shot",
-                    "--virtio-console",
-                    "console",
-                    "--single-process",
-                    "--hypervisor",
-                    hypervisor(options.hypervisor),
-                ]
-                .map(str::to_owned),
-            );
-            command.extend([
-                "--memory".to_owned(),
-                format!("{}M", options.memory_mib),
-                "--kernel".to_owned(),
-                kernel,
-                "--initrd".to_owned(),
-                initrd,
-                "--cmdline".to_owned(),
-                command_line,
-            ]);
-            if let Some(report) = &options.outcome_report {
-                command.extend(["--microvm-report".to_owned(), path_text(report)]);
-            }
-            output::print_stdout(&format!(">> {}", format_command(&command)))
-                .map_err(Exit::from_os_error)?;
-            let Some(prepared) = prepared else {
+            let Some(result) =
+                lifecycle::run(&launch, &distro, &artifacts, &options, &request, held)?
+            else {
                 return Ok(());
             };
-            Err(Exit::Status(run_openvmm(
-                &command,
-                &prepared.inherited(),
-                hold,
-            )?))
+            output::write_stdout(&result.stdout)
+                .and_then(|()| output::write_stderr(&result.stderr))
+                .map_err(Exit::from_os_error)?;
+            Err(Exit::Status(result.returncode))
         }
         (SandboxOperation::Run | SandboxOperation::Provision, None) => {
             unreachable!("run and provision build their launch")
@@ -397,34 +346,39 @@ pub(super) fn run(root: Option<&str>, options: Options) -> Result {
 }
 
 /// Refuses a share of the sandbox's own files: one whose host path equals, contains, or lies
-/// inside the state directory `state_dir`, the image or scratch image of `launch`, or the OpenVMM,
-/// kernel, or Alpine initramfs of `artifacts`, if known. Through it, the guest could read or
-/// change the sandbox's records, its storage, or what the host runs.
+/// inside `directory`, if the sandbox has one, with its name, its state directory or a run's VM
+/// directory; the image or scratch image of `launch`; or, if known, the OpenVMM, kernel, or Alpine
+/// initramfs of the artifact root of `artifacts`, or the OpenVMM that `NVX_OPENVMM` names instead,
+/// which a run runs. Through it, the guest could read or change the sandbox's records, its
+/// storage, or what the host runs.
 ///
 /// The paths are compared once [`paths::resolve`] has resolved them, without a Windows verbatim
 /// prefix. Resolution follows symbolic links and junctions, but not hard links or bind mounts.
 /// `provision` checks before it records the sandbox, and `start` again before it launches it,
-/// since the shares' paths may have come to resolve elsewhere.
+/// since the shares' paths may have come to resolve elsewhere; `run`, which has no state
+/// directory, checks before it creates its VM directory and launches its VM.
 fn refuse_own_files(
-    state_dir: &Path,
+    directory: Option<(&str, &Path)>,
     launch: &SandboxLaunch,
-    artifacts: Option<&ArtifactDir>,
+    artifacts: Option<&Located>,
 ) -> Result {
     let Some(export) = launch.export() else {
         return Ok(());
     };
-    let mut owned = vec![
-        ("state directory", state_dir.to_owned()),
-        ("image", launch.distro().path().to_owned()),
-    ];
+    let mut owned: Vec<_> = directory
+        .map(|(name, path)| (name, path.to_owned()))
+        .into_iter()
+        .collect();
+    owned.push(("image", launch.distro().path().to_owned()));
     owned.extend(
         launch
             .scratch()
             .map(|path| ("scratch image", path.to_owned())),
     );
-    if let Some(dir) = artifacts {
+    if let Some(Located { dir, openvmm }) = artifacts {
         owned.extend([
             ("OpenVMM", dir.openvmm()),
+            ("OpenVMM", openvmm.clone()),
             ("kernel", dir.kernel()),
             ("initramfs", dir.initramfs(Guest::Alpine)),
         ]);
@@ -467,43 +421,6 @@ fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
         Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
         _ => path,
     }
-}
-
-/// Checks the launch of a one-shot run again, and returns its plan with the format and identity of
-/// the distro layer that `binding`, which the run's verification of the layer made, records.
-///
-/// The verification read all of the layer after the shares were planned, so the launch must still
-/// pass [`SandboxLaunch::validated`], as `provision` checks it before recording it and `start`
-/// checks a recorded one: the directories and files of its export plan must still not overlap, by
-/// path or through a hard link or bind mount, and must pass [`ExportPlan::verify`].
-///
-/// [`ExportPlan::verify`]: crate::host::filesystem::ExportPlan::verify
-fn run_plan(launch: &SandboxLaunch, binding: &DistroBinding) -> Result<SandboxPlan> {
-    launch.validated()?;
-    launch.bound_plan(binding).map_err(Exit::from)
-}
-
-/// Checks the distro layer of a one-shot run against `binding`, which the run's verification of
-/// the layer made, binds and claims the scratch image of an upper on scratch, and prepares the
-/// one-shot launch of `plan`, which delivers the shares as boot tokens, with the checked files and
-/// the user's kernel command line `cmdline`.
-///
-/// The checks read no content, so the layer that the run verified is the one that OpenVMM gets:
-/// one that changed meanwhile fails its check.
-fn prepare_run(
-    launch: &SandboxLaunch,
-    binding: &DistroBinding,
-    plan: SandboxPlan,
-    cmdline: &str,
-) -> Result<PreparedLaunch> {
-    let distro = binding.check(launch.distro(), DISTRO_POLICY_REVISION)?;
-    let scratch = match launch.scratch() {
-        Some(scratch) => Some(
-            ScratchBinding::bind(scratch)?.check(scratch, Instant::now() + CLAIM_RELEASE_WAIT)?,
-        ),
-        None => None,
-    };
-    PreparedLaunch::one_shot(plan, distro, scratch, cmdline).map_err(Exit::from)
 }
 
 #[cfg(test)]

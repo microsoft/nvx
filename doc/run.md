@@ -277,7 +277,7 @@ IPv4 or IPv6 exclusions to those native rules:
 }
 ```
 
-Pass the file with `--network-egress-policy-file PATH` on `run`, one-shot
+Pass the file with `--network-egress-policy-file PATH` on `run`,
 `sandbox run`, or `sandbox provision`. An explicit `--network-egress allow` or
 `deny` is required. The file option cannot be mixed with
 `--network-egress-allow` or `--network-egress-deny`.
@@ -857,10 +857,10 @@ mount -t virtiofs microvm /mnt/host
 ## Experimental single-workload sandbox
 
 The `sandbox` command of [`nvx-rs`](usage.md#nvx-rs) launches the microVM
-with one compressed EROFS distro layer under a writable upper: by default one
-preformatted ext4 scratch image, or a tmpfs in guest memory with
-`--upper ram`, as [Overlay upper](#overlay-upper) describes. Build the distro
-layer with `nvx.py`:
+with one distro layer, a compressed EROFS image or a GPT disk, under a writable
+upper: by default one preformatted ext4 scratch image, or a tmpfs in guest
+memory with `--upper ram`, as [Overlay upper](#overlay-upper) describes. Build
+the distro layer with `nvx.py`:
 
 ```bash
 python3 scripts/nvx.py build-distro-layer \
@@ -872,22 +872,40 @@ Read the deterministic UUID from
 `build/ubuntu-distro.erofs.manifest.json`, create scratch, for example with
 [`build-scratch-template`](usage.md#build-scratch-template), which formats the
 sandbox scratch template at the path that `--output` gives, or with
-`mkfs.ext4` itself, then launch the Ubuntu workload through the existing
-Alpine control initramfs:
+`mkfs.ext4` itself, then run an Ubuntu workload in a sandbox that the Alpine
+control initramfs boots and nvx-init manages:
 
 ```bash
 python3 scripts/nvx.py build-scratch-template --output /var/lib/nvx/scratch.ext4
 nvx-rs/target/release/nvx-rs sandbox \
   --layer distro,build/ubuntu-distro.erofs,11111111-1111-1111-1111-111111111111 \
   --scratch /var/lib/nvx/scratch.ext4 \
-  --entrypoint /bin/sh \
+  --entrypoint /bin/sh --arg=-c --arg='cat /etc/os-release' \
   --workload-user 65534:65534 \
   --memory-mib 256
 ```
 
-CI uses `/sbin/nvx-sandbox-smoke` as the entrypoint to verify the security
-profile that this section describes before clean guest exit. Before any other
-check, it requires:
+`sandbox run`, the default operation, keeps no state. It launches the VM that
+a `provision` and a `start` of its options would launch, in a fresh temporary
+VM directory, and prints its OpenVMM command as `>> COMMAND`. Once nvx-init is
+ready and has mapped the shares, the run executes its workload once over the
+control session, as [`sandbox exec`](#managed-lifecycle) does, with the same
+`--cwd`, `--environment`, `--environment-file`,
+`--inherit-default-environment`, and `--exec-timeout-ms` options. It then asks
+nvx-init to stop the VM, terminates OpenVMM if it does not exit within
+`--timeout` seconds, warning that it did, and removes the VM directory, and
+finally prints the workload's standard output and standard error and exits
+with its status. A VM that exits before nvx-init is ready, as when the guest
+refuses the workload identity, fails the run as it fails a `start`, with the
+category and status of the outcome report that OpenVMM published, such as
+`guest-exit status 125`. `--outcome-report` forwards that report, of the VM's
+stop, with the permissions that OpenVMM gave it. Ctrl-C ends the VM, and the
+run then exits with status 130. `--dry-run` prints the command and launches
+nothing.
+
+CI runs `/sbin/nvx-sandbox-smoke`, with `--arg init`, as below, as the workload
+of `sandbox run` and `sandbox exec`, to verify the security profile of the
+executions that nvx-init runs. Before any other check, it requires:
 
 - the fixed `65534:65534` identity as the real, effective, saved, and
   file-system IDs, no supplementary groups, and `HOME=/nonexistent`;
@@ -916,9 +934,10 @@ check, it requires:
 A managed workload that mounted into the agent's namespace would stack its
 runtime mounts on those of earlier requests, so the single-mount check also
 covers repeated managed execs. With `--arg init` as its first argument, for an
-execution in a sandbox that `sandbox start` started, which nvx-init runs as a
-plain process in the VM's root, it checks the host name, which nvx-init's kernel
-command line encodes in hexadecimal, instead of the namespaces, and no cgroup:
+execution of `sandbox run`, or in a sandbox that `sandbox start` started, which
+nvx-init runs as a plain process in the VM's root, it checks the host name,
+which nvx-init's kernel command line encodes in hexadecimal, instead of the
+namespaces, and no cgroup:
 such an execution shares nvx-init's mount, PID, and UTS namespaces and its
 cgroup. With `--arg entry`, for a managed execution, it also requires every
 mount other than `/dev` and its devpts instance to be `nodev`, as the managed
@@ -974,30 +993,26 @@ unused fields, no object may repeat a field, and arrays and objects nest at most
 32 deep, whatever features of `serde_json` other crates of a build enable. The
 artifact name, SHA-256 digest, and package metadata still bind it to the layer.
 
-This is the cold-filesystem bootstrap described in
-[the sandbox design](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), not the final
-production agent. It accepts no environment variables or secrets and does not
-expose sandbox snapshot capture or restore, the configuration region, or runtime RPC.
-Entrypoints, arguments, and guest share targets are individual kernel-command-line
-tokens and therefore cannot contain whitespace, control characters, double
-quotes, or any UTF-8 byte that Linux treats as whitespace, including `0xa0`.
+A run is the cold-filesystem bootstrap described in
+[the sandbox design](design/4.1-guest-filesystem-and-image-model.md#411-layered-sandbox-root), which nvx-init
+manages. It does not expose sandbox snapshot capture or restore, the
+configuration region, or runtime RPC. Guest share targets cannot contain
+whitespace, control characters, double quotes, or any UTF-8 byte that Linux
+treats as whitespace, including `0xa0`, while the workload's entrypoint and
+arguments, which nvx-init receives over the control session, may.
 Sandbox `--cmdline` uses Linux's quote and separator rules, and refuses reserved
 names even when quoted or written with hyphens instead of underscores. Validation
 uses the same trimmed text that is rendered and also checks the guest bootstrap's
 whitespace-only view, so reserved settings inside quoted values cannot override
 the generated settings. It also
 refuses a `--` or unclosed quote that hides the generated root tokens.
-The workload enters private mount/PID/UTS namespaces with
-a private `/dev`, an agent-owned cgroup, no capabilities, and `no_new_privs`.
-It always runs as the fixed non-root `UID:GID` selected at VM creation
-(`65534:65534` by default). The guest verifies that exactly one matching user,
-its primary group, and its absolute home directory exist in the assembled
-root; otherwise the workload is never started.
-The outer agent retains the initramfs root; the capability-stripped child
-enters only the assembled root with `chroot`, because Linux cannot
-`pivot_root` away from an initramfs `rootfs`. A
-[managed](#managed-lifecycle) execution instead moves the assembled root over
-`/` in its own mount namespace.
+nvx-init runs the workload as a plain process in the VM's root, with no
+capabilities and `no_new_privs`, as it runs every
+[managed](#managed-lifecycle) execution. The workload always runs as the fixed
+non-root `UID:GID` selected at VM creation (`65534:65534` by default). The
+guest verifies that exactly one matching user, its primary group, and its
+absolute home directory exist in the assembled root; otherwise the workload is
+never started.
 
 ### Overlay upper
 
@@ -1009,9 +1024,10 @@ for `sandbox run` and `sandbox provision`:
   writes uses host storage, fails with `ENOSPC` when the image is full, and
   survives a managed sandbox's `stop` and next `start`.
 - `ram` keeps the upper in guest memory, with no scratch image or block device.
-  The kernel command line declares `nvx_overlay_upper=ramfs`, and the guest
-  mounts a tmpfs for the upper, `nosuid` and `nodev`, at the kernel's default
-  size, half of the guest's RAM, beyond which a write fails with `ENOSPC`. The
+  The kernel command line declares `nvx_overlay_upper=ramfs` and the cap of
+  `--ram-upper-percent`, from 1 through 90 percent of the guest's RAM, 50 by
+  default, and the guest mounts a tmpfs for the upper, `nosuid` and `nodev`, of
+  that size, beyond which a write fails with `ENOSPC`. The
   kernel cannot reclaim its pages while the files exist, since the guest has no
   swap. Nothing that the workload writes outlives its VM: each `start` of a
   managed sandbox begins with an empty upper.
@@ -1038,20 +1054,23 @@ acceptance for the RAM upper. Like the
 subprocesses with the Ubuntu layer that `nvx-rs download` installs, but it
 attaches no scratch image. It checks that `provision`
 refuses `--upper ram` beside `--scratch`, and `start` refuses `--upper`, before
-either creates any state. A one-shot `run` of `/sbin/nvx-sandbox-smoke` must
-print an OpenVMM command with one sandbox block device, the read-only distro
-layer, and `nvx_overlay_upper=ramfs` in place of the scratch token, and the
-probe must pass its profile checks over a tmpfs upper. The run's
-`--outcome-report`, under the scenario's temporary directory, must report
-success and a complete teardown, and also names its OpenVMM to the scenario's
-process checks and cleanup, which find VMs by that directory. A managed sandbox
+either creates any state. A run of `/sbin/nvx-sandbox-smoke`, which keeps no
+state, must print an OpenVMM command with one sandbox block device, the
+read-only distro layer, `nvx_overlay_upper=ramfs` in place of the scratch
+token, with the default cap, `nvx_ram_upper_percent=50`, and `nvx_sandbox=1`
+without an OpenVMM lifecycle option, so that nvx-init manages its VM, and the
+probe must pass its checks of an execution of nvx-init over a tmpfs upper. The
+run's `--outcome-report`, under the scenario's temporary directory, must report
+the success of the VM's stop and a complete teardown, and its `--cmdline` names
+that directory, which names its OpenVMM to the scenario's process checks and
+cleanup, which find VMs by that directory. A managed sandbox
 must record `ram` without a scratch image, pass the probe's managed checks, show
 its guest one virtio block device and the RAM upper's token, and read back a
 file that an earlier request wrote. After a `stop` and a new `start`, the file
 is gone. The scenario's evidence, with a `sandbox-ram-upper-` prefix, holds its
-bounded command observations, the runtime record, the output of the one-shot
-run, of the probe, and of the guest's view, and the outcome reports of the
-one-shot run and of both stops.
+bounded command observations, the runtime record, the output of the run, of
+the probe, and of the guest's view, and the outcome reports of the run and of
+both stops.
 
 ### Live host shares
 
@@ -1109,17 +1128,9 @@ the guest mounts the shares inside the container root with `nosuid,nodev`,
 before any workload enters its private mount namespace. How it learns of them
 depends on the lifecycle.
 
-A one-shot `sandbox run` delivers them at boot. The guest agent creates each
-target inside the container root and mounts the share there. With several
-shares, or a shared file, it mounts the aggregate at `/run/nvx/shares`, outside
-the container root, and binds each child at its target with its mode, in
-order, as the `nvx_share=NAME,TARGET,MODE[,file]` tokens that NVX adds to the
-kernel command line describe. It binds a shared file at a regular file, which
-it creates when the container root has nothing at the target. The number of
-shares is bounded only by the sandbox's 1024-byte kernel command-line budget.
-
-A managed sandbox delivers them once its guest agent is ready. OpenVMM exports
-every share as a child of one aggregate, which the guest mounts at
+A sandbox, of `run` or of `start`, delivers them once its guest agent is
+ready. OpenVMM exports every share as a child of one aggregate, which the guest
+mounts at
 `/run/nvx/hostfs/root`, where only root can enter, and the kernel command line
 announces only the number of mappings, as `nvx_maps=COUNT`. Once the guest
 agent answers, `start` sends it the mapping table, in order, in as many
@@ -1127,17 +1138,16 @@ requests as it takes. The agent mounts each entry at its target with its mode,
 and creates a missing target only on the container overlay, never inside
 another mapping, as a directory or, for a shared file, a regular file. It
 refuses every workload until it has mounted the whole table. A mapping that
-the guest refuses or cannot mount fails `start`, after the guest shuts down as
-`stop` has it do, so the sandbox never runs with part of its shares; `start`
-terminates OpenVMM only if the guest does not shut down within `--timeout`.
-The kernel command line does not bound the number of a managed sandbox's
+the guest refuses or cannot mount fails `run` or `start`, after the guest
+shuts down as `stop` has it do, so the sandbox never runs with part of its
+shares; they terminate OpenVMM only if the guest does not shut down within
+`--timeout`. The kernel command line does not bound the number of a sandbox's
 shares; the 256 children of one aggregate do.
 
-A one-shot workload exit, a managed `stop`, and any failure after a share is
-mounted unmount the binds or mappings in reverse order, then the aggregate or
-the export, before the overlay is unmounted or the VM powers off, unless the
-guest stops answering, or `start` is interrupted, and OpenVMM is terminated
-first. Each target
+A managed `stop`, and any failure after a share is mounted, unmount the binds
+or mappings in reverse order, then the aggregate or the export, before the
+overlay is unmounted or the VM powers off, unless the guest stops answering, or
+`start` is interrupted, and OpenVMM is terminated first. Each target
 must be an absolute, canonical path; `/`, `/etc`, `/run`, and `/run/nvx`, and
 the `/etc/machine-id`, `/etc/resolv.conf`, `/proc`, `/sys`, `/dev`,
 `/.nvx-agent`, and `/run/nvx/time` trees, are reserved for the container
@@ -1146,9 +1156,9 @@ runtime, which replaces `/etc/machine-id` with the workload's machine ID, keeps
 `/run/nvx`, and binds its time state over `/run/nvx/time`.
 The guest refuses a target whose path crosses a symbolic link in a container
 layer, a target that a container layer holds as another kind of file than the
-share's, and overlapping targets, and a one-shot guest a repeated child. Any
-validation or mount failure aborts a one-shot sandbox with status 125, and
-fails a managed `start`, instead of starting the workload without its shares.
+share's, and overlapping targets. Any validation or mount failure fails a
+`run` or a managed `start`, instead of starting the workload without its
+shares.
 
 An `rw` share supports the symbolic links that package managers and
 language toolchains create; see
@@ -1173,11 +1183,15 @@ deprovision such a sandbox and provision it again.
 A share must not reach the sandbox's own files, which the workload could
 otherwise read or change: `provision` refuses a share whose resolved host path
 equals, contains, or lies inside the sandbox's state directory, its image, its
-scratch image, or the OpenVMM, kernel, or initramfs of the artifact root, before
-it records the sandbox, and `start` refuses one again before it launches the VM.
+scratch image, or the OpenVMM, kernel, or initramfs of the artifact root, or
+the OpenVMM that `NVX_OPENVMM` names, before it records the sandbox, and
+`start` refuses one again before it launches the VM.
 `start` resolves the recorded host paths again, so a share that came to reach
 one of these files through a link since `provision` is refused too. A
-`provision` that finds no artifact root leaves the artifacts to `start`. Only
+`provision` that finds no artifact root leaves the artifacts to `start`. A
+`run`, which has no state directory, refuses a share that reaches any of the
+others, or the temporary VM directory in which it would launch its VM, before
+it launches that VM. Only
 resolved paths are compared, so don't share a directory that holds a link
 through which the host reaches one of these files, nor a hard link or bind
 mount of one.
@@ -1478,19 +1492,10 @@ it runs, a second sandbox, or a `run`, on the same image fails with
 the device and inode number, which a file that is created once the image is
 removed can take again: such a replacement, of the same length, is not refused.
 A sandbox whose upper is in RAM has no scratch image to bind or claim.
-`run` and `start` hand OpenVMM the files that their checks opened, rather than
-paths that something could replace meanwhile. On Linux, OpenVMM inherits their
-descriptors, and its command line names them `/proc/self/fd/N`, as the command
-that `run` prints shows; on Windows, its command line names them by their final
-paths, `\\?\` paths that go through no link, and the checked files keep the
-images from being replaced, renamed, or deleted, until the guest is ready for
-`start`, and until OpenVMM exits for `run`. OpenVMM inherits the checked files
-too, so that its copies keep the images in place even if `run` or `start` ends
-before OpenVMM has opened them, as when it crashes, until OpenVMM exits; the
-sandbox's next transition ends the OpenVMM of such a `start`.
-There, a final path with a comma, semicolon, or unbalanced brackets, or ending
-in `.vhd`, `.vhdx`, `.vmgs`, or `.iso`, which OpenVMM could not attach as a raw
-image, fails the launch. Images are attached raw: stage an image in a container
+`run` binds the scratch image itself, and checks the binding and claims the
+image as `start` does. `run` and `start` then hand OpenVMM the paths of the
+images that they checked, which OpenVMM opens itself: keep the images in place
+while the VM uses them. Images are attached raw: stage an image in a container
 format, such as a VHD, as a raw file first.
 
 `provision` records the guest memory of `--memory-mib`, which it takes from 1
@@ -1589,18 +1594,17 @@ array requests an empty environment. `--inherit-default-environment` layers
 the supplied entries over that default environment instead of replacing it,
 each entry replacing the default variable of the same name; without supplied
 entries it has no effect. Inline values are visible in host process arguments
-and should not be used for secrets. These options apply only to managed
-`sandbox exec`; one-shot execution rejects them. nvx-init, the VM's init, runs
-each managed exec as a plain process in a process group of its own, in the VM's
-root and in nvx-init's mount, PID, and UTS namespaces and cgroup: the VM is the
+and should not be used for secrets. These options apply to `sandbox exec`,
+and to `sandbox run`, which executes its one workload as `exec` does. nvx-init,
+the VM's init, runs each managed exec as a plain process in a process group of
+its own, in the VM's root and in nvx-init's mount, PID, and UTS namespaces and
+cgroup: the VM is the
 boundary of its workloads. Every mount of the root but `/dev` and its devpts
 instance is `nodev`. The workload sees one machine ID for the life of the VM.
 On `stop`, nvx-init syncs the file systems and powers the VM off with them
 mounted, and the next `start` replays the journal of the scratch file system.
-The legacy
-operation-less `sandbox`
-form is `sandbox run`; it remains one-shot and rejects `--state-dir` or any
-request to retain VM state.
+The operation-less `sandbox` form is `sandbox run`, which keeps no state and
+rejects `--state-dir`.
 
 Environment files are limited to 1 MiB of UTF-8 JSON. Environments contain at
 most 256 unique, nonempty names. Each `KEY=VALUE` entry and working-directory
@@ -1643,10 +1647,10 @@ control initramfs, Ubuntu EROFS layer, and fresh copies of the same scratch
 template, so it has the same artifact requirements. It checks that:
 
 - `provision` rejects a root `--workload-user` before it creates any state, and
-  the guest refuses an identity that the Ubuntu image lacks before a one-shot
-  workload starts, and in a managed `start`, which then fails with
+  the guest refuses an identity that the Ubuntu image lacks before any
+  workload starts, in a run and in a managed `start`, which both then fail with
   `guest-exit status 125` from the outcome report that OpenVMM must publish
-  before it exits, and leaves only `config.json`, `sandbox.lock`,
+  before it exits, and the start leaves only `config.json`, `sandbox.lock`,
   `openvmm.log`, and that `outcome.json`, without a runtime record,
   capability, control socket, report staging file, or OpenVMM process;
 - every operation fails on a state directory that was never provisioned, a
@@ -1700,20 +1704,22 @@ fixture for recovery only if that cleanup fails. Its evidence, written to the
 output directory with a `sandbox-lifecycle-` prefix, holds bounded command
 observations (arguments, statuses, output sizes, and state-directory entries),
 the runtime record, the OpenVMM logs, the VM-level and exec outcome reports, the
-guest probe's transcript, and the console of the refused one-shot run, each
-limited to its last 64 KiB. The command observations hold no workload output,
+guest probe's transcript, and the output of the refused run, each limited to
+its last 64 KiB. The command observations hold no workload output,
 and no evidence holds the control capability.
 
 Decoder, helper, and direct control-session tests remain useful supplemental
 coverage for protocol boundaries and guest implementation details. They do not
 replace or establish support through the public `nvx-rs sandbox` interface.
 
-`run --outcome-report PATH` and one-shot `sandbox run --outcome-report PATH`
-forward OpenVMM's bounded local JSON report. Managed `sandbox exec` writes only
-the operation, bounded result category, numeric status, and an opaque operation
-ID to its requested report; stdout, stderr, arguments, environment values, and
-credentials remain excluded. `sandbox stop` waits for OpenVMM teardown and
-retains the latest VM-level report as `outcome.json` in the state directory.
+`run --outcome-report PATH` and `sandbox run --outcome-report PATH` forward
+OpenVMM's bounded local JSON report, with the permissions that OpenVMM gave it:
+that of the VM's stop, for `sandbox run`, whose exit status is its workload's.
+Managed `sandbox exec` writes only the operation, bounded result category,
+numeric status, and an opaque operation ID to its requested report; stdout,
+stderr, arguments, environment values, and credentials remain excluded.
+`sandbox stop` waits for OpenVMM teardown and retains the latest VM-level report
+as `outcome.json` in the state directory.
 On Linux, NVX starts OpenVMM with the caller's umask without the owner's bits,
 so OpenVMM's reports keep their owner's read and write permissions whatever
 that umask, unless their directory has a default POSIX ACL, which Linux
