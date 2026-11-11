@@ -168,6 +168,17 @@ fn commands_download_nothing_for_options_that_they_refuse() {
             "--cmdline",
             "nvx_sandbox=0",
         ],
+        // A balanced quote passes the plan, but not the managed command line of the launch.
+        vec![
+            "sandbox",
+            "run",
+            "--layer",
+            LAYER,
+            "--scratch",
+            SCRATCH,
+            "--cmdline",
+            "a=\"b c\"",
+        ],
     ] {
         let root = checkout(&INSTALLED);
         let before = root.snapshot();
@@ -301,8 +312,11 @@ fn sandbox_run_reads_a_packaged_layer_once_no_download_replaces_it() {
         spec.as_str(),
         "--scratch",
         SCRATCH,
-        "--cmdline",
-        "fake_exit_status=7",
+        "--entrypoint",
+        "/bin/sh",
+        "--arg=-c",
+        "--arg",
+        "exit 7",
     ];
     std::thread::scope(|scope| {
         let run = scope.spawn(|| root.nvx_rs(&arguments));

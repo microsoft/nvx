@@ -341,12 +341,14 @@ jobs:
           )
           scratch="build/ubuntu-smoke-${{ inputs.backend }}.ext4"
           cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
-          # The probe checks the security profile.
+          # A run executes the probe once, as nvx-init runs each execution,
+          # and the probe checks the security profile of that execution.
           nvx-rs/target/release/nvx-rs sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
             --entrypoint /sbin/nvx-sandbox-smoke \
+            --arg init \
             --workload-user 65534:65534 \
             --memory-mib 256
 
@@ -377,6 +379,7 @@ jobs:
             --mount "/workspace,${share},rw" \
             --mount-deny nvx-denied \
             --entrypoint /sbin/nvx-sandbox-smoke \
+            --arg init \
             --arg /workspace \
             --arg rw \
             --workload-user 65534:65534 \
@@ -403,6 +406,7 @@ jobs:
             --mount "/opt/hostedtoolcache,${share},ro" \
             --mount-deny nvx-denied \
             --entrypoint /sbin/nvx-sandbox-smoke \
+            --arg init \
             --arg /opt/hostedtoolcache \
             --arg ro \
             --workload-user 65534:65534 \
@@ -511,18 +515,30 @@ jobs:
           # group. With --mount-owner caller, every share operation must fail
           # with EPERM instead of running as the runner. The OpenVMM unit tests
           # cover the identity of each request, including guest root squash.
+          # A run maps its shares as a start does: its guest agent reaches the
+          # share as guest root, which the mode squashes to the share's owner,
+          # before any workload runs, so that request fails with EPERM, and the
+          # run fails without running its workload.
           cp --reflink=auto build/ubuntu-smoke-scratch.ext4 "${scratch}"
-          nvx-rs/target/release/nvx-rs sandbox \
+          errors=$(mktemp)
+          if nvx-rs/target/release/nvx-rs sandbox \
             --hypervisor "${{ inputs.backend }}" \
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
             --mount "/workspace,${share},rw" \
             --mount-owner caller \
             --entrypoint /sbin/nvx-sandbox-smoke \
+            --arg init \
             --arg /workspace \
             --arg eperm \
             --workload-user 65534:65534 \
-            --memory-mib 256
+            --memory-mib 256 2>"${errors}"; then
+            echo "the caller-owned run reached its share as the runner" >&2
+            exit 1
+          fi
+          cat "${errors}" >&2
+          grep -q 'could not mount a mapped host path (error 1)' "${errors}"
+          rm -f "${errors}"
           test "$(ls -A "${share}")" = nvx-host-marker
           # A managed sandbox persists the ownership mode and applies it on
           # start. Its guest agent reaches the share as guest root, which the
@@ -645,7 +661,7 @@ jobs:
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
             "${share_options[@]}" \
-            "${smoke_arguments[@]}" \
+            --arg init "${smoke_arguments[@]}" \
             --workload-user 65534:65534 \
             --memory-mib 256
           check_shares
@@ -770,7 +786,7 @@ jobs:
             --layer "distro,build/ubuntu-distro.erofs,${uuid}" \
             --scratch "${scratch}" \
             "${share_options[@]}" \
-            "${smoke_arguments[@]}" \
+            --arg init "${smoke_arguments[@]}" \
             --workload-user 65534:65534 \
             --memory-mib 256
           check_share
@@ -844,12 +860,14 @@ jobs:
               ConvertFrom-Json
           $scratch = "build\ubuntu-smoke-${{ inputs.backend }}.ext4"
           Copy-Item build\ubuntu-smoke-scratch.ext4 $scratch
-          # The probe checks the security profile.
+          # A run executes the probe once, as nvx-init runs each execution,
+          # and the probe checks the security profile of that execution.
           nvx-rs\target\release\nvx-rs.exe sandbox `
             --hypervisor "${{ inputs.backend }}" `
             --layer "distro,build\ubuntu-distro.erofs,$($manifest.uuid)" `
             --scratch $scratch `
             --entrypoint /sbin/nvx-sandbox-smoke `
+            --arg init `
             --workload-user 65534:65534 `
             --memory-mib 256
 
@@ -878,6 +896,7 @@ jobs:
             --mount "/workspace,$share,rw" `
             --mount-deny nvx-denied `
             --entrypoint /sbin/nvx-sandbox-smoke `
+            --arg init `
             --arg /workspace `
             --arg rw `
             --workload-user 65534:65534 `
@@ -921,6 +940,7 @@ jobs:
             --mount "/opt/hostedtoolcache,$share,ro" `
             --mount-deny nvx-denied `
             --entrypoint /sbin/nvx-sandbox-smoke `
+            --arg init `
             --arg /opt/hostedtoolcache `
             --arg ro `
             --workload-user 65534:65534 `
@@ -1101,7 +1121,7 @@ jobs:
               if ([IO.File]::ReadAllText((Join-Path $files "results\other.txt")) -ne "other`n") { throw "guest changed a file beside a shared file" }
           }
           Initialize-Shares
-          Invoke-Nvx sandbox --hypervisor "${{ inputs.backend }}" --layer $layer --scratch $scratch @shareOptions @smokeArguments --workload-user 65534:65534 --memory-mib 256
+          Invoke-Nvx sandbox --hypervisor "${{ inputs.backend }}" --layer $layer --scratch $scratch @shareOptions --arg init @smokeArguments --workload-user 65534:65534 --memory-mib 256
           Test-Shares
           # A managed sandbox persists every share and reattaches them on start.
           Initialize-Shares
@@ -1202,7 +1222,7 @@ jobs:
               }
           }
           Initialize-Share
-          Invoke-Nvx sandbox --hypervisor "${{ inputs.backend }}" --layer $layer --scratch $scratch @shareOptions @smokeArguments --workload-user 65534:65534 --memory-mib 256
+          Invoke-Nvx sandbox --hypervisor "${{ inputs.backend }}" --layer $layer --scratch $scratch @shareOptions --arg init @smokeArguments --workload-user 65534:65534 --memory-mib 256
           Test-Share
           # A managed sandbox persists the access policy and reapplies it on
           # start.
