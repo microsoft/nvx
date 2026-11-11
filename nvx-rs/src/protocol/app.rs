@@ -64,11 +64,12 @@ pub(crate) const APP_CAPTURE: u8 = 7;
 #[cfg_attr(
     not(any(
         test,
+        feature = "cli",
         all(feature = "guest", target_os = "linux", target_arch = "x86_64")
     )),
     expect(
         dead_code,
-        reason = "SL4.3 sends activation requests to nvx-init in SL7.7b"
+        reason = "only the CLI's restore driver sends it, and only nvx-init reads it"
     )
 )]
 pub(crate) const APP_ACTIVATE: u8 = 8;
@@ -188,8 +189,11 @@ pub(crate) fn decode_capture_payload(payload: &[u8]) -> Result<bool, ProtocolErr
 /// The prefix is the UID and GID as little-endian `u32`s, then the account-creation flag as
 /// exactly 0 or 1. The remainder is the activation record's unchanged encoding.
 #[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "SL4.3 encodes activation requests")
+    not(any(test, feature = "cli")),
+    expect(
+        dead_code,
+        reason = "only the CLI's restore driver encodes activation requests"
+    )
 )]
 pub(crate) fn encode_activate_payload(
     record: &ActivationRecord,

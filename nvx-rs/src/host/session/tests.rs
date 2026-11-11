@@ -624,6 +624,41 @@ fn capture_refuses_invalid_acknowledgements() {
     }
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn activate_sends_its_payload_and_returns_the_activation_that_ready_reports() {
+    let (mut session, requests) = attached_recording(|kind, id| {
+        assert_eq!(kind, protocol::APP_ACTIVATE);
+        encode_app(APP_READY, id, 0, &[[1].as_slice(), &[9; 16]].concat())
+    });
+    let ready = session.activate(b"activation", deadline()).unwrap();
+    assert_eq!(
+        ready.transaction,
+        Some(crate::activation::TransactionId::from_bytes([9; 16]))
+    );
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [(protocol::APP_ACTIVATE, b"activation".to_vec())]
+    );
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn activate_refuses_a_reply_other_than_a_valid_ready() {
+    let answers: [fn(u8, u64) -> Vec<u8>; 4] = [
+        |_, id| encode_app(APP_ERROR, id, 22, b"invalid-request"),
+        |_, id| encode_app(APP_READY, id ^ 1, 0, &[0]),
+        |_, id| encode_app(APP_READY, id, 1, &[0]),
+        |_, id| encode_app(APP_READY, id, 0, &[2]),
+    ];
+    for answer in answers {
+        let error = attached(answer)
+            .activate(b"activation", deadline())
+            .unwrap_err();
+        assert!(matches!(error, SessionError::Protocol(_)), "{error:?}");
+    }
+}
+
 #[test]
 fn features_report_what_the_guest_provides() {
     let mut session = attached(|kind, id| {

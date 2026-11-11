@@ -876,6 +876,14 @@ cancellation and exit fail every pending phase. Failure stops no process and
 writes no record. A matching Ready ends at `Done`, without sending mappings or
 Start. Terminal results are offered once and absorb later inputs.
 
+NVX's own binaries drive the machine with a blocking driver, private to the
+crate, beside the control session. It checks that the restore-ready client and
+the control server are the VM's held process, sends the same activate message,
+the record and the workload's identity, in at most three sessions, and allows
+60 seconds to Ready, then 30 more for the mapping table and the workload's
+Start. The caller's cancellation and the VM's exit end any pending accept, read
+or write.
+
 `ReadyListener` owns a restore-ready endpoint: a mode-0600 Unix socket in the
 private VM directory on Linux, or a fresh first-instance named pipe with an
 owner-only protected access control list on Windows. Its public `receive`
