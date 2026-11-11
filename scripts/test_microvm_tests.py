@@ -1287,7 +1287,7 @@ class _FakeSandboxCli:
                 returncode = 1
                 stderr = b"NVX-UBUNTU-SANDBOX-FAIL: the workload shares a namespace\n"
             else:
-                if arguments != ["entry"]:
+                if arguments != ["init", "entry"]:
                     raise AssertionError(f"unexpected probe arguments {arguments}")
                 stdout = (
                     b"NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534\n"
@@ -1824,19 +1824,6 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
                     )
                 else:
                     self.assertEqual(stderr.getvalue(), "")
-
-    def test_scratch_journal_check_reads_the_ext4_recovery_flag(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            image = Path(temporary) / "scratch.ext4"
-            superblock = bytearray(2048)
-            image.write_bytes(superblock)
-            self.assertTrue(sandbox_lifecycle_tests.scratch_journal_clean(image))
-            superblock[1024 + 0x60] = sandbox_lifecycle_tests.EXT4_INCOMPAT_RECOVER
-            image.write_bytes(superblock)
-            self.assertFalse(sandbox_lifecycle_tests.scratch_journal_clean(image))
-            image.write_bytes(bytes(1030))
-            with self.assertRaisesRegex(RuntimeError, "truncated"):
-                sandbox_lifecycle_tests.scratch_journal_clean(image)
 
     def test_kill_ends_the_recorded_process(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])

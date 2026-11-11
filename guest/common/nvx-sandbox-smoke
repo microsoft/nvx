@@ -11,6 +11,15 @@ workload_ids="65534 65534 65534 65534"
 initial_namespaces="mnt:4026531832 pid:4026531836 uts:4026531838"
 # The private /dev that the container runtime creates, in byte order.
 device_view="fd full null ptmx pts random shm stderr stdin stdout tty urandom zero"
+# A first argument `init` checks an execution that nvx-init runs as a plain
+# process in the VM's switched root. It has no container entry: it shares
+# nvx-init's mount, PID, and UTS namespaces and its cgroup, and the VM is its
+# boundary.
+nvx_init=false
+if [ "${1:-}" = init ]; then
+    nvx_init=true
+    shift
+fi
 
 fail() {
     echo "NVX-UBUNTU-SANDBOX-FAIL: $*" >&2
@@ -85,6 +94,13 @@ check_namespaces() {
     init_uids=$(status_field /proc/1/status Uid)
     [ "$init_uids" = "$workload_ids" ] ||
         fail "PID 1 of the workload PID namespace runs as $init_uids"
+    check_hostname
+}
+
+# The workload's host name is the one that the kernel command line names, or
+# nvx-sandbox. nvx-init's command line names its bytes in lowercase
+# hexadecimal.
+check_hostname() {
     expected_hostname=nvx-sandbox
     # Read the whole file: a caller's --cmdline keeps its newlines, so tokens
     # may follow a line break.
@@ -99,6 +115,9 @@ check_namespaces() {
     done
     set +f
     read -r workload_hostname </proc/sys/kernel/hostname
+    if [ "$nvx_init" = true ]; then
+        workload_hostname=$(printf '%s' "$workload_hostname" | od -An -v -tx1 | tr -d ' \n')
+    fi
     [ "$workload_hostname" = "$expected_hostname" ] ||
         fail "the workload hostname is $workload_hostname, expected $expected_hostname"
 }
@@ -253,8 +272,8 @@ check_ports() {
         fail "a request for the port permission ended with status $port_status"
 }
 
-# A managed execution enters its root through the agent's entry, which also
-# makes every mount but /dev and its devpts nodev.
+# A managed execution's entry, like nvx-init's switched root, makes every mount
+# but /dev and its devpts nodev.
 check_entry() {
     while read -r _ _ _ _ mount_point mount_options _; do
         case "$mount_point" in
@@ -609,13 +628,17 @@ check_shares_isolated() {
 
 check_identity
 check_capabilities
-check_namespaces
+if [ "$nvx_init" = true ]; then
+    check_hostname
+else
+    check_namespaces
+fi
 check_mounts
 check_devices
 check_device_creation
 check_machine_id
 check_ports
-check_cgroup
+[ "$nvx_init" = true ] || check_cgroup
 check_image
 echo "NVX-UBUNTU-SANDBOX-PROFILE-OK uid=65534 gid=65534"
 # Each share is a TARGET MODE pair; a final TARGET alone is read-only. A MODE
