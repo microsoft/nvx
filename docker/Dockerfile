@@ -94,7 +94,7 @@ RUN python3 scripts/nvx.py build-initramfs --guest ubuntu --architecture "$NVX_A
 FROM ubuntu-initramfs AS ubuntu-distro-layer
 RUN python3 scripts/nvx.py build-distro-layer \
         --guest ubuntu \
-        --output build/ubuntu-distro.erofs
+        --architecture "$NVX_ARCHITECTURE"
 
 # The sandbox scratch template needs only the base image's mkfs.ext4, so it
 # builds no guest binary.
@@ -295,6 +295,11 @@ COPY --from=kernel /repo/build/aarch64/Image.config /Image.config
 COPY --from=kernel /repo/build/aarch64/Image.provenance.json /Image.provenance.json
 COPY --from=ubuntu-initramfs /repo/build/aarch64/initramfs-ubuntu.cpio.gz /initramfs-ubuntu.cpio.gz
 COPY --from=ubuntu-initramfs /repo/build/aarch64/initramfs-ubuntu.cpio.gz.packages.json /initramfs-ubuntu.cpio.gz.packages.json
+
+FROM scratch AS arm64-ubuntu-distro-layer-artifacts
+COPY --from=ubuntu-distro-layer /repo/build/aarch64/ubuntu-distro.erofs /ubuntu-distro.erofs
+COPY --from=ubuntu-distro-layer /repo/build/aarch64/ubuntu-distro.erofs.manifest.json /ubuntu-distro.erofs.manifest.json
+COPY --from=ubuntu-scratch-template /repo/build/ubuntu-smoke-scratch.ext4 /ubuntu-smoke-scratch.ext4
 
 FROM scratch AS kernel-debug-artifacts
 COPY --from=kernel-debug /repo/build/vmlinux-debug /vmlinux-debug

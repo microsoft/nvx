@@ -7,8 +7,8 @@
 //! - `NVX_ARTIFACTS_DIR`: NVX's artifacts, a repository checkout or an extracted release, with
 //!   the install metadata from which NVX gives their runtime identity, and the [`Fixtures`] of
 //!   the layered roots;
-//! - `RUNTIME_ADAPTER_GUEST`: the guest agent, a static `x86_64-unknown-linux-musl` build of
-//!   `runtime-adapter-guest`.
+//! - `RUNTIME_ADAPTER_GUEST`: a static Linux musl build of `runtime-adapter-guest` for the
+//!   selected native artifact ISA, x86-64 or AArch64.
 // Each test crate uses its own part of this module.
 #![allow(dead_code)]
 
@@ -72,7 +72,15 @@ impl Fixtures {
     pub(crate) fn find() -> Self {
         let directory = env::var_os(Artifacts::ENV_DIR)
             .unwrap_or_else(|| panic!("{} must name NVX's artifacts", Artifacts::ENV_DIR));
-        let artifacts = ArtifactDir::from_dir(directory).unwrap();
+        let architecture = if cfg!(target_arch = "aarch64") {
+            nvx::host::artifacts::Architecture::Aarch64
+        } else {
+            nvx::host::artifacts::Architecture::X86_64
+        };
+        let artifacts = ArtifactDir::from_dir(directory)
+            .unwrap()
+            .with_architecture(architecture)
+            .unwrap();
         let distro = artifacts.distro_layer(Guest::Ubuntu).unwrap();
         let manifest = artifacts.distro_manifest(Guest::Ubuntu).unwrap();
         let scratch = artifacts.artifact(SCRATCH_TEMPLATE);

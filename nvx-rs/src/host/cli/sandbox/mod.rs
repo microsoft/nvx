@@ -24,12 +24,12 @@ mod state;
 
 use std::time::Instant;
 
-use super::artifacts::{Located, OPENVMM_VARIABLE, locate};
+use super::artifacts::{Located, OPENVMM_VARIABLE};
 use super::download::{self, Hold};
 use super::shell::format_command;
 use super::{Exit, Result, output};
 use crate::ErrorCode;
-use crate::host::artifacts::{Guest, KERNEL_NAME, require_artifact};
+use crate::host::artifacts::{Architecture, Guest, require_artifact};
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding};
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 use crate::host::sandbox::options::{
@@ -50,6 +50,13 @@ pub(super) use self::options::{
 };
 pub(crate) use self::options::{Options, path_string};
 use self::state::RecordedDistro;
+
+/// Selects native managed artifacts without changing the legacy artifact API's x86 default.
+fn locate(root: Option<&str>) -> Result<Located> {
+    let mut located = super::artifacts::locate(root)?;
+    located.dir = located.dir.with_architecture(Architecture::native())?;
+    Ok(located)
+}
 
 /// The artifacts of a sandbox, found when an operation first needs them.
 pub(crate) struct Artifacts<'a> {
@@ -84,10 +91,17 @@ impl Artifacts<'_> {
     pub(crate) fn require(&self) -> Result<[String; 3]> {
         let Located { dir, openvmm } = locate(self.root)?;
         require_artifact(&openvmm, "OpenVMM release binary")?;
-        let kernel = dir.artifact(KERNEL_NAME);
-        require_artifact(&kernel, "Linux direct kernel")?;
+        #[cfg(windows)]
+        if dir.architecture() == Architecture::Aarch64 {
+            crate::host::artifacts::check_arm64_pe(&openvmm)?;
+        }
+        let kernel = dir.require_kernel()?;
         let initrd = dir.initramfs(Guest::Alpine);
-        require_artifact(&initrd, "initramfs")?;
+        if dir.architecture() == Architecture::Aarch64 {
+            dir.require_initramfs(Guest::Alpine)?;
+        } else {
+            require_artifact(&initrd, "initramfs")?;
+        }
         Ok([
             path_string(&openvmm)?,
             path_string(&kernel)?,

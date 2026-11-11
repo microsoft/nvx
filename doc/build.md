@@ -149,6 +149,16 @@ The normal `build-guest --architecture aarch64 --guest alpine|ubuntu`
 command selects these same producers and namespaces, adding `--native` on
 Linux to avoid Docker. ARM rejects the x86 debug-kernel and all-guests
 distro-layer modes instead of mixing their outputs.
+The separate maintained Ubuntu EROFS producer accepts
+`build-distro-layer --guest ubuntu --architecture aarch64`. It uses the same
+root builder, ARM package lock and input identity as the Ubuntu initramfs,
+and writes `build/aarch64/ubuntu-distro.erofs` and its manifest. The existing
+ISA-neutral scratch producer can target
+`--output build/aarch64/ubuntu-smoke-scratch.ext4`. BuildKit's
+`arm64-ubuntu-distro-layer-artifacts` target exports both through the existing
+local-output mechanism; select `--platform linux/arm64` and
+`--build-arg NVX_ARCHITECTURE=aarch64`. These are maintained producer inputs,
+not a qualification-only filesystem fixture.
 The existing Alpine one-shot container entry selects its control guest's
 fixed x86-64 or AArch64 musl loader; it keeps the same namespace and
 privilege-drop policy and refuses other control ISAs.
@@ -166,6 +176,10 @@ before any process is launched. Existing x86 paths and default selection
 remain unchanged.
 This native runtime default does not change the build commands' x86-64
 default or the existing artifact API's explicit architecture selection.
+The public `sandbox` CLI likewise selects native local artifacts and validates
+the ARM Image, initramfs manifest and Windows OpenVMM PE identity. Its options,
+saved formats and one-VP lifecycle contract are unchanged. ARM release
+publication and snapshot modes remain outside this enablement.
 
 **Deferred ARM cacheinfo metadata.** Phase 1 defers complete Linux sysfs
 cache geometry and sharing metadata, an existing upstream Standard ARM

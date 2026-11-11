@@ -117,7 +117,7 @@ pub(super) fn provenance_identity(
 }
 
 /// Rejects a Windows OpenVMM executable from another ISA before any process or WHP call.
-#[cfg(all(windows, feature = "cli"))]
+#[cfg(windows)]
 pub(crate) fn check_arm64_pe(path: &Path) -> Result<()> {
     use std::io::{Seek, SeekFrom};
 

@@ -35,11 +35,24 @@ class WorkloadArtifacts:
     scratch_template: Path
 
 
-def workload_artifact_paths() -> tuple[tuple[Path, str], ...]:
+def workload_artifact_paths(
+    *, architecture: str = "x86_64"
+) -> tuple[tuple[Path, str], ...]:
     """Return the paths of the Ubuntu workload layer, its manifest, and the
     sandbox scratch template, which the public scenarios read, each with its
     description."""
-    distro = artifact_path(UbuntuBuildConstants.DISTRO_NAME)
+    distro = (
+        artifact_path(UbuntuBuildConstants.DISTRO_NAME)
+        if architecture == "x86_64"
+        else artifact_path(UbuntuBuildConstants.DISTRO_NAME, architecture=architecture)
+    )
+    scratch = (
+        artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME)
+        if architecture == "x86_64"
+        else artifact_path(
+            UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME, architecture=architecture
+        )
+    )
     return (
         (distro, "Ubuntu workload layer"),
         (
@@ -47,16 +60,16 @@ def workload_artifact_paths() -> tuple[tuple[Path, str], ...]:
             "Ubuntu layer manifest",
         ),
         (
-            artifact_path(UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME),
+            scratch,
             "sandbox scratch template",
         ),
     )
 
 
-def load_workload_artifacts() -> WorkloadArtifacts:
+def load_workload_artifacts(*, architecture: str = "x86_64") -> WorkloadArtifacts:
     distro, manifest_path, scratch_template = (
         require_file(path, description)
-        for path, description in workload_artifact_paths()
+        for path, description in workload_artifact_paths(architecture=architecture)
     )
     try:
         manifest: object = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -64,7 +77,10 @@ def load_workload_artifacts() -> WorkloadArtifacts:
         raise ScriptError(f"invalid Ubuntu layer manifest: {manifest_path}") from error
     if not isinstance(manifest, dict):
         raise ScriptError("Ubuntu layer manifest must contain a UUID string")
-    layer_uuid = cast(dict[str, object], manifest).get("uuid")
+    document = cast(dict[str, object], manifest)
+    if architecture != "x86_64" and document.get("architecture") != "arm64":
+        raise ScriptError("ARM64 Ubuntu layer manifest must declare architecture arm64")
+    layer_uuid = document.get("uuid")
     if not isinstance(layer_uuid, str):
         raise ScriptError("Ubuntu layer manifest must contain a UUID string")
     return WorkloadArtifacts(distro, layer_uuid, scratch_template)
@@ -174,9 +190,9 @@ def format_errors(errors: list[Exception]) -> str:
 
 
 def run_managed_exec_configuration(
-    backend: str, *, timeout: float, output_dir: Path
+    backend: str, *, timeout: float, output_dir: Path, architecture: str = "x86_64"
 ) -> None:
-    artifacts = load_workload_artifacts()
+    artifacts = load_workload_artifacts(architecture=architecture)
     distro = artifacts.distro
     layer_uuid = artifacts.layer_uuid
     scratch_template = artifacts.scratch_template

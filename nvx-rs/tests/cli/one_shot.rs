@@ -3,7 +3,9 @@
 //! standard streams, which carry the workload's output, or OpenVMM's, byte for byte, and exits
 //! with OpenVMM's status, which a one-shot sandbox's OpenVMM takes from its workload.
 
-use crate::harness::{Content, LAYER, OPENVMM, Root, SCRATCH, in_parallel, native};
+use crate::harness::{
+    Content, LAYER, OPENVMM, Root, SCRATCH, in_parallel, native, sandbox_relative,
+};
 use crate::openvmm::{
     DISCONNECTED_CONSOLE, NO_CONSOLE, NO_NETWORK, NetworkPolicy, Options, TERMINAL_CONSOLE,
     WORKLOAD, assert_checked_blocks, assert_checked_distro, assert_opened_distro,
@@ -667,11 +669,22 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
     });
     in_parallel(&cases, |case| {
         let root = Root::new();
+        let fixture = |text: &str| {
+            if case
+                .arguments
+                .first()
+                .is_some_and(|argument| argument == "sandbox")
+            {
+                sandbox_relative(text)
+            } else {
+                text.to_owned()
+            }
+        };
         for (relative, content) in &case.files {
-            root.write_content(relative, *content);
+            root.write_content(&fixture(relative), *content);
         }
         for relative in &case.removed {
-            root.remove(relative);
+            root.remove(&fixture(relative));
         }
         let arguments: Vec<&str> = case.arguments.iter().map(String::as_str).collect();
         let environment: Vec<(&str, &str)> = case
@@ -707,7 +720,12 @@ fn one_shot_runs_exit_with_the_workload_or_openvmm_status() {
         );
         // The `>> ` line splits back into the arguments that OpenVMM received.
         if let Some(record) = case.record {
-            assert_eq!(root.openvmm_arguments(record), arguments, "{}", case.name);
+            assert_eq!(
+                root.openvmm_arguments(&fixture(record)),
+                arguments,
+                "{}",
+                case.name
+            );
         }
         let mut options = Options::parse(arguments);
         let mut expected = case.options.clone();

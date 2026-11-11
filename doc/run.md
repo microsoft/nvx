@@ -1652,7 +1652,10 @@ template, so it has the same artifact requirements. It checks that:
   file survives `stop` and a new `start`, because the overlay's upper directory
   is on scratch;
 - `/sbin/nvx-sandbox-smoke` passes its security profile checks in a sandbox
-  provisioned with `--hostname`, after earlier requests;
+  provisioned with `--hostname`, after earlier requests. The x86 port check
+  still requires the fault and permission refusal. ARM instead requires the
+  x86-only diagnostic to remain unsupported and raw platform devices to be
+  absent; the capability, namespace and exact private-device checks stay common;
 - a request that writes more than the 1 MiB output bound exits with status
   125 and an `output-limit` outcome report after the host has received more
   than 1 MiB less one 32 KiB read chunk and at most 1 MiB, and a request whose

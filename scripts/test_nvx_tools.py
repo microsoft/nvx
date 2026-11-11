@@ -16693,6 +16693,10 @@ class BuildTests(unittest.TestCase):
             )
             with image.open("r+b") as template:
                 template.write(b"formatted")
+                template.seek(1024 + 0x38)
+                template.write(b"\x53\xef")
+                template.seek(1024 + 0x160)
+                template.write((1).to_bytes(4, "little"))
 
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "build" / "scratch.ext4"
@@ -16773,6 +16777,61 @@ class BuildTests(unittest.TestCase):
                     build_config.ScratchTemplateBuildConfig(output=output, replace=True)
                 )
             self.assertEqual(stderr.getvalue(), "")
+
+    def test_scratch_template_canonicalizes_unsigned_hash_with_e2fsprogs(self):
+        for corrected in (True, False):
+            with (
+                self.subTest(corrected=corrected),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                image = Path(temporary) / "scratch.ext4"
+                header = bytearray(2048)
+                header[1024 + 0x38 : 1024 + 0x3A] = b"\x53\xef"
+                header[1024 + 0x160 : 1024 + 0x164] = (2).to_bytes(4, "little")
+                image.write_bytes(header)
+
+                def debugfs(
+                    command: Sequence[str],
+                    *,
+                    env: Mapping[str, str],
+                    input_bytes: bytes,
+                    image: Path = image,
+                    corrected: bool = corrected,
+                ) -> None:
+                    self.assertEqual(command, ["debugfs", "-w", str(image)])
+                    self.assertEqual(env["E2FSPROGS_FAKE_TIME"], "1")
+                    self.assertEqual(
+                        input_bytes, b"set_super_value flags 1\nclose -a\n"
+                    )
+                    if corrected:
+                        with image.open("r+b") as volume:
+                            volume.seek(1024 + 0x160)
+                            volume.write((1).to_bytes(4, "little"))
+
+                with (
+                    patch.object(build, "_e2fsprogs_tool", return_value="debugfs"),
+                    patch.object(build, "run_checked", side_effect=debugfs),
+                ):
+                    if corrected:
+                        build._canonicalize_scratch_hash(image)
+                        self.assertEqual(build._scratch_hash_flags(image), 1)
+                    else:
+                        with self.assertRaisesRegex(
+                            common.ScriptError, "debugfs did not"
+                        ):
+                            build._canonicalize_scratch_hash(image)
+
+    def test_scratch_template_keeps_signed_hash_bytes_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "scratch.ext4"
+            header = bytearray(2048)
+            header[1024 + 0x38 : 1024 + 0x3A] = b"\x53\xef"
+            header[1024 + 0x160 : 1024 + 0x164] = (1).to_bytes(4, "little")
+            image.write_bytes(header)
+            with patch.object(build, "run_checked") as command:
+                build._canonicalize_scratch_hash(image)
+            command.assert_not_called()
+            self.assertEqual(image.read_bytes(), header)
 
     def test_scratch_template_names_where_else_to_get_it_off_linux(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -18000,9 +18059,10 @@ class BuildTests(unittest.TestCase):
         )
         name = UbuntuBuildConstants.SCRATCH_TEMPLATE_NAME
         copy = f"COPY --from=ubuntu-scratch-template /repo/build/{name} /{name}"
-        self.assertEqual(dockerfile.count(copy), 2)
+        self.assertEqual(dockerfile.count(copy), 3)
         for target in (
             "ubuntu-distro-layer-artifacts",
+            "arm64-ubuntu-distro-layer-artifacts",
             DockerBuildConstants.ALL_GUESTS_TARGET,
         ):
             with self.subTest(target=target):
@@ -20810,8 +20870,36 @@ class SandboxSmokeProfileTests(unittest.TestCase):
                     f"return {read}; "
                     '[ "$*" = "test port-probe snapshot grant" ] && '
                     f"return {grant}; exit 2; }}\n"
-                    "check_ports\necho checked",
+                    "check_ports x86_64\necho checked",
                     {"/sbin/nvx-time": "nvx_time"},
+                )
+                if message is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "checked\n")
+                else:
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(message, result.stderr)
+
+    def test_arm_port_diagnostic_is_unsupported_and_raw_devices_are_absent(self):
+        for status, exposed, message in (
+            (2, False, None),
+            (0, False, "an ARM x86-port diagnostic ended with status 0"),
+            (1, False, "an ARM x86-port diagnostic ended with status 1"),
+            (2, True, "the workload can reach raw device"),
+        ):
+            with self.subTest(status=status, exposed=exposed):
+                device = self.root / "raw-device"
+                if exposed:
+                    device.write_bytes(b"forbidden device fixture")
+                result = self._run(
+                    ("check_ports",),
+                    f"nvx_time() {{ return {status}; }}\ncheck_ports aarch64\necho checked",
+                    {
+                        "/sbin/nvx-time": "nvx_time",
+                        "/dev/mem": device.as_posix(),
+                        "/dev/port": (self.root / "absent-port").as_posix(),
+                        "/dev/nvx-platform": (self.root / "absent-platform").as_posix(),
+                    },
                 )
                 if message is None:
                     self.assertEqual(result.returncode, 0, result.stderr)
