@@ -12813,6 +12813,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
                 self.assertIn("--scenario sandbox-proxy-only", acceptance)
                 self.assertIn("--scenario sandbox-ram-upper", acceptance)
                 self.assertIn("--scenario sandbox-gpt-layer", acceptance)
+                self.assertIn("--scenario vm-lifecycle", acceptance)
                 self.assertIn(
                     '--output-dir "build/test-results/public-exec-${{ inputs.backend }}"',
                     acceptance,

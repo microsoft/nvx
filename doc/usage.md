@@ -55,7 +55,8 @@ this order:
 
 Without `NVX_RS`, a built executable, or Cargo, they fail and name these
 choices. They rebuild nothing once the executable exists. The
-`managed-lifecycle` scenario also needs Cargo, which runs its `nvx-rs` test.
+`managed-lifecycle` and `vm-lifecycle` scenarios also need Cargo, which runs
+their `nvx-rs` tests.
 
 The provenance of a checkout's `nvx-rs`, `build/nvx-rs.provenance.json`, binds
 the SHA-256 of its executable to a digest of the `nvx-rs` sources that built
@@ -1253,7 +1254,8 @@ which runs only when named: it repeats `smp` and also asserts that every CPU
 uses the one-shot counting LAPIC. `managed-exec-config`, `sandbox-lifecycle`,
 `sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`, the public
 sandbox scenarios, drive the public `nvx-rs sandbox` lifecycle commands (see
-[Run](run.md#managed-lifecycle)) and also read the Ubuntu distro layer, its
+[Run](run.md#managed-lifecycle)), and `vm-lifecycle` drives a VM through the
+public API of `nvx`; they also read the Ubuntu distro layer, its
 manifest, and the sandbox scratch template, which
 [`download`](#download) installs and the guest-artifact build makes; a run
 that selects one of them fails before its first scenario when one of those
@@ -1264,8 +1266,8 @@ and `virtio-features` scenarios and
 the sandbox-control-dependent `snapshot-tiers`, `platform-restore-processors`,
 `platform-zero-fill`, `platform-filesystem`, `platform-aggregate-export`,
 `platform-network-policy`, `managed-exec-config`, `sandbox-lifecycle`,
-`sandbox-proxy-only`, `sandbox-ram-upper`, and `sandbox-gpt-layer`
-scenarios. Ubuntu also rejects
+`sandbox-proxy-only`, `sandbox-ram-upper`, `sandbox-gpt-layer`, and
+`vm-lifecycle` scenarios. Ubuntu also rejects
 the Alpine-prompt-specific `console-snapshot` scenario. `--debug-kernel` boots
 the CI debug kernel, `build/vmlinux-debug`, whose soft-lockup and hung-task
 detectors the guest's time ABI watcher reports; without `--scenario`, it runs
@@ -1304,6 +1306,11 @@ the boot to the managed agent, and runs the ignored `nvx-rs` test
 `tests/managed_lifecycle.rs` with Cargo, which starts OpenVMM with the
 scenario's command line and drives the guest's control session; the scenario
 then checks OpenVMM's outcome report and the guest console. The
+`vm-lifecycle` scenario runs the ignored `nvx-rs` test
+`tests/vm_lifecycle.rs` with Cargo, which creates and spawns a VM of nvx-init
+over the Ubuntu layer and a scratch copy through the public API of `nvx`,
+reattaches to it from the values that it saved, and stops it through its
+guest; the scenario then checks OpenVMM's outcome report. The
 `virtio-features` scenario boots a guest with every fixed virtio device: the
 NIC, the dormant host filesystem slot, both consoles, and both sandbox blocks.
 The guest reports, for each device, the base of its MMIO window, its virtio
