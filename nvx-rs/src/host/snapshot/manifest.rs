@@ -1,6 +1,4 @@
-//! The manifest of a snapshot: a template's capture, which [`SnapshotManifest::read`] reads, and
-//! the host attachments of any microVM snapshot, which `read_attachments` reads for the restores
-//! of `nvx-rs run`.
+//! The manifest of a snapshot: a template's capture, which [`SnapshotManifest::read`] reads.
 //!
 //! OpenVMM writes `manifest.bin` into the directory of a snapshot that it publishes: one message
 //! of the protobuf wire format, as its `mesh` encodes `openvmm.snapshot.SnapshotManifest`, of at
@@ -790,36 +788,13 @@ impl SnapshotManifest {
 
 /// A host attachment of a snapshot's machine contract, `openvmm.snapshot.SnapshotAttachment`: an
 /// endpoint outside the VM, such as the backend of a console, whose identity and reconnect
-/// policy snapshot compatibility and `nvx-rs run` read for a restore.
+/// policy snapshot compatibility reads for a restore.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Attachment {
     /// The stable ID of the device that it attaches, such as `console:microvm-virtio0`.
     pub(crate) stable_id: String,
     /// How a restore reconnects it, such as `require-inherited-attachment`.
     pub(crate) reconnect_policy: String,
-}
-
-/// Reads the host attachments of the snapshot in the directory `snapshot`, in the order of the
-/// machine contract of its manifest, [`MANIFEST_NAME`]: those of any microVM snapshot, a
-/// template's or not, which `nvx-rs run` restores.
-///
-/// It reads the manifest as [`SnapshotManifest::read`] does, and checks its format and the form of
-/// its fields as [`SnapshotManifest::parse`] does, but nothing that makes it a template's. A
-/// manifest without a machine contract holds no attachments.
-///
-/// Fails as [`SnapshotManifest::read`] does, but for a manifest that is not a template's.
-#[cfg(feature = "cli")]
-pub(crate) fn read_attachments(snapshot: &Path) -> Result<Vec<Attachment>> {
-    let (bytes, description) = read_manifest(snapshot)?;
-    let raw = decode_described(
-        &bytes,
-        &description,
-        "the snapshot again with the OpenVMM of this build",
-    )?;
-    Ok(raw
-        .contract
-        .map(|contract| contract.attachments)
-        .unwrap_or_default())
 }
 
 /// What a template's capture mends of a manifest of a format that this build does not read.

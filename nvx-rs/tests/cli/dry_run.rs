@@ -7,10 +7,7 @@ use proptest::test_runner::{Config, TestRunner};
 
 use crate::harness::{Content, Hosts, LAYER, OPENVMM, Outcome, Root, SCRATCH, in_parallel, native};
 use crate::lifecycle::exported;
-use crate::openvmm::{
-    DISCONNECTED_CONSOLE, NO_CONSOLE, Options, TERMINAL_CONSOLE, child, cold_boot, managed_run,
-    restore, share_token, snapshot,
-};
+use crate::openvmm::{Options, child, cold_boot, managed_run, share_token};
 
 /// An egress policy file with an allowed range, an exclusion, a port, and a denied protocol, which
 /// compiles into the rules [`COMPILED_ALLOW`] and [`COMPILED_DENY`].
@@ -46,9 +43,7 @@ struct DryRun {
     refusal: Option<&'static str>,
 }
 
-/// Returns the dry run `name` of `arguments`, which prints an OpenVMM command line of `options`,
-/// in a root that holds a snapshot without a boot console at `{root/snapshot}`, which a restore
-/// restores unless the case writes another manifest there.
+/// Returns the dry run `name` of `arguments`, which prints an OpenVMM command line of `options`.
 fn dry_run<S: ToString>(
     name: &'static str,
     arguments: impl IntoIterator<Item = S>,
@@ -57,7 +52,7 @@ fn dry_run<S: ToString>(
     DryRun {
         name,
         hosts: Hosts::Every,
-        files: vec![snapshot(&NO_CONSOLE)],
+        files: Vec::new(),
         removed: Vec::new(),
         arguments: arguments
             .into_iter()
@@ -78,12 +73,6 @@ impl DryRun {
     fn with_file(mut self, relative: &'static str, content: Content) -> Self {
         self.files.push((relative, content));
         self
-    }
-
-    /// Returns the case with `manifest` as the manifest of the snapshot `{root/snapshot}`.
-    fn with_snapshot(self, manifest: &'static [u8]) -> Self {
-        let (relative, content) = snapshot(manifest);
-        self.with_file(relative, content)
     }
 
     /// Returns the case with the file `relative` removed first.
@@ -366,20 +355,6 @@ fn run_dry_runs() -> Vec<DryRun> {
             share_token(1, "/other", "ro", false),
         ]
     };
-    let mut many = vec![
-        "--restore-snapshot".to_owned(),
-        "{root/snapshot}".to_owned(),
-    ];
-    for index in 0..20 {
-        many.extend([
-            "--mount".to_owned(),
-            format!("/share/{index:02},{{root/share}}"),
-        ]);
-    }
-    let many: Vec<&str> = many.iter().map(String::as_str).collect();
-    let many_children: Vec<String> = (0..20)
-        .map(|index| mount_child(index, &format!("/share/{index:02}"), "{root/share}", "ro"))
-        .collect();
     let fits = "x".repeat(crate::openvmm::two_share_command_line_room());
     vec![
         dry_run("run: Alpine default", run(&[]), cold_boot()),
@@ -527,130 +502,6 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: cpu profile host",
             run(&["--cpu-profile", "host"]),
             cold_boot().with("--cpu-profile", ["host"]),
-        ),
-        dry_run(
-            "run: restore",
-            run(&["--restore-snapshot", "{root/snapshot}"]),
-            restore(),
-        ),
-        // A restore reads its snapshot's manifest, dry or not, and attaches the boot console to
-        // the terminal again where the snapshot's capture did, as OpenVMM requires, with the
-        // other options of a restore.
-        dry_run(
-            "run: restore of a boot console on the terminal",
-            run(&["--restore-snapshot", "{root/snapshot}"]),
-            restore().with("--virtio-console", ["console"]),
-        )
-        .with_snapshot(&TERMINAL_CONSOLE),
-        dry_run(
-            "run: restore of a boot console on the terminal with every option",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--restore-processors",
-                "1",
-                "--restore-network-policy",
-                "--network-profile",
-                "portable",
-                "--outcome-report",
-                "{root/reports/restore.json}",
-            ]),
-            restore()
-                .with("--restore-processors", ["1"])
-                .flag("--restore-network-policy")
-                .with("--network-profile", ["portable"])
-                .with("--virtio-console", ["console"])
-                .with("--microvm-report", ["{root/reports/restore.json}"]),
-        )
-        .with_snapshot(&TERMINAL_CONSOLE),
-        dry_run(
-            "run: restore of a disconnected boot console",
-            run(&["--restore-snapshot", "{root/snapshot}"]),
-            restore(),
-        )
-        .with_snapshot(&DISCONNECTED_CONSOLE),
-        // A restore needs no guest kernel or initramfs.
-        dry_run(
-            "run: restore without guest artifacts",
-            run(&["--restore-snapshot", "{root/snapshot}"]),
-            restore(),
-        )
-        .without("build/vmlinux")
-        .without("build/initramfs.cpio.gz"),
-        dry_run(
-            "run: restore with every option",
-            run(&[
-                "--hypervisor",
-                "mshv",
-                "--processors",
-                "4",
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--restore-processors",
-                "2",
-                "--restore-memory-mib",
-                "1024",
-                "--restore-ready-path",
-                "{root/ready.sock}",
-                "--cpu-profile",
-                "host",
-                "--outcome-report",
-                "{root/reports/restore.json}",
-                "--cmdline",
-                "quiet",
-            ]),
-            restore()
-                .with("--processors", ["4"])
-                .with("--hypervisor", ["mshv"])
-                .with("--restore-processors", ["2"])
-                .with("--restore-memory", ["1024M"])
-                .with("--restore-ready-path", ["{root/ready.sock}"])
-                .with("--cpu-profile", ["host"])
-                .with("--microvm-report", ["{root/reports/restore.json}"])
-                .with("--cmdline", ["quiet"]),
-        ),
-        dry_run(
-            "run: restore of the Alpine guest",
-            run(&["--guest", "alpine", "--restore-snapshot", "{root/snapshot}"]),
-            restore(),
-        ),
-        dry_run(
-            "run: restore with equal processors",
-            run(&[
-                "--processors",
-                "2",
-                "--restore-processors",
-                "2",
-                "--restore-snapshot",
-                "{root/snapshot}",
-            ]),
-            restore()
-                .with("--processors", ["2"])
-                .with("--restore-processors", ["2"]),
-        ),
-        dry_run(
-            "run: restore ignores the memory",
-            run(&[
-                "--memory-mib",
-                "512",
-                "--restore-snapshot",
-                "{root/snapshot}",
-            ]),
-            restore(),
-        ),
-        // Paths print with their components alone, as `Path::components` reads them, relative
-        // ones included: a leading `.` stays.
-        dry_run(
-            "run: restore paths",
-            run(&[
-                "--restore-snapshot",
-                "./snapshot/",
-                "--restore-ready-path",
-                "run//ready.sock",
-            ]),
-            restore()
-                .with("--restore-snapshot", [native("./snapshot")])
-                .with("--restore-ready-path", [native("run/ready.sock")]),
         ),
         dry_run(
             "run: one share",
@@ -885,53 +736,6 @@ fn run_dry_runs() -> Vec<DryRun> {
                 .with("--mount-owner", ["vmm"])
                 .kernel(&two_tokens()),
         ),
-        // A restore adds no boot tokens: its guest keeps the binds that its boot made.
-        dry_run(
-            "run: restore with shares",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--mount",
-                "/data,{root/share},rw",
-                "--mount",
-                "/other,{root/share2}",
-                "--mount",
-                "/etc/single.txt,{root/single.txt}",
-            ]),
-            restore()
-                .with("--mount-aggregate", ["/run/nvx/shares"])
-                .with(
-                    "--mount-child",
-                    [
-                        mount_child(0, "/data", "{root/share}", "rw"),
-                        mount_child(1, "/other", "{root/share2}", "ro"),
-                        mount_child(2, "/etc/single.txt", "{root/single.txt}", "ro,file"),
-                    ],
-                ),
-        ),
-        dry_run(
-            "run: restore with shares and a command line",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--mount",
-                "/data,{root/share},rw",
-                "--mount",
-                "/other,{root/share2}",
-                "--cmdline",
-                "quiet",
-            ]),
-            restore()
-                .with("--mount-aggregate", ["/run/nvx/shares"])
-                .with(
-                    "--mount-child",
-                    [
-                        mount_child(0, "/data", "{root/share}", "rw"),
-                        mount_child(1, "/other", "{root/share2}", "ro"),
-                    ],
-                )
-                .with("--cmdline", ["quiet"]),
-        ),
         // A proxy is exclusive of direct egress allow rules.
         dry_run(
             "run: network",
@@ -1035,94 +839,6 @@ fn run_dry_runs() -> Vec<DryRun> {
             cold_boot().with("--network-egress", ["deny"]),
         )
         .refusing("network policy options require --net"),
-        // A restore takes the addressing of its NIC from the snapshot, so it passes the profile
-        // and the policy without `--net`.
-        dry_run(
-            "run: restore of a networked snapshot",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--network-profile",
-                "portable",
-            ]),
-            restore().with("--network-profile", ["portable"]),
-        ),
-        dry_run(
-            "run: restore with a network policy",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--network-profile",
-                "portable",
-                "--network-egress",
-                "deny",
-                "--network-egress-allow",
-                "10.0.0.0/8:tcp:443",
-                "--network-egress-deny",
-                "10.1.0.0/16",
-                "--host-loopback",
-                "deny",
-                "--network-proxy",
-                "10.0.0.1:3128",
-            ]),
-            restore()
-                .with("--network-profile", ["portable"])
-                .with("--network-egress", ["deny"])
-                .with("--network-egress-allow", ["10.0.0.0/8:tcp:443"])
-                .with("--network-egress-deny", ["10.1.0.0/16"])
-                .with("--host-loopback", ["deny"])
-                .with("--network-proxy", ["10.0.0.1:3128"]),
-        ),
-        dry_run(
-            "run: restore with an egress policy file",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--network-profile",
-                "portable",
-                "--network-egress",
-                "deny",
-                "--network-egress-policy-file",
-                "{root/policy.json}",
-            ]),
-            restore()
-                .with("--network-profile", ["portable"])
-                .with("--network-egress", ["deny"])
-                .with("--network-egress-allow", COMPILED_ALLOW)
-                .with("--network-egress-deny", COMPILED_DENY),
-        )
-        .with_file("policy.json", POLICY),
-        // With `--restore-network-policy`, a restore installs the policy of its network options
-        // in place of a NIC template's deny-all, ingress, explicit host loopback, and forwards
-        // included, which OpenVMM admits only with the option.
-        dry_run(
-            "run: restore that replaces the network policy",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--restore-network-policy",
-                "--network-profile",
-                "portable",
-                "--network-egress",
-                "deny",
-                "--network-egress-allow",
-                "10.0.0.1/32:udp:53",
-                "--network-ingress",
-                "allow",
-                "--host-loopback",
-                "allow",
-                "--host-loopback-forward",
-                "tcp:8080:80",
-            ]),
-            restore()
-                .flag("--restore-network-policy")
-                .with("--network-profile", ["portable"])
-                .with("--network-egress", ["deny"])
-                .with("--network-egress-allow", ["10.0.0.1/32:udp:53"])
-                .with("--network-ingress", ["allow"])
-                .with("--host-loopback", ["allow"])
-                .with("--host-loopback-forward", ["tcp:8080:80"]),
-        ),
         dry_run(
             "run: host loopback forward",
             run(&["--host-loopback-forward", "tcp:8080:80"]),
@@ -1189,16 +905,6 @@ fn run_dry_runs() -> Vec<DryRun> {
             "boot.command_line cannot contain double quotes or a standalone -- with the OpenVMM control console",
         ),
         dry_run(
-            "run: restore retains quoted command line and delimiter",
-            run(&[
-                "--restore-snapshot",
-                "{root/snapshot}",
-                "--cmdline",
-                "a=\"b c\" -- d",
-            ]),
-            restore().with("--cmdline", ["a=\"b c\" -- d"]),
-        ),
-        dry_run(
             "run: command line starting with a dash",
             run(&["--cmdline=-x"]),
             cold_boot().with("--cmdline", ["-x"]),
@@ -1222,13 +928,6 @@ fn run_dry_runs() -> Vec<DryRun> {
             "run: last command line",
             run(&["--cmdline", "a", "--cmdline", "b"]),
             cold_boot().with("--cmdline", ["b"]),
-        ),
-        dry_run(
-            "run: restore without the budget",
-            run(&many),
-            restore()
-                .with("--mount-aggregate", ["/run/nvx/shares"])
-                .with("--mount-child", many_children),
         ),
         // The command line and the boot tokens fill the 1024 bytes that OpenVMM leaves them.
         dry_run(
@@ -1291,11 +990,7 @@ fn dry_runs_print_the_openvmm_command_and_launch_nothing() {
         let cold = case
             .arguments
             .first()
-            .is_some_and(|command| command == "run")
-            && !case
-                .arguments
-                .iter()
-                .any(|argument| argument == "--restore-snapshot");
+            .is_some_and(|command| command == "run");
         let outcome = root.nvx_rs(&arguments);
         eprintln!("case: {}", case.name);
         if let Some(message) = case.refusal {

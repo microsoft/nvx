@@ -47,8 +47,6 @@ pub use self::process::process_start_time;
 pub(crate) use self::process::{
     ProcessHandle, boot_id, host_id, monotonic_ns, open_process, own_bytes_read,
 };
-#[cfg(feature = "cli")]
-pub(crate) use self::spawn::spawn_foreground;
 pub(crate) use self::spawn::{LaunchedProcess, SpawnMode, spawn_with_stdio};
 
 /// Whether this host can run NVX microVMs.

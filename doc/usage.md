@@ -147,73 +147,73 @@ nvx-rs/target/release/nvx-rs run
     [--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT]...
     [--outcome-report PATH]
     [--cmdline TEXT]
-    [--restore-snapshot PATH]
-    [--restore-processors {1,2,4,8}]
-    [--restore-memory-mib MIB]
-    [--restore-ready-path PATH]
-    [--restore-network-policy]
+    [--restore-snapshot NAME --store-dir PATH --state-dir PATH]
+    [--layer ROLE,PATH,IMAGE_UUID]...
+    [--layer-format {erofs,gpt}]
+    [--scratch PATH]
+    [--upper {scratch,ram}]
+    [--ram-upper-percent PERCENT]
+    [--entrypoint PATH]
+    [--arg VALUE]...
+    [--hostname NAME]
+    [--workload-user UID:GID]
+    [--timeout SECONDS]
     [--dry-run]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--guest {alpine,ubuntu,azurelinux}` | `alpine` | Select Alpine, Ubuntu, or Azure Linux userland with the same NVX kernel. This option is not used for snapshot restore. |
+| `--guest {alpine,ubuntu,azurelinux}` | `alpine` | Select Alpine, Ubuntu, or Azure Linux userland with the same NVX kernel. A restore refuses it. |
 | `--hypervisor {auto,whp,kvm,mshv}` | `auto` | Select the OpenVMM hypervisor. `auto` chooses WHP on Windows and KVM elsewhere. |
 | `--machine {microvm}` | `microvm` | Select the fixed-topology microVM with shared-status edge interrupts. |
-| `--memory-mib MIB` | guest-specific | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux. |
-| `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot, in the range of `--memory-mib`. |
-| `--processors {1,2,4,8}` | `1` | Select the microVM processor count, written as one of the choices. |
-| `--cpu-profile ID` | `auto` | Select the guest's [CPU profile](#cpu-profiles): `auto` for the built-in profile of the host's CPU, which falls back with a warning to a development profile derived from this host on an Intel or AMD CPU that no built-in profile serves, a built-in profile ID, or `host` for that development profile. A restore uses the snapshot's profile, which `auto` and, for a host profile, `host` also name. |
-| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose a host directory, or a single regular host file without its directory, at the guest target: an absolute, canonical path other than `/`, without whitespace, control characters, double quotes, backslashes, `=`, or any UTF-8 byte that Linux treats as whitespace, such as the `0xa0` in `à`. Cold boots also protect the system paths listed below. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to expose more directories or files, each with its own target and mode, as the children of an aggregate on the microVM's one virtio-fs device, which the guest binds at their targets; a shared file always uses the aggregate. Targets and host paths must not overlap, and the shares' kernel command-line tokens must fit its 1024-byte budget. An `rw` mapping accepts guest-created symbolic links, which the host never follows. Active snapshot restore requires the same mappings in the same order, with the same canonical paths, kinds, targets, modes, and ownership mode; a dormant-slot restore may attach one new directory mapping that the resumed guest mounts explicitly. |
+| `--memory-mib MIB` | guest-specific | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. Defaults to 128 for Alpine, 512 for Ubuntu, and 512 for Azure Linux, and for a restore to 256, as for [`snapshot restore`](#snapshot-restore), which must be a multiple of 128 between the snapshot's boot memory and its capacity. |
+| `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot, in the range of `--memory-mib`. A restore refuses it. |
+| `--processors {1,2,4,8}` | `1` | Select the microVM processor count, written as one of the choices. A restore refuses it: its VM keeps the processors that the snapshot had online. |
+| `--cpu-profile ID` | `auto` | Select the guest's [CPU profile](#cpu-profiles): `auto` for the built-in profile of the host's CPU, which falls back with a warning to a development profile derived from this host on an Intel or AMD CPU that no built-in profile serves, a built-in profile ID, or `host` for that development profile. A restore refuses it: it uses the snapshot's profile. |
+| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose a host directory, or a single regular host file without its directory, at the guest target: an absolute, canonical path other than `/`, without whitespace, control characters, double quotes, backslashes, `=`, or any UTF-8 byte that Linux treats as whitespace, such as the `0xa0` in `à`. Cold boots also protect the system paths listed below. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to expose more directories or files, each with its own target and mode, as the children of an aggregate on the microVM's one virtio-fs device, which the guest binds at their targets; a shared file always uses the aggregate. Targets and host paths must not overlap, and the shares' kernel command-line tokens must fit its 1024-byte budget. An `rw` mapping accepts guest-created symbolic links, which the host never follows. A restore refuses it and the other share options. |
 | `--mount-deny HOST_PATH` | none | Hide one existing file or directory inside a mounted host root; repeat to deny multiple paths. It may name the root itself when `--mount-allow` paths inside it remain. With several mappings, or a shared file, the path must be absolute; a shared file takes none. |
 | `--mount-allow HOST_PATH` | none | Expose one existing file or directory inside a `--mount-deny` path again; the hidden directories on the way list only the entries that lead to it. Repeat to allow multiple paths. With several mappings, or a shared file, the path must be absolute; a shared file takes none. See [Access policy](run.md#access-policy). |
-| `--mount-write HOST_PATH` | none | Make one existing file or directory one of the only writable parts of an `rw` mapping; the guest's writes anywhere else in it fail with `EROFS`. Repeat to declare multiple writable paths. With several mappings, or a shared file, the path must be absolute; a shared file takes none. Active snapshot restore requires the same denied, allowed, and writable paths. |
+| `--mount-write HOST_PATH` | none | Make one existing file or directory one of the only writable parts of an `rw` mapping; the guest's writes anywhere else in it fail with `EROFS`. Repeat to declare multiple writable paths. With several mappings, or a shared file, the path must be absolute; a shared file takes none. |
 | `--mount-owner {vmm,caller}` | `vmm` | Select the host identity of the guest's operations on every `--mount` directory or file. `caller` performs each one as the guest caller's UID and GID and squashes guest root to the owner of the shared directory or file; it requires a Linux host. See [Run](run.md#file-ownership). |
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. The guest also gets the IPv6 address that embeds it in `fd00::/96`, such as `fd00::a00:2/120` for `10.0.0.2/24`. A restore takes the addresses from the snapshot and rejects this option. |
-| `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net` on a fresh boot, and without it to restore a snapshot captured with `--net`. |
+| `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net` on a fresh boot, and without it to restore a snapshot with a NIC. |
 | `--network-egress {allow,deny}` | `allow` | Set the default guest egress policy. |
-| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). Snapshot capture rejects `allow`, and so does a restore, unless `--restore-network-policy` installs a new policy. |
+| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). Snapshot capture rejects `allow`. |
 | `--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Allow matching guest egress; repeat to add rules. `CIDR` is an IPv4 or IPv6 address or network, and a rule matches only its own family. `PROTOCOL` is `tcp`, `udp`, or `icmp` and matches every port when `PORT` is omitted; only `tcp` and `udp` take a `PORT` or an inclusive `PORT-PORT` range, such as `8000-8010`. |
 | `--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Deny matching guest egress; repeat to add rules. Deny rules take precedence. `PROTOCOL` and `PORT` select traffic as for `--network-egress-allow`. |
 | `--network-egress-policy-file PATH` | none | Load bounded IPv4 and IPv6 ranges and rule-local CIDR exclusions from JSON. Requires explicit `--network-egress`; cannot be mixed with explicit allow/deny rule flags. |
-| `--host-loopback {allow,deny}` | existing mapping | Control access between the guest and host loopback services. Explicit `allow` is bidirectional: the guest reaches host loopback through its gateway, and every TCP and UDP port on which the guest listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; it needs a `--net` prefix of `/29` or shorter, which OpenVMM checks; see [Host-loopback access](run.md#host-loopback-access). Snapshot capture rejects `allow`, and so does a restore, unless `--restore-network-policy` installs a new policy. |
+| `--host-loopback {allow,deny}` | existing mapping | Control access between the guest and host loopback services. Explicit `allow` is bidirectional: the guest reaches host loopback through its gateway, and every TCP and UDP port on which the guest listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; it needs a `--net` prefix of `/29` or shorter, which OpenVMM checks; see [Host-loopback access](run.md#host-loopback-access). Snapshot capture rejects `allow`. |
 | `--network-proxy IPV4:TCP-PORT` | none | Allow one explicit host TCP proxy endpoint. |
-| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Snapshot capture rejects forwards, and so does a restore, unless `--restore-network-policy` installs a new policy. |
-| `--outcome-report PATH` | none | Write a bounded local JSON outcome report to a new file in an existing plain directory. A cold boot rejects an existing destination before launch and never replaces a file or follows a destination symlink. A missing report or publication failure is diagnosed without replacing OpenVMM's exit status. |
-| `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. Cold boots reject double quotes and a standalone `--` token, which the VM control console cannot represent; snapshot restore retains its existing command-line handling. |
-| `--restore-snapshot PATH` | none | Restore the immutable machine contract and saved state from a snapshot directory. A snapshot captured with `--net` needs `--network-profile portable` and the network policy options of its capture, unless `--restore-network-policy` installs a new policy; see [Networked snapshots](run.md#networked-snapshots). |
-| `--restore-processors {1,2,4,8}` | none | Bring this contiguous processor prefix online before restore readiness. Requires an opt-in microVM snapshot and cannot exceed `--processors` capacity. |
-| `--restore-memory-mib MIB` | none | Select the 128 MiB-aligned RAM target for an expansion-capable snapshot restore, in the range of `--memory-mib`. |
-| `--restore-ready-path PATH` | none | Publish one restore-readiness event to an existing Unix socket or Windows named pipe. |
-| `--restore-network-policy` | off | Install the policy of the network options, which may include `--network-ingress allow`, explicit `--host-loopback allow`, and forwards, in place of the complete deny-all policy, `--network-egress deny` and `--host-loopback deny` without egress rules, a proxy, or ingress, that the snapshot's NIC was captured with. The guest applies the new policy's DNS server and listener announcements before the host releases its input; see [Networked snapshots](run.md#networked-snapshots). Requires `--restore-snapshot`. |
-| `--dry-run` | off | Print the generated OpenVMM command without running it. |
+| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Snapshot capture rejects forwards. |
+| `--outcome-report PATH` | none | Write a bounded local JSON outcome report to a new file in an existing plain directory. A cold boot rejects an existing destination before launch and never replaces a file or follows a destination symlink. A missing report or publication failure is diagnosed without replacing OpenVMM's exit status. A restore refuses it. |
+| `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. Cold boots reject double quotes and a standalone `--` token, which the VM control console cannot represent. A restore refuses it. |
+| `--restore-snapshot NAME` | none | Restore the snapshot `NAME` of `--store-dir`, which [`snapshot capture`](#snapshot-capture) published, in place of a cold boot, as described below. A raw OpenVMM snapshot directory is refused. |
+| `--store-dir PATH` | none | The named snapshot store of `--restore-snapshot`, which a restore requires. |
+| `--state-dir PATH` | none | The directory of a restore's sandbox, which a restore requires: one that does not exist, outside the store, on the store's filesystem. The run creates it, and removes it once it ends. A cold boot refuses it. |
+| `--layer`, `--layer-format`, `--scratch`, `--upper`, `--ram-upper-percent`, `--entrypoint`, `--arg`, `--hostname`, `--workload-user`, `--timeout` | as for [`sandbox`](#sandbox) | The image, the upper, and the workload of a restore, and the seconds of its waits, as [`snapshot restore`](#snapshot-restore) takes and checks them: the workload runs over the control protocol, so its entrypoint and arguments may contain whitespace and double quotes. A cold boot refuses them. |
+| `--dry-run` | off | Print the generated OpenVMM command without running it. A restore refuses it. |
 
 Cold `--mount` targets may not cover, equal, or lie below `/bin`, `/boot`,
 `/dev`, `/etc`, `/lib`, `/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/usr`,
 `/var`, or `/init`: these paths belong to the guest's blockless system.
 For example, use `/config/single.txt` rather than `/etc/single.txt` for a
-shared configuration file. Snapshot restore keeps its existing mapping rules.
+shared configuration file.
 Cold mount-policy options require a `--mount`, and network-policy options
 require networking. A proxy is the guest's sole egress path, so it cannot be
 combined with `--network-egress-allow` rules for direct connections.
 
-`nvx-rs run` checks its options, prints the OpenVMM command after `>> `, and
-unless `--dry-run` is given, runs OpenVMM with the standard streams. A cold
-boot attaches the guest's console, the boot console `hvc1`, to them, so that
-the terminal's input reaches the guest through it rather than through the byte
-channel, `hvc0`, whose output, such as the kernel's early messages, goes to
-standard error. A restore attaches the boot console to them again when its
-snapshot's boot console was on the terminal, as the snapshot's `manifest.bin`
-records, since OpenVMM restores such a snapshot only with that console
-attached again, and attaches none otherwise. It reads the manifest even with
-`--dry-run`, and fails, before it downloads anything or starts OpenVMM, when it
-cannot read it. It exits
+`nvx-rs run` checks its options, prints the OpenVMM command of a cold boot
+after `>> `, and unless `--dry-run` is given, runs OpenVMM with the standard
+streams. A cold boot attaches the guest's console, the boot console `hvc1`, to
+them, so that the terminal's input reaches the guest through it rather than
+through the byte channel, `hvc0`, whose output, such as the kernel's early
+messages, goes to standard error. It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and
-`nvx-rs run: error[CODE]: MESSAGE`. A cold boot requires the OpenVMM release
+`nvx-rs run: error[CODE]: MESSAGE`. A run requires the OpenVMM release
 binary, `build/vmlinux`, and the selected `build/initramfs*.cpio.gz`, and a
-restore only OpenVMM. When one of them is missing from a Git checkout that
+restore the Alpine one. When one of them is missing from a Git checkout that
 holds none of the files that a release installs, `run` first installs the
 release of the checkout, as [`download`](#download) does, reporting on standard
 error; a checkout that holds some of them gets a warning instead, and the
@@ -223,6 +223,42 @@ unless it starts like a negative number in ASCII digits, such as `-1`, and its
 name cannot be abbreviated. Ubuntu selection never falls back to Alpine. See
 [Run](run.md) for host setup, guest shutdown, networking, and virtio-fs
 examples.
+
+With `--restore-snapshot NAME`, `run` restores the named snapshot of
+`--store-dir` in place of a cold boot, as [`snapshot restore`](#snapshot-restore)
+restores one, but once: it provisions a managed sandbox in `--state-dir`, a
+new directory outside the store, on the filesystem of the snapshot's files,
+which the restore links into it, with the image, upper, and workload of its
+restore options, and starts it from the snapshot under the snapshot's lock. It
+prints no OpenVMM command, and forwards the workload's output. Once the
+workload has exited with status 0 within `--timeout`, 60 seconds by default, it
+stops the VM; it then removes the sandbox and `--state-dir`, also after a
+failure or Ctrl-C, except as the next paragraph says, and exits with the
+workload's status, or with status 1 for a restore that fails, and 130 after
+Ctrl-C. It refuses a raw OpenVMM snapshot directory, which
+`--restore-snapshot` named before, without reading it, a `--state-dir` that
+exists or lies in the store, a workload that `snapshot restore` refuses, and
+the options that the snapshot or its sandbox fixes: `--guest`,
+`--memory-capacity-mib`, `--processors`, `--cpu-profile`, `--net`, the share
+options, `--outcome-report`, `--cmdline`, and `--dry-run`. A cold boot refuses
+`--store-dir`, `--state-dir`, and the restore options. The snapshot fixes the
+NIC: the restore of a snapshot without one, as `snapshot capture` captures
+them, takes no network options, and that of a snapshot with a NIC installs the
+policy of its network options, which need `--network-profile`, as the policy
+of the NIC, with its DNS server, egress, forwards, and published listeners.
+
+A `run` that dies before it removes its sandbox, as `kill -9` ends it, leaves
+`--state-dir` with the sandbox's files and its view of the snapshot, and its
+VM, whose OpenVMM process keeps running, also once its workload has exited,
+until a command of the sandbox ends it; nothing else does. So does Ctrl-C once
+the workload has exited with status 0, while the run stops the VM. The
+snapshot's lock goes with the `run`, so other restores of the snapshot proceed,
+and a later `run` refuses the existing `--state-dir`. While the workload ran,
+the start was unfinished, and `nvx-rs sandbox deprovision --state-dir PATH`
+ends the VM, through the recovery of the start's launch journal, and removes
+the directory. Once the workload had exited with status 0, the VM runs as a
+started sandbox does, and `nvx-rs sandbox stop --state-dir PATH` must end it
+before `deprovision` removes the directory.
 
 If no built-in CPU profile serves an Intel or AMD host's CPU, OpenVMM falls
 back to a host profile and warns with `NVX-CPU-PROFILE-FALLBACK:` at every
@@ -437,6 +473,8 @@ any other end fails the start, which ends the VM. The sandbox then runs as a
 started one does, for `sandbox exec` and `sandbox stop`. A start journals its
 launch as a cold start does, so a restore whose command dies before the guest
 is ready never completes, and the next command of the sandbox ends its VM.
+[`run --restore-snapshot`](#run) restores a snapshot once, in a sandbox that it
+removes.
 
 ### `download`
 
@@ -1247,10 +1285,7 @@ backend and splits the backend's suite into COUNT shards. The
 test hook, which makes OpenVMM's default CPU profile selection, `auto`, fall
 back to a host profile on a host that a built-in profile serves, checks the
 fallback's warning, captures the guest, and restores it on the snapshot's host
-profile. The `run-console-restore` scenario captures a cold boot whose boot
-console is on OpenVMM's standard streams, restores the snapshot through
-[`nvx-rs run`](#run), which must attach that console to the terminal again, and
-types a script into the restored guest's shell. The `console-snapshot`
+profile. The `console-snapshot`
 scenario first checks that OpenVMM refuses a boot console on TCP, as a
 listener or a client, with a network and without one, since a guest reaches
 host loopback through its gateway (see

@@ -1291,9 +1291,7 @@ mistyped, or repeated field, truncated bytes, and a capture that is not a
 template's: a platform-tier capture for clones, with a read-only `distro` whose
 identity is unbound, a fresh scratch, and the dormant filesystem slot. Of the
 snapshot ID that OpenVMM's SaveVM records, which a microVM capture leaves zero,
-it checks only the length. The restores of [`run`](#run) read the host
-attachments of the machine contract of any microVM snapshot's manifest through
-the same reader, with every check but those that make a manifest a template's.
+it checks only the length.
 
 `CaptureClass` holds the invariant inputs of a capture, known before it: the
 runtime, the guest's build, the backend, the requested CPU profile, the
@@ -2843,46 +2841,50 @@ message.
 `nvx-rs run` ([Usage](../doc/usage.md#run)) has the options, with their names,
 defaults, and value checks, and the checks, messages, outputs, and exit
 statuses of the `nvx.py run` that it replaced, except as
-[Other differences from nvx.py](#other-differences-from-nvxpy) lists. It
-prints `>> COMMAND`, OpenVMM's command line, quoted as `sandbox run` quotes
-it, and unless `--dry-run` is given, it runs OpenVMM with the standard
+[Other differences from nvx.py](#other-differences-from-nvxpy) lists. A cold
+boot prints `>> COMMAND`, OpenVMM's command line, quoted as `sandbox run`
+quotes it, and unless `--dry-run` is given, it runs OpenVMM with the standard
 streams, so that the guest's console and the terminal settings that OpenVMM
 restores behave as they do for OpenVMM itself, and exits with OpenVMM's
-status.
+status; a restore does none of these, as the second item says.
 
 - A cold boot runs the kernel and the initramfs of `--guest`, `alpine` by
   default, with `--memory-mib` or else the guest's default, 128 MiB for Alpine
   and 512 MiB for Ubuntu and Azure Linux, which `Guest::default_memory_mib`
-  gives. `--restore-snapshot` restores a snapshot instead, without them, and
-  with the `--restore-*` options, which need it.
+  gives.
+- `--restore-snapshot NAME` restores the named snapshot of `--store-dir` in
+  place of a cold boot, once, through the path of `snapshot restore`: it
+  provisions a managed sandbox in `--state-dir`, a new directory outside the
+  store, on its filesystem, with the image, upper, workload, and timeout of the
+  options of `snapshot restore` that `sandbox` defines and parses,
+  `--state-dir`, `--layer`, `--layer-format`, `--scratch`, `--upper`,
+  `--ram-upper-percent`, `--entrypoint`, `--arg`, `--hostname`,
+  `--workload-user`, and `--timeout`, starts it from the snapshot, which
+  forwards the workload's output, stops the VM once the workload has exited
+  with status 0, removes the sandbox and its directory in any case, and exits
+  with the workload's status. It refuses a raw OpenVMM snapshot before it
+  reads anything, a `--state-dir` that exists or lies in the store, a workload
+  that `snapshot restore` refuses, and the options of a cold boot that the
+  snapshot or its sandbox fixes; a cold boot refuses `--store-dir`,
+  `--state-dir`, and the restore options. A `run` that dies before it removes
+  the sandbox leaves it with its VM running, which `sandbox deprovision` ends,
+  after `sandbox stop` once the workload has exited with status 0; see
+  [`run`](../doc/usage.md#run).
 - A cold boot attaches the guest's console, the boot console `hvc1`, to the
   terminal with `--virtio-console console`, so that the terminal's input
   reaches the guest through it, not through the byte channel, `hvc0`, whose
-  output, such as the kernel's early messages, goes to standard error. A
-  restore reads its snapshot's `manifest.bin`, dry run or not, and passes
-  `--virtio-console console` when the manifest's machine contract holds the
-  attachment of the boot console, `console:microvm-virtio0`, with the reconnect
-  policy `require-inherited-attachment`, which a capture with
-  `--virtio-console console` records, and which OpenVMM restores only with that
-  option again. It passes no `--virtio-console` otherwise, which OpenVMM
-  requires of a snapshot without a boot console. A manifest that it cannot read
-  fails the restore before OpenVMM starts, and before anything is downloaded,
-  as options that it refuses do.
+  output, such as the kernel's early messages, goes to standard error.
 - A cold boot takes `--net` and `--network-profile` together. A restore takes
-  the addressing of its NIC from the snapshot, as OpenVMM does, so it refuses
-  `--net`, and passes `--network-profile` alone, which OpenVMM requires, with
-  the network policy that the snapshot was captured with, to restore a
-  snapshot that has a NIC, or, with `--restore-network-policy`, which needs
-  `--restore-snapshot`, with a policy of its own, which OpenVMM installs on a
-  NIC template in place of the complete deny-all policy that the template was
-  captured with, and whose DNS server and listener announcements the guest
-  then applies; OpenVMM checks the snapshot and the new policy.
+  the addressing of its NIC from the snapshot, so it refuses `--net`. Its other
+  network options are the restore's own policy, at the NIC's address, which
+  `sandbox` lowers, with its DNS server, egress, forwards, and published
+  listeners; a snapshot with a NIC needs `--network-profile` with them, and one
+  without, as `snapshot capture` captures, refuses them.
 - One directory `--mount` is OpenVMM's `--mount`. Several, or a shared file,
   are the children of an aggregate at `/run/nvx/shares`, whose guest targets
   must be absolute, must not overlap, and must survive the kernel command line,
   and on a cold boot, their `nvx_share=` tokens join `--cmdline` within the
-  1024 bytes that OpenVMM leaves to them; a restore adds none, since its guest
-  keeps the binds that its boot made. `--mount-deny`, `--mount-allow`, and
+  1024 bytes that OpenVMM leaves to them. `--mount-deny`, `--mount-allow`, and
   `--mount-write` name host paths, which OpenVMM attributes to the share that
   holds them, and which must be absolute with an aggregate, unlike those of
   `sandbox`, which apply to the `--mount` before them.
@@ -3073,11 +3075,10 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   `"/state/config.json": Permission denied (os error 13)`, where `nvx.py`
   printed Python's `[Errno 13] Permission denied: '/state/config.json'`.
 - Integer options take ASCII decimal digits, in a range of their own: the MiB
-  of `--memory-mib`, `--memory-capacity-mib`, and `--restore-memory-mib` from 1
-  to 17592186044415, the most whose bytes OpenVMM counts in 64 bits, and
-  `--exec-timeout-ms` from 0 to 4294967295. `--processors` and
-  `--restore-processors` take one of their choices as written, and `--timeout`
-  a number as Rust reads an `f64`. `nvx.py` read them with Python's `int` and
+  of `--memory-mib` and `--memory-capacity-mib` from 1 to 17592186044415, the
+  most whose bytes OpenVMM counts in 64 bits, and `--exec-timeout-ms` from 0 to
+  4294967295. `--processors` takes one of its choices as written, and
+  `--timeout` a number as Rust reads an `f64`. `nvx.py` read them with Python's `int` and
   `float`, which also accept signs, underscores, surrounding whitespace, and the
   digits of other scripts, and left OpenVMM to refuse a negative size, and
   `exec` to refuse a timeout beyond 32 bits, where `nvx-rs` refuses them as
@@ -3165,19 +3166,14 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   [`nvx::host::supervisor`](#nvxhostsupervisor).
 - `start` and `exec` refuse, and `stop` terminates, a VM that another runtime
   identity started; see [Runtime identity](#runtime-identity).
-- `run --restore-snapshot` refuses `--net`, whose addressing a restored NIC
-  takes from the snapshot, and passes `--network-profile` without it, as
-  OpenVMM requires to restore a snapshot that has a NIC. `nvx.py run` took the
-  two only together, so it could not restore such a snapshot: OpenVMM refused
-  its `--net`, or required the `--network-profile` that it omitted.
-- `run --restore-network-policy`, which `nvx.py run` lacked, passes OpenVMM's
-  `--restore-network-policy`, so that a restore of a NIC template installs the
-  policy of its network options; see
-  [Networked snapshots](../doc/run.md#networked-snapshots).
-- `run --restore-snapshot` reads the snapshot's `manifest.bin`, dry run or not,
-  to attach the boot console as the snapshot had it, and fails when it cannot
-  read it, where `nvx.py run` read nothing of the snapshot and left its checks
-  to OpenVMM.
+- `run --restore-snapshot` names a snapshot of `--store-dir` that
+  `snapshot capture` published, and restores it once through the path of
+  `snapshot restore`, where `nvx.py run` handed OpenVMM the directory of a raw
+  snapshot, which `nvx-rs run` refuses before it reads anything. It refuses
+  `--net`, whose addressing a restored NIC takes from the snapshot, and takes
+  none of the options of a raw restore, `--restore-processors`,
+  `--restore-memory-mib`, and `--restore-ready-path`, whose values the snapshot
+  and the restore fix.
 
 ### Test hooks
 
@@ -3186,8 +3182,8 @@ serves the sandbox profile: its managed lifecycle, with the capability on its
 standard input, the control console, and an outcome report at stop, and its
 one-shot runs, which run `/bin/echo`, `/bin/sleep`, `/bin/true`, or
 `/bin/false`, write an outcome report if asked, and exit with the workload's
-status. It also runs the microVMs of `nvx-rs run`, without a guest: a cold
-boot, or the restore of a snapshot directory, prints that it booted or restored
+status. It also runs microVMs without a guest, a cold boot of `nvx-rs run` or
+the restore of a snapshot directory: it prints that it booted or restored
 the microVM, writes an outcome report if asked, and exits with status 0, and a
 restore whose snapshot directory is missing fails with status 1. Like OpenVMM,
 a restore checks its `--virtio-console` against the attachment of the boot

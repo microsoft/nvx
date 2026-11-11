@@ -1,7 +1,6 @@
 //! The network options that `nvx-rs sandbox` and `nvx-rs run` share with `nvx.py`, ported from
-//! the parsers of `scripts/nvx.py`, `_resolve_network_egress_rules`, and
-//! `_extend_network_arguments`: their values, the egress rules of a
-//! `--network-egress-policy-file`, and the OpenVMM options that they become.
+//! the parsers of `scripts/nvx.py` and `_resolve_network_egress_rules`: their values and the
+//! egress rules of a `--network-egress-policy-file`.
 
 use std::path::Path;
 
@@ -115,43 +114,5 @@ impl NetworkOptions {
             allow: compiled.allow,
             deny: compiled.deny,
         })
-    }
-
-    /// Appends the OpenVMM options of these network options and `rules` to `command`, as
-    /// `_extend_network_arguments` does, for `run`, except that `--network-profile` goes without
-    /// `--net` too, as a restore passes it; `sandbox` lowers them through its typed network policy
-    /// instead.
-    pub(crate) fn extend_arguments(&self, command: &mut Vec<String>, rules: &NativeRules) {
-        let mut push = |name: &str, value: &str| {
-            command.push(name.to_owned());
-            command.push(value.to_owned());
-        };
-        if let Some(net) = &self.net {
-            push("--net", net);
-        }
-        if let Some(profile) = self.network_profile {
-            push("--network-profile", profile);
-        }
-        if let Some(egress) = self.network_egress {
-            push("--network-egress", egress);
-        }
-        if let Some(ingress) = self.network_ingress {
-            push("--network-ingress", ingress);
-        }
-        for rule in &rules.allow {
-            push("--network-egress-allow", rule);
-        }
-        for rule in &rules.deny {
-            push("--network-egress-deny", rule);
-        }
-        if let Some(host_loopback) = self.host_loopback {
-            push("--host-loopback", host_loopback);
-        }
-        if let Some(proxy) = &self.network_proxy {
-            push("--network-proxy", proxy);
-        }
-        for forward in &self.host_loopback_forward {
-            push("--host-loopback-forward", forward);
-        }
     }
 }
