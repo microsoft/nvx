@@ -1,54 +1,19 @@
-//! Templates and clones in the guest: the capture of a template's guest before its root's
-//! assembly, and the repair and the activation of each clone that a restore of its snapshot
-//! starts, for a guest init or agent, whether or not it is PID 1.
+//! Templates and clones in the guest: the activation of each clone that a restore of a
+//! template's snapshot starts, once its capture repaired it, for a guest init or agent, whether
+//! or not it is PID 1.
 //!
 //! A platform template is a VM whose snapshot holds no tenant's root, so that every clone that a
 //! restore of the snapshot starts can attach its own image, upper, and export. Its guest captures
-//! through a [`CapturePreparation`], which the caller makes of its own fence of workload
-//! admission, an [`AdmissionFence`], and the identities of the [`Devices`] from which the
-//! snapshot must hold no mount: the `distro` block device and the scratch block device, which
-//! their MMIO windows name, and the host filesystem device, which its virtio-fs tag names.
-//! [`CapturePreparation::prepare`], in order:
-//!
-//! 1. closes the caller's fence, so that no execution starts; a fence that is closed already
-//!    fails to close, which stops the preparation;
-//! 2. reads the mount table of the caller's mount namespace, `/proc/self/mountinfo`, at most
-//!    [`MOUNT_TABLE_LIMIT`] bytes of it, and refuses to capture while anything is mounted from the
-//!    distro device or one of its partitions, the scratch device, an overlay, or the filesystem
-//!    tag, bind mounts included, with a [`Mounted`] that names the first such mount;
-//! 3. waits until the time ABI's boot checks have completed, for 30 seconds at most, runs its
-//!    capture checks, and saves the settings of the stall detectors and suppresses them: RCU's
-//!    stall warnings, the soft-lockup detector, and the hung-task detector.
-//!
-//! It returns an owned [`CaptureBarrier`], which holds the fence closed and the detectors
-//! suppressed. [`CaptureBarrier::capture`] reads the VM generation ID, and requests the capture
-//! through [`TimeAbi::capture`] with the platform tier's request, which keeps no scratch, in the
-//! in-memory mode, so that no file holds the fresh entropy that a restore hands each clone. It
-//! returns how the capture ended:
-//!
-//! - [`Captured::Continued`]: the VM continued without a restore, and the barrier opened the
-//!   fence, then restored the detectors' settings.
-//! - [`Captured::Restored`]: a restore of the snapshot started this VM, a clone whose wall clock
-//!   the time ABI repaired, and whose [`Restore`] holds that entropy as its seed. Nothing else may
-//!   run before the clone's repair acknowledges the restore, so the fence stays closed:
-//!   [`Restored::into_parts`] hands it to the caller, which keeps it closed through the repair,
-//!   and opens it once the clone may admit executions, such as once it is activated. The
-//!   detectors stay suppressed until the repair finishes the restore, which hands their release
-//!   to the time daemon. OpenVMM ends a platform template's VM once its capture commits, so only
-//!   clones return with this outcome.
-//!
-//! [`CaptureBarrier::cancel`] opens the fence, then restores the detectors' settings, and so does
-//! a barrier that is dropped, which ignores a failure. A capture that fails restores the
-//! detectors' settings too, after which the caller ends the VM, but a request that fails leaves
-//! the fence closed: it may fail in a clone whose restore it could not repair. A preparation that
-//! fails releases what it took. A failure is a [`CaptureError`], which names the
-//! [`CaptureStage`] that failed and its [`CaptureCause`].
+//! through [`snapshot::capture`](crate::guest::snapshot::capture), with nothing mounted from the
+//! devices that its clones replace, in one call that, in each clone that a restore of the
+//! snapshot starts, also repairs the restore before it returns the [`Repaired`] clone, as the
+//! [`snapshot`](crate::guest::snapshot) module tells. A failure names the [`CaptureStage`] that
+//! failed and its [`CaptureCause`].
 //!
 //! # Repair
 //!
-//! A clone repairs its restore next, before anything else runs, with a [`Repair`] of the
-//! [`Restore`] that [`Restored::into_parts`] hands over, or with [`repair`](fn@repair), which
-//! runs one once. [`Repair::run`], in order:
+//! In a clone, the capture repairs the restore before it returns, and before anything else runs,
+//! in order:
 //!
 //! 1. checks that the restore holds its seed, and that its capture did not finish it;
 //! 2. reads the online CPUs, which must be a prefix of the CPUs, those that the clone captured
@@ -70,7 +35,7 @@
 //! 4. reseeds the kernel's random number generator with the seed, through
 //!    [`reseed::reseed`](crate::guest::reseed::reseed), then drops the seed, which zeroes its
 //!    bytes. Nothing before draws randomness, from `getrandom` or from `/dev/urandom`;
-//! 5. finishes the restore through [`TimeAbi::restore_finish`], with the acknowledgement when
+//! 5. finishes the restore through the time ABI, with the acknowledgement when
 //!    the host gates its input until then, and the CPUs that it brought online, which hands the
 //!    deferred time work to the time daemon: the restore checks, of the new CPUs too, the stall
 //!    detectors' grace period and release, and the wall-clock discipline's fast cadence. The
@@ -83,13 +48,12 @@
 //!
 //! It returns the [`Repaired`] clone: its new VM generation ID, its number of online CPUs, the
 //! size of its online memory blocks, and when it acknowledged the restore, which an activation
-//! checks against the resources that it expects. The repair records how far it got, so that it
-//! never brings a CPU online twice nor adds a memory block twice, and runs the reseed and the
-//! finish at most once, whoever retries it: a failure at or after the reseed is final. It never
-//! touches the fence. A failure is a [`RepairError`], which names the [`RepairStage`] that
-//! failed, its [`RepairCause`], and the repair's [`RepairProgress`], and selects the status with
-//! which the caller ends the VM, [`RepairError::status`], which `nvx::protocol::status`
-//! documents.
+//! checks against the resources that it expects. The repair never brings a CPU online twice nor
+//! adds a memory block twice, and runs the reseed and the finish at most once. A failure is a
+//! [`RepairError`], which names the [`RepairStage`] that failed, its [`RepairCause`], and the
+//! repair's [`RepairProgress`], and selects the status with which the caller ends the VM,
+//! [`RepairError::status`], which `nvx::protocol::status` documents: the capture fails with it,
+//! as a [`CaptureCause::Repair`], and the guest must end.
 //!
 //! # Strict mode
 //!
@@ -99,10 +63,9 @@
 //! [`status`](crate::guest::time::Violation::status) is the one with which the ABI would have
 //! stopped the VM, rather than stopping the VM, so that the caller owns the VM's exit status and
 //! its shutdown. A capture request fails so in a clone whose restore the time ABI could not
-//! repair, with 195, as a [`CaptureStage::Capture`] error, and a repair, with 195 or 193, as
-//! [`RepairError::status`] tells. The capture's preparation enforces the ABI, as
-//! `nvx-time pre-capture` does, and so does the time daemon: a violation of either stops the VM,
-//! unless the ABI is report-only.
+//! repair, with 195, as a [`CaptureStage::Capture`] failure, and a repair, with 195 or 193, as
+//! [`RepairError::status`] tells. The time daemon enforces the ABI all the same: a violation that
+//! it reports stops the VM, unless the ABI is report-only.
 //!
 //! # Activation
 //!
@@ -193,68 +156,44 @@
 //! # Example
 //!
 //! ```no_run
-//! use std::io;
 //! use std::time::{Duration, Instant};
 //!
-//! use nvx::guest::activation::{
-//!     self, Activation, AdmissionFence, CapturePreparation, Captured, Devices,
-//! };
-//! use nvx::guest::root::Device;
+//! use nvx::guest::activation::Activation;
+//! use nvx::guest::snapshot::{self, Captured, Devices, Disks, Disposition};
 //! use nvx::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 //!
-//! /// The agent's admission of executions, which it checks before it starts one.
-//! struct Admission {
-//!     open: bool,
-//! }
-//!
-//! impl AdmissionFence for Admission {
-//!     fn close(&mut self) -> io::Result<()> {
-//!         // Another preparation, or a clone before its repair, holds the fence closed.
-//!         if !self.open {
-//!             return Err(io::ErrorKind::ResourceBusy.into());
-//!         }
-//!         self.open = false;
-//!         Ok(())
-//!     }
-//!
-//!     fn open(&mut self) {
-//!         self.open = true;
-//!     }
-//! }
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // At boot, the agent started the time daemon with `TimeAbi::start_daemon`, and supervises it.
-//! let mut admission = Admission { open: true };
 //! let devices = Devices {
-//!     distro: Device { mmio: DISTRO_MMIO_BASE, sectors: None },
-//!     scratch: Device { mmio: SCRATCH_MMIO_BASE, sectors: None },
+//!     distro: DISTRO_MMIO_BASE,
+//!     scratch: SCRATCH_MMIO_BASE,
 //!     filesystem_tag: "microvm".to_owned(),
 //! };
-//! let barrier = CapturePreparation::new(&mut admission, devices).prepare()?;
-//! match barrier.capture()? {
-//!     Captured::Continued => println!("the VM continued without a restore"),
-//!     Captured::Restored(restored) => {
-//!         // A clone continues here, with its wall clock repaired. Its repair activates its
-//!         // memory, reseeds it, and acknowledges the restore, while its fence stays closed.
-//!         let (restore, _fence) = restored.into_parts();
-//!         let repaired = match activation::repair(restore) {
-//!             Ok(repaired) => repaired,
-//!             Err(error) => {
-//!                 // The agent ends the VM with the failure's status, after an error line.
-//!                 eprintln!("{error} ({})", error.progress());
-//!                 std::process::exit(error.status().into());
-//!             }
-//!         };
+//! let timeout = Duration::from_secs(30);
+//! match snapshot::capture(&devices, Disks::Fresh, Instant::now() + timeout) {
+//!     Ok(Captured::Restored(repaired)) => {
+//!         // A clone continues here, repaired: its memory activated, its kernel reseeded, and its
+//!         // restore acknowledged.
 //!         println!("{} CPUs, {} bytes of memory", repaired.cpus(), repaired.memory());
 //!         // Its fence-free activation takes the host's Activate: the agent drives it with
 //!         // what its control session receives and admits executions only after Ready.
-//!         let timeout = Duration::from_secs(30);
 //!         let activation = Activation::new(&repaired, timeout, Instant::now());
 //!         println!("activate by {:?}", activation.deadline());
 //!     }
+//!     Ok(Captured::Continued) => println!("the VM continued without a restore"),
+//!     Err(failure) => match failure.disposition {
+//!         // The guest goes on, and the agent reports the failure.
+//!         Disposition::Resumed => eprintln!("{failure}"),
+//!         // The agent ends the VM with the failure's status, after an error line.
+//!         Disposition::MustEnd { status } => {
+//!             eprintln!("{failure}");
+//!             std::process::exit(status.into());
+//!         }
+//!         // A disposition that a later version adds cannot be known to be safe.
+//!         _ => std::process::exit(125),
+//!     },
+//!     // Nor can an outcome that a later version adds.
+//!     Ok(_) => std::process::exit(125),
 //! }
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! # Privileges and effects
@@ -266,10 +205,8 @@
 //! the states of the CPUs that it brings online and its memory interface. They mount nothing and
 //! start no thread, and they start no process and collect no child's status, except a
 //! report-only finish without a running time daemon, which runs the deferred time work itself,
-//! in a child that it waits for, as [`TimeAbi::restore_finish`] tells. Apart from a violation of
-//! the time ABI in the capture's preparation, which stops the VM unless the ABI is report-only,
-//! as [strict mode](#strict-mode) tells, they never power the VM off, so a caller that is not
-//! PID 1 keeps its own reaping, transport, and shutdown. The activation needs no privilege, and
+//! in a child that it waits for. They never power the VM off, so a caller that is not PID 1 keeps
+//! its own reaping, transport, and shutdown. The activation needs no privilege, and
 //! makes no system call and changes no admission fence. Its
 //! application, `apply`, needs the guest's root user, in the guest's initial mount
 //! namespace, as `root::assemble` does: for a GPT disk, it asks the kernel to reread the disk's
@@ -286,17 +223,14 @@ mod tests;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::GenerationId;
-use super::root::{self, Device, Paths};
-use super::snapshot::{self as mounts, DeviceNumber};
+use super::root::{self, Paths};
+use super::snapshot::DeviceNumber;
 use super::sys;
-use super::time::{
-    CaptureOutcome, CaptureRequest, PreCaptureError, Restore, ScratchPolicy, TimeAbi, TimeError,
-};
+use super::time::{CaptureOutcome, CaptureRequest, PreCaptureError, TimeAbi, TimeError};
 
 pub use self::state::{
     Activation, ActivationAction, ActivationCause, ActivationFailure, ActivationInput,
@@ -306,7 +240,6 @@ pub use self::state::{
 pub use self::state::{
     Applied, AppliedTeardownError, ApplyError, NetworkError, RootTemplate, apply,
 };
-pub use super::snapshot::repair::{Repair, repair};
 pub use super::snapshot::{MOUNT_TABLE_LIMIT, Mounted, Origin};
 pub use super::snapshot::{
     RangeFault, RepairCause, RepairError, RepairProgress, RepairStage, Repaired,
@@ -318,327 +251,8 @@ const MOUNT_TABLE: &str = "self/mountinfo";
 /// device number, `MAJ:MIN`.
 const BLOCK_DEVICES: &str = "dev/block";
 
-/// The caller's fence of workload admission, which its agent checks before it starts each
-/// execution: while the fence is closed, no execution starts.
-///
-/// A [`CapturePreparation`] closes it before anything else, and its [`CaptureBarrier`] opens it
-/// again once the capture continues or is canceled, or the barrier is dropped. A clone that a
-/// restore started gets the fence back closed, in its [`Restored`], and a capture request that
-/// fails leaves it closed. The fence need not end the executions that run already: a template's
-/// guest captures before it starts any. A preparation takes the fence, so a caller that keeps
-/// its admission's state lends it a handle of that state, or a mutable reference to its fence,
-/// which the trait's implementation for `&mut F` takes. Several handles may share one state, so
-/// closing the fence acquires it: [`close`](Self::close) fails while the fence is closed, such as
-/// by another preparation's barrier, and a preparation opens only a fence that it closed, so it
-/// never opens one that another holds closed.
-pub trait AdmissionFence {
-    /// Closes the fence: once it returns, no execution starts until [`open`](Self::open). It
-    /// fails while the fence is closed already, whoever closed it, and a failure leaves the fence
-    /// as it was.
-    fn close(&mut self) -> io::Result<()>;
-
-    /// Opens the fence that [`close`](Self::close) closed, so that executions start again.
-    fn open(&mut self);
-}
-
-impl<F: AdmissionFence + ?Sized> AdmissionFence for &mut F {
-    fn close(&mut self) -> io::Result<()> {
-        (**self).close()
-    }
-
-    fn open(&mut self) {
-        (**self).open();
-    }
-}
-
-/// The devices of a template's guest from which a capture must find nothing mounted, so that
-/// each clone attaches its own.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Devices {
-    /// The `distro` block device, which holds a layered root's image, named by its MMIO window,
-    /// such as [`DISTRO_MMIO_BASE`](crate::protocol::root::DISTRO_MMIO_BASE). Nothing may be
-    /// mounted from it or from a partition of it. The capture checks no size.
-    pub distro: Device,
-    /// The scratch block device, named by its MMIO window, such as
-    /// [`SCRATCH_MMIO_BASE`](crate::protocol::root::SCRATCH_MMIO_BASE). Nothing may be mounted
-    /// from it. The capture checks no size.
-    pub scratch: Device,
-    /// The virtio-fs tag of the host filesystem device, which the mount table shows as the source
-    /// of the device's mounts. Nothing may be mounted from it.
-    pub filesystem_tag: String,
-}
-
-/// The preparation of a template's guest for a capture, which the caller makes of its
-/// workload-admission fence and the identities of the devices from which the snapshot must hold
-/// no mount; see the [module](self).
-pub struct CapturePreparation<F> {
-    /// The caller's fence of workload admission.
-    fence: F,
-    /// The devices from which nothing may be mounted.
-    devices: Devices,
-}
-
-impl<F: AdmissionFence> CapturePreparation<F> {
-    /// Returns the preparation of a capture behind the caller's `fence`, of a guest from whose
-    /// `devices` nothing may be mounted.
-    pub fn new(fence: F, devices: Devices) -> Self {
-        Self { fence, devices }
-    }
-
-    /// Prepares the guest for the capture, as the [module](self) describes: closes the fence,
-    /// checks the mount table, waits for the time ABI's boot checks, runs its capture checks, and
-    /// suppresses the stall detectors, then returns the barrier that holds them.
-    ///
-    /// The wait for the boot checks lasts 30 seconds at most. A capture check that fails reports
-    /// a violation of the time ABI, which stops the VM unless the ABI is report-only, since the
-    /// preparation enforces it even in [strict mode](self#strict-mode); in report-only mode, the
-    /// preparation goes on, as `nvx-time pre-capture` does. A preparation that fails after it
-    /// closed the fence opens it again, and leaves the detectors' settings as they were: when it
-    /// suppressed some already, it restores their settings, and a failure to restore them is a
-    /// [`CaptureStage::Release`] error. One after which the calling thread may still hold some of
-    /// the permission for the time ABI's ports fails with [`TimeError::PortRelease`] instead,
-    /// after which the thread must start neither a thread nor a process, which would inherit it.
-    pub fn prepare(self) -> Result<CaptureBarrier<F>, CaptureError> {
-        self.prepare_with(capture_system(None))
-    }
-
-    /// Implements [`prepare`](Self::prepare) on `system`.
-    fn prepare_with(self, system: Box<dyn System>) -> Result<CaptureBarrier<F>, CaptureError> {
-        let Self { mut fence, devices } = self;
-        // A fence that failed to close, which another may hold closed, is never opened.
-        fence
-            .close()
-            .map_err(|error| CaptureError::new(CaptureStage::Fence, CaptureCause::Io(error)))?;
-        let mut barrier = CaptureBarrier {
-            fence: Some(fence),
-            suppressed: false,
-            system,
-        };
-        check_mounts(barrier.system.as_mut(), &devices)
-            .map_err(|cause| CaptureError::new(CaptureStage::Mounts, cause))?;
-        if let Err(error) = barrier.system.pre_capture() {
-            // The barrier restores a suppression that the time ABI holds after a failure, as
-            // after a preparation that succeeded.
-            let (stage, cause, suppressed) = mounts::preparation_failure(error);
-            barrier.suppressed = suppressed;
-            let error = CaptureError::new(stage, cause);
-            return Err(barrier.fail(error));
-        }
-        barrier.suppressed = true;
-        Ok(barrier)
-    }
-}
-
-impl<F> fmt::Debug for CapturePreparation<F> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CapturePreparation")
-            .field("devices", &self.devices)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Checks, in the mount table that `system` reads, that nothing is mounted from `devices` or an
-/// overlay, and fails with the first mount that is, or with why the table could not be checked.
-fn check_mounts(system: &mut dyn System, devices: &Devices) -> Result<(), CaptureCause> {
-    let devices = mounts::Devices {
-        distro: devices.distro.mmio,
-        scratch: devices.scratch.mmio,
-        filesystem_tag: devices.filesystem_tag.clone(),
-    };
-    mounts::check_mounts(system, &devices, None)
-}
-
-/// The barrier of a prepared capture, which holds the caller's fence closed and the stall
-/// detectors suppressed until the capture ends, or the barrier is canceled or dropped; see the
-/// [module](self).
-#[must_use = "dropping the barrier opens the fence and restores the stall detectors"]
-pub struct CaptureBarrier<F: AdmissionFence> {
-    /// The caller's fence of workload admission, which the barrier holds closed, until it opens
-    /// it, or hands it over closed.
-    fence: Option<F>,
-    /// Whether the barrier suppressed the stall detectors, whose settings it restores.
-    suppressed: bool,
-    /// The kernel and the time ABI.
-    system: Box<dyn System>,
-}
-
-impl<F: AdmissionFence> CaptureBarrier<F> {
-    /// Requests the capture: reads the VM generation ID, then requests a capture through
-    /// [`TimeAbi::capture`] with the platform tier's request, which keeps no scratch, in the
-    /// in-memory mode, and returns how it ended.
-    ///
-    /// A VM that continues without a restore gets [`Captured::Continued`], once the barrier
-    /// opened the fence and restored the detectors' settings; a failure to restore them is a
-    /// [`CaptureStage::Release`] error, after which the caller ends the VM. A clone that a
-    /// restore of the snapshot started gets [`Captured::Restored`], with the fence still closed
-    /// and the detectors still suppressed: see the [module](self).
-    ///
-    /// A failure to read the VM generation ID, before the request, opens the fence and restores
-    /// the detectors' settings, as [`cancel`](Self::cancel) does. A request that fails restores
-    /// the detectors' settings, but leaves the fence closed, since it may fail in a clone whose
-    /// restore it could not repair, where no execution may start: there, the time ABI, in
-    /// [strict mode](self#strict-mode), fails it with the violation, [`TimeError::Violation`],
-    /// rather than stopping the VM. Either way, the caller ends the VM, with the violation's
-    /// status if it has one, and a failure to restore the settings is a [`CaptureStage::Release`]
-    /// error, unless the calling thread may still hold some of the permission for the time ABI's
-    /// ports, which [`TimeError::PortRelease`] reports instead.
-    pub fn capture(mut self) -> Result<Captured<F>, CaptureError> {
-        let generation_id = match self.system.generation_id() {
-            Ok(generation_id) => generation_id,
-            Err(error) => {
-                let error =
-                    CaptureError::new(CaptureStage::GenerationId, CaptureCause::Time(error));
-                return Err(self.fail(error));
-            }
-        };
-        // The restore holds its fresh entropy as its seed, which no file holds, until repair
-        // takes it.
-        let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, generation_id);
-        let outcome = match self.system.capture(request) {
-            Ok(outcome) => outcome,
-            Err((error, _)) => {
-                // The fence is dropped closed.
-                self.fence = None;
-                let error = CaptureError::new(CaptureStage::Capture, CaptureCause::Time(error));
-                return Err(self.fail(error));
-            }
-        };
-        match outcome {
-            CaptureOutcome::Continued => {
-                self.release()?;
-                Ok(Captured::Continued)
-            }
-            CaptureOutcome::Restored(restore) => {
-                // The time daemon restores the detectors' settings once repair finishes the
-                // restore, and the caller keeps the fence closed through repair.
-                self.suppressed = false;
-                let fence = self
-                    .fence
-                    .take()
-                    .expect("a barrier holds the fence until it releases it");
-                Ok(Captured::Restored(Restored { restore, fence }))
-            }
-        }
-    }
-
-    /// Cancels the capture: opens the fence, then restores the stall detectors' settings. A
-    /// failure to restore them is a [`CaptureStage::Release`] error, after which the caller ends
-    /// the VM.
-    pub fn cancel(mut self) -> Result<(), CaptureError> {
-        self.release()
-    }
-
-    /// Opens the fence, then restores the stall detectors' settings, if the barrier holds them.
-    fn release(&mut self) -> Result<(), CaptureError> {
-        if let Some(mut fence) = self.fence.take() {
-            fence.open();
-        }
-        if mem::take(&mut self.suppressed) {
-            self.system.cancel_capture().map_err(|detail| {
-                let detail = String::from_utf8_lossy(&detail).into_owned();
-                CaptureError::new(
-                    CaptureStage::Release,
-                    CaptureCause::Io(io::Error::other(detail)),
-                )
-            })?;
-        }
-        Ok(())
-    }
-
-    /// Releases what the barrier holds after `error`, as [`release`](Self::release) does, and
-    /// returns `error`, or the failure to restore the stall detectors' settings, unless `error`
-    /// tells that the calling thread may still hold some of the permission for the time ABI's
-    /// ports, which takes precedence.
-    fn fail(&mut self, error: CaptureError) -> CaptureError {
-        match self.release() {
-            Err(release)
-                if !matches!(error.cause, CaptureCause::Time(TimeError::PortRelease(_))) =>
-            {
-                release
-            }
-            _ => error,
-        }
-    }
-}
-
-impl<F: AdmissionFence> Drop for CaptureBarrier<F> {
-    /// Opens the fence and restores the stall detectors' settings, as
-    /// [`CaptureBarrier::cancel`] does, and ignores a failure.
-    fn drop(&mut self) {
-        let _ = self.release();
-    }
-}
-
-impl<F: AdmissionFence> fmt::Debug for CaptureBarrier<F> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CaptureBarrier")
-            .field("fenced", &self.fence.is_some())
-            .field("suppressed", &self.suppressed)
-            .finish_non_exhaustive()
-    }
-}
-
-/// How a capture that [`CaptureBarrier::capture`] requested ended, in the VM in which it
-/// returned.
-pub enum Captured<F> {
-    /// The VM continued without a restore, as [`CaptureOutcome::Continued`] tells: no snapshot
-    /// was taken, or the restore packet was of the recorded generation. The barrier opened the
-    /// fence and restored the stall detectors' settings.
-    Continued,
-    /// A restore of the snapshot started the VM, a clone, whose wall clock the time ABI repaired.
-    /// The fence stays closed, and the stall detectors stay suppressed.
-    Restored(Restored<F>),
-}
-
-impl<F> fmt::Debug for Captured<F> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Continued => formatter.write_str("Continued"),
-            Self::Restored(restored) => formatter.debug_tuple("Restored").field(restored).finish(),
-        }
-    }
-}
-
-/// A clone's restore, which [`CaptureBarrier::capture`] returns for repair to take next, with
-/// the caller's fence, which stays closed until the caller opens it.
-///
-/// No execution may start before the clone's repair acknowledged the restore, and repair never
-/// opens the fence: the caller opens it once the clone may admit executions, such as once it is
-/// activated. Dropping it leaves the fence closed.
-pub struct Restored<F> {
-    /// The restore that the time ABI repaired, as its restore packet describes it.
-    restore: Restore,
-    /// The caller's fence of workload admission, closed.
-    fence: F,
-}
-
-impl<F> Restored<F> {
-    /// Returns the restore that the time ABI repaired: its new VM generation ID, its targets, and
-    /// whether the host gates its input until the guest acknowledges it.
-    pub fn restore(&self) -> &Restore {
-        &self.restore
-    }
-
-    /// Returns the restore that the time ABI repaired, which holds the restore's fresh entropy as
-    /// its seed, for [`repair`](fn@repair) or a [`Repair`] to take, and the caller's fence, still
-    /// closed.
-    pub fn into_parts(self) -> (Restore, F) {
-        (self.restore, self.fence)
-    }
-}
-
-impl<F> fmt::Debug for Restored<F> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Restored")
-            .field("restore", &self.restore)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A stage of a capture, which a [`CaptureError`] names.
+/// A stage of a capture, which a [`CaptureFailure`](crate::guest::snapshot::CaptureFailure)
+/// names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CaptureStage {
@@ -657,7 +271,7 @@ pub enum CaptureStage {
     GenerationId,
     /// Requesting the capture, and repairing the time of a restore.
     Capture,
-    /// Restoring the stall detectors' settings, as the barrier releases them.
+    /// Restoring the stall detectors' settings.
     Release,
     /// Repairing the clone's resources, entropy and acknowledgement after a restore.
     Repair,
@@ -680,14 +294,15 @@ impl fmt::Display for CaptureStage {
     }
 }
 
-/// Why a stage of a capture failed, which a [`CaptureError`] holds.
+/// Why a stage of a capture failed, which a
+/// [`CaptureFailure`](crate::guest::snapshot::CaptureFailure) holds.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum CaptureCause {
-    /// The caller's fence, or a system call, failed with this error: a read of the mount table
-    /// or of a device's entries in procfs and sysfs, which names the file, a mount table longer
-    /// than [`MOUNT_TABLE_LIMIT`] or of another form than the kernel's, or a save or restore of
-    /// the stall detectors' settings.
+    /// A system call failed with this error: a read of the mount table or of a device's entries
+    /// in procfs and sysfs, which names the file, a mount table longer than [`MOUNT_TABLE_LIMIT`]
+    /// or of another form than the kernel's, or a save or restore of the stall detectors'
+    /// settings.
     Io(io::Error),
     /// Something is mounted from a device from which the capture must find nothing mounted, or
     /// from an overlay.
@@ -714,57 +329,6 @@ impl fmt::Display for CaptureCause {
     }
 }
 
-/// Why a capture's preparation, request, or release failed: the stage that failed, and its cause.
-///
-/// Its `Display` form names both, such as `failed to check the mount table: /run/nvx/rootfs is
-/// mounted from an overlay`.
-#[derive(Debug)]
-pub struct CaptureError {
-    /// The stage that failed.
-    stage: CaptureStage,
-    /// Why it failed.
-    cause: CaptureCause,
-}
-
-impl CaptureError {
-    /// Returns the failure of `stage`, because of `cause`.
-    fn new(stage: CaptureStage, cause: CaptureCause) -> Self {
-        Self { stage, cause }
-    }
-
-    /// Returns the stage that failed.
-    pub fn stage(&self) -> CaptureStage {
-        self.stage
-    }
-
-    /// Returns why it failed.
-    pub fn cause(&self) -> &CaptureCause {
-        &self.cause
-    }
-
-    /// Returns why it failed.
-    pub fn into_cause(self) -> CaptureCause {
-        self.cause
-    }
-}
-
-impl fmt::Display for CaptureError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "failed to {}: {}", self.stage, self.cause)
-    }
-}
-
-impl std::error::Error for CaptureError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.cause {
-            CaptureCause::Io(error) => Some(error),
-            CaptureCause::Time(error) => Some(error),
-            CaptureCause::Repair(error) => Some(error),
-            CaptureCause::Mounted(_) | CaptureCause::Pending => None,
-        }
-    }
-}
-
 /// What a capture reads of the kernel and asks of the time ABI, which the tests' fake replaces.
 pub(super) trait System: Send {
     /// Reads the mount table of the calling process's mount namespace, at most one byte more than
@@ -777,10 +341,6 @@ pub(super) trait System: Send {
 
     /// Returns the canonical sysfs directory of the block device whose number is `device`.
     fn block_device(&mut self, device: DeviceNumber) -> io::Result<PathBuf>;
-
-    /// Waits for the time ABI's boot checks, runs its capture checks, and suppresses the stall
-    /// detectors, as [`TimeAbi::pre_capture`] does.
-    fn pre_capture(&mut self) -> Result<(), PreCaptureError>;
 
     /// Prepares strictly by the caller deadline, retaining suppression ownership on failure.
     fn pre_capture_until(&mut self, deadline: Instant) -> Result<(), (PreCaptureError, bool)>;
@@ -799,7 +359,7 @@ pub(super) trait System: Send {
 struct LiveSystem {
     /// The directories of the kernel's interfaces.
     paths: Paths,
-    /// The time ABI of [`live_abi`], whose preparation of a capture enforces the ABI all the same.
+    /// The time ABI of [`live_abi`].
     abi: TimeAbi,
     /// The caller's pre-request deadline, cleared before the request.
     deadline: Option<Instant>,
@@ -860,10 +420,6 @@ impl System for LiveSystem {
         let directory = fs::canonicalize(&path).map_err(|error| at(&path, &error))?;
         sys::FileLock::check_deadline(self.deadline)?;
         Ok(directory)
-    }
-
-    fn pre_capture(&mut self) -> Result<(), PreCaptureError> {
-        self.abi.pre_capture()
     }
 
     fn pre_capture_until(&mut self, deadline: Instant) -> Result<(), (PreCaptureError, bool)> {

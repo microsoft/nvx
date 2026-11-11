@@ -307,7 +307,7 @@ fn release(system: &mut dyn System) -> Result<(), CaptureCause> {
     })
 }
 
-/// Checks the one bounded mount table for both capture interfaces.
+/// Checks the one bounded mount table of a capture.
 pub(super) fn check_mounts(
     system: &mut dyn System,
     devices: &Devices,

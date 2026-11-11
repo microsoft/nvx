@@ -42,8 +42,8 @@
 //!   launch, bounded output, input, ending, and outcome (`guest::exec`), the typed calls through
 //!   which it runs the time ABI's steps (`guest::time`) and reseeds after a restore
 //!   (`guest::reseed`) in its own process,
-//!   and the preparation of a template's guest for a capture before its root's assembly, and the
-//!   repair of its clones (`guest::clone`). The crate's `nvx-*` guest binaries run the programs.
+//!   and the capture of a template's guest, which repairs its clones (`guest::snapshot`), and
+//!   their activation (`guest::activation`). The crate's `nvx-*` guest binaries run the programs.
 //!   NVX's own guest space, which assembles a layered root, reads GPT disks, mounts host mappings,
 //!   and applies a clone's activation, is internal reference code: hidden, unstable, and
 //!   crate-private once nothing outside NVX uses it.
