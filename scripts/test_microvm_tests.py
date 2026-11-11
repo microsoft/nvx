@@ -569,8 +569,11 @@ class PublicManagedExecAcceptanceTests(unittest.TestCase):
                 returncode = 124
                 category = "timeout"
             elif cwd in ("/does-not-exist", "/etc/passwd", "/root"):
-                returncode = 125
-                stderr = b"cannot use working directory\n"
+                returncode = 1
+                stderr = (
+                    b"error[exec-refused]: managed guest rejected exec "
+                    b"(status=2, category=cwd-failed)\n"
+                )
             elif entrypoint == "/bin/sh":
                 stdout = b"public stdout"
                 stderr = b"public stderr"
