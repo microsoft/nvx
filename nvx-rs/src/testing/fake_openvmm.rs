@@ -103,7 +103,9 @@
 //! kernel command line, which such a command line may omit, has `fake_exit_status=STATUS`. A
 //! restore whose snapshot directory does not exist fails with status 1 and writes no report. A
 //! restore records its command line next to its snapshot, since it has no kernel. The outcome
-//! reports of sandboxes and of these runs take the form of OpenVMM's.
+//! reports of sandboxes and of these runs take the form of OpenVMM's. As OpenVMM does, a managed
+//! VM's report names the operation `managed` only if `--microvm-lifecycle` selects its lifecycle,
+//! and `run` if the CLI's tokens do.
 //!
 //! As OpenVMM does, a restore checks its `--virtio-console` against the attachment of the boot
 //! console, `console:microvm-virtio0`, that the machine contract of the snapshot's manifest holds,
@@ -371,6 +373,8 @@ struct Options {
     program: String,
     /// The lifecycle.
     lifecycle: Lifecycle,
+    /// Whether `--microvm-lifecycle` selected the lifecycle, rather than the CLI's tokens.
+    lifecycle_option: bool,
     /// Whether the command line launches the sandbox profile of `nvx-rs sandbox`: a container
     /// over EROFS layers and an ext4 scratch disk.
     sandbox: bool,
@@ -453,6 +457,19 @@ struct Options {
     network: NetworkSummary,
     /// The options of a template's capture, for [`Lifecycle::Capture`].
     capture: Option<CaptureOptions>,
+}
+
+impl Options {
+    /// Returns the operation that OpenVMM reports for a managed VM: `managed` only for the
+    /// lifecycle that `--microvm-lifecycle` selects, and `run` for one whose init owns its
+    /// lifecycle, as the CLI's tokens select it.
+    fn managed_operation(&self) -> &'static str {
+        if self.lifecycle_option {
+            "managed"
+        } else {
+            "run"
+        }
+    }
 }
 
 /// The network policy of a command line, as the `network_policy` section of OpenVMM's outcome
@@ -641,7 +658,12 @@ pub fn main() -> ExitCode {
         Ok(()) => {
             if let Some(code) = options.exit_during_attach {
                 thread::sleep(options.exit_delay);
-                write_report(&options, "managed", "guest-exit", i32::from(code));
+                write_report(
+                    &options,
+                    options.managed_operation(),
+                    "guest-exit",
+                    i32::from(code),
+                );
                 ExitCode::from(code)
             } else {
                 ExitCode::SUCCESS
@@ -1841,6 +1863,7 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
     Ok(Options {
         program: program.to_owned(),
         lifecycle,
+        lifecycle_option,
         sandbox,
         run,
         restore,
@@ -3027,7 +3050,7 @@ fn serve_client<S: Read + Write + Pending>(
     };
     match session.run(options, guest) {
         Ok(Flow::Exit) => {
-            write_report(options, "managed", "success", 0);
+            write_report(options, options.managed_operation(), "success", 0);
             thread::sleep(options.exit_delay);
             Flow::Exit
         }
