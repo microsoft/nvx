@@ -8,7 +8,6 @@
 /.ruff_cache/
 /.nvx-hosts.json
 /nvx-rs/target/
-/tests/runtime-adapter/target/
 __pycache__/
 *.py[cod]
 *.log

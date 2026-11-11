@@ -2020,7 +2020,7 @@ nothing until `capture` returns. After `Continued` or a `Resumed` failure,
 report on the same session. After `Restored`, take the session's RESET, then
 call `GuestConnection::acknowledge(window)` on that session before receiving
 the activation record. The activation module retains its legacy Device-shaped
-capture and repair interfaces for the test adapter until its migration.
+capture and repair interfaces.
 
 ### `nvx::guest::activation`
 
@@ -3271,8 +3271,7 @@ caller owner.
 Without default features, the crate has only `protocol`, `activation`, `exec`,
 `contract`, `net`, `gpt`, `uuid`, `Hypervisor`, and `Error`, and depends on
 nothing but `serde` when `serde` is enabled and `nix` and `getrandom` when
-`guest` is; the protocol-only configuration of the
-[runtime adapter](../tests/runtime-adapter/README.md) uses it that way.
+`guest` is.
 
 ## Example
 
@@ -3610,8 +3609,8 @@ compiles the examples with the rest of the crate's targets, and
 or a restore up to its restore-ready event.
 
 The [case matrix](../doc/acceptance-case-matrix.md) gives each test of the
-[runtime adapter](../tests/runtime-adapter/README.md), of CI, and of the docs,
-and each microVM scenario, a fate: kept, rewritten, or retired.
+runtime adapter, of CI, and of the docs, and each microVM scenario, a fate:
+kept, rewritten, or retired.
 
 The
 [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml) action runs
