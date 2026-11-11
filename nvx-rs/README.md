@@ -2206,10 +2206,12 @@ names the parser after the usage, as in `nvx-rs run: error[CODE]: MESSAGE`.
 layered root or workload exists. It journals the launch before spawning,
 requests capture through authenticated NVXC, and requires that VM's timely
 exit before finishing and publishing exactly the strict snapshot's three
-entries. The next capture using that store ends an interrupted attempt through
-ordinary launch recovery, never resuming it. See
-[`snapshot capture`](../doc/usage.md#snapshot-capture) for its resource options
-and recovery behavior.
+entries. With `--net IPV4/PREFIX`, the VM has a NIC at that address under the
+complete deny-all policy, which the snapshot keeps, without the policy, so that
+each restore installs a policy of its own on it. The next capture using that
+store ends an interrupted attempt through ordinary launch recovery, never
+resuming it. See [`snapshot capture`](../doc/usage.md#snapshot-capture) for its
+resource options and recovery behavior.
 
 `snapshot restore NAME --store-dir PATH --state-dir PATH` provisions a managed
 sandbox, with the options of `sandbox provision` that a restore takes, whose
@@ -2218,13 +2220,18 @@ then starts it: that start, and each later one, creates the VM with
 `host::vm::create` from the snapshot, through the store's launch journal, and
 drives its restore with the blocking restore driver, which activates the guest
 with the start's own network policy, maps the sandbox's shares, and runs the
-workload, whose output the start forwards until it exits. A restore's guest
-accepts only a fresh upper, so a later start refuses a scratch image once an
-earlier start has created its view, as each start does before its guest can use
-the image. Each start holds the snapshot's exclusive lock from before it links
-the snapshot's files into the sandbox's `openvmm/` view until the start ends or
-the VM has exited, and `deprovision` holds it while it removes the view; a start
-whose command dies leaves a journal whose recovery ends the VM. No index of a
+workload, whose output the start forwards until it exits. The restore's NIC
+comes from the snapshot, which `snapshot capture --net` gives one, so the
+restore takes no `--net`: the network options of a snapshot with a NIC, which
+need `--network-profile`, are the restore's own policy at the NIC's address, as
+for `run --restore-snapshot`, and a snapshot without a NIC refuses them before
+anything is provisioned. A restore's guest accepts only a fresh upper, so a
+later start refuses a scratch image once an earlier start has created its view,
+as each start does before its guest can use the image. Each start holds the
+snapshot's exclusive lock from before it links the snapshot's files into the
+sandbox's `openvmm/` view until the start ends or the VM has exited, and
+`deprovision` holds it while it removes the view; a start whose command dies
+leaves a journal whose recovery ends the VM. No index of a
 snapshot's sandboxes or record of a restore in progress exists. See
 [`snapshot restore`](../doc/usage.md#snapshot-restore).
 
@@ -2406,11 +2413,12 @@ status; a restore does none of these, as the second item says.
   reaches the guest through it, not through the byte channel, `hvc0`, whose
   output, such as the kernel's early messages, goes to standard error.
 - A cold boot takes `--net` and `--network-profile` together. A restore takes
-  the addressing of its NIC from the snapshot, so it refuses `--net`. Its other
-  network options are the restore's own policy, at the NIC's address, which
-  `sandbox` lowers, with its DNS server, egress, forwards, and published
-  listeners; a snapshot with a NIC needs `--network-profile` with them, and one
-  without, as `snapshot capture` captures, refuses them.
+  its NIC, with its addressing, from the snapshot, which
+  `snapshot capture --net` gives one, so it refuses `--net`. Its other network
+  options are the restore's own policy, at the NIC's address, which `sandbox`
+  lowers, with its DNS server, egress, forwards, and published listeners; a
+  snapshot with a NIC needs `--network-profile` with them, and one without
+  refuses them.
 - One directory `--mount` is OpenVMM's `--mount`. Several, or a shared file,
   are the children of an aggregate at `/run/nvx/shares`, whose guest targets
   must be absolute, must not overlap, and must survive the kernel command line,
@@ -2703,10 +2711,10 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   `snapshot capture` published, and restores it once through the path of
   `snapshot restore`, where `nvx.py run` handed OpenVMM the directory of a raw
   snapshot, which `nvx-rs run` refuses before it reads anything. It refuses
-  `--net`, whose addressing a restored NIC takes from the snapshot, and takes
-  none of the options of a raw restore, `--restore-processors`,
-  `--restore-memory-mib`, and `--restore-ready-path`, whose values the snapshot
-  and the restore fix.
+  `--net`: a restored NIC, with its addressing, comes from the snapshot, which
+  `snapshot capture --net` gives one. It takes none of the options of a raw
+  restore, `--restore-processors`, `--restore-memory-mib`, and
+  `--restore-ready-path`, whose values the snapshot and the restore fix.
 
 ### Test hooks
 

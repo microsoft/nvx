@@ -176,7 +176,7 @@ nvx-rs/target/release/nvx-rs run
 | `--mount-allow HOST_PATH` | none | Expose one existing file or directory inside a `--mount-deny` path again; the hidden directories on the way list only the entries that lead to it. Repeat to allow multiple paths. With several mappings, or a shared file, the path must be absolute; a shared file takes none. See [Access policy](run.md#access-policy). |
 | `--mount-write HOST_PATH` | none | Make one existing file or directory one of the only writable parts of an `rw` mapping; the guest's writes anywhere else in it fail with `EROFS`. Repeat to declare multiple writable paths. With several mappings, or a shared file, the path must be absolute; a shared file takes none. |
 | `--mount-owner {vmm,caller}` | `vmm` | Select the host identity of the guest's operations on every `--mount` directory or file. `caller` performs each one as the guest caller's UID and GID and squashes guest root to the owner of the shared directory or file; it requires a Linux host. See [Run](run.md#file-ownership). |
-| `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. The guest also gets the IPv6 address that embeds it in `fd00::/96`, such as `fd00::a00:2/120` for `10.0.0.2/24`. A restore takes the addresses from the snapshot and rejects this option. |
+| `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. The guest also gets the IPv6 address that embeds it in `fd00::/96`, such as `fd00::a00:2/120` for `10.0.0.2/24`. A restore takes its NIC, with these addresses, from the snapshot, which [`snapshot capture --net`](#snapshot-capture) gives one, and rejects this option. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net` on a fresh boot, and without it to restore a snapshot with a NIC. |
 | `--network-egress {allow,deny}` | `allow` | Set the default guest egress policy. |
 | `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). Snapshot capture rejects `allow`. |
@@ -242,11 +242,13 @@ exists or lies in the store, a workload that `snapshot restore` refuses, and
 the options that the snapshot or its sandbox fixes: `--guest`,
 `--memory-capacity-mib`, `--processors`, `--cpu-profile`, `--net`, the share
 options, `--outcome-report`, `--cmdline`, and `--dry-run`. A cold boot refuses
-`--store-dir`, `--state-dir`, and the restore options. The snapshot fixes the
-NIC: the restore of a snapshot without one, as `snapshot capture` captures
-them, takes no network options, and that of a snapshot with a NIC installs the
-policy of its network options, which need `--network-profile`, as the policy
-of the NIC, with its DNS server, egress, forwards, and published listeners.
+`--store-dir`, `--state-dir`, and the restore options. A restore's NIC comes
+from the snapshot: `--net` belongs to the cold boot and to
+[`snapshot capture`](#snapshot-capture), which gives a snapshot its NIC. The
+restore of a snapshot without a NIC takes no network options, and that of a
+snapshot with a NIC installs the policy of its network options, which need
+`--network-profile`, as the policy of the NIC, with its DNS server, egress,
+forwards, and published listeners.
 
 A `run` that dies before it removes its sandbox, as `kill -9` ends it, leaves
 `--state-dir` with the sandbox's files and its view of the snapshot, and its
@@ -408,6 +410,16 @@ dormant scratch is `--scratch-mib` (64 by default). `--processors` (1) and
 `--memory-capacity-mib` may reserve larger capacities. RAM capacity must be a
 multiple of 128 MiB. `--cpu-profile` selects the OpenVMM profile.
 
+The VM has no NIC unless `--net IPV4/PREFIX` gives it one, at that static
+address, as for [`run`](#run): the NIC has the complete deny-all policy, without
+egress, ingress, host-loopback access, forwards, a proxy, or a DNS server, so
+the guest learns no DNS server and announces no listeners, and nothing that the
+snapshot holds depends on the policy. The snapshot keeps the NIC and its
+address. `--net` is the only way to give a snapshot's restores a NIC: each
+restore takes its NIC from the snapshot and refuses `--net`, so it cannot give
+the NIC another address, and installs a network policy of its own on it, as
+[`snapshot restore`](#snapshot-restore) and [`run`](#run) describe.
+
 Only a successful capture whose own VMM exits within `--timeout` (60 whole
 seconds by default) can publish. The immutable named directory contains exactly
 `key.bin`, `snapshot.json` and `openvmm/`; an existing name is never replaced.
@@ -435,32 +447,37 @@ nvx-rs/target/release/nvx-rs snapshot restore baseline \
 options of [`sandbox provision`](#sandbox), but for those that only an
 execution or a cold boot takes, `--cwd`, `--environment`, `--environment-file`,
 `--inherit-default-environment`, `--exec-timeout-ms`, `--wait`,
-`--outcome-report`, `--cmdline`, and `--dry-run`, then starts it from the named
-snapshot of `--store-dir`. The sandbox's configuration records the snapshot,
-its store, and the sandbox's workload, `--entrypoint` with its `--arg` values,
-and each later `sandbox start` of the sandbox restores the snapshot again. Each
-restore runs the workload over the control protocol, as `run` and `exec` do,
-not from the kernel command line, so its entrypoint and arguments may contain
-whitespace and double quotes, which `sandbox provision` refuses; the command
-checks them as `exec` checks its workload before it provisions anything. The
-state directory must be outside the store. The guest of a restore accepts only
-a fresh scratch image, whose upper no earlier root wrote, such as a new empty
-ext4 image, so a later start of a restored sandbox with a scratch image refuses
-once an earlier start has created the sandbox's view of the snapshot, as each
-start does before its guest can use the image: deprovision the sandbox and
-restore the snapshot again with a fresh one. A missing snapshot provisions
-nothing; a sandbox whose start fails stays provisioned, as after
-`sandbox provision`.
+`--outcome-report`, `--cmdline`, `--dry-run`, and `--net`, then starts it from
+the named snapshot of `--store-dir`. The sandbox's configuration records the
+snapshot, its store, and the sandbox's workload, `--entrypoint` with its `--arg`
+values, and each later `sandbox start` of the sandbox restores the snapshot
+again. Each restore runs the workload over the control protocol, as `run` and
+`exec` do, not from the kernel command line, so its entrypoint and arguments
+may contain whitespace and double quotes, which `sandbox provision` refuses;
+the command checks them as `exec` checks its workload before it provisions
+anything. The state directory must be outside the store. The guest of a
+restore accepts only a fresh scratch image, whose upper no earlier root wrote,
+such as a new empty ext4 image, so a later start of a restored sandbox with a
+scratch image refuses once an earlier start has created the sandbox's view of
+the snapshot, as each start does before its guest can use the image:
+deprovision the sandbox and restore the snapshot again with a fresh one. A
+missing snapshot provisions nothing; a sandbox whose start fails stays
+provisioned, as after `sandbox provision`.
 
 A restore attaches the sandbox's image and upper in place of the snapshot's
 placeholder image and dormant scratch: the image must fit the placeholder,
 with its block sizes, and a scratch upper must be as long as the dormant
 scratch. The VM keeps the processors that the snapshot had online, and
 `--memory-mib` must be a multiple of 128 between the snapshot's boot memory and
-its capacity. The snapshot fixes the NIC: one that `snapshot capture` captured
-has none, so its restores take no `--net`. A restore of a snapshot with a NIC
-installs the restore's own network policy, whose DNS server and listener
-announcements the guest applies as it activates.
+its capacity. The sandbox's NIC comes from the snapshot, with its presence and
+its address: `--net` belongs to [`snapshot capture`](#snapshot-capture), which
+gives a snapshot its NIC, and a restore takes no `--net`. A restore of a
+snapshot without a NIC refuses the network options before it provisions
+anything. That of a snapshot with a NIC needs `--network-profile`, and installs
+the policy of its network options, at the NIC's address, as the restore's own
+network policy: OpenVMM enforces its egress, ingress, host-loopback access, and
+forwards, and the guest applies its DNS server and announces its listeners,
+when it publishes them, as it activates.
 
 Each start holds the snapshot's exclusive lock, which it waits for up to
 `--timeout`, from before it links the snapshot's files into the sandbox's view
