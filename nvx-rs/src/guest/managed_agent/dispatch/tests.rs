@@ -575,6 +575,100 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
     Ok(())
 }
 
+/// Starts a restored agent whose activation is ready, activates it with the request that it
+/// accepted, and starts a workload that runs until it is cancelled. Returns the harness, that
+/// request, what Ready reports, and the workload's process.
+fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, Vec<u8>, sys::ProcessId) {
+    use crate::guest::activation::ActivationAction;
+    let config = AgentConfig::for_test(None);
+    let mappings = HostMappings::announced_for(&config, 0);
+    let (mut capture, payload) = Capture::activation_fixture();
+    let restored = capture.restored.as_mut().unwrap();
+    let now = std::time::Instant::now();
+    assert!(matches!(
+        restored.accept(&payload, now).unwrap().0,
+        ActivationAction::Apply(_)
+    ));
+    let ready = restored.activation.complete(now, Ok(())).unwrap().encode();
+    let mut harness = Harness::spawn_with_capture(system, config, mappings, Some(capture));
+    harness.reset(1, 7);
+    assert_eq!(
+        harness.request(APP_ACTIVATE, &payload),
+        response(APP_READY, 42, 0, &ready)
+    );
+    let execution = workload_payload(&["/bin/sh", "-c", "echo $$; exec sleep 30"], None).unwrap();
+    harness.send(43, APP_EXEC, &execution);
+    let mut output = Vec::new();
+    while !output.ends_with(b"\n") {
+        let reply = harness.next_response();
+        assert_eq!(
+            (reply.kind, reply.request_id, reply.status),
+            (APP_STDOUT, 43, 0)
+        );
+        output.extend_from_slice(&reply.payload);
+    }
+    let process = std::str::from_utf8(&output).unwrap().trim_end().parse();
+    let process = sys::ProcessId::from_positive(process.unwrap()).unwrap();
+    (harness, payload, ready, process)
+}
+
+#[test]
+fn restored_activation_retries_during_a_workload_get_cached_ready_or_end_the_session() -> TestResult
+{
+    if super::super::tests::isolate_process_test(
+        "NVX_RESTORED_RUNNING_ACTIVATION_TEST",
+        "guest::managed_agent::dispatch::tests::restored_activation_retries_during_a_workload_get_cached_ready_or_end_the_session",
+    ) {
+        return Ok(());
+    }
+    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
+    let (_identical, mut system) = TestSystem::with_direct();
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
+    let (mut harness, payload, ready, process) = running_restored_workload(system);
+    assert_eq!(
+        harness.request_all(44, APP_ACTIVATE, &payload),
+        vec![response(APP_READY, 44, 0, &ready)]
+    );
+    assert!(sys::process_exists(process));
+    assert_eq!(
+        harness.request_all(43, APP_CANCEL, &[]),
+        vec![response(APP_EXIT, 43, 137, b"cancelled")]
+    );
+    assert!(harness.stop().diagnostics.is_empty());
+
+    // A changed activation fails the started one, which ends the workload and the session
+    // without a reply.
+    let (_changed, mut system) = TestSystem::with_direct();
+    system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
+    let (mut harness, payload, _, process) = running_restored_workload(system);
+    let (record, _) = protocol::decode_activate_payload(&payload)?;
+    let mut configuration = record.configuration().clone();
+    configuration.view.hostname = b"changed".to_vec();
+    let record =
+        crate::activation::ActivationRecord::new(record.restore().copied(), configuration)?;
+    harness.send(
+        44,
+        APP_ACTIVATE,
+        &[&payload[..9], record.encode().as_slice()].concat(),
+    );
+    harness
+        .host
+        .set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
+    assert_eq!(harness.host.read(&mut [0])?, 0);
+    let (outcome, system) = harness.thread.join().unwrap();
+    assert_eq!(outcome.err(), Some(Errno::EPROTO));
+    assert_eq!(
+        system.diagnostics,
+        format!(
+            "NVX-MANAGED-ERROR: stage=data status={}\n",
+            Errno::EPROTO as i32
+        )
+        .as_bytes()
+    );
+    assert!(!sys::process_exists(process));
+    Ok(())
+}
+
 #[test]
 fn mapping_sequence_errors_are_reported_through_dispatch() {
     let (temporary, system) = TestSystem::with_host_export();
