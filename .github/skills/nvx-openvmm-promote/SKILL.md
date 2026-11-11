@@ -111,9 +111,8 @@ Each test stops at its first failure, which names a copy that the revision chang
 After copying a vector file or an excerpt, record the revision in
 [the vectors' README](../../../nvx-rs/tests/vectors/README.md#openvmms-vectors). Rerun the
 comparison after each fix until it passes, since only the NVX CLI jobs run these ignored
-tests. Then run the checks of [check-nvx-rs](../../actions/check-nvx-rs/action.yml), which
-also build the runtime adapter that compiles the excerpts; they may need coordinated
-changes too.
+tests. Then run the checks of [check-nvx-rs](../../actions/check-nvx-rs/action.yml); they
+may need coordinated changes too.
 
 `nvx-rs run` also reads a copy of the identities of OpenVMM's built-in CPU profiles, from
 which it guides a failed cold boot on a CPU that none serves. Compare it with the revision's

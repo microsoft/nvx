@@ -51,7 +51,6 @@ REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "nvx-microvm-guests-kvm": "MICROVM_GUESTS_KVM_RESULT",
     "nvx-microvm-guests-mshv": "MICROVM_GUESTS_MSHV_RESULT",
     "nvx-microvm-guests-whp": "MICROVM_GUESTS_WHP_RESULT",
-    "nvx-microvm-adapter-whp": "MICROVM_ADAPTER_WHP_RESULT",
     "nvx-microvm-debug-kvm": "MICROVM_DEBUG_KVM_RESULT",
     "nvx-microvm-debug-mshv": "MICROVM_DEBUG_MSHV_RESULT",
     "nvx-microvm-debug-whp": "MICROVM_DEBUG_WHP_RESULT",
@@ -82,9 +81,7 @@ REQUIRED_CI_CLI_JOBS = ("nvx-cli-linux", "nvx-cli-windows")
 # from forks too.
 REQUIRED_CI_OPENVMM_CI_JOB = "openvmm-ci"
 # Each backend runs the default suite in one job and, beside it, the guest
-# smoke and sandbox steps that follow the suite in another, with the runtime
-# adapter scenarios on KVM and MSHV. WHP, where those scenarios take about
-# twice as long, runs them in a third job.
+# smoke and sandbox steps that follow the suite in another.
 REQUIRED_CI_MICROVM_TEST_JOBS = (
     "nvx-microvm-tests-kvm",
     "nvx-microvm-tests-mshv",
@@ -92,7 +89,6 @@ REQUIRED_CI_MICROVM_TEST_JOBS = (
     "nvx-microvm-guests-kvm",
     "nvx-microvm-guests-mshv",
     "nvx-microvm-guests-whp",
-    "nvx-microvm-adapter-whp",
 )
 # Pull requests run the CI debug kernel on MSHV, merge groups run it on KVM,
 # and dev pushes and full runs run it on every backend.
@@ -162,13 +158,13 @@ CI_CHANGE_OUTPUTS = (
 CI_DOCUMENTATION_PATHS = re.compile(r"^(doc/|.*\.md$)", re.IGNORECASE)
 # Inputs of the NVX microVM tests: the OpenVMM pin, the guests and every input
 # of their cache keys, the nvx-rs executable that their scenarios run, the
-# runtime adapter that they test, the workflows, actions, and CLI modules that
-# their jobs and the jobs that build their artifacts run, the runners, and the
-# attributes that check out their scripts on Windows. Every module of the CLI
-# is an input but those that none of these jobs runs.
+# workflows, actions, and CLI modules that their jobs and the jobs that build
+# their artifacts run, the runners, and the attributes that check out their
+# scripts on Windows. Every module of the CLI is an input but those that none
+# of these jobs runs.
 MICROVM_TEST_INPUT_PATHS = re.compile(
     r"^(openvmm($|/)|rust-toolchain\.toml$|scripts/setup/|\.gitattributes$|"
-    r"nvx-rs/|tests/runtime-adapter/|"
+    r"nvx-rs/|"
     r"kernel/|guest/|ubuntu/|azurelinux/|"
     r"docker/|\.dockerignore$|SOURCE-MANIFEST\.json$|"
     r"\.github/workflows/(ci|build-openvmm-binary|run-nvx-microvm-tests)\.yml$|"
