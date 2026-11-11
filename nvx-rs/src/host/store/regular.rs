@@ -2,15 +2,15 @@
 //! binding: regular files that are not links, which they read within a bound, and the identity of
 //! a file that a template module holds open.
 //!
-//! The reads themselves are [`platform`]'s: this module re-exports its `open_regular`,
-//! `read_at_most` and `is_refused` for its callers until #1121 deletes them.
+//! The reads themselves are [`platform`]'s: this module re-exports its `open_regular` and
+//! `read_at_most` for its callers until #1121 deletes them.
 
 use std::fs::File;
 use std::io;
 use std::path::Path;
 
 use crate::host::platform;
-pub(crate) use crate::host::platform::{is_refused, open_regular, read_at_most};
+pub(crate) use crate::host::platform::{open_regular, read_at_most};
 use crate::host::seal::FileSeal;
 
 /// Returns whether `error`, with which an open or a removal of the file at `path` failed, means

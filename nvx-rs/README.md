@@ -139,7 +139,7 @@ changes only when the module's purpose does.
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::supervisor`](#nvxhostsupervisor) | The supervisor of a sandbox's VMM, beneath the CLI, `Instance`, and external orchestrators |
-| [`nvx::host::template`](#nvxhosttemplate) | Legacy template capture and clone plans and store, with aliases of the snapshot metadata |
+| [`nvx::host::template`](#nvxhosttemplate) | Legacy template capture plans and store, with aliases of the snapshot metadata |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::session`, `platform`, `report`](#nvxhostsession-platform-report) | The authenticated control session, Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
@@ -1245,18 +1245,10 @@ reattach has verified the VM's exit.
 
 Windows' process-creation API limits `VmmCommand::working_dir` to 258 UTF-16
 code units in its absolute path, including any verbatim prefix and trailing
-separator, whatever the prefix and the host's long-path setting. A raw `spawn`
-refuses an overlong working directory with `InvalidInput`, and never changes the
-requested directory.
-
-`vmm_working_dir` chooses the working directory of the VMM of a sandbox store:
-on Windows, the system directory, such as `C:\Windows\System32`, which every
-host has, whose path is short, and which only administrators may change, and on
-other hosts, the store itself. OpenVMM resolves only the relative paths of its
-arguments against its working directory, and every launch gives it absolute
-ones. Instances, template captures, and clones start their VMMs there, so their
-stores' paths may exceed the limit, and an orchestrator that launches a VMM
-itself, as the supervisor's example does, starts it there too.
+separator. It may name a shorter directory than the store. A raw `spawn`
+refuses an overlong working directory with `InvalidInput`; high-level instance
+and capture preflight return `Unsupported` with the limit in the top-level
+message. Neither silently changes the requested directory.
 
 ### `nvx::host::template`
 
@@ -1379,103 +1371,10 @@ launch that the lease reserves, `Lease::launch`.
 A lease never expires: `Store::release` ends it once the sandbox records no VM
 and no launch.
 
-`ClonePlan::new` plans a clone under the lock that acquired its lease, before
-the launch that the lease reserves, from metadata alone: the leased generation,
-its key, which must speak the current contracts, the boot and control contracts
-of the runtime that captured it included, and its snapshot; a network that
-attaches a NIC if and only if the template has one, at the guest's address of
-the template's NIC, which OpenVMM restores from the snapshot, so that a template
-with a NIC serves the clones of every network policy at its guest's address; a
-processor target of 1, 2, 4, or 8 from the template's processors online at boot
-to its capacity; a memory
-target in whole blocks
-of `MEMORY_BLOCK_SIZE` from the template's RAM to its capacity; the clone's
-image, which the check of its `DistroBinding` opens; its upper, either the
-caller's scratch image, which the check of its `ScratchBinding` claims, and
-which nothing formats, copies, or reads, or RAM, whose restore declares the
-template's scratch absent, so that OpenVMM attaches it with no file and the plan
-creates none;
-its export, if it has one, an `ExportPlan` that `filesystem::plan` made for the
-container root, an aggregate of up to 256 host directories and files, as a cold
-launch exports, none of which may overlap the template store, by the paths that
-the plan and the store's directory resolve to, let the guest write in a
-directory through which the store's path leads, links included, since the host
-reaches the store, and OpenVMM its snapshots, by that path, or be, hold, or for
-a file lie in the directory of the clone's sandbox, in which the host writes the
-clone's records, checks of paths that leave two rules to whoever names the
-export, as they leave the directories above the store: the export must not
-reach the store through an alias of it that an administrator configures, such as
-a bind mount or a mount point of the store, or of a directory above or inside
-it, a loopback share, or a hard link of a payload, nor lie inside a directory
-that a writable export of another sandbox or clone holds, since OpenVMM resolves
-an export's paths again at each launch and restore, so that the directories
-above the export's directories and files must be ones that no guest may change,
-as those above a clone's block devices must; and a fresh capability.
-
-It builds the clone's activation record, `ClonePlan::activation`, which the
-clone's guest applies in place of the configuration that the template captured,
-from the request's `View`, overlay mode, journal policy, and bound of a
-GPT disk's first partition, and from the checked inputs: a restore section with
-a fresh transaction ID of 16 random bytes alone;
-the image, an EROFS layer or a GPT disk, as its binding names it, with the
-filesystem UUID or disk GUID that the adapter's plan
-expects of it, and for a GPT disk the bound of its first partition, whose
-partition table the guest checks with `nvx::gpt` as at a cold launch; a tmpfs
-capped at half of the VM's memory, or the scratch image with the journal policy;
-the export, an aggregate, and its mappings, the plan's binds, from 1
-to 4,096, or no export and no mappings, which leaves the slot dormant; the
-clone's network, the DNS server that OpenVMM serves the guest
-at a gateway under its policy, if any, whether the guest publishes its
-listeners, as under a policy that allows ingress or host-loopback access both
-ways, and the guest's proxy URL; and the processor and memory targets.
-
-The image must present the logical and physical block sizes of the template's
-placeholder and be no longer than it, since a restore presents every clone's
-image at the placeholder's length, its capacity, and reads zeros past the end of
-a shorter image, while a scratch image must present the `BlockGeometry` of the
-template's scratch, its length included, which a restore compares; both must be,
-at the paths by which OpenVMM opens them, the regular files that the checks
-found, which are not links or other reparse points, and which no one else may
-change. Neither the image nor a scratch image may be a file that the sandbox's
-store owns, such as its log or its records, by any path, since the store's
-transitions replace or remove them, and a link or a directory under one of the
-store's names is refused.
-
-`ClonePlan::launch` then launches the clone as the launch that its lease
-reserves, once it has checked that the sandbox's clone binding records the
-lease, that the sandbox records no failure of the clone, which fails once under
-its lease, and, with `ExportPlan::verify`, that the objects of its export, if it
-has one, are still those that its plan found, and returns a `Restoring`: it
-writes the clone's activation record in its canonical encoding,
-`clone-activation.bin`, which OpenVMM hands the clone's guest at the end of its
-restore packet, and from which a caller that takes the clone over checks its
-Ready; it listens for the VMM's restore-ready event, at the socket
-`restore.sock` on Linux, and at a named pipe of a random name on Windows; and it
-runs `supervisor::launch` with OpenVMM's restore of the clone's devices, with
-`--restore-absent-scratch` for a clone in RAM, and of its network, whose policy
-`--restore-network-policy` installs on the template's NIC in place of the
-complete deny-all policy, its export bound to the dormant slot as a cold launch
-attaches it, `--mount-aggregate` with a `--mount-child` of each of its
-directories and files, their hidden, re-exposed, and writable paths, and its
-owner, `--restore-snapshot` with the generation's snapshot in place, which no
-clone copies or changes, so that clones of one generation restore it at once,
-`--restore-memory` with the memory target, `--restore-processors` with the
-processor target, for a template whose processors were not all online at boot,
-`--restore-activation-record` with `clone-activation.bin`, which OpenVMM reads
-before any restored vCPU runs, and seals in the restore packet, gating the
-host's input until the guest acknowledged the restore, and
-`--restore-ready-path`, under the template's backend, CPU profile, and
-processors, with a boot console that discards its output, as cold boots have,
-unless the plan asks for one that the caller reads, and the control console, but
-no kernel, initramfs, command line, or guest address, which the snapshot fixes.
-
 On Linux, where OpenVMM requires a restore's control socket in the snapshot's
 parent, the clone's VMM listens in the generation's payload, at `<launch>.sock`,
-named after the launch that the lease reserves, whose path must be shorter than
-108 bytes with or without the payload's links resolved; on Windows, it listens
-at a named pipe, as every launch does. The VMM inherits the claim of a scratch
-image, on Windows through the image's guard, once the launch has closed the
-claim's handle, which OpenVMM's open of the image would refuse.
+named after the launch that the lease reserves; on Windows, it listens at a
+named pipe, as every launch does.
 
 `ClonePlan::with_boot_console` asks for a boot console that the caller reads,
 which keeps what the guest writes to its kernel console after the restore, such
@@ -1499,112 +1398,6 @@ A payload holds the sockets of its clones only while they lease it: the VMM
 removes its sockets as it exits, a stop or a recovery removes those that an
 abrupt exit leaves, and the release makes the sockets' absence durable before
 the lease ends, and removes the record and `restore.sock`.
-
-`Restoring::activate` then runs the clone's restore sequence through the
-adapter's framing of its control session, a `CloneControl`, by a
-restore-to-Ready deadline that runs from the launch, `RESTORE_TO_READY_TIMEOUT`,
-60 seconds by default: it reads the restore-ready event as soon as it comes,
-refusing another process's connection and bytes that differ from the event, and
-reading nothing past it, since OpenVMM on Windows waits until the host has read
-it, and then closes its end; only then connects to the clone's control endpoint,
-whose console bounds the host's authentication from the connection on; attaches
-with the launch's capability; asks for the clone's Ready, as the session's first
-request, `CloneControl::ready`, which the clone answers once it activated with
-the record of its restore packet, whatever the host did meanwhile; and checks
-that Ready reports the record's transaction ID. The host asks, rather than the
-clone sending Ready unasked, since OpenVMM's broker refuses the guest's records
-while no host is attached, which the guest cannot tell. It replaces a session
-that the adapter lost, as `CloneControl::lost` tells, with a new one that asks
-again, in at most `MAX_ACTIVATION_SESSIONS` sessions by the same deadline, and
-retries nothing else.
-
-`Activated::start` then sends the clone's mapping table, if it has an export,
-through `CloneControl::map`, in order, as a cold launch's guest receives it,
-each path by its child's index, and starts the sandbox once the guest applied
-every mapping, both by a Ready-to-Start deadline from the check of Ready,
-`READY_TO_START_TIMEOUT`, 30 seconds by default, never sending either again,
-and `Started::commit` commits the launch, which writes its runtime record. A
-failure, a partial or failed mapping table included, ends the launch as
-`Starting::abandon` does; a crash before the commit leaves the launch's
-journal, whose recovery ends the VMM, while the lease lasts until the release,
-and a crash after it leaves a VM that reattaches, and keeps its lease while it
-runs.
-
-A failure of a clone is a `CloneFailure`, whose `Evidence` attributes it to an
-`Outcome`, at a `Stage`, once the clone got as far as its `Progress`: the
-request, for a denied authorization, a stale binding, invalid targets, format,
-settings, activation record, or mappings, such as an export that no clone takes,
-or whose objects changed since its plan, or a mapping table that the guest
-refused, as `CloneControl::refused` tells, or an image, a scratch, or a root
-that the template cannot serve, and for a supplied file of the wrong identity,
-length, or geometry, which the host's staging takes instead once the caller
-proves it, `CloneFailure::with_staging_proven`; the host, for an endpoint that
-cannot be bound, resource exhaustion, a host that cannot restore the template,
-another runtime, or a failure of its own operations; unknown, for a lost status,
-a timeout, a reset, a forced kill, or a broken protocol; the template, for a
-malformed generation, or a defect of its capture or repair that a diagnosis
-attributes to it, the only outcome that quarantines the generation, through its
-tombstone, `CloneFailure::quarantine`; and the repair stage, for a status of the
-clone's repair alone.
-
-OpenVMM's outcome report gives the status with which the guest ended the clone's
-VM, which `status_evidence` attributes, and which prevails over what the host or
-the caller saw, but not over evidence of the template, which shows the
-provenance that a status alone leaves to establish: a status of the repair at
-any point, and one of the activation before the start was sent.
-
-A VMM that exits before its restore-ready event, as OpenVMM does once it cannot
-restore the snapshot, after it closed the event's endpoint, which the sequence
-then gives ten seconds to exit, leaves the line with which OpenVMM reported its
-fatal error in its log, which the failure's message keeps, and whose stable
-code, if it says that the host cannot present the template's CPU profile, TSC,
-or LAPIC timer, or that OpenVMM cannot bind the port of a forward of the clone's
-network, `E_PORT_FORWARD_BIND`, attributes the failure to the host. The message
-then keeps the cause of the error that names the forward.
-
-From the launch on, a failure ends the clone's VMM through its verified
-identity, and the sandbox keeps the clone's progress log, `clone-progress.log`,
-which records each step from the spawn to the commit, after a first line that
-names the launch and the boot of the host, a few lines that it appends without a
-sync, and the record of its failure, `clone-failure.json`, JSON in format
-`FAILURE_FORMAT`, which it writes before the teardown, with the teardown
-pending, so that a crash of the caller during the teardown leaves it for a
-reattach to finish, and again once the teardown ended, with the stage, the
-evidence and the status, the original outcome, the transaction, the generation,
-the progress, and the teardown: no VM, an exit or a termination that the host
-verified, or an unresolved one, which keeps the launch's journal or runtime
-record, and the lease; a release removes both, and a sandbox that boots cold
-writes neither. A failure that cannot be recorded before its teardown keeps the
-launch's journal or runtime record, and the lease, so that a reattach still
-finds that the clone failed.
-
-A step or a check of the caller's own that fails once the clone is ready, or
-once its sandbox started, fails the clone with the caller's evidence through
-`Activated::fail` or `Started::fail`, which end the launch and record the
-failure as the sequence's own failures do.
-
-`reattach_clone` takes a clone over after the caller of its launch restarted: it
-reattaches by the identity of its VMM's process, checks a committed clone in a
-new session, in which the clone answers the request for its Ready with the Ready
-of the transaction of `clone-activation.bin`, which it answers in every session,
-and ends a clone that another runtime identity launched, or that fails the
-check, through its verified identity; it records the failure of a launch that a
-crash interrupted, but not the journal that a commit may leave beside its
-runtime record, classifies a VM that exited by its outcome report, which is the
-clone's VM's once its launch began, whether or not a crash left a record of its
-spawn, records a failure before it ends a VMM or clears the runtime record of
-one that exited, and fails, leaving them as they were, if it cannot, finishes a
-failure that a crash left pending as its teardown would have recorded it,
-keeping its transaction, resolves the teardown of an earlier failure with what
-the VMM left as it ended, its outcome report and OpenVMM's fatal error,
-attributes a status of the guest's as one that a workload may have given once
-the clone's progress log is lost, damaged, or was written during another boot of
-the host, whose crash may have lost its last lines, and reads nothing of the
-template store, so that a tombstone or a retirement of the generation leaves the
-clone its lease.
-
-`CloneRecords::read` reads what the sandbox keeps of a clone, for the operations
-that list, inspect, or remove clones.
 
 `Store::tombstone` quarantines a generation, which takes no new lease while its
 leases keep working, and `Store::retire` deletes it once its leases have
@@ -1634,10 +1427,11 @@ report, the snapshot's manifest and artifacts, and the key, and publishes the
 transaction in two commits, a rename into `generations/` that replaces nothing,
 then the index.
 
-The VMMs of captures and clones start in the working directory that
-`vmm_working_dir` chooses, the system directory on Windows, so the
-[Windows working-directory limit](#windows-working-directory-limit) bounds
-neither the template store's paths nor a clone's sandbox directory.
+Capture preflight applies the
+[Windows working-directory limit](#windows-working-directory-limit) to
+`<template-store>\captures\<16-hex-slot>\transaction` before creating the slot
+or scratch. Without a trailing separator this leaves 220 units for the absolute
+template-store path, or 210 for a state root whose store is `<state>\templates`.
 
 A capture that fails publishes nothing, and `Store::recover_captures` ends the
 captures that a crash interrupted, publishing those that were checked, and
@@ -2525,13 +2319,6 @@ Ready, or drops it once it has torn down a launch that failed; the VMM's own
 opens then keep the images, and what it inherited keeps the scratch image's
 claim. Staging, the checks, and the preparation of a launch read no content of
 the images.
-
-The clone of a template takes its block devices by path instead, as the
-template's capture does, since OpenVMM opens the files of a restore itself:
-`ClonePlan::new` checks the clone's image and scratch image through their
-bindings, then checks each at its path, and requires the geometry that the
-template recorded for its own, which `CheckedDistro::geometry` and
-`CheckedScratch::geometry` read through the checked files.
 
 `nvx-rs sandbox provision` records the scratch image's binding under
 `scratch_binding` in `config.json`, at the image's resolved path, and `start`
