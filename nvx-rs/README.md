@@ -3568,6 +3568,18 @@ python3 ../scripts/nvx.py test-guest-binaries \
   --binaries ../build/nvx-rs-guest-binaries
 ```
 
+Two examples compile the documented workflows through the public API alone,
+and nothing runs them: [`host-workflows`](examples/host-workflows.rs), a cold
+boot, a capture into a snapshot, a restore from it, finding a VM again after its
+caller restarts, and a stop; and [`guest-workflows`](examples/guest-workflows.rs),
+for Linux guests, an init's time daemon, control session, capture, activation
+of a restore, and mapping table. The guest example leaves the guest's space to
+its caller: the steps of NVX's reference space, as nvx-init takes them, compile
+in `guest::init::boot::tests::the_reference_space_steps_compile`. Clippy
+compiles the examples with the rest of the crate's targets, and
+[`external-launch`](examples/external-launch.rs) runs a cold boot end to end,
+or a restore up to its restore-ready event.
+
 The
 [`check-nvx-rs`](../.github/actions/check-nvx-rs/action.yml) action runs
 rustfmt, Clippy with warnings denied for all features, for the library
