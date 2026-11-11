@@ -100,10 +100,7 @@ command-line tokens of a capture at OpenVMM's platform tier, and
 `openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
 the function reads. The tests of `nvx::host::template` compile them, and check
 each token of a template's kernel command line with OpenVMM's own function. The
-runtime adapter in `tests/runtime-adapter/` compiles them too, as the allowlist
-with which the guest agent of a template's VM checks its kernel command line,
-and its tests pin the set of tokens that they admit. The third,
-`port_forward_socket_creation.rs`, is the variant of the error of
+third, `port_forward_socket_creation.rs`, is the variant of the error of
 `vm/devices/net/net_consomme/src/resolver.rs` with which OpenVMM reports a port
 forward whose socket on the host it cannot bind, as when a clone's VMM restores
 its NIC with a forward whose port another socket holds. OpenVMM gives that
