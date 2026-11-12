@@ -1,9 +1,8 @@
 //! Bind mounts of host mappings beneath the descriptors of their roots.
 //!
-//! This module is NVX's internal reference code of the guest's space, hidden from the
-//! documentation and unstable: it becomes crate-private once nothing outside NVX uses it.
-//! [`guest::mappings`](super) re-exports its public items at their former paths, hidden too,
-//! beside the mapping values and the host mapping table, which stay public.
+//! This module is part of the guest's space, nvx-init's internal reference code, private to the
+//! crate. [`guest::mappings`](super) re-exports the items that NVX's programs use, beside the
+//! mapping values and the host mapping table, which stay public.
 //!
 //! A [`Mapper`] applies [`Mapping`]s beneath one [`TargetRoot`], in order, from a [`SourceRoot`],
 //! tracks them, and unmounts them, in reverse order, at the teardown of the layered root that
@@ -141,7 +140,7 @@ const FILE_MODE: Mode = Mode::S_IRUSR
 ///
 /// The default reserves nothing more.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Reserved {
+pub(crate) struct Reserved {
     /// The reserved trees, relative to the target root.
     trees: Vec<PathBuf>,
     /// The reserved paths, relative to the target root.
@@ -151,7 +150,7 @@ pub struct Reserved {
 impl Reserved {
     /// Reserves `trees` and `paths`, absolute paths as seen from the target root, which must be
     /// canonical, as a [`Mapping`]'s target is: otherwise [`InvalidMapping::Target`].
-    pub fn new<T, P>(trees: T, paths: P) -> Result<Self, InvalidMapping>
+    pub(crate) fn new<T, P>(trees: T, paths: P) -> Result<Self, InvalidMapping>
     where
         T: IntoIterator,
         T::Item: AsRef<Path>,
@@ -179,7 +178,7 @@ impl Reserved {
     /// [`protocol::share`](crate::protocol::share) lists for the host and the guest: the trees
     /// `/proc`, `/sys`, `/dev`, `/.nvx-agent`, `/etc/machine-id`, `/etc/resolv.conf`, and
     /// `/run/nvx/time`, and the paths `/etc`, `/run`, and `/run/nvx`.
-    pub fn container_root() -> Self {
+    pub(crate) fn container_root() -> Self {
         Self::new(RESERVED_MOUNT_TARGETS, RESERVED_EXACT_MOUNT_TARGETS)
             .expect("the container runtime's reserved targets are canonical")
     }
@@ -198,7 +197,7 @@ impl Reserved {
 /// system, and the root's own mounts, each of a whole file system too, on which the mapper may
 /// create what a target lacks.
 #[derive(Debug)]
-pub struct TargetRoot {
+pub(crate) struct TargetRoot {
     /// The root's directory, opened with `O_PATH`.
     directory: FileDescriptor,
     /// The unique IDs of the root's own mounts: the root's mount first.
@@ -211,7 +210,7 @@ impl TargetRoot {
     /// the root's own: for example a layered root's overlay, or a guest's `/`. A final symbolic
     /// link at `path` is not followed. It needs Linux 6.8 or later, for the unique mount IDs and
     /// `statmount`.
-    pub fn open(path: &Path) -> io::Result<Self> {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
         Self::open_with(&mut SystemKernel, path)
     }
 
@@ -219,7 +218,7 @@ impl TargetRoot {
     /// the root's own mounts, on which the mapper may create what a target lacks, such as the
     /// scratch file system of a root without an overlay, and whose root a mapping may cover. A
     /// final symbolic link at `path` is not followed.
-    pub fn add_mount(&mut self, path: &Path) -> io::Result<()> {
+    pub(crate) fn add_mount(&mut self, path: &Path) -> io::Result<()> {
         self.add_mount_with(&mut SystemKernel, path)
     }
 
@@ -263,14 +262,14 @@ impl TargetRoot {
 /// The root beneath which a [`Mapper`] or a runtime bind opens the sources of mappings, such as the
 /// guest's mount of the host's export: a descriptor of a directory.
 #[derive(Debug)]
-pub struct SourceRoot {
+pub(crate) struct SourceRoot {
     /// The root's directory, opened with `O_PATH`.
     directory: FileDescriptor,
 }
 
 impl SourceRoot {
     /// Opens the directory `path`, not through a final symbolic link.
-    pub fn open(path: &Path) -> io::Result<Self> {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
             directory: open_directory(path)?,
         })
@@ -280,7 +279,7 @@ impl SourceRoot {
 /// A step of applying or unmounting a mapping, at which a system call failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum Step {
+pub(crate) enum Step {
     /// Opening the source beneath its root: a missing source fails with `ENOENT`, a symbolic or
     /// magic link on its path with `ELOOP`, and a path that crosses into another mount with
     /// `EXDEV`.
@@ -323,7 +322,7 @@ impl fmt::Display for Step {
 /// Why a mapper refused a mapping, or failed to apply or unmount it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum MappingError {
+pub(crate) enum MappingError {
     /// An earlier mapping of the mapper failed, so it refuses every later one.
     Latched,
     /// The runtime reserves the target, or a tree below it.
@@ -382,7 +381,7 @@ impl MappingError {
     /// mapper, `EPERM` for a reserved target, `EBUSY` for an overlap or a mount point, `EINVAL`
     /// for a kind, `ELOOP` for a link, `ENOTDIR` for a component that is not a directory, `EXDEV`
     /// for a foreign mount, and `EAGAIN` for a moved mapping.
-    pub fn raw_os_error(&self) -> i32 {
+    pub(crate) fn raw_os_error(&self) -> i32 {
         let error = match self {
             Self::Latched => Errno::ECANCELED,
             Self::Reserved => Errno::EPERM,
@@ -451,7 +450,7 @@ impl std::error::Error for MappingError {}
 
 /// Which mapping of a batch a [`Mapper`] refused or failed to apply, from 0, and why.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ApplyError {
+pub(crate) struct ApplyError {
     /// The index of the mapping in its batch.
     entry: usize,
     /// Why it was refused or failed.
@@ -460,12 +459,12 @@ pub struct ApplyError {
 
 impl ApplyError {
     /// Returns the index of the mapping in its batch, from 0.
-    pub fn entry(&self) -> usize {
+    pub(crate) fn entry(&self) -> usize {
         self.entry
     }
 
     /// Returns why the mapping was refused or failed.
-    pub fn error(&self) -> &MappingError {
+    pub(crate) fn error(&self) -> &MappingError {
         &self.error
     }
 }
@@ -480,7 +479,7 @@ impl std::error::Error for ApplyError {}
 
 /// A mapping that a teardown failed to unmount, which stays mounted.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct UnmountFailure {
+pub(crate) struct UnmountFailure {
     /// The mapping's target, as an absolute path in the root.
     target: PathBuf,
     /// Why it was not unmounted.
@@ -489,14 +488,14 @@ pub struct UnmountFailure {
 
 impl UnmountFailure {
     /// Returns the mapping's target, as an absolute path in the root.
-    pub fn target(&self) -> &Path {
+    pub(crate) fn target(&self) -> &Path {
         &self.target
     }
 
     /// Returns why the mapping was not unmounted: [`MappingError::Moved`] if another mount is at
     /// its target, and otherwise the failed [`Step::Locate`] or [`Step::Unmount`], which is also
     /// the step of a mapping that a rename moved and that the teardown failed to detach.
-    pub fn error(&self) -> &MappingError {
+    pub(crate) fn error(&self) -> &MappingError {
         &self.error
     }
 }
@@ -514,14 +513,14 @@ impl fmt::Display for UnmountFailure {
 
 /// The mappings that a teardown failed to unmount, in the order in which it attempted them.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TeardownError {
+pub(crate) struct TeardownError {
     /// The failures, which is never empty.
     failures: Vec<UnmountFailure>,
 }
 
 impl TeardownError {
     /// Returns the failures, in the order in which the teardown attempted them.
-    pub fn failures(&self) -> &[UnmountFailure] {
+    pub(crate) fn failures(&self) -> &[UnmountFailure] {
         &self.failures
     }
 }
@@ -564,7 +563,7 @@ struct Stray {
 /// The applier of a root's mappings, which checks, attaches, tracks, and unmounts them, as the
 /// [module](self) describes.
 #[derive(Debug)]
-pub struct Mapper {
+pub(crate) struct Mapper {
     /// The root beneath which it maps.
     root: TargetRoot,
     /// The targets that the root's profile reserves.
@@ -580,7 +579,7 @@ pub struct Mapper {
 
 impl Mapper {
     /// Returns a mapper of no mappings yet beneath `root`, whose profile reserves `reserved`.
-    pub fn new(root: TargetRoot, reserved: Reserved) -> Self {
+    pub(crate) fn new(root: TargetRoot, reserved: Reserved) -> Self {
         Self {
             root,
             reserved,
@@ -592,7 +591,7 @@ impl Mapper {
 
     /// Returns the targets of the mappings that the mapper tracks, in the order in which it
     /// applied them, relative to the root.
-    pub fn targets(&self) -> impl ExactSizeIterator<Item = &Path> {
+    pub(crate) fn targets(&self) -> impl ExactSizeIterator<Item = &Path> {
         self.mapped.iter().map(|mapped| mapped.target.as_path())
     }
 

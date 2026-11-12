@@ -130,9 +130,6 @@ changes only when the module's purpose does.
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
-| [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its assembly, shares, export, and teardown |
-| [`nvx::guest::view`](#nvxguestview) | The VM-wide hostname, machine ID, and single-server resolver, whose binds the layered root owns |
-| [`nvx::guest::gpt`](#nvxguestgpt) | `read_disk`: the partition table of a GPT disk, read and checked through its block device |
 
 GPT lower layers use `noload,errors=remount-ro`: the kernel neither loads nor
 replays their journals, because even a journal whose file system does not
@@ -205,8 +202,8 @@ it, `virtfs_tag=` the device's tag, `virtfs_mode=` `ro` or `rw`, an
 `HostExport::parse` reads them as the guest's init splits the command line: all
 four tokens or none, each once and in its form, with the checks of NVX's shell
 init, and no `nvx_share=` token, which binds a live share. It returns the
-`HostExport`, the device's tag and mode, which
-`nvx::guest::root::Root::mount_export` mounts, or `None`.
+`HostExport`, the device's tag and mode, which nvx-init's space mounts, or
+`None`.
 `tests/fixtures/export-tokens.json` holds its cases.
 
 ### `nvx::protocol::nvxs`
@@ -1101,12 +1098,11 @@ The programs that run in Linux guests; see [Guest binaries](#guest-binaries).
 ### `nvx::guest::mappings`
 
 The mapping values, `Mapping`, `Access`, `Kind`, `InvalidMapping`, and
-`MAX_PATH_BYTES`, and `MappingTable` are public. The mapper, in the hidden
-`mapper` module, whose items keep their paths here, hidden too, is NVX's
-internal reference code of the guest's space: unstable, and crate-private once
-nothing outside NVX uses it.
+`MAX_PATH_BYTES`, and `MappingTable` are public. The mapper, in the `mapper`
+module, is part of the guest's space, nvx-init's internal reference code,
+private to the crate, which re-exports the items that NVX's programs use here.
 
-`Mapper`: applies host mappings for any guest init or agent beneath the
+`Mapper`: applies host mappings beneath the
 descriptor of a `TargetRoot`, the root of a mount of a whole file system, which
 `statmount` tells from a bind of a directory below it, such as a layered root's
 overlay or a guest's `/`, from a `SourceRoot`, such as the guest's mount of the
@@ -1146,7 +1142,7 @@ decode, holds no entry, does not continue the table, ends past the
 announcement, or maps the export's root, which an empty source names, as a
 `TableError::Refused` at the entry that it expects next, which changes nothing.
 It hands the part's mappings to the caller, which applies them beneath the root
-of its choice, such as through a `Mapper`; the first that
+of its choice, such as through its own mapper; the first that
 fails latches the table, which reports it as a `TableError::Failed` with its
 entry, and refuses every later part. The table is complete once every announced
 mapping is applied, and none failed, and the caller's teardown tears it down.
@@ -1154,8 +1150,8 @@ mapping is applied, and none failed, and the caller's teardown tears it down.
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
 a `MappingTable` and a mapper, beneath `/` in direct mode; the table refuses an
 empty source, since the export is an aggregate, whose root lists its children,
-and NVX's hosts, whose exports are all aggregates, send none. A layered `Root`
-mounts its live shares through a mapper.
+and NVX's hosts, whose exports are all aggregates, send none. nvx-init's
+layered root mounts its live shares through a mapper.
 
 ### `nvx::guest::nvxs`
 
@@ -1279,46 +1275,44 @@ which returns the `ActivationAction` that the adapter takes.
 
 `Activation::accept` decodes the record with `ActivationRecord::decode`, and
 accepts only a clone's, with a restore section, that expects the CPU count and
-the memory size that the repair reports, before any side effect, while a packet
-without a record fails the activation; the adapter applies the record with
-`apply`, as at a cold boot: it assembles the root as `root::assemble` does,
-with the record's image, an EROFS image whose UUID it checks if the record
-expects one, or a GPT disk whose GUID it checks if the record expects one, its
-upper, a tmpfs or the scratch with the record's journal policy, and its overlay
-mode, and with the `RootTemplate` that the guest's own configuration holds,
-which its template captured: the runtime directory, the block devices, the
-timeout, the host filesystem device's virtio-fs tag, and the gateway of the
-template's NIC, if it has one, but waits for no device past the activation's
-deadline, which the adapter passes, so that the application ends by then.
-`apply`, `RootTemplate`, `Applied`, `ApplyError`, `AppliedTeardownError`, and
-`NetworkError` are hidden: NVX's internal reference code of the guest's space,
-unstable, and crate-private once nothing outside NVX uses it.
+the memory size that the repair reports, before any side effect, while an
+Activate whose record the adapter's framing refused unread, as longer than a
+record can be, fails as a record that long does; the adapter applies the record
+in its own space, by the activation's deadline.
+
+nvx-init applies it with its own space, NVX's internal reference code, private
+to the crate, as at a cold boot: it assembles the root with the record's image,
+an EROFS image whose UUID it checks if the record expects one, or a GPT disk
+whose GUID it checks if the record expects one, its upper, a tmpfs or the
+scratch with the record's journal policy, and its overlay mode, and with the
+inputs that the guest's own configuration holds, which its template captured:
+the runtime directory, the block devices, the timeout, the host filesystem
+device's virtio-fs tag, and the gateway of the template's NIC, if it has one,
+but waits for no device past the activation's deadline, so that the
+application ends by then.
 
 For a GPT disk, it first asks the kernel to reread the disk's partition table
 with `BLKRRPART`, since the kernel created the block devices of partitions for
 the template's placeholder. Whatever the image, it requires a fresh upper, whose
 `upper` and `work` directories are missing or empty, in a bounded check that
 reads no file, while a cold sandbox's scratch keeps its upper across boots. It
-uses no execution identity from the record, which carries none: each execution names its
-own identity, which `Entry::check` checks, as in a sandbox without a workload
-identity at a cold boot. With the record's export, it mounts the host export through that
-filesystem device with `Root::mount_export`, read-write, at `hostfs/root` in the
-runtime directory, outside the root, since the record names no mode and OpenVMM
-limits each child to its own access. It applies the record's VM-wide view with
-`view::apply`, passing the record's own DNS server. The view sets the hostname
-and, when requested, generates a machine ID after repair's reseed. The root
-owns the machine-ID and resolver binds, including those made before a later
-failure. Application starts no announcer and no other process. It returns
-the `Applied` root and workload, from which `take_export` hands the adapter the
-export's `SourceRoot`, to map the host's mapping table from once the clone is
-ready, `proxy` the network's proxy endpoint, which the adapter tells its
-workloads as at a cold boot, and `publication` and `gateway`, from which its
-caller starts and supervises ingress. Its `teardown` closes the export's root,
-then tears the root down with its view binds. A switched root unmounts
-nothing. A failure returns an
-`ApplyError`, `Export` or `Network` among them, after which nothing that it
-mounted or bound stays mounted unless the error reports the unmounts that
-failed.
+uses no execution identity from the record, which carries none: each execution
+names its own identity, as in a sandbox without a workload identity at a cold
+boot. With the record's export, it mounts the host export through that
+filesystem device, read-write, at `hostfs/root` in the runtime directory,
+outside the root, since the record names no mode and OpenVMM limits each child
+to its own access. It applies the record's VM-wide view, with the record's own
+DNS server. The view sets the hostname and, when requested, generates a machine
+ID after repair's reseed. The root owns the machine-ID and resolver binds,
+including those made before a later failure. Application starts no announcer
+and no other process. nvx-init keeps the root and workload that it activated:
+the export's root, from which it maps the host's mapping table once the clone
+is ready, the network's proxy endpoint, which it tells its workloads as at a
+cold boot, and the publication and gateway, from which it starts and supervises
+ingress. Their teardown closes the export's root, then tears the root down with
+its view binds. A switched root unmounts nothing. After a failure, of the
+export or the network among others, nothing that the application mounted or
+bound stays mounted unless the failure reports the unmounts that failed.
 
 Once the adapter passed the activation what the session received while the
 application ran, which came before Ready, `Activation::complete` returns the
@@ -1350,130 +1344,6 @@ its `GenerationId`, and the reseed of the kernel's random number generator with
 it, in the caller's process. A `Seed` keeps its bytes in one allocation, which
 no move copies, zeroes them with volatile writes when it is dropped, can't be
 cloned, and formats none of them. `nvx-reseed` runs them.
-
-### `nvx::guest::root`
-
-The operations of a layered root, for a guest init or agent, whether or not it
-is PID 1. The module is hidden: NVX's internal reference code of the guest's
-space, unstable, and crate-private once nothing outside NVX uses it.
-
-`assemble`: the `Assembly`'s block devices, found by their MMIO windows, checked
-against their roles' access modes and their expected sizes, and flushed, and the
-`Root` that it mounts, at a runtime directory, a canonical path that no symbolic
-link leads through, that it holds exclusively until its teardown, where nothing
-is mounted already, once it has checked everything: the read-only layers of the
-`Image` that the caller names, which it never probes: an EROFS image, whose
-expected `nvx::uuid::Uuid` it checks in its superblock, or a GPT disk whose
-partition table it reads and checks with `nvx::guest::gpt::read_disk`, against
-the caller's `nvx::gpt::Expected` values, whose first partition it reads, up to
-the caller's bound, as opaque bytes that it never mounts, and whose later
-partitions, at least one, hold ext4 layers that it mounts `ro,nosuid,nodev` with
-`errors=remount-ro`, so that an error that the kernel finds in a layer fails the
-operation that found it, rather than panic the guest, as the layer's superblock
-may ask, from the block devices that the kernel created when it found the disk,
-once their superblocks show that no journal needs a recovery, which their
-read-only device can't take, partition 2's at the overlay's base and the last
-partition's at its top, under an overlay mounted `nosuid,nodev` with the one
-option set of the caller's `OverlayMode`, `metacopy=on,xino=on` or, for lowers
-that may carry untrusted overlay xattrs, `metacopy=off,redirect_dir=nofollow`,
-with no fallback, whose upper and work directories are on the `Upper`: an ext4
-scratch mounted `nosuid,nodev`, whose superblock it checks for a journal that
-the caller's `Journal` policy forbids, or a tmpfs mounted `nosuid,nodev` with
-`size=N%` for the caller's cap of N percent of the guest's memory, which it
-refuses outside 1 to 90 before anything changes, or else at the kernel's
-default size. It refuses overlay options longer than
-`MOUNT_OPTIONS_LIMIT`, the most that a mount passes, which, below `/run/nvx`,
-fit up to 195 layers of a GPT disk, and an overlay that the kernel's mount table
-shows read-only or without the mode's options in effect, since the kernel mounts
-one so, rather than fail, when its upper can't hold its work directory or its
-extended attributes.
-
-`Root::mount_share` and `Root::mount_aggregate`: virtio-fs live shares at
-targets in the root that it checks, against the targets that `protocol::share`
-reserves among others, with one aggregate per root, which it attaches through
-its `mappings::Mapper` beneath the overlay, with NVX's container root's reserved
-targets: a share's device mounted out of the root, then moved onto its target,
-and a copy of each child's entry of the aggregate.
-
-`Root::mount_export`: the host export, the aggregate device of
-`protocol::export`, one per root, mounted `nosuid,nodev` with the access of its
-`ExportMode` at `hostfs/root` in the runtime directory, out of the root, below a
-directory that only root may enter, whose root it returns as the `SourceRoot` of
-the caller's mappings, which the caller's own mapper applies. A share, a child,
-or the export that fails latches the root.
-
-`Root::mount_runtime`: the runtime's file systems, which an init mounts once
-for its VM, before the root's first live share, after it makes every
-mount of the root's tree `nosuid,nodev`: procfs at `/proc`, sysfs at `/sys`,
-read-only, a tmpfs at `/dev` with an execution's device nodes and links, devpts
-at `/dev/pts`, and tmpfs at `/dev/shm` and `/run`, with an execution's options,
-then the time status's directory, when the caller names one, bound read-only at
-`/run/nvx/time`. It refuses a mount point that leads through a symbolic link or
-where something is mounted already, and, before it changes anything, a call
-while the root holds the runtime's mounts, whose `/dev` and `/dev/pts` a second
-restriction would make `nodev`, or a live share, since the `/run`
-tmpfs would hide one beneath `/run` from the teardown. A call that fails
-unmounts what it mounted. A later share beneath `/run` is on that
-tmpfs, which the root's mapper owns, as a guest's mapper owns its `/tmp`.
-Each attachment is checked at its named target before it is recorded. A runtime
-mount whose attachment fails and which cannot be detached keeps its mount
-descriptor, so rollback and teardown can retry cleanup without trusting its
-original path.
-
-`Root::switch`: the switch into the root, which an init makes once for its VM:
-it moves the root's mount onto `/`, then makes the root the caller's root
-directory with `chroot`, and its working directory with `chdir`. Once the mount
-is on `/`, the root has switched for good: a second switch and the teardown are
-refused, and dropping the root unmounts nothing, while descriptors opened before
-the switch, such as a `TargetRoot` and a `SourceRoot`, still map. A move that
-fails leaves the root where it was.
-
-`Root::teardown`: the view's binds, then the shares in reverse order, a runtime mount whose
-attachment failed and which could not be detached, then the mounts of an
-aggregate, of the export, and of the runtime, the later first, the overlay,
-the layers from the top down, and the upper, with every failed sync or unmount
-reported. An
-ext4 scratch's file system is synced before its unmount, since a mount namespace
-that copied the root's mounts keeps them, unsynced, after this one unmounts
-them, and a scratch whose sync fails stays mounted.
-
-Each failure is a typed `Error`, or a `SwitchError` for the switch. The
-operations collect no child's status, change the caller's root only by the
-switch and never its credentials, start no async runtime, and never power the VM
-off.
-
-### `nvx::guest::view`
-
-Hidden, unstable internal reference code of the guest's space, like `root`.
-`apply(&mut Root, &activation::View, dns)` sets the current UTS namespace's
-hostname from the view's bytes. Image mode leaves `/etc/machine-id` untouched;
-generated mode writes a new UUID at `MACHINE_ID_FILE` in the runtime directory
-and binds it read-only over the image's ID. Optional DNS writes one server in
-`RESOLVER_FILE` and binds it read-only over `/etc/resolv.conf`.
-`nvx::guest::activation` re-exports both file constants.
-
-The root owns every bind, including an attachment left by a failed call.
-Teardown before the switch removes them; after the switch teardown refuses
-and drop unmounts nothing. A view is attempted once per root, before its
-switch. Refusals return the crate's `Error` with kind `Unsupported`, and
-system failures with kind `Io`; an error does not restore the old hostname
-or remove generated files. The activation record's hostname limit and
-machine-ID modes are unchanged.
-
-### `nvx::guest::gpt`
-
-Hidden, like `nvx::guest::root`, which reads its disks through it: NVX's
-internal reference code of the guest's space, unstable, and crate-private once
-nothing outside NVX uses it.
-
-`read_disk`: the partition table of a GPT disk, read and checked with
-`nvx::gpt`'s `Disk::read` through the disk's block device, which the caller
-opened, at the logical block size and size that `BLKSSZGET` and `BLKGETSIZE64`
-report, with the caller's `Expected` values, such as the disk GUID that a boot
-parameter names. It only reads the device, at explicit offsets, so it never
-moves the file's position. It neither compares the partitions that the kernel
-created with the table nor asks the kernel to reread the table. Each failure is
-a typed `DeviceError`.
 
 ## Egress policy files
 
@@ -2554,18 +2424,19 @@ The `guest` feature adds the programs that run in NVX's Linux guests: the
 Linux images ship all ten at their established `/sbin/nvx-*` paths. The
 module's libraries are not programs: `terminal` opens the terminal on which an
 agent serves its session, and `mappings` describes host mappings and keeps the
-account of a host's mapping table. NVX's own guest space is internal reference
-code, hidden, unstable, and crate-private once nothing outside NVX uses it:
-the mapper of `mappings` mounts host mappings beneath the descriptors of the
-roots that its caller names, and `root` assembles a layered root, mounts live
-shares in it through the mapper, and tears it down.
+account of a host's mapping table. NVX's own guest space is nvx-init's internal
+reference code, private to the crate, as [nvx-init's space](#nvx-inits-space)
+tells: the mapper of `mappings` mounts host mappings beneath the descriptors of
+the roots that its caller names, and `root` assembles a layered root, mounts
+live shares in it through the mapper, and tears it down.
 `nvx-managed-agent` opens its control terminal and runs direct workloads through
 nvx-init's plain-process core: each child resets its priority, drops its
 credentials and capabilities, and enters its working directory before exec.
 Each execution ends its process group, including on normal completion, without
 cgroups, namespaces, limits, or a privilege-dropping helper. It applies its
-host mapping table through `mappings`, from its mount of the host's export,
-beneath `/` in direct mode, and any other guest init or agent can use them too.
+host mapping table through the table of `mappings` and nvx-init's mapper, from
+its mount of the host's export, beneath `/` in direct mode, and any other guest
+init or agent can use the table and the mapping values too.
 Any guest init or agent can also run the boot steps of `nvx-time` and the steps
 of `nvx-reseed` in its own process, through the
 `nvx::guest::time` and `nvx::guest::reseed` calls, on which both programs run,
@@ -2574,7 +2445,7 @@ and a template's guest captures before its root's assembly through
 and, in each clone, repairs its restore: it activates the restore's memory
 target, reseeds the kernel's random number generator, and finishes the restore,
 as `nvx-snapshot` does.
-Nor is the hidden `gpt` module a program: it reads the partition table of a GPT
+Nor is the private `gpt` module a program: it reads the partition table of a GPT
 disk's block device.
 
 | Binary | Program |
@@ -2636,6 +2507,134 @@ host-only code under `src/host/` and test-only modules in `tests.rs` files or
 which `GuestRustBuildConstants` in
 [`build_constants.py`](../scripts/nvx_tools/build_constants.py) then has to
 select.
+
+### nvx-init's space
+
+nvx-init's space, the root that it assembles and what it mounts in it, is NVX's
+internal reference code, private to the crate: `nvx::guest::root`,
+`nvx::guest::view`, `nvx::guest::gpt`, the mapper of `nvx::guest::mappings`, and
+the application of `nvx::guest::activation`, which nvx-init and NVX's managed
+agent use. The
+[guest-agent guidelines](../doc/guest-agent-guidelines.md#build-the-space) give
+the rules that it keeps, which another init's space may adapt.
+
+#### `nvx::guest::root`
+
+The operations of a layered root, whether or not their caller is PID 1.
+
+`assemble`: the `Assembly`'s block devices, found by their MMIO windows, checked
+against their roles' access modes and their expected sizes, and flushed, and the
+`Root` that it mounts, at a runtime directory, a canonical path that no symbolic
+link leads through, that it holds exclusively until its teardown, where nothing
+is mounted already, once it has checked everything: the read-only layers of the
+`Image` that the caller names, which it never probes: an EROFS image, whose
+expected `nvx::uuid::Uuid` it checks in its superblock, or a GPT disk whose
+partition table it reads and checks with `nvx::guest::gpt::read_disk`, against
+the caller's `nvx::gpt::Expected` values, whose first partition it reads, up to
+the caller's bound, as opaque bytes that it never mounts, and whose later
+partitions, at least one, hold ext4 layers that it mounts `ro,nosuid,nodev` with
+`errors=remount-ro`, so that an error that the kernel finds in a layer fails the
+operation that found it, rather than panic the guest, as the layer's superblock
+may ask, from the block devices that the kernel created when it found the disk,
+once their superblocks show that no journal needs a recovery, which their
+read-only device can't take, partition 2's at the overlay's base and the last
+partition's at its top, under an overlay mounted `nosuid,nodev` with the one
+option set of the caller's `OverlayMode`, `metacopy=on,xino=on` or, for lowers
+that may carry untrusted overlay xattrs, `metacopy=off,redirect_dir=nofollow`,
+with no fallback, whose upper and work directories are on the `Upper`: an ext4
+scratch mounted `nosuid,nodev`, whose superblock it checks for a journal that
+the caller's `Journal` policy forbids, or a tmpfs mounted `nosuid,nodev` with
+`size=N%` for the caller's cap of N percent of the guest's memory, which it
+refuses outside 1 to 90 before anything changes, or else at the kernel's
+default size. It refuses overlay options longer than
+`MOUNT_OPTIONS_LIMIT`, the most that a mount passes, which, below `/run/nvx`,
+fit up to 195 layers of a GPT disk, and an overlay that the kernel's mount table
+shows read-only or without the mode's options in effect, since the kernel mounts
+one so, rather than fail, when its upper can't hold its work directory or its
+extended attributes.
+
+`Root::mount_share` and `Root::mount_aggregate`: virtio-fs live shares at
+targets in the root that it checks, against the targets that `protocol::share`
+reserves among others, with one aggregate per root, which it attaches through
+its `mappings::Mapper` beneath the overlay, with NVX's container root's reserved
+targets: a share's device mounted out of the root, then moved onto its target,
+and a copy of each child's entry of the aggregate.
+
+`Root::mount_export`: the host export, the aggregate device of
+`protocol::export`, one per root, mounted `nosuid,nodev` with the access of its
+`ExportMode` at `hostfs/root` in the runtime directory, out of the root, below a
+directory that only root may enter, whose root it returns as the `SourceRoot` of
+the caller's mappings, which the caller's own mapper applies. A share, a child,
+or the export that fails latches the root.
+
+`Root::mount_runtime`: the runtime's file systems, which an init mounts once
+for its VM, before the root's first live share, after it makes every
+mount of the root's tree `nosuid,nodev`: procfs at `/proc`, sysfs at `/sys`,
+read-only, a tmpfs at `/dev` with an execution's device nodes and links, devpts
+at `/dev/pts`, and tmpfs at `/dev/shm` and `/run`, with an execution's options,
+then the time status's directory, when the caller names one, bound read-only at
+`/run/nvx/time`. It refuses a mount point that leads through a symbolic link or
+where something is mounted already, and, before it changes anything, a call
+while the root holds the runtime's mounts, whose `/dev` and `/dev/pts` a second
+restriction would make `nodev`, or a live share, since the `/run`
+tmpfs would hide one beneath `/run` from the teardown. A call that fails
+unmounts what it mounted. A later share beneath `/run` is on that
+tmpfs, which the root's mapper owns, as a guest's mapper owns its `/tmp`.
+Each attachment is checked at its named target before it is recorded. A runtime
+mount whose attachment fails and which cannot be detached keeps its mount
+descriptor, so rollback and teardown can retry cleanup without trusting its
+original path.
+
+`Root::switch`: the switch into the root, which an init makes once for its VM:
+it moves the root's mount onto `/`, then makes the root the caller's root
+directory with `chroot`, and its working directory with `chdir`. Once the mount
+is on `/`, the root has switched for good: a second switch and the teardown are
+refused, and dropping the root unmounts nothing, while descriptors opened before
+the switch, such as a `TargetRoot` and a `SourceRoot`, still map. A move that
+fails leaves the root where it was.
+
+`Root::teardown`: the view's binds, then the shares in reverse order, a runtime mount whose
+attachment failed and which could not be detached, then the mounts of an
+aggregate, of the export, and of the runtime, the later first, the overlay,
+the layers from the top down, and the upper, with every failed sync or unmount
+reported. An
+ext4 scratch's file system is synced before its unmount, since a mount namespace
+that copied the root's mounts keeps them, unsynced, after this one unmounts
+them, and a scratch whose sync fails stays mounted.
+
+Each failure is a typed `Error`, or a `SwitchError` for the switch. The
+operations collect no child's status, change the caller's root only by the
+switch and never its credentials, start no async runtime, and never power the VM
+off.
+
+#### `nvx::guest::view`
+
+`apply(&mut Root, &activation::View, dns)` sets the current UTS namespace's
+hostname from the view's bytes. Image mode leaves `/etc/machine-id` untouched;
+generated mode writes a new UUID at `MACHINE_ID_FILE` in the runtime directory
+and binds it read-only over the image's ID. Optional DNS writes one server in
+`RESOLVER_FILE` and binds it read-only over `/etc/resolv.conf`.
+`nvx::guest::activation` re-exports both file constants.
+
+The root owns every bind, including an attachment left by a failed call.
+Teardown before the switch removes them; after the switch teardown refuses
+and drop unmounts nothing. A view is attempted once per root, before its
+switch. Refusals return the crate's `Error` with kind `Unsupported`, and
+system failures with kind `Io`; an error does not restore the old hostname
+or remove generated files. The activation record's hostname limit and
+machine-ID modes are unchanged.
+
+#### `nvx::guest::gpt`
+
+`read_disk`, through which `nvx::guest::root` reads its disks: the partition
+table of a GPT disk, read and checked with
+`nvx::gpt`'s `Disk::read` through the disk's block device, which the caller
+opened, at the logical block size and size that `BLKSSZGET` and `BLKGETSIZE64`
+report, with the caller's `Expected` values, such as the disk GUID that a boot
+parameter names. It only reads the device, at explicit offsets, so it never
+moves the file's position. It neither compares the partitions that the kernel
+created with the table nor asks the kernel to reread the table. Each failure is
+a typed `DeviceError`.
 
 ## Testing
 
