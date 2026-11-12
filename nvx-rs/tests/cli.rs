@@ -2056,12 +2056,32 @@ fn an_interrupted_start_keeps_its_claim_until_recovery_confirms_exit() {
         .join("build")
         .join("fake-openvmm-state-blocks.json");
     assert!(!blocks.exists());
-    let scratch_binding: nvx::host::sandbox::scratch::ScratchBinding =
-        serde_json::from_value(root.json("state/config.json")["scratch_binding"].clone()).unwrap();
-    let error = scratch_binding
-        .check(&scratch, Instant::now() + Duration::from_millis(100))
-        .unwrap_err();
-    assert_eq!(error.code(), nvx::ErrorCode::ScratchClaimed);
+    // A run of another sandbox on the same images finds the scratch image claimed.
+    let sandbox_run: Vec<String> = vec![
+        "sandbox".into(),
+        "run".into(),
+        "--layer".into(),
+        format!(
+            "distro,{},11111111-1111-1111-1111-111111111111",
+            distro.to_str().unwrap()
+        ),
+        "--scratch".into(),
+        scratch.to_str().unwrap().to_owned(),
+        "--entrypoint".into(),
+        "/bin/echo".into(),
+    ];
+    let output = run(&root, &sandbox_run);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stderr),
+        error_line(
+            "scratch-claimed",
+            &format!(
+                "another sandbox claims the ext4 scratch image {}",
+                scratch.to_str().unwrap()
+            ),
+        )
+    );
     assert_eq!(fs::read(&distro).unwrap(), b"distro\n");
     assert_eq!(fs::read(&scratch).unwrap(), b"scratch\n");
 
@@ -2088,11 +2108,9 @@ fn an_interrupted_start_keeps_its_claim_until_recovery_confirms_exit() {
     assert!(process.has_exited().unwrap());
     assert!(!journal.exists());
     assert!(!root.below("state/control.capability").exists());
-    assert!(
-        scratch_binding
-            .check(&scratch, Instant::now() + Duration::from_secs(2))
-            .is_ok()
-    );
+    // The claim went with the VM: a run on the same images claims the scratch image again.
+    let output = run(&root, &sandbox_run);
+    assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(transition(&root, "deprovision", "state", &[]), succeeded());
     assert_eq!(fs::read(&distro).unwrap(), b"distro\n");
     assert_eq!(fs::read(&scratch).unwrap(), b"scratch\n");
@@ -2680,13 +2698,17 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
 #[test]
 fn run_boots_each_guest_with_its_default_memory() {
     let root = Root::new();
-    for guest in nvx::host::artifacts::Guest::ALL {
-        let initramfs = root.path.join("build").join(guest.initramfs_name());
-        fs::write(initramfs, "initramfs\n").unwrap();
-        let arguments = ["run", "--guest", guest.name(), "--dry-run"].map(str::to_owned);
+    // Each guest of `nvx.py`, its initramfs, and the RAM in MiB with which `run` boots it.
+    for (guest, initramfs, memory_mib) in [
+        ("alpine", "initramfs.cpio.gz", 128),
+        ("ubuntu", "initramfs-ubuntu.cpio.gz", 512),
+        ("azurelinux", "initramfs-azurelinux.cpio.gz", 512),
+    ] {
+        fs::write(root.path.join("build").join(initramfs), "initramfs\n").unwrap();
+        let arguments = ["run", "--guest", guest, "--dry-run"].map(str::to_owned);
         let output = run(&root, &arguments);
         assert!(output.status.success(), "{}", text(&output.stderr));
-        let memory = format!(" --memory {}M ", guest.default_memory_mib());
+        let memory = format!(" --memory {memory_mib}M ");
         assert!(text(&output.stdout).contains(&memory), "{guest}");
     }
 }
