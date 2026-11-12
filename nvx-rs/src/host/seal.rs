@@ -22,11 +22,13 @@
 //!
 //! Other hosts cannot seal files.
 
+#[cfg(any(feature = "cli", windows))]
 use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::Path;
 
+#[cfg(any(feature = "cli", windows))]
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[cfg(windows)]
@@ -35,12 +37,14 @@ mod windows;
 
 /// The version of the seals that this build takes. Seals of different versions never compare
 /// equal.
-pub const SEAL_VERSION: u32 = 1;
+#[cfg(any(all(feature = "cli", target_os = "linux"), windows))]
+pub(crate) const SEAL_VERSION: u32 = 1;
 
 /// The platform scheme of a seal: the host that took it, which fixes what its fields mean.
+#[cfg(any(feature = "cli", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum SealScheme {
+pub(crate) enum SealScheme {
     /// Linux: the device and inode, with the change time.
     Linux,
     /// Windows: the volume serial number and the file ID, without a change time.
@@ -48,9 +52,10 @@ pub enum SealScheme {
 }
 
 /// The kind of a sealed file.
+#[cfg(any(feature = "cli", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum FileKind {
+pub(crate) enum FileKind {
     /// A regular file.
     Regular,
     /// A directory.
@@ -69,13 +74,14 @@ pub enum FileKind {
 
 /// A timestamp of a sealed file: whole seconds since the Unix epoch, negative before it, and the
 /// nanoseconds within the second.
+#[cfg(any(feature = "cli", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SealTime {
+pub(crate) struct SealTime {
     /// Whole seconds since 1970-01-01 00:00:00 UTC.
-    pub seconds: i64,
+    pub(crate) seconds: i64,
     /// Nanoseconds within the second, below 1,000,000,000.
-    pub nanoseconds: u32,
+    pub(crate) nanoseconds: u32,
 }
 
 /// The seal of an open file: what the host reported about it, from its metadata alone.
@@ -91,9 +97,10 @@ pub struct SealTime {
 /// ```
 ///
 /// `fileId` holds 32 hexadecimal digits, and `changed` is `null` on Windows.
+#[cfg(any(feature = "cli", windows))]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FileSeal {
+pub(crate) struct FileSeal {
     /// [`SEAL_VERSION`].
     version: u32,
     /// The host that took the seal.
@@ -113,6 +120,7 @@ pub struct FileSeal {
     changed: Option<SealTime>,
 }
 
+#[cfg(any(feature = "cli", windows))]
 impl FileSeal {
     /// Seals `file`, open, from its metadata as the host reports it now.
     ///
@@ -121,37 +129,41 @@ impl FileSeal {
     /// Fails with the host's error, and with [`io::ErrorKind::Unsupported`] on hosts other than
     /// Linux and Windows, and on Windows for a handle that is not a file of a disk volume, such as
     /// a pipe.
-    pub fn of(file: &File) -> io::Result<Self> {
+    pub(crate) fn of(file: &File) -> io::Result<Self> {
         imp::seal(file)
     }
 
     /// Returns the host that took the seal.
-    pub fn scheme(&self) -> SealScheme {
+    #[cfg(feature = "cli")]
+    pub(crate) fn scheme(&self) -> SealScheme {
         self.scheme
     }
 
     /// Returns the device, or on Windows the volume serial number.
-    pub fn device(&self) -> u64 {
+    pub(crate) fn device(&self) -> u64 {
         self.device
     }
 
     /// Returns the inode, or on Windows the file ID.
-    pub fn file_id(&self) -> u128 {
+    pub(crate) fn file_id(&self) -> u128 {
         self.file_id.0
     }
 
     /// Returns the kind of file.
-    pub fn kind(&self) -> FileKind {
+    #[cfg(feature = "cli")]
+    pub(crate) fn kind(&self) -> FileKind {
         self.kind
     }
 
     /// Returns the length in bytes.
-    pub fn length(&self) -> u64 {
+    #[cfg(feature = "cli")]
+    pub(crate) fn length(&self) -> u64 {
         self.length
     }
 
     /// Returns what differs first between this seal and `other`, in the order version, scheme,
     /// identity, kind, length, modification time, and change time, or `None` if they are equal.
+    #[cfg(feature = "cli")]
     pub(crate) fn difference(&self, other: &Self) -> Option<&'static str> {
         if self.version != other.version {
             Some("seal version")
@@ -174,21 +186,25 @@ impl FileSeal {
 }
 
 /// A file ID, which the serde form of a seal writes as 32 lowercase hexadecimal digits.
+#[cfg(any(feature = "cli", windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FileId(pub(crate) u128);
 
+#[cfg(any(feature = "cli", windows))]
 impl fmt::Display for FileId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:032x}", self.0)
     }
 }
 
+#[cfg(any(feature = "cli", windows))]
 impl Serialize for FileId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
     }
 }
 
+#[cfg(any(feature = "cli", windows))]
 impl<'de> Deserialize<'de> for FileId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let digits = String::deserialize(deserializer)?;
@@ -209,6 +225,7 @@ impl<'de> Deserialize<'de> for FileId {
 /// Windows, it also opens a directory, and denies other opens for writing or deleting the file
 /// until the file is closed, so that nothing modifies, renames, or replaces the file meanwhile;
 /// opens that only read it, such as OpenVMM's open of a read-only disk, share it.
+#[cfg(feature = "cli")]
 pub(crate) fn open_guarded(path: &Path) -> io::Result<File> {
     imp::open_guarded(path)
 }
@@ -224,14 +241,18 @@ pub(crate) fn open_read(path: &Path) -> io::Result<File> {
 mod imp {
     use std::fs::{File, OpenOptions};
     use std::io;
-    use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(feature = "cli")]
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::path::Path;
 
     use nix::fcntl::OFlag;
 
+    #[cfg(feature = "cli")]
     use super::{FileId, FileKind, FileSeal, SEAL_VERSION, SealScheme, SealTime};
 
     /// See [`FileSeal::of`].
+    #[cfg(feature = "cli")]
     pub(super) fn seal(file: &File) -> io::Result<FileSeal> {
         let metadata = file.metadata()?;
         let file_type = metadata.file_type();
@@ -263,6 +284,7 @@ mod imp {
     }
 
     /// Returns the time of `seconds` and `nanoseconds`, as the kernel reports a file's time.
+    #[cfg(feature = "cli")]
     fn time(seconds: i64, nanoseconds: i64) -> io::Result<SealTime> {
         let nanoseconds = u32::try_from(nanoseconds)
             .ok()
@@ -280,6 +302,7 @@ mod imp {
     }
 
     /// See [`super::open_guarded`].
+    #[cfg(feature = "cli")]
     pub(super) fn open_guarded(path: &Path) -> io::Result<File> {
         open_read(path)
     }
@@ -303,9 +326,11 @@ mod imp {
     use std::io;
     use std::path::Path;
 
+    #[cfg(feature = "cli")]
     use super::FileSeal;
 
     /// See [`FileSeal::of`].
+    #[cfg(feature = "cli")]
     pub(super) fn seal(_file: &File) -> io::Result<FileSeal> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -314,6 +339,7 @@ mod imp {
     }
 
     /// See [`super::open_guarded`].
+    #[cfg(feature = "cli")]
     pub(super) fn open_guarded(path: &Path) -> io::Result<File> {
         File::open(path)
     }
@@ -324,5 +350,5 @@ mod imp {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", windows)))]
+#[cfg(all(test, feature = "cli", any(target_os = "linux", windows)))]
 pub(crate) mod tests;

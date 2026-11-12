@@ -1,19 +1,24 @@
 //! The Windows seal, from the file information of the open handle, and the opens of sealed files.
 
 use std::ffi::c_void;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(feature = "cli")]
+use std::fs::OpenOptions;
 use std::io;
 use std::mem;
+#[cfg(feature = "cli")]
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{FILETIME, GetLastError, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_INFO,
-    FILE_SHARE_READ, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FileIdInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileType,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ID_INFO, FILE_TYPE_DISK,
+    FILE_TYPE_UNKNOWN, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFileType,
 };
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ};
 
 use super::{FileId, FileKind, FileSeal, SEAL_VERSION, SealScheme, SealTime};
 
@@ -94,6 +99,7 @@ fn time(time: FILETIME) -> SealTime {
 }
 
 /// See [`super::open_guarded`].
+#[cfg(feature = "cli")]
 pub(super) fn open_guarded(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)

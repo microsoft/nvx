@@ -10,7 +10,8 @@ use super::*;
 use crate::ErrorKind;
 use crate::host::config::BlockGeometry;
 use crate::host::paths;
-use crate::host::sandbox::{LayerRole, block_geometry};
+use crate::host::sandbox::block_geometry;
+use crate::host::sandbox::layer::LayerRole;
 use crate::host::seal::open_read;
 use crate::host::seal::tests::open_metadata_only;
 

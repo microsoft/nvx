@@ -7,13 +7,18 @@ use std::path::PathBuf;
 
 use proptest::prelude::*;
 
+#[cfg(feature = "cli")]
 use super::distro::DistroFormat;
+#[cfg(feature = "cli")]
+use super::layer::{LAYER_ROLES, LayerRole, SandboxLayer};
 use super::mount::{parse_mount_value, validate_mount_target};
 use super::*;
 use crate::ErrorKind;
 use crate::protocol::cmdline::tests::model;
+#[cfg(feature = "cli")]
 use crate::uuid::Uuid;
 
+#[cfg(feature = "cli")]
 const UUID: &str = "11111111-2222-3333-4444-555555555555";
 
 fn refused<T: std::fmt::Debug>(result: Result<T>) {
@@ -51,6 +56,7 @@ fn workload_identity_grammar() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn layer_values_are_role_path_uuid() {
     assert_eq!(LAYER_ROLES, [LayerRole::Distro]);
@@ -290,6 +296,7 @@ proptest! {
         prop_assert_eq!(parse_workload_identity(&format!("{uid}:{gid}")).unwrap(), (uid, gid));
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn canonical_layer_uuids_round_trip(bytes in any::<[u8; 16]>()) {
         let uuid = Uuid::from_bytes(bytes).to_string();

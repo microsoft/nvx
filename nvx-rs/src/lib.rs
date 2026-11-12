@@ -27,10 +27,10 @@
 //!   NVX writes and reads, and in the layout in which GPT stores them. It has no dependencies, so
 //!   the host and the guest share it.
 //! - [`Hypervisor`]: the hypervisors that run the VMs.
-//! - [`host`] (feature `host`): the layouts of NVX's artifacts, the OpenVMM command line, the
-//!   lowering of network and filesystem policies, the host's NVXS connection, process and
-//!   platform primitives, VMs that a caller creates, starts, reattaches to, and stops in private
-//!   directories that it owns, and the manifests and compatibility keys of templates.
+//! - [`host`] (feature `host`): the OpenVMM command line, the lowering of network and filesystem
+//!   policies, the host's NVXS connection, process and platform primitives, VMs that a caller
+//!   creates, starts, reattaches to, and stops in private directories that it owns, and the
+//!   manifests and compatibility keys of templates.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
 //!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest
 //!   init or agent opens the terminal on which it serves its session (`guest::terminal`), starts

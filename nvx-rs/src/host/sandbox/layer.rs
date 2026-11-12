@@ -14,24 +14,24 @@ use crate::uuid::Uuid;
 /// A sandbox takes exactly one layer, the distro layer, which OpenVMM attaches as the `distro`
 /// sandbox block device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum LayerRole {
+pub(crate) enum LayerRole {
     /// The distribution, the only layer of a sandbox.
     Distro,
 }
 
 /// The layer roles that `--layer` accepts and that a launch holds: `LAYER_ROLES`.
-pub const LAYER_ROLES: [LayerRole; 1] = [LayerRole::Distro];
+pub(crate) const LAYER_ROLES: [LayerRole; 1] = [LayerRole::Distro];
 
 impl LayerRole {
     /// Returns the role's name: `distro`.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Distro => "distro",
         }
     }
 
     /// Returns the role that `name` names, if any, one of the [`LAYER_ROLES`].
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         LAYER_ROLES.into_iter().find(|role| role.as_str() == name)
     }
 }
@@ -45,7 +45,7 @@ impl fmt::Display for LayerRole {
 /// A read-only layer: its role, its host image, the image's format, and the identity that the
 /// guest expects of it, the UUID of an EROFS filesystem or the GUID of a GPT disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SandboxLayer {
+pub(crate) struct SandboxLayer {
     /// The layer's role.
     role: LayerRole,
     /// The image, with its components normalized.
@@ -61,7 +61,7 @@ impl SandboxLayer {
     /// Returns the EROFS layer of `role` at `path` with filesystem `uuid`, which are used as
     /// given, except that `path` is spelled with its components alone, as
     /// [`Path::components`] reads them.
-    pub fn new(role: LayerRole, path: &str, uuid: impl Into<String>) -> Self {
+    pub(crate) fn new(role: LayerRole, path: &str, uuid: impl Into<String>) -> Self {
         Self {
             role,
             path: paths::normalized(Path::new(path)),
@@ -73,7 +73,7 @@ impl SandboxLayer {
     /// Returns the GPT disk of `role` at `path` with the disk GUID `guid`, which are used as
     /// given, except that `path` is spelled with its components alone, as [`new`](Self::new)
     /// spells it.
-    pub fn gpt(role: LayerRole, path: &str, guid: impl Into<String>) -> Self {
+    pub(crate) fn gpt(role: LayerRole, path: &str, guid: impl Into<String>) -> Self {
         Self {
             format: DistroFormat::Gpt,
             ..Self::new(role, path, guid)
@@ -85,7 +85,7 @@ impl SandboxLayer {
     ///
     /// The UUID must be canonical: lowercase hexadecimal digits in hyphenated groups of
     /// 8, 4, 4, 4, and 12. Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
-    pub fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         let fields: Vec<&str> = value.split(',').collect();
         let [role, path, uuid] = fields[..] else {
             return Err(refused("--layer must be ROLE,PATH,EROFS_UUID"));
@@ -107,23 +107,23 @@ impl SandboxLayer {
     }
 
     /// Returns the layer's role.
-    pub fn role(&self) -> LayerRole {
+    pub(crate) fn role(&self) -> LayerRole {
         self.role
     }
 
     /// Returns the layer's image.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     /// Returns the format of the layer's image.
-    pub fn format(&self) -> DistroFormat {
+    pub(crate) fn format(&self) -> DistroFormat {
         self.format
     }
 
     /// Returns the identity that the guest expects of the layer's image: the UUID of an EROFS
     /// filesystem, or the GUID of a GPT disk.
-    pub fn uuid(&self) -> &str {
+    pub(crate) fn uuid(&self) -> &str {
         &self.uuid
     }
 }

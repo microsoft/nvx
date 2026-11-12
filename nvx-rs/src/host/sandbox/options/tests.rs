@@ -4,15 +4,18 @@ use std::fs;
 use std::path::PathBuf;
 
 use proptest::prelude::*;
+#[cfg(feature = "cli")]
 use serde_json::json;
+#[cfg(feature = "cli")]
 use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::ErrorKind;
 use crate::host::paths::{self, resolve};
-use crate::host::sandbox::SandboxLayer;
+#[cfg(feature = "cli")]
 use crate::host::sandbox::distro::{DISTRO_POLICY_REVISION, DistroBinding, DistroFormat};
-use crate::host::sandbox::layer::LayerRole;
+#[cfg(feature = "cli")]
+use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
 use crate::host::sandbox::mount::{plan_mounts, validate_mounts};
 
 fn message<T: std::fmt::Debug>(result: Result<T>) -> String {
@@ -60,11 +63,13 @@ fn sandbox_rejects_systemd_entrypoint() {
 }
 
 /// A distro layer in a temporary directory.
+#[cfg(feature = "cli")]
 struct Layer {
     /// The temporary directory.
     directory: tempfile::TempDir,
 }
 
+#[cfg(feature = "cli")]
 impl Layer {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -97,6 +102,7 @@ impl Layer {
     }
 }
 
+#[cfg(feature = "cli")]
 fn distro_sha256() -> String {
     Sha256::digest(b"distro")
         .iter()
@@ -193,6 +199,7 @@ fn environment_files_hold_a_json_array_of_strings() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn distro_manifest_binds_the_layer() {
     let layer = Layer::new();
@@ -248,6 +255,7 @@ fn distro_manifest_binds_the_layer() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn systemd_entrypoints_and_images_are_refused_independently() {
     let layer = Layer::new();
@@ -356,6 +364,7 @@ proptest! {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn sandbox_allows_non_systemd_sbin_init() {
     let layer = Layer::new();
@@ -366,6 +375,7 @@ fn sandbox_allows_non_systemd_sbin_init() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn the_entrypoint_check_needs_no_manifest_and_precedes_the_distro_verification() {
     let layer = Layer::new();
@@ -392,6 +402,7 @@ fn the_entrypoint_check_needs_no_manifest_and_precedes_the_distro_verification()
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn sandbox_rejects_systemd_from_bound_distro_metadata() {
     let layer = Layer::new();
@@ -474,6 +485,7 @@ fn sandbox_rejects_systemd_from_bound_distro_metadata() {
     layer.preflight("/sbin/init").unwrap();
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn distro_manifests_are_strict_json() {
     let layer = Layer::new();

@@ -1,7 +1,8 @@
 //! The host side of NVX.
 //!
-//! - [`artifacts`] locates the OpenVMM executable and the guest kernel and initramfs, and every
-//!   artifact of the guests that `nvx.py` runs, in a repository checkout or a release.
+//! - The private `artifacts` locates, for the CLI, the OpenVMM executable and the guest kernel and
+//!   initramfs, and every artifact of the guests that `nvx.py` runs, in a repository checkout or
+//!   a release.
 //! - [`runtime`] holds what every launch shares: the paths of those three files and their
 //!   [`RuntimeIdentity`](runtime::RuntimeIdentity), the hypervisor, which
 //!   [`probe_hypervisor`](runtime::probe_hypervisor) checks, and the
@@ -28,9 +29,9 @@
 //!   exits and termination reaches only it, whether or not the caller started it.
 //! - [`sandbox`] is the launch profile of `nvx-rs sandbox`: a container over read-only EROFS
 //!   layers and a private ext4 scratch disk, with live shares, and the checks of its options.
-//!   [`sandbox::distro`] binds a distro layer to what explicit verification found, so that a
-//!   launch checks the layer through [`seal`], which seals open files from their metadata alone,
-//!   and [`sandbox::scratch`] binds and claims a scratch image.
+//!   Its private `distro` (feature `cli`) binds a distro layer to what explicit verification
+//!   found, so that the CLI's launches check the layer through the private `seal`, which seals open
+//!   files from their metadata alone, and its private `scratch` binds and claims a scratch image.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
 //!   its files and endpoints, and a checked cold, capture or restore [`Prepared`](vm::Prepared)
 //!   launch with its opened log and control credential, which the library never writes. A
@@ -56,12 +57,12 @@
 //!
 //! The host modules deny unsafe code. On Unix, the private `sys` module confines the system calls
 //! that the standard library lacks behind documented safe functions, which call `nix`. The
-//! Windows platform module and the Windows module of [`seal`] still call `windows-sys` directly,
+//! Windows platform module and the Windows module of `seal` still call `windows-sys` directly,
 //! and the CLI's identification of the host CPU executes `CPUID` through its `core::arch`
 //! intrinsic, which the crate's minimum Rust version still marks unsafe.
 #![deny(unsafe_code)]
 
-pub mod artifacts;
+pub(crate) mod artifacts;
 #[cfg(feature = "cli")]
 #[doc(hidden)]
 pub mod cli;
@@ -78,7 +79,7 @@ pub mod restore;
 mod restore_driver;
 pub mod runtime;
 pub mod sandbox;
-pub mod seal;
+pub(crate) mod seal;
 #[cfg(feature = "cli")]
 pub(crate) mod session;
 pub mod snapshot;
