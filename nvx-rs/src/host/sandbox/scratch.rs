@@ -11,10 +11,9 @@
 //! [`ScratchBinding::check`] checks it before a launch. Neither reads or maps the image's content.
 //! The check opens the image, compares it with the binding, claims it, compares it again, since
 //! the launch whose claim it waited for may have changed it, and returns it open, as a
-//! [`CheckedScratch`], which a [`PreparedLaunch`](super::PreparedLaunch) hands to the VMM: a
-//! replacement, or a change of kind or length, fails the check. On Linux, the file ID is the inode
-//! number, which a file that is created once the image is removed can take again: a replacement
-//! made that way, with the image's length, passes the check.
+//! [`CheckedScratch`]: a replacement, or a change of kind or length, fails the check. On Linux,
+//! the file ID is the inode number, which a file that is created once the image is removed can
+//! take again: a replacement made that way, with the image's length, passes the check.
 //!
 //! # Claims
 //!
@@ -25,25 +24,22 @@
 //! [`ErrorCode::ScratchClaimed`].
 //!
 //! - On Linux, the check opens the image for reading and writing and takes an exclusive `flock`
-//!   lock of that open file description. The VMM inherits the descriptor, which it opens again as
-//!   `/proc/self/fd/N`, and keeps it until it exits, so the claim lasts until both the caller and
-//!   the VMM have closed it. A process that another thread of the caller spawns while the
-//!   descriptor is open holds a copy of it from its fork until it executes its program, and with
-//!   it the claim, for that moment: a check therefore waits for a claim that should be free, for
-//!   [`CLAIM_RELEASE_WAIT`] for example, rather than fail at once.
+//!   lock of that open file description. A VMM that inherits the descriptor keeps it until it
+//!   exits, so the claim lasts until both the caller and the VMM have closed it. A process that
+//!   another thread of the caller spawns while the descriptor is open holds a copy of it from its
+//!   fork until it executes its program, and with it the claim, for that moment: a check
+//!   therefore waits for a claim that should be free, for [`CLAIM_RELEASE_WAIT`] for example,
+//!   rather than fail at once.
 //! - On Windows, the check's handle is a guard that holds no access to the image's content: it
 //!   shares reading and writing, which OpenVMM's open of the image needs, and denies deleting and
 //!   renaming it, so that the image's path names the checked image until the guard is released.
 //!   Two guards exclude each other, since each asks for the delete access that the other denies.
 //!   The check then makes sure that no other process has the image open for writing, as the VMM
 //!   of another sandbox does: an open that denies writing succeeds only then. It then opens the
-//!   image for writing, sharing every access, as the claim's handle. The VMM inherits the guard
-//!   and the claim's handle, and uses neither: so it holds the claim, and its copy of the guard the
-//!   image's path, from its start, even if the caller ends before the VMM has opened the image,
-//!   which closes the caller's own. Once the VMM has opened the image, at authenticated Ready, the
-//!   caller releases the guard, its own and the VMM's copy, through
-//!   [`PreparedLaunch::release`](super::PreparedLaunch::release), and the VMM's handles, open for
-//!   writing, keep the claim.
+//!   image for writing, sharing every access, as the claim's handle. A VMM that inherits the
+//!   claim's handle holds the claim from its start, even if the caller ends before the VMM has
+//!   opened the image, which closes the caller's own; once the VMM has opened the image, its
+//!   handles, open for writing, keep the claim.
 //!
 //! Claims exclude the launches of NVX: a process that writes the image without claiming it, which
 //! on Linux takes no `flock` lock and on Windows does not keep the image open, is not kept out.
@@ -128,15 +124,12 @@ pub struct ScratchBinding {
 /// A scratch image that [`ScratchBinding::check`] found unchanged and claimed, held open.
 ///
 /// On Linux, the file is the image, open for reading and writing, whose open file description
-/// holds the claim, and which the VMM inherits. On Windows, it is the image's guard, which holds
-/// no access to its content and denies deleting and renaming it, so that the image's path names
-/// the checked image while the guard is held, and the checked scratch also holds the claim's
-/// handle, open for writing; the VMM inherits both. Dropping it closes them, which releases the
-/// claim, and on Windows the guard, unless a VMM that inherited them still holds them; see
-/// [Claims](self#claims).
-///
-/// A [`PreparedLaunch`](super::PreparedLaunch) takes it, with the path at which the check opened
-/// the image, and hands the image to the VMM.
+/// holds the claim, which a VMM that inherits the file keeps. On Windows, it is the image's guard,
+/// which holds no access to its content and denies deleting and renaming it, so that the image's
+/// path names the checked image while the guard is held, and the checked scratch also holds the
+/// claim's handle, open for writing, which a VMM that inherits it keeps. Dropping it closes them,
+/// which releases the claim, and on Windows the guard, unless a VMM that inherited them still
+/// holds them; see [Claims](self#claims).
 #[derive(Debug)]
 pub struct CheckedScratch {
     /// The checked image, or on Windows its guard.
@@ -144,6 +137,13 @@ pub struct CheckedScratch {
     /// The claim's handle on Windows: the image, open for writing and sharing every access,
     /// which the VMM inherits so that it holds the claim from its start.
     #[cfg(windows)]
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(
+            dead_code,
+            reason = "it holds the claim, which only the CLI hands to the VMMs that it starts"
+        )
+    )]
     claim: File,
     /// The path at which the check opened the image.
     path: PathBuf,
@@ -187,15 +187,9 @@ impl CheckedScratch {
     }
 
     /// Returns the claim's handle, which the VMM inherits on Windows.
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "cli"))]
     pub(crate) fn claim(&self) -> &File {
         &self.claim
-    }
-
-    /// Returns the checked image, for a prepared launch to move.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn file_mut(&mut self) -> &mut File {
-        &mut self.file
     }
 }
 

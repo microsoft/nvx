@@ -6,11 +6,9 @@
 //!
 //! The module has no code of its own, and supervises nothing: it re-exports these items from the
 //! crate's private spawn and platform modules. [`host::vm`](crate::host::vm) creates, spawns,
-//! reattaches to, and stops a VM in a private directory that its caller owns. SL6.3 deletes
-//! `spawn_command` and the checked-file handoff of
-//! [`PreparedLaunch`](crate::host::sandbox::PreparedLaunch), and settles the launcher of the
-//! `external-launch` example: the last users of this path, besides the tests of the spawn in
-//! `tests/supervisor.rs`.
+//! reattaches to, and stops a VM in a private directory that its caller owns. SL6.3 deletes it,
+//! with `spawn_command`: its last users are the tests of the spawn in `tests/supervisor.rs` and
+//! `tests/checked_handoff.rs`.
 //!
 //! # Inheritance
 //!

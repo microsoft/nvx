@@ -10,8 +10,6 @@ use std::marker::PhantomData;
 use std::os::fd::{AsFd, BorrowedFd};
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, BorrowedHandle};
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::MutexGuard;
 #[cfg(windows)]
@@ -126,8 +124,7 @@ struct Borrowed<'a>(std::convert::Infallible, PhantomData<&'a ()>);
 /// - On Linux, the descriptor must be close-on-exec in the caller, as Rust opens its files, and
 ///   stays so: only the VMM's own process clears the flag, between its fork and its exec, so no
 ///   process that another thread spawns meanwhile inherits it. A spawn refuses a descriptor that
-///   is not close-on-exec, since any process that the caller spawns would inherit it. The VMM
-///   opens it again as `/proc/self/fd/N`, which `proc_path` returns.
+///   is not close-on-exec, since any process that the caller spawns would inherit it.
 /// - On Windows, the handle joins the explicit list of handles that the VMM inherits, and is
 ///   inheritable only while the VMM is created, after which the spawn restores its earlier
 ///   inheritability. Spawns of VMMs take that window one at a time, under the crate's spawn lock,
@@ -150,17 +147,6 @@ impl<'a> Inherited<'a> {
     #[cfg(windows)]
     pub fn new(object: &'a impl AsHandle) -> Self {
         Self(object.as_handle())
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Inherited<'_> {
-    /// Returns the path through which the VMM opens the descriptor again: `/proc/self/fd/N`,
-    /// where `N` is its number in the caller and in the VMM.
-    pub fn proc_path(&self) -> PathBuf {
-        use std::os::fd::AsRawFd;
-
-        PathBuf::from(format!("/proc/self/fd/{}", self.0.as_raw_fd()))
     }
 }
 
