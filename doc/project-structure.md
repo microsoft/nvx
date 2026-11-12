@@ -24,7 +24,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Implementation of the `nvx.py` commands |
 | `scripts/nvx.py` | Canonical build, run, test, benchmark, and packaging CLI |
-| `scripts/setup` | Development host and GitHub Actions runner bootstrap scripts, and the manifest of the tool versions that they install |
+| `scripts/setup` | Development host and GitHub Actions runner bootstrap scripts, the manifest of the tool versions that they install, and the Python package that provisions NVX's CI runners on Azure |
 | `scripts/nvx_adversarial_executor.py` | Credential-free adversarial executor protocol entry point |
 | `.cache/linux` | Generated verified/patched Linux tree; ignored by Git |
 | `build/sources` | Generated Linux, Alpine, and Ubuntu release sources; ignored by Git |
@@ -168,6 +168,14 @@ nvx/
 |   |   |-- time_abi.py          Time ABI harness checks and CPU profile guidance
 |   |   `-- ubuntu.py            Verified Ubuntu rootfs and EROFS preparation
 |   |-- setup/                   Host and Actions runner bootstrap scripts
+|   |   |-- azure/                Azure CI runner provisioning of existing scale sets
+|   |   |   |-- nvx_azure/        Standard-library Python package that scale-set instances run to become CI runners
+|   |   |   |-- linux/            Example Linux scale-set configuration
+|   |   |   |-- windows/          Example Windows configuration, Custom Script entry shim, and PowerShell adapters
+|   |   |   |-- build_package.py  Offline packager of a scale set's bootstrap payload and model patch
+|   |   |   |-- requirements.txt  The packager's Python requirement
+|   |   |   `-- README.md         Azure runner provisioning guide
+|   |   |-- README.md             Development host and Actions runner bootstrap guide
 |   |   |-- setup-linux.sh        Linux/KVM or Linux/MSHV development-host and Actions runner bootstrap
 |   |   |-- setup-windows-whp.ps1 Windows/WHP development-host and Actions runner bootstrap
 |   |   `-- tool-versions.conf    Shared tool release and checksum pins
@@ -366,6 +374,11 @@ hooks that `test-layout-allowlist.json` allows them, and
 The `setup/` scripts bootstrap development hosts and GitHub Actions runners
 using the [tool manifest](../scripts/setup/tool-versions.conf);
 see [Automated environment bootstrap](setup.md#automated-environment-bootstrap).
+On Azure, `setup/azure/nvx_azure` is the standard-library Python package with
+which the instances of NVX's CI scale sets provision themselves as runners,
+through those scripts, and `setup/azure/build_package.py` packages it into a
+scale set's custom data; see
+[Azure CI runner provisioning](../scripts/setup/azure/README.md).
 `nvx-hosts.example.json` is the template for the
 [remote agent host](setup.md#remote-agent-hosts) inventory, and CI runs
 `publish_development_release.py` to publish development releases,

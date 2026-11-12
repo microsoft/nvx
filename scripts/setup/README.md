@@ -11,8 +11,15 @@ Runner-only mode, which `--runner-only` on Linux and `-RunnerOnly` on Windows
 select, prepares a persistent GitHub Actions runner for NVX's CI jobs instead,
 and needs no checkout.
 
-For Azure VMSS bootstrapping, see [Azure provisioning](azure/README.md). The
-scripts in this directory remain usable on supported hosts outside Azure.
+On Azure, [`azure/`](azure/README.md) provisions NVX's CI runners on existing
+virtual machine scale sets with `nvx_azure`, a Python package that needs only
+the standard library: each instance runs it from the scale set's custom data
+when it is provisioned, and it checks the instance's identity, prepares its
+data disk and backend, runs `setup-linux.sh` or `setup-windows-whp.ps1` in
+runner-only mode, and registers the runner with a registration token that it
+requests with a GitHub credential from Key Vault. `azure/build_package.py`
+packages it, with these scripts and the tool manifest, into that custom data.
+The scripts in this directory remain usable on supported hosts outside Azure.
 
 They do not create machines or initialize a checkout. Runner-only mode
 consumes a short-lived registration token from standard input and does not
@@ -267,9 +274,11 @@ Validate dependencies without changing the host or requiring build artifacts:
 sh scripts/setup/setup-linux.sh --backend kvm --check-only --skip-build
 ```
 
-Omit `--skip-build` to also validate the built artifacts and the command that
-NVX generates for the backend. Use `--workspace PATH` when the script is
-outside the checkout.
+Omit `--skip-build` to also validate the built artifacts, build `nvx-rs` from
+the `nvx` package with the command of
+[Usage](../../doc/usage.md#nvx-rs) and record its provenance, and check the
+command that `nvx-rs run --dry-run` generates for the backend. Use
+`--workspace PATH` when the script is outside the checkout.
 
 To produce a revision-bound guest bundle for a Windows build:
 
@@ -313,9 +322,11 @@ Validate dependencies without changing the host or requiring build artifacts:
 .\scripts\setup\setup-windows-whp.ps1 -CheckOnly -SkipBuild
 ```
 
-Omit `-SkipBuild` to also validate the guest artifacts, OpenVMM binary, and
-generated WHP command. Use `-Workspace PATH` when the script is outside the
-checkout.
+Omit `-SkipBuild` to also validate the guest artifacts and the OpenVMM binary,
+build `nvx-rs` from the `nvx` package with the command of
+[Usage](../../doc/usage.md#nvx-rs) and record its provenance, and check the
+command that `nvx-rs run --dry-run` generates for WHP. Use `-Workspace PATH`
+when the script is outside the checkout.
 
 ## Tool versions
 
