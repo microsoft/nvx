@@ -21,7 +21,6 @@ pub(crate) enum ExitStatus {
     Usage = 2,
     /// A benchmark could not open, connect, size, or time its device, or a diagnostic could not
     /// prepare or run its measurement.
-    #[cfg(any(target_arch = "x86_64", test))]
     SetupFailure = 3,
     /// A benchmark transfer or send was incomplete.
     #[cfg(any(target_arch = "x86_64", test))]
@@ -42,7 +41,6 @@ pub(crate) enum CommandError {
     Operation,
     /// A benchmark could not open, connect, size, or time its device, or a diagnostic could not
     /// prepare or run its measurement.
-    #[cfg(any(target_arch = "x86_64", test))]
     Setup,
     /// A benchmark transfer or send was incomplete.
     #[cfg(any(target_arch = "x86_64", test))]
@@ -61,7 +59,6 @@ impl From<Result<(), CommandError>> for ExitStatus {
             Ok(()) => Self::Success,
             Err(CommandError::Usage) => Self::Usage,
             Err(CommandError::Operation) => Self::Failure,
-            #[cfg(any(target_arch = "x86_64", test))]
             Err(CommandError::Setup) => Self::SetupFailure,
             #[cfg(any(target_arch = "x86_64", test))]
             Err(CommandError::Transfer) => Self::TransferFailure,

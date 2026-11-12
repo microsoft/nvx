@@ -69,6 +69,7 @@ from .common import (
 from .guests import GUEST_NAMES, GuestDescriptor, guest_descriptor
 from .managed_exec_tests import (
     WorkloadArtifacts,
+    load_workload_artifacts,
     run_managed_exec_configuration,
     workload_artifact_paths,
 )
@@ -77,7 +78,7 @@ from .microvm_shards import configure_parser as configure_shards_parser
 from .microvm_shards import load_partition, shard_scenarios
 from .nvx_rs import EgressRules, compile_egress_policy
 from .openvmm_process import BootConsole, OpenvmmProcess
-from .sandbox_lifecycle_tests import run_sandbox_lifecycle
+from .sandbox_lifecycle_tests import run_sandbox_lifecycle, scratch_journal_clean
 from .sandbox_proxy_tests import run_sandbox_proxy_only
 from .sandbox_ram_upper_tests import run_sandbox_ram_upper
 from .shard_plans import parse_shard
@@ -201,6 +202,76 @@ DEBUG_KERNEL_SCENARIOS = (
 # counting LAPIC; `smp-lapic` repeats it and asserts the counting-LAPIC facts,
 # for explicit local use (#286).
 MICROVM_EXPLICIT_SCENARIOS = ("smp-lapic",)
+COLD_ONLY_SCENARIOS = frozenset(
+    (
+        "command-line-limit",
+        "directional-network-policy",
+        "denied-filesystem-paths",
+        "filesystem-comma-paths",
+        "filesystem-owner",
+        "filesystem-policy",
+        "filesystem-shares",
+        "guest-boot",
+        "guest-identity",
+        "host-loopback-policy",
+        "interrupt-map",
+        "ipv6-egress-policy",
+        "lifecycle",
+        "l3-l4-egress-policy",
+        "l3-l4-egress-port-ranges",
+        "l3-l4-egress-protocols",
+        "managed-lifecycle",
+        "managed-exec-config",
+        "private-network-ingress",
+        "sandbox-blocks",
+        "sandbox-lifecycle",
+        "sandbox-proxy-only",
+        "sandbox-ram-upper",
+        "smp",
+        "structured-outcome",
+        "virtio-features",
+        "virtio-net",
+        "workload-identity",
+    )
+)
+COLD_DEFERRED_SCENARIOS = dict.fromkeys(
+    (
+        "console-exit",
+        "console-snapshot",
+        "endpoint-policy-snapshot",
+        "filesystem-snapshot",
+        "network-snapshot",
+        "platform-aggregate-export",
+        "platform-filesystem",
+        "platform-network-policy",
+        "platform-restore-processors",
+        "platform-zero-fill",
+        "restore-downtime",
+        "restore-memory",
+        "restore-processors",
+        "run-console-restore",
+        "scratch-snapshot",
+        "smp-snapshot",
+        "snapshot-core",
+        "snapshot-rollback",
+        "snapshot-tiers",
+        "untiered-network-policy",
+    ),
+    "requires snapshot/capture/restore; no maintained standalone cold projection",
+) | {
+    "cpu-profile-fallback": "uses the x86 host-cpu-unknown hook and then restores",
+    "time-abi-conformance": "guest exhaustive X1-X6 command is x86 CPUID/MSR-only",
+    "time-host-correction": "x86-only counter/fault hooks and host UTC correction scope",
+}
+COLD_PROJECTION_SCENARIOS = frozenset(
+    (
+        "filesystem-policy",
+        "filesystem-shares",
+        "interrupt-map",
+        "ipv6-egress-policy",
+        "private-network-ingress",
+    )
+)
 SMP_LAPIC_COUNTING_MARKER = b"NVX-SMP-LAPIC-COUNTING-OK"
 MICROVM_PROCESSOR_COUNTS = (1, 2, 4, 8)
 MICROVM_TEST_SCRIPTS_DIR = Path(__file__).with_name("microvm_test_scripts")
@@ -811,6 +882,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--cold-only",
+        action="store_true",
+        help="run only the explicitly selected cold scope; requires --scenario, "
+        "keeps all cold assertions of mixed scenarios and defers their snapshot tail",
+    )
+    parser.add_argument(
         "--shard",
         type=parse_shard,
         metavar="INDEX/COUNT",
@@ -826,9 +903,22 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         type=int,
         choices=MICROVM_PROCESSOR_COUNTS,
         nargs="+",
-        default=list(MICROVM_PROCESSOR_COUNTS),
         metavar="COUNT",
-        help="processor counts for SMP and restore tests (default: 1 2 4 8)",
+        help="processor counts for SMP, restore and managed lifecycle tests "
+        "(default: 1 2 4 8 for SMP/restore, 1 for managed lifecycle)",
+    )
+    parser.add_argument(
+        "--managed-root",
+        choices=("initramfs", "scratch", "ram"),
+        default="initramfs",
+        help="managed-lifecycle root fixture; scratch/ram require --guest ubuntu "
+        "and reuse its maintained distro layer (default: initramfs)",
+    )
+    parser.add_argument(
+        "--start-stop-cycles",
+        type=positive_int,
+        help="repeat Start/Stop of one provisioned public scratch/RAM sandbox; "
+        "requires sandbox-lifecycle or sandbox-ram-upper (RAM requires at least 2)",
     )
     parser.add_argument(
         "--memory-mib",
@@ -991,6 +1081,13 @@ def _read_script(name: str) -> str:
     script = (MICROVM_TEST_SCRIPTS_DIR / name).read_text(encoding="utf-8")
     if not script.endswith("\n"):
         raise ValueError(f"microVM test script must end with a newline: {name}")
+    if name in (
+        "filesystem-shares.sh",
+        "interrupt-map.sh.in",
+        "sandbox-blocks.sh",
+        "virtio-net.sh",
+    ):
+        script = _read_script("virtio-mmio.sh") + script
     return script
 
 
@@ -1269,6 +1366,7 @@ def run_guest_boot(
     timeout: float,
     log_path: Path,
     architecture: str | None = None,
+    processors: int = 1,
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -1277,6 +1375,7 @@ def run_guest_boot(
         initrd,
         memory_mib,
         "quiet loglevel=0",
+        processors=processors,
     )
     run_guest_script(
         command,
@@ -1911,7 +2010,10 @@ def run_smp(
     timeout: float,
     log_path: Path,
     counting_lapic: bool = False,
+    architecture: str = "x86_64",
 ) -> None:
+    if counting_lapic and architecture != "x86_64":
+        raise ScriptError("smp-lapic is an x86 counting-LAPIC check")
     command = workload_boot_command(
         executable,
         backend,
@@ -1922,7 +2024,7 @@ def run_smp(
         processors=processors,
     )
     script = (
-        smp_probe_script(processors, exit_guest=False)
+        smp_probe_script(processors, exit_guest=False, architecture=architecture)
         + warp_probe_script()
         + "nvx-exit 0\n"
     )
@@ -3609,6 +3711,7 @@ def run_ipv6_egress_policy(
     timeout: float,
     output_dir: Path,
     guest: str = "alpine",
+    cold_only: bool = False,
 ) -> None:
     endpoints = _bind_ipv6_egress_ports()
     try:
@@ -3691,17 +3794,18 @@ def run_ipv6_egress_policy(
                 }
             )
 
-        _run_ipv6_egress_snapshot(
-            executable,
-            kernel,
-            initrd,
-            backend,
-            memory_mib=memory_mib,
-            timeout=timeout,
-            output_dir=output_dir,
-            endpoint=endpoints["tcp6-named"],
-            named_port=named_port,
-        )
+        if not cold_only:
+            _run_ipv6_egress_snapshot(
+                executable,
+                kernel,
+                initrd,
+                backend,
+                memory_mib=memory_mib,
+                timeout=timeout,
+                output_dir=output_dir,
+                endpoint=endpoints["tcp6-named"],
+                named_port=named_port,
+            )
 
         invalid = workload_boot_command(
             executable,
@@ -4576,6 +4680,7 @@ def run_private_network_ingress(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    cold_only: bool = False,
 ) -> None:
     """Verify that ``--network-ingress allow`` publishes the guest's listeners.
 
@@ -4764,6 +4869,8 @@ def run_private_network_ingress(
         probe=unpublished,
     )
 
+    if cold_only:
+        return
     with tempfile.TemporaryDirectory(prefix="nvx-ingress-snapshot-") as temporary:
         invalid = _private_ingress_command(
             executable,
@@ -5403,10 +5510,13 @@ class InterruptMapEntry(NamedTuple):
     actions: str
     fired: int
     unhandled: int
+    dt_interrupts: str | None = None
 
 
 def parse_interrupt_map(
     output: str,
+    *,
+    architecture: str = "x86_64",
 ) -> tuple[dict[str, dict[int, InterruptMapEntry]], dict[str, int]]:
     """Return the interrupt-map scenario's reports in ``output``, by step and
     by the base of each device's window, and the guest's ERR, MIS, and SPU
@@ -5427,7 +5537,12 @@ def parse_interrupt_map(
             fields = dict(field.split("=", 1) for field in line[len(prefix) :].split())
             if prefix == INTERRUPT_MAP_ERRORS_PREFIX:
                 errors = {
-                    name: int(fields[name]) for name in INTERRUPT_MAP_ERROR_COUNTS
+                    name: int(fields[name])
+                    for name in (
+                        ("err",)
+                        if architecture == "aarch64"
+                        else INTERRUPT_MAP_ERROR_COUNTS
+                    )
                 }
                 continue
             step = fields["step"]
@@ -5441,6 +5556,7 @@ def parse_interrupt_map(
                 fields["actions"],
                 int(fields["count"]),
                 int(fields["unhandled"]),
+                fields.get("dt_interrupts"),
             )
         except (KeyError, ValueError) as error:
             raise RuntimeError(
@@ -5462,6 +5578,7 @@ def check_interrupt_map(
     *,
     before: str,
     after: str = "traffic",
+    architecture: str = "x86_64",
 ) -> None:
     """Check the interrupt-map scenario's reports against the map of the
     architecture guide (2.4.2 and Table 2.7): after the steps ``before`` and
@@ -5473,6 +5590,7 @@ def check_interrupt_map(
     interrupt (MIS), and no spurious APIC interrupt (SPU).
 
     Raises RuntimeError naming each departure."""
+    arm = architecture == "aarch64"
     problems: list[str] = []
     for step in (before, after):
         entries = steps.get(step)
@@ -5492,12 +5610,34 @@ def check_interrupt_map(
                     f"no {expected.name} is reported at {base:#x} after step {step}"
                 )
                 continue
-            if entry.irq != expected.irq:
+            if not arm and entry.irq != expected.irq:
                 problems.append(
                     f"{expected.name} at {base:#x} interrupts on IRQ {entry.irq}, "
                     f"not {expected.irq}"
                 )
-            if entry.chip != "IO-APIC" or entry.hwirq != entry.irq:
+            if arm:
+                # DT names SPI index N; the GIC hardware INTID is 32 + N.
+                # Linux's allocated IRQ number is neither of those.
+                slot = (base - 0xD000_0000) // 0x1000
+                if entry.chip != "GICv3" or entry.hwirq != 32 + slot:
+                    problems.append(
+                        f"{expected.name}'s Linux IRQ {entry.irq} is INTID "
+                        f"{entry.hwirq} of {entry.chip}, not GICv3 INTID {32 + slot}"
+                    )
+                if entry.dt_interrupts != f"00000000{slot:08x}00000001":
+                    problems.append(
+                        f"{expected.name}'s DT interrupt cells are "
+                        f"{entry.dt_interrupts!r}, not [GIC_SPI=0, {slot}, "
+                        "EDGE_RISING=1]"
+                    )
+                if (
+                    entry.irq < 0
+                    or sum(other.irq == entry.irq for other in entries.values()) != 1
+                ):
+                    problems.append(
+                        f"{expected.name}'s Linux IRQ {entry.irq} is invalid or shared"
+                    )
+            elif entry.chip != "IO-APIC" or entry.hwirq != entry.irq:
                 problems.append(
                     f"{expected.name}'s IRQ {entry.irq} is input {entry.hwirq} of "
                     f"{entry.chip}, not the IOAPIC input of its number"
@@ -5515,14 +5655,23 @@ def check_interrupt_map(
         for base in sorted(bases):
             expected = MICROVM_VIRTIO_DEVICES[base]
             first, last = steps[before][base], steps[after][base]
+            if arm and first.irq != last.irq:
+                problems.append(
+                    f"{expected.name}'s Linux IRQ changed from {first.irq} "
+                    f"to {last.irq} with traffic"
+                )
             if last.fired <= first.fired:
                 problems.append(
                     f"{expected.name}'s IRQ {first.irq} fired {first.fired} times "
                     f"after step {before} and {last.fired} after step {after}"
                 )
-    if not errors:
+    if arm and not errors:
+        problems.append("the guest reported no GIC Err count")
+    elif arm and errors["err"]:
+        problems.append(f"/proc/interrupts counts {errors['err']} GIC errors (Err)")
+    elif not arm and not errors:
         problems.append("the guest reported no ERR, MIS, and SPU counts")
-    elif any(errors.values()):
+    elif not arm and any(errors.values()):
         problems.append(
             f"/proc/interrupts counts {errors['err']} APIC errors or spurious PIC "
             f"interrupts (ERR), {errors['mis']} misrouted IOAPIC interrupts "
@@ -5535,7 +5684,9 @@ def check_interrupt_map(
         )
 
 
-def _interrupt_map_script(devices: int, *, capture: str) -> str:
+def _interrupt_map_script(
+    devices: int, *, capture: str, architecture: str = "x86_64"
+) -> str:
     """Return the interrupt-map scenario's guest script for a guest with
     ``devices`` virtio devices, which runs ``capture`` between its boot report
     and its traffic.
@@ -5546,6 +5697,7 @@ def _interrupt_map_script(devices: int, *, capture: str) -> str:
         "interrupt-map.sh.in",
         DEVICES=str(devices),
         CAPTURE=capture,
+        ARCHITECTURE=architecture,
         GUEST_ATTACH="".join(f"\\{byte:03o}" for byte in INTERRUPT_MAP_GUEST_ATTACH),
     )
 
@@ -5559,6 +5711,8 @@ def run_interrupt_map(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    cold_only: bool = False,
+    architecture: str = "x86_64",
 ) -> None:
     """Check the interrupt map of the architecture guide (2.4.2 and Table
     2.7) end to end.
@@ -5572,6 +5726,10 @@ def run_interrupt_map(
     IOAPIC interrupt, or spurious interrupt. A snapshot of a microVM with the
     NIC, the share, and the boot console then restores with the same
     interrupts, which fire again after the restore."""
+    if architecture == "aarch64" and not cold_only:
+        raise ScriptError(
+            "ARM64 interrupt-map requires --cold-only; restore is unsupported"
+        )
     with tempfile.TemporaryDirectory(prefix="nvx-interrupt-map-") as temporary:
         root = Path(temporary)
         share = root / "share"
@@ -5599,13 +5757,23 @@ def run_interrupt_map(
             )
         result = run_guest_script(
             command,
-            _interrupt_map_script(len(MICROVM_VIRTIO_DEVICES), capture=""),
+            _interrupt_map_script(
+                len(MICROVM_VIRTIO_DEVICES), capture="", architecture=architecture
+            ),
             INTERRUPT_MAP_COMPLETION_MARKER,
             timeout=timeout,
             log_path=output_dir / "interrupt-map.log",
         )
-        steps, errors = parse_interrupt_map(result["output"])
-        check_interrupt_map(steps, errors, MICROVM_VIRTIO_DEVICES, before="boot")
+        steps, errors = parse_interrupt_map(result["output"], architecture=architecture)
+        check_interrupt_map(
+            steps,
+            errors,
+            MICROVM_VIRTIO_DEVICES,
+            before="boot",
+            architecture=architecture,
+        )
+        if cold_only:
+            return
 
         snapshot_path = root / "snapshot"
         capture_command = [
@@ -10015,6 +10183,7 @@ def run_filesystem_shares(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    cold_only: bool = False,
 ) -> None:
     """Attach a read-write workspace, a read-only tool cache, a data directory
     with a hidden root, and a read-only and a read-write file, each without
@@ -10179,6 +10348,8 @@ def run_filesystem_shares(
                 invalid, output_dir / f"filesystem-shares-{name}.log", timeout, expected
             )
 
+        if cold_only:
+            return
         # Every child belongs to the snapshot contract, in order.
         snapshot = root / "snapshot"
         with OpenvmmProcess(
@@ -10339,6 +10510,7 @@ def run_filesystem_policy(
     memory_mib: int,
     timeout: float,
     output_dir: Path,
+    cold_only: bool = False,
 ) -> None:
     """Narrow a read-write share's writes and expose a path in a hidden subtree.
 
@@ -10441,6 +10613,8 @@ def run_filesystem_policy(
                 expected,
             )
 
+        if cold_only:
+            return
         # The policy belongs to the snapshot contract, and the restored guest
         # keeps both its writable handle and the policy.
         snapshot = root / "snapshot"
@@ -11370,6 +11544,43 @@ def run(args: argparse.Namespace) -> int:
     validate_openvmm_test_backend(args.backend)
     descriptor = guest_descriptor(args.guest)
     architecture = getattr(args, "architecture", "x86_64")
+    cold_only = getattr(args, "cold_only", False)
+    if cold_only and args.scenario is None:
+        raise ScriptError("--cold-only requires explicit --scenario selection")
+    if cold_only:
+        outside = set(args.scenario) - COLD_ONLY_SCENARIOS
+        if outside:
+            raise ScriptError(
+                "scenario(s) have no maintained cold projection: "
+                + ", ".join(sorted(outside))
+            )
+    if architecture == "aarch64" and args.scenario is not None:
+        outside = set(args.scenario) - COLD_ONLY_SCENARIOS
+        mixed = set(args.scenario) & COLD_PROJECTION_SCENARIOS
+        if outside or (mixed and not cold_only):
+            raise ScriptError(
+                "ARM64 correctness cannot run a snapshot/x86-only scope; "
+                "select maintained cold scenarios explicitly and use --cold-only "
+                "for mixed scenarios"
+            )
+    managed_processors = tuple(dict.fromkeys(args.processors or (1,)))
+    args.processors = args.processors or list(MICROVM_PROCESSOR_COUNTS)
+    managed_root = getattr(args, "managed_root", "initramfs")
+    start_stop_cycles = getattr(args, "start_stop_cycles", None)
+    if start_stop_cycles is not None:
+        if not args.scenario or not set(args.scenario) <= {
+            "sandbox-lifecycle",
+            "sandbox-ram-upper",
+        }:
+            raise ScriptError(
+                "--start-stop-cycles requires explicit public scratch/RAM scenarios"
+            )
+        if "sandbox-ram-upper" in args.scenario and start_stop_cycles < 2:
+            raise ScriptError(
+                "RAM-upper acceptance requires at least two Start/Stop cycles"
+            )
+    if managed_root != "initramfs" and descriptor.name != "ubuntu":
+        raise ScriptError("--managed-root scratch/ram requires --guest ubuntu")
     debug_kernel = getattr(args, "debug_kernel", False)
     if architecture == "aarch64" and args.scenario is None:
         raise ScriptError(
@@ -11448,6 +11659,13 @@ def run(args: argparse.Namespace) -> int:
                 f"{guest_label} guest does not support correctness scenario(s): "
                 + ", ".join(sorted(unsupported))
             )
+    if managed_root != "initramfs" and "managed-lifecycle" not in scenarios:
+        raise ScriptError("--managed-root requires the managed-lifecycle scenario")
+    layered = (
+        load_workload_artifacts(architecture=architecture)
+        if managed_root != "initramfs"
+        else None
+    )
     # A default run runs the public sandbox scenarios too, so their Ubuntu
     # artifacts must be there before any scenario runs.
     public = [
@@ -11481,6 +11699,8 @@ def run(args: argparse.Namespace) -> int:
         kernel="debug" if debug_kernel else "default",
         processors=args.processors,
         scenarios=scenarios,
+        architecture=architecture,
+        scope="cold" if cold_only else "full",
     ) as report:
         _run_scenarios(
             report,
@@ -11491,6 +11711,8 @@ def run(args: argparse.Namespace) -> int:
             kernel=kernel,
             initrd=initrd,
             output_dir=output_dir,
+            managed_processors=managed_processors,
+            layered=layered,
         )
         report.finish()
         report_time_abi_evidence(
@@ -11513,27 +11735,38 @@ def _run_scenarios(
     kernel: Path,
     initrd: Path,
     output_dir: Path,
+    managed_processors: Sequence[int] = (1,),
+    layered: WorkloadArtifacts | None = None,
 ) -> None:
     """Run the selected scenarios in their fixed order, and time each
     execution in `report`."""
     architecture = getattr(args, "architecture", "x86_64")
+    cold_only = getattr(args, "cold_only", False)
     if "guest-boot" in scenarios:
-        report.start(
-            "guest-boot",
-            f"Running {descriptor.distribution} initramfs boot correctness "
-            f"on OpenVMM/{args.backend}",
-        )
-        run_guest_boot(
-            executable,
-            kernel,
-            initrd,
-            args.backend,
-            descriptor,
-            memory_mib=args.memory_mib,
-            timeout=args.timeout,
-            log_path=output_dir / f"{descriptor.name}-guest-boot.log",
-            architecture=architecture,
-        )
+        for processors in managed_processors:
+            report.start(
+                "guest-boot",
+                f"Running {descriptor.distribution} initramfs boot correctness "
+                f"({processors} vCPU) on OpenVMM/{args.backend}",
+                processors=[processors],
+            )
+            run_guest_boot(
+                executable,
+                kernel,
+                initrd,
+                args.backend,
+                descriptor,
+                memory_mib=args.memory_mib,
+                timeout=args.timeout,
+                log_path=output_dir
+                / (
+                    f"{descriptor.name}-guest-boot.log"
+                    if managed_processors == (1,)
+                    else f"{descriptor.name}-guest-boot-{processors}vcpu.log"
+                ),
+                architecture=architecture,
+                **({"processors": processors} if managed_processors != (1,) else {}),
+            )
     if "guest-identity" in scenarios:
         report.start(
             "guest-identity",
@@ -11641,6 +11874,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            cold_only=cold_only,
         )
     if "filesystem-policy" in scenarios:
         report.start(
@@ -11656,6 +11890,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            cold_only=cold_only,
         )
     if "filesystem-comma-paths" in scenarios:
         report.start(
@@ -11733,6 +11968,11 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             architecture=architecture,
+            **(
+                {"start_stop_cycles": args.start_stop_cycles}
+                if getattr(args, "start_stop_cycles", None) is not None
+                else {}
+            ),
         )
     if "sandbox-proxy-only" in scenarios:
         report.start(
@@ -11755,21 +11995,76 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             architecture=architecture,
+            **(
+                {"start_stop_cycles": args.start_stop_cycles}
+                if getattr(args, "start_stop_cycles", None) is not None
+                else {}
+            ),
         )
     if "managed-lifecycle" in scenarios:
-        report.start(
-            "managed-lifecycle",
-            f"Running managed microVM lifecycle on OpenVMM/{args.backend}",
-        )
-        run_managed_lifecycle(
-            executable,
-            kernel,
-            initrd,
-            args.backend,
-            memory_mib=args.memory_mib,
-            timeout=args.timeout,
-            output_dir=output_dir,
-        )
+        managed_root = getattr(args, "managed_root", "initramfs")
+        managed_initrd = initrd
+        if layered is not None:
+            control_initrd = BuildConfig.initramfs_config("alpine", architecture).output
+            assert control_initrd is not None
+            managed_initrd = require_file(
+                control_initrd, "Alpine sandbox control initramfs"
+            )
+        for processors in managed_processors:
+            case_root = output_dir
+            if managed_root != "initramfs" or managed_processors != (1,):
+                case_root /= f"managed-lifecycle-{managed_root}-{processors}vcpu"
+                if case_root.exists():
+                    raise ScriptError(
+                        f"managed fixture evidence already exists: {case_root}; "
+                        "select a fresh --output-dir"
+                    )
+                case_root.mkdir()
+            scratch = None
+            if managed_root == "scratch":
+                assert layered is not None
+                scratch = case_root / "scratch.ext4"
+                shutil.copyfile(layered.scratch_template, scratch)
+                if not scratch_journal_clean(scratch):
+                    raise ScriptError(
+                        f"managed scratch template is not clean: {scratch}"
+                    )
+            states = (
+                ("absent", "present" if scratch is not None else "absent")
+                if layered is not None
+                else (None,)
+            )
+            for index, previous in enumerate(states, 1):
+                log_root = case_root
+                variant = None
+                if previous is not None:
+                    log_root /= f"boot-{index}-{previous}"
+                    log_root.mkdir()
+                    variant = f"{managed_root}-boot-{index}-{previous}"
+                report.start(
+                    "managed-lifecycle",
+                    f"Running managed microVM lifecycle ({processors} vCPU, "
+                    f"root={managed_root}, previous={previous}) on OpenVMM/{args.backend}",
+                    processors=[processors],
+                    variant=variant,
+                )
+                run_managed_lifecycle(
+                    executable,
+                    kernel,
+                    managed_initrd,
+                    args.backend,
+                    memory_mib=args.memory_mib,
+                    timeout=args.timeout,
+                    output_dir=log_root,
+                    processors=processors,
+                    layered=layered,
+                    scratch=scratch,
+                    expected_previous_state=previous,
+                )
+                if scratch is not None and not scratch_journal_clean(scratch):
+                    raise RuntimeError(
+                        f"managed scratch journal is not clean: {scratch}"
+                    )
     if "structured-outcome" in scenarios:
         report.start(
             "structured-outcome",
@@ -11847,6 +12142,7 @@ def _run_scenarios(
             timeout=args.timeout,
             output_dir=output_dir,
             guest=descriptor.name,
+            cold_only=cold_only,
         )
     if "host-loopback-policy" in scenarios:
         report.start(
@@ -11875,6 +12171,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            **({"cold_only": True} if cold_only else {}),
         )
     if "denied-filesystem-paths" in scenarios:
         report.start(
@@ -11938,6 +12235,7 @@ def _run_scenarios(
                 timeout=args.timeout,
                 log_path=output_dir / f"{scenario}-{processors}.log",
                 counting_lapic=counting_lapic,
+                architecture=architecture,
             )
     if "sandbox-blocks" in scenarios:
         report.start(
@@ -12253,6 +12551,8 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             output_dir=output_dir,
+            cold_only=cold_only,
+            architecture=architecture,
         )
     if "command-line-limit" in scenarios:
         report.start(

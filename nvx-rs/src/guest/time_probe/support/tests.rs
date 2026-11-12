@@ -30,10 +30,13 @@ fn numeric_options_are_strict() {
     assert_eq!(parse_u64(b"10"), Some(10));
     assert!(parse_u64(b"010").is_none());
     assert!(parse_u64(b"1x").is_none());
-    assert_eq!(parse_rate(b"2.5"), Some(2.5));
-    assert_eq!(parse_rate(b"1e200"), Some(1e200));
-    assert!(parse_rate(b"0").is_none());
-    assert!(parse_rate(b"2.5x").is_none());
+    #[cfg(target_arch = "x86_64")]
+    {
+        assert_eq!(parse_rate(b"2.5"), Some(2.5));
+        assert_eq!(parse_rate(b"1e200"), Some(1e200));
+        assert!(parse_rate(b"0").is_none());
+        assert!(parse_rate(b"2.5x").is_none());
+    }
 }
 
 /// Returns the diagnostic that `arguments` prints for an invalid option or value.
@@ -66,6 +69,7 @@ fn options_take_inline_or_following_values() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn kernel_numbers_are_read_in_the_kernels_form() {
     assert_eq!(parse_kernel_decimal(b" 2194.843"), Some(2194.843));
     assert_eq!(parse_kernel_decimal(b"    3.000000"), Some(3.0));
@@ -97,6 +101,7 @@ fn kernel_numbers_are_read_in_the_kernels_form() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn rate_sources_print_their_tokens() {
     assert_eq!(
         TscRateSource::SysfsTscFreqKhz.to_string(),

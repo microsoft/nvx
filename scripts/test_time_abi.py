@@ -340,6 +340,7 @@ class FieldParsingTests(unittest.TestCase):
         )
         assert listing is not None
         pinned: dict[str, tuple[str, str, tuple[tuple[int, int, range], ...]]] = {}
+        pinned_arm: dict[str, time_abi.ArmCpuProfile] = {}
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         checkout = Path(temporary.name)
@@ -352,6 +353,11 @@ class FieldParsingTests(unittest.TestCase):
             assert content is not None
             (profiles / Path(path).name).write_text(content, encoding="utf-8")
             document = json.loads(content)
+            arm = time_abi.arm_cpu_profile(document)
+            if arm is not None:
+                self.assertNotIn(arm.profile_id, pinned_arm)
+                pinned_arm[arm.profile_id] = arm
+                continue
             generation = document["generation"]
             # Keyed by profile ID, so that a revision that the copy lacks fails
             # the comparison instead of replacing another.
@@ -383,6 +389,18 @@ class FieldParsingTests(unittest.TestCase):
             for revision in range(1, generation.revision + 1)
         }
         self.assertEqual(copy, pinned)
+        copied_documents = json.loads(
+            (
+                root / "nvx-rs" / "src" / "host" / "cli" / "cpu_generations.json"
+            ).read_text(encoding="utf-8")
+        )
+        copied_arm: dict[str, time_abi.ArmCpuProfile] = {}
+        for document in copied_documents:
+            arm = time_abi.arm_cpu_profile(document)
+            if arm is not None:
+                self.assertNotIn(arm.profile_id, copied_arm)
+                copied_arm[arm.profile_id] = arm
+        self.assertEqual(copied_arm, pinned_arm)
         # benchmark reads the same generations from these documents, as it
         # reads them from the OpenVMM checkout that it builds.
         self.assertEqual(
@@ -406,6 +424,34 @@ class FieldParsingTests(unittest.TestCase):
         generations = time_abi.openvmm_cpu_generations(checkout)
         self.assertEqual(set(generations), {icelake, alderlake, sapphire_rapids})
         self.assertEqual(len(generations), 3)
+        arm_profile: dict[str, object] = {
+            "schema": "nvx.arm64.cpu.v1",
+            "id": "qualcomm.oryon-x1.v1",
+            "physical_address_bits": 36,
+            "fields": [{"register": "ID_AA64PFR0_EL1"}],
+        }
+        arm: dict[str, object] = {
+            "vendor": "qualcomm",
+            "sha256": "sha256:" + "a" * 64,
+            "profile": arm_profile,
+        }
+        (
+            checkout / time_abi.OPENVMM_CPU_PROFILES / "qualcomm.oryon-x1.v1.json"
+        ).write_text(json.dumps(arm), encoding="utf-8")
+        self.assertEqual(
+            time_abi.arm_cpu_profile(arm),
+            time_abi.ArmCpuProfile(
+                "qualcomm.oryon-x1.v1",
+                "qualcomm",
+                "a" * 64,
+                36,
+                ("ID_AA64PFR0_EL1",),
+            ),
+        )
+        self.assertEqual(
+            set(time_abi.openvmm_cpu_generations(checkout)),
+            {icelake, alderlake, sapphire_rapids},
+        )
         # A CPU that only the checkout's profiles cover is benchmarked with
         # them, and not with NVX's copy of the catalog.
         sapphire_rapids_host = time_abi.HostCpu("GenuineIntel", 6, 143, 8)
@@ -434,6 +480,21 @@ class FieldParsingTests(unittest.TestCase):
             ("not-json", None, "cannot read the CPU profile .*not-json.json"),
             ("list", [], "it is not a JSON object"),
             ("no-generation", {"vendor": "GenuineIntel"}, "names no vendor"),
+            (
+                "arm-schema",
+                {**arm, "profile": {**arm_profile, "schema": "unknown"}},
+                "ARM profile schema is unsupported",
+            ),
+            (
+                "arm-digest",
+                {**arm, "sha256": "sha256:bad"},
+                "ARM profile identity is malformed",
+            ),
+            (
+                "arm-width",
+                {**arm, "profile": {**arm_profile, "physical_address_bits": True}},
+                "physical address bits is not an integer",
+            ),
             (
                 "no-cpus",
                 {**valid, "generation": {"name": "icelake-sp", "cpus": []}},
@@ -1029,6 +1090,14 @@ class MonitorTests(unittest.TestCase):
         arm_line = BOOT_LINE.replace("tsc_hz=2194804000", "tsc_hz=19200000").replace(
             "lapic_hz=1000000000", "lapic_hz=0"
         )
+        explicit = TimeAbiMonitor(
+            ["openvmm", "--hypervisor", "whp", "--kernel", "custom-kernel-name"],
+            architecture="aarch64",
+        )
+        explicit.feed(arm_line.encode() + STATUS_OK.encode())
+        self.assertEqual(explicit.require_boot("explicit ISA")["tsc_hz"], "19200000")
+        with self.assertRaisesRegex(ValueError, "unsupported counter architecture"):
+            TimeAbiMonitor(architecture="unknown")
         for profile in ("auto", "host"):
             command = [
                 "nvx-rs.exe",
@@ -2198,6 +2267,9 @@ class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        architecture = patch.object(doctor, "host_architecture", return_value="x86_64")
+        architecture.start()
+        self.addCleanup(architecture.stop)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -2271,6 +2343,34 @@ class DoctorTests(unittest.TestCase):
                 self.assertEqual(
                     context.facts["invariant_tsc"], "no (missing nonstop_tsc)"
                 )
+        arm = doctor_context(self.root, "whp")
+        arm.architecture = "aarch64"
+        arm.no_openvmm = True
+        counter = (
+            "cpu",
+            {
+                "architecture": "aarch64",
+                "counter": "cntvct_el0",
+                "counter_hz": "19200000",
+            },
+        )
+        with (
+            patch.object(doctor, "run_probe", return_value=[counter]),
+            patch.object(doctor, "host_cpu") as legacy,
+            patch.object(doctor.subprocess, "run") as process,
+        ):
+            for fingerprint in (None, self.root / "arm-fingerprint.json"):
+                arm.fingerprint = fingerprint
+                result = doctor.check_cpu(arm)
+                self.assertFalse(result.passed)
+                self.assertIn("unsupported", result.detail)
+                self.assertIn("evidence only", result.detail)
+        legacy.assert_not_called()
+        process.assert_not_called()
+        self.assertEqual(arm.facts["host_counter_hz"], "19200000")
+        self.assertEqual(arm.facts["profile"], "unverified")
+        self.assertNotIn("profile_digest", arm.facts)
+        self.assertFalse((self.root / "arm-fingerprint.json").exists())
 
     def test_cpu_check_verifies_the_profile_with_openvmm_fingerprint(self):
         fingerprint = self.root / "out" / "fingerprint.json"
@@ -2598,6 +2698,14 @@ class DoctorTests(unittest.TestCase):
                 self.assertIsNone(doctor.host_cpu_signature())
 
     def test_preflight_parses_openvmm_verification(self):
+        arm = doctor_context(self.root / "unavailable", "whp")
+        arm.architecture = "aarch64"
+        with patch.object(doctor.subprocess, "run") as process:
+            result = doctor.check_openvmm_preflight(arm)
+        self.assertFalse(result.passed)
+        self.assertIn("OpenVMM was not found", result.detail)
+        process.assert_not_called()
+        self.assertNotIn("tsc_hz", arm.facts)
         # The line format of OpenVMM's openvmm_entry verify.rs.
         line = (
             "NVX-TIME-ABI-VERIFY: v=1 status=ok backend=kvm "
@@ -2606,11 +2714,203 @@ class DoctorTests(unittest.TestCase):
             "sync=CommonOffset\n"
         )
 
-        def context_with_files(backend: str = "kvm") -> doctor.DoctorContext:
+        def context_with_files(
+            backend: str = "kvm", *, architecture: str = "x86_64"
+        ) -> doctor.DoctorContext:
             context = doctor_context(self.root, backend)
+            context.architecture = architecture
             for path in (context.openvmm, context.kernel, context.initrd):
                 path.write_bytes(b"")
+            if architecture == "aarch64":
+                context.openvmm.write_bytes(
+                    b"MZ"
+                    + bytes(58)
+                    + (64).to_bytes(4, "little")
+                    + b"PE\0\0"
+                    + (0xAA64).to_bytes(2, "little")
+                )
             return context
+
+        arm_line = (
+            "NVX-TIME-ABI-VERIFY: v=1 status=ok backend=whp architecture=aarch64 "
+            "cpu_profile=qualcomm.oryon-x1.v1 "
+            "cpu_profile_sha256=20960eafb1f3fb34304b876506e4345bd3fcfb626635d9927ac362898854394d "
+            "counter_hz=19200000 backend_usable_gpa_bits=39 configured_gpa_bits=36 "
+            "architectural_pa_bits=36 effective_parange=1 feature_bank_count=2 "
+            "feature_bank0=9214927272156348133 feature_bank1=1202595102644 "
+            "cpu_id_registers_verified=15 backend_readback=verified "
+            "effective_cpu=verified guest_started=false\n"
+        )
+        arm = context_with_files("whp", architecture="aarch64")
+        arm.architecture = "aarch64"
+        with (
+            patch.object(
+                doctor.subprocess, "run", return_value=completed(arm_line)
+            ) as process,
+            patch.object(
+                doctor,
+                "run_probe",
+                return_value=[
+                    (
+                        "cpu",
+                        {
+                            "architecture": "aarch64",
+                            "counter": "cntvct_el0",
+                            "counter_hz": "19200000",
+                        },
+                    )
+                ],
+            ),
+            patch.object(doctor, "host_cpu") as legacy,
+        ):
+            self.assertTrue(doctor.check_cpu(arm).passed)
+            self.assertTrue(doctor.check_openvmm_preflight(arm).passed)
+        process.assert_called_once()
+        legacy.assert_not_called()
+        self.assertNotIn("--cpu-fingerprint", process.call_args.args[0])
+        self.assertEqual(arm.facts["profile"], "qualcomm.oryon-x1.v1")
+        for alias in ("tsc_hz", "native_tsc_hz", "lapic_hz", "sync"):
+            self.assertNotIn(alias, arm.facts)
+        # A second registered fixture proves this is not an Oryon/frequency gate.
+        with tempfile.TemporaryDirectory() as temporary:
+            catalog_root = Path(temporary)
+            catalog_path = (
+                catalog_root
+                / "nvx-rs"
+                / "src"
+                / "host"
+                / "cli"
+                / "cpu_generations.json"
+            )
+            catalog_path.parent.mkdir(parents=True)
+            original = json.loads(
+                (
+                    doctor.BuildConstants.REPO_ROOT
+                    / "nvx-rs"
+                    / "src"
+                    / "host"
+                    / "cli"
+                    / "cpu_generations.json"
+                ).read_bytes()
+            )
+            arm_identity = next(
+                document for document in original if "profile" in document
+            )
+            another = {
+                **arm_identity,
+                "vendor": "example",
+                "sha256": "sha256:" + "b" * 64,
+                "profile": {
+                    **arm_identity["profile"],
+                    "id": "example.server-arm.v2",
+                    "physical_address_bits": 40,
+                },
+            }
+            catalog_path.write_text(json.dumps([*original, another]), encoding="utf-8")
+            other_report = (
+                arm_line.replace("qualcomm.oryon-x1.v1", "example.server-arm.v2")
+                .replace(arm_identity["sha256"][7:], "b" * 64)
+                .replace("counter_hz=19200000", "counter_hz=24000000")
+                .replace("backend_usable_gpa_bits=39", "backend_usable_gpa_bits=48")
+                .replace("configured_gpa_bits=36", "configured_gpa_bits=40")
+                .replace("architectural_pa_bits=36", "architectural_pa_bits=40")
+                .replace("effective_parange=1", "effective_parange=2")
+            )
+            other = context_with_files("whp", architecture="aarch64")
+            other.architecture = "aarch64"
+            other.facts["host_counter_hz"] = "24000000"
+            with (
+                patch.object(doctor.BuildConstants, "REPO_ROOT", catalog_root),
+                patch.object(
+                    doctor.subprocess, "run", return_value=completed(other_report)
+                ),
+            ):
+                result = doctor.check_openvmm_preflight(other)
+            self.assertTrue(result.passed, result.detail)
+            self.assertEqual(other.facts["profile"], "example.server-arm.v2")
+        for output, problem in (
+            (arm_line.replace("v=1", "v=2"), "expected 1"),
+            (
+                arm_line.replace("architecture=aarch64", "architecture=x86_64"),
+                "expected aarch64",
+            ),
+            (
+                arm_line.replace("qualcomm.oryon-x1.v1", "qualcomm.host.v1"),
+                "no pinned ARM",
+            ),
+            (arm_line.replace("20960eaf", "00000000"), "profile digest"),
+            (
+                arm_line.replace("counter_hz=19200000", "counter_hz=19200001"),
+                "CNTFRQ_EL0",
+            ),
+            (
+                arm_line.replace("configured_gpa_bits=36", "configured_gpa_bits=40"),
+                "address-width",
+            ),
+            (
+                arm_line.replace(
+                    "backend_usable_gpa_bits=39", "backend_usable_gpa_bits=32"
+                ),
+                "address-width",
+            ),
+            (
+                arm_line.replace("effective_parange=1", "effective_parange=2"),
+                "address-width",
+            ),
+            (
+                arm_line.replace("feature_bank_count=2", "feature_bank_count=1"),
+                "expected 2",
+            ),
+            (
+                arm_line.replace(
+                    "feature_bank1=1202595102644", "feature_bank1=18446744073709551616"
+                ),
+                "bounded unsigned",
+            ),
+            (
+                arm_line.replace(
+                    "cpu_id_registers_verified=15", "cpu_id_registers_verified=14"
+                ),
+                "every pinned ID register",
+            ),
+            (
+                arm_line.replace(
+                    "backend_readback=verified", "backend_readback=missing"
+                ),
+                "expected verified",
+            ),
+            (
+                arm_line.replace("guest_started=false", "guest_started=true"),
+                "expected false",
+            ),
+            (arm_line.rstrip() + " tsc_hz=19200000\n", "x86/UTC aliases"),
+            (arm_line + arm_line, "multiple verification"),
+            (
+                "NVX-TIME-ABI-VERIFY: v=1 status=fail backend=whp code=E_PROFILE_UNKNOWN detail=unknown\n",
+                "E_PROFILE_UNKNOWN",
+            ),
+        ):
+            with self.subTest(arm=problem):
+                rejected = context_with_files("whp", architecture="aarch64")
+                rejected.architecture = "aarch64"
+                rejected.facts["host_counter_hz"] = "19200000"
+                with patch.object(
+                    doctor.subprocess, "run", return_value=completed(output)
+                ):
+                    result = doctor.check_openvmm_preflight(rejected)
+                self.assertFalse(result.passed, result.detail)
+                self.assertIn(problem, result.detail)
+                self.assertNotIn("profile_digest", rejected.facts)
+        emulated = context_with_files("whp", architecture="aarch64")
+        data = bytearray(emulated.openvmm.read_bytes())
+        data[68:70] = (0x8664).to_bytes(2, "little")
+        emulated.openvmm.write_bytes(data)
+        with (
+            patch.object(doctor.subprocess, "run") as process,
+            self.assertRaisesRegex(doctor.ScriptError, "expected native aarch64"),
+        ):
+            doctor.check_openvmm_preflight(emulated)
+        process.assert_not_called()
 
         context = context_with_files()
         with patch.object(
@@ -2872,6 +3172,41 @@ class DoctorTests(unittest.TestCase):
             context = doctor_context(self.root, backend)
             context.schedule = doctor.CI_SCHEDULE
             return context
+
+        arm = ci_context("whp")
+        arm.architecture = "aarch64"
+        counter = {
+            "architecture": "aarch64",
+            "counter": "cntvct_el0",
+            "counter_hz": "19200000",
+        }
+        arm_samples = records(
+            [19_200_000.0, 19_200_000.0],
+            interval_s=1.0,
+            bracket=0,
+            clock_hz=10_000_000,
+            resolution_ns=100.0,
+            names=("QueryPerformanceCounter", "QueryPerformanceCounter"),
+        )
+        result = check(arm, [("cpu", counter), *arm_samples], windows=True)
+        self.assertTrue(result.passed, result.detail)
+        self.assertIn("cntvct_el0_hz=19200000", result.detail)
+        self.assertIn("host CNTFRQ_EL0's 19200000 Hz", result.detail)
+        self.assertEqual(arm.facts["host_counter_hz"], "19200000")
+        self.assertNotIn("tsc_hz", arm.facts)
+        for field, value in (
+            ("architecture", "x86_64"),
+            ("counter", "tsc"),
+            ("counter_hz", "0"),
+            ("counter_hz", str(1 << 32)),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(doctor.ScriptError):
+                    check(
+                        arm,
+                        [("cpu", {**counter, field: value}), *arm_samples],
+                        windows=True,
+                    )
 
         steady = [2793437000.0 + jitter for jitter in (0, 200, -150, 100) * 3]
         context = doctor_context(self.root)
@@ -3631,6 +3966,27 @@ class DoctorTests(unittest.TestCase):
         # A newer guest also reports the boot check's CPU time.
         single = boot(1).replace("elapsed_us=1873", "elapsed_us=1873 cpu_us=1100")
         single += warp_output(pairs=0, offset=0)
+        arm = doctor_context(self.root, "whp")
+        arm.architecture = "aarch64"
+        arm_single = single.replace("tsc_hz=2194804000", "tsc_hz=24000000").replace(
+            "lapic_hz=1000000000", "lapic_hz=0"
+        )
+        with (
+            patch.object(doctor.os, "cpu_count", return_value=1),
+            patch.object(time_abi.platform, "machine", return_value="ARM64"),
+            patch.object(
+                doctor, "run_guest_script", return_value={"text": arm_single}
+            ) as guest,
+            patch.object(doctor, "check_utc") as utc,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            (arm_result,) = doctor.run_checks(arm, ("H6",))
+        self.assertTrue(arm_result.passed, arm_result.detail)
+        guest.assert_called_once()
+        utc.assert_not_called()
+        self.assertEqual(arm.facts["counter_hz"], "24000000")
+        self.assertNotIn("sync", arm.facts)
+        self.assertNotIn("tsc_hz", arm.facts)
         with (
             patch.object(doctor.os, "cpu_count", return_value=8),
             patch.object(
@@ -3861,6 +4217,24 @@ class DoctorTests(unittest.TestCase):
             'check=H2 status=fail detail="float division by zero"', stdout.getvalue()
         )
         self.assertIn("check=H5 status=pass", stdout.getvalue())
+        for architecture in ("x86_64", "aarch64"):
+            for failed in ("H4", "H7"):
+                context = doctor_context(self.root, "whp")
+                context.architecture = architecture
+                checks = {check: passing(check) for check in doctor.CHECK_IDS}
+                checks[failed] = broken
+                with (
+                    self.subTest(architecture=architecture, failed=failed),
+                    patch.dict(doctor.CHECKS, checks),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    results = doctor.run_checks(context, doctor.CHECK_IDS)
+                self.assertEqual(
+                    [result.check for result in results], list(doctor.CHECK_IDS)
+                )
+                self.assertEqual(
+                    [result.check for result in results if not result.passed], [failed]
+                )
 
     def test_warnings_reach_the_line_the_summary_and_ci_annotations(self):
         warning = "the host's clock correction uses 60% of the guest's 250 ppm budget"
@@ -3901,10 +4275,12 @@ class DoctorTests(unittest.TestCase):
     def test_run_selects_the_cpu_fingerprint_or_runs_without_openvmm(self):
         seen: list[Path | None] = []
         schedules: list[doctor.Schedule] = []
+        artifacts: list[tuple[str, Path, Path]] = []
 
         def cpu(context: doctor.DoctorContext) -> doctor.CheckResult:
             seen.append(context.fingerprint)
             schedules.append(context.schedule)
+            artifacts.append((context.architecture, context.kernel, context.initrd))
             context.facts["surface_digest"] = "sha256:62"
             return doctor.CheckResult("H2", True, "ok")
 
@@ -3939,6 +4315,26 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(doctor.CI_SCHEDULE.rate_samples, 3)
         self.assertEqual(doctor.CI_SCHEDULE.rate_interval_ms, 1_000)
         self.assertIn("CPU surface digest: `sha256:62`", summary.read_text("utf-8"))
+        with (
+            patch.object(doctor, "host_architecture", return_value="aarch64"),
+            patch.dict(doctor.CHECKS, {"H2": cpu}),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            arguments = doctor_parser().parse_args(
+                ["--backend", "whp", "--checks", "H2", "--no-openvmm"]
+            )
+            self.assertEqual(doctor.run(arguments), 0)
+            self.assertEqual(
+                artifacts[-1],
+                (
+                    "aarch64",
+                    doctor.BuildConstants.BUILD_DIR / "aarch64" / "Image",
+                    doctor.BuildConstants.BUILD_DIR / "aarch64" / "initramfs.cpio.gz",
+                ),
+            )
+            arguments.architecture = "x86_64"
+            with self.assertRaisesRegex(doctor.ScriptError, "native host architecture"):
+                doctor.run(arguments)
         arguments = doctor_parser().parse_args(["--backend", "kvm", "--no-openvmm"])
         with self.assertRaisesRegex(doctor.ScriptError, "cannot run H3 and H6"):
             doctor.run(arguments)
@@ -3949,7 +4345,11 @@ class DoctorTests(unittest.TestCase):
 
     def test_builds_the_host_probe_once_per_source_version(self):
         target = doctor.probe_path(self.root)
-        self.assertRegex(target.name, r"^nvx-host-time-probe-[0-9a-f]{16}(\.exe)?$")
+        self.assertRegex(
+            target.name, r"^nvx-host-time-probe-x86_64-[0-9a-f]{16}(\.exe)?$"
+        )
+        with patch.object(doctor, "host_architecture", return_value="aarch64"):
+            self.assertNotEqual(target, doctor.probe_path(self.root))
 
         def rustc(command: list[str], **_kwargs: object):
             Path(command[command.index("-o") + 1]).write_bytes(b"probe")

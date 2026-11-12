@@ -35,7 +35,7 @@ Subject: [PATCH] hvc: add the restricted NVX ARM64 development platform binding
  obj-$(CONFIG_HVC_RISCV_SBI)	+= hvc_riscv_sbi.o
 --- a/drivers/tty/hvc/hvc_nvx_mmio.c
 +++ b/drivers/tty/hvc/hvc_nvx_mmio.c
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,277 @@
 +// SPDX-License-Identifier: GPL-2.0
 +#include <linux/capability.h>
 +#include <linux/console.h>
@@ -43,12 +43,16 @@ Subject: [PATCH] hvc: add the restricted NVX ARM64 development platform binding
 +#include <linux/fs.h>
 +#include <linux/init.h>
 +#include <linux/io.h>
++#include <linux/kernel.h>
 +#include <linux/miscdevice.h>
 +#include <linux/mm.h>
++#include <linux/moduleparam.h>
 +#include <linux/of_address.h>
 +#include <linux/platform_device.h>
 +#include <linux/serial_core.h>
++#include <linux/string.h>
 +#include <linux/uaccess.h>
++#include <asm/setup.h>
 +
 +#include "hvc_console.h"
 +
@@ -103,11 +107,31 @@ Subject: [PATCH] hvc: add the restricted NVX ARM64 development platform binding
 +		writeb(text[i], device->port.membase + NVX_DATA);
 +}
 +
++static char nvx_early_cmdline[COMMAND_LINE_SIZE] __initdata;
++
++static int __init nvx_early_loglevel(char *param, char *val,
++				    const char *unused, void *arg)
++{
++	int level;
++
++	if (!strcmp(param, "quiet"))
++		console_loglevel = CONSOLE_LOGLEVEL_QUIET;
++	else if (!strcmp(param, "debug"))
++		console_loglevel = CONSOLE_LOGLEVEL_DEBUG;
++	else if (!strcmp(param, "loglevel") && val && get_option(&val, &level))
++		console_loglevel = level;
++	return 0;
++}
++
 +static int __init nvx_early_setup(struct earlycon_device *device,
 +				 const char *options)
 +{
 +	if (device->port.mapbase != NVX_BASE || !device->port.membase)
 +		return -EINVAL;
++	/* Apply later loglevel options before earlycon flushes its print buffer. */
++	strscpy(nvx_early_cmdline, boot_command_line, sizeof(nvx_early_cmdline));
++	parse_args("early NVX console", nvx_early_cmdline, NULL, 0, 0, 0, NULL,
++		   nvx_early_loglevel);
 +	device->con->write = nvx_early_write;
 +	return 0;
 +}

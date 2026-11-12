@@ -5,13 +5,17 @@
 //! spellings of the values that are not finite differ, which [`fixed`] maps to C's.
 
 /// Seconds in a day, which split a time into its day and the seconds within it.
+#[cfg(target_arch = "x86_64")]
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 /// Days from 0000-03-01 to 1970-01-01 in the proleptic Gregorian calendar, which
 /// [`civil_date`] counts from.
+#[cfg(target_arch = "x86_64")]
 const DAYS_TO_UNIX_EPOCH: i64 = 719_468;
 /// Days in a 400-year cycle of the Gregorian calendar.
+#[cfg(target_arch = "x86_64")]
 const DAYS_PER_ERA: i64 = 146_097;
 /// Years in a 400-year cycle of the Gregorian calendar.
+#[cfg(target_arch = "x86_64")]
 const YEARS_PER_ERA: i64 = 400;
 
 /// Formats `value` with C's `%.{precision}f`.
@@ -39,12 +43,14 @@ pub(super) fn f1(value: f64) -> String {
 }
 
 /// Formats a nine-decimal seconds field with C `%.9f`.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn f9(value: f64) -> String {
     fixed(value, 9)
 }
 
 /// Returns the proleptic Gregorian year, month, and day of `days` since 1970-01-01, by Howard
 /// Hinnant's `civil_from_days`, which counts from 0000-03-01 so that a leap day ends its year.
+#[cfg(target_arch = "x86_64")]
 fn civil_date(days: i64) -> (i64, i64, i64) {
     let days = days + DAYS_TO_UNIX_EPOCH;
     let era = days.div_euclid(DAYS_PER_ERA);
@@ -65,6 +71,7 @@ fn civil_date(days: i64) -> (i64, i64, i64) {
 
 /// Formats Unix `seconds` as C's `strftime` with `%Y-%m-%dT%H:%M:%S` formats `gmtime_r`'s
 /// UTC broken-down time.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn utc_seconds(seconds: i64) -> String {
     let (year, month, day) = civil_date(seconds.div_euclid(SECONDS_PER_DAY));
     let time = seconds.rem_euclid(SECONDS_PER_DAY);

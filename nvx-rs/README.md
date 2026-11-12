@@ -2796,8 +2796,13 @@ disk's block device.
 | `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` | Serves the managed control session and supervises sequential workloads; `--exec-config-fd FD -- WORKLOAD ...` is the direct agent's internal launch helper |
 | `nvx-ingress [inherit\|start] GATEWAY_IPV4` | Announces reachable TCP listeners and settled UDP sockets to the portable-network gateway, from a privileged source port that it binds, or, with `inherit`, from its standard input, a socket that a clone's application bound to one; `start` starts `inherit` as `Announcer::start` does and exits once it runs, or with status 1 if it does not start, for a guest agent that cannot hold the announcer; `test DIRECTORY` runs synthetic procfs snapshots |
 | `nvx-time [--report-only] COMMAND` | Enforces NVX time ABI v1 through shared cold-boot checks, time-state publication, and the discipline and violation-watcher daemon on x86_64 and aarch64; capture/restore and the `test NAME ...` decoder and process hooks remain x86_64-only |
-| `nvx-time-probe latency\|warp\|clock ...` | Diagnoses clock-read latency, cross-CPU TSC warp and offset, the clocks, CPUID, clock events, kernel messages, and optionally MSRs (x86_64) |
+| `nvx-time-probe latency\|warp\|clock ...` | Diagnoses x86 clocks, CPUID and optional MSRs; the pairwise counter-warp diagnostic also supports aarch64 |
 | `nvx-init TIME_DAEMON [ANNOUNCER]` | Takes PID 1 over from a layered root's early boot, with its time daemon and optional announcer: gives itself and them an out-of-memory score adjustment of -1000 and a nice value of -10, collects every child's status, and, after `sync`, ends the VM with status 125 when a helper ends or 0 on `SIGTERM`; elsewhere it exits with 2 (x86_64, aarch64) |
+
+On aarch64, the probe's measurement command is `warp`, using fenced
+`CNTVCT_EL0` reads and the actual `CNTFRQ_EL0` on every selected CPU. It reports
+`counter_hz` and rejects x86-only latency/clock commands and frequency overrides.
+The x86 command lines and output remain unchanged.
 
 The init agent also uses the private, read-only
 `nvx-init --root-device distro|scratch|no-scratch` query on ARM. It resolves

@@ -15,6 +15,24 @@ use serde_json::{Value, json};
 /// Returns the identity of the profile `document`, with the fields that the copy holds: its ID,
 /// its vendor, and its generation's name and CPU models.
 fn identity(document: &Value) -> Value {
+    if document["profile"]["schema"] == "nvx.arm64.cpu.v1" {
+        let fields: Vec<Value> = document["profile"]["fields"]
+            .as_array()
+            .expect("an ARM profile names its ID registers")
+            .iter()
+            .map(|field| json!({"register": field["register"]}))
+            .collect();
+        return json!({
+            "vendor": document["vendor"],
+            "sha256": document["sha256"],
+            "profile": {
+                "schema": document["profile"]["schema"],
+                "id": document["profile"]["id"],
+                "physical_address_bits": document["profile"]["physical_address_bits"],
+                "fields": fields,
+            },
+        });
+    }
     let generation = &document["generation"];
     let cpus: Vec<Value> = generation["cpus"]
         .as_array()
@@ -39,7 +57,14 @@ fn identity(document: &Value) -> Value {
 fn by_id(profiles: impl IntoIterator<Item = Value>) -> BTreeMap<String, Value> {
     let mut identities = BTreeMap::new();
     for profile in profiles {
-        let id = profile["id"].as_str().unwrap().to_owned();
+        let id = if profile["profile"]["schema"] == "nvx.arm64.cpu.v1" {
+            &profile["profile"]["id"]
+        } else {
+            &profile["id"]
+        }
+        .as_str()
+        .unwrap()
+        .to_owned();
         assert!(
             identities.insert(id.clone(), profile).is_none(),
             "{id} is listed twice"
@@ -87,7 +112,7 @@ fn the_copy_matches_the_submodules_profiles() {
     assert!(
         by_id(copy) == by_id(pinned),
         "src/host/cli/cpu_generations.json differs from the CPU profiles that the OpenVMM \
-         submodule pins: copy the ID, the vendor, and the generation of each profile, and keep \
-         the order in which nvx-rs run lists the generations"
+         submodule pins: copy each ISA's identity, retaining ARM schema/digest/address width \
+         instead of CPUID fields, and keep the order in which nvx-rs run lists the generations"
     );
 }

@@ -43,7 +43,7 @@ GUIDES = (
     REPO_ROOT / ".github" / "copilot-instructions.md",
 )
 
-PLATFORMS = ("linux-x86_64", "windows-x86_64")
+PLATFORMS = ("linux-x86_64", "windows-x86_64", "windows-aarch64")
 RELEASES = ("rust.toolchain", "cargo_nextest.version", "cargo_llvm_cov.version")
 ARTIFACT_TOOLS = ("rustup", "sccache", "actions_runner")
 # What the installers assume about each artifact: rustup's installer runs
@@ -52,10 +52,13 @@ ARTIFACT_TOOLS = ("rustup", "sccache", "actions_runner")
 ARTIFACT_SUFFIXES = {
     ("rustup", "linux-x86_64"): "/rustup-init",
     ("rustup", "windows-x86_64"): "/rustup-init.exe",
+    ("rustup", "windows-aarch64"): "/rustup-init.exe",
     ("sccache", "linux-x86_64"): ".tar.gz",
     ("sccache", "windows-x86_64"): ".tar.gz",
+    ("sccache", "windows-aarch64"): ".tar.gz",
     ("actions_runner", "linux-x86_64"): ".tar.gz",
     ("actions_runner", "windows-x86_64"): ".zip",
+    ("actions_runner", "windows-aarch64"): ".zip",
 }
 # Words that name each pinned tool. A line that holds one of them and a
 # release hard-codes a pin.
@@ -375,11 +378,11 @@ _SHELL_READER_FUNCTIONS = (
     "tool_manifest_value",
     "tool_manifest_artifact",
 )
-# Resolves every pin of each manifest argument for both platforms. A failed
+# Resolves every pin of each manifest argument for every platform. A failed
 # read ends only its subshell, so later cases still run.
 _SHELL_READER = """
 for manifest in "$@"; do
-    for tool_platform in linux-x86_64 windows-x86_64; do
+    for tool_platform in linux-x86_64 windows-x86_64 windows-aarch64; do
         printf '### %s\\n' "$tool_platform"
         (
             tool_manifest=$manifest
@@ -410,7 +413,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($errors.Count -ne 0) {
     throw "setup script has parse errors"
 }
-foreach ($name in "Read-ToolManifest", "Get-ToolManifestValue", "Get-ToolArtifact") {
+foreach ($name in "Read-ToolManifest", "Get-ToolManifestValue", "Get-ToolArtifact", "Get-ToolPlatform") {
     $definition = $ast.Find({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -421,7 +424,7 @@ foreach ($name in "Read-ToolManifest", "Get-ToolManifestValue", "Get-ToolArtifac
 """
 _POWERSHELL_READER = """
 foreach ($path in $env:NVX_TEST_MANIFESTS.Split([char]10)) {
-    foreach ($platform in "linux-x86_64", "windows-x86_64") {
+    foreach ($platform in "linux-x86_64", "windows-x86_64", "windows-aarch64") {
         [Console]::Out.WriteLine("### $platform")
         try {
             $manifest = Read-ToolManifest $path
@@ -755,11 +758,18 @@ class ToolManifestReaderTests(unittest.TestCase):
         if not powershells:
             self.skipTest("PowerShell is unavailable")
         source = WINDOWS.read_text(encoding="utf-8")
-        start = source.index("\n$ToolPlatform = ") + 1
+        start = source.index("\n$ToolManifest = ") + 1
         block = source[start : source.index("\n\n", start) + 1]
-        self.assertIn('$ToolPlatform = "windows-x86_64"\n', block)
+        self.assertIn("$ToolPlatform = Get-ToolPlatform $NativeArchitecture\n", block)
+        native_architecture = (
+            "[Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()"
+        )
+        self.assertIn(native_architecture, block)
+        block = block.replace(native_architecture, "$env:NVX_TEST_ARCHITECTURE")
         self.assertEqual(block.count("$PSScriptRoot"), 1)
         block = block.replace("$PSScriptRoot", "$env:NVX_TEST_SETUP_DIRECTORY")
+        start = source.index("\n$VisualStudioToolsComponent = ") + 1
+        block += source[start : source.index("\n$ExpectedRunnerLabels = ", start)]
         names = {
             "RustToolchain": "rust.toolchain",
             "CargoNextestVersion": "cargo_nextest.version",
@@ -767,16 +777,34 @@ class ToolManifestReaderTests(unittest.TestCase):
         }
         text = MANIFEST.read_text(encoding="utf-8")
         entries = parse_manifest(text)
-        expected = {name: entries[key] for name, key in names.items()}
-        for prefix, tool in (
-            ("Rustup", "rustup"),
-            ("Sccache", "sccache"),
-            ("Runner", "actions_runner"),
+        expected_by_architecture: dict[str, tuple[str, dict[str, str]]] = {}
+        for architecture, tool_platform in (
+            ("X64", "windows-x86_64"),
+            ("Arm64", "windows-aarch64"),
         ):
-            artifact = resolve_artifact(entries, tool, "windows-x86_64")
-            expected[f"{prefix}Version"] = artifact.version
-            expected[f"{prefix}Artifact"] = artifact.name
-            expected[f"{prefix}Sha256"] = artifact.sha256
+            expected = {name: entries[key] for name, key in names.items()}
+            arm = architecture == "Arm64"
+            target_architecture = "aarch64" if arm else "x86_64"
+            expected.update(
+                VisualStudioToolsComponent="Microsoft.VisualStudio.Component.VC.Tools."
+                + ("ARM64" if arm else "x86.x64"),
+                VisualStudioArchitecture="arm64" if arm else "amd64",
+                RustHost=f"{target_architecture}-pc-windows-msvc",
+                RustTargets=f"{target_architecture}-unknown-none "
+                f"{target_architecture}-unknown-uefi",
+                GuestKernelName="Image" if arm else "vmlinux",
+                GuestBuildRelativeDirectory="build\\aarch64" if arm else "build",
+            )
+            for prefix, tool in (
+                ("Rustup", "rustup"),
+                ("Sccache", "sccache"),
+                ("Runner", "actions_runner"),
+            ):
+                artifact = resolve_artifact(entries, tool, tool_platform)
+                expected[f"{prefix}Version"] = artifact.version
+                expected[f"{prefix}Artifact"] = artifact.name
+                expected[f"{prefix}Sha256"] = artifact.sha256
+            expected_by_architecture[architecture] = (tool_platform, expected)
         report = "".join(
             f'[Console]::Out.WriteLine("{name}=" + ${name})\n' for name in expected
         )
@@ -787,41 +815,51 @@ class ToolManifestReaderTests(unittest.TestCase):
             "    exit 1\n"
             "}\n"
         )
-        cases = (
-            ("canonical", text, None),
-            (
-                "incomplete-linux",
-                _with_line(text, "sccache.artifacts.linux-x86_64.sha256", None),
-                None,
-            ),
-            (
-                "incomplete-windows",
-                _with_line(text, "rustup.artifacts.windows-x86_64.sha256", None),
-                ("undefined", "rustup.artifacts.windows-x86_64.sha256"),
-            ),
-        )
         for powershell in powershells:
-            for case, manifest, error in cases:
-                with self.subTest(powershell=Path(powershell).name, case=case):
-                    directory = self.root / "windows" / case
-                    _write_case(directory, manifest)
-                    result = _run_powershell(
-                        powershell,
-                        script,
-                        {
-                            "NVX_TEST_SETUP_SCRIPT": str(WINDOWS),
-                            "NVX_TEST_SETUP_DIRECTORY": str(directory),
-                        },
-                    )
-                    if error is not None:
-                        self.assertEqual(result.returncode, 1, result.stderr)
-                        self.assertEqual(_error(result.stdout), error)
-                        continue
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(
-                        result.stdout.splitlines(),
-                        [f"{name}={value}" for name, value in expected.items()],
-                    )
+            for architecture, (
+                tool_platform,
+                expected,
+            ) in expected_by_architecture.items():
+                missing_key = f"rustup.artifacts.{tool_platform}.sha256"
+                cases = (
+                    ("canonical", text, None),
+                    (
+                        "incomplete-linux",
+                        _with_line(text, "sccache.artifacts.linux-x86_64.sha256", None),
+                        None,
+                    ),
+                    (
+                        "incomplete-windows",
+                        _with_line(text, missing_key, None),
+                        ("undefined", missing_key),
+                    ),
+                )
+                for case, manifest, error in cases:
+                    with self.subTest(
+                        powershell=Path(powershell).name,
+                        architecture=architecture,
+                        case=case,
+                    ):
+                        directory = self.root / "windows" / architecture / case
+                        _write_case(directory, manifest)
+                        result = _run_powershell(
+                            powershell,
+                            script,
+                            {
+                                "NVX_TEST_SETUP_SCRIPT": str(WINDOWS),
+                                "NVX_TEST_SETUP_DIRECTORY": str(directory),
+                                "NVX_TEST_ARCHITECTURE": architecture,
+                            },
+                        )
+                        if error is not None:
+                            self.assertEqual(result.returncode, 1, result.stderr)
+                            self.assertEqual(_error(result.stdout), error)
+                            continue
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(
+                            result.stdout.splitlines(),
+                            [f"{name}={value}" for name, value in expected.items()],
+                        )
 
     def test_setups_never_let_rustup_update_itself(self):
         # A self-update would replace the pinned rustup with its latest
@@ -1578,6 +1616,7 @@ $definition = $ast.Find({
 try {
     [Console]::Out.WriteLine((Get-ExpectedRunnerLabels `
         -AdditionalLabels $env:NVX_TEST_EXTRA_LABELS `
+        -HostType $env:NVX_TEST_HOST_TYPE `
         -BenchmarkRunner:($env:NVX_TEST_BENCHMARK -eq 'true')))
 }
 catch {
@@ -1606,9 +1645,21 @@ catch {
             ("bad label", False, None),
         )
         for powershell in powershells:
-            for extra, benchmark, expected in cases:
+            host_cases = [
+                (extra, benchmark, expected, "virtual-machine")
+                for extra, benchmark, expected in cases
+            ] + [
+                ("pool", False, "windows,whp,baremetal,general,pool", "baremetal"),
+                ("", True, "windows,whp,baremetal,benchmark", "baremetal"),
+                ("BAREMETAL", False, None, "baremetal"),
+                ("", False, None, "container"),
+            ]
+            for extra, benchmark, expected, host_type in host_cases:
                 with self.subTest(
-                    powershell=powershell, extra=extra, benchmark=benchmark
+                    powershell=powershell,
+                    extra=extra,
+                    benchmark=benchmark,
+                    host_type=host_type,
                 ):
                     result = _run_powershell(
                         powershell,
@@ -1617,6 +1668,7 @@ catch {
                             "NVX_TEST_SETUP_SCRIPT": str(WINDOWS),
                             "NVX_TEST_EXTRA_LABELS": extra,
                             "NVX_TEST_BENCHMARK": str(benchmark).lower(),
+                            "NVX_TEST_HOST_TYPE": host_type,
                         },
                     )
                     if expected is None:

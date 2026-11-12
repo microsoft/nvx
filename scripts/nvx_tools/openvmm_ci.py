@@ -9,7 +9,9 @@ NVX's use of OpenVMM, the x86-64 Linux and Windows unit tests and the VMM tests
 on KVM, MSHV, and Windows, to have passed for the pinned revision in either
 workflow, and waits while they run. The gates' other jobs, such as the VMM tests
 on TDX and SEV-SNP hosts, test OpenHCL and confidential VMs, which NVX does not
-use. See doc/ci.md, "OpenVMM CI".
+use. ARM selection adds the existing native Windows ARM unit and VMM jobs,
+without removing x86 coverage or changing workflow/repository trust.
+See doc/ci.md, "OpenVMM CI".
 """
 
 from __future__ import annotations
@@ -43,6 +45,10 @@ OPENVMM_CI_REQUIRED_JOBS = (
     "run vmm-tests [x64-linux-intel-mshv]",
     "run vmm-tests [x64-windows-intel]",
     "run vmm-tests [x64-windows-amd]",
+)
+OPENVMM_CI_ARM64_REQUIRED_JOBS = (
+    "unit tests [aarch64-windows]",
+    "run vmm-tests [aarch64-windows]",
 )
 # How long the check waits between two looks at runs that have not finished.
 # OpenVMM's gates take one and a half to two hours, so a look every five
@@ -225,6 +231,7 @@ def check_openvmm_ci(
     revision: str,
     *,
     wait_seconds: float,
+    required: Sequence[str] = OPENVMM_CI_REQUIRED_JOBS,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> list[Verdict]:
@@ -235,7 +242,7 @@ def check_openvmm_ci(
     failures = 0
     while True:
         try:
-            verdicts = assess_openvmm_ci(openvmm_ci_runs(api, revision))
+            verdicts = assess_openvmm_ci(openvmm_ci_runs(api, revision), required)
         except (ScriptError, OSError) as error:
             failures += 1
             if failures > FAILED_LOOK_RETRIES or clock() + POLL_SECONDS > deadline:
@@ -293,7 +300,12 @@ def command_check_openvmm_ci(args: argparse.Namespace) -> None:
     # too, under a lower rate limit.
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
     api = GitHubClient(token, os.environ.get("GITHUB_API_URL") or GITHUB_API_URL)
-    verdicts = check_openvmm_ci(api, revision, wait_seconds=args.wait_minutes * 60)
+    required: tuple[str, ...] = OPENVMM_CI_REQUIRED_JOBS
+    if args.architecture == "aarch64":
+        required += OPENVMM_CI_ARM64_REQUIRED_JOBS
+    verdicts = check_openvmm_ci(
+        api, revision, wait_seconds=args.wait_minutes * 60, required=required
+    )
     for verdict in verdicts:
         print(f"{verdict.state}: {verdict.job}: {verdict.detail}")
     if args.summary is not None:
@@ -325,6 +337,13 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     parser.description = (
         "Check that OpenVMM's checkin gates passed the jobs that cover NVX's use "
         "of OpenVMM for the pinned OpenVMM revision (doc/ci.md, 'OpenVMM CI')."
+    )
+    parser.add_argument(
+        "--architecture",
+        choices=("x86_64", "aarch64"),
+        default="x86_64",
+        help="coverage ISA: aarch64 adds native Windows ARM unit/VMM jobs "
+        "without dropping any x86 jobs (default: x86_64)",
     )
     parser.add_argument(
         "--revision",
