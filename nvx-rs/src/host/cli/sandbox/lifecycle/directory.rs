@@ -3,10 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::ErrorCode;
-use crate::host::cli::sandbox::error_with_cause;
+use crate::host::cli::store::StateDir;
 use crate::host::cli::{Exit, Result, io_error};
 use crate::host::paths;
-use crate::host::store::SandboxStore;
 
 /// Returns the error for an I/O error that an operation on `path` met.
 pub(super) fn os_error(error: &std::io::Error, path: &Path) -> Exit {
@@ -57,10 +56,11 @@ fn parent(path: &Path) -> Option<&Path> {
 }
 
 /// Creates the state directory at `path`, as provision does. An existing directory stays as it is,
-/// and the store then refuses one that is not private to the current user; any other existing
-/// path fails as creating a directory fails for a path that exists. A new directory is created as
-/// the store creates it, private to the current user, below parents that are created as needed,
-/// even when an existing one goes meanwhile: nothing else creates the directory itself.
+/// and the CLI's store then refuses one that is not private to the current user; any other
+/// existing path fails as creating a directory fails for a path that exists. A new directory is
+/// created as [`StateDir::create`] creates it, private to the current user, below parents that
+/// are created as needed, even when an existing one goes meanwhile: nothing else creates the
+/// directory itself.
 pub(crate) fn create_state_directory(path: &Path) -> Result {
     if path.is_dir() {
         return Ok(());
@@ -71,9 +71,7 @@ pub(crate) fn create_state_directory(path: &Path) -> Result {
     if let Some(parent) = parent(path) {
         make_directories(parent, 0o777)?;
     }
-    SandboxStore::create(path)
-        .map(drop)
-        .map_err(error_with_cause)
+    StateDir::create(path).map(drop)
 }
 
 /// Returns the error with which creating a directory fails for a path that exists.
