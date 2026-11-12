@@ -45,7 +45,7 @@ nvx/
 |   |   |-- ci.yml               Main build, test, benchmark, and release workflow
 |   |   |-- copilot-code-review.yml Copilot code review environment
 |   |   |-- copilot-setup-steps.yml Copilot cloud agent environment
-|   |   |-- module-diagrams.yml  Module diagrams of the nvx crate, drawn after merges
+|   |   |-- module-diagrams.yml  Module diagrams of the nvx crate, drawn every night
 |   |   |-- nightly-ci-report.yml Report of failed nightly CI runs
 |   |   |-- nvx-rs-coverage.yml  Coverage of nvx-rs's own tests, for dev and pull requests
 |   |   |-- nvx-rs-mutants.yml   On-demand mutation testing of nvx-rs
@@ -245,7 +245,7 @@ reusable workflows: `build-openvmm-binary.yml` builds OpenVMM for one target,
 also publish the `nvx` crate to
 crates.io. The other workflows report failed nightly CI runs, flag the pull
 requests that change existing tests, draw the module
-diagrams of the `nvx` crate after merges, run adversarial campaigns, measure
+diagrams of the `nvx` crate every night, run adversarial campaigns, measure
 the coverage of the `nvx` crate's tests and of the Python tooling's unit tests
 as `dev` changes, measure every week which host code of the `nvx` crate the
 KVM microVM scenarios reach, run the `nvx` crate's mutation tests, verify
