@@ -1,4 +1,4 @@
-//! Builders of the manifests and capture classes of snapshots, for their tests.
+//! Builders of the manifests and capture contexts of snapshots, for their tests.
 //!
 //! [`Proto`] writes the protobuf wire format as OpenVMM's `mesh` does, independently of the reader
 //! that the tests check, and [`ManifestSpec`] holds each field of a manifest, so that a test
@@ -10,18 +10,18 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::{
-    BlockGeometry, CaptureClass, DESCRIPTION_FILE, Invariants, KEY_FILE, MANIFEST_NAME,
+    BlockGeometry, CaptureContext, DESCRIPTION_FILE, Invariants, KEY_FILE, MANIFEST_NAME,
     OPENVMM_DIR, Snapshot, SnapshotKey, SnapshotManifest,
 };
 use crate::ErrorKind;
 use crate::activation::{Journal, MachineIdMode, OverlayMode, View};
 use crate::host::config::{
-    ConsoleAttachment, LayeredRoot, NetworkConfig, NicConfig, RootConfig, UpperConfig, VmConfig,
+    Capacity, CaptureConfig, ConsoleAttachment, DiskCapture, LayeredRoot, NetworkConfig, NicConfig,
+    RootConfig, UpperConfig, VmConfig,
 };
 use crate::host::network::{Access, NetworkPolicy};
 use crate::host::process::BootId;
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-use crate::host::sandbox::SandboxNetwork;
 use crate::hypervisor::Hypervisor;
 use crate::net::Ipv4Cidr;
 use crate::protocol::root::RootImage;
@@ -971,39 +971,47 @@ pub(in crate::host) fn artifact(digit: char) -> ArtifactIdentity {
     ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap()
 }
 
-/// Returns the class of the capture of [`ManifestSpec::template`].
-pub(in crate::host) fn class() -> CaptureClass {
-    CaptureClass {
+/// Returns the checked inputs of the capture of [`ManifestSpec::template`].
+pub(in crate::host) fn context() -> CaptureContext {
+    CaptureContext {
+        capture: CaptureConfig {
+            disks: DiskCapture::Fresh {
+                image: BlockGeometry {
+                    length: 1024 * MIB,
+                    logical_block_size: 512,
+                    physical_block_size: 4096,
+                },
+                scratch: BlockGeometry {
+                    length: 64 * MIB,
+                    logical_block_size: 512,
+                    physical_block_size: 512,
+                },
+            },
+            processors: Capacity {
+                boot: 2,
+                capacity: 2,
+            },
+            memory: Capacity {
+                boot: 512,
+                capacity: 2048,
+            },
+            invariants: Invariants::new(),
+        },
+        nic: None,
+        console: ConsoleAttachment::Disconnected,
         runtime: RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c')),
-        guest_build: ArtifactIdentity::new("guest-build-1").unwrap(),
         hypervisor: Hypervisor::Kvm,
-        cpu_profile: "auto".to_owned(),
-        processors: 2,
-        boot_processors: 2,
-        memory: 512 * MIB,
-        memory_capacity: 2048 * MIB,
-        distro: BlockGeometry {
-            length: 1024 * MIB,
-            logical_block_size: 512,
-            physical_block_size: 4096,
-        },
-        scratch: BlockGeometry {
-            length: 64 * MIB,
-            logical_block_size: 512,
-            physical_block_size: 512,
-        },
-        network: None,
-        invariants: Invariants::new(),
+        cpu_profile: Some("auto".to_owned()),
     }
 }
 
-/// Returns the class of the capture of [`ManifestSpec::with_network`].
-pub(in crate::host) fn network_class() -> CaptureClass {
-    CaptureClass {
-        network: Some(
-            SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(Access::Allow)).unwrap(),
-        ),
-        ..class()
+/// Returns the checked inputs of the capture of [`ManifestSpec::with_network`].
+pub(in crate::host) fn network_context() -> CaptureContext {
+    CaptureContext {
+        nic: Some(NicConfig {
+            guest_network: Ipv4Cidr::parse("10.0.0.2/24").unwrap(),
+        }),
+        ..context()
     }
 }
 
@@ -1026,7 +1034,7 @@ impl SnapshotFixture {
         crate::host::vm::create_private_dir(&openvmm).unwrap();
         let spec = ManifestSpec::template();
         let manifest = SnapshotManifest::parse(&spec.encode()).unwrap();
-        let key = SnapshotKey::new(&class(), &manifest).unwrap();
+        let key = SnapshotKey::from_capture(&context(), &manifest).unwrap();
         write_private(&dir.join(KEY_FILE), &key.to_bytes()).unwrap();
         write_private(&dir.join(DESCRIPTION_FILE), b"not JSON").unwrap();
         write_private(&openvmm.join(MANIFEST_NAME), &spec.encode()).unwrap();
@@ -1203,7 +1211,7 @@ fn snapshot_open_refuses_a_key_from_another_manifest_machine() {
         let mut spec = fixture.spec.clone();
         mutate(&mut spec);
         let manifest = SnapshotManifest::parse(&spec.encode()).unwrap();
-        let key = SnapshotKey::new(&class(), &manifest).unwrap();
+        let key = SnapshotKey::from_capture(&context(), &manifest).unwrap();
         write_private(&fixture.dir.join(KEY_FILE), &key.to_bytes()).unwrap();
         refused(&fixture.dir);
     }
@@ -1240,7 +1248,7 @@ fn snapshot_open_refuses_a_compatible_key_with_another_capture_time() {
         let mut spec = fixture.spec.clone();
         mutate(&mut spec);
         let manifest = SnapshotManifest::parse(&spec.encode()).unwrap();
-        let key = SnapshotKey::new(&class(), &manifest).unwrap();
+        let key = SnapshotKey::from_capture(&context(), &manifest).unwrap();
         assert_eq!(key.identity(), fixture.key.identity());
         write_private(&fixture.dir.join(KEY_FILE), &key.to_bytes()).unwrap();
         refused(&fixture.dir);
@@ -1530,7 +1538,7 @@ impl RestoreFixture {
             openvmm: snapshot.root.path().join("unread-openvmm"),
             kernel: snapshot.root.path().join("unread-kernel"),
             initramfs: snapshot.root.path().join("unread-initramfs"),
-            identity: class().runtime,
+            identity: context().runtime,
             hypervisor: Hypervisor::Kvm,
             cpu_profile: Some("intel.icelake-sp.v1".to_owned()),
             windows_breakaway: false,
@@ -1555,15 +1563,20 @@ impl RestoreFixture {
 
     fn write_metadata(&mut self) {
         let manifest = SnapshotManifest::parse(&self.snapshot.spec.encode()).unwrap();
-        let mut class = class();
-        class.processors = self.snapshot.spec.vp_count;
-        class.boot_processors = match manifest.machine.boot_processors {
-            0 => class.processors,
-            count => count,
+        let mut context = context();
+        let processors = self.snapshot.spec.vp_count;
+        context.capture.processors = Capacity {
+            boot: u64::from(match manifest.machine.boot_processors {
+                0 => processors,
+                count => count,
+            }),
+            capacity: u64::from(processors),
         };
-        class.distro = manifest.machine.distro;
-        class.scratch = manifest.machine.scratch;
-        class.network = self
+        context.capture.disks = DiskCapture::Fresh {
+            image: manifest.machine.distro,
+            scratch: manifest.machine.scratch,
+        };
+        context.nic = self
             .snapshot
             .spec
             .contract
@@ -1571,18 +1584,15 @@ impl RestoreFixture {
             .unwrap()
             .network
             .as_ref()
-            .map(|network| {
-                SandboxNetwork::new(
-                    &format!(
-                        "{}/{}",
-                        std::net::Ipv4Addr::from(network.ipv4),
-                        network.prefix_length
-                    ),
-                    NetworkPolicy::new(Access::Allow),
-                )
-                .unwrap()
+            .map(|network| NicConfig {
+                guest_network: Ipv4Cidr::parse(&format!(
+                    "{}/{}",
+                    std::net::Ipv4Addr::from(network.ipv4),
+                    network.prefix_length
+                ))
+                .unwrap(),
             });
-        self.snapshot.key = SnapshotKey::new(&class, &manifest).unwrap();
+        self.snapshot.key = SnapshotKey::from_capture(&context, &manifest).unwrap();
         crate::host::platform::write_private(
             &self.snapshot.dir.join(KEY_FILE),
             &self.snapshot.key.to_bytes(),
