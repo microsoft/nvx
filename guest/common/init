@@ -35,13 +35,6 @@ case "$cmdline" in
     *" nvx_sandbox=1 "*) sandbox_mode=true ;;
     *) sandbox_mode=false ;;
 esac
-new_init=false
-if [ "$sandbox_mode" = true ]; then
-    case "$cmdline" in
-        *" nvx_lifecycle="*) ;;
-        *) new_init=true ;;
-    esac
-fi
 
 fatal() {
     echo "$*" >&2
@@ -165,12 +158,10 @@ control_tty=
 workload_account=
 entrypoint=
 entrypoints=0
-# Kernel command-line tokens are deliberately split on spaces. OpenVMM's
-# options give the lifecycle and the workload identity tokens of their own; a
-# blockless launch of the CLI gives the CLI's instead, nvx_mode=one-shot or
-# nvx_mode=managed and nvx_identity=UID:GID, and names its one-shot workload
-# with nvx_entrypoint= and nvx_arg= tokens, whose values become the positional
-# parameters, in order.
+# Kernel command-line tokens are deliberately split on spaces. A blockless
+# launch of the CLI gives nvx_mode=one-shot or nvx_mode=managed and
+# nvx_identity=UID:GID, and names its one-shot workload with nvx_entrypoint=
+# and nvx_arg= tokens, whose values become the positional parameters, in order.
 # shellcheck disable=SC2086
 set -f
 set --
@@ -182,10 +173,8 @@ for token in $cmdline; do
             nvx_exec=${token#*=}
             [ -n "$nvx_exec" ] || fatal "nvx_exec must not be empty"
             ;;
-        nvx_workload_uid=*) workload_uid=${token#*=} ;;
-        nvx_workload_gid=*) workload_gid=${token#*=} ;;
         nvx_identity=*) read_workload_identity "${token#*=}" ;;
-        nvx_lifecycle=* | nvx_mode=*) workload_lifecycle=${token#*=} ;;
+        nvx_mode=*) workload_lifecycle=${token#*=} ;;
         nvx_entrypoint=*)
             entrypoint=${token#*=}
             entrypoints=$((entrypoints + 1))
@@ -196,7 +185,7 @@ for token in $cmdline; do
     esac
 done
 set +f
-if [ -n "$nvx_exec" ] && [ "$new_init" = false ]; then
+if [ -n "$nvx_exec" ] && [ "$sandbox_mode" = false ]; then
     case "$nvx_exec" in
         /*) ;;
         *) fatal "nvx_exec must be an absolute initramfs path" ;;
@@ -317,11 +306,6 @@ if [ -n "$nip" ]; then
     fi
 fi
 if [ "$sandbox_mode" = true ]; then
-    if [ "$new_init" = false ]; then
-        [ -x /sbin/nvx-init-agent ] ||
-            workload_fatal "selected guest cannot act as sandbox control"
-        exec /sbin/nvx-init-agent
-    fi
     [ -x /sbin/nvx-init ] ||
         workload_fatal "selected guest cannot act as sandbox control"
     # nvx-time boot returns before its child publishes the daemon PID.
