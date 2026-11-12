@@ -1,9 +1,8 @@
 use std::cell::{Cell, RefCell};
 
-use super::stop::terminate_within;
+use super::stop::{StopOutcome, terminate_within};
 use super::*;
 use crate::host::cli::deadline::Deadline;
-use crate::host::supervisor::StopOutcome;
 
 /// An OpenVMM of another runtime identity whose termination a test scripts, without a process.
 struct Scripted {
