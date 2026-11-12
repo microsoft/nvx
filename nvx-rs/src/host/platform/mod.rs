@@ -42,7 +42,6 @@ use other as imp;
 use windows as imp;
 
 pub(crate) use imp::*;
-pub use imp::{SUPPORTED, create_private_dir, file_identity, process_start_time};
 
 /// Why this module refused a file for what the file is.
 #[derive(Debug)]

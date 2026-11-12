@@ -18,7 +18,7 @@ use crate::host::sys::{self, Errno, PidFd};
 /// exits, as on Windows: a zombie whose main thread exited first still runs while its other threads
 /// exit, and they keep the process's descriptors, such as an inherited log and its lock, open.
 /// Zombies without other threads count as exited.
-pub fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
+pub(crate) fn process_start_time(pid: u32) -> io::Result<Option<u64>> {
     let Some(stat) = read_stat(pid)? else {
         return Ok(None);
     };
