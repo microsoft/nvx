@@ -697,11 +697,12 @@ fn connect_running(
     endpoint: &str,
 ) -> Result<Option<Box<dyn Transport>>> {
     let pid = launched.process.reference().pid;
-    connect_before_exit(
-        endpoint,
-        || platform::connect_endpoint(endpoint, pid, Duration::from_millis(250)),
-        |timeout| launched.wait_status(timeout),
-    )
+    // On Linux, OpenVMM may write its console output and exit before the console's peer check.
+    #[cfg(target_os = "linux")]
+    let connect = || platform::connect_child_endpoint(endpoint, pid);
+    #[cfg(not(target_os = "linux"))]
+    let connect = || platform::connect_endpoint(endpoint, pid, Duration::from_millis(250));
+    connect_before_exit(endpoint, connect, |timeout| launched.wait_status(timeout))
 }
 
 /// Connects to the verified endpoint, or yields to the owned child's confirmed exit.
