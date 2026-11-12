@@ -8,8 +8,8 @@
 //! caller keeps those paths stable while the VM uses them.
 //!
 //! Provision checks the images, the workload and the export plan of its options with
-//! [`check_images`] and [`check_workload`], as the plan of the sandbox profile checked them, and
-//! each start checks them again in the record, with [`Config::check`].
+//! [`check_images`] and [`check_workload`], and each start checks them again in the record, with
+//! [`Config::check`].
 //!
 //! The network is the [`NetworkRecord`] of the sandbox's network options, from which each start
 //! builds the network's policy again, as provision built it.
@@ -117,10 +117,10 @@ fn resolved(path: &Path) -> Result<String> {
     path_string(&paths::resolve(path).map_err(Exit::from_os_error)?)
 }
 
-/// Refuses the workload of a sandbox as the plan of the sandbox profile refused it: an
-/// `entrypoint` that is not an absolute path or that holds whitespace, a control character, or a
-/// quote, an argument of `args` that is empty or holds one, a `hostname` that is not a lowercase
-/// RFC 1123 label of up to 63 characters, and the root's UID or GID in `identity`.
+/// Refuses the workload of a sandbox: an `entrypoint` that is not an absolute path or that holds
+/// whitespace, a control character, or a quote, an argument of `args` that is empty or holds one,
+/// a `hostname` that is not a lowercase RFC 1123 label of up to 63 characters, and the root's UID
+/// or GID in `identity`.
 pub(crate) fn check_workload(
     entrypoint: &str,
     args: &[String],
@@ -152,8 +152,7 @@ pub(crate) fn check_workload(
     Ok(())
 }
 
-/// Refuses the images of a sandbox as the plan of the sandbox profile refused them before its
-/// launch: `distro`, and `scratch`, the scratch image of an upper on scratch, must each be a
+/// Refuses the images of a sandbox before its launch: `distro`, and `scratch`, the scratch image of an upper on scratch, must each be a
 /// regular file whose path, and the path to which it resolves, has no comma, semicolon, or
 /// unbalanced bracket, and does not end in an extension with which OpenVMM would not attach it as
 /// a raw image. It also refuses `export`, if any, once its directories and files overlap, by path

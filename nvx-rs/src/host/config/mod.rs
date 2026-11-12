@@ -1160,6 +1160,10 @@ fn reject_container_backend(
 }
 
 /// Preserves the legacy sandbox refusal set used by snapshot and clone flows.
+#[cfg_attr(
+    not(feature = "cli"),
+    allow(dead_code, reason = "only the CLI's sandboxes refuse container images")
+)]
 pub(crate) fn reject_container_path(path: &Path, shown: &str) -> Result<()> {
     reject_container_backend(path, shown, true, false)
 }

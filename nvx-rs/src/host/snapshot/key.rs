@@ -463,7 +463,7 @@ impl SnapshotKey {
             }
         }
         let requested_network = class.guest_network;
-        // A network that `SandboxNetwork` accepts has the canonical form that this writes.
+        // An `Ipv4Cidr` displays a network in the canonical form that this writes.
         let found_network = machine.nic.as_ref().map(guest_network_of);
         if found_network != requested_network {
             let describe = |network: Option<String>| network.unwrap_or_else(|| "none".to_owned());
