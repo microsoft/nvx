@@ -10,9 +10,10 @@
   summary, and commit mapping below cover positions 001-131, the PR09 fixups at positions
   241-243, the PR13 fixup at position 247, the PR18 fixup at position 248, the PR20 fixup at
   position 249, and the PR19 fixup at position 250.
-- NVX's pinned OpenVMM revision: `c72fc56a3716fafaf1a9b5473c2de646c2a74815`, position 261, the
-  head of microsoft/openvmm#5055, whose three commits follow position 258, `024ecee62`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5053 merged with positions 256 and 257 after
+- NVX's pinned OpenVMM revision: `c2c21ddb25822e13bd1cf1b33ed693545cc7bbb5`, position 262, the
+  head of microsoft/openvmm#5056, whose commit follows position 261, `c72fc56a3`, the head of
+  `feature/microvm/dev`, which microsoft/openvmm#5055 merged with positions 259 and 260 after
+  position 258, `024ecee62`, which microsoft/openvmm#5053 merged with positions 256 and 257 after
   position 255, `90f87319d`, which microsoft/openvmm#5052 merged with position 254 after position
   253, `3cd9f149b`, which microsoft/openvmm#5046 merged after position 252, `9f10ce7a8`,
   which microsoft/openvmm#5044 merged after position 251, `174da3a0d`,
@@ -46,8 +47,8 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 130 commits past
-  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 251-261 are not
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 131 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 251-262 are not
   yet assigned to PRs, positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248
   is a PR18 fixup, position 249 is a PR20 fixup, and position 250 is a PR19 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
@@ -1031,7 +1032,8 @@ ba105dd7f
   -> restored VM time run from the TSCs' restart [254-255]
   -> LAPIC timer restores without drift or a downtime refire [256-258]
   -> LAPIC timer captures that keep a taken timer from refiring [259-261]
-  -> c72fc56a3 (NVX pin)
+  -> restore phase logs through a host clock step back [262]
+  -> c2c21ddb2 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1068,7 +1070,7 @@ helper that the case uses.
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 130 later commits,
+The NVX pin extends the chain past position 131 without merges. Of the 131 later commits,
 positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, position 248 is a PR18 fixup,
 position 249 is a PR20 fixup, position 250 is a PR19 fixup, and the others are not yet classified
 or assigned to PRs.
@@ -1076,7 +1078,7 @@ Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-261 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-262 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1215,6 +1217,7 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 259 | `727cad63f` | - | - | - | - | kvm: deliver the interrupts that KVM holds without running the VP (microsoft/openvmm#5055) |
 | 260 | `9f14b54fd` | - | - | - | - | virt_kvm: keep a restore from firing a taken one-shot LAPIC timer again (microsoft/openvmm#5055) |
 | 261 | `c72fc56a3` | - | - | - | - | virt_kvm: build the LAPIC timer KVM tests for musl (microsoft/openvmm#5055); fold into 260 |
+| 262 | `c2c21ddb2` | - | - | - | - | microVM: saturate the time ABI restore's logged phase durations (microsoft/openvmm#5056) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
@@ -1869,6 +1872,17 @@ list of the x86-64 module, and in the VP state module, whose KVM LAPIC page from
 KVM tests use, with position 256's guest RAM and position 259's delivery, so it follows positions
 256, 257, and 259 upstream. Position 261 changes only position 260's KVM tests, which it builds for
 musl, for which the `libc` crate defines no `SIGEV_THREAD_ID`, so it folds into position 260.
+
+Position 262 changes only the time ABI's logs of how long the phases of a restore take: the
+restore clock event of the VM worker's time ABI, which position 144 adds and position 146 gives its
+concurrent LAPIC and VM-time phases, and the synchronized TSC sets of the MSHV and WHP backends of
+positions 134 and 140. It computes each of their phases that is the difference of two readings
+with a helper that it adds to `virt`'s time ABI module of position 132, which gives 0 where the
+host's monotonic clock stepped back past the phase's start and the subtraction panicked, in files
+that positions 135, 138, 139, 142, 145, 147-150, 152, 153, 156, 158-160, 193, 201, 220, 223, 224,
+252-255, and 258 also change. It changes nothing that a mapped PR adds. Replaying it on upstream
+main conflicts in all four of its files: upstream main lacks the time ABI, so it follows the time
+ABI series upstream.
 
 ## PR summary
 
