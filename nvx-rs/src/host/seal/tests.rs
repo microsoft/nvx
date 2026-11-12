@@ -12,14 +12,13 @@ use super::*;
 /// `EBADF`.
 #[cfg(target_os = "linux")]
 pub(crate) fn open_metadata_only(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
 
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(OFlag::O_PATH.bits())
-        .open(path)
+    // `nix` passes `O_PATH` on, where `OpenOptionsExt::custom_flags` masks out the bits of
+    // `O_ACCMODE`, which on musl include `O_PATH`: a musl build would open the file for reading.
+    let file = nix::fcntl::open(path, OFlag::O_PATH | OFlag::O_CLOEXEC, Mode::empty())?;
+    Ok(File::from(file))
 }
 
 /// Opens `path` for its metadata alone, as the Linux variant does. Without `FILE_READ_DATA`,
