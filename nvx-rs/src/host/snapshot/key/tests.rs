@@ -1,12 +1,12 @@
-//! Tests of [`SnapshotKey`] and [`CaptureClass`]: what a key holds, what it leaves out, and its
-//! canonical encoding.
+//! Tests of [`SnapshotKey`]: what a key holds, what it leaves out, and its canonical encoding.
 
 use std::collections::HashSet;
 
 use super::*;
 use crate::ErrorCode;
-use crate::host::network::{Access, EgressRule, HostLoopback, NetworkPolicy, NetworkProxy};
-use crate::host::snapshot::tests::{self as support, MIB, ManifestSpec, artifact, network_class};
+use crate::host::config::NicConfig;
+use crate::host::snapshot::tests::{self as support, MIB, ManifestSpec, artifact, network_context};
+use crate::net::Ipv4Cidr;
 
 /// Returns the manifest that `spec` encodes.
 fn manifest(spec: &ManifestSpec) -> SnapshotManifest {
@@ -28,31 +28,46 @@ fn capture_time_len(time: &TimeContract) -> usize {
         }
 }
 
-/// Returns the key of the template that a capture of `class` made, whose manifest `spec`
+/// Returns the key of the template that the capture of `context` made, whose manifest `spec`
 /// encodes.
-fn key(class: &CaptureClass, spec: &ManifestSpec) -> SnapshotKey {
-    SnapshotKey::new(class, &manifest(spec)).unwrap()
+fn key(context: &CaptureContext, spec: &ManifestSpec) -> SnapshotKey {
+    SnapshotKey::from_capture(context, &manifest(spec)).unwrap()
 }
 
 /// Returns the key of the template with a NIC of the tests.
 fn network_key() -> SnapshotKey {
-    key(&network_class(), &ManifestSpec::with_network())
+    key(&network_context(), &ManifestSpec::with_network())
 }
 
-/// A change to the class and the manifest of the template with a NIC of the tests.
-type Change = fn(&mut CaptureClass, &mut ManifestSpec);
+/// A change to the context and the manifest of the capture of the template with a NIC of the
+/// tests.
+type Change = fn(&mut CaptureContext, &mut ManifestSpec);
 
 /// Returns the identity of the key of the template with a NIC of the tests once `change` changes
 /// it.
 fn identity_after(change: Change) -> KeyIdentity {
-    let (mut class, mut spec) = (network_class(), ManifestSpec::with_network());
-    change(&mut class, &mut spec);
-    key(&class, &spec).identity()
+    let (mut context, mut spec) = (network_context(), ManifestSpec::with_network());
+    change(&mut context, &mut spec);
+    key(&context, &spec).identity()
+}
+
+/// Returns the geometries of the placeholder image and of the dormant scratch that the capture of
+/// `context` attaches.
+fn disks(context: &mut CaptureContext) -> (&mut BlockGeometry, &mut BlockGeometry) {
+    let DiskCapture::Fresh { image, scratch } = &mut context.capture.disks;
+    (image, scratch)
+}
+
+/// Returns the NIC at `network`, an IPv4 address and prefix length.
+fn nic(network: &str) -> Option<NicConfig> {
+    Some(NicConfig {
+        guest_network: Ipv4Cidr::parse(network).unwrap(),
+    })
 }
 
 /// Changes the RAM of a capture to `memory` bytes, below 3 GiB, of the same capacity.
-fn set_memory(class: &mut CaptureClass, spec: &mut ManifestSpec, memory: u64) {
-    class.memory = memory;
+fn set_memory(context: &mut CaptureContext, spec: &mut ManifestSpec, memory: u64) {
+    context.capture.memory.boot = memory / MIB;
     spec.memory_size = memory;
     let contract = spec.contract();
     contract.memory_ranges = vec![(0, memory, 0)];
@@ -63,21 +78,27 @@ fn set_memory(class: &mut CaptureClass, spec: &mut ManifestSpec, memory: u64) {
 fn each_part_of_the_key_changes_it() {
     let changes: &[(&str, Change)] = &[
         // Bundle and contracts.
-        ("OpenVMM", |class, _| class.runtime.openvmm = artifact('d')),
-        ("kernel", |class, _| class.runtime.kernel = artifact('d')),
-        ("initramfs", |class, _| {
-            class.runtime.initramfs = artifact('d')
+        ("OpenVMM", |context, _| {
+            context.runtime.openvmm = artifact('d')
         }),
-        ("boot contract", |class, _| class.runtime.boot_contract += 1),
-        ("control contract", |class, _| {
-            class.runtime.control_contract = "other-revision".to_owned();
+        ("kernel", |context, _| {
+            context.runtime.kernel = artifact('d')
         }),
-        ("control session", |class, _| {
-            class.runtime.control_session += 1
+        ("initramfs", |context, _| {
+            context.runtime.initramfs = artifact('d')
+        }),
+        ("boot contract", |context, _| {
+            context.runtime.boot_contract += 1
+        }),
+        ("control contract", |context, _| {
+            context.runtime.control_contract = "other-revision".to_owned();
+        }),
+        ("control session", |context, _| {
+            context.runtime.control_session += 1
         }),
         // CPU and time.
-        ("backend", |class, spec| {
-            class.hypervisor = Hypervisor::Mshv;
+        ("backend", |context, spec| {
+            context.hypervisor = Hypervisor::Mshv;
             spec.contract().source_hypervisor = "mshv".to_owned();
         }),
         ("CPU vendor", |_, spec| {
@@ -104,18 +125,18 @@ fn each_part_of_the_key_changes_it() {
         ("LAPIC timer rate", |_, spec| spec.time().apic_hz += 1),
         ("rate policy", |_, spec| spec.time().tolerance_ppm += 1),
         // Resources.
-        ("processors", |class, spec| {
-            class.processors = 4;
-            class.boot_processors = 4;
+        ("processors", |context, spec| {
+            context.capture.processors.capacity = 4;
+            context.capture.processors.boot = 4;
             spec.vp_count = 4;
             spec.contract().topology = (1, 1, 4, 1, vec![0, 1, 2, 3]);
         }),
         ("processors online at boot", |_, spec| {
             spec.contract().boot_online_vp_count = 2;
         }),
-        ("RAM", |class, spec| set_memory(class, spec, 640 * MIB)),
-        ("RAM capacity", |class, spec| {
-            class.memory_capacity = 1024 * MIB;
+        ("RAM", |context, spec| set_memory(context, spec, 640 * MIB)),
+        ("RAM capacity", |context, spec| {
+            context.capture.memory.capacity = 1024;
             let contract = spec.contract();
             contract.memory_capacity = 1024 * MIB;
             contract.expansion_ranges = vec![(512 * MIB, 512 * MIB)];
@@ -136,21 +157,22 @@ fn each_part_of_the_key_changes_it() {
             spec.contract().command_line.push_str(" quiet");
         }),
         // Disks.
-        ("distro capacity", |class, spec| {
-            class.distro.length *= 2;
+        ("distro capacity", |context, spec| {
+            disks(context).0.length *= 2;
             spec.contract().blocks[0].length *= 2;
         }),
-        ("distro block sizes", |class, spec| {
-            class.distro.physical_block_size = 512;
+        ("distro block sizes", |context, spec| {
+            disks(context).0.physical_block_size = 512;
             spec.contract().blocks[0].physical_block_size = 512;
         }),
-        ("scratch length", |class, spec| {
-            class.scratch.length *= 2;
+        ("scratch length", |context, spec| {
+            disks(context).1.length *= 2;
             spec.contract().blocks[1].length *= 2;
         }),
-        ("scratch geometry", |class, spec| {
-            class.scratch.logical_block_size = 4096;
-            class.scratch.physical_block_size = 4096;
+        ("scratch geometry", |context, spec| {
+            let (_, requested) = disks(context);
+            requested.logical_block_size = 4096;
+            requested.physical_block_size = 4096;
             let scratch = &mut spec.contract().blocks[1];
             scratch.logical_block_size = 4096;
             scratch.physical_block_size = 4096;
@@ -203,8 +225,8 @@ fn each_part_of_the_key_changes_it() {
         ("interrupt-status page", |_, spec| {
             spec.contract().status_page.0 += 0x1000;
         }),
-        ("NIC presence", |class, spec| {
-            *class = support::class();
+        ("NIC presence", |context, spec| {
+            *context = support::context();
             *spec = ManifestSpec::template();
         }),
         ("network profile", |_, spec| {
@@ -212,16 +234,12 @@ fn each_part_of_the_key_changes_it() {
         }),
         ("guest MAC", |_, spec| spec.network().guest_mac[5] = 3),
         ("gateway MAC", |_, spec| spec.network().gateway_mac[5] = 3),
-        ("IPv4 address", |class, spec| {
-            class.network = Some(
-                SandboxNetwork::new("10.0.0.3/24", NetworkPolicy::new(Access::Allow)).unwrap(),
-            );
+        ("IPv4 address", |context, spec| {
+            context.nic = nic("10.0.0.3/24");
             spec.network().ipv4 = [10, 0, 0, 3];
         }),
-        ("IPv4 prefix", |class, spec| {
-            class.network = Some(
-                SandboxNetwork::new("10.0.0.2/16", NetworkPolicy::new(Access::Allow)).unwrap(),
-            );
+        ("IPv4 prefix", |context, spec| {
+            context.nic = nic("10.0.0.2/16");
             spec.network().prefix_length = 16;
         }),
         ("IPv4 gateway", |_, spec| {
@@ -252,8 +270,8 @@ fn each_part_of_the_key_changes_it() {
         ("policy encoding", |_, spec| {
             spec.network().policy_encoding_version = 3;
         }),
-        ("invariant setting", |class, _| {
-            class.invariants = Invariants::new()
+        ("invariant setting", |context, _| {
+            context.capture.invariants = Invariants::new()
                 .with("isolation.seccomp", "strict")
                 .unwrap();
         }),
@@ -267,11 +285,11 @@ fn each_part_of_the_key_changes_it() {
         );
     }
     // Two values of one setting make two keys.
-    let mut class = network_class();
-    class.invariants = Invariants::new()
+    let mut context = network_context();
+    context.capture.invariants = Invariants::new()
         .with("isolation.seccomp", "relaxed")
         .unwrap();
-    assert!(identities.insert(key(&class, &ManifestSpec::with_network()).identity()));
+    assert!(identities.insert(key(&context, &ManifestSpec::with_network()).identity()));
 }
 
 #[test]
@@ -329,9 +347,9 @@ fn a_generations_own_metadata_leaves_the_key_as_it_is() {
             spec.cpu().document = b"another document".to_vec();
         }),
         ("capture CPU signature", |_, spec| spec.cpu().signature += 1),
-        // The class requests a profile, which the key names as OpenVMM selected it.
-        ("requested CPU profile", |class, _| {
-            class.cpu_profile = "intel.icelake-sp.v1".to_owned();
+        // The capture requests a profile, which the key names as OpenVMM selected it.
+        ("requested CPU profile", |context, _| {
+            context.cpu_profile = Some("intel.icelake-sp.v1".to_owned());
         }),
     ];
     let base = network_key();
@@ -342,22 +360,6 @@ fn a_generations_own_metadata_leaves_the_key_as_it_is() {
             "a change of the {part} changes the key"
         );
     }
-}
-
-#[test]
-fn the_guest_build_is_not_part_of_a_snapshot_key() {
-    let class = network_class();
-    let spec = ManifestSpec::with_network();
-    let made = key(&class, &spec);
-    let other = CaptureClass {
-        guest_build: ArtifactIdentity::new("guest-build-2").unwrap(),
-        ..class.clone()
-    };
-    assert_ne!(class.identity().unwrap(), other.identity().unwrap());
-    let changed = key(&other, &spec);
-    assert_eq!(changed, made);
-    assert_eq!(changed.to_bytes(), made.to_bytes());
-    assert_eq!(changed.identity(), made.identity());
 }
 
 #[test]
@@ -375,7 +377,7 @@ fn complete_capture_time_round_trips_without_changing_compatibility_identity() {
         time.lineage = u32::MAX;
         time.cut_to_anchor_ns = cut;
         let manifest = manifest(&spec);
-        let key = SnapshotKey::new(&network_class(), &manifest).unwrap();
+        let key = SnapshotKey::from_capture(&network_context(), &manifest).unwrap();
         assert_eq!(key.time(), manifest.time());
         assert_ne!(key.to_bytes(), base.to_bytes());
         assert_eq!(key.identity(), base.identity());
@@ -407,8 +409,8 @@ fn canonical_keys_require_capture_time_and_a_known_host_clock() {
 #[test]
 fn a_key_holds_what_its_capture_made() {
     let made = network_key();
-    let class = network_class();
-    assert_eq!(made.runtime(), &class.runtime);
+    let mut context = network_context();
+    assert_eq!(made.runtime(), &context.runtime);
     assert_eq!(made.hypervisor(), Hypervisor::Kvm);
     assert_eq!(made.cpu_profile(), "intel.icelake-sp.v1");
     assert_eq!((made.processors(), made.boot_processors()), (2, 0));
@@ -424,23 +426,21 @@ fn a_key_holds_what_its_capture_made() {
         made.command_line(),
         ManifestSpec::with_network().contract().command_line
     );
-    assert_eq!(
-        (made.distro(), made.scratch()),
-        (class.distro, class.scratch)
-    );
+    let (image, scratch) = disks(&mut context);
+    assert_eq!((made.distro(), made.scratch()), (*image, *scratch));
     assert!(made.has_network());
     assert_eq!(made.guest_network().as_deref(), Some("10.0.0.2/24"));
-    let template = key(&support::class(), &ManifestSpec::template());
+    let template = key(&support::context(), &ManifestSpec::template());
     assert!(!template.has_network());
     assert_eq!(template.guest_network(), None);
     assert_eq!(made.filesystem_tag(), "microvm");
     assert_eq!(made.invariants(), &Invariants::new());
 }
 
-/// Asserts that the capture of `class` whose manifest is `spec` does not match its class, with
-/// a message that holds `expected`.
-fn assert_mismatched(class: &CaptureClass, spec: &ManifestSpec, expected: &str) {
-    let error = SnapshotKey::new(class, &manifest(spec)).unwrap_err();
+/// Asserts that the capture of `context` whose manifest is `spec` does not match what `context`
+/// requests, with a message that holds `expected`.
+fn assert_mismatched(context: &CaptureContext, spec: &ManifestSpec, expected: &str) {
+    let error = SnapshotKey::from_capture(context, &manifest(spec)).unwrap_err();
     assert_eq!(error.code(), ErrorCode::Io, "{error}");
     assert!(
         error
@@ -455,38 +455,38 @@ fn assert_mismatched(class: &CaptureClass, spec: &ManifestSpec, expected: &str) 
 #[test]
 fn a_capture_that_does_not_match_its_class_is_refused() {
     let (template, with_network) = (ManifestSpec::template(), ManifestSpec::with_network());
-    let base = support::class();
-    let mut class = base.clone();
-    class.hypervisor = Hypervisor::Mshv;
+    let base = support::context();
+    let mut context = base.clone();
+    context.hypervisor = Hypervisor::Mshv;
     assert_mismatched(
-        &class,
+        &context,
         &template,
         "its backend is kvm, but the class requests mshv",
     );
     for requested in ["amd.genoa.v1", "intel.icelake-sp.v2", "host"] {
-        class = base.clone();
-        class.cpu_profile = requested.to_owned();
+        context = base.clone();
+        context.cpu_profile = Some(requested.to_owned());
         assert_mismatched(
-            &class,
+            &context,
             &template,
             &format!("its CPU profile is intel.icelake-sp.v1, but the class requests {requested}"),
         );
     }
-    class = base.clone();
-    class.processors = 4;
-    class.boot_processors = 4;
+    context = base.clone();
+    context.capture.processors.capacity = 4;
+    context.capture.processors.boot = 4;
     assert_mismatched(
-        &class,
+        &context,
         &template,
         "it has 2 processors, 2 online at boot, but the class requests 4 processors, 4 online at \
          boot",
     );
-    // A capture whose processors are all online at boot does not serve a class that keeps some
+    // A capture whose processors are all online at boot does not serve a request that keeps some
     // offline.
-    class = base.clone();
-    class.boot_processors = 1;
+    context = base.clone();
+    context.capture.processors.boot = 1;
     assert_mismatched(
-        &class,
+        &context,
         &template,
         "it has 2 processors, 2 online at boot, but the class requests 2 processors, 1 online",
     );
@@ -497,44 +497,38 @@ fn a_capture_that_does_not_match_its_class_is_refused() {
         &spec,
         "it has 2 processors, 1 online at boot, but the class requests 2 processors, 2 online",
     );
-    assert!(SnapshotKey::new(&class, &manifest(&spec)).is_ok());
-    class = base.clone();
-    class.memory = 1024 * MIB;
+    assert!(SnapshotKey::from_capture(&context, &manifest(&spec)).is_ok());
+    context = base.clone();
+    context.capture.memory.boot = 1024;
     assert_mismatched(
-        &class,
+        &context,
         &template,
         "it has 536870912 bytes of RAM, of a capacity of 2147483648, but the class requests \
          1073741824 bytes of RAM",
     );
-    class = base.clone();
-    class.memory_capacity = 4096 * MIB;
-    assert_mismatched(&class, &template, "of a capacity of 4294967296");
-    class = base.clone();
-    class.distro.length *= 2;
-    assert_mismatched(&class, &template, "its distro geometry is");
-    class = base.clone();
-    class.scratch.physical_block_size = 4096;
-    assert_mismatched(&class, &template, "its scratch geometry is");
+    context = base.clone();
+    context.capture.memory.capacity = 4096;
+    assert_mismatched(&context, &template, "of a capacity of 4294967296");
+    context = base.clone();
+    disks(&mut context).0.length *= 2;
+    assert_mismatched(&context, &template, "its distro geometry is");
+    context = base.clone();
+    disks(&mut context).1.physical_block_size = 4096;
+    assert_mismatched(&context, &template, "its scratch geometry is");
     assert_mismatched(
         &base,
         &with_network,
         "its NIC network is 10.0.0.2/24, but the class requests none",
     );
     assert_mismatched(
-        &network_class(),
+        &network_context(),
         &template,
         "its NIC network is none, but the class requests 10.0.0.2/24",
     );
-    // A network whose policy lets nothing through attaches no NIC.
-    class = base.clone();
-    class.network =
-        Some(SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(Access::Deny)).unwrap());
-    assert_mismatched(&class, &with_network, "but the class requests none");
-    assert_eq!(key(&class, &template), key(&base, &template));
-    class.network =
-        Some(SandboxNetwork::new("10.0.0.3/24", NetworkPolicy::new(Access::Allow)).unwrap());
+    context = base.clone();
+    context.nic = nic("10.0.0.3/24");
     assert_mismatched(
-        &class,
+        &context,
         &with_network,
         "its NIC network is 10.0.0.2/24, but the class requests 10.0.0.3/24",
     );
@@ -544,166 +538,79 @@ fn a_capture_that_does_not_match_its_class_is_refused() {
 fn a_class_selects_a_profile_as_openvmm_does() {
     let mut spec = ManifestSpec::template();
     spec.cpu().id = "intel.host.v1".to_owned();
-    let mut class = support::class();
+    let mut context = support::context();
     // `auto` falls back to a profile that the host derives when no built-in profile serves the
     // host's CPU.
     for requested in ["auto", "host", "intel.host.v1"] {
-        class.cpu_profile = requested.to_owned();
-        assert_eq!(key(&class, &spec).cpu_profile(), "intel.host.v1");
+        context.cpu_profile = Some(requested.to_owned());
+        assert_eq!(key(&context, &spec).cpu_profile(), "intel.host.v1");
     }
-    class.cpu_profile = "intel.icelake-sp.v1".to_owned();
-    assert_mismatched(&class, &spec, "its CPU profile is intel.host.v1");
+    context.cpu_profile = Some("intel.icelake-sp.v1".to_owned());
+    assert_mismatched(&context, &spec, "its CPU profile is intel.host.v1");
 }
 
 #[test]
-fn invalid_classes_are_refused() {
-    type ClassChange = fn(&mut CaptureClass);
-    let cases: &[(ClassChange, &str)] = &[
+fn captures_of_invalid_contexts_are_refused() {
+    type ContextChange = fn(&mut CaptureContext);
+    let cases: &[(ContextChange, &str)] = &[
         (
-            |class| class.runtime.control_contract = "two words".to_owned(),
+            |context| context.runtime.control_contract = "two words".to_owned(),
             "control contract revision \"two words\" must hold 1 to 128 printable ASCII \
              characters and no space",
         ),
         (
-            |class| class.cpu_profile = "fastest".to_owned(),
+            |context| context.cpu_profile = Some("fastest".to_owned()),
             "CPU profile \"fastest\" must be \"auto\", \"host\", or a profile ID",
         ),
         (
-            |class| class.processors = 3,
+            |context| context.capture.processors.capacity = 3,
             "a capture of 3 processors with 2 online at boot needs 1, 2, 4, or 8 of each",
         ),
         (
-            |class| class.boot_processors = 0,
+            |context| context.capture.processors.boot = 0,
             "a capture of 2 processors with 0 online at boot",
         ),
         (
-            |class| class.boot_processors = 4,
-            "a capture of 2 processors with 4 online at boot",
+            |context| context.capture.processors.boot = 4,
+            "a capture of 2 processors can't have 4 online at boot",
         ),
         (
-            |class| class.memory = 0,
-            "a capture of 0 bytes of RAM needs a nonzero RAM",
+            |context| context.capture.memory.boot = 0,
+            "a capture needs memory at boot",
         ),
         (
-            |class| class.memory_capacity = class.memory - 1,
-            "needs a nonzero RAM and a capacity of at least it",
+            |context| context.capture.memory.capacity = context.capture.memory.boot - 128,
+            "is below its 512 MiB at boot",
         ),
         (
-            |class| class.distro.logical_block_size = 256,
-            "the distro device of a capture is invalid: its logical block size 256 is not a \
-             power of two of at least 512",
+            |context| disks(context).0.logical_block_size = 256,
+            "the image disk of a capture is invalid: its logical block size 256 is not a power \
+             of two of at least 512",
         ),
         (
-            |class| class.scratch.length = 0,
-            "the scratch device of a capture is invalid: its length 0",
+            |context| disks(context).1.length = 0,
+            "the scratch disk of a capture is invalid: its length 0",
         ),
     ];
     for (change, expected) in cases {
-        let mut class = network_class();
-        change(&mut class);
-        for error in [
-            class.check().unwrap_err(),
-            class.to_bytes().unwrap_err(),
-            class.identity().unwrap_err(),
-            SnapshotKey::new(&class, &manifest(&ManifestSpec::with_network())).unwrap_err(),
-        ] {
-            assert_eq!(error.code(), ErrorCode::Unsupported, "{error}");
-            assert!(
-                error.message().contains(expected),
-                "{:?} lacks {expected:?}",
-                error.message()
-            );
-        }
-    }
-}
-
-#[test]
-fn each_field_of_a_class_changes_its_identity() {
-    type ClassChange = fn(&mut CaptureClass);
-    let changes: &[ClassChange] = &[
-        |class| class.runtime.openvmm = artifact('d'),
-        |class| class.runtime.kernel = artifact('d'),
-        |class| class.runtime.initramfs = artifact('d'),
-        |class| class.runtime.boot_contract += 1,
-        |class| class.runtime.control_contract = "other".to_owned(),
-        |class| class.runtime.control_session += 1,
-        |class| class.guest_build = artifact('e'),
-        |class| class.hypervisor = Hypervisor::Whp,
-        |class| class.cpu_profile = "host".to_owned(),
-        |class| class.processors = 4,
-        |class| class.boot_processors = 1,
-        |class| class.memory = 1024 * MIB,
-        |class| class.memory_capacity = 4096 * MIB,
-        |class| class.distro.length *= 2,
-        |class| class.distro.physical_block_size = 512,
-        |class| class.scratch.length *= 2,
-        |class| {
-            class.scratch.logical_block_size = 4096;
-            class.scratch.physical_block_size = 4096;
-        },
-        |class| class.network = None,
-        |class| {
-            let policy = NetworkPolicy::new(Access::Allow);
-            class.network = Some(SandboxNetwork::new("10.0.0.3/24", policy).unwrap());
-        },
-        |class| {
-            class.invariants = Invariants::new()
-                .with("isolation.seccomp", "strict")
-                .unwrap();
-        },
-    ];
-    let base = network_class().identity().unwrap();
-    let mut identities = HashSet::from([base]);
-    for (index, change) in changes.iter().enumerate() {
-        let mut class = network_class();
-        change(&mut class);
+        let mut context = network_context();
+        change(&mut context);
+        let error = SnapshotKey::from_capture(&context, &manifest(&ManifestSpec::with_network()))
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Unsupported, "{error}");
         assert!(
-            identities.insert(class.identity().unwrap()),
-            "change {index} leaves the class's identity as it is"
+            error.message().contains(expected),
+            "{:?} lacks {expected:?}",
+            error.message()
         );
     }
-    // A network that attaches no NIC is no network.
-    let mut denied = network_class();
-    denied.network =
-        Some(SandboxNetwork::new("10.0.0.2/24", NetworkPolicy::new(Access::Deny)).unwrap());
-    let mut none = network_class();
-    none.network = None;
-    assert_eq!(denied.identity().unwrap(), none.identity().unwrap());
-    // The template captures its NIC under the complete deny-all policy, which each clone's restore
-    // replaces, so the policy of a network that attaches one is no part of its class.
-    for policy in [
-        NetworkPolicy::new(Access::Allow).with_deny(EgressRule::to("192.0.2.0/24")),
-        NetworkPolicy::new(Access::Deny).with_allow(EgressRule::to("192.0.2.0/24")),
-        NetworkPolicy {
-            ingress: Access::Allow,
-            ..NetworkPolicy::new(Access::Deny)
-        },
-        NetworkPolicy {
-            host_loopback: HostLoopback::Allow,
-            ..NetworkPolicy::new(Access::Deny)
-        },
-        NetworkPolicy::proxy_only(NetworkProxy::new(3128)),
-    ] {
-        let mut class = network_class();
-        class.network = Some(SandboxNetwork::new("10.0.0.2/24", policy).unwrap());
-        assert_eq!(class.identity().unwrap(), base, "{:?}", class.network);
-    }
-    // The identity digests the canonical encoding after the class's domain.
-    let class = network_class();
-    let mut digest = Sha256::new();
-    digest.update(b"nvx capture class\0");
-    digest.update(class.to_bytes().unwrap());
-    assert_eq!(
-        class.identity().unwrap().as_bytes(),
-        &<[u8; 32]>::from(digest.finalize())
-    );
 }
 
 #[test]
 fn keys_read_back_from_their_canonical_encoding() {
     for made in [
         network_key(),
-        key(&support::class(), &ManifestSpec::template()),
+        key(&support::context(), &ManifestSpec::template()),
     ] {
         let bytes = made.to_bytes();
         assert_eq!(&bytes[..2], &[1, 0]);
@@ -722,14 +629,13 @@ fn keys_read_back_from_their_canonical_encoding() {
 
 #[test]
 fn keys_with_the_removed_guest_build_field_are_refused() {
-    let class = network_class();
     let made = network_key();
     let mut prefix = Writer::default();
     prefix.u16(SnapshotKey::VERSION);
     write_runtime(&mut prefix, made.runtime());
     let offset = prefix.finish().len();
     let mut field = Writer::default();
-    field.text(class.guest_build.as_str());
+    field.text("guest-build-1");
     let mut old = made.to_bytes();
     old.splice(offset..offset, field.finish());
     assert_eq!(
@@ -813,7 +719,7 @@ fn a_key_that_holds_its_network_s_lowering_after_its_invariants_is_refused() {
             vec!["--net", "10.0.0.2/24", "--network-profile", "portable"],
         ),
         (
-            key(&support::class(), &ManifestSpec::template()),
+            key(&support::context(), &ManifestSpec::template()),
             Vec::new(),
         ),
     ] {
@@ -879,13 +785,13 @@ fn keys_of_machines_that_no_manifest_describes_are_refused() {
         );
     }
     // Invariant settings out of the order of their names, which a key never writes.
-    let mut class = network_class();
-    class.invariants = Invariants::new()
+    let mut context = network_context();
+    context.capture.invariants = Invariants::new()
         .with("a", "1")
         .unwrap()
         .with("b", "2")
         .unwrap();
-    let made = key(&class, &ManifestSpec::with_network());
+    let made = key(&context, &ManifestSpec::with_network());
     let mut bytes = made.to_bytes();
     let end = bytes.len() - capture_time_len(made.time());
     let tail = [
@@ -937,17 +843,9 @@ fn identities_have_a_text_form() {
             format!("{invalid:?} is not a template key's identity, which is 64 hexadecimal digits")
         );
     }
-    let class = network_class().identity().unwrap();
-    assert_eq!(class.to_string().parse::<ClassIdentity>().unwrap(), class);
-    assert!(
-        "x".parse::<ClassIdentity>()
-            .unwrap_err()
-            .message()
-            .contains("is not a capture class's identity")
-    );
 }
 
-/// The conformance vectors of version 1 of the canonical encodings of keys and classes.
+/// The conformance vectors of version 1 of the canonical encoding of keys.
 const VECTORS: &str = include_str!("../../../../tests/vectors/snapshot-key-v1.txt");
 
 /// The versions of the contracts that the vectors hold.
@@ -979,23 +877,21 @@ fn vectors(kind: &str) -> Vec<(&'static str, Vec<u8>, Vec<&'static str>)> {
         .collect()
 }
 
-/// Returns the class of the capture that the vectors call `name`, with the runtime that they
+/// Returns the context of the capture that the vectors call `name`, with the runtime that they
 /// hold.
-fn vector_class(name: &str) -> CaptureClass {
-    let mut class = if name == "NETWORK" {
-        let class = network_class();
-        CaptureClass {
-            invariants: Invariants::new()
-                .with("isolation.seccomp", "strict")
-                .unwrap()
-                .with("limits.pids", "512")
-                .unwrap(),
-            ..class
-        }
+fn vector_context(name: &str) -> CaptureContext {
+    let mut context = if name == "NETWORK" {
+        let mut context = network_context();
+        context.capture.invariants = Invariants::new()
+            .with("isolation.seccomp", "strict")
+            .unwrap()
+            .with("limits.pids", "512")
+            .unwrap();
+        context
     } else {
-        support::class()
+        support::context()
     };
-    class.runtime = RuntimeIdentity {
+    context.runtime = RuntimeIdentity {
         openvmm: artifact('a'),
         kernel: artifact('b'),
         initramfs: artifact('c'),
@@ -1003,7 +899,7 @@ fn vector_class(name: &str) -> CaptureClass {
         control_contract: "nvx-microvm-v2-control-v2".to_owned(),
         control_session: 1,
     };
-    class
+    context
 }
 
 /// Returns the manifest of the capture that the vectors call `name`, as microVM ABI 2 captured it:
@@ -1070,26 +966,15 @@ fn the_conformance_vectors_decode_and_encode() {
         if name != "MINIMAL" {
             // The key that this crate derives from the capture is the vector's, but for the
             // versions of the contracts, which are this crate's.
-            let derived = SnapshotKey::new(&vector_class(name), &manifest(&vector_spec(name)))
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let derived =
+                SnapshotKey::from_capture(&vector_context(name), &manifest(&vector_spec(name)))
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
             let derived = SnapshotKey {
                 contracts: VECTOR_CONTRACTS,
                 ..derived
             };
             assert_eq!(derived, key, "{name}");
         }
-    }
-    let classes = vectors("CLASS");
-    let names: Vec<&str> = classes.iter().map(|(name, ..)| *name).collect();
-    assert_eq!(names, ["TEMPLATE", "NETWORK"]);
-    for (name, bytes, values) in classes {
-        let class = vector_class(name);
-        assert_eq!(class.encode(&VECTOR_CONTRACTS).unwrap(), bytes, "{name}");
-        assert_eq!(
-            values,
-            [ClassIdentity(digest(CLASS_DOMAIN, &bytes)).to_string()],
-            "{name}"
-        );
     }
     let versions = vectors("INVALID_KEY_VERSION");
     assert_eq!(versions.len(), 3);
