@@ -2319,12 +2319,14 @@ fn output_beyond_the_cap_ends_the_workload_after_the_reads_that_fit() -> TestRes
     let (temporary, mut harness) = direct_harness();
     // As the C agent did, the agent forwards each read of up to 32 KiB while the output
     // stays within 1 MiB, and ends the workload at the first read beyond it, before the
-    // workload could leave its marker.
+    // workload could leave its marker. The workload writes 3 MiB into a pipe that holds 1 MiB
+    // at most, even after uutils' `head -c` (Ubuntu 26.04's `head`) grows it to fit what it
+    // copies, so it can finish only after the agent has read 2 MiB.
     let chunk = 32 * 1024;
     let marker = temporary.path().join("survived");
     let script = format!(
         "head -c {} /dev/zero; touch '{}'",
-        protocol::MAX_OUTPUT_BYTES + protocol::MAX_OUTPUT_BYTES / 2,
+        3 * protocol::MAX_OUTPUT_BYTES,
         marker.display()
     );
     let mut replies = harness.request_all(
