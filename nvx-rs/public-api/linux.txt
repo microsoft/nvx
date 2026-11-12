@@ -7,7 +7,6 @@ method nvx::Error::io
 method nvx::Error::kind
 method nvx::Error::message
 method nvx::Error::new
-method nvx::Error::not_found
 method nvx::Error::other
 method nvx::Error::protocol
 method nvx::Error::timed_out
@@ -33,15 +32,12 @@ variant nvx::ErrorCode::Protocol
 variant nvx::ErrorCode::RuntimeMismatch
 variant nvx::ErrorCode::SandboxBusy
 variant nvx::ErrorCode::SandboxExited
-variant nvx::ErrorCode::SandboxLeased
 variant nvx::ErrorCode::SandboxNotProvisioned
 variant nvx::ErrorCode::SandboxNotRunning
 variant nvx::ErrorCode::SandboxProvisioned
 variant nvx::ErrorCode::SandboxRunning
 variant nvx::ErrorCode::ScratchClaimed
 variant nvx::ErrorCode::StillRunning
-variant nvx::ErrorCode::TemplateIneligible
-variant nvx::ErrorCode::TemplateTombstoned
 variant nvx::ErrorCode::TimedOut
 variant nvx::ErrorCode::Unavailable
 variant nvx::ErrorCode::Unsupported

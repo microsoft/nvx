@@ -155,16 +155,6 @@ pub enum ErrorCode {
     ExecRefused,
     /// `endpoint-closed`: OpenVMM closed the control endpoint, as it does when the VM shuts down.
     EndpointClosed,
-    /// `template-ineligible`: the restore window of a template's generation, which the time
-    /// contract of its capture sets, excludes the host's time, so no clone may restore it now: its
-    /// capture is too old, or the host's clock is behind the capture's.
-    TemplateIneligible,
-    /// `template-tombstoned`: a tombstone quarantines the template's generation, which takes no
-    /// new clones, while the clones that lease it keep their leases.
-    TemplateTombstoned,
-    /// `sandbox-leased`: the sandbox holds a lease of a template's generation, which allows no
-    /// other lease, and one launch of its clone, until a release ends it once its VM has exited.
-    SandboxLeased,
 }
 
 impl ErrorCode {
@@ -197,9 +187,6 @@ impl ErrorCode {
         Self::ScratchClaimed,
         Self::ExecRefused,
         Self::EndpointClosed,
-        Self::TemplateIneligible,
-        Self::TemplateTombstoned,
-        Self::SandboxLeased,
     ];
 
     /// Returns the stable spelling of this code.
@@ -232,19 +219,13 @@ impl ErrorCode {
             Self::ScratchClaimed => "scratch-claimed",
             Self::ExecRefused => "exec-refused",
             Self::EndpointClosed => "endpoint-closed",
-            Self::TemplateIneligible => "template-ineligible",
-            Self::TemplateTombstoned => "template-tombstoned",
-            Self::SandboxLeased => "sandbox-leased",
         }
     }
 
     /// Returns the kind of the errors that have this code.
     pub const fn kind(self) -> ErrorKind {
         match self {
-            Self::Unavailable
-            | Self::ArtifactMissing
-            | Self::TemplateIneligible
-            | Self::TemplateTombstoned => ErrorKind::Unavailable,
+            Self::Unavailable | Self::ArtifactMissing => ErrorKind::Unavailable,
             Self::Unsupported
             | Self::ArgumentUnrecognized
             | Self::ArgumentMissing
@@ -262,8 +243,7 @@ impl ErrorCode {
             | Self::SandboxRunning
             | Self::VmmIndeterminate
             | Self::ForeignFiles
-            | Self::OutcomeReportExists
-            | Self::SandboxLeased => ErrorKind::Other,
+            | Self::OutcomeReportExists => ErrorKind::Other,
         }
     }
 }
@@ -335,11 +315,6 @@ impl Error {
     /// Creates an [`ErrorKind::Io`] error.
     pub fn io(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Io, message)
-    }
-
-    /// Creates an [`ErrorKind::NotFound`] error.
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::NotFound, message)
     }
 
     /// Creates an [`ErrorKind::Protocol`] error.
