@@ -14,15 +14,27 @@ use crate::harness::{HYPERVISOR, OPENVMM, Root, is_hex};
 /// Caller bytes left by the two-directory fixture, its native bootstrap, and a terminating NUL.
 pub(crate) fn two_share_command_line_room() -> usize {
     use nvx::host::filesystem::GUEST_EXPORT;
-    use nvx::host::sandbox::mount::MOUNT_TAG;
 
     let kernel = "nvx_hostname=6e7678 nvx_machine_id=image nvx_maps=2 nvx_mode=one-shot \
                   nvx_share=0,/a,ro nvx_share=1,/b,rw";
-    // OpenVMM appends the tokens of the aggregate, read-write since one share is.
-    let fragment = format!(
-        " virtfs_dir={GUEST_EXPORT} virtfs_tag={MOUNT_TAG} virtfs_mode=rw virtfs_aggregate=1"
-    );
+    // OpenVMM appends the tokens of the aggregate, read-write since one share is, which name its
+    // virtio-fs device by its tag, `microvm`.
+    let fragment =
+        format!(" virtfs_dir={GUEST_EXPORT} virtfs_tag=microvm virtfs_mode=rw virtfs_aggregate=1");
     nvx::host::config::COMMAND_LINE_BUDGET - kernel.len() - fragment.len() - 2
+}
+
+/// Splits an OpenVMM `--mount` or `--mount-child` value of a fixture, `NAME,HOST_PATH[,ro|rw]`,
+/// as OpenVMM reads it: the name, a guest target or a child's, ends at the first comma, and with
+/// another comma the mode follows the last one. Returns the name, the host path, and whether the
+/// share is read-only, as it is by default.
+fn mount_value(value: &str) -> (String, String, bool) {
+    let (name, rest) = value
+        .split_once(',')
+        .unwrap_or_else(|| panic!("{value:?} names no host path"));
+    let (host, mode) = rest.rsplit_once(',').unwrap_or((rest, "ro"));
+    assert!(matches!(mode, "ro" | "rw"), "{value:?} has no mode");
+    (name.to_owned(), host.to_owned(), mode == "ro")
 }
 
 /// The options of OpenVMM that take no value.
@@ -257,7 +269,6 @@ impl Options {
             NetworkProxy,
         };
         use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-        use nvx::host::sandbox::mount::{MountAccess, parse_mount_value};
         use nvx::host::vm::{self, VmDir};
 
         use nvx::host::network::{ForwardProtocol, Protocol};
@@ -267,7 +278,7 @@ impl Options {
         let mut shares = Vec::new();
         let mut files = BTreeSet::new();
         for value in old.values("--mount") {
-            let (target, host, access) = parse_mount_value(value)?;
+            let (target, host, read_only) = mount_value(value);
             let host = PathBuf::from(host);
             let host = if host.is_absolute() {
                 host
@@ -277,13 +288,13 @@ impl Options {
             if host.is_file() {
                 files.insert(target.clone());
             }
-            shares.push((target, host, access));
+            shares.push((target, host, read_only));
         }
         let tokens: Vec<_> = caller.split_ascii_whitespace().map(str::to_owned).collect();
         let mut generated = Vec::new();
         for value in old.values("--mount-child") {
             let child = value.strip_suffix(",file").unwrap_or(value);
-            let (name, host, access) = parse_mount_value(child)?;
+            let (name, host, read_only) = mount_value(child);
             let token = tokens
                 .iter()
                 .find(|token| {
@@ -307,7 +318,7 @@ impl Options {
             if value.ends_with(",file") {
                 files.insert(target.clone());
             }
-            shares.push((target, host, access));
+            shares.push((target, host, read_only));
             generated.push(token.clone());
         }
         for token in generated.iter().rev() {
@@ -342,11 +353,11 @@ impl Options {
         }
         let mappings: Vec<_> = shares
             .iter()
-            .map(|(target, host, access)| Mapping {
+            .map(|(target, host, read_only)| Mapping {
                 name: "--mount",
                 path: host,
                 target: Target::Guest(target),
-                read_only: *access == MountAccess::ReadOnly,
+                read_only: *read_only,
             })
             .collect();
         let export = filesystem::plan(&ExportRequest {
