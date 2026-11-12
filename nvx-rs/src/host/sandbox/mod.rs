@@ -4,8 +4,9 @@
 //! This is the profile of `nvx-rs sandbox`: its documented limits and option semantics, with
 //! native Rust input validation and diagnostics:
 //!
-//! - [`SandboxLayer`]: the distro layer of a sandbox, the one [`LayerRole`] that a sandbox takes:
-//!   an EROFS filesystem, as `nvx-rs sandbox` names it with `ROLE,PATH,EROFS_UUID`, or a GPT disk.
+//! - The private `layer` (feature `cli`): `SandboxLayer`, the distro layer of a sandbox, the one
+//!   `LayerRole` that a sandbox takes: an EROFS filesystem, as `nvx-rs sandbox` names it with
+//!   `ROLE,PATH,EROFS_UUID`, or a GPT disk.
 //! - [`SandboxMount`]: a requested live share of a host directory or regular file at a guest
 //!   target, with its access mode, owner, and access-policy paths; [`mount`] holds the rules of
 //!   guest targets and the checks of host paths, and plans the shares of a sandbox through the
@@ -13,10 +14,12 @@
 //! - [`options`]: the checks that `nvx-rs sandbox` and `nvx-rs run` apply to their options: the
 //!   attribution of access-policy paths to shares, the systemd entrypoint check, the targets of
 //!   `nvx-rs run` shares, and the managed exec environment.
-//! - [`distro`]: the binding of the distro layer, which explicit verification makes from the
-//!   layer and its manifest, and which a launch checks from metadata alone.
-//! - [`scratch`]: the binding of the scratch image, its identity, kind, and length, which a
-//!   launch checks from metadata alone, and the claim of the image by one sandbox at a time.
+//! - The private `distro` (feature `cli`): the binding of the distro layer, which explicit
+//!   verification makes from the layer and its manifest, and which a launch checks from metadata
+//!   alone.
+//! - The private `scratch` (feature `cli`): the binding of the scratch image, its identity, kind,
+//!   and length, which a launch checks from metadata alone, and the claim of the image by one
+//!   sandbox at a time.
 //! - The block geometry that OpenVMM presents for a block device, its length and its logical and
 //!   physical block sizes, which the crate reads through an open file of the device's image, as
 //!   OpenVMM reads it.
@@ -32,18 +35,20 @@
 //! is [`ErrorKind::Io`](crate::ErrorKind::Io), with the native I/O error and, where available,
 //! the path quoted with Rust's debug formatting.
 
-pub mod distro;
+#[cfg(feature = "cli")]
+pub(crate) mod distro;
 pub(crate) mod geometry;
-pub mod layer;
+#[cfg(feature = "cli")]
+pub(crate) mod layer;
 pub mod mount;
 pub mod options;
-pub mod scratch;
+#[cfg(feature = "cli")]
+pub(crate) mod scratch;
 
 use std::fs::File;
 use std::path::Path;
 
 use self::geometry::BlockGeometry;
-pub use self::layer::{LAYER_ROLES, LayerRole, SandboxLayer};
 use self::mount::os_error;
 pub use self::mount::{MountAccess, MountKind, MountOwner, MountPolicy, PolicyKind, SandboxMount};
 use crate::error::{Error, ErrorCode, Result};
