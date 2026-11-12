@@ -28,7 +28,7 @@ use nvx::host::restore::{
 use nvx::host::runtime::Runtime;
 use nvx::host::session::{self, ControlSession, SessionError};
 use nvx::host::snapshot::{self, Snapshot};
-use nvx::host::vm::{self, Launched, Reattached, SavedVm, Stopped, VmDir, VmOutputs};
+use nvx::host::vm::{self, Launched, Prepared, Reattached, SavedVm, Stopped, VmDir, VmOutputs};
 
 /// One byte past OpenVMM's 25-byte restore-ready event, so that a longer event fails to parse.
 const READY_LIMIT: usize = 26;
@@ -51,13 +51,14 @@ pub struct Saved {
 }
 
 /// A capture or restore that failed once its VM started, and whose VM didn't show its exit when
-/// the caller ended it. The caller takes it from the error with `downcast`, and keeps the VM, to
-/// stop it again, with its directory, and a restore's view and lock of the snapshot, until the
-/// VM exits.
+/// the spawn or the caller ended it. The caller takes it from the error with `downcast`, and
+/// keeps the VM, to stop it again, with its directory, and a restore's view and lock of the
+/// snapshot, until the VM exits, or, without the VM, until the host restarts.
 #[derive(Debug)]
 pub struct Unstopped {
-    /// The VM, whose process may still run.
-    pub launched: Launched,
+    /// The VM, whose process may still run, or `None` after a spawn that could not confirm the
+    /// exit of the process that it started, which the caller can then neither stop nor wait for.
+    pub launched: Option<Launched>,
     /// Why the capture or restore failed, and why its VM didn't stop.
     pub reason: String,
 }
@@ -134,7 +135,7 @@ where
         .capture_context()
         .cloned()
         .ok_or("the configuration's boot has no capture")?;
-    let launched = vm::spawn(prepared)?;
+    let launched = start(prepared)?;
     let process = launched.process.reference();
     let requested = session::connect(
         &launched.outputs.endpoint,
@@ -174,7 +175,7 @@ where
 /// which every caller of the snapshot takes before it opens it, through the restore-ready event
 /// or the VM's verified exit, and around the view's removal. NVX takes no lock, and Windows
 /// needs none. The caller holds it through this call, which ends the VM when the restore fails,
-/// or returns the VM in an [`Unstopped`] error, which the caller keeps.
+/// or fails with an [`Unstopped`] error, after which the caller keeps holding it.
 ///
 /// `activate` sends the activation record's bytes as the first request of the caller's own
 /// protocol with its guest, and returns the activation that the guest's Ready reports. The
@@ -195,8 +196,7 @@ where
     let dir = VmDir::open(directory)?;
     let prepared = vm::create(runtime, config, Some(snapshot), &dir)?;
     let record = prepared.activation_record(transaction)?;
-    // A spawn that fails stops the child that it started.
-    let mut launched = vm::spawn(prepared)?;
+    let mut launched = start(prepared)?;
     match drive(&mut launched, &record, activate, deadline) {
         Ok(session) => Ok((launched, session)),
         Err(error) => Err(end(launched, error)),
@@ -398,6 +398,18 @@ pub fn stop(
     vm::stop(process, outputs, request, Instant::now() + grace, deadline)
 }
 
+/// Starts a capture's or restore's VM. A spawn that fails ends the process that it started; one
+/// that cannot confirm that exit fails here with an [`Unstopped`] error without the VM.
+fn start(prepared: Prepared) -> Result<Launched, Box<dyn Error>> {
+    vm::spawn(prepared).map_err(|error| match error.kind() {
+        ErrorKind::StillRunning => Box::new(Unstopped {
+            reason: format!("{error}, and the process that it started may still run"),
+            launched: None,
+        }) as Box<dyn Error>,
+        _ => error.into(),
+    })
+}
+
 /// Ends a VM that its caller gives up on after `error`, at once, and returns `error` once the
 /// VM's exit is verified, or an [`Unstopped`] error that returns the VM to the caller.
 fn end(launched: Launched, error: Box<dyn Error>) -> Box<dyn Error> {
@@ -412,7 +424,7 @@ fn end(launched: Launched, error: Box<dyn Error>) -> Box<dyn Error> {
         Ok(_) => error,
         Err(failure) => Box::new(Unstopped {
             reason: format!("{error}, and its VM did not stop: {failure}"),
-            launched,
+            launched: Some(launched),
         }),
     }
 }
