@@ -1,5 +1,5 @@
-//! The canonical encoding of a snapshot key and of a capture class. The key's compatibility
-//! prefix, and the complete class encoding, are the bytes whose SHA-256 digest is their identity.
+//! The canonical encoding of a snapshot key. The key's compatibility prefix is the bytes whose
+//! SHA-256 digest is its identity.
 //!
 //! Every value has exactly one encoding, and the reader refuses any other:
 //!

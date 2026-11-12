@@ -10,10 +10,10 @@ use serde_json::Value;
 
 use super::*;
 use crate::Hypervisor;
-use crate::host::config::{Capacity, CaptureConfig, ConsoleAttachment, DiskCapture, NicConfig};
+use crate::host::config::{DiskCapture, NicConfig};
 use crate::host::process::{BootId, Opened, Process, ProcessRef};
 use crate::host::snapshot::Snapshot;
-use crate::host::snapshot::tests::{MIB, ManifestSpec, SnapshotFixture, class};
+use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, context};
 use crate::host::vm::create_private_dir;
 
 /// A producer kept alive through its stdin until its parent records its real identity.
@@ -81,29 +81,7 @@ impl Fixture {
             fs::remove_file(snapshot.dir.join(name)).unwrap();
         }
         let dir = VmDir::open(&snapshot.dir).unwrap();
-        let class = class();
-        let context = CaptureContext {
-            capture: CaptureConfig {
-                disks: DiskCapture::Fresh {
-                    image: class.distro,
-                    scratch: class.scratch,
-                },
-                processors: Capacity {
-                    boot: u64::from(class.boot_processors),
-                    capacity: u64::from(class.processors),
-                },
-                memory: Capacity {
-                    boot: class.memory / MIB,
-                    capacity: class.memory_capacity / MIB,
-                },
-                invariants: class.invariants,
-            },
-            nic: None,
-            console: ConsoleAttachment::Disconnected,
-            runtime: class.runtime,
-            hypervisor: class.hypervisor,
-            cpu_profile: Some(class.cpu_profile),
-        };
+        let context = context();
         let fixture = Self {
             _snapshot: snapshot,
             dir,
