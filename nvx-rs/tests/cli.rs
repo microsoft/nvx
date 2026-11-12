@@ -1885,7 +1885,8 @@ fn a_running_sandbox_claims_its_scratch_image() {
     assert!(output.status.success(), "{}", text(&output.stderr));
 }
 
-/// Waits until the file at `path` exists.
+/// Waits until the file at `path` exists. A test that reads the file's content waits with
+/// [`wait_for_json`] instead, since a file can exist before its writer has written its content.
 fn wait_for(path: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while !path.exists() {
@@ -1947,13 +1948,14 @@ fn start_opens_the_stable_caller_paths_that_provision_checked() {
         .unwrap();
 
     // OpenVMM has started, and has not opened its images yet.
-    wait_for(&root.path.join("build").join("fake-openvmm-state.json"));
+    let arguments: Vec<String> =
+        serde_json::from_value(wait_for_json(&root.below("build/fake-openvmm-state.json")))
+            .unwrap();
     let blocks = root
         .path
         .join("build")
         .join("fake-openvmm-state-blocks.json");
     assert!(!blocks.exists());
-    let arguments = root.openvmm_arguments("build/fake-openvmm-state.json");
     let mut options = openvmm::Options::parse(&arguments);
     openvmm::assert_stable_blocks(&root, &options.take("--microvm-sandbox-block"), true);
     let journal = wait_for_json(&root.below("state/launch.json"));
