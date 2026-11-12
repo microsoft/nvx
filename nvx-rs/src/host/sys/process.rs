@@ -102,17 +102,42 @@ impl PidFd {
     ///
     /// Fails with `ESRCH` if the process has exited.
     pub(crate) fn kill(&self) -> io::Result<()> {
+        self.send_signal(Signal::SIGKILL as libc::c_int)?;
+        Ok(())
+    }
+
+    /// Returns whether the process still holds its ID: it runs, or it has exited and has not
+    /// been reaped, as signal 0 shows without signaling it. No other process can take the ID
+    /// before the process is reaped.
+    pub(crate) fn holds_its_id(&self) -> io::Result<bool> {
+        match self.send_signal(0) {
+            // Another user's process refuses the signal, but it holds its ID.
+            Ok(()) | Err(Errno::EPERM) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Sends `signal` to the process, or with 0, only checks that it could.
+    fn send_signal(&self, signal: libc::c_int) -> Result<(), Errno> {
         // SAFETY: the descriptor is a valid pidfd, and a null siginfo with no flags is allowed.
         Errno::result(unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,
                 self.0.as_raw_fd(),
-                Signal::SIGKILL as libc::c_int,
+                signal,
                 ptr::null::<libc::siginfo_t>(),
                 0,
             )
-        })?;
-        Ok(())
+        })
+        .map(drop)
+    }
+}
+
+impl From<OwnedFd> for PidFd {
+    /// Takes `descriptor`, which must be a pidfd, such as `SO_PEERPIDFD` returns.
+    fn from(descriptor: OwnedFd) -> Self {
+        Self(descriptor)
     }
 }
 
