@@ -148,10 +148,9 @@
 //! the adapter maps the host's mapping table once the clone is ready, the network's proxy
 //! endpoint, which the adapter tells its workloads as at a cold boot, and the publication and
 //! gateway with which the caller starts and supervises ingress. The `teardown` of the `Applied`
-//! closes the export's root, then tears the root down with its view binds. Its `into_parts`
-//! returns the root and machine ID, with every bind still owned by the root. An
-//! application that fails returns an `ApplyError` instead, after which nothing that it mounted or
-//! bound stays mounted, unless the error holds the unmounts that failed.
+//! closes the export's root, then tears the root down with its view binds. An application that
+//! fails returns an `ApplyError` instead, after which nothing that it mounted or bound stays
+//! mounted, unless the error holds the unmounts that failed.
 //!
 //! # Example
 //!

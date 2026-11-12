@@ -6,10 +6,10 @@
 //! beside the mapping values and the host mapping table, which stay public.
 //!
 //! A [`Mapper`] applies [`Mapping`]s beneath one [`TargetRoot`], in order, from a [`SourceRoot`],
-//! tracks them, and unmounts them at its [`teardown`](Mapper::teardown). [`bind`] applies one
-//! runtime bind, such as a generated machine ID, a resolver file, or the runtime's time status,
-//! through the same walk and attach, without the checks of a host mapping's target and without
-//! tracking.
+//! tracks them, and unmounts them, in reverse order, at the teardown of the layered root that
+//! owns it. A runtime bind, such as a generated machine ID, a resolver file, or the runtime's time
+//! status, goes through the same walk and attach, without the checks of a host mapping's target
+//! and without tracking.
 //!
 //! # Walk
 //!
@@ -86,40 +86,23 @@
 //!
 //! # Order and failure
 //!
-//! [`Mapper::apply`] applies a batch of mappings in order. Zero mappings do no work. The first
+//! A mapper applies a batch of mappings in order. Zero mappings do no work. The first
 //! mapping that is refused or fails is reported with its index; the mappings before it stay
 //! mapped, and the mapper refuses every later one, in this batch or another: the failure latches
 //! for the mapper's lifetime, so that its caller starts nothing on a partial table.
 //!
 //! # Teardown
 //!
-//! [`Mapper::teardown`] first detaches the mapping that a rename moved, if its attach failed to
-//! detach it, through the descriptor that the mapper kept, then unmounts the mappings in reverse
-//! order. It opens each target again from the root, checks that the topmost mount there is the
-//! mapping's, and unmounts it by its name in its parent directory, whose descriptor it opened
-//! from the root, without following a link there and without detaching a busy mount; this needs
-//! procfs at `/proc`. It attempts each, whatever failed before, and reports every failure. A
-//! mapper that is dropped leaves its mappings mounted.
+//! At the teardown of the layered root that owns a mapper, `Mapper::unmount_with` first detaches
+//! the mapping that a rename moved, if its attach failed to detach it, through the descriptor that
+//! the mapper kept, then unmounts the mappings in reverse order. It opens each target again from
+//! the root, checks that the topmost mount there is the mapping's, and unmounts it by its name in
+//! its parent directory, whose descriptor it opened from the root, without following a link there
+//! and without detaching a busy mount; this needs procfs at `/proc`. It attempts each, whatever
+//! failed before, and reports every failure. A mapper that is dropped leaves its mappings mounted.
 //!
-//! A layered [`Root`](crate::guest::root::Root) mounts its live shares, and the mappings that its
-//! caller applies, through one, which its teardown unmounts first.
-//!
-//! ```no_run
-//! use std::path::Path;
-//!
-//! use nvx::guest::mappings::{Access, Mapper, Mapping, Reserved, SourceRoot, TargetRoot};
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let root = TargetRoot::open(Path::new("/newroot"))?;
-//! let mut mapper = Mapper::new(root, Reserved::container_root());
-//! let export = SourceRoot::open(Path::new("/run/export"))?;
-//! // Mounts the export's 0/workspace at /newroot/workspace, read-write, nosuid, and nodev.
-//! let workspace = Mapping::new("0/workspace", "/workspace", Access::ReadWrite)?;
-//! mapper.apply(&export, &[workspace])?;
-//! mapper.teardown()?;
-//! # Ok(())
-//! # }
-//! ```
+//! A layered [`Root`](crate::guest::root::Root) mounts its live shares through one, which its
+//! teardown unmounts first.
 
 #[cfg(test)]
 mod tests;
@@ -277,7 +260,7 @@ impl TargetRoot {
     }
 }
 
-/// The root beneath which a [`Mapper`] or [`bind`] opens the sources of mappings, such as the
+/// The root beneath which a [`Mapper`] or a runtime bind opens the sources of mappings, such as the
 /// guest's mount of the host's export: a descriptor of a directory.
 #[derive(Debug)]
 pub struct SourceRoot {
@@ -380,8 +363,8 @@ pub enum MappingError {
     /// mount at the target since then.
     Moved {
         /// Whether the mapping stays mounted, wherever it is: because detaching it failed too,
-        /// in which case a mapper's teardown detaches it, or because a teardown does not unmount
-        /// what it does not find at its target.
+        /// in which case the mapper's `unmount_with` detaches it, or because a teardown does not
+        /// unmount what it does not find at its target.
         mounted: bool,
     },
     /// A system call failed at a step.
@@ -558,8 +541,8 @@ impl fmt::Display for TeardownError {
 
 impl std::error::Error for TeardownError {}
 
-/// A mapping that a mapper attached and tracks, or a runtime bind that [`bind_with`] made, which
-/// [`unbind_with`] unmounts.
+/// A mapping that a mapper attached and tracks, or a runtime bind that [`bind_retained_with`] made,
+/// which [`unbind_with`] unmounts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Mapped {
     /// The target, relative to the root.
@@ -607,57 +590,20 @@ impl Mapper {
         }
     }
 
-    /// Applies `mappings` beneath the root, in order, from `source`, as the [module](self)
-    /// describes, and tracks them. It needs the privilege to mount.
-    ///
-    /// The first mapping that is refused or fails is reported with its index, after the mappings
-    /// before it, which stay mapped, and the mapper refuses every later mapping from then on.
-    /// Zero mappings do no work. A mapping that a rename moved, and that the mapper failed to
-    /// detach, [`MappingError::Moved`] with `mounted`, is not tracked, but the teardown detaches
-    /// it first.
-    pub fn apply(&mut self, source: &SourceRoot, mappings: &[Mapping]) -> Result<(), ApplyError> {
-        self.apply_with(&mut SystemKernel, source, mappings)
-    }
-
-    /// Checks the target of `mapping` as [`apply`](Self::apply) does before it opens anything:
-    /// that it is neither reserved nor overlaps an earlier mapping.
-    pub fn check(&self, mapping: &Mapping) -> Result<(), MappingError> {
-        self.check_target(mapping.target())
-    }
-
-    /// Returns whether a mapping failed, after which the mapper refuses every later one.
-    pub fn is_latched(&self) -> bool {
-        self.latched
-    }
-
     /// Returns the targets of the mappings that the mapper tracks, in the order in which it
     /// applied them, relative to the root.
     pub fn targets(&self) -> impl ExactSizeIterator<Item = &Path> {
         self.mapped.iter().map(|mapped| mapped.target.as_path())
     }
 
-    /// Unmounts the mappings in reverse order, as the [module](self) describes, and reports every
-    /// one that it failed to unmount, which stays mounted. It first detaches the mapping that a
-    /// rename moved and that the mapper failed to detach, if any.
-    pub fn teardown(self) -> Result<(), TeardownError> {
-        self.teardown_with(&mut SystemKernel)
-    }
-
-    /// Implements [`teardown`](Self::teardown) with `kernel`.
-    pub(crate) fn teardown_with(mut self, kernel: &mut dyn Kernel) -> Result<(), TeardownError> {
-        let failures: Vec<UnmountFailure> = self
-            .unmount_with(kernel)
-            .into_iter()
-            .map(|(_, failure)| failure)
-            .collect();
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(TeardownError { failures })
-        }
-    }
-
-    /// Implements [`apply`](Self::apply) with `kernel`.
+    /// Applies `mappings` beneath the root, in order, from `source`, with `kernel`, as the
+    /// [module](self) describes, and tracks them. It needs the privilege to mount.
+    ///
+    /// The first mapping that is refused or fails is reported with its index, after the mappings
+    /// before it, which stay mapped, and the mapper refuses every later mapping from then on.
+    /// Zero mappings do no work. A mapping that a rename moved, and that the mapper failed to
+    /// detach, [`MappingError::Moved`] with `mounted`, is not tracked, but the teardown detaches
+    /// it first.
     pub(crate) fn apply_with(
         &mut self,
         kernel: &mut dyn Kernel,
@@ -681,8 +627,8 @@ impl Mapper {
     /// mounted where only it can reach, onto `target`, a path relative to the root, as the mapper
     /// attaches a directory's mapping: with `nosuid`, `nodev`, and `access` set while the mount is
     /// still where only the caller reaches it, and after the same checks. The mapper then tracks
-    /// it as a mapping, or, as [`apply`](Self::apply) does, detaches it at the teardown if a
-    /// rename moved it and detaching it failed.
+    /// it as a mapping, or, as `apply_with` does, detaches it at the teardown if a rename moved it
+    /// and detaching it failed.
     pub(crate) fn move_mount_with(
         &mut self,
         kernel: &mut dyn Kernel,
@@ -700,10 +646,10 @@ impl Mapper {
     }
 
     /// Detaches the mapping that a rename moved, if the mapper failed to detach it, then unmounts
-    /// the mappings in reverse order with `kernel`, forgets them all, and returns, in the order of
-    /// the attempts, each that it failed to unmount, with its index among the mapper's attaches
-    /// that left a mount: the moved mapping's, which the mapper attached last, is the number of
-    /// its mappings.
+    /// the mappings in reverse order with `kernel`, as the [module](self) describes, forgets them
+    /// all, and returns, in the order of the attempts, each that it failed to unmount, which stays
+    /// mounted, with its index among the mapper's attaches that left a mount: the moved mapping's,
+    /// which the mapper attached last, is the number of its mappings.
     pub(crate) fn unmount_with(&mut self, kernel: &mut dyn Kernel) -> Vec<(usize, UnmountFailure)> {
         let mapped = std::mem::take(&mut self.mapped);
         let mut failures = Vec::new();
@@ -723,7 +669,8 @@ impl Mapper {
         failures
     }
 
-    /// Checks the relative `target` as [`check`](Self::check) does.
+    /// Checks the relative `target` before an attach opens anything: that it is neither reserved
+    /// nor overlaps an earlier mapping.
     fn check_target(&self, target: &Path) -> Result<(), MappingError> {
         let target = bytes(target);
         if self.reserved.holds(target) {
@@ -782,28 +729,15 @@ impl Mapper {
     }
 }
 
-/// Binds the source of `mapping`, beneath `source`, at its target beneath `root`, with the walk,
-/// the creation, the checks of kinds and mounts, and the attach of a [`Mapper`]'s mapping, as the
-/// [module](self) describes, but without the checks of reserved targets and overlaps, which a
-/// runtime's own binds, such as a generated machine ID over `/etc/machine-id`, would fail, and
-/// without tracking it: it lasts as long as the mount namespace, or until its caller unmounts it.
-/// So does a bind that a rename moved and that it failed to detach, wherever it went, which it
-/// reports as [`MappingError::Moved`] with `mounted`. It needs the privilege to mount.
-pub fn bind(root: &TargetRoot, source: &SourceRoot, mapping: &Mapping) -> Result<(), MappingError> {
-    bind_with(&mut SystemKernel, root, source, mapping).map(drop)
-}
-
-/// Implements [`bind`] with `kernel`, and returns the bind, which [`unbind_with`] unmounts.
-pub(crate) fn bind_with(
-    kernel: &mut dyn Kernel,
-    root: &TargetRoot,
-    source: &SourceRoot,
-    mapping: &Mapping,
-) -> Result<Mapped, MappingError> {
-    bind_retained_with(kernel, root, source, mapping).map_err(|failure| failure.error)
-}
-
-/// Implements [`bind_with`], retaining a moved mount that could not be detached for its caller.
+/// Binds the source of `mapping`, beneath `source`, at its target beneath `root`, with `kernel`,
+/// with the walk, the creation, the checks of kinds and mounts, and the attach of a [`Mapper`]'s
+/// mapping, as the [module](self) describes, but without the checks of reserved targets and
+/// overlaps, which a runtime's own binds, such as a generated machine ID over `/etc/machine-id`,
+/// would fail, and without tracking it: it returns the bind, which [`unbind_with`] unmounts, and
+/// which otherwise lasts as long as the mount namespace. A bind that a rename moved and that it
+/// failed to detach stays mounted wherever it went, which it reports as [`MappingError::Moved`]
+/// with `mounted`, with the descriptor of the bind's mount, for its caller to detach. It needs the
+/// privilege to mount.
 pub(crate) fn bind_retained_with(
     kernel: &mut dyn Kernel,
     root: &TargetRoot,
@@ -825,10 +759,11 @@ pub(crate) fn bind_retained_with(
     })
 }
 
-/// Unmounts `binds`, which [`bind_with`] made beneath `root`, in reverse order, with `kernel`, as a
-/// mapper's teardown unmounts its mappings: each that is the topmost mount at its target, by its
-/// name in its parent directory, without detaching a busy one. It attempts each, whatever failed
-/// before, and reports every one that it failed to unmount, which stays mounted.
+/// Unmounts `binds`, which [`bind_retained_with`] made beneath `root`, in reverse order, with
+/// `kernel`, as [`Mapper::unmount_with`] unmounts a mapper's mappings: each that is the topmost
+/// mount at its target, by its name in its parent directory, without detaching a busy one. It
+/// attempts each, whatever failed before, and reports every one that it failed to unmount, which
+/// stays mounted.
 pub(crate) fn unbind_with(
     kernel: &mut dyn Kernel,
     root: &TargetRoot,
