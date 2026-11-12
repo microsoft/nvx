@@ -100,21 +100,28 @@ pub fn cold_boot(
     Ok((launched, saved))
 }
 
-/// Captures a snapshot of `config`, whose boot asks for a capture, in `directory`, a new private
+/// Captures a snapshot of `config`, whose boot has a `capture`, in `directory`, a new private
 /// directory, moves it to `snapshot_dir`, another, which must be empty, and opens it there.
 ///
-/// The guest captures itself, as the guest example shows, and its VM exits once the capture
+/// `request` asks the guest for a snapshot, in the caller's own protocol with its guest, on a
+/// control session that only the VM's own process may serve, and returns once the guest answered.
+/// The guest then captures the VM, as the guest example shows, and the VM exits once the capture
 /// commits. The caller finishes the capture with the proof of that exit, then moves the
 /// snapshot's three entries, and nothing else, out of the VM directory. It keeps them private
-/// and immutable while it restores from them. A VM that doesn't exit by `deadline` captures
-/// nothing, and the caller ends it, or keeps it in an [`Unstopped`] error.
-pub fn capture(
+/// and immutable while it restores from them. When the request fails, or the VM doesn't exit by
+/// `deadline`, the caller finishes no snapshot: it ends the VM, or keeps it in an [`Unstopped`]
+/// error.
+pub fn capture<R>(
     runtime: &Runtime,
     config: &VmConfig,
     directory: &Path,
     snapshot_dir: &Path,
+    request: R,
     deadline: Instant,
-) -> Result<Snapshot, Box<dyn Error>> {
+) -> Result<Snapshot, Box<dyn Error>>
+where
+    R: FnOnce(&mut ControlSession, Instant) -> Result<(), SessionError>,
+{
     vm::create_private_dir(snapshot_dir)?;
     if fs::read_dir(snapshot_dir)?.next().is_some() {
         return Err("the snapshot's directory is not empty".into());
@@ -126,8 +133,20 @@ pub fn capture(
     let context = prepared
         .capture_context()
         .cloned()
-        .ok_or("the configuration's boot asks for no capture")?;
+        .ok_or("the configuration's boot has no capture")?;
     let launched = vm::spawn(prepared)?;
+    let process = launched.process.reference();
+    let requested = session::connect(
+        &launched.outputs.endpoint,
+        process.pid,
+        process.start_time,
+        deadline,
+    )
+    .and_then(|stream| ControlSession::attach(stream, launched.capability.as_bytes(), deadline))
+    .and_then(|mut session| request(&mut session, deadline));
+    if let Err(error) = requested {
+        return Err(end(launched, error.into()));
+    }
     let exited = match launched.process.wait(deadline) {
         Ok(Some(exited)) => exited,
         Ok(None) => {
