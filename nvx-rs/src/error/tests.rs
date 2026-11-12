@@ -1,9 +1,40 @@
 use super::*;
 
+/// Every code, in the order of the README's table of codes.
+const CODES: [ErrorCode; 27] = [
+    ErrorCode::Unavailable,
+    ErrorCode::Unsupported,
+    ErrorCode::Exited,
+    ErrorCode::StillRunning,
+    ErrorCode::Io,
+    ErrorCode::NotFound,
+    ErrorCode::Protocol,
+    ErrorCode::TimedOut,
+    ErrorCode::Other,
+    ErrorCode::ArgumentUnrecognized,
+    ErrorCode::ArgumentMissing,
+    ErrorCode::ArgumentInvalid,
+    ErrorCode::ArtifactMissing,
+    ErrorCode::SandboxNotProvisioned,
+    ErrorCode::SandboxProvisioned,
+    ErrorCode::SandboxNotRunning,
+    ErrorCode::SandboxRunning,
+    ErrorCode::SandboxExited,
+    ErrorCode::SandboxBusy,
+    ErrorCode::RuntimeMismatch,
+    ErrorCode::VmmIndeterminate,
+    ErrorCode::FormatUnsupported,
+    ErrorCode::ForeignFiles,
+    ErrorCode::OutcomeReportExists,
+    ErrorCode::ScratchClaimed,
+    ErrorCode::ExecRefused,
+    ErrorCode::EndpointClosed,
+];
+
 #[test]
 fn errors_keep_their_kind_message_and_cause() {
     let cause = std::io::Error::other("disk full");
-    let error = Error::io("cannot write /state/runtime.json").with_source(cause);
+    let error = Error::new(ErrorKind::Io, "cannot write /state/runtime.json").with_source(cause);
     assert_eq!(error.kind(), ErrorKind::Io);
     assert_eq!(error.code(), ErrorCode::Io);
     assert_eq!(error.to_string(), "cannot write /state/runtime.json");
@@ -39,7 +70,7 @@ fn codes_determine_kinds() {
         Error::new(ErrorKind::RuntimeMismatch, "elsewhere").code(),
         ErrorCode::RuntimeMismatch
     );
-    assert_eq!(Error::unsupported("no").code(), ErrorCode::Unsupported);
+    assert_eq!(Error::unavailable("no").code(), ErrorCode::Unavailable);
     assert_eq!(
         ErrorCode::SandboxNotRunning.to_string(),
         "sandbox-not-running"
@@ -69,7 +100,7 @@ fn every_kind_has_a_code_of_its_own_spelling() {
 #[test]
 fn codes_are_unique_lowercase_words_joined_by_hyphens() {
     let mut seen = std::collections::HashSet::new();
-    for code in ErrorCode::ALL {
+    for code in CODES {
         let spelling = code.as_str();
         assert!(seen.insert(spelling), "{spelling} repeats");
         assert!(
@@ -79,17 +110,17 @@ fn codes_are_unique_lowercase_words_joined_by_hyphens() {
             "{spelling}"
         );
         // A finer code is never spelled as a kind, whose code it would shadow.
-        if ErrorCode::from(code.kind()) != *code {
+        if ErrorCode::from(code.kind()) != code {
             assert_ne!(spelling, code.kind().as_str());
         }
     }
-    assert_eq!(seen.len(), ErrorCode::ALL.len());
+    assert_eq!(seen.len(), CODES.len());
 }
 
 #[test]
 fn the_readme_documents_every_code_with_its_kind() {
     // The table of the README's "Error codes" section lists each code and its kind, in the
-    // order of `ErrorCode::ALL`.
+    // order of `CODES`.
     let readme = include_str!("../../README.md");
     let documented: Vec<(String, String)> = readme
         .lines()
@@ -103,7 +134,7 @@ fn the_readme_documents_every_code_with_its_kind() {
             Some((code.to_owned(), kind.to_owned()))
         })
         .collect();
-    let expected: Vec<(String, String)> = ErrorCode::ALL
+    let expected: Vec<(String, String)> = CODES
         .iter()
         .map(|code| (code.as_str().to_owned(), format!("{:?}", code.kind())))
         .collect();
