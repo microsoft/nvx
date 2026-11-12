@@ -48,6 +48,11 @@ the guest artifacts in `build/` and OpenVMM in `openvmm/target/release/`.
 The `nvx-rs` of an extracted release package, `bin/nvx-rs`, uses the release's
 artifacts; see [Artifact root](../nvx-rs/README.md#artifact-root).
 
+`nvx-rs` keeps the state of its sandboxes and snapshots in the directories that
+their commands name, `--state-dir` and `--store-dir`, in formats of its own,
+which another version of NVX may not read and never migrates: upgrade with
+fresh state, as [Upgrades](run.md#upgrades) says.
+
 The [`test-microvm`](#test-microvm) scenarios run `nvx-rs` too. They run, in
 this order:
 
@@ -352,7 +357,7 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 | `--layer-format {erofs,gpt}` | `erofs` | Select the image format of `run` or `provision` explicitly, without probing the file or inferring its format from its name. Other sandbox operations reject this option. |
 | `--scratch PATH` | required for `run` and `provision` with a scratch upper | Attach a preformatted ext4 scratch image as the overlay's writable upper. `--upper ram` refuses it. |
 | `--upper {scratch,ram}` | `scratch` | Select the overlay's writable upper for `run` or `provision`: `scratch`, the image of `--scratch`, or `ram`, a tmpfs in guest memory with no scratch image, which loses the workload's writes when the VM stops. The default RAM cap is half of guest memory, which `--ram-upper-percent` changes. See [Overlay upper](run.md#overlay-upper). |
-| `--ram-upper-percent PERCENT` | `50` | Set the RAM upper's cap of `run` or `provision` to an ASCII decimal integer from 1 through 90 percent of VM memory. Requires `--upper ram`; other sandbox operations reject this option. The typed configuration of `provision` records the cap, image format and path, and upper kind, which each start reads unchanged. Older configuration formats are refused rather than migrated. |
+| `--ram-upper-percent PERCENT` | `50` | Set the RAM upper's cap of `run` or `provision` to an ASCII decimal integer from 1 through 90 percent of VM memory. Requires `--upper ram`; other sandbox operations reject this option. The typed configuration of `provision` records the cap, image format and path, and upper kind, which each start reads unchanged. A configuration of another format is refused, not migrated; see [Upgrades](run.md#upgrades). |
 | `--state-dir PATH` | required for managed operations | Select persistent sandbox state. `run`, which keeps no state, rejects this option. |
 | `--entrypoint PATH` | `/bin/sh` | Select the absolute entrypoint of the workload of `run` or `exec`, which runs it over the control protocol. `provision`, which runs no workload, refuses one with whitespace, control characters, double quotes, or any UTF-8 byte that Linux treats as whitespace. |
 | `--arg VALUE` | none | Append one nonempty argument of the workload of `run` or `exec`. Repeat to pass multiple arguments. `provision` refuses one with whitespace, control characters, double quotes, or any UTF-8 byte that Linux treats as whitespace. |
@@ -479,7 +484,11 @@ placeholder image and dormant scratch: the image must fit the placeholder,
 with its block sizes, and a scratch upper must be as long as the dormant
 scratch. The VM keeps the processors that the snapshot had online, and
 `--memory-mib` must be a multiple of 128 between the snapshot's boot memory and
-its capacity.
+its capacity. The snapshot's key records the runtime identity that captured
+it: the OpenVMM, kernel, and Alpine initramfs of the artifacts, and the
+contracts of NVX. A restore under another one, as after an upgrade that
+installs new artifacts, is refused, and the snapshot must be captured again;
+see [Upgrades](run.md#upgrades).
 
 The sandbox's NIC comes from the snapshot, with its presence and its address:
 `--net` belongs to [`snapshot capture`](#snapshot-capture), which gives a

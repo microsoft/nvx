@@ -693,10 +693,8 @@ boot layout 1, time ABI 1, restore packet 1, and snapshot manifest 2, whose
 version 1 is upstream OpenVMM's. It reads no snapshot of an earlier OpenVMM,
 whose manifest it refuses with `E_SNAPSHOT_VERSION` by its version, or by its
 missing format magic for the earliest manifests of version 2, before it
-decodes the rest, and `nvx-rs` refuses a template of an earlier OpenVMM by its
-snapshot format.
-Capture them again; to restore them as they are, use NVX commit
-`304f8e1686b4fba188ad2d9c8d932498a6ca2980` with the OpenVMM that it pins.
+decodes the rest: capture such a snapshot again, as [Upgrades](#upgrades) says
+of every snapshot of other artifacts.
 
 The machine is the one that the earlier OpenVMM called microVM ABI 3: no
 virtio device offers `VIRTIO_F_ACCESS_PLATFORM`, no console offers its size
@@ -1563,27 +1561,6 @@ as [`snapshot restore`](usage.md#snapshot-restore) describes. The plan of the
 NVX Rust API reports the URL as the guest sees it, `SCHEME://GATEWAY:PORT`, or
 `GATEWAY:PORT` for a proxy without a scheme, as `--network-proxy` names it.
 
-Earlier releases passed the network options to OpenVMM. The planner now
-refuses, before launch:
-
-- a proxy with egress allowed, with egress rules, with `--network-ingress
-  allow`, with `--host-loopback allow` or without `--host-loopback`, with
-  forwards, or on port 53, which OpenVMM accepted;
-- UDP forwards with egress denied by default, or with a deny rule that covers
-  the guest network, which OpenVMM accepted but whose replies its egress policy
-  dropped;
-- `--host-loopback allow` with a `/30` guest network, which OpenVMM accepted;
-- a network option without `--net`, a malformed `--net`, rule, forward, or
-  proxy, and a proxy that is not at the gateway, which OpenVMM refused as it
-  started.
-
-A policy with `--network-egress deny` and `--host-loopback deny`, and no allow
-rules, `--network-ingress allow`, or `--network-proxy`, now attaches no network
-device, where OpenVMM attached one that carried nothing. `start` refuses a
-sandbox that an earlier release provisioned, whose configuration records the
-network options rather than the typed policy; deprovision it and provision it
-again.
-
 The `sandbox-proxy-only` scenario of `test-microvm --backend BACKEND` is the
 acceptance for proxy-only networking. Like the
 [managed lifecycle](#managed-lifecycle) scenarios, it runs `nvx-rs sandbox` as
@@ -1641,9 +1618,8 @@ absence, and the distro policy that accepted it. It records the layer at its
 resolved path, so for a layer given through a link to another name, it also
 verifies the manifest beside the link's target. `start` checks the binding
 from metadata alone, without reading the layer again, and refuses a layer or
-manifest that was replaced, modified, added, or removed since `provision`, and a
-configuration without a binding, as older releases wrote; deprovision such a
-sandbox and provision it again. `provision` and `start` refuse a manifest path
+manifest that was replaced, modified, added, or removed since `provision`.
+`provision` and `start` refuse a manifest path
 that they cannot look up, as through a link loop, rather than take it for no
 manifest. Keep provisioned layers and their manifests read-only, and never
 rewrite them in place.
@@ -1671,11 +1647,8 @@ while the VM uses them. Images are attached raw: stage an image in a container
 format, such as a VHD, as a raw file first.
 
 `provision` records the guest memory of `--memory-mib`, which it takes from 1
-to 17592186044415 MiB, as `run` does. `provision` in `nvx.py` and in earlier
-releases of `nvx-rs` recorded any integer, such as 0 or -1, whose RAM OpenVMM
-then refused at every start. `start` refuses a configuration that records
-memory outside that range before it launches OpenVMM; deprovision such a
-sandbox and provision it again.
+to 17592186044415 MiB, as `run` does, and `start` refuses a configuration that
+records memory outside that range before it launches OpenVMM.
 
 Lifecycle transitions fail closed: `start` rejects a sandbox that is already
 running; `exec` and `stop` require a live OpenVMM process; and `deprovision`
@@ -1703,13 +1676,9 @@ terminates its OpenVMM without a guest shutdown, waits up to `--timeout`
 seconds for it to exit, and warns that it did. A `stop` that cannot determine
 the OpenVMM process, whose terminated OpenVMM does not exit in time, or whose
 wait Ctrl-C ends, keeps the sandbox's runtime record, and the next `stop`
-retries. The store reads
-runtime records of its own format only, so
-stop every running sandbox with the NVX version that started it before you
-switch versions: a version with another format fails every transition of such
-a sandbox with a message that names the format of its record. An OpenVMM that
-an interrupted `start` of an earlier version left behind has no record, and
-that version asked for it to be ended by hand: end it before the switch too.
+retries. The store's records belong to the version of NVX that wrote them, so
+stop and deprovision each sandbox with the version that started it before you
+switch versions, as [Upgrades](#upgrades) says.
 
 `provision`, `start`, `stop`, and `deprovision` hold the store's lock,
 `sandbox.lock` in the state directory, until they return, so the transitions
@@ -1900,3 +1869,22 @@ On Linux, NVX starts OpenVMM with the caller's umask without the owner's bits,
 so OpenVMM's reports keep their owner's read and write permissions whatever
 that umask, unless their directory has a default POSIX ACL, which Linux
 applies instead of the umask. Neither OpenVMM nor NVX uploads these files.
+
+## Upgrades
+
+NVX keeps no state from one version to the next, and migrates none: each
+version starts with fresh state. A version keeps the state directories of its
+sandboxes and its snapshot stores in formats of its own, and may refuse those
+that another version wrote, as it refuses a sandbox's configuration of another
+format with `format-unsupported`, or fail to read their records at all. A
+snapshot restores only under the runtime identity that captured it, which
+names the OpenVMM, kernel, and Alpine initramfs of its artifacts and the
+contracts of NVX, so a restore refuses it once an upgrade has installed new
+artifacts. To upgrade:
+
+1. With the version that you leave, stop and deprovision each sandbox, which
+   also ends the VM of a start that was interrupted.
+2. Switch to the new version of `nvx-rs` and its artifacts.
+3. Capture the snapshots again, into new stores, since a store never replaces
+   a snapshot's name, and provision or restore the sandboxes again. No command
+   removes a snapshot: remove an old store once no sandbox restores from it.
