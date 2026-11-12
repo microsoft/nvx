@@ -7086,20 +7086,30 @@ class MicrovmTests(unittest.TestCase):
             "teardown": {name: True for name in microvm_tests.OUTCOME_TEARDOWN_FIELDS},
         }
 
-    def test_workload_identity_scenario_checks_enforcement_and_rejection(self):
+    # The results of the scenario's first three boots, which run the probe as
+    # its identity, refuse an identity that the guest lacks, and reject root.
+    WORKLOAD_IDENTITY_CHECKS = (
+        openvmm_process.OpenvmmProcessResult(
+            0, microvm_tests.WORKLOAD_IDENTITY_MARKER + b"\n"
+        ),
+        openvmm_process.OpenvmmProcessResult(
+            125, b"configured workload UID is unavailable\n"
+        ),
+        openvmm_process.OpenvmmProcessResult(
+            2, b"microVM workload UID must be nonzero\n"
+        ),
+    )
+    WORKLOAD_IDENTITY_REFUSED = openvmm_process.OpenvmmProcessResult(
+        125,
+        b"NVX-WORKLOAD-ERROR: " + microvm_tests.OPENVMM_IDENTITY_REFUSAL + b"\n",
+    )
+
+    def _run_workload_identity(
+        self, results: list[openvmm_process.OpenvmmProcessResult]
+    ) -> MagicMock:
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(microvm_tests, "OpenvmmProcess") as process:
-                process.return_value.__enter__.return_value.wait.side_effect = [
-                    openvmm_process.OpenvmmProcessResult(
-                        0, microvm_tests.WORKLOAD_IDENTITY_MARKER + b"\n"
-                    ),
-                    openvmm_process.OpenvmmProcessResult(
-                        125, b"configured workload UID is unavailable\n"
-                    ),
-                    openvmm_process.OpenvmmProcessResult(
-                        2, b"microVM workload UID must be nonzero\n"
-                    ),
-                ]
+                process.return_value.__enter__.return_value.wait.side_effect = results
                 microvm_tests.run_workload_identity(
                     Path("openvmm"),
                     Path("kernel"),
@@ -7109,15 +7119,21 @@ class MicrovmTests(unittest.TestCase):
                     timeout=40,
                     output_dir=Path(temporary),
                 )
+        return process
 
-        self.assertEqual(process.call_count, 3)
+    def test_workload_identity_scenario_checks_enforcement_and_rejection(self):
+        process = self._run_workload_identity(
+            [*self.WORKLOAD_IDENTITY_CHECKS, *[self.WORKLOAD_IDENTITY_REFUSED] * 2]
+        )
+
+        self.assertEqual(process.call_count, 5)
         commands = [call.args[0] for call in process.call_args_list]
         self.assertEqual(
             [
                 command[command.index("--microvm-workload-identity") + 1]
                 for command in commands
             ],
-            ["65534:65534", "12345:12345", "0:0"],
+            ["65534:65534", "12345:12345", "0:0", "65534:65534", "12345:12345"],
         )
         self.assertTrue(
             all(
@@ -7127,7 +7143,9 @@ class MicrovmTests(unittest.TestCase):
             )
         )
         # The guest's init takes the identity from the CLI's token, which
-        # names the identity of OpenVMM's option.
+        # names the identity of OpenVMM's option, but for the last two boots,
+        # which must fail closed: one without the CLI's token, and one with
+        # another identity.
         self.assertEqual(
             [
                 command[command.index("--cmdline") + 1].split()[-1]
@@ -7137,8 +7155,30 @@ class MicrovmTests(unittest.TestCase):
                 "nvx_identity=65534:65534",
                 "nvx_identity=12345:12345",
                 "nvx_identity=0:0",
+                "nvx_exec=/sbin/nvx-identity-probe",
+                "nvx_identity=65534:65534",
             ],
         )
+
+    def test_workload_identity_scenario_fails_a_guest_that_does_not_fail_closed(self):
+        ran = openvmm_process.OpenvmmProcessResult(
+            0, microvm_tests.WORKLOAD_IDENTITY_MARKER + b"\n"
+        )
+        for results, message in (
+            (
+                [openvmm_process.OpenvmmProcessResult(80, b"")],
+                "a boot with no CLI workload identity did not fail closed",
+            ),
+            (
+                [self.WORKLOAD_IDENTITY_REFUSED, ran],
+                "a boot with another CLI workload identity did not fail closed",
+            ),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._run_workload_identity(
+                        [*self.WORKLOAD_IDENTITY_CHECKS, *results]
+                    )
 
     def test_structured_outcome_scenario_covers_exit_policy_and_rejection(self):
         applied = self._outcome_report(
