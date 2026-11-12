@@ -568,7 +568,7 @@ of the Rust guest binaries' inputs that the guest package manifests record,
 which `nvx.py guest-binary-source-identity` prints, because the images carry
 only those binaries of `nvx-rs` and `hashFiles` hashes contents only. The
 inputs are the files that the guest binaries' build reads:
-`rust-toolchain.toml`; the crate's manifest, lockfile, build script, and Cargo
+`rust-toolchain.toml`; the crate's manifest, lockfile, and Cargo
 configuration; every file under `nvx-rs/src/` but the host side, which is the
 `host` and `testing` modules and the `nvx-rs` and `nvx-fake-openvmm` binaries,
 and the test modules, which are the `tests.rs` files and the `tests`
@@ -2146,11 +2146,8 @@ the commit's files in the version alone.
 - Every file is the commit's byte for byte, which rules out CRLF line endings,
   but for the rewritten version and the files that Cargo generates,
   `Cargo.toml` and `.cargo_vcs_info.json`, which must hold no CR either.
-- It holds the license, the readme, the build script, and `artifacts.json`.
-- Its files build with every feature, as a dependent's build does. `bundled`
-  downloads the Linux KVM and MSHV packages of the release that
-  `artifacts.json` pins, which must match their digests and declare the
-  crate's control contract.
+- It holds the license and the readme.
+- Its files build with every feature, as a dependent's build does.
 
 The job outputs the version and the package's SHA-256. Its build runs the
 build scripts and procedural macros of the crate's dependencies, so it holds
@@ -2329,9 +2326,6 @@ otherwise use; the musl check of the guest binaries checks `guest` alone.
 Clippy's checks of all targets compile the crate's examples, among them the
 compile-only `host-workflows` and, in the musl check, `guest-workflows`, so
 that the documented workflows keep compiling against the public API.
-It also validates bundled artifact staging with a fixture package. The action
-sets `NVX_BUNDLE=skip` for `--all-features` builds, so that `bundled` stages
-nothing instead of downloading the pinned release.
 
 On Linux, the `nvx-rs` job also checks the public API of `nvx` against its
 snapshots, [`nvx-rs/public-api/linux.txt`](../nvx-rs/public-api/linux.txt) and

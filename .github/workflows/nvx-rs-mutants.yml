@@ -145,8 +145,6 @@ jobs:
         shell: bash
         working-directory: nvx-rs
         env:
-          # --all-features enables `bundled`; stage nothing instead of downloading a release.
-          NVX_BUNDLE: skip
           FILES: ${{ needs.plan.outputs.files }}
           TESTS: ${{ needs.plan.outputs.tests }}
           TARGETS: ${{ needs.plan.outputs.targets }}

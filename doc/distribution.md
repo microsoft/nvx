@@ -162,13 +162,7 @@ change reaches crates.io within a day of its merge.
 
 The version that `nvx-rs/Cargo.toml` declares is the lowest that CI
 publishes. A pull request changes it to start another series, such as
-`0.2.0-alpha.1`. Only `nvx`'s version changes in `nvx-rs/Cargo.lock`. The
-`bundled` feature of the published crate downloads the release that
-[`nvx-rs/artifacts.json`](../nvx-rs/artifacts.json) pins and fails unless that
-release declares the crate's microVM, time, restore-packet, control-session,
-and control contracts, which CI checks before it publishes. When a contract has
-changed, publication stays blocked until a pull request repins a compatible release;
-see [Bundled artifacts](../nvx-rs/README.md#bundled-artifacts).
+`0.2.0-alpha.1`. Only `nvx`'s version changes in `nvx-rs/Cargo.lock`.
 
 When CI cannot publish, as when the newest version on crates.io records no
 commit that `dev` holds, a pull request declares the next version as above,
@@ -179,7 +173,6 @@ and once it merges, a crate owner publishes that version from a fresh clone of
 git clone --branch dev https://github.com/microsoft/nvx.git nvx-crate
 cd nvx-crate/nvx-rs
 git ls-files --eol . | grep -E 'w/(crlf|mixed)'  # prints nothing
-cargo check --locked --features bundled          # stages the pinned release
 cargo publish --locked --dry-run
 cargo publish --locked
 ```
