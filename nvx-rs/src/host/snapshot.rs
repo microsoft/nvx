@@ -58,8 +58,8 @@ use crate::host::{filesystem, platform, sandbox, seal};
 use crate::net::Ipv4Cidr;
 use crate::{Error, Hypervisor, Result};
 
+pub(super) use self::capture::check_snapshot;
 pub use self::capture::{CapturedSnapshot, finish_capture};
-pub(super) use self::capture::{check_exit, check_snapshot};
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
 pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, SnapshotKey};
 pub use self::manifest::{

@@ -650,8 +650,6 @@ pub struct SnapshotManifest {
     pub(super) attachments: Vec<Attachment>,
 }
 
-pub(in crate::host) use SnapshotManifest as TemplateManifest;
-
 impl SnapshotManifest {
     /// Reads the manifest of the snapshot in the directory `snapshot`: its [`MANIFEST_NAME`].
     ///

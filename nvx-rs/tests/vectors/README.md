@@ -70,10 +70,10 @@ the key that the vector's bytes decode to.
   `CLASS|NETWORK` of
   `snapshot-key-v1.txt` came to encode its network in place as the template
   captures it, under the complete deny-all policy: the encodings of a key and
-  of a class have not been released, so a template store that an earlier build
-  created is not supported, and is deleted and created again, since nothing
-  migrates it. The snapshot key also drops the obsolete guest-build field and
-  uses the `nvx snapshot key` hash domain in place, and now appends the full
+  of a class have not been released, so no key or class that an earlier build
+  encoded is supported, since nothing migrates it. The snapshot key also drops
+  the obsolete guest-build field and uses the `nvx snapshot key` hash domain in
+  place, and now appends the full
   capture-time contract while its compatibility identity still digests only
   the preceding compatibility fields: no snapshot outlives a deployment,
   and the prior key encoding is not supported.
@@ -98,15 +98,15 @@ of `openvmm/openvmm_helpers/src/snapshot/microvm.rs` that admits the kernel
 command-line tokens of a capture at OpenVMM's platform tier, and
 `microvm_control_tty_command_line.rs`, the constant of
 `openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
-the function reads. The tests of `nvx::host::template` compile them, and check
-each token of a template's kernel command line with OpenVMM's own function. The
-third, `port_forward_socket_creation.rs`, is the variant of the error of
-`vm/devices/net/net_consomme/src/resolver.rs` with which OpenVMM reports a port
-forward whose socket on the host it cannot bind, as when a clone's VMM restores
-its NIC with a forward whose port another socket holds. OpenVMM gives that
-error no code, so the launch of a clone attributes it to the host by its text,
-and the tests of `nvx::host::template` read the excerpt, and check that the
-text is OpenVMM's.
+the function reads. The tests of `nvx::host::config` compile them, and check
+that its allowlist of a capture's kernel command-line tokens admits each token
+as OpenVMM's own function does. The third, `port_forward_socket_creation.rs`,
+is the variant of the error of `vm/devices/net/net_consomme/src/resolver.rs`
+with which OpenVMM reports a port forward whose socket on the host it cannot
+bind, as when a clone's VMM restores its NIC with a forward whose port another
+socket holds. OpenVMM gives that error no code, so the launch of a clone, which
+#1121 deleted, attributed it to the host by its text; only the comparison below
+reads the excerpt now.
 
 The tests cannot call OpenVMM's broker or its allowlist: OpenVMM's workspace
 needs a later Rust release than `nvx`'s minimum, and the `nvx-rs` job cannot

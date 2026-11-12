@@ -48,7 +48,7 @@ nvx-rs/
 │   ├── host/        feature `host` (default): the runtime that every launch shares, VM
 │   │                directories and configurations, artifacts, launch, network and egress policy
 │   │                files, filesystem, NVXS connection, session, process, platform, VM instances,
-│   │                sandbox stores, templates' manifests, compatibility keys, store, and leases,
+│   │                sandbox stores, templates' manifests and compatibility keys,
 │   │                outcome reports, file seals, and the sandbox launch profile of `nvx-rs sandbox`,
 │   │                its distro and scratch bindings, and its prepared launches; with feature
 │   │                `cli`, the `nvx-rs` CLI
@@ -64,7 +64,7 @@ nvx-rs/
 │   │                the typed calls through which it runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
 ├── tests/           fake-OpenVMM, CLI, NVXS session, process-supervision, checked-handoff, store,
-│                    host-module layering, template-capture, and guest-binary tests, the CLI's
+│                    host-module layering, and guest-binary tests, the CLI's
 │                    scenario tests and their harness, in cli/, the store's record fixtures, the
 │                    hand-written sandbox configurations of every format, the cases of the export
 │                    and root boot tokens, and the template manifests that OpenVMM wrote, in
@@ -139,7 +139,6 @@ changes only when the module's purpose does.
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::supervisor`](#nvxhostsupervisor) | The supervisor of a sandbox's VMM, beneath the CLI, `Instance`, and external orchestrators |
-| [`nvx::host::template`](#nvxhosttemplate) | Legacy template capture plans and store, with aliases of the snapshot metadata |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::session`, `platform`, `report`](#nvxhostsession-platform-report) | The authenticated control session, Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
@@ -655,8 +654,39 @@ responsive shell input, and a verified clean exit; it downloads no artifact.
 `SnapshotKey` and `SnapshotManifest` own the compatibility key and strict
 OpenVMM manifest reader. `SnapshotManifest::time` and `SnapshotKey::time` expose
 the capture's `TimeContract`, whose `eligibility` checks its restore window at a `HostTime`;
-`HostTime::now` samples the host's clock and identities. The existing
-`host::template` names remain aliases of these same types.
+`HostTime::now` samples the host's clock and identities.
+
+`SnapshotManifest::read` reads the `manifest.bin` that OpenVMM wrote for a
+capture, at most `MAX_MANIFEST_LEN` bytes of a regular file that is not a link
+or other reparse point, and refuses another snapshot format version, an unknown,
+mistyped, or repeated field, truncated bytes, and a capture that is not a
+template's: a platform-tier capture for clones, with a read-only `distro` whose
+identity is unbound, a fresh scratch, and the dormant filesystem slot.
+
+`CaptureClass` holds the invariant inputs of a capture, known before it: the
+runtime, the guest's build, the backend, the requested CPU profile, the
+processors, those online at boot, and RAM, the geometries of the disks, the
+network, of which it takes what the template captures alone, its NIC at the
+guest's address under the complete deny-all policy, and the adapter's other
+`Invariants`.
+
+`SnapshotKey::new` checks that the capture made the machine that its class
+requested, and derives the template's compatibility key, from metadata alone:
+the runtime and contract versions through which its clones are restored, the
+backend, CPU profile and effective CPUID, topology, rates, resources, kernel
+command line, disks, and devices of its machine, with the NIC's addresses and
+the identity of the complete deny-all policy under which the capture attached
+it, which each clone's restore replaces with the clone's own, so that a template
+with a NIC serves the clones of every network policy at its guest's address.
+
+A key and a class each have one canonical, versioned encoding, whose
+domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
+to and from the `nvx::activation::Identity` by which a clone's lease and durable records
+name its template's key, or a `ClassIdentity`; the
+[conformance vectors](tests/vectors/README.md) of version 1,
+`tests/vectors/snapshot-key-v1.txt`, pin both encodings and identities. The
+key's encoding, version 1, leaves the network policy out, since templates
+capture their NIC under the complete deny-all policy.
 
 The key's canonical encoding and identity use the snapshot names and omit
 `guest_build`. Version 1 changes in place: no snapshot outlives a deployment,
@@ -668,6 +698,13 @@ agree with the manifest's time. Its compatibility identity excludes capture
 anchors, host and boot identities, lineage and cut-to-anchor time: captures
 at different times can have different key bytes and the same `KeyIdentity`.
 The declared rates and time ABI remain compatibility inputs.
+
+`TimeContract::eligibility` decides, apart from compatibility, whether a clone
+may restore a capture at a host's time, a `HostTime`, which `HostTime::now`
+samples as OpenVMM does: within the boot of the capture, by the host's monotonic
+clock, and otherwise by UTC, the downtime must not be negative, and the interval
+by which a restore advances the clone's VM time at most `MAX_DOWNTIME_NS`, 30
+days.
 
 `Snapshot::open` checks exactly `key.bin`, `snapshot.json` and
 `openvmm/{manifest.bin,memory.bin,state.bin}`. Directories are private, files
@@ -832,7 +869,7 @@ with and what a restore may grow it to; and the caller's `Invariants`, at most
 64 settings that NVX keeps without interpreting them, each named by 1 to 64
 lowercase ASCII letters, digits, `.`, `-`, and `_` from a letter, with a value
 of at most 256 printable ASCII characters. `Invariants` and `BlockGeometry`
-belong here, and `nvx::host::template` re-exports them where they were.
+belong here.
 
 `CaptureConfig::check` checks a capture without reading the host. It fails with
 an `nvx::Error` of kind `Unsupported` for processors at boot or a capacity other
@@ -1165,12 +1202,11 @@ orchestrators, which keep the configuration, the authorization, and the
 application protocol.
 
 `launch` runs the store's launch steps under the sandbox's lock, as a launch
-whose `LaunchId` the caller reserved beforehand, a fresh one for each launch, or
-that a clone's lease reserves: it writes the journal's marker, which names the
-launch, spawns OpenVMM with the claimed log, records its `ProcessRef` right
-after, and returns a `Starting` launch that the caller commits once the VMM
-serves its control endpoint, or abandons. A launch that fails never leaves an
-unrecorded VMM running.
+whose `LaunchId` the caller reserved beforehand, a fresh one for each launch: it
+writes the journal's marker, which names the launch, spawns OpenVMM with the
+claimed log, records its `ProcessRef` right after, and returns a `Starting`
+launch that the caller commits once the VMM serves its control endpoint, or
+abandons. A launch that fails never leaves an unrecorded VMM running.
 
 `spawn_vm` starts a caller-owned command without a store, with the same strict
 Windows log-job requirement as `vm::spawn`: an untrusted job name or a log that
@@ -1226,12 +1262,6 @@ identity.
 after the orchestrator restarts within the same host boot: `Live`, `Mismatched`
 with another runtime identity, `Exited`, or `Indeterminate`.
 
-A clone's launch takes its locks in one order, the template store's, then the
-sandbox's, which guards its clone binding and launch journal, then the scratch
-image's claim, and holds none for the VM's lifetime; its lease lasts through
-crashes and reattaches, until a release ends it once a stop, a termination, or a
-reattach has verified the VM's exit.
-
 #### Windows working-directory limit
 
 Windows' process-creation API limits `VmmCommand::working_dir` to 258 UTF-16
@@ -1240,157 +1270,6 @@ separator. It may name a shorter directory than the store. A raw `spawn`
 refuses an overlong working directory with `InvalidInput`; high-level instance
 and capture preflight return `Unsupported` with the limit in the top-level
 message. Neither silently changes the requested directory.
-
-### `nvx::host::template`
-
-The legacy plans and store of templates, captures of a microVM from which
-independent clones are restored. Their metadata names remain aliases of
-[`host::snapshot`](#nvxhostsnapshot)'s types.
-
-`TemplatePlan::new` lowers an adapter's `SandboxPlan` into the plan of a
-template's capture, without I/O: the placeholder `distro`, which its
-`DistroBinding` binds, and whose length is the capacity of every clone's image,
-over a dormant scratch device, the sparse file `SCRATCH_NAME` in the capture's
-transaction directory, with the dormant filesystem slot, and no NIC or one at
-the guest's address of the adapter's network, under the complete deny-all
-policy, whatever the network's own, which each clone's restore replaces with the
-clone's; `TemplateResources`, with the processors, 1, 2, 4, or 8, and those
-online at boot, as many or fewer, and RAM and a `--memory-capacity` in blocks of
-`MEMORY_BLOCK_SIZE`; the kernel command line `nvx_sandbox=1`, with `maxcpus=`
-and the processors online at boot when they are fewer, so that the capture's
-whole command line holds tokens of OpenVMM's platform allowlist alone, and no
-tenant data, which the tests check with a copy of the allowlist's source; and
-the capture's options, `--snapshot-tier platform`, a `--snapshot-destination`,
-`SNAPSHOT_NAME` in the transaction directory, and
-`--snapshot-block-identity generation` with the capture's bound-block
-`StorageGeneration`, so that the capture hashes no block device.
-
-`TemplateManifest::read` reads the `manifest.bin` that OpenVMM wrote for a
-capture, at most `MAX_MANIFEST_LEN` bytes of a regular file that is not a link
-or other reparse point, and refuses another snapshot format version, an unknown,
-mistyped, or repeated field, truncated bytes, and a capture that is not a
-template's: a platform-tier capture for clones, with a read-only `distro` whose
-identity is unbound, a fresh scratch, and the dormant filesystem slot.
-
-`CaptureClass` holds the invariant inputs of a capture, known before it: the
-runtime, the guest's build, the backend, the requested CPU profile, the
-processors, those online at boot, and RAM, the geometries of the disks, the
-network, of which it takes what the template captures alone, its NIC at the
-guest's address under the complete deny-all policy, and the adapter's other
-`Invariants`.
-
-`TemplateKey::new` checks that the capture made the machine that its class
-requested, and derives the template's compatibility key, from metadata alone:
-the runtime and contract versions through which its clones are restored, the
-backend, CPU profile and effective CPUID, topology, rates, resources, kernel
-command line, disks, and devices of its machine, with the NIC's addresses and
-the identity of the complete deny-all policy under which the capture attached
-it, which each clone's restore replaces with the clone's own, so that a template
-with a NIC serves the clones of every network policy at its guest's address. A
-capture's own metadata, such as its time anchor and host, stays out of the key.
-
-A key and a class each have one canonical, versioned encoding, whose
-domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
-to and from the `nvx::activation::Identity` by which a clone's lease and durable records
-name its template's key, or a `ClassIdentity`; the
-[conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/snapshot-key-v1.txt`, pin both encodings and identities. The
-key's encoding, version 1, leaves the network policy out, since templates
-capture their NIC under the complete deny-all policy, and has not been released,
-so a template store that an earlier build created is not supported: delete it
-and create a new one. There is no migration.
-
-`Store` keeps the generations of templates that a host published, apart from
-every sandbox's store, at a location that the adapter chooses: a private
-directory with an identity of its own, a `StoreId`, the immutable payload of
-each generation, its key's canonical encoding beside the snapshot that OpenVMM
-published, and the versioned `Index` of them, which lists each generation with
-the identities of its key and capture class and its own metadata, such as its
-time contract.
-
-`Store::create` creates a store, or opens the one that its directory holds,
-crash-safely and once between concurrent creations, and refuses a directory with
-foreign entries; `Store::open` opens one.
-
-Its records are JSON in one format, replaced atomically, and records of another
-format fail rather than being migrated. Its directories must be private to the
-current user, and it refuses links and, on Windows, other reparse points among
-its directories and files.
-
-Four namespaces stay apart: the `nvx::activation::StoreGeneration`, the host's
-publication ID, which the index assigns in the order of publication and never
-twice, and by which a clone's lease and durable records name its template; the
-bound-block `StorageGeneration` of a capture, which belongs to the storage
-owner; the time lineage counter of the time contract; and the VM generation ID,
-which the store never records.
-
-`TimeContract::eligibility` decides, apart from compatibility, whether a clone
-may restore a capture at a host's time, a `HostTime`, which `HostTime::now`
-samples as OpenVMM does: within the boot of the capture, by the host's monotonic
-clock, and otherwise by UTC, the downtime must not be negative, and the interval
-by which a restore advances the clone's VM time at most `MAX_DOWNTIME_NS`, 30
-days.
-
-`Store::select` selects the latest eligible generation of a key that no
-tombstone quarantines.
-
-`Store::acquire` leases a generation to a clone in one transaction, under the
-store's lock and then the sandbox's: it checks the generation's eligibility,
-writes the lease's record in the store and the clone binding, `clone.json`,
-beside the sandbox's launch journal, and returns the lease with the sandbox's
-lock, the only one under which the caller launches the clone, once, as the
-launch that the lease reserves, `Lease::launch`.
-
-A lease never expires: `Store::release` ends it once the sandbox records no VM
-and no launch.
-
-On Linux, where OpenVMM requires a restore's control socket in the snapshot's
-parent, the clone's VMM listens in the generation's payload, at `<launch>.sock`,
-named after the launch that the lease reserves; on Windows, it listens at a
-named pipe, as every launch does.
-
-A payload holds the sockets of its clones only while they lease it: the VMM
-removes its socket as it exits, a stop or a recovery removes the one that an
-abrupt exit leaves, and the release makes the socket's absence durable before
-the lease ends, and removes the record and `restore.sock`.
-
-`Store::tombstone` quarantines a generation, which takes no new lease while its
-leases keep working, and `Store::retire` deletes it once its leases have
-drained, crash-safely, removing the records of leases that no clone binding
-names any more.
-
-`Store::create_template` serves a `Capture`, an adapter's plan for a capture
-class with the placeholder's binding and the runtime's artifacts, with a
-generation of its class that the store holds and that is eligible at the host's
-time, which it reads once it holds the class's slot, `Created::Existing`, or
-captures one, `Created::Captured`, while `Store::refresh_template` always
-captures, and leaves older generations and their leases untouched.
-
-A capture runs in its class's slot under `captures/`, a sandbox store whose lock
-serializes the class's captures, which comes before the store's lock, and which
-keeps the log and outcome report of the VMM of the class's latest capture: in a
-private transaction on the store's volume, which is also the sandbox store of
-its VM, since OpenVMM requires the control socket of a VM that captures a
-snapshot, on Linux, beside the snapshot's destination, it creates the dormant
-scratch, checks the placeholder through its binding, and both block devices at
-their paths, regular files that are not links or other reparse points, that
-belong to the user or an administrator, and that no one else may change, and
-launches the template's VM through `supervisor::launch` from the transaction,
-holding no handle that could write either file, since OpenVMM opens them itself
-by path, as it does a restore's. Once the VMM has exited, it checks the outcome
-report, the snapshot's manifest and artifacts, and the key, and publishes the
-transaction in two commits, a rename into `generations/` that replaces nothing,
-then the index.
-
-Capture preflight applies the
-[Windows working-directory limit](#windows-working-directory-limit) to
-`<template-store>\captures\<16-hex-slot>\transaction` before creating the slot
-or scratch. Without a trailing separator this leaves 220 units for the absolute
-template-store path, or 210 for a state root whose store is `<state>\templates`.
-
-A capture that fails publishes nothing, and `Store::recover_captures` ends the
-captures that a crash interrupted, publishing those that were checked, and
-retiring the others.
 
 ### `nvx::host::seal`
 
@@ -3271,9 +3150,7 @@ tests, only the test hooks that
 [Test layout](../doc/contribute.md#test-layout) describes.
 
 The tests need no hypervisor. The fake-OpenVMM test drives `Instance` end to end
-against `nvx-fake-openvmm`, and the template-capture test runs templates'
-captures through the supervisor against it, up to a crash of the adapter whose
-VMM a recovery ends. The CLI test runs the
+against `nvx-fake-openvmm`. The CLI test runs the
 [scenario tests](#scenario-tests) of `nvx-rs`, and checks the guest-feature
 requirement and, on Linux, Ctrl-C. The
 [conformance vectors](tests/vectors/README.md) of the wire formats cover both

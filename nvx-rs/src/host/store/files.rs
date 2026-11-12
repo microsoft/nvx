@@ -5,9 +5,6 @@
 //! and its log only as [`StoreFile`]s, each of which holds a file's path with what messages call
 //! it, so that no read or lock of one of them skips the checks that refuse a file that others may
 //! open.
-//!
-//! The template store, [`template::Store`](crate::host::template::Store), keeps its own records
-//! with the same lock files, atomic replacements, removals, and syncs.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};

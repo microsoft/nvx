@@ -1191,33 +1191,6 @@ mod windows {
     }
 
     #[test]
-    fn a_retried_removal_of_the_clone_files_takes_those_whose_deletion_is_pending_for_removed() {
-        let (_directory, dir) = sandbox();
-        for name in CLONE_FILE_NAMES {
-            fs::write(dir.join(name), b"").unwrap();
-        }
-        // A release that failed once it removed the clone's files, which readers hold, retries
-        // their removal, which finds each one's deletion pending.
-        let pending: Vec<File> = CLONE_FILE_NAMES
-            .into_iter()
-            .map(|name| delete_pending(&dir.join(name)))
-            .collect();
-        let locked = SandboxStore::lock_existing(&dir, &files(), None).unwrap();
-        locked
-            .remove_clone_files(&locked.open_dir().unwrap())
-            .unwrap();
-        drop(locked);
-        drop(pending);
-        let names = entries_of(&dir);
-        assert!(
-            names
-                .iter()
-                .all(|name| !CLONE_FILE_NAMES.contains(&name.as_str())),
-            "{names:?}"
-        );
-    }
-
-    #[test]
     fn locks_refuse_a_lock_file_that_refuses_access_for_good() {
         // A read-only lock file, and a directory at its path, refuse an open for writing as a
         // removed lock file does, but they open without access rights, so the locks fail at once,
