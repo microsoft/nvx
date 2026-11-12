@@ -97,12 +97,12 @@ initramfs into a RAM filesystem capped at half of guest memory; see
 The package manifest `initramfs-azurelinux.cpio.gz.packages.json` records the
 release, architecture, base image, input digest, and artifact SHA-256. Each
 package entry names the RPM's version, release, architecture, license, and
-source RPM. The manifest also records the shared aggregate Rust source digest
-and each of the ten installed guest-binary digests. The input digest is a
-domain-separated SHA-256 over the release, architecture, base image, and the
-checkout files that define the build: the Dockerfile, package lock, build
-modules, guest scripts, complete `nvx-rs` guest input set, and
-`rust-toolchain.toml`.
+source RPM. The manifest also records the digest of the `nvx` package's
+[guest inputs](../build.md#the-nvx-package) and each of the ten installed
+guest-binary digests. The input digest is a domain-separated SHA-256 over the
+release, architecture, base image, and the checkout files that define the
+build: the Dockerfile, package lock, build modules, guest scripts, and the
+`nvx` package's guest inputs, `rust-toolchain.toml` among them.
 
 Release staging rejects a manifest that does not match the artifact, the base
 image, or the current inputs. Only binary-only packages carry the two Azure
@@ -110,7 +110,7 @@ Linux files; the published platform releases are binary-only, and
 `nvx-rs download` installs them. `collect-sources` does not collect Azure
 Linux corresponding source, so `package --include-source` omits the guest; see
 [Package and source delivery](../distribution.md) and the
-[release layout](../build.md).
+[release layout](../build.md#release-packages).
 
 ## Validation
 
