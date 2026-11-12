@@ -642,9 +642,9 @@ fn cpu_sets_hold_the_cpus_that_the_abi_covers() {
         .try_fold(CpuSet::new(), CpuSet::with)
         .unwrap();
     assert_eq!(set.to_string(), "1-3,6");
-    assert_eq!(set.iter().collect::<Vec<_>>(), [1, 2, 3, 6]);
+    assert_eq!(set.0.iter().collect::<Vec<_>>(), [1, 2, 3, 6]);
     assert_eq!(
-        (set.len(), set.contains(6), set.contains(4)),
+        (set.0.len(), set.0.contains(6), set.0.contains(4)),
         (4, true, false)
     );
     assert_eq!(
@@ -652,7 +652,7 @@ fn cpu_sets_hold_the_cpus_that_the_abi_covers() {
         Some("63".to_owned())
     );
     assert_eq!(CpuSet::new().with(64), None);
-    assert!(CpuSet::new().is_empty());
+    assert!(CpuSet::new().0.is_empty());
     assert_eq!(CpuSet::new().to_string(), "none");
     assert_eq!(CpuSet::from(CpuMask::parse(b"1-3,6").unwrap()), set);
 

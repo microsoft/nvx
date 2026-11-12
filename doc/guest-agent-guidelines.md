@@ -44,9 +44,10 @@ The library's calls leave all of this to the init:
   listeners, then replaces itself with nvx-init, which inherits both as its
   children.
 
-One other call starts processes, which an init can avoid: a report-only
-[`TimeAbi::restore_finish`](../nvx-rs/src/guest/time/api.rs), which
-`capture`'s repair calls, runs the restore's deferred time work itself when
+One other call starts processes, which an init can avoid: `capture`, whose
+repair finishes the restore through the time ABI's private
+[`TimeAbi::restore_finish`](../nvx-rs/src/guest/time/api.rs). In report-only
+mode, the finish runs the restore's deferred time work itself when
 no time daemon runs, in a calling process that must have no other thread: it
 forks a child, which waits for a grandchild that forces an RCU grace period,
 and collects only the child, so a grandchild that outlives the RCU stall

@@ -208,8 +208,9 @@ impl std::error::Error for CaptureFailure {
 ///
 /// The deadline bounds pre-request work only. This call drives no transport and never powers off
 /// the VM. A restore is repaired inline, and failures return its disposition. Only a report-only
-/// finish without a running time daemon starts helper processes, as
-/// [`restore_finish`](super::time::TimeAbi::restore_finish) describes.
+/// finish without a running time daemon starts helper processes: it runs the restore's deferred
+/// time work itself, which needs a process that has no other thread, through a child that waits
+/// for a grandchild that forces an RCU grace period, and it waits for that child alone.
 pub fn capture(
     devices: &Devices,
     disks: Disks,
