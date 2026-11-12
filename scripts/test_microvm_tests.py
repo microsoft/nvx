@@ -5691,7 +5691,8 @@ class MicrovmTests(unittest.TestCase):
         return runs
 
     def test_managed_lifecycle_runs_the_nvx_rs_test_and_checks_what_it_leaves(self):
-        # nvx-rs/tests/managed_lifecycle.rs drives the control session; the
+        # The unit test of nvx-rs's host control session in
+        # src/host/session/tests/managed_lifecycle.rs drives the session; the
         # scenario hands it OpenVMM's command, then checks the outcome report
         # and the guest console.
         with tempfile.TemporaryDirectory() as temporary:
@@ -5722,11 +5723,15 @@ class MicrovmTests(unittest.TestCase):
                 "--manifest-path",
                 os.fspath(BuildConstants.REPO_ROOT / "nvx-rs" / "Cargo.toml"),
                 "--locked",
-                "--test",
-                "managed_lifecycle",
+                "--features",
+                "cli",
+                "--lib",
                 "--",
                 "--ignored",
                 "--nocapture",
+                "--exact",
+                "host::session::tests::managed_lifecycle::"
+                "a_managed_guest_runs_request_scoped_workloads_until_it_stops",
             ],
         )
         # The repository root selects the pinned Rust release.
@@ -5791,8 +5796,9 @@ class MicrovmTests(unittest.TestCase):
             patch.object(microvm_tests.subprocess, "Popen") as popen,
             self.assertRaisesRegex(
                 common.ScriptError,
-                "runs the nvx-rs test managed_lifecycle with Cargo, which is not "
-                "on PATH",
+                "runs the nvx-rs test host::session::tests::managed_lifecycle::"
+                "a_managed_guest_runs_request_scoped_workloads_until_it_stops with "
+                "Cargo, which is not on PATH",
             ),
         ):
             microvm_tests.run_managed_lifecycle(
@@ -5854,8 +5860,9 @@ class MicrovmTests(unittest.TestCase):
             (
                 {"returncode": 101},
                 RuntimeError,
-                "the managed lifecycle test managed_lifecycle failed with exit "
-                "status 101",
+                "the managed lifecycle test host::session::tests::managed_lifecycle::"
+                "a_managed_guest_runs_request_scoped_workloads_until_it_stops failed "
+                "with exit status 101",
             ),
             # The guest's own explanation comes before the test's failure.
             (

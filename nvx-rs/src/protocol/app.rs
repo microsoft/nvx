@@ -54,10 +54,13 @@ pub const APP_MAPS: u8 = 6;
 #[cfg_attr(
     not(any(
         test,
-        feature = "host",
+        feature = "cli",
         all(feature = "guest", target_os = "linux", target_arch = "x86_64")
     )),
-    expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
+    expect(
+        dead_code,
+        reason = "only the CLI's capture command sends it, and only nvx-init reads it"
+    )
 )]
 pub(crate) const APP_CAPTURE: u8 = 7;
 /// Request that nvx-init activate a restored VM with its record and workload identity.
@@ -159,8 +162,11 @@ pub fn decode_app(frame: &[u8]) -> Result<AppFrame<'_>, ProtocolError> {
 
 /// Encodes the capture request's flag as one byte, 0 or 1.
 #[cfg_attr(
-    not(any(test, feature = "host")),
-    expect(dead_code, reason = "SL7.7a makes nvx-init handle capture requests")
+    not(any(test, feature = "cli")),
+    expect(
+        dead_code,
+        reason = "only the CLI's capture command sends capture requests"
+    )
 )]
 pub(crate) fn encode_capture_payload(kill_executions: bool) -> [u8; 1] {
     [u8::from(kill_executions)]
