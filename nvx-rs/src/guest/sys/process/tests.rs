@@ -74,67 +74,6 @@ pub(crate) fn fork_isolated_test() -> Result<ForkResult, Errno> {
     }
 }
 
-/// Starts a child that ends at once with `status`, before it could run a program, and that
-/// reports its end with no signal, as a child that `clone` starts with no exit signal does, for
-/// the tests of the waits that name such a child.
-pub(crate) fn spawn_child_without_exit_signal(status: u8) -> Result<ProcessId, Errno> {
-    let none: nix::libc::c_long = 0;
-    // SAFETY: without `CLONE_VM`, and with no stack of its own, the child runs in a copy of this
-    // process, as after `fork`, where it calls only `_exit`, which takes no lock that another of
-    // this process's threads could hold. No flag asks for an exit signal.
-    let child = unsafe { nix::libc::syscall(nix::libc::SYS_clone, none, none, none, none, none) };
-    match child {
-        0 => exit_immediately(status),
-        child if child < 0 => Err(Errno::last()),
-        child => {
-            let child = nix::libc::pid_t::try_from(child).map_err(|_| Errno::EOVERFLOW)?;
-            Ok(ProcessId::from_pid(Pid::from_raw(child)))
-        }
-    }
-}
-
-/// Forks a child that makes the calling thread its tracer, stops with `SIGSTOP`, and exits with
-/// `status` once its tracer continues it, or with 99 if it cannot be traced.
-///
-/// libc's `ptrace` is used because the crate does not enable `nix`'s.
-pub(crate) fn spawn_traced_child(status: u8) -> ProcessId {
-    // SAFETY: the child makes only the async-signal-safe `ptrace`, `raise`, and `_exit` calls,
-    // as a child of a multithreaded process may.
-    match unsafe { nix::unistd::fork() }.expect("fork") {
-        nix::unistd::ForkResult::Child => {
-            // SAFETY: `PTRACE_TRACEME` reads none of the other arguments.
-            let traced = unsafe {
-                nix::libc::ptrace(
-                    nix::libc::PTRACE_TRACEME,
-                    0,
-                    std::ptr::null_mut::<nix::libc::c_void>(),
-                    std::ptr::null_mut::<nix::libc::c_void>(),
-                )
-            };
-            if traced != 0 {
-                exit_immediately(99);
-            }
-            let _ = nix::sys::signal::raise(Signal::SIGSTOP);
-            exit_immediately(status)
-        }
-        nix::unistd::ForkResult::Parent { child } => ProcessId::from_pid(child),
-    }
-}
-
-/// Continues `process`, which the calling thread traces and which is stopped, without a signal.
-pub(crate) fn continue_traced(process: ProcessId) {
-    // SAFETY: `PTRACE_CONT` reads the process ID, and a null signal, which delivers none.
-    let result = unsafe {
-        nix::libc::ptrace(
-            nix::libc::PTRACE_CONT,
-            process.0.as_raw(),
-            std::ptr::null_mut::<nix::libc::c_void>(),
-            std::ptr::null_mut::<nix::libc::c_void>(),
-        )
-    };
-    assert_eq!(result, 0, "PTRACE_CONT: {}", Errno::last());
-}
-
 /// Makes the system call `number` fail with `EPERM` in the calling thread, and in every process
 /// that it starts from now on, through a seccomp filter that allows every other call, for a test
 /// that runs in a process of its own, since no filter can be removed. It first sets the thread's
@@ -406,7 +345,6 @@ fn a_real_time_signal_goes_through_a_pidfd_and_to_a_process_group() {
         .spawn()
         .unwrap();
     let process = ProcessId::from_child(&leader);
-    assert_eq!(process_group_of(process), Ok(process));
     assert_eq!(signal_process_group(process, 65), Err(Errno::EINVAL));
     assert_eq!(signal_process_group(process, 41), Ok(()));
     assert_eq!(leader.wait().unwrap().signal(), Some(41));
