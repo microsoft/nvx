@@ -117,8 +117,9 @@ The script builds rustdoc's JSON with the Rust release that
 ## Test ownership
 
 OpenVMM owns control-plane coverage. Its own CI runs its unit,
-documentation, and VMM tests on each pull request into the pinned branch and
-on each push to it, and the `openvmm-ci` job of NVX CI checks that they passed
+documentation, and VMM tests on each pull request into the pinned branch that
+is ready for review and on the pushes to it, and the `openvmm-ci` job of NVX
+CI checks that they passed
 the pinned revision instead of running them, with
 [`check-openvmm-ci`](usage.md#check-openvmm-ci), which checks a checkout's pin
 locally too (see [OpenVMM CI](ci.md#openvmm-ci)). Run its unit and
@@ -362,7 +363,8 @@ A pin promotion moves the `openvmm` gitlink to a reviewed OpenVMM revision:
 - In the pull request, name the OpenVMM pull request and the exact pinned
   SHA, the scope and any prerequisite revisions, and the validation you ran.
 - A gitlink change is an input of every CI suite, so its pull request runs
-  the full matrix, including both OpenVMM suites.
+  the full matrix, including the [OpenVMM CI](ci.md#openvmm-ci) check of the
+  new pin, which waits up to 300 minutes for OpenVMM's CI to pass it.
 - When a rebase conflicts on the gitlink, do not pick either side: combining
   both changes usually needs a new OpenVMM revision.
 
