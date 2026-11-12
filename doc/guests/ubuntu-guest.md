@@ -89,7 +89,7 @@ The builder then:
    `/nonexistent`, a `nogroup` group, and usr-merged `/bin`, `/sbin`, `/lib`,
    and `/lib64` links; and
 7. installs the NVX scripts from `guest/common` and `guest/ubuntu`, and the
-   ten Rust guest binaries from `nvx-rs`.
+   ten Rust guest binaries of the `nvx` package.
 
 The builder never executes a binary from the Ubuntu tree on the host. Both
 artifacts are packed with root ownership, fixed timestamps, and a stable file
@@ -121,8 +121,8 @@ Alpine.
 It installs the same ten Rust guest binaries as Alpine and Azure Linux under
 their `/sbin/nvx-*` names. Docker copies all ten from one digest-pinned Rust
 builder, while native and determinism builds use the shared fresh-target
-routine. The package manifest records one aggregate `nvx-rs` source digest
-and each installed binary's digest.
+routine. The package manifest records the digest of the `nvx` package's
+[guest inputs](../build.md#the-nvx-package) and each installed binary's digest.
 
 ## Ubuntu sandbox layer
 
@@ -146,7 +146,9 @@ proof.
 
 The layer runs under the Alpine control initramfs as the sandbox's read-only
 `distro` layer over a writable scratch disk, which is formatted separately
-with `mkfs.ext4`; see the
+with `mkfs.ext4`, such as a copy of the sandbox scratch template,
+`ubuntu-smoke-scratch.ext4`, which the sandbox scenarios boot and
+[`build-scratch-template`](../usage.md#build-scratch-template) formats; see the
 [experimental sandbox](../run.md#experimental-single-workload-sandbox). The
 sandbox's init, nvx-init, a static binary, runs each execution itself, as a
 plain process in the VM's root. Its executions share nvx-init's mount, PID,
@@ -172,7 +174,8 @@ Base or the lock.
 Release staging rejects an Ubuntu manifest that does not match its artifact
 and the current inputs. Platform releases carry all four Ubuntu files under
 `guest/`, with the sandbox scratch template, `ubuntu-smoke-scratch.ext4`,
-which has no manifest; `nvx-rs download` installs them all, and
+which has no manifest, as [Release packages](../build.md#release-packages)
+lists; `nvx-rs download` installs them all, and
 `run --guest ubuntu` fails when the initramfs is missing instead of falling
 back to Alpine.
 [Package and source delivery](../distribution.md) describes how
