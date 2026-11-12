@@ -19,7 +19,7 @@ are build products or caches and are not part of the tracked source tree. The
 | `guest` | Common and distribution-specific guest scripts |
 | `ubuntu` | Pinned Ubuntu supplemental binary-package lock |
 | `azurelinux` | Checksum-pinned Azure Linux supplemental RPM lock |
-| `nvx-rs` | Rust crate `nvx`: the NVX mechanics |
+| `nvx-rs` | The `nvx` package: the library of NVX's mechanisms, with NVX's own programs as its binaries |
 | `openvmm` | Public OpenVMM Git submodule from `microsoft/openvmm`, tracking its `feature/microvm/dev` branch |
 | `data` | Tracked performance history and generated benchmark data |
 | `scripts/nvx_tools` | Implementation of the `nvx.py` commands |
@@ -98,20 +98,28 @@ nvx/
 |   |-- config-microvm           MicroVM kernel configuration, generated from the feature inventory
 |   |-- config-microvm.derived   Rule that sets each symbol of config-microvm beyond the inventory
 |   `-- config-microvm-debug     CI debug-kernel fragment (watchdogs on)
-|-- nvx-rs/                      Rust crate `nvx` for the NVX mechanics
+|-- nvx-rs/                      The `nvx` package: NVX's library, with NVX's own programs as its binaries
 |   |-- src/
+|   |   |-- lib.rs               The crate's root, its documentation, and its public modules
 |   |   |-- protocol/            Control-console codec, NVXS session, and the guest targets that live shares may not take, shared by the host and the guest
 |   |   |-- activation/          The activation record of a layered root, its canonical encoding, and what Ready reports about it, shared by the host, the guest, and every adapter's framing
 |   |   |-- contract.rs          Control-contract versions and release compatibility
 |   |   |-- net/                 CIDR parsing and subtraction, and hostname and guest-network forms
 |   |   |-- gpt/                 Strict reading of GPT disks whose first partition configures an adapter and whose other partitions hold a root's read-only layers, shared by the host and the guest
-|   |   |-- host/                Artifacts, launch, network and egress-policy lowering, sessions, VMs, the sandbox launch profile, and the `nvx-rs` CLI (feature `cli`)
-|   |   |-- testing/             Fake OpenVMM (feature `testing`)
-|   |   |-- guest/               Programs that run in Linux guests, the guest's NVXS connection, the libraries through which any guest init or agent opens the terminal on which it serves its session, starts a program, collects its children's statuses, settles its executions' cgroups, drives each execution, mounts host mappings beneath the descriptors of the roots that it names, assembles and tears down a layered root, and reads a GPT disk's partition table through its block device, and the typed calls through which it runs the time ABI's steps and the reseed (feature `guest`)
-|   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
+|   |   |-- uuid.rs              UUIDs in their canonical text and in GPT's layout, shared by the host and the guest
+|   |   |-- hypervisor.rs        The hypervisors that run the VMs: KVM, MSHV, and WHP
+|   |   |-- error.rs             `nvx::Error` and its `ErrorKind`, and the crate's private `ErrorCode`
+|   |   |-- host/                Feature `host`: the runtime, VMs and their configuration, snapshots, restores, the transport, process references, outcome reports, and the lowering of network postures and host export plans; private to the crate, the platform layer and what only NVX's CLI uses, such as the export planner, the sandbox launch profile, and the egress policy compiler; with feature `cli`, NVX's hidden `nvx-rs` CLI
+|   |   |-- testing/             Feature `testing`: NVX's hidden fake OpenVMM
+|   |   |-- guest/               Feature `guest`, on Linux: the libraries on which a guest init builds, such as its NVXS session, terminal, host mappings, time ABI steps, reseed, snapshot capture, and activation; NVX's hidden guest programs; and NVX's guest space, private to the crate
+|   |   `-- bin/                 One file per binary, which calls its program's hidden `main`: nvx-rs, nvx-fake-openvmm, and the ten guest binaries
 |   |-- examples/                The external-launch example, and the documented host and guest workflows, which only compile
-|   |-- tests/                   Fake-OpenVMM behavior, process and VM spawn, CLI scenario, NVXS session, guest-binary, and hypervisor public-API VM lifecycle tests, the security checklist, sandbox configurations of every format, the cases of the export and root boot tokens, and the conformance vectors of the wire formats
-|   `-- public-api/              The crate's public API on Linux and on Windows, which CI checks
+|   |-- tests/                   Integration tests of the CLI's scenarios, in cli/, the fake OpenVMM, the guest binaries, the NVXS session, in nvxs/, the layering of `nvx::host`, a VM's lifecycle on a hypervisor, the security checklist, and the copies of the OpenVMM submodule's data, with their fixtures and the conformance vectors of the wire formats
+|   |-- public-api/              The crate's public API on Linux and on Windows, which CI checks
+|   |-- Cargo.toml               Package manifest: features, binaries, examples, and the `guest` profile
+|   |-- Cargo.lock               The package's own lockfile
+|   |-- LICENSE                  The package's MIT license, which the crate ships
+|   `-- README.md                The crate's guide: its modules, the nvx-rs CLI, its features, its guest binaries, and its tests
 |-- openvmm/                     OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
@@ -136,6 +144,8 @@ nvx/
 |   |   |-- development_release.py Resumable development release publication
 |   |   |-- doctor.py            Time ABI host qualification
 |   |   |-- elf.py               Static-executable check of ELF binaries
+|   |   |-- guest_artifact_reuse.py Reuse of a pull request's guest artifacts in its merge group and dev push
+|   |   |-- guest_binaries.py    Build, checks, and identity of the nvx package's guest binaries
 |   |   |-- guests.py            Typed guest descriptors
 |   |   |-- host_telemetry.py    Benchmark host provenance and Windows capture storage telemetry
 |   |   |-- host_time_probe.rs   Host TSC probe that doctor builds and runs
@@ -148,7 +158,7 @@ nvx/
 |   |   |-- microvm_test_scripts/ Guest workloads for the microVM tests
 |   |   |-- microvm_tests.py     NVX microVM correctness tests
 |   |   |-- nightly_ci.py        Nightly CI failure report
-|   |   |-- nvx_rs.py            Finds and builds nvx-rs, and runs it for the microVM tests
+|   |   |-- nvx_rs.py            Finds and builds nvx-rs, records its provenance, and runs it for the microVM tests
 |   |   |-- openvmm_ci.py        Check that OpenVMM's own CI passed the pinned revision
 |   |   |-- openvmm_process.py   Foreground OpenVMM process control for tests
 |   |   |-- performance.py       CI performance collection, persistence, and gates
@@ -209,7 +219,10 @@ nvx/
 ```
 
 The ignored `.cache/` directory may also appear at the repository root. It
-contains downloaded and prepared upstream source trees, including Linux.
+contains the verified upstream archives and packages that the guest builds
+download, under `downloads/`, and the prepared upstream source trees, including
+Linux; `NVX_CACHE_DIR` moves the guest builds' cache elsewhere, as
+[Build](build.md) describes.
 
 ## Source directories
 
@@ -305,19 +318,25 @@ for other kernel-specific details.
 
 ### `nvx-rs/`
 
-The Rust crate `nvx` holds the NVX mechanics: the
-authenticated control protocol of the guest agent, artifact discovery,
-OpenVMM's command line, the lowering of network and
-filesystem policies, the compiler of the egress policy files that `nvx-rs run`
-and `nvx-rs sandbox` accept, process and platform primitives for Linux and
-Windows hosts, the creation, spawn, and stop of VMs, the sandbox launch profile
-of `nvx-rs sandbox`, the `nvx-rs` command-line interface that runs NVX's
-microVMs and sandboxes, downloads releases, compiles egress policies, and looks
-up artifacts, and a fake OpenVMM for tests. Its
-`guest` feature builds the ten static executables that every guest image
-installs at `/sbin/nvx-*`. It is a standalone crate with its own `Cargo.lock`,
-and builds independently of the OpenVMM submodule. See its
-[README](../nvx-rs/README.md) and its [module diagrams](modules/README.md).
+`nvx-rs/` holds the `nvx` package, the repository's one Cargo package. Its
+library, `nvx`, holds the mechanisms of NVX's microVMs: the NVXS session and
+the codecs that the host and the guest share, OpenVMM's command line, the
+lowering of network postures and host export plans into OpenVMM's options,
+verified references to OpenVMM's processes, the creation, spawn, reattachment,
+and stop of VMs, their snapshots and restores, and the guest's side of a
+snapshot. Its binaries are NVX's own programs: the `nvx-rs` command-line
+interface (feature `cli`), which runs NVX's microVMs and sandboxes, downloads
+releases, compiles egress policies, and looks up artifacts; a fake OpenVMM for
+its tests (feature `testing`); and the ten static executables that every guest
+image installs at `/sbin/nvx-*` (feature `guest`). The code that only these
+programs use, such as the CLI's stores, export planner, and egress policy
+compiler, the platform layer, and the guest's space, is private to the crate,
+and each binary calls a `main` that `#[doc(hidden)]` hides, so the snapshots
+in `public-api/` record the library's public API alone. The package has its
+own `Cargo.lock`, and builds independently of the OpenVMM submodule;
+[The nvx package](build.md#the-nvx-package) lists its features, profiles,
+binaries, outputs, and license inputs. See its [README](../nvx-rs/README.md)
+and its [module diagrams](modules/README.md).
 
 ### `openvmm/`
 
@@ -342,6 +361,9 @@ module has no dependencies on the workflow or configuration modules.
 Standalone benchmark shell programs and parameterized guest templates
 live in `nvx_tools/benchmark_scripts/`, and the guest workloads of the microVM
 tests live in `nvx_tools/microvm_test_scripts/`.
+`nvx_tools/guest_binaries.py` builds, checks, and identifies the guest binaries
+of the `nvx` package, and `nvx_tools/nvx_rs.py` builds `nvx-rs` and records its
+provenance; see [The nvx package](build.md#the-nvx-package).
 Source-collection scripts assemble corresponding-source archives for Linux,
 Alpine, and Ubuntu. The adversarial controller, typed broker, credential-free
 executor, watchdog, and tracked deterministic catalogs also live in
@@ -429,14 +451,14 @@ build on `openvmm_git.py`.
 
 | Path | Contents |
 | --- | --- |
-| `.cache/` | Downloaded, verified, and patched upstream source trees |
-| `build/` | Kernels, initramfs and EROFS images, package manifests, and collected sources |
+| `.cache/` | Downloaded and verified upstream archives and packages, and patched upstream source trees |
+| `build/` | Kernels, initramfs and EROFS images, the sandbox scratch template, package manifests, the provenance of OpenVMM, the kernels, the Alpine initramfs, and `nvx-rs`, and collected sources |
 | `data/baseline/` | Base-branch histories staged by the performance gate |
 | `data/results/` | Collected p50 results for the current commit |
 | `data/runs/` | Raw benchmark logs and per-platform artifacts |
 | `dist/` | Staged binary and source release archives |
 | `openvmm/target/` | Rust build output produced inside the OpenVMM submodule |
-| `nvx-rs/target/` | Rust build output of the `nvx` crate |
+| `nvx-rs/target/` | Cargo's build output of the `nvx` package, among it `release/nvx-rs[.exe]` |
 | `.ruff_cache/` | Ruff's local lint cache |
 | `__pycache__/` | Python bytecode caches that may appear below Python source directories |
 
