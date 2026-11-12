@@ -466,3 +466,49 @@ fn a_unix_transport_reports_what_its_peer_has_not_read() {
     peer.read_exact(&mut rest).unwrap();
     assert_eq!(transport.unread().unwrap(), Some(0));
 }
+
+/// Returns the permission bits of the mode of the file at `path`, not following a link.
+fn permission_bits(path: &std::path::Path) -> u32 {
+    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(feature = "cli")]
+#[test]
+fn a_fifo_in_place_of_a_private_file_is_left_as_it_is_without_waiting_for_a_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lock");
+    nix::unistd::mkfifo(&path, Mode::S_IRUSR).unwrap();
+    // An open of the FIFO for reading would wait for a writer, which never comes.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let fifo = path.clone();
+    let mode = Mode::S_IRUSR | Mode::S_IWUSR;
+    thread::spawn(move || sender.send(restore_private_file_mode(&fifo, mode)));
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the FIFO was opened for reading")
+        .unwrap();
+    assert_eq!(permission_bits(&path), 0o400);
+}
+
+#[test]
+fn a_store_directory_gets_mode_700_even_where_the_umask_withholds_reading_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store");
+    // A umask that clears the owner's permission to read what it creates, in a thread of the
+    // test's own, whose umask no other thread shares.
+    let problem = thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                nix::sched::unshare(nix::sched::CloneFlags::CLONE_FS).unwrap();
+                nix::sys::stat::umask(Mode::from_bits_truncate(0o477));
+                create_store_dir(&path)
+            })
+            .join()
+            .unwrap()
+    });
+    let mode = permission_bits(&path);
+    // Lets the temporary directory go, even if the umask's mode stayed.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(problem.unwrap(), None);
+    assert_eq!(mode, 0o700);
+}
