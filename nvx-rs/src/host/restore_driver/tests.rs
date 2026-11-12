@@ -181,7 +181,11 @@ fn record() -> ActivationRecord {
 
 fn workload() -> Workload<'static> {
     Workload {
-        identity: WorkloadIdentity::DEFAULT,
+        identity: WorkloadIdentity {
+            uid: 65534,
+            gid: 65534,
+            create_account: false,
+        },
         exec: protocol::Workload {
             argv: vec!["/bin/true".to_owned()],
             timeout_ms: 0,
