@@ -9,6 +9,14 @@
 //! status and error categories, 1 MiB output and receive windows, and timeout and cancellation
 //! behavior.
 //!
+//! It also serves NVXC version 2, whose frames carry the same requests, and in which each answer
+//! of a request takes its version. An execution of version 2 runs as one of version 1 does, alone,
+//! and a second `EXEC` gets `BUSY`, but its workload reads a pipe of the standard input that the
+//! host streams, which the agent acknowledges as it writes it, up to its explicit end; its output
+//! has no cap; and `STOP` ends it. While it runs, the agent's records wait in a send queue rather
+//! than for the console, and the agent reads none of the workload's output while the queue is
+//! full.
+//!
 //! The agent exits with 0, or with 125 when it fails.
 //!
 //! # Structure
@@ -29,7 +37,7 @@
 //! ends it, and reports its launch and outcome, and the
 //! agent forwards the output as NVXC frames, serves the control session while the workload runs,
 //! and reports the outcome. The agent keeps its own policy: the null device as the workload's
-//! standard input, the identity, the output cap,
+//! standard input and the output cap of version 1, the identity,
 //! the timeout, the precedence of a cancellation, a timeout, and the cap over the workload's own
 //! status, and the outcome that it reports for a failed launch stage. It builds the workload's
 //! environment in memory, as C's environment functions changed it, and passes it to `execve`, so

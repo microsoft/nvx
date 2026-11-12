@@ -9,10 +9,23 @@ use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
 use crate::guest::snapshot::{Captured, Disposition};
 use crate::guest::sys::{self, Errno, FileDescriptor, Pollable};
 use crate::protocol::nvxs::{GuestEvent, RecordError, RecordType, SessionError};
-use crate::protocol::{self, APP_ERROR, OUTER_MAX_PAYLOAD, OUTER_RECEIVE_WINDOW};
+use crate::protocol::{
+    self, APP_ERROR, APP_EXIT, APP_READY, APP_STDERR, APP_STDOUT, APP_STOPPED, OUTER_MAX_PAYLOAD,
+    OUTER_RECEIVE_WINDOW, v2,
+};
+
+/// Bytes that the send queue holds before the agent stops reading an execution's output, until
+/// the control console takes them.
+const SEND_QUEUE_BYTES: usize = 64 * 1024;
 
 /// The agent's control session: the guest's role of the shared NVXS session on the control
 /// console, and the NVXC frames that its DATA records carry.
+///
+/// It serves requests of NVXC versions 1 and 2, which keep the codes of the kinds that both have,
+/// and answers each in the version of the request that it serves. While an execution of version
+/// 2 runs, the session's records go through a send queue, which never waits for the console, so
+/// that the agent keeps serving control requests while the host does not read; the record that
+/// it sends next without streaming waits until the console has taken the queue and itself.
 pub(crate) struct Session<'r> {
     /// The guest's NVXS connection on the owned control-console descriptor.
     connection: GuestConnection<Control<'r>>,
@@ -21,6 +34,9 @@ pub(crate) struct Session<'r> {
     /// Error of the connection's latest failure, which a connection that a failure ended reports
     /// again.
     last_error: Option<Errno>,
+    /// Whether the request that the session serves is of version 2, whose frames its answers
+    /// take.
+    v2: bool,
 }
 
 /// Byte transport only: the existing connection still owns all record framing.
@@ -32,6 +48,10 @@ struct Control<'r> {
     outcome: RefCell<Result<bool, String>>,
     /// Bounds partial I/O until the restored activation's Ready has been written.
     deadline: Cell<Option<Instant>>,
+    /// Records that the console has not taken yet, in order.
+    queue: RefCell<Vec<u8>>,
+    /// Whether writes add to the queue rather than wait for the console.
+    queueing: Cell<bool>,
 }
 
 impl Control<'_> {
@@ -74,14 +94,26 @@ impl Control<'_> {
             .copied()
             .map_err(|_| Errno::ECHILD)
     }
+
+    /// Writes as much of the queue as the console takes without waiting.
+    fn send_queued(&self) -> io::Result<()> {
+        let mut queue = self.queue.borrow_mut();
+        while !queue.is_empty() {
+            match self.descriptor.write(&queue) {
+                Ok(0) => return Err(Errno::EIO.into()),
+                Ok(written) => drop(queue.drain(..written)),
+                Err(Errno::EAGAIN) => break,
+                Err(Errno::EINTR) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Read for Control<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         if bytes.is_empty() {
-            return Read::read(&mut self.descriptor, bytes);
-        }
-        if self.runtime.is_none() && self.deadline.get().is_none() {
             return Read::read(&mut self.descriptor, bytes);
         }
         loop {
@@ -114,12 +146,16 @@ impl Read for Control<'_> {
 
 impl Write for Control<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.runtime.is_none() && self.deadline.get().is_none() {
-            return Write::write(&mut self.descriptor, bytes);
-        }
         if bytes.is_empty() {
             return Write::write(&mut self.descriptor, bytes);
         }
+        if self.queueing.get() {
+            self.queue.get_mut().extend_from_slice(bytes);
+            self.send_queued()?;
+            return Ok(bytes.len());
+        }
+        let queued = std::mem::take(self.queue.get_mut());
+        self.write_all(&queued)?;
         loop {
             self.remaining()?;
             if self.runtime.is_some() {
@@ -167,6 +203,16 @@ pub(crate) enum Event {
     Reset,
     /// The payload of a DATA record: one NVXC frame, which [`Session::accept_request`] decodes.
     Data(Vec<u8>),
+}
+
+/// An NVXC request that the session accepted, whose answers take its version.
+pub(crate) enum Request<'a> {
+    /// A request of version 1, or one of version 2 of a kind that version 1 has too, with the
+    /// code that both give it.
+    App(protocol::AppFrame<'a>),
+    /// Version 2's standard input of the execution of this ID: a `STDIN` frame's bytes, or `None`
+    /// for its `STDIN_END`.
+    Stdin(u64, Option<&'a [u8]>),
 }
 
 /// A record from the broker that ended the session, classified by the stage at which the C agent
@@ -242,9 +288,12 @@ impl<'r> Session<'r> {
                 status: Cell::new(None),
                 outcome: RefCell::new(Ok(false)),
                 deadline: Cell::new(None),
+                queue: RefCell::new(Vec::new()),
+                queueing: Cell::new(false),
             }),
             capture: None,
             last_error: None,
+            v2: false,
         }
     }
 
@@ -452,7 +501,8 @@ impl<'r> Session<'r> {
                             ));
                         }
                     };
-                    let mut replies = vec![request.request_id];
+                    // Each joined request gets its Ready in its own version.
+                    let mut replies = vec![(request.request_id, self.v2)];
                     while sys::readable_or_hung_up(&[self.descriptor().borrowed()], 0)?[0] {
                         match self
                             .next_event()
@@ -464,17 +514,22 @@ impl<'r> Session<'r> {
                                 replies.clear();
                             }
                             Event::Data(bytes) => {
-                                let retry = self
+                                let retry = match self
                                     .accept_request(&bytes)
-                                    .map_err(DataFailure::into_error)?;
-                                if retry.kind != protocol::APP_ACTIVATE {
-                                    return Err(activation_failure(
-                                        restored
-                                            .activation
-                                            .input(Instant::now(), ActivationInput::Request)
-                                            .expect_err("an activation takes no request yet"),
-                                    ));
-                                }
+                                    .map_err(DataFailure::into_error)?
+                                {
+                                    Request::App(retry) if retry.kind == protocol::APP_ACTIVATE => {
+                                        retry
+                                    }
+                                    _ => {
+                                        return Err(activation_failure(
+                                            restored
+                                                .activation
+                                                .input(Instant::now(), ActivationInput::Request)
+                                                .expect_err("an activation takes no request yet"),
+                                        ));
+                                    }
+                                };
                                 if !matches!(
                                     restored
                                         .accept(retry.payload, Instant::now())
@@ -484,7 +539,7 @@ impl<'r> Session<'r> {
                                 ) {
                                     return Err(Errno::EPROTO);
                                 }
-                                replies.push(retry.request_id);
+                                replies.push((retry.request_id, self.v2));
                             }
                         }
                     }
@@ -494,10 +549,13 @@ impl<'r> Session<'r> {
                         .map_err(activation_failure)?;
                     (Some(retained), ready, replies)
                 }
-                ActivationAction::Ready(ready) => (None, ready, vec![request.request_id]),
+                ActivationAction::Ready(ready) => {
+                    (None, ready, vec![(request.request_id, self.v2)])
+                }
                 _ => return Err(Errno::EPROTO),
             };
-            for id in replies {
+            for (id, v2) in replies {
+                self.v2 = v2;
                 self.send_app(protocol::APP_READY, id, 0, &ready.encode())?;
             }
             self.connection.get_ref().deadline.set(None);
@@ -616,29 +674,63 @@ impl<'r> Session<'r> {
         acknowledged.map_err(|error| self.error(error))
     }
 
-    /// Decodes the NVXC request that a DATA payload carries, then returns the payload's bytes to
-    /// the receive window before the agent serves the request, as the C agent did.
+    /// Decodes the NVXC request that a DATA payload carries, of version 1 or 2, then returns the
+    /// payload's bytes to the receive window before the agent serves the request, as the C agent
+    /// did. The session answers in the request's version until it accepts another.
     pub(crate) fn accept_request<'a>(
         &mut self,
         payload: &'a [u8],
-    ) -> Result<protocol::AppFrame<'a>, DataFailure> {
+    ) -> Result<Request<'a>, DataFailure> {
         // A DATA payload has at most `OUTER_MAX_PAYLOAD` bytes, so its length fits either type.
         let status = payload.len() as i32;
-        let frame = protocol::decode_app(payload)
-            .map_err(|_| data_failure(DataFailureKind::Application, status))?;
-        if frame.request_id == 0 || frame.status != 0 {
-            return Err(data_failure(DataFailureKind::Application, status));
+        let streams = payload.get(4) == Some(&v2::VERSION);
+        let request = if streams {
+            v2::Frame::decode(payload)
+                .ok()
+                .map(|(request_id, frame)| match frame {
+                    v2::Frame::Stdin(bytes) => Request::Stdin(request_id, Some(bytes)),
+                    v2::Frame::StdinEnd => Request::Stdin(request_id, None),
+                    // Version 2 keeps version 1's header, and the codes of the kinds that both
+                    // have, which its decoder checked.
+                    _ => Request::App(protocol::AppFrame {
+                        kind: payload[5],
+                        request_id,
+                        status: 0,
+                        payload: &payload[protocol::APP_HEADER_LEN..],
+                    }),
+                })
+        } else {
+            protocol::decode_app(payload)
+                .ok()
+                .filter(|frame| frame.request_id != 0 && frame.status == 0)
+                .map(Request::App)
         }
+        .ok_or_else(|| data_failure(DataFailureKind::Application, status))?;
         let credited = self.connection.credit(payload.len() as u32);
         credited.map_err(|error| DataFailure {
             kind: DataFailureKind::Credit,
             status,
             error: self.error(error),
         })?;
-        Ok(frame)
+        self.v2 = streams;
+        Ok(request)
     }
 
-    /// Encodes and sends one application frame, in one DATA record.
+    /// Whether the session answers in version 2.
+    pub(crate) fn v2(&self) -> bool {
+        self.v2
+    }
+
+    /// Answers in version 2, or in version 1, such as an execution's frames after a control
+    /// request of its own version.
+    pub(crate) fn answer_in(&mut self, v2: bool) {
+        self.v2 = v2;
+    }
+
+    /// Encodes and sends one application frame, in one DATA record, in the session's version.
+    ///
+    /// In version 2, `READY` starts with the protocol version, an `ERROR` of the `busy` category
+    /// is `BUSY`, and an `EXIT` names its outcome as version 1 does.
     pub(crate) fn send_app(
         &mut self,
         kind: u8,
@@ -646,15 +738,72 @@ impl<'r> Session<'r> {
         status: i32,
         payload: &[u8],
     ) -> Result<(), Errno> {
-        if protocol::APP_HEADER_LEN
-            .checked_add(payload.len())
-            .is_none_or(|length| length > OUTER_MAX_PAYLOAD)
-        {
-            return Err(Errno::EMSGSIZE);
-        }
-        let frame = protocol::encode_app(kind, request_id, status, payload);
+        let frame = if self.v2 {
+            let frame = match kind {
+                APP_READY => v2::Frame::Ready {
+                    version: v2::VERSION,
+                    activation: payload,
+                },
+                APP_STDOUT => v2::Frame::Stdout(payload),
+                APP_STDERR => v2::Frame::Stderr(payload),
+                APP_EXIT => v2::Frame::Exit {
+                    status,
+                    outcome: outcome(payload),
+                },
+                APP_STOPPED => v2::Frame::Stopped,
+                APP_ERROR if payload == protocol::BUSY.as_bytes() => v2::Frame::Busy,
+                APP_ERROR => v2::Frame::Error {
+                    status,
+                    category: payload,
+                },
+                _ => return Err(Errno::EINVAL),
+            };
+            frame.encode(request_id).map_err(|_| Errno::EMSGSIZE)?
+        } else {
+            if protocol::APP_HEADER_LEN
+                .checked_add(payload.len())
+                .is_none_or(|length| length > OUTER_MAX_PAYLOAD)
+            {
+                return Err(Errno::EMSGSIZE);
+            }
+            protocol::encode_app(kind, request_id, status, payload)
+        };
         let sent = self.connection.send(&frame);
         sent.map_err(|error| self.error(error))
+    }
+
+    /// Acknowledges `count` bytes written into the standard input of the execution of
+    /// `request_id`, in version 2.
+    pub(crate) fn send_ack(&mut self, request_id: u64, count: u32) -> Result<(), Errno> {
+        let frame = v2::Frame::StdinAck(count)
+            .encode(request_id)
+            .map_err(|_| Errno::EINVAL)?;
+        let sent = self.connection.send(&frame);
+        sent.map_err(|error| self.error(error))
+    }
+
+    /// Streams, while an execution of version 2 runs: every record goes through the send queue,
+    /// which never waits for the console, and which the next record sent without streaming
+    /// follows.
+    pub(crate) fn stream(&self, on: bool) {
+        self.connection.get_ref().queueing.set(on);
+    }
+
+    /// Whether the send queue holds [`SEND_QUEUE_BYTES`], so that the agent reads no more of an
+    /// execution's output.
+    pub(crate) fn queue_full(&self) -> bool {
+        self.connection.get_ref().queue.borrow().len() >= SEND_QUEUE_BYTES
+    }
+
+    /// Whether the send queue holds bytes, so that the agent polls the console writable.
+    pub(crate) fn queued(&self) -> bool {
+        !self.connection.get_ref().queue.borrow().is_empty()
+    }
+
+    /// Writes as much of the send queue as the console takes without waiting.
+    pub(crate) fn send_queued(&mut self) -> Result<(), Errno> {
+        let sent = self.connection.get_ref().send_queued();
+        sent.map_err(|error| self.error(GuestConnectionError::Io(error)))
     }
 
     /// Sends one application ERROR frame with an ASCII category.
@@ -703,6 +852,17 @@ impl<'r> Session<'r> {
 fn activation_failure(error: impl std::fmt::Display) -> Errno {
     init::report_activation(error);
     Errno::EPROTO
+}
+
+/// Returns version 2's outcome of the execution whose version-1 `EXIT` category is `category`.
+fn outcome(category: &[u8]) -> v2::Outcome {
+    match category {
+        b"exit" => v2::Outcome::Exit,
+        b"signal" => v2::Outcome::Signal,
+        b"timeout" => v2::Outcome::Timeout,
+        b"cancelled" => v2::Outcome::Cancelled,
+        _ => v2::Outcome::Failed,
+    }
 }
 
 /// Returns the stage at which the C agent reported a record that the session refused, or `None`

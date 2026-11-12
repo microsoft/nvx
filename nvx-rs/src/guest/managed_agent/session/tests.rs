@@ -78,6 +78,19 @@ impl Peer {
         self.host_sequence += 1;
     }
 
+    fn send_v2(&mut self, id: u64, frame: v2::Frame<'_>) {
+        let bytes = frame.encode(id).unwrap();
+        let record = encode_outer(
+            OUTER_DATA,
+            &INSTANCE,
+            self.epoch,
+            self.host_sequence,
+            &bytes,
+        );
+        self.stream.write_all(&record.unwrap()).unwrap();
+        self.host_sequence += 1;
+    }
+
     fn credit(&mut self) {
         let (header, _) = self.read();
         assert_eq!(header.record_type, OUTER_CREDIT);
@@ -142,9 +155,9 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
     let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
     let ready = crate::activation::ReadyActivation::of(&record).encode();
     let bytes = activate_bytes(&mut session, &mut peer, 61, &payload);
-    let request = session
-        .accept_request(&bytes)
-        .unwrap_or_else(|_| panic!("valid activate"));
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid activate");
+    };
     peer.credit();
     let retained = session
         .activate_with(request, |restored, _, accepted, workload| {
@@ -167,9 +180,9 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
     assert!(!session.rootless());
     assert_eq!(session.connection.get_ref().deadline.get(), None);
     let bytes = activate_bytes(&mut session, &mut peer, 63, &payload);
-    let request = session
-        .accept_request(&bytes)
-        .unwrap_or_else(|_| panic!("valid retry"));
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid retry");
+    };
     peer.credit();
     assert!(
         session
@@ -185,6 +198,37 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
     assert_eq!(
         session.activation_state_for_test(),
         Some(ActivationState::Started)
+    );
+}
+
+#[test]
+fn joined_activations_get_ready_in_their_own_versions() {
+    let (mut session, mut peer, payload) = restored();
+    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+    let ready = crate::activation::ReadyActivation::of(&record).encode();
+    let bytes = activate_bytes(&mut session, &mut peer, 61, &payload);
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid activate");
+    };
+    peer.credit();
+    let retained = session.activate_with(request, |_, _, _, _| {
+        peer.send_v2(62, v2::Frame::Activate(&payload));
+        Ok("one applied space")
+    });
+    assert_eq!(retained.unwrap(), Some("one applied space"));
+    peer.credit();
+    peer.app(APP_READY, 61, 0, &ready);
+    let (_, frame) = peer.read();
+    let activation = ready.as_slice();
+    assert_eq!(
+        v2::Frame::decode(&frame).unwrap(),
+        (
+            62,
+            v2::Frame::Ready {
+                version: v2::VERSION,
+                activation
+            }
+        )
     );
 }
 
@@ -229,9 +273,9 @@ fn changed_record_or_workload_bytes_during_application_fail_without_ready() {
             changed.extend(record.encode());
         }
         let bytes = activate_bytes(&mut session, &mut peer, 64, &payload);
-        let request = session
-            .accept_request(&bytes)
-            .unwrap_or_else(|_| panic!("valid activate"));
+        let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+            panic!("valid activate");
+        };
         peer.credit();
         let result = session.activate_with(request, |_, _, _, _| {
             peer.send(protocol::APP_ACTIVATE, 65, &changed);
@@ -252,9 +296,9 @@ fn changed_record_or_workload_bytes_during_application_fail_without_ready() {
 fn failed_application_never_reports_ready_or_admits_root_dependent_work() {
     let (mut session, mut peer, payload) = restored();
     let bytes = activate_bytes(&mut session, &mut peer, 66, &payload);
-    let request = session
-        .accept_request(&bytes)
-        .unwrap_or_else(|_| panic!("valid activate"));
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid activate");
+    };
     peer.credit();
     assert_eq!(
         session
@@ -283,9 +327,9 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     let (mut session, mut peer, payload) = restored();
     assert_eq!(session.activation_status(), None);
     let bytes = activate_bytes(&mut session, &mut peer, 68, &payload);
-    let request = session
-        .accept_request(&bytes)
-        .unwrap_or_else(|_| panic!("valid activate"));
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid activate");
+    };
     peer.credit();
     let failure = crate::Error::io("the network settings cannot be applied").with_source(
         crate::guest::activation::ApplyError::Network {
@@ -306,9 +350,9 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     // A request while the record applies fails the activation as the protocol's failure.
     let (mut session, mut peer, payload) = restored();
     let bytes = activate_bytes(&mut session, &mut peer, 69, &payload);
-    let request = session
-        .accept_request(&bytes)
-        .unwrap_or_else(|_| panic!("valid activate"));
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid activate");
+    };
     peer.credit();
     let result = session.activate_with(request, |_, _, _, _| {
         peer.send(protocol::APP_PING, 70, &[]);
@@ -319,6 +363,25 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
         session.activation_state_for_test(),
         Some(ActivationState::Failed)
     );
+    assert_eq!(
+        session.activation_status(),
+        Some(protocol::status::ACTIVATION_PROTOCOL)
+    );
+}
+
+#[test]
+fn standard_input_while_the_record_applies_fails_the_activation_as_the_protocols_failure() {
+    let (mut session, mut peer, payload) = restored();
+    let bytes = activate_bytes(&mut session, &mut peer, 71, &payload);
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid activate");
+    };
+    peer.credit();
+    let result = session.activate_with(request, |_, _, _, _| {
+        peer.send_v2(71, v2::Frame::Stdin(b"x"));
+        Ok(())
+    });
+    assert_eq!(result.err(), Some(Errno::EPROTO));
     assert_eq!(
         session.activation_status(),
         Some(protocol::status::ACTIVATION_PROTOCOL)
@@ -390,9 +453,9 @@ fn queue(
     else {
         panic!("the capture request is DATA");
     };
-    let request = session
-        .accept_request(&bytes)
-        .unwrap_or_else(|_| panic!("valid frame"));
+    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
+        panic!("valid frame");
+    };
     let accepted = session.queue_capture(request, active).unwrap();
     peer.credit();
     accepted

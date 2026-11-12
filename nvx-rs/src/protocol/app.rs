@@ -49,10 +49,13 @@ pub(crate) mod workload {
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 #[cfg_attr(
-    not(test),
+    not(any(
+        test,
+        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+    )),
     expect(
         dead_code,
-        reason = "SL4.4b's guest loop and fake OpenVMM serve NVXC v2, and SL4.4c's host speaks it"
+        reason = "SL4.4b's fake OpenVMM serves NVXC v2, and SL4.4c's host speaks it"
     )
 )]
 pub(crate) mod v2;

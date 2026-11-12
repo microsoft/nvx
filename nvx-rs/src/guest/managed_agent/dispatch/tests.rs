@@ -225,6 +225,7 @@ fn read_outer(host: &mut UnixStream) -> (OuterHeader, Vec<u8>) {
 }
 
 mod runtime;
+mod streams;
 
 fn response(kind: u8, request_id: u64, status: i32, payload: &[u8]) -> Response {
     Response {
