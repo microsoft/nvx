@@ -1,6 +1,7 @@
 #![cfg(any(target_os = "linux", windows))]
 
 use std::error::Error as _;
+#[cfg(feature = "cli")]
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 
@@ -52,6 +53,7 @@ fn bind(endpoint: &str) -> Server {
     }
 }
 
+#[cfg(feature = "cli")]
 fn exchange(server: Server) {
     #[cfg(target_os = "linux")]
     let mut peer = server.accept().unwrap().0;
@@ -96,6 +98,7 @@ impl Drop for Sleeper {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn verified_and_legacy_connections_wait_for_the_owned_endpoint_and_keep_native_io() {
     let process = reference(std::process::id());
@@ -138,6 +141,7 @@ fn verified_and_legacy_connections_wait_for_the_owned_endpoint_and_keep_native_i
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn another_process_serving_the_endpoint_is_refused() {
     let vm = Sleeper::new();

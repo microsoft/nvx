@@ -136,7 +136,8 @@ registers them. `sandbox` and the control protocol belong to `nvx-rs`
 scenarios drive them as commands, compile egress policies with
 `nvx-rs egress compile`, and leave the control session to `nvx-rs`: the
 `managed-lifecycle` scenario builds OpenVMM's command line and runs the ignored
-`nvx-rs` test `tests/managed_lifecycle.rs`, which drives the guest, and the
+`nvx-rs` unit test `src/host/session/tests/managed_lifecycle.rs`, which drives
+the guest, and the
 `vm-lifecycle` scenario runs the ignored test `tests/vm_lifecycle.rs`, which
 drives a VM through the public API of `nvx`. Add no
 Python client of the control protocol, lifecycle, or egress logic.
