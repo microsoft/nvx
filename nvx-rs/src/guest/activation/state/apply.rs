@@ -1,7 +1,8 @@
 //! Application of an accepted activation record, without starting a process.
 //!
-//! This is unstable internal reference code of the guest's space. The root owns the VM-wide
-//! view's binds; the caller owns ingress and the admission of its workloads.
+//! This module is part of the guest's space, nvx-init's internal reference code, private to the
+//! crate, as the [activation](crate::guest::activation#activation) describes. The root owns the
+//! VM-wide view's binds; the caller owns ingress and the admission of its workloads.
 
 #[cfg(test)]
 mod tests;
@@ -25,21 +26,20 @@ use crate::guest::view::{self, MachineId};
 pub use crate::guest::view::{MACHINE_ID_FILE, RESOLVER_FILE};
 
 /// The root inputs captured by a template, shared by its clones.
-#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RootTemplate {
+pub(crate) struct RootTemplate {
     /// The runtime directory beneath which the root and its view files are assembled.
-    pub runtime: PathBuf,
+    pub(crate) runtime: PathBuf,
     /// The distro device, whose placeholder a clone replaces with its image.
-    pub distro: Device,
+    pub(crate) distro: Device,
     /// The scratch device, unused by a record with a RAM upper.
-    pub scratch: Device,
+    pub(crate) scratch: Device,
     /// How long assembly waits for each device, never past the activation's deadline.
-    pub timeout: Duration,
+    pub(crate) timeout: Duration,
     /// The virtio-fs tag of the host filesystem device, as [`Devices::filesystem_tag`] names it.
-    pub filesystem_tag: String,
+    pub(crate) filesystem_tag: String,
     /// The template NIC's gateway, returned for the caller's ingress setup.
-    pub gateway: Option<Ipv4Addr>,
+    pub(crate) gateway: Option<Ipv4Addr>,
 }
 
 /// The applied root and VM-wide view, with the settings the caller needs for ingress.
@@ -48,9 +48,8 @@ pub struct RootTemplate {
 /// published listeners, starts and supervises ingress itself. The root owns every view bind,
 /// including one made before a later failure: its teardown removes them before its switch,
 /// and nothing unmounts them afterwards.
-#[doc(hidden)]
 #[derive(Debug)]
-pub struct Applied {
+pub(crate) struct Applied {
     /// The export descriptor, dropped before the root unless the caller takes it.
     export: Option<SourceRoot>,
     /// The root, which also owns the view's binds.
@@ -65,47 +64,46 @@ pub struct Applied {
 
 impl Applied {
     /// Returns the assembled root.
-    pub fn root(&self) -> &Root {
+    pub(crate) fn root(&self) -> &Root {
         &self.root
     }
 
     /// Returns the assembled root to mount runtime filesystems and shares in, and to switch into.
-    pub fn root_mut(&mut self) -> &mut Root {
+    pub(crate) fn root_mut(&mut self) -> &mut Root {
         &mut self.root
     }
 
     /// Returns the proxy endpoint for the caller to tell its workloads.
-    pub fn proxy(&self) -> Option<&str> {
+    pub(crate) fn proxy(&self) -> Option<&str> {
         self.proxy.as_deref()
     }
 
     /// Returns the record's publication, or unpublished when it has no network.
-    pub fn publication(&self) -> Publication {
+    pub(crate) fn publication(&self) -> Publication {
         self.publication
     }
 
     /// Returns the template NIC's gateway for the caller's ingress setup.
-    pub fn gateway(&self) -> Option<Ipv4Addr> {
+    pub(crate) fn gateway(&self) -> Option<Ipv4Addr> {
         self.gateway
     }
 
     /// Takes the export's root, whose descriptor must close before the root's teardown.
-    pub fn take_export(&mut self) -> Option<SourceRoot> {
+    pub(crate) fn take_export(&mut self) -> Option<SourceRoot> {
         self.export.take()
     }
 
     /// Closes the export descriptor, then tears the root down, including its view binds.
     ///
     /// As [`Root::teardown`] specifies, a switched root refuses teardown and unmounts nothing.
-    pub fn teardown(self) -> Result<(), AppliedTeardownError> {
+    pub(crate) fn teardown(self) -> Result<(), AppliedTeardownError> {
         teardown_with(&mut LiveSystem, self.export, self.root)
     }
 }
 
 /// Why an applied root's teardown failed: the root's teardown, which includes its view binds.
-#[doc(hidden)]
 #[derive(Debug)]
-pub struct AppliedTeardownError {
+pub(crate) struct AppliedTeardownError {
     /// The root's teardown failure, including its view binds.
     root: Option<TeardownError>,
 }
@@ -131,8 +129,7 @@ impl std::error::Error for AppliedTeardownError {}
 /// The result reports the record's publication and the template's gateway. Published listeners
 /// require a gateway, but the caller, not this application, starts and supervises ingress.
 /// Each execution supplies its own identity; application reads no account database.
-#[doc(hidden)]
-pub fn apply(
+pub(crate) fn apply(
     record: &ActivationRecord,
     template: &RootTemplate,
     deadline: Option<Instant>,
@@ -148,10 +145,9 @@ pub fn apply(
 }
 
 /// Why applying an activation record failed.
-#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum ApplyError {
+pub(crate) enum ApplyError {
     /// The distro device did not appear, or its GPT partition table could not be reread.
     Gpt(root::Error),
     /// Assembly failed, including a refusal of a non-fresh upper.
@@ -223,10 +219,9 @@ impl std::error::Error for ApplyError {
 }
 
 /// Why an activation's network settings could not be applied.
-#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum NetworkError {
+pub(crate) enum NetworkError {
     /// The resolver file could not be written.
     Write(io::Error),
     /// The resolver bind retained by the root failed.

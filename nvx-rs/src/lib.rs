@@ -41,8 +41,8 @@
 //!   and the capture of a template's guest, which repairs its clones (`guest::snapshot`), and
 //!   their activation (`guest::activation`). The crate's `nvx-*` guest binaries run the programs.
 //!   NVX's own guest space, which assembles a layered root, reads GPT disks, mounts host mappings,
-//!   and applies a clone's activation, is internal reference code: hidden, unstable, and
-//!   crate-private once nothing outside NVX uses it.
+//!   and applies a clone's activation, is nvx-init's internal reference code, private to the
+//!   crate.
 //!
 //! # Example
 //!

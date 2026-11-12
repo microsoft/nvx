@@ -27,7 +27,7 @@ const VIRTIOFS: &[u8] = b"virtiofs";
 
 /// What a child of an aggregate share is: a host directory, or a host file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum ShareKind {
+pub(crate) enum ShareKind {
     /// A directory, bound at a directory of the root.
     #[default]
     Directory,
@@ -47,22 +47,22 @@ impl ShareKind {
 
 /// A child of an aggregate share: an entry of the aggregate, bound at a target in the root.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ShareChild {
+pub(crate) struct ShareChild {
     /// The name of the child's entry in the aggregate: letters, digits, `.`, `_`, and `-`, other
     /// than `.` and `..`.
-    pub name: String,
+    pub(crate) name: String,
     /// The absolute path in the root at which the child is bound.
-    pub target: PathBuf,
+    pub(crate) target: PathBuf,
     /// Whether the workload may write the child.
-    pub access: Access,
+    pub(crate) access: Access,
     /// What the child is.
-    pub kind: ShareKind,
+    pub(crate) kind: ShareKind,
 }
 
 /// Why a live share, or the host export, was refused before anything was mounted for it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum ShareRefusal {
+pub(crate) enum ShareRefusal {
     /// The virtio-fs tag is not a nonempty name of letters, digits, `_`, and `-`.
     Tag(String),
     /// An aggregate has no children.
@@ -164,7 +164,12 @@ impl Root {
     ///
     /// A failure once the target passed its checks latches the root, and unmounts the device from
     /// `staging`, or leaves it there for the teardown if that unmount fails too.
-    pub fn mount_share(&mut self, tag: &str, target: &Path, access: Access) -> Result<(), Error> {
+    pub(crate) fn mount_share(
+        &mut self,
+        tag: &str,
+        target: &Path,
+        access: Access,
+    ) -> Result<(), Error> {
         let mount = Mount::Share {
             tag: tag.to_owned(),
             target: target.to_owned(),
@@ -199,7 +204,7 @@ impl Root {
     ///
     /// A root has one aggregate at most, since every aggregate is mounted at the same place: once
     /// the root has mounted one, whether or not its children were all bound, another is refused.
-    pub fn mount_aggregate(
+    pub(crate) fn mount_aggregate(
         &mut self,
         tag: &str,
         access: Access,
@@ -272,7 +277,7 @@ impl Root {
     /// A root has one export at most, since every export is mounted at the same place: once the
     /// root has mounted one, another is refused. A failure once the tag passed its check latches
     /// the root; an export that is mounted by then stays for the teardown.
-    pub fn mount_export(&mut self, tag: &str, access: Access) -> Result<SourceRoot, Error> {
+    pub(crate) fn mount_export(&mut self, tag: &str, access: Access) -> Result<SourceRoot, Error> {
         let export = Mount::Export {
             tag: tag.to_owned(),
         };

@@ -61,9 +61,8 @@ nvx-init's time daemon runs for the VM's life.
 NVX's space is internal reference code that nvx-init implements, not public
 API: the modules that hold it, `guest::root`, `guest::view`, `guest::gpt`, the
 mapper of `guest::mappings`, and `guest::activation::apply` with its types,
-are hidden from the documentation, unstable, and become private to the crate
-once nothing outside NVX uses them. Another init builds its own space, or
-adapts this code; it builds on no space module of `nvx`.
+are private to the crate. Another init builds its own space, or adapts this
+code; it builds on no space module of `nvx`.
 
 The space's inputs are public contracts:
 

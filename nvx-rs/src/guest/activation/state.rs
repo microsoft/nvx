@@ -3,7 +3,7 @@
 //! the host in one Activate, and [`apply`](fn@apply), which activates the clone's root and workload
 //! with that configuration, as the [module](super#activation) describes.
 
-mod apply;
+pub(crate) mod apply;
 #[cfg(test)]
 mod tests;
 
@@ -17,10 +17,8 @@ use crate::activation::{
     ActivationError, ActivationRecord, ExpectedResources, ReadyActivation, TransactionId,
 };
 
-pub use self::apply::{
-    Applied, AppliedTeardownError, ApplyError, MACHINE_ID_FILE, NetworkError, RESOLVER_FILE,
-    RootTemplate, apply,
-};
+pub(crate) use self::apply::{Applied, ApplyError, RootTemplate, apply};
+pub use self::apply::{MACHINE_ID_FILE, RESOLVER_FILE};
 
 /// The activation of a repaired clone: the state machine, without I/O and independent of any
 /// framing, of the clone's control session, which takes the clone's configuration from the host
@@ -29,8 +27,8 @@ pub use self::apply::{
 ///
 /// The adapter passes it what it receives on the session, each an [`ActivationInput`], through
 /// [`input`](Self::input), and does what the [`ActivationAction`] that it returns says. The
-/// adapter applies the record of the Activate that the activation accepted, with
-/// `apply`, whose waits end by the activation's [`deadline`](Self::deadline), passes
+/// adapter applies the record of the Activate that the activation accepted, in its own space,
+/// by the activation's [`deadline`](Self::deadline), passes
 /// the activation what the session received while the application ran, which came before Ready,
 /// then reports the result through [`complete`](Self::complete), whose Ready answers the Activate
 /// and each retry that [joined](ActivationAction::Join) it, and it reports the start of the
@@ -54,13 +52,11 @@ pub use self::apply::{
 /// # Example
 ///
 /// ```no_run
+/// use std::error::Error;
 /// use std::time::Instant;
 ///
-/// use nvx::activation::ReadyActivation;
-/// use nvx::guest::activation::{
-///     self, Activation, ActivationAction, ActivationFailure, ActivationInput,
-///     Applied, RootTemplate,
-/// };
+/// use nvx::activation::{ActivationRecord, ReadyActivation};
+/// use nvx::guest::activation::{Activation, ActivationAction, ActivationFailure, ActivationInput};
 ///
 /// /// What the agent's control session received from the host, in the agent's own framing.
 /// enum Received {
@@ -87,12 +83,16 @@ pub use self::apply::{
 ///     /// Queues the acknowledgement of the session's reset, and abandons the earlier epoch's
 ///     /// work.
 ///     fn acknowledge(&mut self);
-///     /// Keeps the clone's activated root and workload: the identity, if any, in which it runs
-///     /// every execution, with the hostname of every execution, the root, with the runtime's
-///     /// binds on it, which `Applied::teardown` removes before it tears the root down, and the
-///     /// export's root, which `Applied::take_export` hands over, from which it maps the host's
-///     /// mapping table.
-///     fn keep(&mut self, applied: Applied);
+///     /// Activates the clone's root and workload with the settings of `record` in the agent's
+///     /// own space, whose waits for the devices end by `deadline`, and keeps them: the identity,
+///     /// if any, in which it runs every execution, with the hostname of every execution, the
+///     /// root, and the export's root, from which it maps the host's mapping table. nvx-init's
+///     /// space, NVX's internal reference code, is private to `nvx`.
+///     fn activate(
+///         &mut self,
+///         record: &ActivationRecord,
+///         deadline: Option<Instant>,
+///     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 ///     /// Queues Ready, which reports `activation` beside the agent's own identities, such as its
 ///     /// build.
 ///     fn ready(&mut self, activation: ReadyActivation);
@@ -101,13 +101,8 @@ pub use self::apply::{
 ///     fn serve(&mut self, message: Vec<u8>) -> bool;
 /// }
 ///
-/// /// Serves the control session of the clone whose activation is `activation`, and whose
-/// /// template captured `template`, the inputs of its root's assembly, until it fails.
-/// fn serve(
-///     agent: &mut impl Agent,
-///     template: &RootTemplate,
-///     mut activation: Activation,
-/// ) -> Result<(), ActivationFailure> {
+/// /// Serves the control session of the clone whose activation is `activation`, until it fails.
+/// fn serve(agent: &mut impl Agent, mut activation: Activation) -> Result<(), ActivationFailure> {
 ///     loop {
 ///         let Some(received) = agent.receive(activation.deadline()) else {
 ///             // The deadline passed, unless the clone is ready, which ends the activation.
@@ -122,10 +117,10 @@ pub use self::apply::{
 ///                 // effects start here. The
 ///                 // application waits for the devices until the activation's deadline at the
 ///                 // latest, so that it ends by then.
-///                 let applied = activation::apply(&record, template, activation.deadline());
+///                 let applied = agent.activate(&record, activation.deadline());
 ///                 // What the host sent meanwhile came before Ready: a retry of the Activate,
 ///                 // byte for byte, joins the application, and anything else, a reset included,
-///                 // fails the activation, which drops what the application assembled.
+///                 // fails the activation.
 ///                 let mut joined = 0;
 ///                 while let Some(received) = agent.receive(Some(Instant::now())) {
 ///                     let action = activation.input(Instant::now(), input(&received))?;
@@ -133,14 +128,8 @@ pub use self::apply::{
 ///                         joined += 1;
 ///                     }
 ///                 }
-///                 let ready = match applied {
-///                     Ok(applied) => {
-///                         agent.keep(applied);
-///                         activation.complete(Instant::now(), Ok(()))?
-///                     }
-///                     // A failed application fails the activation.
-///                     Err(error) => activation.complete(Instant::now(), Err(error.into()))?,
-///                 };
+///                 // A failed application fails the activation.
+///                 let ready = activation.complete(Instant::now(), applied)?;
 ///                 // Ready answers the Activate, and each retry that joined its application.
 ///                 for _ in 0..=joined {
 ///                     agent.ready(ready);
@@ -484,8 +473,8 @@ pub enum ActivationAction {
     /// The activation took the input, which needs nothing more of the adapter.
     Continue,
     /// The activation accepted the host's Activate, whose record decoded and validated, and
-    /// which nothing before had any side effect of: the adapter applies the record with
-    /// `apply`, which activates the root and the workload with its settings, passes
+    /// which nothing before had any side effect of: the adapter applies the record in its own
+    /// space, which activates the root and the workload with its settings, passes
     /// the activation what the session received meanwhile, which came before Ready, then reports
     /// the result to [`Activation::complete`].
     Apply(Box<ActivationRecord>),

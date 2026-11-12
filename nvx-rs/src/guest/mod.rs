@@ -16,14 +16,13 @@
 //! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
 //!
 //! The guest's space, the root that an init assembles and what it mounts in it, is each init's
-//! own. NVX's own space is internal reference code, which NVX's guest programs use: it is hidden
-//! from this documentation and unstable, and it becomes crate-private once nothing outside NVX
-//! uses it. It is `root`, which assembles a layered root, mounts live shares in it,
+//! own. NVX's own space is nvx-init's internal reference code, private to the crate, which NVX's
+//! guest programs use. It is `root`, which assembles a layered root, mounts live shares in it,
 //! and tears it down; `view`, which sets the VM's hostname,
 //! machine ID, and resolver file, whose binds the root owns; `gpt`, which reads the partition
 //! table of a GPT disk that the kernel attached as a block device; the mapper of `mappings`, which
 //! mounts host mappings beneath the descriptors of the roots that it names; and the activation's
-//! application, `activation::apply` and its types, with which a clone assembles its root and
+//! application, with which a clone assembles its root and
 //! applies its VM-wide view without starting a process. The contracts that every space reads
 //! stay public: the mapping values and [`MappingTable`](mappings::MappingTable), and the tokens
 //! and records of [`protocol`](crate::protocol) and [`activation`](crate::activation).
@@ -133,8 +132,7 @@ pub mod device_io;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod exit;
-#[doc(hidden)]
-pub mod gpt;
+pub(crate) mod gpt;
 #[doc(hidden)]
 pub mod ingress;
 #[cfg(target_arch = "x86_64")]
@@ -149,8 +147,7 @@ pub mod mappings;
 pub mod mmio_write;
 pub mod nvxs;
 pub mod reseed;
-#[doc(hidden)]
-pub mod root;
+pub(crate) mod root;
 #[cfg(target_arch = "x86_64")]
 pub mod snapshot;
 pub mod terminal;
@@ -159,5 +156,4 @@ pub mod time;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod time_probe;
-#[doc(hidden)]
-pub mod view;
+pub(crate) mod view;

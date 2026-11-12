@@ -333,7 +333,7 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     peer.credit();
     let failure = crate::Error::io("the network settings cannot be applied").with_source(
         crate::guest::activation::ApplyError::Network {
-            error: crate::guest::activation::NetworkError::Gateway,
+            error: crate::guest::activation::state::apply::NetworkError::Gateway,
             teardown: None,
         },
     );

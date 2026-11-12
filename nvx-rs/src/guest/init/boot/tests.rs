@@ -278,7 +278,7 @@ fn an_expired_activation_cannot_begin_or_advance_to_another_space_step() {
 #[test]
 fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
     use crate::activation::{ActivationRecord, Configuration, RestoreSection, TransactionId};
-    use crate::guest::activation::NetworkError;
+    use crate::guest::activation::state::apply::NetworkError;
     use crate::protocol::status::*;
 
     let now = Instant::now();

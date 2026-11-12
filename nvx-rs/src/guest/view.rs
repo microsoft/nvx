@@ -1,8 +1,8 @@
 //! The VM-wide hostname, machine ID, and resolver file of an assembled root.
 //!
-//! This is unstable internal reference code of the guest's space, hidden from documentation;
-//! it becomes crate-private once nothing outside NVX uses it. The root owns the view's binds:
-//! its teardown removes them before its switch, and nothing unmounts them afterwards.
+//! This module is part of the guest's space, nvx-init's internal reference code, private to the
+//! crate. The root owns the view's binds: its teardown removes them before its switch, and
+//! nothing unmounts them afterwards.
 
 use std::fs;
 use std::io;
@@ -32,7 +32,7 @@ pub(crate) const RESOLVER_TARGET: &str = "/etc/resolv.conf";
 /// The machine ID visible at `/etc/machine-id`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum MachineId {
+pub(crate) enum MachineId {
     /// The image's own `/etc/machine-id`, left untouched.
     #[default]
     Image,
@@ -46,7 +46,7 @@ impl MachineId {
     /// whatever the umask: 32 lowercase hexadecimal digits and a newline.
     ///
     /// An existing file or symbolic link fails with `AlreadyExists` and is left alone.
-    pub fn generate(path: impl Into<PathBuf>) -> io::Result<Self> {
+    pub(crate) fn generate(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         let mut id = [0u8; 16];
         getrandom::fill(&mut id).map_err(|error| {
@@ -84,7 +84,7 @@ impl MachineId {
 /// to set the hostname and mount, and refuses an invalid hostname, a switched or failed root,
 /// or a root whose view has already been attempted. System failures have kind `Io`; refusals
 /// have kind `Unsupported`. An error does not restore the previous hostname or remove files.
-pub fn apply(root: &mut Root, view: &View, dns: Option<IpAddr>) -> Result<MachineId> {
+pub(crate) fn apply(root: &mut Root, view: &View, dns: Option<IpAddr>) -> Result<MachineId> {
     apply_staged(root, view, dns).map_err(ApplyFailure::into_error)
 }
 
