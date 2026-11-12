@@ -767,6 +767,7 @@ run's results or stopped, after persisting the others.
 
 ```text
 python3 scripts/nvx.py check-openvmm-ci
+    [--architecture {x86_64,aarch64}]
     [--revision SHA]
     [--wait-minutes MINUTES]
     [--summary PATH]
@@ -779,7 +780,13 @@ and OpenVMM CI workflows of `microsoft/openvmm` whose head is the revision,
 with the latest attempt of each of their jobs, and requires each job that
 covers NVX's use of OpenVMM, the x86-64 Linux and Windows unit tests and the
 VMM tests on KVM, MSHV, and Windows, to have passed in at least one of those
-runs. It ignores the runs of a pull request from a fork, which run the fork's
+runs. The default `x86_64` selection retains those six jobs.
+`--architecture aarch64` also requires the existing native Windows ARM
+unit and VMM jobs, `unit tests [aarch64-windows]` and
+`run vmm-tests [aarch64-windows]`, without removing any x86 requirement.
+The shared CI pipeline selects this eight-job coverage. Missing, skipped,
+pending or failed ARM evidence cannot pass. This selection does not change
+workflow or repository trust: it ignores the runs of a pull request from a fork, which run the fork's
 copy of the workflows, and the workflows' other jobs. A job is pending while a
 run that has not finished may still pass it, failed when every run that ran it
 finished it without passing, and missing when no run will run it. With
@@ -1144,9 +1151,12 @@ python3 scripts/nvx.py test-microvm
     [--architecture {x86_64,aarch64}]
     [--guest {alpine,ubuntu,azurelinux}]
     [--scenario SCENARIO]...
+    [--cold-only]
     [--debug-kernel]
     [--shard INDEX/COUNT]
     [--processors {1,2,4,8} ...]
+    [--managed-root {initramfs,scratch,ram}]
+    [--start-stop-cycles COUNT]
     [--memory-mib MIB]
     [--timeout SECONDS]
     [--output-dir PATH]
@@ -1181,6 +1191,24 @@ selection and uses `build/aarch64/Image`, matching initramfs and managed-layer
 inputs; it does not qualify every scenario listed here for ARM. Public sandbox
 scenarios retain the existing one-VP CLI contract; `--processors` does not add
 a sandbox processor option or change saved configurations.
+`--cold-only` requires explicit scenario selection and rejects cases without a
+maintained cold projection. It retains all cold assertions and preboot refusals
+of `filesystem-policy`, `filesystem-shares`, and `ipv6-egress-policy`, omitting
+only their snapshot portions. `interrupt-map` retains every device's driver,
+traffic, trigger, and exclusive-handler checks; ARM additionally checks the
+DT's SPI index and rising-edge cells against the GIC hardware INTID, not Linux's
+dynamically allocated IRQ number. ARM requires `--cold-only` for these mixed
+scenarios. Snapshot-only cases are not silently replaced or reported as passing.
+`virtio-net` retains the original x86 fixed-window command-line assertion,
+without adding an IRQ-number constraint; ARM checks the MMIO resource and
+DT binding.
+The maintained cold inventory includes `command-line-limit`, whose effective
+command line uses the shared 2,048-byte binding on both ISAs. The complete
+inventory and explicit deferral reasons are
+`COLD_ONLY_SCENARIOS` and `COLD_DEFERRED_SCENARIOS` in the existing runner.
+`console-exit` is a restore/backpressure case, not a cold case. The guest's
+`time-abi-conformance` exhaustive X1-X6 command and the host-correction fault
+hooks remain x86-only; they are not renamed or reported as ARM passes.
 `--shard INDEX/COUNT`, such as `1/2`, runs shard INDEX of the COUNT shards of
 the default Alpine suite on the default kernel, the scenarios of a run without
 `--scenario` but the public sandbox scenarios, which CI runs in its guest and
@@ -1223,6 +1251,37 @@ the boot to the managed agent, and runs the ignored `nvx-rs` test
 `tests/managed_lifecycle.rs` with Cargo, which starts OpenVMM with the
 scenario's command line and drives the guest's control session; the scenario
 then checks OpenVMM's outcome report and the guest console. The
+default managed fixture remains a single-vCPU initramfs boot. Explicit
+`--processors` counts also select its and `guest-boot`'s VP counts on ARM.
+On x86, both scenarios retain their one-VP execution even when explicit counts
+select SMP/restore tests, whose defaults remain 1, 2, 4 and 8.
+`--managed-root scratch` and `--managed-root ram` require `--guest ubuntu`
+and reuse its maintained EROFS
+layer and the same authenticated Rust test. Both make two cold boots per VP
+count: scratch requires absent/present previous state and a clean journal
+after each boot; RAM requires absent/absent state and attaches no scratch.
+Non-default fixture logs have separate VP/root/boot directories and refuse
+to overwrite existing evidence; select a fresh `--output-dir` for a rerun.
+
+`--start-stop-cycles COUNT` applies only to explicit `sandbox-lifecycle` or
+`sandbox-ram-upper` selections. It repeats clean Start/Stop of **one
+provisioned public one-VP sandbox**, without changing its public configuration.
+Scratch must retain the written state and a clean journal on each stop; the
+RAM upper must lose the preceding boot's write on each restart. RAM therefore
+requires at least two cycles. Omitting the option preserves the existing cases:
+one clean scratch cycle before its overlap/crash/recovery assertions, and two
+RAM starts. Explicit repetitions keep numbered cycle operations, runtime
+records, logs and outcomes; the existing identity/refusal/recovery cases still
+run and are not counted as clean repetition cycles. A failure is not retried.
+
+The shared `smp` probe retains the x86 APIC/LAPIC assertions. On ARM64 it
+checks the CPU's 64-bit DT affinity instead of an APIC ID, the architected
+timer's per-CPU interrupt progress instead of `LOC`, and reschedule/call IPIs
+instead of the x86 interrupt labels. Both retain online-count, flat
+package/core/thread topology, pinned worker rendezvous, bounded timer
+progress and warp assertions. `smp-lapic` remains explicitly x86-only.
+
+The
 `virtio-features` scenario boots a guest with every fixed virtio device: the
 NIC, the dormant host filesystem slot, both consoles, and both sandbox blocks.
 The guest reports, for each device, the base of its MMIO window, its virtio
@@ -1259,6 +1318,8 @@ names its kind. The first line, `run`, describes the run:
 | `schema`, `schema_version` | `nvx-microvm-durations` and `1`. The version changes only when a reader of the previous version would misread a report, not when a field is added. |
 | `started_at` | When the run and its `setup` started, in UTC, such as `2026-10-21T13:50:00.123Z` |
 | `guest`, `backend` | The `--guest` and the `--backend` |
+| `architecture` | The selected guest/counter ISA; reports without this field predate ARM64 and are x86-only inputs |
+| `scope` | `cold` with `--cold-only`, otherwise `full`; an omitted field denotes an older full-scope report |
 | `kernel` | `debug` with `--debug-kernel`, otherwise `default` |
 | `processors` | The `--processors` counts, without repeats |
 | `scenarios` | The selected scenarios |
@@ -1272,6 +1333,7 @@ follow one another without gaps, so they add up to the run's time:
   where the OS doesn't report that start, until the first scenario starts;
 - a `scenario` for each scenario execution, until the next one starts.
   `console-exit`, `smp`, and `smp-lapic` execute once per processor count;
+  managed lifecycle also records each selected VP and each layered cold boot;
 - `teardown`, which sums up the time ABI evidence and records the run's
   outcome.
 
@@ -1280,7 +1342,7 @@ Every span has its `started_at`, its `seconds`, rounded to the millisecond, its
 `SIGTERM`, and
 an `error`: for a failure, the exception's type and message, cut to 1,000
 characters, and otherwise `null`. A `scenario` record also has the
-`scenario`, the `guest`, `backend`, and `kernel`, and its `processors`: the
+`scenario`, the `guest`, `backend`, `architecture`, `scope`, and `kernel`, and its `processors`: the
 `--processors` counts that the execution covers, such as `[4]` for `smp` on 4
 vCPUs, the largest count for `time-abi-conformance`, all of them for
 `smp-snapshot` and `restore-processors`, those up to 4 for
@@ -1288,6 +1350,11 @@ vCPUs, the largest count for `time-abi-conformance`, all of them for
 take them. A failed run ends with the failed scenario's record and the
 `teardown`; a run that is killed keeps every record that it completed and has
 no `teardown`.
+
+Layered managed executions also record a `variant` naming their root mode,
+boot index and expected previous state. These are additive diagnostic fields,
+not changes to a sandbox or VM state format. Neither ARM64 nor cold-projection
+reports silently feed the existing full-scope x86 shard estimates.
 
 ### `plan-microvm-shards`
 
@@ -1334,6 +1401,7 @@ changed shard.
 ```text
 python3 scripts/nvx.py doctor
     --backend {kvm,mshv,whp}
+    [--architecture {x86_64,aarch64}]
     [--checks ID ...]
     [--openvmm PATH]
     [--kernel PATH]
@@ -1356,22 +1424,55 @@ check and the subset that CI runs.
 | Option | Default | Description |
 | --- | --- | --- |
 | `--backend {kvm,mshv,whp}` | required | Select the backend to qualify. |
+| `--architecture {x86_64,aarch64}` | native host ISA | Select the native counter and guest artifact ISA. Emulated-ISA qualification is refused; ARM64 requires WHP. |
 | `--checks ID ...` | `H1` to `H7` | Run only these checks, from `H1` to `H7`, in order. |
 | `--openvmm PATH` | `openvmm/target/release/openvmm[.exe]` | Select the OpenVMM binary for `H2`, `H3`, and `H6`. |
-| `--kernel PATH` | `build/vmlinux` | Select the guest kernel for `H3` and `H6`. |
-| `--initrd PATH` | `build/initramfs.cpio.gz` | Select the guest initramfs for `H3` and `H6`. |
-| `--cpu-fingerprint PATH` | `nvx-cpu-fingerprint-<backend>.json` in the probe directory | Select where `H2` writes OpenVMM's CPU fingerprint. |
-| `--no-openvmm` | off | Qualify without an OpenVMM binary. `H2` then checks the CPU identity and generation but not the CPU profile, and `--checks` must exclude `H3` and `H6`, which boot OpenVMM. |
+| `--kernel PATH` | `build/vmlinux`, or `build/aarch64/Image` on ARM64 | Select the guest kernel for `H3` and `H6`. |
+| `--initrd PATH` | `build/initramfs.cpio.gz`, or `build/aarch64/initramfs.cpio.gz` on ARM64 | Select the guest initramfs for `H3` and `H6`. |
+| `--cpu-fingerprint PATH` | `nvx-cpu-fingerprint-<backend>.json` in the probe directory | Select where x86 `H2` writes OpenVMM's CPU fingerprint. Explicit use on ARM is rejected, not redirected to another format. |
+| `--no-openvmm` | off | Qualify without an OpenVMM binary. x86 `H2` checks CPU identity/generation but not the profile; ARM `H2` remains nonpassing without admission evidence. Exclude `H3` and `H6`, which launch OpenVMM. |
 | `--ci-schedule` | off | Run `H4` and `H6` on CI's short schedules: 3 rate samples 1 s apart instead of 13 samples 10 s apart, and two warp-probe runs instead of five. |
 | `--probe-dir PATH` | `$RUNNER_TOOL_CACHE/nvx-host-time-probe`, or `build/host-time-probe` | Select the cache directory for the host probe, which the doctor builds with `rustc`. |
 | `--summary PATH` | none | Append a Markdown summary, for example to `$GITHUB_STEP_SUMMARY`. |
 | `--timeout SECONDS` | `120` | Set the seconds allowed for each probe or guest. `H4` gets its sampling window on top. |
+
+The host probe cache is ISA-specific. On ARM64, `H4` measures `CNTVCT_EL0`
+against the same host clock references and applies the same stability,
+uncertainty, correction and synchronization assertions as x86. Its native
+`CNTFRQ_EL0` observation is not VMM programming/readback or CPU-profile proof.
+The existing `tsc_hz` fact slots remain compatibility fields for counter rates.
+QPC and the architected counter may share an oscillator, so their agreement
+does not independently establish a UTC frequency or authority. Windows'
+programmed-adjustment mode alone does not establish whether UTC is
+synchronized; the retained published-status gate and `H7`'s source check
+remain distinct. Read-only NTP offset observations do not discipline Windows
+or substitute for those admission requirements.
+
+ARM `H2` and `H3` share one invocation of OpenVMM's existing experimental
+time ABI verifier when the selected OpenVMM supports its ARM
+report. They require a registered profile/digest, observed counter and address
+metadata, verified feature-bank and effective-ID admission, and
+`guest_started=false`; selected-contract INFO logs do not substitute. Legacy
+ARM `--cpu-fingerprint` remains unsupported. A VMM without the ARM verifier
+fails explicitly, rather than skipping or reinterpreting x86 fields.
+
+The verifier may create partition and VP objects, but returns before guest
+execution; its success is neither a claim of no VP allocation nor UTC
+authority. Both ISAs run only the selected checks; unselected checks remain
+unverified. Partial warp/counter evidence is not full host or UTC qualification,
+and any failed selected check fails the run. Local and CI checks use the same
+scenarios and assertions on any admitted native ARM64/WHP host. Profile
+identities and address requirements come from registered catalog data, counter
+frequency from native/admitted observations, and capacity from the host;
+the currently recorded Oryon results do not qualify other hardware.
 
 ### `test-runtime-adapter`
 
 ```text
 python3 scripts/nvx.py test-runtime-adapter
     --backend {kvm,mshv,whp}
+    [--architecture {x86_64,aarch64}]
+    [--cold-only]
     [--guest-agent PATH]
     [--check-only]
     [--cargo CARGO]
@@ -1394,6 +1495,9 @@ from `--guest-agent` (default
 `tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest`),
 and fails unless each of them ran and passed. `--check-only` checks the names
 alone, and needs neither a hypervisor nor the guest agent.
+The default x86 path retains its guest-agent file admission. Selecting ARM
+additionally requires a matching native Windows/WHP host and a static ARM ELF
+guest agent; runtime execution requires explicit `--cold-only`.
 
 ### `test-adversarial`
 

@@ -1014,8 +1014,82 @@ queueing, and the run without benchmarks 14.7, while 98 of the pool's 600
 jobs would have waited 2 minutes or more, at a p90 of 4.8 minutes. The WHP
 platform job then ends last in most runs that run the benchmarks.
 
+## ARM64 cold correctness
+
+The shared pipeline also declares native ARM64/WHP cold correctness. This is
+source wiring, **not evidence that NVX can use the runner pool or that its jobs
+have passed**. The existing OpenVMM `self-hosted`, `Windows`, `ARM64`,
+`Baremetal` pool is a possible reuse target; NVX access and the existing
+Network Service job/account, tool, ACL, time and cleanup checks must be verified
+there. The workflow does not register a runner or reconfigure a user's PC.
+
+The same Windows CLI build steps are shared by YAML anchor, with separate
+native x86 and ARM jobs and artifact identities; the x86 job still waits for
+no other job. The existing VMM build workflow accepts the ISA, and the existing
+guest action builds fresh ARM Docker exports on a native Linux ARM builder:
+`guest-aarch64-{kernel,alpine,ubuntu,ubuntu-distro}` under `build/aarch64`.
+The runtime adapter's real ARM musl guest agent is a separate artifact.
+ARM neither restores nor publishes x86 guest reuse/cache records, release
+catalogs or determinism evidence.
+
+`nvx-microvm-tests-whp-aarch64` calls the same correctness workflow with explicit
+cold scenarios, not the x86 snapshot shards. Its inventory covers every
+maintained cold scenario once, with separate blockless, EROFS/scratch and
+EROFS/RAM managed variants. PRs and merge groups use 1/8 VPs for boot, SMP and
+those managed variants; full scheduled/dispatched runs use 1/2/4/8. Other
+scenarios retain their existing VP contract, including public one-VP sandboxes.
+The cold cell uses 256 MiB and the managed fixtures 1 GiB; these selections are
+not claims of a maximum qualified memory. The separate adapter caller uses
+the existing complete registry and its declared cold capability projection.
+
+Layered managed fixtures use the same Alpine control initramfs as public
+sandboxes and the selected Ubuntu EROFS workload layer, not Ubuntu's interactive
+initramfs as the control guest. ARM device assertions retain each fixed MMIO
+window and interrupt requirement through Linux resources and DT bindings;
+x86 retains command-line discovery. SMP reads the CPU node's declared DT cell
+width rather than assuming a 64-bit `reg`. The cold projections, including
+private-network ingress, retain their traffic and policy assertions but defer
+the snapshot tail; the default x86 full cases still run those tails.
+
+The scheduled/dispatched serial job selects these existing cases:
+
+| Selection | Count and state lifetime |
+| --- | --- |
+| `guest-boot`, 1 VP | 50 cold boots, separate cycle evidence |
+| `guest-boot`, 8 VPs | 50 cold boots, separate cycle evidence |
+| `sandbox-lifecycle`, 1 VP | 25 complete cases, each with Deprovision and its existing negative/recovery assertions |
+| `sandbox-lifecycle --start-stop-cycles 10` | 10 clean Start/Stop cycles of one provisioned scratch sandbox |
+| `sandbox-ram-upper --start-stop-cycles 10` | 10 Start/Stop cycles of one provisioned RAM sandbox, checking reset after every stop |
+| `smp`, `managed-lifecycle` | Ordered 1/2/4/8-VP sequences in one job without rebooting the runner |
+
+These are case counts, not a fabricated total VM count: the public lifecycle
+case also exercises refused starts, overlap and crash recovery. The existing
+1,000-iteration shared-status race is unchanged. The shared workflow forwards
+ISA, scenarios, processors, memory, root and cycles, downloads only the guest
+components those selections read, and retains recursive per-cycle durations
+and distinct ISA/root/cell failure artifacts. No ARM duration partition has
+been measured; ARM cold reports cannot rebalance the existing full x86 shards.
+The shared argument binder runs directly with the native Python custom shell
+(`python` on Windows, `python3` on Linux), so self-hosted Windows runners need
+no Bash to validate the same inputs and emit the same JSON and step outputs.
+OS-guarded steps share one anchored script and environment, with literal shell
+commands rather than expressions in the workflow's shell field.
+
+ARM producer, CLI, VMM, cold and adapter results feed `Required status check`;
+the repetition result is required for full runs and explicitly skipped for
+PRs/merge groups. Existing H4 and selected-check policy remains: unselected H5/H7
+checks are unverified, not new ARM-only per-job prerequisites. Native CPU/time
+preflight and partial functional evidence are not full UTC or service-account
+qualification. ARM snapshots, the x86 exhaustive CPUID/MSR/fault-hook cases,
+and an ARM debug-kernel campaign are not included. The bounded adversarial
+campaign additionally needs its trusted controller/executor, explicit ISA
+routing and approved resource/credit limits; no campaign is launched or
+credited by these source changes. The fork-headed OpenVMM CI acceptance rule
+is unchanged and remains a separate prerequisite.
+
 ## MicroVM test shards
 
+The existing x86-64 partition is unchanged.
 `nvx.py test-microvm --shard INDEX/COUNT` runs one of COUNT shards of the
 default Alpine suite on the default kernel, which holds the scenarios that
 `test-microvm` runs without `--scenario` but the public sandbox scenarios,
@@ -1753,7 +1827,15 @@ requires the jobs of the gates that cover NVX's use of OpenVMM,
 `run vmm-tests` jobs of `x64-linux-amd-kvm`, `x64-linux-intel-mshv`,
 `x64-windows-intel`, and `x64-windows-amd`, to have passed for the pinned
 revision, in a run of either workflow whose head is the revision in
-`microsoft/openvmm`. A pull request's run tests GitHub's merge of the pull
+`microsoft/openvmm`. The Phase 3 CI call explicitly selects
+`--architecture aarch64`, additionally requiring the existing upstream
+`unit tests [aarch64-windows]` and `run vmm-tests [aarch64-windows]` jobs.
+All six x86 requirements remain, and the standalone command still defaults
+to x86-only coverage. Both ISAs use the same latest-attempt assessment and
+missing/pending/failure rules; a skipped ARM job is not a pass. This extends
+coverage, not trust: the existing fork-headed run rejection remains intact,
+including for the selected PR until an exception is explicitly approved.
+A pull request's run tests GitHub's merge of the pull
 request into the branch, which holds the tree of the head while the head
 descends from the branch, as landing it requires. The job reads the pin from
 the checkout's index and the public repository's runs with the run's token,
@@ -2257,6 +2339,10 @@ also need the guest artifacts; `--openvmm`, `--kernel`, and `--initrd`
 override their default build paths. `--no-openvmm` qualifies a host without
 OpenVMM: H2 then checks the CPU identity and generation only, and H3 and H6
 cannot run.
+On ARM, the host probe brackets `CNTVCT_EL0` with `ISB` on both sides and
+retains the assembly's compiler memory barrier, matching the guest's maintained
+counter-read ordering. This host diagnostic does not change OpenVMM's counter
+or UTC backend.
 
 The doctor gates on measured properties, alike on every backend: the guest
 warp probe at 1 µs with its idle gaps (H6), the TSC rate stability (H4), and

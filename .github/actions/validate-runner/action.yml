@@ -2,6 +2,10 @@ name: Validate runner
 description: Verify the toolchain and virtualization backend required by an NVX job
 
 inputs:
+  architecture:
+    description: Native runner ISA, never an emulated process ISA
+    required: false
+    default: x86_64
   backend:
     description: Virtualization backend expected on the runner
     required: true
@@ -52,6 +56,12 @@ runs:
           exit 1
         fi
         cargo --version
+        expected_host="${{ inputs.architecture }}-unknown-linux-gnu"
+        actual_host=$(rustc -vV | sed -n 's/^host: //p')
+        test "${actual_host}" = "${expected_host}" || {
+          echo "::error::Rust host ${actual_host} is not native ${expected_host}" >&2
+          exit 1
+        }
         cargo nextest --version
         sccache --version
         test "${RUSTC_WRAPPER:-}" = sccache
@@ -110,6 +120,26 @@ runs:
           throw "$rustVersion does not match Rust $toolchain, which rust-toolchain.toml pins"
         }
         cargo --version
+        $architecture = "${{ inputs.architecture }}"
+        switch ($architecture) {
+          "x86_64" { $nativeArchitecture = "X64" }
+          "aarch64" { $nativeArchitecture = "Arm64" }
+          default { throw "Unsupported runner architecture: $architecture" }
+        }
+        $runtime = [System.Runtime.InteropServices.RuntimeInformation]
+        if ($runtime::OSArchitecture.ToString() -ne $nativeArchitecture -or
+            $runtime::ProcessArchitecture.ToString() -ne $nativeArchitecture) {
+          throw "Runner OS and PowerShell must both be native $nativeArchitecture"
+        }
+        $expectedHost = "$architecture-pc-windows-msvc"
+        $rustHost = (rustc -vV | Select-String '^host: ').Line.Substring(6)
+        if ($rustHost -ne $expectedHost) {
+          throw "Rust host $rustHost is not native $expectedHost"
+        }
+        if ($architecture -eq "aarch64" -and
+            -not [string]::IsNullOrWhiteSpace($env:CARGO_BUILD_TARGET)) {
+          throw "Native ARM builds require CARGO_BUILD_TARGET unset, not an inherited cross-build override"
+        }
         cargo nextest --version
         sccache --version
         if ($env:RUSTC_WRAPPER -ne "sccache") {
@@ -152,19 +182,21 @@ runs:
         if ($jobSid -ne "S-1-5-20") {
           throw "Actions job uses SID $jobSid, expected Network Service"
         }
-        $system32 = Join-Path $env:SystemRoot "System32"
-        $pcatFirmware = @(
-          (Join-Path $system32 "vmfirmwarepcat.dll"),
-          (Join-Path $system32 "vmfirmware.dll")
-        )
-        if (@($pcatFirmware | Where-Object {
-              Test-Path -LiteralPath $_ -PathType Leaf
-            }).Count -eq 0) {
-          throw "Hyper-V PCAT firmware was not found under $system32"
-        }
-        $svgaFirmware = Join-Path $system32 "VmEmulatedDevices.dll"
-        if (-not (Test-Path -LiteralPath $svgaFirmware -PathType Leaf)) {
-          throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
+        if ($architecture -eq "x86_64") {
+          $system32 = Join-Path $env:SystemRoot "System32"
+          $pcatFirmware = @(
+            (Join-Path $system32 "vmfirmwarepcat.dll"),
+            (Join-Path $system32 "vmfirmware.dll")
+          )
+          if (@($pcatFirmware | Where-Object {
+                Test-Path -LiteralPath $_ -PathType Leaf
+              }).Count -eq 0) {
+            throw "Hyper-V PCAT firmware was not found under $system32"
+          }
+          $svgaFirmware = Join-Path $system32 "VmEmulatedDevices.dll"
+          if (-not (Test-Path -LiteralPath $svgaFirmware -PathType Leaf)) {
+            throw "Hyper-V SVGA firmware was not found: $svgaFirmware"
+          }
         }
 
     # A cancelled job's harness can start OpenVMM after the runner's orphan
@@ -271,6 +303,7 @@ runs:
       run: >-
         python3 scripts/nvx.py doctor
         --backend "${{ inputs.backend }}"
+        --architecture "${{ inputs.architecture }}"
         --checks H1 H2 H4
         ${{ inputs.warp-probe == 'true' && 'H6' || '' }}
         ${{ inputs.verify-openvmm == 'true' && 'H3 --cpu-fingerprint "${RUNNER_TEMP}/nvx-cpu-fingerprint.json"' || '--no-openvmm' }}
@@ -280,19 +313,37 @@ runs:
     - name: Qualify host time on Windows
       if: runner.os == 'Windows'
       shell: powershell
-      run: >-
-        python scripts\nvx.py doctor
-        --backend "${{ inputs.backend }}"
-        --checks H1 H2 H4
-        ${{ inputs.warp-probe == 'true' && 'H6' || '' }}
-        ${{ inputs.verify-openvmm == 'true' && 'H3 --cpu-fingerprint "$env:RUNNER_TEMP\nvx-cpu-fingerprint.json"' || '--no-openvmm' }}
-        --ci-schedule
-        --summary "$env:GITHUB_STEP_SUMMARY"
+      run: |
+        $ErrorActionPreference = "Stop"
+        $architecture = "${{ inputs.architecture }}"
+        $checks = @("H1", "H2", "H4")
+        $arguments = @("--architecture", $architecture)
+        if ($architecture -eq "aarch64") {
+          if ("${{ inputs.verify-openvmm }}" -ne "true") {
+            # This is pre-build tooling/time admission, not CPU admission.
+            # Every ARM guest job must require the post-product H2/H3 gate.
+            $checks = @("H1", "H4")
+            Write-Output "ARM H2/H3 admission is pending the mandatory post-product verifier"
+          }
+        }
+        if ("${{ inputs.warp-probe }}" -eq "true") { $checks += "H6" }
+        if ("${{ inputs.verify-openvmm }}" -eq "true") {
+          $checks += "H3"
+          if ($architecture -eq "x86_64") {
+            $arguments += @("--cpu-fingerprint", "$env:RUNNER_TEMP\nvx-cpu-fingerprint.json")
+          }
+        } else {
+          $arguments += "--no-openvmm"
+        }
+        python scripts\nvx.py doctor --backend "${{ inputs.backend }}" `
+          --checks @checks @arguments --ci-schedule `
+          --summary "$env:GITHUB_STEP_SUMMARY"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # A failed CPU profile check keeps OpenVMM's fingerprint, which names the
     # host's whole CPU surface for a new generation or profile revision.
     - name: Upload the CPU fingerprint
-      if: failure() && inputs.verify-openvmm == 'true'
+      if: failure() && inputs.verify-openvmm == 'true' && inputs.architecture == 'x86_64'
       uses: actions/upload-artifact@v7
       with:
         path: ${{ runner.temp }}/nvx-cpu-fingerprint.json

@@ -128,7 +128,7 @@ load_tool_manifest() {
                 platform=${platform%.*}
                 case "$platform" in
                     '' | *[!a-z0-9_-]*) tool_manifest_error "unsupported key: ${key}" ;;
-                    linux-x86_64 | windows-x86_64) ;;
+                    linux-x86_64 | windows-x86_64 | windows-aarch64) ;;
                     *) tool_manifest_error "unsupported platform: ${platform}" ;;
                 esac
                 ;;

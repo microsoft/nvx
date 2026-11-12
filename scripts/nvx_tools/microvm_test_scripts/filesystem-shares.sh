@@ -18,8 +18,8 @@ expect_read_only() {
 
 # One virtio-fs slot carries every share as a child of one aggregate, which
 # the guest mounts where only root can enter and binds at each target.
-grep -q 'virtio_mmio.device=0x1000@0xd0001000:17' /proc/cmdline || fail 40
-if grep -q '0xd0008000' /proc/cmdline; then
+fixed_virtio_present d0001000 17 || fail 40
+if ! fixed_virtio_absent d0008000; then
     fail 41
 fi
 grep -q 'virtfs_dir=/run/nvx/shares virtfs_tag=microvm virtfs_mode=rw virtfs_aggregate=1' /proc/cmdline || fail 42

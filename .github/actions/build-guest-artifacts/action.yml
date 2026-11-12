@@ -2,6 +2,12 @@ name: Build guest artifacts
 description: Cache or build the pinned Linux kernel and guest images
 
 inputs:
+  architecture:
+    description: >-
+      Guest ISA. ARM uses fresh native Docker builds only, with no x86 cache,
+      artifact reuse, determinism, Azure Linux, or debug-kernel claim.
+    required: false
+    default: x86_64
   components:
     description: >-
       Space-separated guest artifacts to cache or build, so that jobs beside
@@ -43,6 +49,9 @@ inputs:
     default: "false"
 
 outputs:
+  artifact-directory:
+    description: Architecture-qualified output directory
+    value: ${{ steps.architecture.outputs.directory }}
   cache-keys:
     description: >-
       The exact cache keys of the guest artifacts, as a JSON object by name,
@@ -72,6 +81,59 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Select native guest architecture
+      id: architecture
+      shell: bash
+      env:
+        ARCHITECTURE: ${{ inputs.architecture }}
+        COMPONENTS: ${{ inputs.components }}
+        RESTORE_ONLY: ${{ inputs.restore-only }}
+        SAVE_CACHE: ${{ inputs.save-cache }}
+        REUSE: ${{ inputs.reuse }}
+        RECORD: ${{ inputs.record-artifact }}
+      run: |
+        set -euo pipefail
+        case "${ARCHITECTURE}" in
+          x86_64)
+            echo "directory=build" >> "${GITHUB_OUTPUT}"
+            echo "platform=linux/amd64" >> "${GITHUB_OUTPUT}"
+            echo "kernel-target=kernel-artifacts" >> "${GITHUB_OUTPUT}"
+            echo "alpine-target=initramfs-artifacts" >> "${GITHUB_OUTPUT}"
+            echo "ubuntu-target=ubuntu-initramfs-artifacts" >> "${GITHUB_OUTPUT}"
+            echo "distro-target=ubuntu-distro-layer-artifacts" >> "${GITHUB_OUTPUT}"
+            ;;
+          aarch64)
+            if [[ "${RESTORE_ONLY}" != false || "${SAVE_CACHE}" != false ||
+                  "${REUSE}" != false || -n "${RECORD}" ]]; then
+              echo "::error::ARM guest artifacts require explicit fresh-only builds; x86 cache/reuse records are not ARM provenance" >&2
+              exit 1
+            fi
+            case " ${COMPONENTS} " in
+              *" azurelinux "* | *" debug-kernel "*)
+                echo "::error::ARM cold scope has no Azure Linux or debug-kernel component" >&2
+                exit 1
+                ;;
+            esac
+            engine=$(docker info --format '{{.Architecture}}')
+            case "${engine}" in
+              aarch64 | arm64) ;;
+              *)
+                echo "::error::ARM producers require a native ARM Docker engine, not ${engine} emulation" >&2
+                exit 1
+                ;;
+            esac
+            echo "directory=build/aarch64" >> "${GITHUB_OUTPUT}"
+            echo "platform=linux/arm64" >> "${GITHUB_OUTPUT}"
+            echo "kernel-target=arm64-kernel-artifacts" >> "${GITHUB_OUTPUT}"
+            echo "alpine-target=arm64-artifacts" >> "${GITHUB_OUTPUT}"
+            echo "ubuntu-target=arm64-ubuntu-artifacts" >> "${GITHUB_OUTPUT}"
+            echo "distro-target=arm64-ubuntu-distro-layer-artifacts" >> "${GITHUB_OUTPUT}"
+            ;;
+          *)
+            echo "::error::Unsupported guest architecture: ${ARCHITECTURE}" >&2
+            exit 1
+            ;;
+        esac
     # An unknown name fails here rather than silently selecting nothing.
     - name: Select guest artifact components
       id: components
@@ -128,6 +190,7 @@ runs:
 
     - name: Resolve guest cache keys
       id: guest-cache-keys
+      if: inputs.architecture == 'x86_64'
       shell: bash
       env:
         KERNEL_VERSION: ${{ steps.guest-versions.outputs.kernel-version }}
@@ -159,7 +222,7 @@ runs:
 
     - name: Restore Linux kernel (zstd)
       id: cache-linux-kernel-zstd
-      if: steps.components.outputs.kernel == 'true'
+      if: inputs.architecture == 'x86_64' && steps.components.outputs.kernel == 'true'
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -171,7 +234,7 @@ runs:
 
     - name: Restore Alpine disk image (zstd)
       id: cache-alpine-image-zstd
-      if: steps.components.outputs.alpine == 'true'
+      if: inputs.architecture == 'x86_64' && steps.components.outputs.alpine == 'true'
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -183,7 +246,7 @@ runs:
 
     - name: Restore Ubuntu initramfs (zstd)
       id: cache-ubuntu-initramfs-zstd
-      if: steps.components.outputs.ubuntu == 'true'
+      if: inputs.architecture == 'x86_64' && steps.components.outputs.ubuntu == 'true'
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -194,7 +257,7 @@ runs:
 
     - name: Restore Ubuntu distro layer (zstd)
       id: cache-ubuntu-distro-zstd
-      if: steps.components.outputs.ubuntu == 'true'
+      if: inputs.architecture == 'x86_64' && steps.components.outputs.ubuntu == 'true'
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -206,7 +269,7 @@ runs:
 
     - name: Restore Azure Linux initramfs (zstd)
       id: cache-azurelinux-initramfs-zstd
-      if: steps.components.outputs.azurelinux == 'true'
+      if: inputs.architecture == 'x86_64' && steps.components.outputs.azurelinux == 'true'
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -225,6 +288,7 @@ runs:
     - name: Reuse the merged pull request's guest artifacts
       id: reuse
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         inputs.reuse == 'true' &&
         inputs.record-artifact != ''
@@ -253,13 +317,16 @@ runs:
       shell: bash
       run: >-
         docker build
+        --platform "${{ steps.architecture.outputs.platform }}"
+        --build-arg NVX_ARCHITECTURE="${{ inputs.architecture }}"
         --file docker/Dockerfile
-        --target kernel-artifacts
-        --output type=local,dest=build
+        --target "${{ steps.architecture.outputs.kernel-target }}"
+        --output type=local,dest="${{ steps.architecture.outputs.directory }}"
         .
 
     - name: Save Linux kernel (zstd)
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         inputs.save-cache == 'true' &&
         steps.components.outputs.kernel == 'true' &&
@@ -275,7 +342,7 @@ runs:
 
     - name: Restore Linux debug kernel (zstd)
       id: cache-linux-debug-kernel-zstd
-      if: steps.components.outputs.debug-kernel == 'true'
+      if: inputs.architecture == 'x86_64' && steps.components.outputs.debug-kernel == 'true'
       uses: actions/cache/restore@v5
       with:
         path: |
@@ -300,6 +367,7 @@ runs:
 
     - name: Save Linux debug kernel (zstd)
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         inputs.save-cache == 'true' &&
         steps.components.outputs.debug-kernel == 'true' &&
@@ -322,13 +390,16 @@ runs:
       shell: bash
       run: >-
         docker build
+        --platform "${{ steps.architecture.outputs.platform }}"
+        --build-arg NVX_ARCHITECTURE="${{ inputs.architecture }}"
         --file docker/Dockerfile
-        --target initramfs-artifacts
-        --output type=local,dest=build
+        --target "${{ steps.architecture.outputs.alpine-target }}"
+        --output type=local,dest="${{ steps.architecture.outputs.directory }}"
         .
 
     - name: Save Alpine disk image (zstd)
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         inputs.save-cache == 'true' &&
         steps.components.outputs.alpine == 'true' &&
@@ -351,15 +422,18 @@ runs:
       shell: bash
       run: >-
         docker build
+        --platform "${{ steps.architecture.outputs.platform }}"
+        --build-arg NVX_ARCHITECTURE="${{ inputs.architecture }}"
         --file docker/Dockerfile
-        --target ubuntu-initramfs-artifacts
-        --output type=local,dest=build
+        --target "${{ steps.architecture.outputs.ubuntu-target }}"
+        --output type=local,dest="${{ steps.architecture.outputs.directory }}"
         .
 
     # A reused image passed this check in the run that built it, as a cached
     # one did.
     - name: Verify Ubuntu artifact determinism (Docker)
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         (
           steps.components.outputs.ubuntu == 'true' &&
@@ -378,6 +452,7 @@ runs:
 
     - name: Save Ubuntu initramfs (zstd)
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         inputs.save-cache == 'true' &&
         steps.components.outputs.ubuntu == 'true' &&
@@ -411,6 +486,7 @@ runs:
 
     - name: Save Azure Linux initramfs (zstd)
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         inputs.save-cache == 'true' &&
         steps.components.outputs.azurelinux == 'true' &&
@@ -434,13 +510,16 @@ runs:
       shell: bash
       run: >-
         docker build
+        --platform "${{ steps.architecture.outputs.platform }}"
+        --build-arg NVX_ARCHITECTURE="${{ inputs.architecture }}"
         --file docker/Dockerfile
-        --target ubuntu-distro-layer-artifacts
-        --output type=local,dest=build
+        --target "${{ steps.architecture.outputs.distro-target }}"
+        --output type=local,dest="${{ steps.architecture.outputs.directory }}"
         .
 
     - name: Save Ubuntu distro layer (zstd)
       if: >-
+        inputs.architecture == 'x86_64' &&
         inputs.restore-only != 'true' &&
         inputs.save-cache == 'true' &&
         steps.components.outputs.ubuntu == 'true' &&
@@ -458,7 +537,7 @@ runs:
     # and the dev push that merge this run's pull request can check them before
     # they reuse them.
     - name: Record guest artifact keys and digests
-      if: inputs.restore-only != 'true' && inputs.record-artifact != ''
+      if: inputs.architecture == 'x86_64' && inputs.restore-only != 'true' && inputs.record-artifact != ''
       shell: bash
       env:
         COMPONENTS: ${{ inputs.components }}
@@ -469,7 +548,7 @@ runs:
         --keys "${GUEST_CACHE_KEYS}"
 
     - name: Upload guest artifact record
-      if: inputs.restore-only != 'true' && inputs.record-artifact != ''
+      if: inputs.architecture == 'x86_64' && inputs.restore-only != 'true' && inputs.record-artifact != ''
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.record-artifact }}

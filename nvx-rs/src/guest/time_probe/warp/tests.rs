@@ -4,8 +4,26 @@ use super::*;
 /// A TSC rate of 1 GHz, at which a cycle is a nanosecond.
 const GIGAHERTZ: TscRate = TscRate {
     hz: 1e9,
+    #[cfg(target_arch = "x86_64")]
     source: TscRateSource::Option,
+    #[cfg(target_arch = "aarch64")]
+    source: TscRateSource::CntfrqEl0,
 };
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_warp_uses_the_actual_counter_rate_and_restores_affinity() {
+    let before = affinity_cpus().unwrap();
+    let rate = architectural_rate(&before[..1]).unwrap();
+    assert_eq!(
+        rate.hz,
+        sys::aarch64::counter_frequency_hz().unwrap() as f64
+    );
+    assert_eq!(rate.source, TscRateSource::CntfrqEl0);
+    assert_eq!(affinity_cpus().unwrap(), before);
+    assert!(matches!(architectural_rate(&[]), Err(Errno::EINVAL)));
+    assert_eq!(affinity_cpus().unwrap(), before);
+}
 
 /// Returns a ping-pong leader's result whose round trips bound the offset to `lo..=hi`
 /// cycles, and whose quickest round trip took `min_rtt` cycles at twice the offset

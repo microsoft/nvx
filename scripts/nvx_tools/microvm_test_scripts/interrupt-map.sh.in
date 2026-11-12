@@ -1,4 +1,5 @@
 set -eu
+architecture=@ARCHITECTURE@
 fail() {
     code="$1"
     echo "NVX-INTERRUPT-MAP-FAIL code=$code"
@@ -13,22 +14,6 @@ bound_devices() {
         [ -e "$device" ] && bound=$((bound + 1))
     done
     echo "$bound"
-}
-
-# Prints the base of the MMIO window that /proc/iomem lists under the name of
-# the virtio-mmio platform device $1.
-window_base() {
-    while IFS=' ' read -r range separator name _; do
-        [ "$separator" = : ] && [ "$name" = "$1" ] || continue
-        echo "${range%%-*}"
-        return 0
-    done </proc/iomem
-    return 1
-}
-
-# Prints the base of the MMIO window of the virtio device $1.
-device_base() {
-    window_base "$(basename "$(dirname "$(readlink -f "/sys/bus/virtio/devices/$1")")")"
 }
 
 # Prints the interrupt whose handlers include the virtio device $1's, which
@@ -76,11 +61,18 @@ report() {
         base=$(device_base "$name") || fail 21
         irq=$(device_irq "$name") || fail 22
         line=/sys/kernel/irq/$irq
+        binding=
+        if [ "$architecture" = aarch64 ]; then
+            platform=$(dirname "$(readlink -f "$device")")
+            cells=$(od -An -v -tx1 "$platform/of_node/interrupts") || fail 23
+            binding="dt_interrupts=$(printf '%s' "$cells" | tr -d '[:space:]')"
+        fi
         echo "NVX-INTERRUPT-MAP step=$1 base=0x$base device=$name irq=$irq" \
             "chip=$(cat "$line/chip_name") hwirq=$(cat "$line/hwirq")" \
             "type=$(cat "$line/type") actions=$(cat "$line/actions")" \
             "count=$(irq_count "$irq")" \
-            "unhandled=$(awk '$1 == "unhandled" { print $2 }' "/proc/irq/$irq/spurious")"
+            "unhandled=$(awk '$1 == "unhandled" { print $2 }' "/proc/irq/$irq/spurious")" \
+            "$binding"
     done
 }
 
@@ -167,10 +159,15 @@ report traffic
 # The APIC errors and spurious PIC interrupts (ERR), the level-triggered
 # interrupts that the IOAPIC misrouted (MIS), and the spurious APIC
 # interrupts (SPU).
-echo "NVX-INTERRUPT-MAP-ERRORS" \
-    "err=$(awk '$1 == "ERR:" { print $2 }' /proc/interrupts)" \
-    "mis=$(awk '$1 == "MIS:" { print $2 }' /proc/interrupts)" \
-    "spu=$(awk '$1 == "SPU:" { print $2 }' /proc/interrupts)"
+if [ "$architecture" = aarch64 ]; then
+    echo "NVX-INTERRUPT-MAP-ERRORS" \
+        "err=$(awk '$1 == "Err:" { print $2 }' /proc/interrupts)"
+else
+    echo "NVX-INTERRUPT-MAP-ERRORS" \
+        "err=$(awk '$1 == "ERR:" { print $2 }' /proc/interrupts)" \
+        "mis=$(awk '$1 == "MIS:" { print $2 }' /proc/interrupts)" \
+        "spu=$(awk '$1 == "SPU:" { print $2 }' /proc/interrupts)"
+fi
 # The whole map, for the log.
 cat /proc/interrupts
 echo NVX-INTERRUPT-MAP-OK

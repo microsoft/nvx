@@ -7,11 +7,78 @@ use std::thread;
 use super::format::{f0, f1};
 use super::support::{
     Arguments, NANOSECONDS_PER_SECOND, TscRate, affinity_cpus, check_cpus_allowed, cycles_to_ns,
-    detect_tsc_rate, format_cpu_list, parse_cpu_list, parse_rate, round_ll,
+    format_cpu_list, parse_cpu_list, round_ll,
 };
+#[cfg(target_arch = "x86_64")]
+use super::support::{detect_tsc_rate, parse_rate};
 use crate::guest::parse::parse_u64;
 use crate::guest::status::CommandError;
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::x86::pause;
 use crate::guest::sys::{self, Errno, TimeValLike};
+#[cfg(target_arch = "aarch64")]
+use std::hint::spin_loop as pause;
+
+/// Counter units in the ISA-specific diagnostic, without changing x86 output.
+#[cfg(target_arch = "x86_64")]
+const COUNTER_HZ_FIELD: &str = "tsc_hz";
+#[cfg(target_arch = "aarch64")]
+const COUNTER_HZ_FIELD: &str = "counter_hz";
+
+/// Reads the counter used by the unchanged pairwise algorithms.
+fn read_counter() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        sys::x86::rdtsc()
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        sys::aarch64::virtual_counter()
+    }
+}
+
+/// Orders the counter read after preceding accesses.
+fn read_counter_ordered() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        sys::x86::rdtsc_lfence()
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        sys::aarch64::virtual_counter()
+    }
+}
+
+/// Brackets the counter read with the ISA's existing barriers.
+fn read_counter_fenced() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        sys::x86::rdtsc_fenced()
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        sys::aarch64::virtual_counter()
+    }
+}
+
+/// Requires the actual nominal counter frequency to agree on every selected CPU.
+#[cfg(target_arch = "aarch64")]
+fn architectural_rate(cpus: &[usize]) -> Result<TscRate, Errno> {
+    let _affinity = sys::AffinityGuard::save()?;
+    let mut frequency = None;
+    for &cpu in cpus {
+        sys::pin_current_thread(cpu)?;
+        let current = sys::aarch64::counter_frequency_hz()?;
+        if frequency.is_some_and(|previous| previous != current) {
+            return Err(Errno::EPROTO);
+        }
+        frequency = Some(current);
+    }
+    Ok(TscRate {
+        hz: frequency.ok_or(Errno::EINVAL)? as f64,
+        source: super::support::TscRateSource::CntfrqEl0,
+    })
+}
 
 /// Milliseconds that each test runs per CPU pair without `--duration-ms`.
 const DEFAULT_DURATION_MS: u64 = 100;
@@ -221,7 +288,7 @@ fn barrier(ready: &AtomicU32, abort: &AtomicBool, failed: bool) -> bool {
     }
     ready.fetch_add(1, Ordering::SeqCst);
     while ready.load(Ordering::SeqCst) < 2 {
-        sys::x86::pause();
+        pause();
     }
     !abort.load(Ordering::SeqCst)
 }
@@ -250,7 +317,7 @@ fn warp_worker(
     if !barrier(&state.ready.0, &state.abort, pinned.is_err()) {
         return pinned.map(|()| 0);
     }
-    let end = sys::x86::rdtsc_lfence().wrapping_add(budget_cycles);
+    let end = read_counter_ordered().wrapping_add(budget_cycles);
     let deadline = coarse_ns().wrapping_add(
         (cycles_to_ns(budget_cycles as f64, rate) + STALL_SECONDS * NANOSECONDS_PER_SECOND) as u64,
     );
@@ -258,11 +325,11 @@ fn warp_worker(
     loop {
         while state.lock.0.swap(true, Ordering::Acquire) {
             while state.lock.0.load(Ordering::Relaxed) {
-                sys::x86::pause();
+                pause();
             }
         }
         let previous = state.last_tsc.load(Ordering::Relaxed);
-        let now = sys::x86::rdtsc_lfence();
+        let now = read_counter_ordered();
         state.last_tsc.store(now, Ordering::Relaxed);
         if previous > now {
             state.max_warp.fetch_max(previous - now, Ordering::Relaxed);
@@ -271,7 +338,7 @@ fn warp_worker(
         state.lock.0.store(false, Ordering::Release);
         if iteration & WARP_CHECK_MASK == 0 {
             if leader
-                && (sys::x86::rdtsc() > end
+                && (read_counter() > end
                     || (iteration & WARP_STALL_CHECK_MASK == 0 && coarse_ns() > deadline))
             {
                 state.stop.store(true, Ordering::Relaxed);
@@ -314,7 +381,7 @@ fn ping_leader(
     if !barrier(&state.ready.0, &state.abort, pinned.is_err()) {
         return Err(pinned.err().unwrap_or(Errno::EINVAL));
     }
-    let end = sys::x86::rdtsc_lfence().wrapping_add(budget_cycles);
+    let end = read_counter_ordered().wrapping_add(budget_cycles);
     let mut result = LeaderResult {
         rounds: 0,
         min_rtt: u64::MAX,
@@ -326,18 +393,18 @@ fn ping_leader(
     let mut round = 1_u64;
     loop {
         let mut spins = 0_u64;
-        let t1 = sys::x86::rdtsc_fenced();
+        let t1 = read_counter_fenced();
         state.sequence.0.store(2 * round - 1, Ordering::Release);
         while state.sequence.0.load(Ordering::Acquire) != 2 * round {
             spins += 1;
-            if spins & SPIN_CHECK_MASK == 0 && sys::x86::rdtsc().wrapping_sub(t1) > stall_cycles {
+            if spins & SPIN_CHECK_MASK == 0 && read_counter().wrapping_sub(t1) > stall_cycles {
                 result.stalled = true;
                 state.sequence.0.store(PP_STOP, Ordering::Release);
                 return Ok(result);
             }
-            sys::x86::pause();
+            pause();
         }
-        let t3 = sys::x86::rdtsc_lfence();
+        let t3 = read_counter_ordered();
         let t2 = state.t2.load(Ordering::Relaxed);
         let rtt = t3.wrapping_sub(t1);
         let lo = t2.wrapping_sub(t3) as i64;
@@ -352,7 +419,7 @@ fn ping_leader(
             offsets.push(lo.wrapping_add(hi));
         }
         result.rounds = round;
-        if round & PING_CHECK_MASK == 0 && sys::x86::rdtsc() > end {
+        if round & PING_CHECK_MASK == 0 && read_counter() > end {
             state.sequence.0.store(PP_STOP, Ordering::Release);
             return Ok(result);
         }
@@ -381,16 +448,16 @@ fn ping_follower(state: &PingState, cpu: usize, stall_cycles: u64) -> Result<(),
             }
             spins += 1;
             if spins & SPIN_CHECK_MASK == 0 {
-                let now = sys::x86::rdtsc();
+                let now = read_counter();
                 if wait_start == 0 {
                     wait_start = now;
                 } else if now.wrapping_sub(wait_start) > stall_cycles {
                     return Ok(());
                 }
             }
-            sys::x86::pause();
+            pause();
         }
-        state.t2.store(sys::x86::rdtsc_fenced(), Ordering::Relaxed);
+        state.t2.store(read_counter_fenced(), Ordering::Relaxed);
         state.sequence.0.store(2 * round, Ordering::Release);
         round += 1;
     }
@@ -473,6 +540,7 @@ pub(super) fn run(
 ) -> Result<(), CommandError> {
     let mut duration_ms = DEFAULT_DURATION_MS;
     let mut bound_ns = DEFAULT_BOUND_NS;
+    #[cfg(target_arch = "x86_64")]
     let mut override_hz = None;
     let mut cpus = None;
     let mut arguments = Arguments::new(b"warp", arguments);
@@ -487,7 +555,15 @@ pub(super) fn run(
         } else if let Some(value) = arguments.value(argument, b"--bound-ns") {
             bound_ns = parse_u64(value).ok_or_else(|| arguments.invalid(err))?;
         } else if let Some(value) = arguments.value(argument, b"--tsc-hz") {
-            override_hz = Some(parse_rate(value).ok_or_else(|| arguments.invalid(err))?);
+            #[cfg(target_arch = "x86_64")]
+            {
+                override_hz = Some(parse_rate(value).ok_or_else(|| arguments.invalid(err))?);
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                let _ = value;
+                return Err(arguments.invalid(err));
+            }
         } else {
             return Err(arguments.invalid(err));
         }
@@ -514,7 +590,21 @@ pub(super) fn run(
             CommandError::Setup
         })?;
     check_cpus_allowed(b"warp", &cpus, err)?;
+    #[cfg(target_arch = "x86_64")]
     let rate = detect_tsc_rate(override_hz);
+    #[cfg(target_arch = "aarch64")]
+    let rate = architectural_rate(&cpus).map_err(|error| {
+        super::report(
+            err,
+            &[
+                b"nvx-time-probe warp: invalid per-CPU CNTFRQ_EL0: ",
+                error.desc().as_bytes(),
+                b"\n",
+            ],
+        );
+        CommandError::Setup
+    })?;
+    #[cfg(target_arch = "x86_64")]
     if rate.hz <= 0.0 {
         super::report(
             err,
@@ -534,7 +624,7 @@ pub(super) fn run(
     let _ = writeln!(
         out,
         "nvx-time-probe {} warp: cpus={cpu_text} pairs={expected_pairs} duration_ms={duration_ms} \
-         (per test per pair) tsc_hz={} tsc_hz_source={} bound_ns={bound_ns}",
+         (per test per pair) {COUNTER_HZ_FIELD}={} {COUNTER_HZ_FIELD}_source={} bound_ns={bound_ns}",
         super::VERSION,
         f0(rate.hz),
         rate.source
@@ -618,10 +708,15 @@ pub(super) fn run(
         let _ = writeln!(out, "single CPU: no pairs to compare");
     }
     if !conclusive {
+        let read_name = if cfg!(target_arch = "x86_64") {
+            "RDTSC"
+        } else {
+            "CNTVCT_EL0"
+        };
         let _ = writeln!(
             out,
             "warning: offset uncertainty (+/-{} ns) is not below the bound ({bound_ns} ns); \
-             the verdict is not conclusive (trapped RDTSC or a descheduled vCPU?)",
+             the verdict is not conclusive (trapped {read_name} or a descheduled vCPU?)",
             round_ll(cycles_to_ns(max_uncertainty, rate))
         );
     }
@@ -637,8 +732,8 @@ pub(super) fn run(
         out,
         "NVX-TIME-PROBE warp-detail max_abs_offset_cycles={} max_uncertainty_ns={} \
          max_skew_bound_ns={} total_warps={total_warps} inconsistent_pairs={inconsistent} \
-         stalled_pairs={stalled} cpus={cpu_text} duration_ms={duration_ms} tsc_hz={} \
-         tsc_hz_source={} conclusive={}",
+         stalled_pairs={stalled} cpus={cpu_text} duration_ms={duration_ms} {COUNTER_HZ_FIELD}={} \
+         {COUNTER_HZ_FIELD}_source={} conclusive={}",
         f1(max_abs_offset),
         round_ll(cycles_to_ns(max_uncertainty, rate)),
         round_ll(cycles_to_ns(max_skew_bound, rate)),

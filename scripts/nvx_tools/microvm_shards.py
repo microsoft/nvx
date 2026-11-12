@@ -238,6 +238,8 @@ def read_reports(
         backend = header.get("backend")
         if (
             header.get("guest") != "alpine"
+            or header.get("architecture", "x86_64") != "x86_64"
+            or header.get("scope", "full") != "full"
             or header.get("kernel") != "default"
             or header.get("processors") != list(processors)
             or not isinstance(backend, str)

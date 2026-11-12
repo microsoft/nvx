@@ -4075,15 +4075,23 @@ def benchmark_device_io_workload(
 def smp_probe_script(
     processors: int,
     *,
+    architecture: str = "x86_64",
     exit_guest: bool = True,
     network_gateway: str | None = None,
     ioapic_irq: int | None = None,
 ) -> str:
     if processors not in (1, 2, 4, 8):
         raise ValueError("microVM SMP probe supports 1, 2, 4, or 8 vCPUs")
+    if architecture not in ("x86_64", "aarch64"):
+        raise ValueError(f"unsupported SMP probe architecture: {architecture}")
     if (network_gateway is None) != (ioapic_irq is None):
         raise ValueError("network gateway and IOAPIC IRQ must be specified together")
-    apic_ids = ",".join(str(cpu) for cpu in range(processors))
+    if architecture == "aarch64" and network_gateway is not None:
+        raise ValueError("the IOAPIC SMP network probe is x86-only")
+    apic_ids = ",".join(
+        f"0x{cpu:016x}" if architecture == "aarch64" else str(cpu)
+        for cpu in range(processors)
+    )
     network_probe = ""
     if network_gateway is not None and ioapic_irq is not None:
         network_probe = _render_benchmark_script(
@@ -4093,6 +4101,8 @@ def smp_probe_script(
         )
     rendered = _render_benchmark_script(
         "smp-probe.sh.in",
+        ARCHITECTURE=architecture,
+        IDENTITY_LIST_NAME="dt_mpidrs" if architecture == "aarch64" else "apic_ids",
         PROCESSORS=str(processors),
         APIC_IDS=apic_ids,
         NETWORK_PROBE=network_probe,

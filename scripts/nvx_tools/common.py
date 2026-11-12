@@ -31,6 +31,39 @@ class ScriptError(RuntimeError):
     """Raised for an actionable command-line workflow failure."""
 
 
+def host_architecture() -> str:
+    architecture = platform.machine().lower()
+    if architecture in ("arm64", "aarch64"):
+        return "aarch64"
+    if architecture in ("amd64", "x86_64"):
+        return "x86_64"
+    raise ScriptError(f"unsupported native host architecture {architecture!r}")
+
+
+def require_pe_architecture(path: Path, architecture: str) -> Path:
+    """Require the PE/COFF machine before executing a Windows product."""
+    machines = {"x86_64": 0x8664, "aarch64": 0xAA64}
+    if architecture not in machines:
+        raise ScriptError(f"unsupported PE architecture {architecture!r}")
+    with path.open("rb") as stream:
+        dos = stream.read(64)
+        if len(dos) != 64 or dos[:2] != b"MZ":
+            raise ScriptError(f"{path} has no valid DOS/PE header")
+        offset = int.from_bytes(dos[60:64], "little")
+        if offset < 64:
+            raise ScriptError(f"{path} has an invalid PE header offset")
+        stream.seek(offset)
+        header = stream.read(6)
+    if len(header) != 6 or header[:4] != b"PE\0\0":
+        raise ScriptError(f"{path} has no valid PE/COFF header")
+    machine = int.from_bytes(header[4:6], "little")
+    if machine != machines[architecture]:
+        raise ScriptError(
+            f"{path} has PE machine {machine:#06x}, expected native {architecture}"
+        )
+    return path
+
+
 def is_link_or_junction(path: Path) -> bool:
     """Return whether ``path`` is a symbolic link or, on Windows, a junction.
 

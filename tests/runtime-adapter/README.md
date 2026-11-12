@@ -38,7 +38,26 @@ Each configuration enables one side of `nvx`:
 | --- | --- | --- | --- | --- |
 | Protocol-only | none | none | `frame`, `root`, `probe`, `exec`, `template` | none |
 | Host-only | `--features host` | `host` | `frame`, `root`, `probe`, `exec`, `template`, `host`, `runtime`, `initramfs`, `staged`, `sharing`, `layered`, `capture`, `generations`, `hook` | `runtime-adapter-host` |
-| Guest-only | `--features guest --target x86_64-unknown-linux-musl` | `guest` | `frame`, `root`, `probe`, `exec`, `template`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
+| Guest-only | `--features guest --target x86_64-unknown-linux-musl` (or `aarch64-unknown-linux-musl`) | `guest` | `frame`, `root`, `probe`, `exec`, `template`, `guest`, `worker` | `runtime-adapter-guest`, a static executable |
+
+The consolidated runner's `--architecture` selects the guest agent ISA. Its
+default x86_64 path retains the existing guest-agent file admission. ARM64
+additionally checks the agent's static ELF ISA and requires a matching native
+Windows/WHP host and explicit `--cold-only` for runtime runs; the runner uses
+the native ARM64 MSVC target for the host tests.
+
+Cold selection reuses the same registry, Cargo targets and assertions. Its
+explicit target inventory classifies `template_capture`, `template_operations`,
+`clone_start`, `host_session`, `staged_images` and `layered_launch` as portable
+host-side checks; `vm_restart`, `vm_steps` and `vm_layered` as cold-domain
+checks; and `vm_template` and `vm_clone` as deferred snapshot-domain checks.
+Cold-domain targets include prelaunch refusals, so their test count is not a
+VM-launch count. Every target remains in the exhaustive naming/ignored-test
+check, including deferred targets. A stale classification, an unregistered
+test, a zero-cold selection, or a selected test that does not run and pass
+fails the command. `--check-only` checks this inventory and runs no scenario;
+it is not native guest qualification. Normal x86 runs still select the full
+suite.
 
 ## Framing
 

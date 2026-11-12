@@ -45,14 +45,14 @@ def guest_rust_target(architecture: str) -> str:
 
 
 def guest_binary_inventory(architecture: str = "x86_64") -> tuple[str, ...]:
-    """Keep x86's inventory and omit non-cold-boot ARM diagnostic executables."""
+    """Keep shared boot/warp helpers and omit ARM's unsupported x86 I/O probes."""
     guest_rust_target(architecture)
     if architecture == "x86_64":
         return GuestRustBuildConstants.BINARIES
     return tuple(
         binary
         for binary in GuestRustBuildConstants.BINARIES
-        if binary not in ("nvx-mmio-write", "nvx-device-io", "nvx-time-probe")
+        if binary not in ("nvx-mmio-write", "nvx-device-io")
     )
 
 

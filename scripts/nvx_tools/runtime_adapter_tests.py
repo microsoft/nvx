@@ -22,20 +22,36 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from .build_constants import BuildConstants, OpenVMMBuildConstants
+from .build_constants import BuildConstants, GuestRustBuildConstants
 from .ci import OPENVMM_TEST_BACKENDS, validate_openvmm_test_backend
-from .common import ScriptError, require_file
+from .common import ScriptError, host_architecture, require_file
+from .elf import check_static_executables
 
 ADAPTER_DIRECTORY = BuildConstants.REPO_ROOT / "tests" / "runtime-adapter"
 PACKAGE = "runtime-adapter"
 SCENARIOS = ADAPTER_DIRECTORY / "scenarios.txt"
-GUEST_AGENT = (
-    ADAPTER_DIRECTORY
+GUEST_AGENTS = {
+    architecture: ADAPTER_DIRECTORY
     / "target"
-    / OpenVMMBuildConstants.MUSL_RUST_TARGET
+    / target
     / "release"
     / "runtime-adapter-guest"
-)
+    for architecture, target in GuestRustBuildConstants.TARGETS.items()
+}
+GUEST_AGENT = GUEST_AGENTS["x86_64"]
+SCENARIO_SCOPES = {
+    "template_capture": "portable",
+    "template_operations": "portable",
+    "clone_start": "portable",
+    "host_session": "portable",
+    "staged_images": "portable",
+    "layered_launch": "portable",
+    "vm_restart": "cold",
+    "vm_steps": "cold",
+    "vm_layered": "cold",
+    "vm_template": "snapshot",
+    "vm_clone": "snapshot",
+}
 # libtest's line for a test that ended, and the summary of a test target's run.
 _TEST_LINE = re.compile(r"^test (\S+) \.\.\. (\S+)")
 _RESULT_LINE = re.compile(r"^test result: \S+\. (\d+) passed; ")
@@ -56,11 +72,21 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--backend", choices=OPENVMM_TEST_BACKENDS, required=True)
     parser.add_argument(
+        "--architecture",
+        choices=GuestRustBuildConstants.ARCHITECTURES,
+        default="x86_64",
+    )
+    parser.add_argument(
+        "--cold-only",
+        action="store_true",
+        help="run the explicitly classified portable/cold targets, retaining the "
+        "exhaustive full-suite naming check; report snapshot targets as deferred",
+    )
+    parser.add_argument(
         "--guest-agent",
         type=Path,
-        default=GUEST_AGENT,
-        help="the adapter's guest agent, a static musl executable (default: its "
-        "release build in tests/runtime-adapter)",
+        help="the adapter's guest agent, a static musl executable of --architecture "
+        "(default: its ISA-specific release build in tests/runtime-adapter)",
     )
     parser.add_argument(
         "--check-only",
@@ -119,7 +145,9 @@ def cargo_test_targets(cargo: str, environment: dict[str, str]) -> list[str]:
     raise ScriptError(f"Cargo's metadata of the adapter has no package {PACKAGE}")
 
 
-def cargo_test(cargo: str, target: str | None, *arguments: str) -> list[str]:
+def cargo_test(
+    cargo: str, target: str | None, *arguments: str, host_target: str | None = None
+) -> list[str]:
     """Returns the command that runs the test target `target` of the adapter's
     host-only configuration, or the unit tests of its library for `None`, with
     libtest's `arguments`."""
@@ -130,6 +158,7 @@ def cargo_test(cargo: str, target: str | None, *arguments: str) -> list[str]:
         "--locked",
         "--features",
         "host",
+        *(["--target", host_target] if host_target is not None else []),
         *selection,
         "--",
         *arguments,
@@ -230,7 +259,11 @@ def streamed(command: list[str], environment: dict[str, str]) -> tuple[str, int]
 
 
 def suite_problems(
-    targets: Sequence[Target], cargo: str, environment: dict[str, str]
+    targets: Sequence[Target],
+    cargo: str,
+    environment: dict[str, str],
+    *,
+    host_target: str | None = None,
 ) -> list[str]:
     """Returns why `targets` are not the adapter's suite: each target that is not one
     of the adapter's test targets, each scenario that names a test that its target does
@@ -243,7 +276,15 @@ def suite_problems(
             problems.append(f"{target.name} is not a test target of the adapter")
             continue
         listed = listing(
-            cargo_test(cargo, target.name, "--list", "--format", "terse"), environment
+            cargo_test(
+                cargo,
+                target.name,
+                "--list",
+                "--format",
+                "terse",
+                host_target=host_target,
+            ),
+            environment,
         )
         if listed.returncode != 0:
             problems.append(f"cannot list the tests of {target.name}:\n{listed.stderr}")
@@ -252,7 +293,15 @@ def suite_problems(
     named = {target.name for target in targets}
     others = [name for name in available if name not in named]
     for name in [None, *others]:
-        command = cargo_test(cargo, name, "--ignored", "--list", "--format", "terse")
+        command = cargo_test(
+            cargo,
+            name,
+            "--ignored",
+            "--list",
+            "--format",
+            "terse",
+            host_target=host_target,
+        )
         listed = listing(command, environment)
         what = "the library" if name is None else name
         if listed.returncode != 0:
@@ -269,13 +318,67 @@ def command_test_runtime_adapter(args: argparse.Namespace) -> int:
     backend = cast(str, args.backend)
     cargo = cast(str, args.cargo)
     check_only = cast(bool, args.check_only)
-    targets = read_scenarios()
+    architecture = getattr(args, "architecture", "x86_64")
+    cold_only = getattr(args, "cold_only", False)
+    if architecture == "aarch64" and architecture != host_architecture():
+        raise ScriptError("runtime adapter validation requires its native host ISA")
+    if architecture == "aarch64" and (backend != "whp" or sys.platform != "win32"):
+        raise ScriptError(
+            "ARM64 runtime adapter validation requires native Windows/WHP"
+        )
+    if architecture == "aarch64" and not check_only and not cold_only:
+        raise ScriptError("ARM64 adapter runs require explicit --cold-only selection")
+    all_targets = read_scenarios()
+    targets = all_targets
+    if cold_only:
+        named = {target.name for target in all_targets}
+        if named != SCENARIO_SCOPES.keys():
+            raise ScriptError(
+                "runtime adapter scope inventory differs from its canonical targets: "
+                f"unclassified={sorted(named - SCENARIO_SCOPES.keys())}; "
+                f"stale={sorted(SCENARIO_SCOPES.keys() - named)}"
+            )
+        if any(
+            scope not in ("portable", "cold", "snapshot")
+            for scope in SCENARIO_SCOPES.values()
+        ):
+            raise ScriptError("runtime adapter inventory has an unknown scenario scope")
+        targets = [
+            target
+            for target in all_targets
+            if SCENARIO_SCOPES[target.name] in ("portable", "cold")
+        ]
+        if not any(
+            SCENARIO_SCOPES[target.name] == "cold" and target.tests
+            for target in targets
+        ):
+            raise ScriptError("runtime adapter cold scope selects no cold cases")
+        deferred = [
+            target
+            for target in all_targets
+            if SCENARIO_SCOPES[target.name] == "snapshot"
+        ]
+        print(
+            f"runtime adapter cold scope on {architecture}: "
+            f"{sum(len(target.tests) for target in targets)} selected tests; "
+            f"{sum(len(target.tests) for target in deferred)} deferred snapshot tests "
+            f"({', '.join(target.name for target in deferred)})"
+        )
+    host_target = "aarch64-pc-windows-msvc" if architecture == "aarch64" else None
     environment = os.environ.copy()
     if not check_only:
         validate_openvmm_test_backend(backend)
         guest = require_file(
-            cast(Path, args.guest_agent), "runtime adapter guest agent"
+            cast(Path | None, args.guest_agent) or GUEST_AGENTS[architecture],
+            "runtime adapter guest agent",
         )
+        if architecture == "aarch64":
+            try:
+                check_static_executables([guest], architecture=architecture)
+            except ValueError as error:
+                raise ScriptError(
+                    f"invalid runtime adapter guest agent: {error}"
+                ) from error
         environment["NVX_HYPERVISOR"] = backend
         # Cargo runs the tests in the adapter's directory, so a relative directory of
         # artifacts is the caller's, and NVX takes an empty one for none.
@@ -284,11 +387,16 @@ def command_test_runtime_adapter(args: argparse.Namespace) -> int:
             Path(artifacts).resolve() if artifacts else BuildConstants.REPO_ROOT
         )
         environment["RUNTIME_ADAPTER_GUEST"] = os.fspath(guest.resolve())
-    problems = suite_problems(targets, cargo, environment)
+    problems = suite_problems(all_targets, cargo, environment, host_target=host_target)
     if not problems and not check_only:
         for target in targets:
             command = cargo_test(
-                cargo, target.name, "--include-ignored", "--exact", *target.tests
+                cargo,
+                target.name,
+                "--include-ignored",
+                "--exact",
+                *target.tests,
+                host_target=host_target,
             )
             output, status = streamed(command, environment)
             problems.extend(run_problems(target, output, status))
@@ -302,7 +410,8 @@ def command_test_runtime_adapter(args: argparse.Namespace) -> int:
         return 1
     if check_only:
         print(
-            f"{count} scenarios name exactly the tests of {len(targets)} targets, and "
+            f"{sum(len(target.tests) for target in all_targets)} scenarios name exactly "
+            f"the tests of {len(all_targets)} targets, and "
             "neither the library nor another target has an ignored test"
         )
     else:

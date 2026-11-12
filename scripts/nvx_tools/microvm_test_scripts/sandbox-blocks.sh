@@ -15,11 +15,11 @@ for name in vda vdb; do
     [ -b "/dev/$name" ] || fail 20
 done
 [ ! -b /dev/vdc ] || fail 30
-grep -q 'virtio_mmio.device=0x1000@0xd0003000:19' /proc/cmdline || fail 21
-grep -q 'virtio_mmio.device=0x1000@0xd0006000:22' /proc/cmdline || fail 24
+fixed_virtio_present d0003000 19 || fail 21
+fixed_virtio_present d0006000 22 || fail 24
 # The windows and interrupts of the removed runtime and custom layers stay unassigned.
-! grep -q '0xd0004000' /proc/cmdline || fail 31
-! grep -q '0xd0005000' /proc/cmdline || fail 32
+fixed_virtio_absent d0004000 || fail 31
+fixed_virtio_absent d0005000 || fail 32
 [ "$(cat /sys/block/vda/ro)" = 1 ] || fail 25
 [ "$(cat /sys/block/vdb/ro)" = 0 ] || fail 28
 printf MICROVM-SCRATCH-OK | dd of=/dev/vdb bs=512 count=1 conv=sync,notrunc 2>/dev/null

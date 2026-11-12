@@ -1,16 +1,16 @@
-//! Host TSC probe for NVX time ABI host qualification.
+//! Host counter probe for NVX time ABI host qualification.
 //!
 //! `nvx.py doctor` builds this file with `rustc` and runs it for the host
 //! checks that doc/ci.md ("Host qualification") describes: H2 (the CPU
 //! identity and the host's invariant-TSC bit), H4 (sleep-separated samples of
-//! the TSC against the host's monotonic clocks), and H5 (cross-CPU TSC skew
+//! the counter against the host's monotonic clocks), and H5 (cross-CPU counter skew
 //! between pinned threads). It has no dependencies and prints
 //! `NVX-HOST-TIME-PROBE` lines of `key=value` fields; the doctor applies the
 //! bounds.
 
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,7 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_ERROR: u8 = 3;
 
 #[inline(always)]
+#[cfg(target_arch = "x86_64")]
 fn tsc() -> u64 {
     // SAFETY: LFENCE and RDTSC are baseline x86-64 instructions.
     unsafe {
@@ -30,6 +31,24 @@ fn tsc() -> u64 {
     }
 }
 
+#[inline(always)]
+#[cfg(target_arch = "aarch64")]
+fn tsc() -> u64 {
+    let counter: u64;
+    // SAFETY: ISB brackets the unprivileged counter read and orders compiler accesses.
+    unsafe {
+        core::arch::asm!(
+            "isb",
+            "mrs {counter}, cntvct_el0",
+            "isb",
+            counter = out(reg) counter,
+            options(nostack, preserves_flags),
+        );
+    }
+    counter
+}
+
+#[cfg(target_arch = "x86_64")]
 fn cpuid(leaf: u32) -> [u32; 4] {
     // SAFETY: CPUID is a baseline x86-64 instruction. Newer Rust releases
     // declare the intrinsic safe, older ones unsafe.
@@ -89,7 +108,11 @@ mod affinity {
         fn GetCurrentThread() -> Handle;
         fn GetCurrentProcess() -> Handle;
         fn SetThreadAffinityMask(thread: Handle, mask: usize) -> usize;
-        fn GetProcessAffinityMask(process: Handle, process_mask: *mut usize, system_mask: *mut usize) -> i32;
+        fn GetProcessAffinityMask(
+            process: Handle,
+            process_mask: *mut usize,
+            system_mask: *mut usize,
+        ) -> i32;
     }
 
     pub fn allowed() -> Result<Vec<usize>, String> {
@@ -164,7 +187,10 @@ mod clock {
 
         /// Returns the clock's reported resolution in nanoseconds.
         pub fn resolution_ns(self) -> Result<f64, String> {
-            let mut time = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut time = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             // SAFETY: time points to a valid timespec.
             if unsafe { clock_getres(self.id, &mut time) } != 0 {
                 return Err(format!(
@@ -179,7 +205,10 @@ mod clock {
         /// Returns the clock in ticks.
         #[inline(always)]
         pub fn now(self) -> u64 {
-            let mut time = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut time = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             // SAFETY: time points to a valid timespec, and both clocks always
             // exist.
             unsafe { clock_gettime(self.id, &mut time) };
@@ -283,8 +312,12 @@ fn parse_cpus(text: &str) -> Result<Vec<usize>, String> {
             Some((start, end)) => (start, end),
             None => (part, part),
         };
-        let start: usize = start.parse().map_err(|_| format!("invalid CPU list {text:?}"))?;
-        let end: usize = end.parse().map_err(|_| format!("invalid CPU list {text:?}"))?;
+        let start: usize = start
+            .parse()
+            .map_err(|_| format!("invalid CPU list {text:?}"))?;
+        let end: usize = end
+            .parse()
+            .map_err(|_| format!("invalid CPU list {text:?}"))?;
         if end < start {
             return Err(format!("invalid CPU range {part:?}"));
         }
@@ -315,6 +348,7 @@ fn format_cpus(cpus: &[usize]) -> String {
     parts.join(",")
 }
 
+#[cfg(target_arch = "x86_64")]
 fn cpu() -> Result<(), String> {
     let [max_basic, ebx, ecx, edx] = cpuid(0);
     let mut vendor = Vec::new();
@@ -358,8 +392,26 @@ fn cpu() -> Result<(), String> {
     Ok(())
 }
 
-/// Reads the TSC between two reads of `clock` and returns the tightest of 64
-/// such brackets as (TSC, clock ticks before the read, clock ticks between
+#[cfg(target_arch = "aarch64")]
+fn cpu() -> Result<(), String> {
+    let frequency: u64;
+    // SAFETY: CNTFRQ_EL0 is the architected counter's unprivileged frequency register.
+    unsafe {
+        core::arch::asm!(
+            "mrs {frequency}, cntfrq_el0",
+            frequency = out(reg) frequency,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    if frequency == 0 {
+        return Err("CNTFRQ_EL0 reports a zero counter frequency".into());
+    }
+    println!("{PREFIX} cpu architecture=aarch64 counter=cntvct_el0 counter_hz={frequency}");
+    Ok(())
+}
+
+/// Reads the counter between two reads of `clock` and returns the tightest of 64
+/// such brackets as (counter, clock ticks before the read, clock ticks between
 /// the two clock reads).
 fn clock_sample(clock: clock::Clock) -> (u64, u64, u64) {
     let mut best: Option<(u64, u64, u64)> = None;
@@ -404,6 +456,8 @@ fn clock_step(clock: clock::Clock) -> Result<(u64, bool), String> {
 
 fn rate(arguments: &[String]) -> Result<(), String> {
     check_options(arguments, &["--samples", "--interval-ms"])?;
+    #[cfg(target_arch = "aarch64")]
+    cpu()?;
     let samples: u32 = number(arguments, "--samples", 3)?;
     let interval_ms: u64 = number(arguments, "--interval-ms", 1000)?;
     if samples < 2 || interval_ms == 0 {
@@ -418,7 +472,11 @@ fn rate(arguments: &[String]) -> Result<(), String> {
         let reported_ns = clock.resolution_ns()?;
         let (step, repeated) = clock_step(clock)?;
         let step_ns = step as f64 * 1e9 / hz as f64;
-        let resolution_ns = if repeated { reported_ns.max(step_ns) } else { reported_ns };
+        let resolution_ns = if repeated {
+            reported_ns.max(step_ns)
+        } else {
+            reported_ns
+        };
         println!(
             "{PREFIX} clock role={role} name={} hz={hz} resolution_ns={resolution_ns:.3} \
              reported_resolution_ns={reported_ns:.3} step_ns={step_ns:.3} repeated={}",
@@ -573,7 +631,10 @@ fn measure_pair(initiator: usize, responder: usize, duration: Duration) -> Resul
 }
 
 fn skew(arguments: &[String]) -> Result<(), String> {
-    check_options(arguments, &["--duration-ms", "--cpus", "--tsc-hz", "--bound-ns"])?;
+    check_options(
+        arguments,
+        &["--duration-ms", "--cpus", "--tsc-hz", "--bound-ns"],
+    )?;
     let duration_ms: u64 = number(arguments, "--duration-ms", 5)?;
     let bound_ns: f64 = number(arguments, "--bound-ns", 1000.0)?;
     let allowed = affinity::allowed()?;
@@ -610,7 +671,10 @@ fn skew(arguments: &[String]) -> Result<(), String> {
             pairs += 1;
             if pair.stalled {
                 stalled += 1;
-                println!("{PREFIX} pair cpus={first}-{second} rounds={} stalled=1", pair.rounds);
+                println!(
+                    "{PREFIX} pair cpus={first}-{second} rounds={} stalled=1",
+                    pair.rounds
+                );
                 continue;
             }
             inconsistent += usize::from(!pair.consistent);

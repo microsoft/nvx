@@ -37,7 +37,11 @@ param(
 
     [Parameter()]
     [ValidatePattern('^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$')]
-    [string]$ExtraRunnerLabels
+    [string]$ExtraRunnerLabels,
+
+    [Parameter()]
+    [ValidateSet("virtual-machine", "baremetal")]
+    [string]$HostType
 )
 
 Set-StrictMode -Version 2.0
@@ -79,7 +83,7 @@ function Read-ToolManifest {
         if ($field.StartsWith("artifacts.")) {
             $platform = $Matches[2]
             $field = $Matches[3]
-            if ($platform -cnotin @("linux-x86_64", "windows-x86_64")) {
+            if ($platform -cnotin @("linux-x86_64", "windows-x86_64", "windows-aarch64")) {
                 throw "${location}: unsupported platform: $platform"
             }
         }
@@ -135,10 +139,12 @@ function Get-ToolArtifact {
 function Get-ExpectedRunnerLabels {
     param(
         [string]$AdditionalLabels,
-        [switch]$BenchmarkRunner
+        [switch]$BenchmarkRunner,
+        [ValidateSet("virtual-machine", "baremetal")]
+        [string]$HostType = "virtual-machine"
     )
 
-    $labels = @("windows", "whp", "virtual-machine")
+    $labels = @("windows", "whp", $HostType.ToLowerInvariant())
     if ($BenchmarkRunner) {
         $labels += "benchmark"
     }
@@ -160,10 +166,20 @@ function Get-ExpectedRunnerLabels {
     return $labels -join ','
 }
 
+function Get-ToolPlatform {
+    param([Parameter(Mandatory = $true)][string]$Architecture)
+    switch -CaseSensitive ($Architecture) {
+        "X64" { return "windows-x86_64" }
+        "Arm64" { return "windows-aarch64" }
+        default { throw "unsupported native Windows architecture: $Architecture" }
+    }
+}
+
 # The versions, artifacts, and checksums of the tools that this script
 # installs; stage the manifest next to the script.
-$ToolPlatform = "windows-x86_64"
 $ToolManifest = Read-ToolManifest (Join-Path $PSScriptRoot "tool-versions.conf")
+$NativeArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$ToolPlatform = Get-ToolPlatform $NativeArchitecture
 $RustToolchain = Get-ToolManifestValue $ToolManifest "rust.toolchain"
 $CargoNextestVersion = Get-ToolManifestValue $ToolManifest "cargo_nextest.version"
 $CargoLlvmCovVersion = Get-ToolManifestValue $ToolManifest "cargo_llvm_cov.version"
@@ -180,8 +196,42 @@ $RunnerVersion = $runnerRelease.Version
 $RunnerArtifact = $runnerRelease.Name
 $RunnerSha256 = $runnerRelease.Sha256
 
+if ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString() -cne
+    $NativeArchitecture) {
+    throw "setup requires native $NativeArchitecture PowerShell, not an emulated process"
+}
+if ([string]::IsNullOrWhiteSpace($HostType)) {
+    if ($RunnerOnly -and $NativeArchitecture -ceq "Arm64") {
+        throw "ARM64 runner setup requires an explicit -HostType baremetal or virtual-machine"
+    }
+    $HostType = "virtual-machine"
+}
+$VisualStudioToolsComponent = if ($NativeArchitecture -ceq "Arm64") {
+    "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+} else {
+    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+}
+$VisualStudioArchitecture = if ($NativeArchitecture -ceq "Arm64") { "arm64" } else { "amd64" }
+$RustTargets = if ($NativeArchitecture -ceq "Arm64") {
+    @("aarch64-unknown-none", "aarch64-unknown-uefi")
+} else {
+    @("x86_64-unknown-none", "x86_64-unknown-uefi")
+}
+$RustHost = if ($NativeArchitecture -ceq "Arm64") {
+    "aarch64-pc-windows-msvc"
+} else {
+    "x86_64-pc-windows-msvc"
+}
+$GuestKernelName = if ($NativeArchitecture -ceq "Arm64") { "Image" } else { "vmlinux" }
+$GuestBuildRelativeDirectory = if ($NativeArchitecture -ceq "Arm64") {
+    "build\aarch64"
+} else {
+    "build"
+}
+
 $ExpectedRunnerLabels = Get-ExpectedRunnerLabels `
-    -AdditionalLabels $ExtraRunnerLabels -BenchmarkRunner:$BenchmarkRunner
+    -AdditionalLabels $ExtraRunnerLabels -BenchmarkRunner:$BenchmarkRunner `
+    -HostType $HostType
 
 if (-not $RunnerOnly) {
     if ([string]::IsNullOrWhiteSpace($Workspace)) {
@@ -197,9 +247,9 @@ $BenchmarkScratchVariable = "NVX_BENCHMARK_SCRATCH"
 $BenchmarkScratchName = "nvx-benchmark-scratch"
 $RustupHome = Join-Path $ToolRoot "rustup"
 $RequiredGuestArtifacts = @(
-    "vmlinux",
-    "vmlinux.config",
-    "vmlinux.provenance.json",
+    $GuestKernelName,
+    "$GuestKernelName.config",
+    "$GuestKernelName.provenance.json",
     "initramfs.cpio.gz",
     "initramfs.cpio.gz.packages.json",
     "initramfs.provenance.json",
@@ -207,10 +257,14 @@ $RequiredGuestArtifacts = @(
     "initramfs-ubuntu.cpio.gz.packages.json",
     "ubuntu-distro.erofs",
     "ubuntu-distro.erofs.manifest.json",
-    "ubuntu-smoke-scratch.ext4",
-    "initramfs-azurelinux.cpio.gz",
-    "initramfs-azurelinux.cpio.gz.packages.json"
+    "ubuntu-smoke-scratch.ext4"
 )
+if ($NativeArchitecture -ceq "X64") {
+    $RequiredGuestArtifacts += @(
+        "initramfs-azurelinux.cpio.gz",
+        "initramfs-azurelinux.cpio.gz.packages.json"
+    )
+}
 
 function Assert-LastExitCode {
     param([Parameter(Mandatory = $true)][string]$Description)
@@ -804,7 +858,7 @@ function Test-VisualStudioBuildTools {
     $instances = @(& $vswhere `
             -products * `
             -requires `
-            Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            $VisualStudioToolsComponent `
             Microsoft.VisualStudio.Component.Windows11SDK.26100 `
             -property installationPath)
     return $LASTEXITCODE -eq 0 -and $instances.Count -gt 0
@@ -826,7 +880,7 @@ function Install-Toolchain {
     if (-not (Test-VisualStudioBuildTools)) {
         $vsArguments = @(
             "--override",
-            "--wait --quiet --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended"
+            "--wait --quiet --norestart --add Microsoft.VisualStudio.Workload.VCTools --add $VisualStudioToolsComponent --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended"
         )
         Install-WinGetPackage "Microsoft.VisualStudio.2022.BuildTools" $vsArguments
     }
@@ -882,12 +936,8 @@ function Install-Toolchain {
         "toolchain", "install", $RustToolchain, "--profile", "minimal",
         "--no-self-update"
     )
-    Invoke-Native $rustupPath @(
-        "target", "add",
-        "x86_64-unknown-none",
-        "x86_64-unknown-uefi",
-        "--toolchain", $RustToolchain
-    )
+    Invoke-Native $rustupPath (@("target", "add") + $RustTargets +
+        @("--toolchain", $RustToolchain))
     # cargo-llvm-cov merges and reports coverage profiles with the release's
     # own llvm-profdata and llvm-cov.
     Invoke-Native $rustupPath @(
@@ -1494,7 +1544,7 @@ function Copy-GuestArtifacts {
     $revision = Get-CurrentRevision
     Assert-GuestArtifactSet $GuestArtifactsDirectory $revision
 
-    $buildDirectory = Join-Path $Workspace "build"
+    $buildDirectory = Join-Path $Workspace $GuestBuildRelativeDirectory
     New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
     foreach ($name in @($RequiredGuestArtifacts) + @("REVISION", "SHA256SUMS")) {
         Copy-Item `
@@ -1514,7 +1564,7 @@ function Get-VisualStudioEnvironment {
     $installationOutput = @(& $vswhere `
             -latest `
             -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -requires $VisualStudioToolsComponent `
             -property installationPath)
     Assert-LastExitCode "Visual Studio discovery"
     $installationPath = ($installationOutput -join "").Trim()
@@ -1536,7 +1586,7 @@ function Build-Nvx {
     Push-Location $Workspace
     try {
         Invoke-Native $python @("scripts\nvx.py", "verify")
-        $command = 'call "{0}" -no_logo -arch=amd64 -host_arch=amd64 && "{1}" scripts\nvx.py build-openvmm' -f $vsDevCmd, $python
+        $command = 'call "{0}" -no_logo -arch={2} -host_arch={2} && "{1}" scripts\nvx.py build-openvmm' -f $vsDevCmd, $python, $VisualStudioArchitecture
         Invoke-Native $env:ComSpec @("/d", "/s", "/c", $command)
     }
     finally {
@@ -1619,12 +1669,15 @@ function Assert-Environment {
     }
 
     $rustVersion = & (Get-RequiredCommand "rustup.exe") `
-        run $RustToolchain rustc --version
+        run $RustToolchain rustc --version --verbose
     Assert-LastExitCode "Rust $RustToolchain"
     $rustVersionText = $rustVersion -join "`n"
     if ($rustVersionText -notmatch "rustc ([0-9]+\.[0-9]+\.[0-9]+)" -or
         $Matches[1] -ne $RustToolchain) {
         throw "Rust $RustToolchain is required, found $rustVersionText"
+    }
+    if ($rustVersionText -notmatch "(?m)^host: $([regex]::Escape($RustHost))`r?$") {
+        throw "native Rust host $RustHost is required, found $rustVersionText"
     }
     $nextestVersion = & (Get-RequiredCommand "cargo-nextest.exe") --version
     Assert-LastExitCode "cargo-nextest --version"
@@ -1671,7 +1724,7 @@ function Assert-Environment {
     $installedTargets = & (Get-RequiredCommand "rustup.exe") `
         target list --installed --toolchain $RustToolchain
     Assert-LastExitCode "rustup target list"
-    foreach ($target in @("x86_64-unknown-none", "x86_64-unknown-uefi")) {
+    foreach ($target in $RustTargets) {
         if ($target -notin @($installedTargets)) {
             throw "Rust target $target is not installed"
         }
@@ -1693,7 +1746,9 @@ function Assert-Environment {
         if ($feature.State -ne "Enabled") {
             throw "Hyper-V is not enabled"
         }
-        Assert-PcatFirmware
+        if ($NativeArchitecture -ceq "X64") {
+            Assert-PcatFirmware
+        }
     }
 
     if ($SkipWorkspace) {
@@ -1703,7 +1758,8 @@ function Assert-Environment {
     try {
         Invoke-Native $python @("scripts\nvx.py", "verify")
         if ($RequireBuild) {
-            Assert-GuestArtifactSet "$Workspace\build" (Get-CurrentRevision)
+            Assert-GuestArtifactSet (Join-Path $Workspace $GuestBuildRelativeDirectory) `
+                (Get-CurrentRevision)
             if (-not (Test-Path `
                         -LiteralPath "$Workspace\openvmm\target\release\openvmm.exe" `
                         -PathType Leaf)) {
@@ -1809,7 +1865,9 @@ if (-not $SkipBuild) {
 
 if (-not $SkipBuild -and
     [string]::IsNullOrWhiteSpace($GuestArtifactsDirectory) -and
-    -not (Test-Path -LiteralPath "$Workspace\build\vmlinux" -PathType Leaf)) {
+    -not (Test-Path -LiteralPath (Join-Path `
+                (Join-Path $Workspace $GuestBuildRelativeDirectory) $GuestKernelName) `
+            -PathType Leaf)) {
     Write-Output "NVX_GUEST_ARTIFACTS_REQUIRED=1"
     Write-Output "Stage a same-revision guest bundle and rerun with -GuestArtifactsDirectory."
     exit 21

@@ -57,6 +57,7 @@ from nvx_tools import (  # noqa: E402
     merge_queue,
     microvm_durations,
     microvm_shards,
+    microvm_tests,
     nvx_rs,
     openvmm_ci,
     openvmm_process,
@@ -80,7 +81,6 @@ from nvx_tools.build_constants import (  # noqa: E402
     ZstdBuildConstants,
 )
 from nvx_tools.microvm_tests import (  # noqa: E402
-    MICROVM_PROCESSOR_COUNTS,
     PUBLIC_SANDBOX_SCENARIOS,
     default_suite,
 )
@@ -552,33 +552,33 @@ def _simulate_workflow_jobs(
     return results
 
 
-def _matrix_legs(job: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _matrix_legs(
+    job: Mapping[str, Any], *, event_name: str = "pull_request"
+) -> list[dict[str, Any]]:
     """Return the inputs that each leg of a job that calls a reusable workflow
     passes, with the expressions of its matrix and strategy resolved; a job
     without a matrix has one leg."""
     strategy: Mapping[str, Any] = job.get("strategy", {})
     matrix: dict[str, list[Any]] = dict(strategy.get("matrix", {}))
-    if {"include", "exclude"} & set(matrix):
+    included = matrix.pop("include", [])
+    if "exclude" in matrix or (included and matrix):
         raise AssertionError(f"unsupported matrix: {matrix}")
-    combinations = [
+    combinations = included or [
         dict(zip(matrix, values, strict=True))
         for values in itertools.product(*matrix.values())
     ]
     legs: list[dict[str, Any]] = []
     for combination in combinations:
-        expressions: dict[str, Any] = {
-            f"${{{{ matrix.{name} }}}}": value for name, value in combination.items()
+        context = {
+            "matrix": combination,
+            "strategy": {"job-total": len(combinations)},
+            "github": {"event_name": event_name},
         }
-        expressions["${{ strategy.job-total }}"] = len(combinations)
 
-        def resolve(value: Any, expressions: dict[str, Any] = expressions) -> Any:
+        def resolve(value: Any, context: dict[str, Any] = context) -> Any:
             if not isinstance(value, str):
                 return value
-            if value in expressions:
-                return expressions[value]
-            for expression, replacement in expressions.items():
-                value = value.replace(expression, str(replacement))
-            return value
+            return _interpolate_expressions(value, context, {})
 
         legs.append(
             {name: resolve(value) for name, value in job.get("with", {}).items()}
@@ -587,32 +587,99 @@ def _matrix_legs(job: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _resolve_inputs(text: str, inputs: Mapping[str, Any]) -> str:
-    """Resolve the input expressions of a reusable workflow's step: an input,
-    `inputs.NAME && 'VALUE' || 'OTHER'`, and `inputs.NAME && format(...)
-    || 'OTHER'` with inputs as the arguments."""
+    """Resolve the same expression grammar used by workflow conditions."""
 
-    def value(name: str) -> Any:
-        return inputs[name.removeprefix("inputs.")]
+    def format_values(template: str, *args: Any) -> str:
+        return template.format(*args)
 
-    def formatted(match: re.Match[str]) -> str:
-        if not value(match.group(1)):
-            return match.group(4)
-        arguments = [str(value(name.strip())) for name in match.group(3).split(",")]
-        return match.group(2).format(*arguments)
-
-    text = re.sub(
-        r"\$\{\{ (inputs\.[a-z-]+) && format\('([^']*)', ([^)]*)\) "
-        r"\|\| '([^']*)' \}\}",
-        formatted,
-        text,
-    )
-    text = re.sub(
-        r"\$\{\{ (inputs\.[a-z-]+) && '([^']*)' \|\| '([^']*)' \}\}",
-        lambda match: match.group(2 if value(match.group(1)) else 3),
-        text,
-    )
     return re.sub(
-        r"\$\{\{ (inputs\.[a-z-]+) \}\}", lambda match: str(value(match.group(1))), text
+        r"\$\{\{(.*?)\}\}",
+        lambda match: (
+            match.group(0)
+            if re.search(r"\b(?:runner|github)\.", match.group(1))
+            else _expression_string(
+                _evaluate_expression(
+                    match.group(1),
+                    {"inputs": inputs},
+                    {"format": format_values},
+                )
+            )
+        ),
+        text,
+        flags=re.DOTALL,
+    )
+
+
+def _correctness_arguments(inputs: Mapping[str, Any], system: str) -> dict[str, Any]:
+    path = (
+        BuildConstants.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
+    )
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    selected_steps = [
+        step
+        for step in workflow["jobs"]["test"]["steps"]
+        if step["name"].startswith("Bind shared correctness arguments")
+        and _evaluate_expression(step["if"], {"runner": {"os": system}}, {})
+    ]
+    if len(selected_steps) != 1:
+        raise AssertionError(f"expected exactly one native binder on {system}")
+    step = selected_steps[0]
+    defaults = {
+        name: definition.get("default")
+        for name, definition in workflow[True]["workflow_call"]["inputs"].items()
+    }
+    inputs = defaults | dict(inputs)
+    environment = {
+        **os.environ,
+        **{name: _resolve_inputs(value, inputs) for name, value in step["env"].items()},
+        "RUNNER_OS": system,
+        "PYTHONPATH": str(BuildConstants.REPO_ROOT / "scripts"),
+        "PATH": "",
+    }
+    shell = shlex.split(step["shell"])
+    expected = "python" if system == "Windows" else "python3"
+    if shell != [expected, "{0}"]:
+        raise AssertionError(f"binder needs the native Python custom shell: {shell}")
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "outputs"
+        environment["GITHUB_OUTPUT"] = str(output)
+        script = Path(directory) / "correctness arguments.py"
+        script.write_text(step["run"], encoding="utf-8")
+        # Use this interpreter for the runner's Python alias, with no shell tools.
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=directory,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode:
+            raise AssertionError(result.stderr)
+        selected = json.loads(
+            (Path(directory) / "build" / "nvx-correctness-arguments.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        expected_output = (
+            f"workload-artifacts={str(selected['workload_artifacts']).lower()}\n"
+        )
+        if output.read_text(encoding="utf-8") != expected_output:
+            raise AssertionError("binder's workload-artifacts output does not match")
+        return selected
+
+
+def _runner_system(runner: str | list[str]) -> str:
+    labels: list[str] = (
+        (json.loads(runner) if runner.startswith("[") else [runner])
+        if isinstance(runner, str)
+        else runner
+    )
+    return (
+        "Windows"
+        if any("windows" in str(label).lower() for label in labels)
+        else "Linux"
     )
 
 
@@ -5944,8 +6011,105 @@ class OpenVMMCiTests(unittest.TestCase):
                     text,
                 )
 
+    def test_arm_coverage_requires_both_existing_jobs_without_trusting_forks(self):
+        arm_jobs = openvmm_ci.OPENVMM_CI_ARM64_REQUIRED_JOBS
+        self.assertEqual(
+            arm_jobs,
+            ("unit tests [aarch64-windows]", "run vmm-tests [aarch64-windows]"),
+        )
+        cases: list[tuple[str | None, str]] = [(None, "success"), (None, "fork")]
+        cases.extend(
+            (name, state)
+            for name in arm_jobs
+            for state in (
+                "missing",
+                "failure",
+                "skipped",
+                "pending",
+                "unlisted-pending",
+            )
+        )
+        for target, state in cases:
+            with self.subTest(target=target, state=state):
+                jobs = _openvmm_gate_jobs(7)
+                for name in arm_jobs:
+                    if name == target and state in ("missing", "unlisted-pending"):
+                        continue
+                    jobs.append(
+                        _openvmm_job(
+                            7,
+                            name,
+                            status="in_progress"
+                            if name == target and state == "pending"
+                            else "completed",
+                            conclusion=None
+                            if name == target and state == "pending"
+                            else state
+                            if name == target
+                            else "success",
+                        )
+                    )
+                run = _openvmm_run(
+                    7,
+                    status="in_progress"
+                    if state == "unlisted-pending"
+                    else "completed",
+                    head_repository="ahuja-gautam/openvmm"
+                    if state == "fork"
+                    else "microsoft/openvmm",
+                )
+                api = _FakeOpenVMMCiApi(([run], {7: jobs}))
+                args = nvx.parse_args(
+                    [
+                        "check-openvmm-ci",
+                        "--architecture",
+                        "aarch64",
+                        "--revision",
+                        _OPENVMM_REVISION,
+                    ]
+                )
+                with (
+                    patch.object(openvmm_ci, "GitHubClient", return_value=api),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                ):
+                    if state == "success":
+                        args.handler(args)
+                    else:
+                        with self.assertRaises(common.ScriptError):
+                            args.handler(args)
+                lines = output.getvalue().splitlines()
+                verdicts = [line for line in lines if not line.startswith("::")]
+                self.assertEqual(len(verdicts), 8)
+                if state == "fork":
+                    self.assertTrue(
+                        all(line.startswith("missing:") for line in verdicts)
+                    )
+                    self.assertEqual(api.requests, ["runs"])
+                elif state == "success":
+                    self.assertTrue(
+                        all(line.startswith("passed:") for line in verdicts)
+                    )
+                else:
+                    expected = (
+                        "pending"
+                        if state in ("pending", "unlisted-pending")
+                        else "missing"
+                        if state == "missing"
+                        else "failed"
+                    )
+                    self.assertTrue(
+                        any(
+                            line.startswith(f"{expected}: {target}:")
+                            for line in verdicts
+                        )
+                    )
+                    self.assertEqual(
+                        sum(line.startswith("passed:") for line in verdicts), 7
+                    )
+
     def test_command_checks_the_pin_with_any_token(self):
         args = nvx.parse_args(["check-openvmm-ci"])
+        self.assertEqual(args.architecture, "x86_64")
         api = _FakeOpenVMMCiApi(([_openvmm_run(7)], {7: _openvmm_gate_jobs(7)}))
         with (
             patch.object(
@@ -6061,6 +6225,17 @@ class CiConfigurationTests(unittest.TestCase):
                 *DockerBuildConstants.DEBUG_KERNEL_ARTIFACT_NAMES,
             },
         )
+        components.update(
+            {
+                f"guest-aarch64-{name}": components[f"guest-{name}"]
+                for name in ("alpine", "ubuntu", "ubuntu-distro")
+            }
+        )
+        components["guest-aarch64-kernel"] = {
+            "Image",
+            "Image.config",
+            "Image.provenance.json",
+        }
 
         producers: dict[str, str] = {}
         for job_name, job in jobs.items():
@@ -6075,7 +6250,12 @@ class CiConfigurationTests(unittest.TestCase):
                     self.assertNotIn(name, producers)
                     producers[name] = job_name
                     paths = str(arguments["path"]).split()
-                    self.assertTrue(all(path.startswith("build/") for path in paths))
+                    prefix = (
+                        "build/aarch64/"
+                        if name.startswith("guest-aarch64-")
+                        else "build/"
+                    )
+                    self.assertTrue(all(path.startswith(prefix) for path in paths))
                     self.assertEqual(
                         {PurePosixPath(path).name for path in paths}, components[name]
                     )
@@ -6090,27 +6270,43 @@ class CiConfigurationTests(unittest.TestCase):
             "azurelinux": {"guest-azurelinux"},
             "debug-kernel": {"guest-debug-kernel"},
         }
-        built: dict[str, str] = {}
+        architectural_uploads = {
+            ("x86_64", name): names for name, names in uploads.items()
+        } | {
+            ("aarch64", name): {
+                artifact.replace("guest-", "guest-aarch64-", 1)
+                for artifact in uploads[name]
+            }
+            for name in ("kernel", "alpine", "ubuntu")
+        }
+        built: dict[tuple[str, str], str] = {}
         for job_name, job in jobs.items():
             for step in job.get("steps", []):
                 if step.get("uses") != "./.github/actions/build-guest-artifacts":
                     continue
                 selected = str(step.get("with", {}).get("components", "")).split()
+                architecture = step.get("with", {}).get("architecture", "x86_64")
                 with self.subTest(producer=job_name):
                     self.assertTrue(selected)
                     for component in selected:
-                        self.assertIn(component, uploads)
-                        self.assertNotIn(component, built)
-                        built[component] = job_name
+                        key = (architecture, component)
+                        self.assertIn(key, architectural_uploads)
+                        self.assertNotIn(key, built)
+                        built[key] = job_name
                     self.assertEqual(
                         {
                             name
                             for name, producer in producers.items()
                             if producer == job_name
                         },
-                        set[str]().union(*(uploads[name] for name in selected)),
+                        set[str]().union(
+                            *(
+                                architectural_uploads[architecture, name]
+                                for name in selected
+                            )
+                        ),
                     )
-        self.assertEqual(set(built), set(uploads))
+        self.assertEqual(set(built), set(architectural_uploads))
 
         kernel_alpine = {
             KernelBuildConstants.BINARY_NAME,
@@ -6153,6 +6349,12 @@ class CiConfigurationTests(unittest.TestCase):
         }
 
         def reads(step: dict[str, Any], context: Mapping[str, object]) -> set[str]:
+            architecture = context.get("inputs.architecture", "x86_64")
+            kernel = (
+                "Image"
+                if architecture == "aarch64"
+                else KernelBuildConstants.BINARY_NAME
+            )
             uses = str(step.get("uses", ""))
             if uses.startswith("./"):
                 self.assertIn(uses, actions)
@@ -6161,11 +6363,22 @@ class CiConfigurationTests(unittest.TestCase):
                     and step.get("with", {}).get("verify-openvmm") != "true"
                 ):
                     return set()
-                return actions[uses]
+                return {
+                    kernel if name == KernelBuildConstants.BINARY_NAME else name
+                    for name in actions[uses]
+                }
             if uses:
                 self.assertTrue(uses.startswith("actions/"), uses)
                 return set()
             script = str(step["run"])
+            if step.get("name", "").startswith("Run NVX microVM tests on "):
+                inputs = {
+                    name.removeprefix("inputs."): value
+                    for name, value in context.items()
+                    if name.startswith("inputs.")
+                }
+                selected = _correctness_arguments(inputs, str(context["runner.os"]))
+                script = "nvx.py " + shlex.join(selected["arguments"])
             files = {
                 name
                 for name in re.findall(r"\bbuild[/\\]([\w.-]+)", script)
@@ -6202,36 +6415,37 @@ class CiConfigurationTests(unittest.TestCase):
                     # A default run of a guest that controls sandboxes runs
                     # the public sandbox scenarios too, but no shard does.
                     default_run = not (scenarios or debug or sharded)
-                    if scenarios & PUBLIC_SANDBOX_SCENARIOS or (
-                        default_run and descriptor.sandbox_control
+                    if (
+                        scenarios & PUBLIC_SANDBOX_SCENARIOS
+                        or (default_run and descriptor.sandbox_control)
+                        or (
+                            "managed-lifecycle" in scenarios
+                            and context.get("inputs.managed-root", "initramfs")
+                            != "initramfs"
+                        )
                     ):
                         files |= workload
                 else:
                     self.assertIn(command, commands)
                     files |= commands[command]
-            return files
+            return {
+                kernel if name == KernelBuildConstants.BINARY_NAME else name
+                for name in files
+            }
 
         def holds(condition: object, context: Mapping[str, object]) -> bool:
-            # The conjunctions of atoms that the steps that read or download
-            # guest artifacts use; anything else fails the test.
-            for term in _expression_conjuncts(str(condition or "true")):
-                if term == "true":
-                    continue
-                match = re.fullmatch(
-                    r"(!?)\s*([\w.-]+)(?:\s*(==|!=)\s*'([^']*)')?", term
+            nested: dict[str, Any] = {}
+            for name, value in context.items():
+                fields = name.split(".")
+                target = nested
+                for field in fields[:-1]:
+                    target = target.setdefault(field, {})
+                target[fields[-1]] = value
+            return _expression_truthy(
+                _evaluate_expression(
+                    str(condition or "true"), nested, _job_status_functions(True)
                 )
-                self.assertIsNotNone(match, term)
-                assert match is not None
-                negated, name, operator, literal = match.groups()
-                value = context[name]
-                result = (
-                    bool(value)
-                    if operator is None
-                    else (str(value) == literal) == (operator == "==")
-                )
-                if result == bool(negated):
-                    return False
-            return True
+            )
 
         def consume(
             steps: list[dict[str, Any]], context: Mapping[str, object]
@@ -6240,26 +6454,51 @@ class CiConfigurationTests(unittest.TestCase):
             # its steps read, or None if it downloads none; such a job reads
             # none from its build directory either.
             downloads: set[str] = set()
+            inputs = {
+                name.removeprefix("inputs."): value
+                for name, value in context.items()
+                if name.startswith("inputs.")
+            }
+            if any(step.get("id") == "correctness" for step in steps):
+                selected = _correctness_arguments(inputs, str(context["runner.os"]))
+                context = dict(context) | {
+                    "steps.correctness.outputs.workload-artifacts": str(
+                        selected["workload_artifacts"]
+                    ).lower()
+                    if context["runner.os"] == "Windows"
+                    else "",
+                    "steps.correctness-linux.outputs.workload-artifacts": str(
+                        selected["workload_artifacts"]
+                    ).lower()
+                    if context["runner.os"] != "Windows"
+                    else "",
+                }
             for step in steps:
                 arguments = step.get("with", {})
-                if str(step.get("uses", "")).startswith(
-                    "actions/download-artifact@"
-                ) and str(arguments.get("name", arguments.get("pattern"))).startswith(
-                    "guest-"
+                name = _resolve_inputs(
+                    str(arguments.get("name", arguments.get("pattern"))), inputs
+                )
+                if (
+                    str(step.get("uses", "")).startswith("actions/download-artifact@")
+                    and name.startswith("guest-")
+                    and holds(step.get("if"), context)
                 ):
                     self.assertNotIn("pattern", arguments)
-                    self.assertEqual(arguments["path"], "build")
-                    if holds(step.get("if"), context):
-                        downloads.add(arguments["name"])
+                    self.assertEqual(
+                        _resolve_inputs(arguments["path"], inputs),
+                        "build/aarch64"
+                        if inputs.get("architecture") == "aarch64"
+                        else "build",
+                    )
+                    downloads.add(name)
             if not downloads:
                 return None
             read: set[str] = set()
             for step in steps:
                 if str(step.get("uses", "")).startswith("actions/download-artifact@"):
                     continue
-                files = reads(step, context)
-                if files and holds(step.get("if"), context):
-                    read |= files
+                if holds(step.get("if"), context):
+                    read |= reads(step, context)
             return downloads, read
 
         consumers: set[str] = set()
@@ -6279,11 +6518,7 @@ class CiConfigurationTests(unittest.TestCase):
                     inputs = {**defaults, **leg}
                     contexts.append(
                         {
-                            "runner.os": (
-                                "Windows"
-                                if "windows" in json.loads(inputs["runner"])
-                                else "Linux"
-                            ),
+                            "runner.os": _runner_system(inputs["runner"]),
                             **{
                                 f"inputs.{name}": value
                                 for name, value in inputs.items()
@@ -6299,11 +6534,7 @@ class CiConfigurationTests(unittest.TestCase):
                 legs = job.get("strategy", {}).get("matrix", {}).get("include", [{}])
                 contexts = [
                     {
-                        "runner.os": (
-                            "Windows"
-                            if "windows" in json.loads(leg.get("runner", "[]"))
-                            else "Linux"
-                        ),
+                        "runner.os": _runner_system(leg.get("runner", [])),
                         **{f"matrix.{name}": value for name, value in leg.items()},
                     }
                     for leg in legs
@@ -6315,7 +6546,12 @@ class CiConfigurationTests(unittest.TestCase):
                     continue
                 consumers.add(job_name)
                 downloaded, read = downloads
-                expected = {name for name, files in components.items() if files & read}
+                arm = context.get("inputs.architecture") == "aarch64"
+                expected = {
+                    name
+                    for name, files in components.items()
+                    if name.startswith("guest-aarch64-") == arm and files & read
+                }
                 with self.subTest(job=job_name, context=context):
                     self.assertEqual(downloaded, expected)
                     needs = job.get("needs", [])
@@ -6333,6 +6569,8 @@ class CiConfigurationTests(unittest.TestCase):
             consumers,
             {
                 *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
+                *ci.REQUIRED_CI_ARM_MICROVM_JOBS,
+                ci.REQUIRED_CI_ARM_REPETITION_JOB,
                 *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
                 *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
                 *ci.REQUIRED_CI_PLATFORM_JOBS,
@@ -6365,9 +6603,58 @@ class CiConfigurationTests(unittest.TestCase):
                 downloaded, read = result
                 self.assertEqual(
                     downloaded,
-                    {name for name, files in components.items() if files & read},
+                    {
+                        name
+                        for name, files in components.items()
+                        if not name.startswith("guest-aarch64-") and files & read
+                    },
                 )
                 self.assertIn("guest-ubuntu-distro", downloaded)
+
+            for guest in ("alpine", "ubuntu", "azurelinux"):
+                selected = context | {
+                    "inputs.guest": guest,
+                    "inputs.scenarios": '["guest-boot"]',
+                }
+                with self.subTest(system=system, selected_guest=guest):
+                    result = consume(microvm_steps, selected)
+                    assert result is not None
+                    downloaded, _ = result
+                    self.assertEqual(
+                        downloaded,
+                        {"guest-kernel", "guest-alpine", f"guest-{guest}"},
+                    )
+            azure = next(
+                step
+                for step in microvm_steps
+                if step["name"] == "Download Azure Linux initramfs"
+            )
+            for selected_guest, all_guests, debug, expected in (
+                ("azurelinux", False, False, True),
+                ("alpine", False, False, False),
+                ("ubuntu", False, False, False),
+                ("alpine", True, False, True),
+                ("azurelinux", False, True, False),
+                ("alpine", True, True, False),
+            ):
+                with self.subTest(
+                    system=system,
+                    guest=selected_guest,
+                    all_guests=all_guests,
+                    debug=debug,
+                ):
+                    self.assertEqual(
+                        holds(
+                            azure["if"],
+                            context
+                            | {
+                                "inputs.guest": selected_guest,
+                                "inputs.guests-and-sandboxes": all_guests,
+                                "inputs.debug-kernel": debug,
+                            },
+                        ),
+                        expected,
+                    )
 
         # test-openvmm boots the kernel and the Alpine initramfs.
         requested: list[str] = []
@@ -6898,6 +7185,18 @@ class CiConfigurationTests(unittest.TestCase):
         )
         for event_name, same_repository, flags, successful_jobs in cases:
             changes = ci.CiChanges(*flags)
+            successful_jobs = set(successful_jobs)
+            if changes.run_microvm_tests:
+                if changes.run_guest_artifacts:
+                    successful_jobs.add("artifacts-aarch64")
+                if event_name != "pull_request" or same_repository:
+                    successful_jobs.add("build-nvx-rs-windows-aarch64-msvc")
+                    if changes.run_openvmm_binaries:
+                        successful_jobs.add("build-openvmm-windows-aarch64-msvc")
+                        if changes.run_guest_artifacts:
+                            successful_jobs.update(ci.REQUIRED_CI_ARM_MICROVM_JOBS)
+                            if event_name in ci.CI_FULL_RUN_EVENTS:
+                                successful_jobs.add(ci.REQUIRED_CI_ARM_REPETITION_JOB)
             with self.subTest(
                 event_name=event_name,
                 same_repository=same_repository,
@@ -7048,6 +7347,26 @@ class CiConfigurationTests(unittest.TestCase):
         # The release and the recording of the performance results accept a
         # skipped OpenVMM CI check only when the change selected none (#690).
         gates = ("release", "performance-record")
+        arm_selections = {
+            "artifacts-aarch64": ["run-guest-artifacts", "run-microvm-tests"],
+            "build-nvx-rs-windows-aarch64-msvc": ["run-microvm-tests"],
+            "build-openvmm-windows-aarch64-msvc": [
+                "run-openvmm-binaries",
+                "run-microvm-tests",
+            ],
+            **dict.fromkeys(
+                (*ci.REQUIRED_CI_ARM_MICROVM_JOBS, ci.REQUIRED_CI_ARM_REPETITION_JOB),
+                ["run-guest-artifacts", "run-openvmm-binaries", "run-microvm-tests"],
+            ),
+        }
+        for job_name, outputs in arm_selections.items():
+            with self.subTest(job=job_name):
+                job = _workflow_job(workflow, job_name)
+                self.assertIn("needs.openvmm-changes.result != 'success'", job)
+                self.assertEqual(
+                    re.findall(r"needs\.openvmm-changes\.outputs\.([a-z-]+)", job),
+                    outputs,
+                )
         for job_name in gates:
             with self.subTest(job=job_name):
                 self.assertEqual(
@@ -7066,7 +7385,7 @@ class CiConfigurationTests(unittest.TestCase):
                 for job_name in jobs
                 if "needs.openvmm-changes.outputs." in _workflow_job(workflow, job_name)
             },
-            set(selections) | {"required-status-check", *gates},
+            set(selections) | set(arm_selections) | {"required-status-check", *gates},
         )
         # The detector checks and forwards exactly the classifier's outputs.
         script = _workflow_step(workflow, "openvmm-changes", "Detect relevant changes")
@@ -7536,7 +7855,16 @@ class CiConfigurationTests(unittest.TestCase):
                     else:
                         # Only cache writes follow save-cache, so builds still
                         # run when an artifact misses the cache.
-                        self.assertNotIn("save-cache", str(entry))
+                        self.assertNotIn(
+                            "save-cache",
+                            str(
+                                {
+                                    key: value
+                                    for key, value in entry.items()
+                                    if key != "env"
+                                }
+                            ),
+                        )
                         continue
                 writes[source] = writes.get(source, 0) + 1
 
@@ -7560,10 +7888,15 @@ class CiConfigurationTests(unittest.TestCase):
             for name, callee, arguments in calls
             if callee in save_cache_actions
         ]
-        self.assertEqual(len(save_cache_calls), 4)
+        self.assertEqual(len(save_cache_calls), 5)
         for name, arguments in save_cache_calls:
             with self.subTest(call=name):
-                self.assertEqual(arguments.get("save-cache"), save_cache)
+                self.assertEqual(
+                    arguments.get("save-cache"),
+                    "false"
+                    if arguments.get("architecture") == "aarch64"
+                    else save_cache,
+                )
         # No other push-only job condition is allowed in this workflow: only
         # the release, performance persistence, the four save-cache arguments,
         # and the two reuse arguments name the push event; ci.yml itself writes
@@ -7989,7 +8322,14 @@ class CiConfigurationTests(unittest.TestCase):
             download,
         )
         self.assertIn("uses: actions/download-artifact@v8\n", download)
-        self.assertIn("name: runtime-adapter-guest\n", download)
+        for architecture, expected in (
+            ("x86_64", "runtime-adapter-guest"),
+            ("aarch64", "runtime-adapter-guest-aarch64"),
+        ):
+            self.assertIn(
+                f"name: {expected}\n",
+                _resolve_inputs(download, {"architecture": architecture}),
+            )
         self.assertIn("path: build/runtime-adapter\n", download)
         for system, setup, guest_agent in (
             ("Linux", linux_build, agent),
@@ -9145,6 +9485,10 @@ python3() {
                 "whp",
                 "openvmm-windows-msvc",
             ),
+            "build-openvmm-windows-aarch64-msvc": (
+                "whp",
+                "openvmm-windows-aarch64-msvc",
+            ),
         }
         self.assertEqual(
             workflow.count("uses: ./.github/workflows/build-openvmm-binary.yml"),
@@ -9487,15 +9831,12 @@ python3() {
                 name = "<unnamed>"
             with self.subTest(step=name):
                 condition = _yaml_scalar(step, "if")
-                guard = "inputs.restore-only != 'true' && "
-                self.assertTrue(condition.startswith(guard), condition)
-                cache_condition = condition.removeprefix(guard)
-                self.assertIn("cache-hit != 'true'", cache_condition)
-                if "||" in cache_condition:
-                    self.assertTrue(
-                        _outer_parentheses_enclose(cache_condition),
-                        cache_condition,
-                    )
+                conjuncts = _expression_conjuncts(condition)
+                self.assertIn("inputs.restore-only != 'true'", conjuncts)
+                self.assertIn("cache-hit != 'true'", condition)
+                for conjunct in conjuncts:
+                    if "||" in conjunct:
+                        self.assertTrue(_outer_parentheses_enclose(conjunct), conjunct)
 
     def test_guest_artifact_restore_only_leaves_restore_steps_active(self):
         action = (
@@ -9527,6 +9868,99 @@ python3() {
                 except AssertionError:
                     continue
                 self.assertNotIn("restore-only", condition)
+
+    def test_arm_guest_producer_requires_fresh_native_inputs(self):
+        path = (
+            BuildConstants.REPO_ROOT
+            / ".github"
+            / "actions"
+            / "build-guest-artifacts"
+            / "action.yml"
+        )
+        action = yaml.safe_load(path.read_text(encoding="utf-8"))
+        step = next(
+            step for step in action["runs"]["steps"] if step.get("id") == "architecture"
+        )
+        shell = shutil.which("bash")
+        self.assertIsNotNone(shell, "the maintained guest producer requires Bash")
+        assert shell is not None
+        defaults = {
+            "ARCHITECTURE": "aarch64",
+            "COMPONENTS": "kernel alpine ubuntu",
+            "RESTORE_ONLY": "false",
+            "SAVE_CACHE": "false",
+            "REUSE": "false",
+            "RECORD": "",
+            "ENGINE": "arm64",
+            "GITHUB_OUTPUT": "outputs",
+        }
+        cases: list[tuple[dict[str, str], bool]] = [
+            ({}, True),
+            ({"ENGINE": "aarch64"}, True),
+            (
+                {"ARCHITECTURE": "x86_64", "SAVE_CACHE": "true", "ENGINE": "unused"},
+                True,
+            ),
+            ({"ENGINE": "x86_64"}, False),
+            ({"ARCHITECTURE": "unknown"}, False),
+            ({"COMPONENTS": "kernel debug-kernel"}, False),
+            ({"COMPONENTS": "azurelinux"}, False),
+        ]
+        cases.extend(
+            ({name: "true"}, False) for name in ("RESTORE_ONLY", "SAVE_CACHE", "REUSE")
+        )
+        cases.append(({"RECORD": "record"}, False))
+        stub = 'docker() { test "$*" = "info --format {{.Architecture}}" || return 79; printf "%s\\n" "$ENGINE"; }\n'
+        for overrides, passes in cases:
+            with (
+                self.subTest(overrides=overrides),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                environment = os.environ | defaults | overrides
+                result = subprocess.run(
+                    [shell, "-c", stub + step["run"]],
+                    cwd=directory,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, passes, result.stderr)
+                output = Path(directory) / "outputs"
+                if passes:
+                    fields = dict(
+                        line.split("=", 1)
+                        for line in output.read_text(encoding="utf-8").splitlines()
+                    )
+                    arm = environment["ARCHITECTURE"] == "aarch64"
+                    self.assertEqual(
+                        fields["directory"], "build/aarch64" if arm else "build"
+                    )
+                    self.assertEqual(
+                        fields["platform"], "linux/arm64" if arm else "linux/amd64"
+                    )
+                    if arm:
+                        self.assertEqual(
+                            {
+                                name: fields[name]
+                                for name in (
+                                    "kernel-target",
+                                    "alpine-target",
+                                    "ubuntu-target",
+                                    "distro-target",
+                                )
+                            },
+                            {
+                                "kernel-target": "arm64-kernel-artifacts",
+                                "alpine-target": "arm64-artifacts",
+                                "ubuntu-target": "arm64-ubuntu-artifacts",
+                                "distro-target": "arm64-ubuntu-distro-layer-artifacts",
+                            },
+                        )
+                else:
+                    self.assertIn("::error::", result.stderr)
+                    self.assertFalse(output.exists())
 
     def test_guest_artifact_jobs_record_their_components(self):
         github = BuildConstants.REPO_ROOT / ".github"
@@ -9576,7 +10010,11 @@ python3() {
         self.assertEqual(record["name"], "Record guest artifact keys and digests")
         self.assertEqual(
             _expression_conjuncts(record["if"]),
-            ["inputs.restore-only != 'true'", "inputs.record-artifact != ''"],
+            [
+                "inputs.architecture == 'x86_64'",
+                "inputs.restore-only != 'true'",
+                "inputs.record-artifact != ''",
+            ],
         )
         self.assertEqual(
             record["env"],
@@ -9624,8 +10062,13 @@ python3() {
                     continue
                 arguments = step["with"]
                 with self.subTest(job=job_name):
-                    if arguments["components"].split() == ["debug-kernel"]:
+                    if (
+                        arguments["components"].split() == ["debug-kernel"]
+                        or arguments.get("architecture") == "aarch64"
+                    ):
                         self.assertNotIn("record-artifact", arguments)
+                        if arguments.get("architecture") == "aarch64":
+                            self.assertEqual(arguments["save-cache"], "false")
                         continue
                     name = arguments["record-artifact"]
                     self.assertFalse(name.startswith("guest-"), name)
@@ -9712,6 +10155,7 @@ python3() {
         self.assertEqual(
             _expression_conjuncts(reuse["if"]),
             [
+                "inputs.architecture == 'x86_64'",
                 "inputs.restore-only != 'true'",
                 "inputs.reuse == 'true'",
                 "inputs.record-artifact != ''",
@@ -9928,6 +10372,10 @@ python3() {
         for job_name, job in workflow["jobs"].items():
             for step in job.get("steps", []):
                 if step.get("uses") == "./.github/actions/build-guest-artifacts":
+                    if step.get("with", {}).get("architecture", "x86_64") != "x86_64":
+                        self.assertEqual(step["with"].get("save-cache"), "false")
+                        self.assertNotIn("record-artifact", step["with"])
+                        continue
                     for component in step["with"]["components"].split():
                         builders[component] = job_name
         uploads = _guest_uploads()
@@ -9948,7 +10396,16 @@ python3() {
                     sorted(files),
                     sorted(release.GUEST_ARTIFACT_COMPONENTS[component]),
                 )
-        self.assertEqual(set(uploads) - handed_over, {"guest-debug-kernel"})
+        self.assertEqual(
+            set(uploads) - handed_over,
+            {
+                "guest-debug-kernel",
+                "guest-aarch64-kernel",
+                "guest-aarch64-alpine",
+                "guest-aarch64-ubuntu",
+                "guest-aarch64-ubuntu-distro",
+            },
+        )
 
     def test_ci_runs_debug_kernel_on_mshv_for_prs_and_all_for_non_prs(self):
         workflow = (
@@ -10048,8 +10505,14 @@ python3() {
             "if: inputs.debug-kernel",
             microvm_workflow[download - 120 : download],
         )
-        debug_flag = "${{ inputs.debug-kernel && '--debug-kernel' || '' }}"
-        self.assertEqual(microvm_workflow.count(debug_flag), 2)
+        binding = _workflow_step(
+            workflow=microvm_workflow,
+            job_name="test",
+            step_name="Bind shared correctness arguments",
+        )
+        self.assertIn(
+            'if debug:\n              arguments += ["--debug-kernel"]', binding
+        )
         # The debug run replaces every production-kernel workload rather than
         # adding to it: each step that drives nvx.py without the debug kernel
         # flag boots build/vmlinux, so it must skip the debug jobs (#371).
@@ -10069,7 +10532,7 @@ python3() {
             except AssertionError:
                 step_condition = ""
             with self.subTest(step=name):
-                if debug_flag in script:
+                if "nvx-correctness-arguments.json" in script:
                     debug_steps.append(name)
                     self.assertNotIn("debug-kernel", step_condition)
                     continue
@@ -10129,7 +10592,9 @@ python3() {
                 for kind in ("tests", "guests", "debug")
                 for backend in backends
             }
-            | {f"nvx-microvm-adapter-{backend}" for backend in separate},
+            | {f"nvx-microvm-adapter-{backend}" for backend in separate}
+            | set(ci.REQUIRED_CI_ARM_MICROVM_JOBS)
+            | {ci.REQUIRED_CI_ARM_REPETITION_JOB},
         )
         for backend, label in backends.items():
             suite = jobs[f"nvx-microvm-tests-{backend}"]
@@ -10195,10 +10660,14 @@ python3() {
         names = [step["name"] for step in steps]
         setup = names[: names.index("Validate runner") + 1]
         downloads = {
-            step["name"]: step["with"]["name"]
+            step["name"]: _resolve_inputs(
+                step["with"]["name"], {"architecture": "x86_64"}
+            )
             for step in steps
             if str(step.get("uses", "")).startswith("actions/download-artifact@")
-            and str(step["with"]["name"]).startswith("guest-")
+            and _resolve_inputs(
+                str(step["with"]["name"]), {"architecture": "x86_64"}
+            ).startswith("guest-")
         }
         uploads = [
             step
@@ -10230,6 +10699,8 @@ python3() {
                 "inputs.runtime-adapter": adapter,
                 "!inputs.runtime-adapter": single or not adapter,
                 "!inputs.shard": not sharded,
+                "(steps.correctness.outputs.workload-artifacts || steps.correctness-linux.outputs.workload-artifacts) == 'true'": True,
+                "(inputs.guests-and-sandboxes || inputs.guest == 'ubuntu')": guests,
             }
             chosen: list[str] = []
             for step in steps:
@@ -10364,7 +10835,11 @@ python3() {
                         for leg in legs
                         if not uploads_in(upload, leg)
                     ],
-                    [f"{backends[backend]} / Runtime adapter" for backend in separate],
+                    [
+                        leg["display-name"]
+                        for leg in legs
+                        if leg["runtime-adapter"] and not leg["guests-and-sandboxes"]
+                    ],
                 )
         failure_logs = next(
             step
@@ -10387,6 +10862,123 @@ python3() {
                 ),
             ],
         )
+
+    def test_correctness_binder_executes_without_shell_tools_on_each_platform(self):
+        cases = (
+            (
+                "Linux",
+                {"backend": "kvm", "shard": 1, "shard-count": 2},
+                [
+                    "test-microvm",
+                    "--backend",
+                    "kvm",
+                    "--architecture",
+                    "x86_64",
+                    "--guest",
+                    "alpine",
+                    "--shard",
+                    "1/2",
+                ],
+                1,
+                "build/test-results/microvm-kvm",
+                False,
+            ),
+            (
+                "Windows",
+                {"backend": "whp", "guests-and-sandboxes": True},
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "x86_64",
+                    "--guest",
+                    "alpine",
+                ],
+                1,
+                "build/test-results/microvm-whp",
+                True,
+            ),
+            (
+                "Windows",
+                {
+                    "backend": "whp",
+                    "architecture": "aarch64",
+                    "cold-only": True,
+                    "scenarios": '["sandbox-lifecycle"]',
+                    "processors": "[1]",
+                    "start-stop-cycles": 10,
+                    "memory-mib": 1024,
+                    "cycles": 2,
+                    "managed-root": "scratch",
+                    "output-dir": "build/test-results/trial-arm",
+                    "result-id": "scratch-10",
+                },
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "aarch64",
+                    "--guest",
+                    "alpine",
+                    "--scenario",
+                    "sandbox-lifecycle",
+                    "--processors",
+                    "1",
+                    "--start-stop-cycles",
+                    "10",
+                    "--memory-mib",
+                    "1024",
+                    "--cold-only",
+                    "--managed-root",
+                    "scratch",
+                ],
+                2,
+                "build/test-results/trial-arm",
+                True,
+            ),
+        )
+        for system, inputs, arguments, cycles, directory, artifacts in cases:
+            with self.subTest(system=system, inputs=inputs):
+                self.assertEqual(
+                    _correctness_arguments(inputs, system),
+                    {
+                        "arguments": arguments,
+                        "cycles": cycles,
+                        "output_dir": directory,
+                        "workload_artifacts": artifacts,
+                    },
+                )
+
+    def test_correctness_binder_retains_input_guards_without_shell_tools(self):
+        cases: tuple[tuple[str, Mapping[str, Any], str], ...] = (
+            ("Windows", {"scenarios": "{}"}, "JSON string array"),
+            ("Windows", {"processors": "[true]"}, "JSON integer array"),
+            ("Windows", {"result-id": "../cell"}, "artifact-safe"),
+            ("Windows", {"cycles": 0}, "positive integer"),
+            ("Linux", {"cycles": 2}, "serial cycles require Windows"),
+            ("Windows", {"memory-mib": -1}, "must be nonnegative"),
+            (
+                "Windows",
+                {"architecture": "aarch64"},
+                "explicit Windows/WHP cold scope",
+            ),
+            (
+                "Windows",
+                {"architecture": "aarch64", "cold-only": True},
+                "explicit existing scenarios",
+            ),
+        )
+        for system, inputs, message in cases:
+            with (
+                self.subTest(system=system, inputs=inputs),
+                self.assertRaisesRegex(AssertionError, message),
+            ):
+                _correctness_arguments(
+                    {"backend": "whp" if system == "Windows" else "kvm"} | dict(inputs),
+                    system,
+                )
 
     def test_ci_runs_each_default_microvm_suite_in_its_shards(self):
         # #696: each backend runs its default suite in the shards that
@@ -10418,12 +11010,16 @@ python3() {
         sharded = {
             step["name"]: str(step["run"])
             for step in steps
-            if "inputs.shard" in str(step.get("run", ""))
+            if step["name"].startswith("Run NVX microVM tests on ")
         }
         self.assertEqual(
             set(sharded),
             {"Run NVX microVM tests on Linux", "Run NVX microVM tests on Windows"},
         )
+        for command in sharded.values():
+            self.assertIn("nvx-correctness-arguments.json", command)
+            self.assertIn("selected", command)
+        self.assertIn("os.execv(", sharded["Run NVX microVM tests on Linux"])
         partition = microvm_shards.load_partition()
         suite = default_suite()
         shard = "Shard ${{ matrix.shard }} of ${{ strategy.job-total }}"
@@ -10467,19 +11063,14 @@ python3() {
                 )
                 ran: list[str] = []
                 for leg in legs:
-                    command = _resolve_inputs(
-                        sharded[f"Run NVX microVM tests on {system}"], leg
-                    )
-                    self.assertNotIn("${{", command)
-                    args = nvx.parse_args(
-                        shlex.split(command.split("nvx.py ", 1)[1].replace("\\", "/"))
-                    )
+                    selected = _correctness_arguments(leg, system)
+                    args = nvx.parse_args(selected["arguments"])
                     self.assertEqual(
                         (args.backend, args.shard, args.scenario, args.debug_kernel),
                         (backend, (leg["shard"], count), None, False),
                     )
                     self.assertEqual(args.guest, "alpine")
-                    self.assertEqual(args.processors, list(MICROVM_PROCESSOR_COUNTS))
+                    self.assertIsNone(args.processors)
                     ran.extend(
                         microvm_shards.shard_scenarios(
                             partition, backend, args.shard, suite
@@ -10491,9 +11082,79 @@ python3() {
         for kind in ("guests", "debug"):
             for backend in backends:
                 leg = {**defaults, **jobs[f"nvx-microvm-{kind}-{backend}"]["with"]}
-                for step_name, run in sharded.items():
+                for step_name in sharded:
                     with self.subTest(job=f"{kind}-{backend}", step=step_name):
-                        self.assertNotIn("--shard", _resolve_inputs(run, leg))
+                        selected = _correctness_arguments(
+                            leg, "Windows" if backend == "whp" else "Linux"
+                        )
+                        self.assertNotIn("--shard", selected["arguments"])
+                        self.assertEqual(
+                            "--debug-kernel" in selected["arguments"], kind == "debug"
+                        )
+
+        arm = jobs["nvx-microvm-tests-whp-aarch64"]
+        self.assertFalse(arm["strategy"]["fail-fast"])
+        self.assertEqual(arm["strategy"]["max-parallel"], 1)
+        for event in ("pull_request", "merge_group", "schedule", "workflow_dispatch"):
+            cells = _matrix_legs(arm, event_name=event)
+            observed: list[tuple[str, str]] = []
+            for cell in cells:
+                selected = _correctness_arguments(cell, "Windows")
+                args = nvx.parse_args(selected["arguments"])
+                with self.subTest(event=event, cell=cell["result-id"]):
+                    self.assertEqual(args.architecture, "aarch64")
+                    self.assertTrue(args.cold_only)
+                    self.assertIsNone(args.shard)
+                    self.assertFalse(args.debug_kernel)
+                    self.assertEqual(args.backend, "whp")
+                    self.assertEqual(
+                        args.processors,
+                        [1, 2, 4, 8] if event in ci.CI_FULL_RUN_EVENTS else [1, 8],
+                    )
+                    self.assertEqual(
+                        args.memory_mib,
+                        1024 if args.scenario == ["managed-lifecycle"] else 256,
+                    )
+                    observed.extend(
+                        (
+                            scenario,
+                            args.managed_root
+                            if scenario == "managed-lifecycle"
+                            else "cold",
+                        )
+                        for scenario in args.scenario
+                    )
+            expected = {
+                (scenario, "cold")
+                for scenario in microvm_tests.COLD_ONLY_SCENARIOS
+                if scenario != "managed-lifecycle"
+            }
+            expected.update(
+                ("managed-lifecycle", root) for root in ("initramfs", "scratch", "ram")
+            )
+            self.assertEqual(set(observed), expected)
+            self.assertEqual(len(observed), len(expected))
+        repeat = jobs[ci.REQUIRED_CI_ARM_REPETITION_JOB]
+        self.assertEqual(repeat["strategy"]["max-parallel"], 1)
+        expected_repetitions = {
+            "cold-1vp-50": (["guest-boot"], [1], 50, None),
+            "cold-8vp-50": (["guest-boot"], [8], 50, None),
+            "public-lifecycle-25": (["sandbox-lifecycle"], [1], 25, None),
+            "scratch-start-stop-10": (["sandbox-lifecycle"], [1], 1, 10),
+            "ram-start-stop-10": (["sandbox-ram-upper"], [1], 1, 10),
+            "mixed-1-2-4-8vp": (["smp", "managed-lifecycle"], [1, 2, 4, 8], 1, None),
+        }
+        observed_repetitions: dict[str, tuple[Any, ...]] = {}
+        for cell in _matrix_legs(repeat, event_name="schedule"):
+            selected = _correctness_arguments(cell, "Windows")
+            args = nvx.parse_args(selected["arguments"])
+            observed_repetitions[cell["result-id"].removeprefix("repeat-")] = (
+                args.scenario,
+                args.processors,
+                selected["cycles"],
+                args.start_stop_cycles,
+            )
+        self.assertEqual(observed_repetitions, expected_repetitions)
 
     def test_benchmarks_rely_on_the_microvm_correctness_jobs(self):
         # #286: the benchmark action ran a second smp-lapic gate before
@@ -10561,7 +11222,7 @@ python3() {
         self.assertEqual(check["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertEqual(
             check["run"],
-            'python3 scripts/nvx.py check-openvmm-ci --wait-minutes "${WAIT_MINUTES}" '
+            'python3 scripts/nvx.py check-openvmm-ci --architecture aarch64 --wait-minutes "${WAIT_MINUTES}" '
             '--summary "${GITHUB_STEP_SUMMARY}"',
         )
         # A pull request, whose pin promotion passes once OpenVMM's CI does,
@@ -10882,6 +11543,10 @@ python3() {
                 provenance = _workflow_step(
                     workflow, job_name, "Upload nvx-rs provenance"
                 )
+                if job_name == "build-nvx-rs-windows-msvc":
+                    record = record.replace('"${{ matrix.target }}"', target)
+                    upload = upload.replace("${{ matrix.artifact }}", artifact)
+                    provenance = provenance.replace("${{ matrix.artifact }}", artifact)
                 for option in ("--release", "--locked", "--features cli"):
                     self.assertIn(option, build)
                 self.assertIn("--manifest-path nvx-rs/Cargo.toml", build)
@@ -11745,22 +12410,87 @@ python3() {
                 self.assertIn(f"      shell: {shell}\n", step)
                 self.assertIn(command, step)
                 self.assertIn('--backend "${{ inputs.backend }}"', step)
-                self.assertIn("--checks H1 H2 H4\n", step)
-                self.assertIn(
-                    "${{ inputs.warp-probe == 'true' && 'H6' || '' }}\n", step
-                )
-                fingerprint = (
-                    '"${RUNNER_TEMP}/nvx-cpu-fingerprint.json"'
-                    if shell == "bash"
-                    else '"$env:RUNNER_TEMP\\nvx-cpu-fingerprint.json"'
-                )
-                self.assertIn(
-                    "${{ inputs.verify-openvmm == 'true' && "
-                    f"'H3 --cpu-fingerprint {fingerprint}' || '--no-openvmm' }}}}\n",
-                    step,
-                )
-                self.assertIn("--ci-schedule\n", step)
+                if shell == "bash":
+                    self.assertIn("--checks H1 H2 H4\n", step)
+                    self.assertIn(
+                        "${{ inputs.warp-probe == 'true' && 'H6' || '' }}\n", step
+                    )
+                    self.assertIn(
+                        "${{ inputs.verify-openvmm == 'true' && "
+                        "'H3 --cpu-fingerprint \"${RUNNER_TEMP}/nvx-cpu-fingerprint.json\"' || '--no-openvmm' }}\n",
+                        step,
+                    )
+                else:
+                    self.assertIn('$checks = @("H1", "H2", "H4")', step)
+                    self.assertIn('$checks = @("H1", "H4")', step)
+                    self.assertIn('$checks += "H6"', step)
+                    self.assertIn('$checks += "H3"', step)
+                    self.assertIn('if ($architecture -eq "x86_64")', step)
+                    self.assertNotIn('"H5"', step)
+                    self.assertNotIn('"H7"', step)
+                self.assertIn("--ci-schedule", step)
                 self.assertIn(summary, step)
+        if os.name == "nt":
+            script = _composite_action_script(
+                validate_runner, "Qualify host time on Windows"
+            )
+            for architecture in ("x86_64", "aarch64"):
+                for verify, warp in (
+                    ("false", "false"),
+                    ("true", "false"),
+                    ("true", "true"),
+                ):
+                    rendered = script
+                    for name, value in {
+                        "architecture": architecture,
+                        "backend": "whp",
+                        "verify-openvmm": verify,
+                        "warp-probe": warp,
+                    }.items():
+                        rendered = rendered.replace("${{ inputs." + name + " }}", value)
+                    stub = (
+                        "function python { "
+                        "$json = @($args) | ConvertTo-Json -Compress; "
+                        "Write-Output ('NVX_TEST_ARGS=' + $json); "
+                        "$global:LASTEXITCODE=0 }\n"
+                    )
+                    result = run_powershell(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-Command",
+                            stub + rendered,
+                        ],
+                        env={
+                            **os.environ,
+                            "RUNNER_TEMP": str(self._testMethodName),
+                            "GITHUB_STEP_SUMMARY": "summary",
+                        },
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    line = next(
+                        line
+                        for line in result.stdout.splitlines()
+                        if line.startswith("NVX_TEST_ARGS=")
+                    )
+                    arguments = nvx.parse_args(
+                        json.loads(line.removeprefix("NVX_TEST_ARGS="))[1:]
+                    )
+                    self.assertEqual(arguments.architecture, architecture)
+                    expected = {"H1", "H4"}
+                    if architecture == "x86_64" or verify == "true":
+                        expected.add("H2")
+                    if verify == "true":
+                        expected.add("H3")
+                    if warp == "true":
+                        expected.add("H6")
+                    self.assertEqual(set(arguments.checks), expected)
+                    self.assertEqual(arguments.no_openvmm, verify == "false")
+                    self.assertEqual(
+                        arguments.cpu_fingerprint is not None,
+                        architecture == "x86_64" and verify == "true",
+                    )
         args = nvx.parse_args(
             ["doctor", "--backend", "kvm", "--checks", "H1", "H2", "H4", "H3"]
             + ["--cpu-fingerprint", "fingerprint.json", "--ci-schedule"]
@@ -11787,7 +12517,10 @@ python3() {
         # A failed CPU profile check keeps OpenVMM's fingerprint.
         upload = validate_runner.split("    - name: Upload the CPU fingerprint\n")[1]
         upload = upload.split("\n\n", 1)[0]
-        self.assertIn("if: failure() && inputs.verify-openvmm == 'true'\n", upload)
+        self.assertIn(
+            "if: failure() && inputs.verify-openvmm == 'true' && inputs.architecture == 'x86_64'\n",
+            upload,
+        )
         self.assertIn("path: ${{ runner.temp }}/nvx-cpu-fingerprint.json\n", upload)
         self.assertIn("if-no-files-found: ignore\n", upload)
         # Jobs that run OpenVMM qualify the runner after downloading it.
@@ -11951,7 +12684,7 @@ python3() {
         )
         # Registration and check mode share one label set.
         self.assertEqual(
-            windows_setup.count('@("windows", "whp", "virtual-machine")'), 1
+            windows_setup.count('@("windows", "whp", $HostType.ToLowerInvariant())'), 1
         )
         for function_name, assignment in (
             ("Install-ActionsRunner", "\n    $labels = $ExpectedRunnerLabels\n"),
@@ -12923,7 +13656,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
         self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
         self.assertEqual(
             upload["with"]["path"],
-            f"build/test-results/*/{microvm_durations.REPORT_NAME}",
+            f"build/test-results/**/{microvm_durations.REPORT_NAME}",
         )
         # The path's pattern finds the report of every test-microvm step.
         microvm_runs = [
@@ -12947,11 +13680,15 @@ Write-Output (Get-BenchmarkScratchDirectory)
         kernel = "${{ inputs.debug-kernel && 'debug' || 'default' }}"
         part = "${{ inputs.guests-and-sandboxes && '-guests' || '' }}"
         shard = "${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}"
+        isa = "${{ inputs.architecture == 'aarch64' && format('-aarch64-{0}', inputs.managed-root) || '' }}"
+        cell = "${{ inputs.result-id && format('-{0}', inputs.result-id) || '' }}"
         name = upload["with"]["name"]
         self.assertEqual(
             name,
             "nvx-microvm-durations-${{ runner.os }}-${{ inputs.backend }}-"
             + kernel
+            + isa
+            + cell
             + part
             + shard
             + "-${{ github.run_id }}-${{ github.run_attempt }}",
@@ -12967,6 +13704,8 @@ Write-Output (Get-BenchmarkScratchDirectory)
             set(jobs),
             {
                 *ci.REQUIRED_CI_MICROVM_TEST_JOBS,
+                *ci.REQUIRED_CI_ARM_MICROVM_JOBS,
+                ci.REQUIRED_CI_ARM_REPETITION_JOB,
                 *ci.REQUIRED_CI_MICROVM_DEBUG_JOBS,
                 *ci.REQUIRED_CI_MICROVM_DEBUG_PUSH_JOBS,
             },
@@ -12980,9 +13719,7 @@ Write-Output (Get-BenchmarkScratchDirectory)
                 if inputs.get("runtime-adapter", False) is True and not guests:
                     continue
                 legs += 1
-                system = (
-                    "Windows" if "windows" in json.loads(inputs["runner"]) else "Linux"
-                )
+                system = _runner_system(inputs["runner"])
                 debug = inputs.get("debug-kernel", False) is True
                 index = inputs.get("shard", 0)
                 for attempt in (1, 2):
@@ -12992,6 +13729,18 @@ Write-Output (Get-BenchmarkScratchDirectory)
                         .replace(kernel, "debug" if debug else "default")
                         .replace(part, "-guests" if guests else "")
                         .replace(shard, f"-shard-{index}" if index else "")
+                        .replace(
+                            isa,
+                            f"-aarch64-{inputs.get('managed-root', 'initramfs')}"
+                            if inputs.get("architecture", "x86_64") != "x86_64"
+                            else "",
+                        )
+                        .replace(
+                            cell,
+                            f"-{inputs['result-id']}"
+                            if inputs.get("result-id")
+                            else "",
+                        )
                         .replace("${{ github.run_id }}", "39585909588")
                         .replace("${{ github.run_attempt }}", str(attempt))
                     )
@@ -17753,8 +18502,12 @@ class BuildTests(unittest.TestCase):
             for line in action.splitlines()
             if line.startswith("    - name: ")
         ]
-        self.assertEqual(steps[0], "Select guest artifact components")
+        self.assertEqual(
+            steps[:2],
+            ["Select native guest architecture", "Select guest artifact components"],
+        )
         always = {
+            "Select native guest architecture",
             "Select guest artifact components",
             "Resolve guest artifact versions",
             "Resolve guest cache keys",
@@ -21253,6 +22006,11 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
         targets: Mapping[str, str] | None = None,
         check_only: bool = False,
         artifacts: str | None = None,
+        architecture: str = "x86_64",
+        cold_only: bool = False,
+        scopes: Mapping[str, str] | None = None,
+        guest_data: bytes | None = None,
+        native_architecture: str | None = None,
     ) -> tuple[int, list[tuple[list[str], dict[str, str]]], str, str]:
         """Runs the handler on the scenarios at `path`, for an adapter whose Cargo
         metadata holds the test targets `targets`, by name with their sources, and
@@ -21298,9 +22056,20 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
             return f"{output}\ntest result: ok. {len(names)} passed; 0 failed;\n", 0
 
         guest = path.parent / "runtime-adapter-guest"
-        guest.write_bytes(b"")
+        header = bytearray(64)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[16:18] = (2).to_bytes(2, "little")
+        header[18:20] = (183 if architecture == "aarch64" else 62).to_bytes(2, "little")
+        header[20:24] = (1).to_bytes(4, "little")
+        header[52:54] = (64).to_bytes(2, "little")
+        guest.write_bytes(header if guest_data is None else guest_data)
         args = argparse.Namespace(
-            backend="kvm", cargo="cargo", check_only=check_only, guest_agent=guest
+            backend="whp" if architecture == "aarch64" else "kvm",
+            cargo="cargo",
+            check_only=check_only,
+            guest_agent=guest,
+            architecture=architecture,
+            cold_only=cold_only,
         )
         scenarios = runtime_adapter_tests.read_scenarios(path)
         with (
@@ -21308,6 +22077,21 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
                 runtime_adapter_tests, "read_scenarios", return_value=scenarios
             ),
             patch.object(runtime_adapter_tests, "ADAPTER_DIRECTORY", path.parent),
+            patch.object(
+                runtime_adapter_tests,
+                "host_architecture",
+                return_value=native_architecture or architecture,
+            ),
+            patch.object(
+                runtime_adapter_tests.sys,
+                "platform",
+                "win32" if architecture == "aarch64" else sys.platform,
+            ),
+            (
+                patch.object(runtime_adapter_tests, "SCENARIO_SCOPES", dict(scopes))
+                if scopes is not None
+                else contextlib.nullcontext()
+            ),
             patch.object(runtime_adapter_tests, "validate_openvmm_test_backend"),
             patch.object(runtime_adapter_tests, "listing", fake_listing),
             patch.object(runtime_adapter_tests, "streamed", fake_streamed),
@@ -21327,7 +22111,25 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
         self.assertEqual(args.backend, "kvm")
         self.assertEqual(args.cargo, "cargo")
         self.assertFalse(args.check_only)
-        self.assertEqual(args.guest_agent, runtime_adapter_tests.GUEST_AGENT)
+        self.assertIsNone(args.guest_agent)
+        self.assertEqual(args.architecture, "x86_64")
+        self.assertFalse(args.cold_only)
+        arm = nvx.parse_args(
+            [
+                "test-runtime-adapter",
+                "--backend",
+                "whp",
+                "--architecture",
+                "aarch64",
+                "--cold-only",
+                "--guest-agent",
+                "agent",
+            ]
+        )
+        self.assertTrue(arm.cold_only)
+        self.assertEqual(
+            (arm.architecture, arm.guest_agent), ("aarch64", Path("agent"))
+        )
         self.assertIs(args.handler, runtime_adapter_tests.command_test_runtime_adapter)
 
     def test_ci_runs_the_suite_by_name_on_each_backend(self):
@@ -21381,6 +22183,14 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
         rows = re.findall(r"^\| `(\w+)` \| `(\w+)` \|", section, re.MULTILINE)
 
         self.assertEqual(rows, named)
+        self.assertEqual(
+            set(runtime_adapter_tests.SCENARIO_SCOPES),
+            {target.name for target in targets},
+        )
+        self.assertEqual(
+            set(runtime_adapter_tests.SCENARIO_SCOPES.values()),
+            {"portable", "cold", "snapshot"},
+        )
 
     def test_libtest_s_terse_list_names_the_tests(self):
         self.assertEqual(
@@ -21487,6 +22297,69 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
         status, runs, stdout, _ = self._run(path, listings, check_only=True)
         self.assertEqual((status, runs), (0, []))
         self.assertIn("3 scenarios name exactly the tests of 2 targets", stdout)
+        cold_path = self._scenarios("vm_a a\nvm_a b\nunit x\nother restored\n")
+        cold_listings = {
+            **listings,
+            ("other", "--list"): "restored: test\n",
+        }
+        scopes = {"vm_a": "cold", "unit": "portable", "other": "snapshot"}
+        for architecture in ("x86_64", "aarch64"):
+            status, runs, stdout, stderr = self._run(
+                cold_path,
+                cold_listings,
+                architecture=architecture,
+                cold_only=True,
+                scopes=scopes,
+            )
+            self.assertEqual(status, 0, stderr)
+            self.assertEqual(
+                [command[command.index("--test") + 1] for command, _ in runs],
+                ["vm_a", "unit"],
+            )
+            self.assertIn("3 selected tests; 1 deferred snapshot tests (other)", stdout)
+            for command, _ in runs:
+                if architecture == "aarch64":
+                    self.assertEqual(
+                        command[command.index("--target") + 1],
+                        "aarch64-pc-windows-msvc",
+                    )
+                else:
+                    self.assertNotIn("--target", command)
+            status, runs, stdout, _ = self._run(
+                cold_path,
+                cold_listings,
+                architecture=architecture,
+                cold_only=True,
+                check_only=True,
+                scopes=scopes,
+            )
+            self.assertEqual((status, runs), (0, []))
+            self.assertIn("4 scenarios name exactly the tests of 3 targets", stdout)
+        with self.assertRaisesRegex(common.ScriptError, "unclassified"):
+            self._run(cold_path, cold_listings, cold_only=True, scopes={"vm_a": "cold"})
+        with self.assertRaisesRegex(common.ScriptError, "no cold cases"):
+            self._run(
+                cold_path,
+                cold_listings,
+                cold_only=True,
+                scopes={name: "portable" for name in scopes},
+            )
+        with self.assertRaisesRegex(common.ScriptError, "unknown scenario scope"):
+            self._run(
+                cold_path,
+                cold_listings,
+                cold_only=True,
+                scopes={**scopes, "unit": "unknown"},
+            )
+        broken = {
+            **cold_listings,
+            ("other", "--list"): "restored: test\nunlisted: test\n",
+        }
+        status, runs, _, stderr = self._run(
+            cold_path, broken, cold_only=True, scopes=scopes
+        )
+        self.assertEqual((status, runs), (1, []))
+        self.assertIn("other has the test unlisted", stderr)
 
     def test_the_handler_takes_a_relative_directory_of_artifacts_from_the_caller(self):
         path = self._scenarios("unit x\n")
@@ -21507,6 +22380,45 @@ class RuntimeAdapterSuiteTests(unittest.TestCase):
                 status, runs, _, stderr = self._run(path, listings, artifacts=artifacts)
                 self.assertEqual(status, 0, stderr)
                 self.assertEqual(Path(runs[0][1]["NVX_ARTIFACTS_DIR"]), expected)
+
+    def test_arm_admission_does_not_change_the_x86_handler(self):
+        path = self._scenarios("vm_a a\n")
+        listings = {
+            ("vm_a", "--list"): "a: test\n",
+            ("unit", "--ignored"): "",
+            ("lib", "--ignored"): "",
+            ("other", "--ignored"): "",
+        }
+        for native_architecture in ("x86_64", "aarch64"):
+            with self.subTest(native_architecture=native_architecture):
+                status, runs, _, stderr = self._run(
+                    path,
+                    listings,
+                    guest_data=b"legacy x86 fixture",
+                    native_architecture=native_architecture,
+                )
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(len(runs), 1)
+                self.assertNotIn("--target", runs[0][0])
+        with self.assertRaisesRegex(common.ScriptError, "native host ISA"):
+            self._run(
+                path,
+                listings,
+                architecture="aarch64",
+                cold_only=True,
+                native_architecture="x86_64",
+            )
+        with self.assertRaisesRegex(
+            common.ScriptError, "invalid runtime adapter guest agent"
+        ):
+            self._run(
+                path,
+                listings,
+                architecture="aarch64",
+                cold_only=True,
+                scopes={"vm_a": "cold"},
+                guest_data=b"not an ELF",
+            )
 
     def test_the_handler_runs_nothing_once_the_names_are_not_the_tests(self):
         path = self._scenarios("vm_a a\nvm_a gone\ngone x\n")
@@ -24221,6 +25133,56 @@ class BenchmarkTests(unittest.TestCase):
             benchmark.smp_probe_script(3)
         with self.assertRaises(ValueError):
             benchmark.smp_probe_script(4, network_gateway="10.0.0.1")
+        arm = benchmark.smp_probe_script(4, architecture="aarch64")
+        self.assertIn("architecture=aarch64", arm)
+        self.assertIn('read_dt_mpidr "/sys/devices/system/cpu/cpu${cpu}/of_node"', arm)
+        self.assertIn('"$1/reg"', arm)
+        self.assertIn("SMP-MPIDR-FAIL", arm)
+        self.assertIn("SMP-TIMER-FAIL", arm)
+        self.assertIn("arch_timer", arm)
+        self.assertIn("/^IPI[01]:$/", arm)
+        self.assertIn("dt_mpidrs=" + ",".join(f"0x{cpu:016x}" for cpu in range(4)), arm)
+        self.assertNotIn("@", arm)
+        with self.assertRaisesRegex(ValueError, "x86-only"):
+            benchmark.smp_probe_script(
+                4, architecture="aarch64", network_gateway="10.0.0.1", ioapic_irq=16
+            )
+
+    def test_smp_arm_identity_reads_the_declared_device_tree_cell_width(self):
+        shell = shutil.which("sh")
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = benchmark.smp_probe_script(1, architecture="aarch64")
+        start = script.index("read_dt_mpidr() {\n")
+        end = script.index("\n}\n", start) + len("\n}\n")
+        function = script[start:end]
+        for cells, width, status in (
+            (1, 4, 0),
+            (2, 8, 0),
+            (1, 8, 1),
+            (2, 4, 1),
+            (3, 12, 1),
+        ):
+            with (
+                self.subTest(cells=cells, width=width),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                node = root / "cpus" / "cpu0"
+                node.mkdir(parents=True)
+                (node.parent / "#address-cells").write_bytes(cells.to_bytes(4, "big"))
+                (node / "reg").write_bytes((7).to_bytes(width, "big"))
+                result = subprocess.run(
+                    [shell],
+                    input=function + "\nread_dt_mpidr cpus/cpu0\n",
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    cwd=root,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                if status == 0:
+                    self.assertEqual(result.stdout, "0000000000000007\n")
 
     def test_snapshot_request_triggers_waiting_capture_controller(self):
         script = benchmark.snapshot_request_script(

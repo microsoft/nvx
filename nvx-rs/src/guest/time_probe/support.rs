@@ -2,62 +2,90 @@
 
 use std::fmt;
 use std::io::Write;
-use std::sync::OnceLock;
-use std::time::Duration;
+#[cfg(target_arch = "x86_64")]
+use std::{sync::OnceLock, time::Duration};
 
-use crate::guest::kernel_text::{self, KmsgRecord, SyslogLine};
+use crate::guest::kernel_text;
+#[cfg(target_arch = "x86_64")]
+use crate::guest::kernel_text::{KmsgRecord, SyslogLine};
+#[cfg(target_arch = "x86_64")]
 use crate::guest::parse::{parse_decimal, parse_f64};
 use crate::guest::status::CommandError;
-use crate::guest::sys::{self, Errno, Mode, OpenFlags, TimeValLike, kernel};
+use crate::guest::sys::{self, Errno};
+#[cfg(target_arch = "x86_64")]
+use crate::guest::sys::{Mode, OpenFlags, TimeValLike, kernel};
 
 use super::MAX_CPUS;
 
 /// The largest structured `/dev/kmsg` record, the kernel's `CONSOLE_EXT_LOG_MAX`.
+#[cfg(target_arch = "x86_64")]
 const KMSG_RECORD_MAX: usize = 8192;
 /// Size of the buffer for the kernel's log when the kernel does not report the log's size.
+#[cfg(target_arch = "x86_64")]
 const FALLBACK_LOG_SIZE: usize = 1 << 20;
-/// Nanoseconds in a second, which scale a TSC rate's cycles.
+/// Nanoseconds in a second, which scale the selected counter's cycles.
 pub(super) const NANOSECONDS_PER_SECOND: f64 = 1e9;
 /// kHz in a MHz, and Hz in a kHz.
+#[cfg(target_arch = "x86_64")]
 const THOUSAND: f64 = 1000.0;
 /// The interval over which the probe measures the TSC rate when nothing reports it.
+#[cfg(target_arch = "x86_64")]
 const MEASURE_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Where the probe found the TSC rate.
+/// Where the probe found the selected ISA's counter rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TscRateSource {
     /// The `--tsc-hz` option.
+    #[cfg(target_arch = "x86_64")]
     Option,
     /// The kernel's `tsc_freq_khz` sysfs attribute.
+    #[cfg(target_arch = "x86_64")]
     SysfsTscFreqKhz,
     /// The kernel log's refined TSC calibration.
+    #[cfg(target_arch = "x86_64")]
     KmsgRefined,
     /// The kernel log's detected TSC rate.
+    #[cfg(target_arch = "x86_64")]
     KmsgDetectedTsc,
     /// The kernel log's detected processor rate.
+    #[cfg(target_arch = "x86_64")]
     KmsgDetectedProcessor,
     /// The first `cpu MHz` of `/proc/cpuinfo`.
+    #[cfg(target_arch = "x86_64")]
     CpuinfoCpuMhz,
     /// A measurement against `CLOCK_MONOTONIC_RAW`.
+    #[cfg(target_arch = "x86_64")]
     MeasuredMonotonicRaw,
+    /// The actual architectural nominal frequency, without a guessed or measured fallback.
+    #[cfg(target_arch = "aarch64")]
+    CntfrqEl0,
 }
 
 impl fmt::Display for TscRateSource {
     /// Writes the source's stable output token.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            #[cfg(target_arch = "x86_64")]
             Self::Option => "option",
+            #[cfg(target_arch = "x86_64")]
             Self::SysfsTscFreqKhz => "sysfs-tsc_freq_khz",
+            #[cfg(target_arch = "x86_64")]
             Self::KmsgRefined => "kmsg-refined",
+            #[cfg(target_arch = "x86_64")]
             Self::KmsgDetectedTsc => "kmsg-detected-tsc",
+            #[cfg(target_arch = "x86_64")]
             Self::KmsgDetectedProcessor => "kmsg-detected-processor",
+            #[cfg(target_arch = "x86_64")]
             Self::CpuinfoCpuMhz => "cpuinfo-cpu-mhz",
+            #[cfg(target_arch = "x86_64")]
             Self::MeasuredMonotonicRaw => "measured-monotonic-raw",
+            #[cfg(target_arch = "aarch64")]
+            Self::CntfrqEl0 => "cntfrq_el0",
         })
     }
 }
 
-/// Detected TSC frequency and the source that supplied it.
+/// Counter frequency and the source that supplied it.
 #[derive(Clone, Copy)]
 pub(super) struct TscRate {
     /// Cycles per second, zero for a measurement that could not read its clock.
@@ -67,6 +95,7 @@ pub(super) struct TscRate {
 }
 
 /// Parses a positive, finite rate option, such as `--tsc-hz`, in decimal floating point.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn parse_rate(text: &[u8]) -> Option<f64> {
     parse_f64(text).filter(|value| *value > 0.0)
 }
@@ -197,6 +226,7 @@ pub(super) fn format_cpu_list(cpus: &[usize]) -> String {
 
 /// Parses a decimal number in the form in which the kernel prints rates, such as `2194.843`:
 /// digits with an optional fraction, after optional spaces and tabs.
+#[cfg(target_arch = "x86_64")]
 fn parse_kernel_decimal(text: &[u8]) -> Option<f64> {
     let number = std::str::from_utf8(text)
         .ok()?
@@ -212,6 +242,7 @@ fn parse_kernel_decimal(text: &[u8]) -> Option<f64> {
 /// Iterates the records of the nonblocking `/dev/kmsg`, skipping those that the kernel overwrote
 /// before the probe read them. Fails with the error that ended the reading when it read no
 /// record, such as `EAGAIN` for a log without records.
+#[cfg(target_arch = "x86_64")]
 fn kmsg_from_dev(mut consume: impl FnMut(KmsgRecord<'_>)) -> Result<(), Errno> {
     let log = sys::open(
         kernel::KERNEL_LOG_DEVICE,
@@ -238,6 +269,7 @@ fn kmsg_from_dev(mut consume: impl FnMut(KmsgRecord<'_>)) -> Result<(), Errno> {
 
 /// Iterates the lines of the whole `syslog(2)` buffer, which the probe reads when `/dev/kmsg`
 /// yields no records.
+#[cfg(target_arch = "x86_64")]
 fn kmsg_from_syslog(mut consume: impl FnMut(KmsgRecord<'_>)) -> Result<(), Errno> {
     let size = kernel::kernel_log_size()
         .ok()
@@ -261,17 +293,20 @@ fn kmsg_from_syslog(mut consume: impl FnMut(KmsgRecord<'_>)) -> Result<(), Errno
 }
 
 /// Iterates kernel messages, preferring structured `/dev/kmsg`.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn kmsg_foreach(mut consume: impl FnMut(KmsgRecord<'_>)) -> Result<(), Errno> {
     kmsg_from_dev(&mut consume).or_else(|_| kmsg_from_syslog(consume))
 }
 
 /// Reads `/proc/cpuinfo` once, as raw bytes, which are empty when it cannot be read.
+#[cfg(target_arch = "x86_64")]
 fn cpuinfo() -> &'static [u8] {
     static TEXT: OnceLock<Vec<u8>> = OnceLock::new();
     TEXT.get_or_init(|| sys::read_file(kernel::CPU_INFORMATION).unwrap_or_default())
 }
 
 /// Returns the value of the first `/proc/cpuinfo` line whose key starts with `key`.
+#[cfg(target_arch = "x86_64")]
 fn cpuinfo_value(key: &[u8]) -> Option<&'static [u8]> {
     cpuinfo()
         .split(|&byte| byte == b'\n')
@@ -283,6 +318,7 @@ fn cpuinfo_value(key: &[u8]) -> Option<&'static [u8]> {
 }
 
 /// Lazily extracts CPU-zero feature-flag words.
+#[cfg(target_arch = "x86_64")]
 fn cpu_flags() -> &'static [Vec<u8>] {
     static FLAGS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
     FLAGS.get_or_init(|| {
@@ -297,11 +333,13 @@ fn cpu_flags() -> &'static [Vec<u8>] {
 }
 
 /// Returns whether cpuinfo contains one exact feature flag.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn cpuinfo_has_flag(flag: &[u8]) -> bool {
     cpu_flags().iter().any(|word| word == flag)
 }
 
 /// Returns the first positive cpuinfo MHz value.
+#[cfg(target_arch = "x86_64")]
 fn cpuinfo_mhz() -> Option<f64> {
     cpuinfo_value(b"cpu MHz")
         .and_then(parse_kernel_decimal)
@@ -309,6 +347,7 @@ fn cpuinfo_mhz() -> Option<f64> {
 }
 
 /// Returns the positive MHz value between a kernel message's `prefix` and `suffix`.
+#[cfg(target_arch = "x86_64")]
 fn mhz_after(text: &[u8], prefix: &[u8], suffix: &[u8]) -> Option<f64> {
     let start = kernel_text::find(text, prefix)? + prefix.len();
     let value = &text[start..];
@@ -317,12 +356,14 @@ fn mhz_after(text: &[u8], prefix: &[u8], suffix: &[u8]) -> Option<f64> {
 }
 
 /// Converts MHz to whole kHz, rounded, and then to hertz, as the C probe did.
+#[cfg(target_arch = "x86_64")]
 fn mhz_to_hz(mhz: f64) -> f64 {
     (mhz * THOUSAND).round() * THOUSAND
 }
 
 /// Measures the TSC rate against the raw monotonic clock over `interval`, or returns zero when
 /// the clock cannot be read.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn measure_tsc_hz(interval: Duration) -> f64 {
     let first = sys::clock_time(sys::Clock::MonotonicRaw);
     let t0 = sys::x86::rdtsc_fenced();
@@ -341,6 +382,7 @@ pub(super) fn measure_tsc_hz(interval: Duration) -> f64 {
 }
 
 /// Returns the TSC rate that the kernel exposes in sysfs, when it does.
+#[cfg(target_arch = "x86_64")]
 fn sysfs_tsc_rate() -> Option<TscRate> {
     let khz = parse_decimal(&sys::read_line(kernel::TSC_FREQUENCY_KHZ).ok()?)?;
     (khz > 0).then_some(TscRate {
@@ -351,6 +393,7 @@ fn sysfs_tsc_rate() -> Option<TscRate> {
 
 /// Returns the TSC rate that the kernel logged: its last refined calibration, or else its last
 /// detected TSC rate, or else its last detected processor rate.
+#[cfg(target_arch = "x86_64")]
 fn kmsg_tsc_rate() -> Option<TscRate> {
     let (mut refined, mut tsc, mut processor) = (None, None, None);
     let _ = kmsg_foreach(|record| {
@@ -379,6 +422,7 @@ fn kmsg_tsc_rate() -> Option<TscRate> {
 
 /// Returns the rate of `/proc/cpuinfo`'s first `cpu MHz`, unless the `aperfmperf` flag shows that
 /// the processor's frequency varies.
+#[cfg(target_arch = "x86_64")]
 fn cpuinfo_tsc_rate() -> Option<TscRate> {
     let mhz = cpuinfo_mhz()?;
     (!cpuinfo_has_flag(b"aperfmperf")).then(|| TscRate {
@@ -389,6 +433,7 @@ fn cpuinfo_tsc_rate() -> Option<TscRate> {
 
 /// Detects the TSC rate from the `--tsc-hz` option, then sysfs, then the kernel log, then
 /// cpuinfo, and measures it as a last resort.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn detect_tsc_rate(override_hz: Option<f64>) -> TscRate {
     override_hz
         .map(|hz| TscRate {
@@ -405,6 +450,7 @@ pub(super) fn detect_tsc_rate(override_hz: Option<f64>) -> TscRate {
 }
 
 /// Reads the active clocksource, or `unknown`.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn current_clocksource() -> Vec<u8> {
     sys::read_line(kernel::CURRENT_CLOCKSOURCE).unwrap_or_else(|_| b"unknown".to_vec())
 }

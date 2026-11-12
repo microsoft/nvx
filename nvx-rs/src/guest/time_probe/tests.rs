@@ -39,3 +39,48 @@ fn the_shared_statuses_keep_the_probes_contract() {
         assert_eq!(ExitStatus::from(result) as u8, status, "{result:?}");
     }
 }
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_refuses_x86_diagnostics_and_counter_frequency_overrides() {
+    for arguments in [
+        vec![&b"latency"[..]],
+        vec![&b"clock"[..]],
+        vec![&b"warp"[..], b"--tsc-hz", b"1000000000"],
+        vec![&b"warp"[..], b"--tsc-hz=1000000000"],
+    ] {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert_eq!(
+            run(&args(&arguments), &mut out, &mut err),
+            Err(CommandError::Usage)
+        );
+        assert!(out.is_empty());
+        assert!(!err.is_empty());
+    }
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_warp_reports_the_architectural_rate_without_tsc_fields() {
+    let cpu = support::affinity_cpus().unwrap()[0].to_string();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    assert_eq!(
+        run(
+            &args(&[b"warp", b"--cpus", cpu.as_bytes()]),
+            &mut out,
+            &mut err
+        ),
+        Ok(())
+    );
+    assert!(err.is_empty());
+    let text = String::from_utf8(out).unwrap();
+    let frequency = crate::guest::sys::aarch64::counter_frequency_hz().unwrap();
+    assert!(text.contains(&format!(
+        "counter_hz={frequency} counter_hz_source=cntfrq_el0"
+    )));
+    assert!(!text.contains("tsc_hz"));
+    assert!(text.contains("pairs=0 verdict=PASS bound_ns=1000"));
+    assert!(text.contains("conclusive=1"));
+}

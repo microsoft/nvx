@@ -19,7 +19,6 @@ use std::str::FromStr;
 ///
 /// Returns `None` for an empty argument, any other character, a decimal number with a leading
 /// zero, which C read as octal, or a value above `u64::MAX`.
-#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn parse_u64(text: &[u8]) -> Option<u64> {
     let text = std::str::from_utf8(text).ok()?;
     let (digits, radix) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
