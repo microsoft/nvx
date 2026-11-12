@@ -1416,15 +1416,24 @@ def run_workload_identity(
     timeout: float,
     output_dir: Path,
 ) -> None:
-    base = workload_boot_command(
-        executable,
-        backend,
-        kernel,
-        initrd,
-        memory_mib,
-        "quiet loglevel=0 nvx_exec=/sbin/nvx-identity-probe",
-    )
-    accepted = [*base, "--microvm-workload-identity", "65534:65534"]
+    def command(identity: str) -> list[str]:
+        # The guest's init reads the identity from the CLI's token; OpenVMM
+        # checks its own option, and appends tokens that the init ignores.
+        return [
+            *workload_boot_command(
+                executable,
+                backend,
+                kernel,
+                initrd,
+                memory_mib,
+                "quiet loglevel=0 nvx_exec=/sbin/nvx-identity-probe "
+                f"nvx_identity={identity}",
+            ),
+            "--microvm-workload-identity",
+            identity,
+        ]
+
+    accepted = command("65534:65534")
     with OpenvmmProcess(
         accepted,
         output_dir / "workload-identity.log",
@@ -1435,7 +1444,7 @@ def run_workload_identity(
     ):
         raise RuntimeError("fixed non-root workload identity was not enforced")
 
-    unavailable = [*base, "--microvm-workload-identity", "12345:12345"]
+    unavailable = command("12345:12345")
     with OpenvmmProcess(
         unavailable,
         output_dir / "workload-identity-unavailable.log",
@@ -1448,7 +1457,7 @@ def run_workload_identity(
     ):
         raise RuntimeError("unavailable workload identity did not fail closed")
 
-    root = [*base, "--microvm-workload-identity", "0:0"]
+    root = command("0:0")
     with OpenvmmProcess(
         root,
         output_dir / "workload-identity-root.log",
@@ -1466,6 +1475,10 @@ MANAGED_LIFECYCLE_TEST = (
     "host::session::tests::managed_lifecycle::"
     "a_managed_guest_runs_request_scoped_workloads_until_it_stops"
 )
+# The CLI's tokens with which the guest's init selects the managed lifecycle
+# and the workload identity; OpenVMM's options, which OpenVMM itself checks,
+# append tokens that the init ignores.
+MANAGED_LIFECYCLE_TOKENS = "nvx_mode=managed nvx_identity=65534:65534"
 
 
 def ignored_nvx_rs_test_command(cargo: str, test: str) -> list[str]:
@@ -1550,7 +1563,7 @@ def run_managed_lifecycle(
             kernel.resolve(),
             initrd.resolve(),
             memory_mib,
-            "quiet loglevel=0",
+            f"quiet loglevel=0 {MANAGED_LIFECYCLE_TOKENS}",
             boot_console=False,
         )
         command.extend(
@@ -1645,7 +1658,7 @@ def run_managed_lifecycle(
         kernel,
         initrd,
         memory_mib,
-        "quiet loglevel=0",
+        f"quiet loglevel=0 {MANAGED_LIFECYCLE_TOKENS}",
     )
     invalid.extend(
         (

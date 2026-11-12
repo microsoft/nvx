@@ -5801,6 +5801,12 @@ class MicrovmTests(unittest.TestCase):
             ("--microvm-lifecycle", "managed"),
         ):
             self.assertEqual(openvmm[openvmm.index(option) + 1], value)
+        # The guest's init takes the lifecycle and the identity from the CLI's
+        # tokens, not from those that OpenVMM's options append.
+        self.assertEqual(
+            openvmm[openvmm.index("--cmdline") + 1].split()[-2:],
+            ["nvx_mode=managed", "nvx_identity=65534:65534"],
+        )
         self.assertIn("--microvm-control-auth-stdin", openvmm)
         self.assertEqual(preserved, self._managed_report())
 
@@ -7119,6 +7125,19 @@ class MicrovmTests(unittest.TestCase):
                 in command[command.index("--cmdline") + 1]
                 for command in commands
             )
+        )
+        # The guest's init takes the identity from the CLI's token, which
+        # names the identity of OpenVMM's option.
+        self.assertEqual(
+            [
+                command[command.index("--cmdline") + 1].split()[-1]
+                for command in commands
+            ],
+            [
+                "nvx_identity=65534:65534",
+                "nvx_identity=12345:12345",
+                "nvx_identity=0:0",
+            ],
         )
 
     def test_structured_outcome_scenario_covers_exit_policy_and_rejection(self):
