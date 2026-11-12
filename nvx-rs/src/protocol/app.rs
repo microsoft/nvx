@@ -44,20 +44,9 @@ pub(crate) mod workload {
 }
 
 #[cfg(any(
-    feature = "cli",
     feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
-#[cfg_attr(
-    not(any(
-        test,
-        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-    )),
-    expect(
-        dead_code,
-        reason = "SL4.4b's fake OpenVMM serves NVXC v2, and SL4.4c's host speaks it"
-    )
-)]
 pub(crate) mod v2;
 
 /// Magic of every application frame.
