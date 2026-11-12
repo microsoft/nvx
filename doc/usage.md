@@ -2,9 +2,12 @@
 
 NVX has two command-line interfaces, which run from the repository root:
 
-- [`nvx-rs`](#nvx-rs) runs NVX microVMs and sandboxes: [`run`](#run) boots or
-  restores a microVM on the terminal, [`sandbox`](#sandbox) runs or manages
-  workloads over EROFS layers and a private ext4 scratch or tmpfs upper, and
+- [`nvx-rs`](#nvx-rs) runs NVX microVMs and sandboxes: [`run`](#run) boots a
+  microVM on the terminal, or restores a named snapshot once,
+  [`sandbox`](#sandbox) runs or manages workloads over an EROFS image or a GPT
+  disk and a private ext4 scratch or tmpfs upper,
+  [`snapshot capture`](#snapshot-capture) captures a named snapshot, from which
+  [`snapshot restore`](#snapshot-restore) starts managed sandboxes, and
   [`download`](#download) installs the release of the checkout, which `run`
   and `sandbox` also download into a checkout that holds no artifacts.
 - `scripts/nvx.py`, with Python 3.10 or newer, builds, tests, benchmarks, and
@@ -99,7 +102,7 @@ each code, which callers of the `nvx` library see in its place.
 | `sandbox-not-running` | 1 | `exec` or `stop` found the VM of a provisioned sandbox not running. |
 | `sandbox-running` | 1 | `start` or `deprovision` found the sandbox's VM, or a launch of it, running. |
 | `sandbox-exited` | 1 | The sandbox's OpenVMM exited without a `stop`: the transition that finds it reports it and clears its runtime record, and `start` launches the sandbox again. |
-| `sandbox-busy` | 1 | Another lifecycle transition held the sandbox's lock until `--timeout` passed, or another `exec` held its exec lock until `--wait` passed. |
+| `sandbox-busy` | 1 | Another lifecycle transition held the sandbox's lock, or another command the lock of a snapshot or of a store's captures, until `--timeout` passed, or another `exec` held the sandbox's exec lock until `--wait` passed. |
 | `runtime-mismatch` | 1 | The sandbox's VM runs under another runtime identity than the artifacts', whose differing parts the message names, so only `stop`, which terminates it, applies. |
 | `vmm-indeterminate` | 1 | Whether the sandbox's OpenVMM runs cannot be determined, so its records remain for a later attempt. |
 | `format-unsupported` | 1 | A record or report has a format that this build does not read, such as the state of a sandbox that another build provisioned or started. |
@@ -167,7 +170,7 @@ nvx-rs/target/release/nvx-rs run
 | `--memory-capacity-mib MIB` | none | Reserve an immutable, 128 MiB-aligned RAM capacity for a fresh microVM snapshot, in the range of `--memory-mib`. A restore refuses it. |
 | `--processors {1,2,4,8}` | `1` | Select the microVM processor count, written as one of the choices. A restore refuses it: its VM keeps the processors that the snapshot had online. |
 | `--cpu-profile ID` | `auto` | Select the guest's [CPU profile](#cpu-profiles): `auto` for the built-in profile of the host's CPU, which falls back with a warning to a development profile derived from this host on an Intel or AMD CPU that no built-in profile serves, a built-in profile ID, or `host` for that development profile. A restore refuses it: it uses the snapshot's profile. |
-| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose a host directory, or a single regular host file without its directory, at the guest target: an absolute, canonical path other than `/`, without whitespace, control characters, double quotes, backslashes, `=`, or any UTF-8 byte that Linux treats as whitespace, such as the `0xa0` in `à`. Cold boots also protect the system paths listed below. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to expose more directories or files, each with its own target and mode, as the children of an aggregate on the microVM's one virtio-fs device, which the guest binds at their targets; a shared file always uses the aggregate. Targets and host paths must not overlap, and the shares' kernel command-line tokens must fit its 1024-byte budget. An `rw` mapping accepts guest-created symbolic links, which the host never follows. A restore refuses it and the other share options. |
+| `--mount GUEST_TARGET,HOST_PATH[,ro\|rw]` | none | Expose a host directory, or a single regular host file without its directory, at the guest target: an absolute, canonical path other than `/`, without whitespace, control characters, double quotes, backslashes, `=`, or any UTF-8 byte that Linux treats as whitespace, such as the `0xa0` in `à`. Cold boots also protect the system paths listed below. The mode follows the last comma, so `HOST_PATH` may contain commas when the mode is given. Repeat to expose more directories or files, each with its own target and mode, through an aggregate on the microVM's one virtio-fs device, which the guest binds at their targets. Targets must not overlap, but host paths may: a mapped path inside a mapped directory shares that directory's child, unless it is read-only inside a writable part of it, which is refused; see [virtio-fs host mapping](run.md#virtio-fs-host-mapping). The shares' kernel command-line tokens must fit its 1024-byte budget. An `rw` mapping accepts guest-created symbolic links, which the host never follows. A restore refuses it and the other share options. |
 | `--mount-deny HOST_PATH` | none | Hide one existing file or directory inside a mounted host root; repeat to deny multiple paths. It may name the root itself when `--mount-allow` paths inside it remain. With several mappings, or a shared file, the path must be absolute; a shared file takes none. |
 | `--mount-allow HOST_PATH` | none | Expose one existing file or directory inside a `--mount-deny` path again; the hidden directories on the way list only the entries that lead to it. Repeat to allow multiple paths. With several mappings, or a shared file, the path must be absolute; a shared file takes none. See [Access policy](run.md#access-policy). |
 | `--mount-write HOST_PATH` | none | Make one existing file or directory one of the only writable parts of an `rw` mapping; the guest's writes anywhere else in it fail with `EROFS`. Repeat to declare multiple writable paths. With several mappings, or a shared file, the path must be absolute; a shared file takes none. |
@@ -175,15 +178,15 @@ nvx-rs/target/release/nvx-rs run
 | `--net IPV4/PREFIX` | none | Enable virtio-net with the static guest IPv4 address and prefix. The guest also gets the IPv6 address that embeds it in `fd00::/96`, such as `fd00::a00:2/120` for `10.0.0.2/24`. A restore takes its NIC, with these addresses, from the snapshot, which [`snapshot capture --net`](#snapshot-capture) gives one, and rejects this option. |
 | `--network-profile {portable}` | none | Select the required cross-platform network behavior contract; must be specified with `--net` on a fresh boot, and without it to restore a snapshot with a NIC. |
 | `--network-egress {allow,deny}` | `allow` | Set the default guest egress policy. |
-| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). Snapshot capture rejects `allow`. |
+| `--network-ingress {allow,deny}` | `deny` | Set the default host ingress policy. `allow` publishes every TCP and UDP port on which the guest listens to clients on the host's private networks, and to the host itself only with `--host-loopback allow`; see [Private-network ingress](run.md#private-network-ingress). |
 | `--network-egress-allow CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Allow matching guest egress; repeat to add rules. `CIDR` is an IPv4 or IPv6 address or network, and a rule matches only its own family. `PROTOCOL` is `tcp`, `udp`, or `icmp` and matches every port when `PORT` is omitted; only `tcp` and `udp` take a `PORT` or an inclusive `PORT-PORT` range, such as `8000-8010`. |
 | `--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Deny matching guest egress; repeat to add rules. Deny rules take precedence. `PROTOCOL` and `PORT` select traffic as for `--network-egress-allow`. |
 | `--network-egress-policy-file PATH` | none | Load bounded IPv4 and IPv6 ranges and rule-local CIDR exclusions from JSON. Requires explicit `--network-egress`; cannot be mixed with explicit allow/deny rule flags. |
-| `--host-loopback {allow,deny}` | existing mapping | Control access between the guest and host loopback services. Explicit `allow` is bidirectional: the guest reaches host loopback through its gateway, and every TCP and UDP port on which the guest listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; it needs a `--net` prefix of `/29` or shorter, which OpenVMM checks; see [Host-loopback access](run.md#host-loopback-access). Snapshot capture rejects `allow`. |
+| `--host-loopback {allow,deny}` | existing mapping | Control access between the guest and host loopback services. Explicit `allow` is bidirectional: the guest reaches host loopback through its gateway, and every TCP and UDP port on which the guest listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; it needs a `--net` prefix of `/29` or shorter, which OpenVMM checks; see [Host-loopback access](run.md#host-loopback-access). |
 | `--network-proxy IPV4:TCP-PORT` | none | Allow one explicit host TCP proxy endpoint. |
-| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Snapshot capture rejects forwards. |
+| `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. |
 | `--outcome-report PATH` | none | Write a bounded local JSON outcome report to a new file in an existing plain directory. A cold boot rejects an existing destination before launch and never replaces a file or follows a destination symlink. A missing report or publication failure is diagnosed without replacing OpenVMM's exit status. A restore refuses it. |
-| `--cmdline TEXT` | empty | Append kernel parameters; `nvx_*` and `tsc=` tokens are reserved. Cold boots reject double quotes and a standalone `--` token, which the VM control console cannot represent. A restore refuses it. |
+| `--cmdline TEXT` | empty | Append kernel parameters. The tokens that NVX renders for the guest's root, view, and shares, such as `nvx_hostname`, `nvx_machine_id`, and `nvx_maps`, and `virtfs_*` tokens, are refused, and OpenVMM refuses those that it owns; see [Effective Command Line](design/5.1-boot-protocol.md#512-effective-command-line). Cold boots reject double quotes and a standalone `--` token, which the VM control console cannot represent. A restore refuses it. |
 | `--restore-snapshot NAME` | none | Restore the snapshot `NAME` of `--store-dir`, which [`snapshot capture`](#snapshot-capture) published, in place of a cold boot, as described below. A raw OpenVMM snapshot directory is refused. |
 | `--store-dir PATH` | none | The named snapshot store of `--restore-snapshot`, which a restore requires. |
 | `--state-dir PATH` | none | The directory of a restore's sandbox, which a restore requires: one that does not exist, outside the store, on the store's filesystem. The run creates it, and removes it once it ends. A cold boot refuses it. |
@@ -200,11 +203,12 @@ require networking. A proxy is the guest's sole egress path, so it cannot be
 combined with `--network-egress-allow` rules for direct connections.
 
 `nvx-rs run` checks its options, prints the OpenVMM command of a cold boot
-after `>> `, and unless `--dry-run` is given, runs OpenVMM with the standard
-streams. A cold boot attaches the guest's console, the boot console `hvc1`, to
-them, so that the terminal's input reaches the guest through it rather than
-through the byte channel, `hvc0`, whose output, such as the kernel's early
-messages, goes to standard error. It exits
+after `>> `, and unless `--dry-run` is given, runs OpenVMM in a private
+temporary VM directory, which it removes once OpenVMM has exited, on the
+terminal. A cold boot attaches the guest's console, the boot console `hvc1`,
+to the standard streams, so that the terminal's input reaches the guest through
+it rather than through the byte channel, `hvc0`, whose output, such as the
+kernel's early messages, goes to standard error with OpenVMM's log. It exits
 with status 1 for an error, 2 for a usage error, and 130 after Ctrl-C, and
 otherwise with the status that OpenVMM returns. Its errors and usage errors
 carry their [error codes](#error-codes), as `error[CODE]: MESSAGE` and
@@ -227,24 +231,25 @@ restores one, but once: it provisions a managed sandbox in `--state-dir`, a
 new directory outside the store, on the filesystem of the snapshot's files,
 which the restore links into it, with the image, upper, and workload of its
 restore options, and starts it from the snapshot under the snapshot's lock. It
-prints no OpenVMM command, and forwards the workload's output. Once the
-workload has exited with status 0 within `--timeout`, 60 seconds by default, it
-stops the VM; it then removes the sandbox and `--state-dir`, also after a
-failure or Ctrl-C, except as the next paragraph says, and exits with the
-workload's status, or with status 1 for a restore that fails, and 130 after
-Ctrl-C. It refuses a raw OpenVMM snapshot directory, which
-`--restore-snapshot` named before, without reading it, a `--state-dir` that
-exists or lies in the store, a workload that `snapshot restore` refuses, and
-the options that the snapshot or its sandbox fixes: `--guest`,
-`--memory-capacity-mib`, `--processors`, `--cpu-profile`, `--net`, the share
-options, `--outcome-report`, `--cmdline`, and `--dry-run`. A cold boot refuses
+prints no OpenVMM command, and forwards the workload's output, as it comes; the
+workload reads no standard input. Once the workload has exited with status 0
+within `--timeout`, 60 seconds by default, it stops the VM; it then removes the
+sandbox and `--state-dir`, also after a failure or Ctrl-C, except as the next
+paragraph says, and exits with the workload's status, or with status 1 for a
+restore that fails, and 130 after Ctrl-C. `--restore-snapshot` names only a
+snapshot of the store, so `run` refuses a raw OpenVMM snapshot directory
+without reading it. It also refuses a `--state-dir` that exists or lies in the
+store, a workload that `snapshot restore` refuses, and the options that the
+snapshot or its sandbox fixes: `--guest`, `--memory-capacity-mib`,
+`--processors`, `--cpu-profile`, `--net`, the share options,
+`--outcome-report`, `--cmdline`, and `--dry-run`. A cold boot refuses
 `--store-dir`, `--state-dir`, and the restore options. A restore's NIC comes
 from the snapshot: `--net` belongs to the cold boot and to
 [`snapshot capture`](#snapshot-capture), which gives a snapshot its NIC. The
 restore of a snapshot without a NIC takes no network options, and that of a
-snapshot with a NIC installs the policy of its network options, which need
-`--network-profile`, as the policy of the NIC, with its DNS server, egress,
-forwards, and published listeners.
+snapshot with a NIC installs them, with `--network-profile`, as the restore's
+own network policy, with its DNS server, egress, forwards, and published
+listeners, as [`snapshot restore`](#snapshot-restore) describes.
 
 A `run` that dies before it removes its sandbox, as `kill -9` ends it, leaves
 `--state-dir` with the sandbox's files and its view of the snapshot, and its
@@ -332,9 +337,12 @@ errors and usage errors carry their [error codes](#error-codes), as
 `error[CODE]: MESSAGE` and `nvx-rs sandbox: error[CODE]: MESSAGE`. An `exec`,
 and the workload of a `run`, stream the command's standard input to the
 workload until it ends, and the workload's standard output and error back as
-they arrive, without a limit; a command whose input is the null device gives
-the workload none. An error of the command's own follows the workload's output
-on a new line, and Ctrl-C cancels the workload. Options take their values as
+they arrive, without a limit on their size; a command whose input is the null
+device gives the workload none. The workload must end within `--timeout`, or
+the command fails with `timed-out`. An error of the command's own follows the
+workload's output on a new line. Ctrl-C asks the guest to end the workload,
+and the command exits with status 130 without waiting for it: an `exec` leaves
+its sandbox running, while a `run` ends its VM. Options take their values as
 those of [`run`](#run) do, and their names cannot be abbreviated either.
 
 | Option | Default | Description |
@@ -351,8 +359,8 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 | `--hostname NAME` | `nvx-sandbox` | Set the workload UTS hostname. |
 | `--workload-user UID:GID` | `65534:65534` | Select the fixed non-root workload identity for `run` or `provision`. Both IDs must be ASCII decimal integers from 1 to 4294967294, without signs, whitespace, or underscores. |
 | `--memory-mib MIB` | `256` | Set guest memory in MiB, an ASCII decimal integer from 1 to 17592186044415, without signs, whitespace, or underscores. |
-| `--timeout SECONDS` | `60` | Set the timeout for each managed control request and its response in `run`, `start`, `exec`, and `stop`, the longest time that `run` and `stop` wait for the VM to exit once the guest shuts it down, and the longest time that `provision`, `start`, `stop`, and `deprovision` wait for another lifecycle transition of the sandbox. It is a decimal number, with an optional fraction and exponent, that must be finite and greater than 0. |
-| `--wait SECONDS` | `60` | Set the longest time that a managed `exec` waits for the `exec` that another `nvx-rs` process runs in the sandbox to end, since a sandbox runs one `exec` at a time; it then fails with `sandbox-busy`. `stop` never waits for an `exec`. Like `--timeout`, which still bounds each wait for another lifecycle transition, it is a decimal number that must be finite and greater than 0. |
+| `--timeout SECONDS` | `60` | Set the timeout for each managed control request and its response in `run`, `start`, `exec`, and `stop`, within which the workload of `run` and `exec`, whose output streams until it ends, must end; the longest time that `run` and `stop` wait for the VM to exit once the guest shuts it down; and the longest time that `provision`, `start`, `exec`, `stop`, and `deprovision` wait for another lifecycle transition of the sandbox. It is a decimal number, with an optional fraction and exponent, that must be finite and greater than 0. |
+| `--wait SECONDS` | `60` | Set the longest time that a managed `exec` waits for the `exec` that another `nvx-rs` process runs in the sandbox to end and release the sandbox's exec lock, since a sandbox runs one `exec` at a time; it then fails with `sandbox-busy`. `stop` never waits for an `exec`. Like `--timeout`, which still bounds each wait for another lifecycle transition, it is a decimal number that must be finite and greater than 0. |
 | `--exec-timeout-ms MILLISECONDS` | `0` | Set the guest's timeout of the workload of `run` or `exec` to an ASCII decimal integer from 0 to 4294967295, without signs, whitespace, or underscores; zero disables the workload deadline. This is separate from the finite host `--timeout` control deadline. |
 | `--cwd GUEST_PATH` | `/` | Set an absolute working directory inside the workload root for `run` or `exec`. It is resolved after the workload identity and root are applied; missing, inaccessible, or non-directory paths fail the workload launch. Default and layered environments point `PWD` at this directory; an exact replacement environment controls `PWD` itself. |
 | `--environment KEY=VALUE` | omitted | Set the exact environment of the workload of `run` or `exec`. Repeat for multiple entries. Empty values, spaces, additional equals signs, and UTF-8 are preserved. Inline values are visible in the invoking host process arguments; use `--environment-file` for sensitive values. |
@@ -372,7 +380,7 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 | `--network-egress-deny CIDR[:PROTOCOL[:PORT[-PORT]]]` | none | Deny matching guest egress; repeat to add rules. Requires explicit `--network-egress`; deny rules take precedence. `PROTOCOL` and `PORT` select traffic as for `--network-egress-allow`. |
 | `--network-egress-policy-file PATH` | none | Load bounded IPv4 and IPv6 ranges and rule-local CIDR exclusions for `run` or `provision`. Managed provision persists the compiled rules in its network policy, not this path. Requires explicit `--network-egress`; cannot be mixed with explicit allow/deny rule flags. |
 | `--host-loopback {allow,deny}` | guest to host | Control access between the workload and host loopback services for `run` or `provision`. Without the option, the workload reaches host loopback through its gateway, subject to the egress policy, and no port is published; `deny` closes both directions. Explicit `allow` is bidirectional: the workload reaches host loopback through its gateway, and every TCP and UDP port on which the workload listens is published on host loopback for the host alone, or with `--network-ingress allow` admits the host as well; see [Host-loopback access](run.md#host-loopback-access). |
-| `--network-proxy IPV4:TCP-PORT` | none | Make the network proxy-only: the workload reaches the HTTP or HTTPS proxy that listens on host `127.0.0.1:TCP-PORT` at `IPV4:TCP-PORT`, where `IPV4` must be the guest gateway, and nothing else. `TCP-PORT` can't be 53, where OpenVMM answers DNS at the gateway. Requires `--network-egress deny` and `--host-loopback deny`, and refuses egress rules, `--network-ingress allow`, and forwards. NVX gives the workload no proxy settings; see [Proxy-only networking](run.md#proxy-only-networking). |
+| `--network-proxy IPV4:TCP-PORT` | none | Make the network proxy-only: the workload reaches the HTTP or HTTPS proxy that listens on host `127.0.0.1:TCP-PORT` at `IPV4:TCP-PORT`, where `IPV4` must be the guest gateway, and nothing else. `TCP-PORT` can't be 53, where OpenVMM answers DNS at the gateway. Requires `--network-egress deny` and `--host-loopback deny`, and refuses egress rules, `--network-ingress allow`, and forwards. NVX gives the workloads of a cold boot no proxy settings; see [Proxy-only networking](run.md#proxy-only-networking). |
 | `--host-loopback-forward PROTOCOL:HOST_PORT:GUEST_PORT` | none | Publish one TCP or UDP localhost port to the guest; repeat to add forwards. Requires `--host-loopback allow`. A UDP forward also requires egress allowed by default and no deny rule that covers the guest network, which carries its replies; OpenVMM lets the replies on a forwarded TCP connection through whatever the egress policy. |
 | `--outcome-report PATH` | none | Write a bounded local JSON outcome report: for `run`, OpenVMM's report of its VM, which the guest stopped after the workload; for `exec`, the workload's outcome. |
 | `--cmdline TEXT` | empty | Append non-sandbox kernel parameters, which `nvx-rs` reads as Linux does: split at whitespace, which includes the `0xa0` in `à`, outside double quotes, with names that match whether they spell a dash or an underscore. Parameters whose names start with `nvx_` or `virtfs_` are reserved and refused, even inside a quoted value, and so are a `--` or unclosed quote that hides the tokens that OpenVMM appends, and double quotes, which the VM control console cannot represent; see [Experimental single-workload sandbox](run.md#experimental-single-workload-sandbox). The guest powers off if its kernel applies a clock parameter that the time ABI forbids, such as `tsc=unstable`. |
@@ -382,13 +390,14 @@ those of [`run`](#run) do, and their names cannot be abbreviated either.
 artifacts before they launch, as `nvx-rs run` does. A `run` keeps no state:
 it launches the VM that a `provision` and a `start` of its options would
 launch, in a temporary VM directory that it removes, executes its workload
-once, as `exec` does, has the guest shut the VM down, which it terminates if
-it does not exit within `--timeout` seconds, and then prints the workload's
-standard output and error and exits with its status; see
+once, as `exec` does, with its streams, has the guest shut the VM down, which
+it terminates if it does not exit within `--timeout` seconds, and exits with
+the workload's status; see
 [Experimental single-workload sandbox](run.md#experimental-single-workload-sandbox).
 
-See [Run](run.md) for artifact preparation, the security boundary, and current
-snapshot/configuration limitations.
+See [Run](run.md) for artifact preparation, the security boundary, the
+[managed lifecycle](run.md#managed-lifecycle), and
+[named snapshots](run.md#named-snapshots).
 
 ### `snapshot capture`
 
@@ -420,19 +429,21 @@ the NIC another address, and installs a network policy of its own on it, as
 [`snapshot restore`](#snapshot-restore) and [`run`](#run) describe.
 
 Only a successful capture whose own VMM exits within `--timeout` (60 whole
-seconds by default) can publish. The immutable named directory contains exactly
-`key.bin`, `snapshot.json` and `openvmm/`; an existing name is never replaced.
-Capture's own VM directory is then removed. A timed-out VM is stopped but its
-capture is never finished. Other control or launch-record failures also stop
-the command's verified VM without finishing it. The next capture command using
-this store ends and removes an interrupted attempt through ordinary launch
-recovery, without resuming or publishing it. Indeterminate recovery retains its
-evidence and reports an error. Unknown files or nonempty unjournaled capture-slot
-contents are kept for inspection, not deleted; an empty launch lock alone is
-harmless. Known host and OpenVMM atomic staging files are recovered only with
-a valid launch journal. Captures in one store serialize; snapshot locks remain
-separate from their immutable directories. [`snapshot restore`](#snapshot-restore)
-starts managed sandboxes from them.
+seconds by default) can publish, and prints `Snapshot captured`. The immutable
+named directory contains exactly `key.bin`, `snapshot.json` and `openvmm/`; an
+existing name is never replaced. Capture's own VM directory is then removed. A
+timed-out VM is stopped but its capture is never finished. Other control or
+launch-record failures also stop the command's verified VM without finishing
+it. The next capture command using this store ends and removes an interrupted
+attempt through ordinary launch recovery, without resuming or publishing it.
+Indeterminate recovery retains its evidence and reports an error. Unknown files
+or nonempty unjournaled capture-slot contents are kept for inspection, not
+deleted; an empty launch lock alone is harmless. Known host and OpenVMM atomic
+staging files are recovered only with a valid launch journal. Captures in one
+store serialize, and one that waits for another longer than `--timeout` fails
+with `sandbox-busy`; snapshot locks remain separate from their immutable
+directories. [`snapshot restore`](#snapshot-restore) starts managed sandboxes
+from them.
 
 ### `snapshot restore`
 
@@ -468,30 +479,42 @@ placeholder image and dormant scratch: the image must fit the placeholder,
 with its block sizes, and a scratch upper must be as long as the dormant
 scratch. The VM keeps the processors that the snapshot had online, and
 `--memory-mib` must be a multiple of 128 between the snapshot's boot memory and
-its capacity. The sandbox's NIC comes from the snapshot, with its presence and
-its address: `--net` belongs to [`snapshot capture`](#snapshot-capture), which
-gives a snapshot its NIC, and a restore takes no `--net`. A restore of a
-snapshot without a NIC refuses the network options before it provisions
-anything. That of a snapshot with a NIC needs `--network-profile`, and installs
-the policy of its network options, at the NIC's address, as the restore's own
-network policy: OpenVMM enforces its egress, ingress, host-loopback access, and
-forwards, and the guest applies its DNS server and announces its listeners,
-when it publishes them, as it activates.
+its capacity.
+
+The sandbox's NIC comes from the snapshot, with its presence and its address:
+`--net` belongs to [`snapshot capture`](#snapshot-capture), which gives a
+snapshot its NIC, and a restore takes no `--net`. A restore of a snapshot
+without a NIC refuses the network options before it provisions anything. That
+of a snapshot with a NIC needs `--network-profile`, and installs the policy of
+its network options, at the NIC's address, as the restore's own network policy,
+in place of the capture's deny-all. OpenVMM installs its egress, ingress,
+host-loopback access, and forwards, whose host ports it binds, before any vCPU
+runs. The guest applies the rest as it activates, before it reports Ready, so
+before the host sends it the mapping table of the sandbox's shares and starts
+the workload: it names in `/etc/resolv.conf` the DNS server that a cold boot
+under the policy would name, if any; it starts announcing its listeners when
+the policy publishes them, through private-network ingress or explicit
+host-loopback access; and it gives the proxy of a proxy-only policy, as
+`--network-proxy` names it, to the workloads of the sandbox as `http_proxy`,
+`https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` in their default environment. A
+guest that cannot apply them ends its VM, which fails the restore. Each start
+of the sandbox installs the policy again.
 
 Each start holds the snapshot's exclusive lock, which it waits for up to
-`--timeout`, from before it links the snapshot's files into the sandbox's view
-of it, `openvmm/` in the state directory, until the start ends or the VM has
-exited, and `sandbox deprovision` holds it while it removes the view, so it
-needs the snapshot's store: concurrent restores of one snapshot start one at a
-time. Once the guest is ready, it maps the sandbox's shares and runs the
-workload, whose output the command forwards, and waits for it to exit with
-status 0 within `--timeout`, as the default workload, `/bin/sh`, does at once;
-any other end fails the start, which ends the VM. The sandbox then runs as a
-started one does, for `sandbox exec` and `sandbox stop`. A start journals its
-launch as a cold start does, so a restore whose command dies before the guest
-is ready never completes, and the next command of the sandbox ends its VM.
-[`run --restore-snapshot`](#run) restores a snapshot once, in a sandbox that it
-removes.
+`--timeout` before it fails with `sandbox-busy`, from before it links the
+snapshot's files into the sandbox's view of it, `openvmm/` in the state
+directory, until the start ends or the VM has exited, and `sandbox deprovision`
+holds it while it removes the view, so it needs the snapshot's store:
+concurrent restores of one snapshot start one at a time. Once the guest is
+ready, it maps the sandbox's shares and runs the workload, whose standard input
+ends at once and whose output the command forwards as it comes, and waits for
+it to exit with status 0 within `--timeout`, as the default workload, `/bin/sh`,
+does at once; any other end fails the start, which ends the VM. The sandbox
+then runs as a started one does, for `sandbox exec` and `sandbox stop`. A start
+journals its launch as a cold start does, so a restore whose command dies
+before the guest is ready never completes, and the next command of the sandbox
+ends its VM. [`run --restore-snapshot`](#run) restores a snapshot once, in a
+sandbox that it removes.
 
 A restore that fails before its guest is ready, in `snapshot restore`, a later
 `sandbox start`, or `run --restore-snapshot`, fails with the restore's evidence
