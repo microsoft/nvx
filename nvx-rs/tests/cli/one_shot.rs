@@ -574,15 +574,72 @@ fn gated_native(
     let pid = record["pid"].as_u64().unwrap().try_into().unwrap();
     let reference = ProcessRef {
         pid,
-        start_time: nvx::host::platform::process_start_time(pid)
-            .unwrap()
-            .expect("the gated fake must still be running"),
+        start_time: start_time(pid),
         boot: BootId::current().unwrap(),
     };
     match Process::open(&reference).unwrap() {
         Opened::Running(process) => process,
         Opened::Exited(_) => panic!("the gated fake already exited"),
     }
+}
+
+/// Returns the start time of the gated fake, whose ID is `pid`, as a `ProcessRef` holds it: the
+/// `starttime` field of `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+fn start_time(pid: u32) -> u64 {
+    let stat =
+        std::fs::read(format!("/proc/{pid}/stat")).expect("the gated fake must still be running");
+    // The command name may hold spaces and parentheses, so the fields after it, from field 3,
+    // start after the last closing parenthesis.
+    let name_end = stat.iter().rposition(|&byte| byte == b')').unwrap();
+    std::str::from_utf8(&stat[name_end + 1..])
+        .unwrap()
+        .split_whitespace()
+        .nth(22 - 3)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Returns the start time of the gated fake, whose ID is `pid`, as a `ProcessRef` holds it: the
+/// creation time of the process as a 64-bit `FILETIME`.
+#[cfg(windows)]
+fn start_time(pid: u32) -> u64 {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: OpenProcess has no memory-safety preconditions.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    assert!(
+        !handle.is_null(),
+        "the gated fake must still be running: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: the handle is open, and nothing else owns it.
+    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: the handle has query access, and every output pointer is valid.
+    let queried = unsafe {
+        GetProcessTimes(
+            process.as_raw_handle(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    assert_ne!(queried, 0, "{}", std::io::Error::last_os_error());
+    (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)
 }
 
 fn foreground_exits_promptly(
