@@ -784,3 +784,29 @@ fn a_manifest_path_whose_lookup_fails_is_no_absent_manifest_for_a_binding() {
         .check_with(&layer, DISTRO_POLICY_REVISION, METADATA_ONLY)
         .unwrap();
 }
+
+#[test]
+fn a_staged_image_that_was_replaced_fails_its_check() {
+    // Callers stage images in a directory that only their own account can write.
+    let directory = tempfile::tempdir().unwrap();
+    let images = directory.path().join("images");
+    crate::host::vm::create_private_dir(&images).unwrap();
+    let path = images.join("distro.erofs");
+    fs::write(&path, b"layer").unwrap();
+    let layer = SandboxLayer::new(
+        LayerRole::Distro,
+        path.to_str().unwrap(),
+        "01234567-89ab-cdef-0123-456789abcdef",
+    );
+    let binding = DistroBinding::verify(&layer).unwrap();
+    drop(binding.check(&layer, DISTRO_POLICY_REVISION).unwrap());
+    fs::rename(&path, images.join("original.erofs")).unwrap();
+    fs::write(&path, b"layer").unwrap();
+    assert_eq!(
+        binding
+            .check(&layer, DISTRO_POLICY_REVISION)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Unavailable
+    );
+}
