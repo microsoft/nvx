@@ -2414,9 +2414,6 @@ usage errors, which no library error has.
 | `scratch-claimed` | `TimedOut` | Another sandbox claims the scratch image |
 | `exec-refused` | `Protocol` | The guest agent refused the workload, as for a working directory that it cannot use |
 | `endpoint-closed` | `Protocol` | OpenVMM closed the control endpoint, as it does when the VM shuts down |
-| `template-ineligible` | `Unavailable` | The restore window of a template's generation, which the time contract of its capture sets, excludes the host's time, so no clone may restore it now: its capture is too old, or the host's clock is behind the capture's |
-| `template-tombstoned` | `Unavailable` | A tombstone quarantines the template's generation, which takes no new clones, while the clones that lease it keep their leases |
-| `sandbox-leased` | `Other` | The sandbox holds a lease of a template's generation, which allows no other lease, and one launch of its clone, until a release ends it once its VM has exited |
 
 ## Guest binaries
 
