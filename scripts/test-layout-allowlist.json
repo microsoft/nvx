@@ -12,7 +12,7 @@
     "nvx-rs/src/host/platform/windows/mod.rs": 1,
     "nvx-rs/src/host/platform/windows/process.rs": 2,
     "nvx-rs/src/host/platform/windows/spawn.rs": 1,
-    "nvx-rs/src/host/session.rs": 5,
-    "nvx-rs/src/host/vm.rs": 2
+    "nvx-rs/src/host/vm.rs": 2,
+    "nvx-rs/src/protocol/app.rs": 1
   }
 }
