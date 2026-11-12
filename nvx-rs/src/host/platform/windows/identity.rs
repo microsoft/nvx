@@ -3,15 +3,20 @@
 
 #[cfg(feature = "cli")]
 use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(any(test, feature = "cli"))]
+use std::fs::OpenOptions;
 use std::io;
 use std::mem;
 #[cfg(feature = "cli")]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(any(test, feature = "cli"))]
 use std::os::windows::fs::OpenOptionsExt;
+#[cfg(any(test, feature = "cli"))]
 use std::os::windows::io::AsRawHandle;
 #[cfg(feature = "cli")]
 use std::os::windows::io::OwnedHandle;
+#[cfg(any(test, feature = "cli"))]
 use std::path::Path;
 #[cfg(feature = "cli")]
 use std::ptr;
@@ -19,8 +24,10 @@ use std::ptr;
 #[cfg(feature = "cli")]
 use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(any(test, feature = "cli"))]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
 
 #[cfg(feature = "cli")]
@@ -30,6 +37,7 @@ use super::{owned, raw};
 /// system such as ReFS does not keep unique.
 ///
 /// The object is opened without access rights, which succeeds even while OpenVMM holds it open.
+#[cfg(any(test, feature = "cli"))]
 pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     let file = OpenOptions::new()
         .access_mode(0)
@@ -283,6 +291,7 @@ pub(crate) fn opened_file_id(file: &fs::File) -> io::Result<(u64, u128)> {
 }
 
 /// Returns the volume serial number and 64-bit file index of the file that `handle` holds open.
+#[cfg(any(test, feature = "cli"))]
 fn handle_identity(handle: HANDLE) -> io::Result<(u64, u64)> {
     let information = handle_information(handle)?;
     Ok((

@@ -1,5 +1,6 @@
 //! Checks and rendering of a recorded export plan.
 
+#[cfg(feature = "cli")]
 use std::fs;
 use std::path::PathBuf;
 
@@ -8,17 +9,21 @@ use super::host_path::{display_path, relative_text};
 use super::limits::policy_limits;
 use super::policy::{Writable, nearest_rule, policy_rule_problem};
 use super::{
-    Bind, CALLER_OWNER_ON_WINDOWS, ExportChild, ExportPlan, FileIdentity, GUEST_EXPORT,
-    MAX_AGGREGATE_POLICY_BYTES, MAX_CHILDREN, MAX_GUEST_PATH, Owner, ReservedTargets,
-    changed_object, check_caller_roots, outermost, resolved_path_problem, target_problem,
-    uninspected, volume_root_refusal,
+    Bind, ExportChild, ExportPlan, GUEST_EXPORT, MAX_AGGREGATE_POLICY_BYTES, MAX_CHILDREN,
+    MAX_GUEST_PATH, Owner, ReservedTargets, outermost, resolved_path_problem, target_problem,
+    volume_root_refusal,
+};
+#[cfg(feature = "cli")]
+use super::{
+    CALLER_OWNER_ON_WINDOWS, FileIdentity, changed_object, check_caller_roots, uninspected,
 };
 use crate::error::{Error, Result};
+#[cfg(feature = "cli")]
 use crate::host::platform;
 use crate::protocol::{HostMap, MAPS_TOKEN, MAX_HOST_MAPPINGS};
 
 impl ExportPlan {
-    /// Checks that a plan read back from a record is one that [`crate::host::filesystem::plan`] could have made for a root
+    /// Checks that a plan read from a record is one that the CLI's planner could make for a root
     /// that reserves `reserved`: at least one and at most [`MAX_CHILDREN`] children, none inside
     /// another, each an absolute host path below a volume's root, with its host paths in the form
     /// in which `plan` resolves them, whose policy paths lie inside it within OpenVMM's limits and
@@ -32,7 +37,7 @@ impl ExportPlan {
     /// when they may narrow its writes only to paths that keep its other read-write binds
     /// writable; and each denied or mapped object that a workload could move, strictly inside a
     /// part of the child that the guest may write, must carry its identity. It reads nothing from
-    /// the host; [`verify`](Self::verify) checks the host.
+    /// the host, which the CLI checks before each start.
     ///
     /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
     pub fn check(&self, reserved: ReservedTargets<'_>) -> Result<()> {
@@ -338,7 +343,8 @@ impl ExportPlan {
     /// failure to inspect an object, which shows nothing of the object, fails with
     /// [`ErrorKind::Io`](crate::ErrorKind::Io), with its cause. Run it while the VM is stopped, so
     /// that no workload can race with it; OpenVMM checks each child's kind again when it opens it.
-    pub fn verify(&self) -> Result<()> {
+    #[cfg(feature = "cli")]
+    pub(crate) fn verify(&self) -> Result<()> {
         for bind in self.binds.iter().filter(|bind| bind.read_only) {
             let (child, path) = self.bound(bind)?;
             // Without writable paths, the guest may write all of a writable child.
@@ -398,6 +404,7 @@ impl ExportPlan {
     }
 
     /// Returns the child that holds `bind` and the host path that `bind` maps.
+    #[cfg(feature = "cli")]
     fn bound(&self, bind: &Bind) -> Result<(&ExportChild, PathBuf)> {
         let Some(child) = self.children.get(bind.child) else {
             return Err(Error::io(

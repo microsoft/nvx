@@ -115,7 +115,7 @@ changes only when the module's purpose does.
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
-| [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
+| [`nvx::host::filesystem`](#nvxhostfilesystem) | The plan of the host paths that a VM exports to the guest through OpenVMM's virtio-fs device, its check and lowering, and the guest-path convention |
 | [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
@@ -136,8 +136,7 @@ layer whose superblock requests recovery, before mounting anything. This
 policy does not change EROFS layers or writable ext4 scratches.
 
 Lowering functions take the names by which messages refer to their inputs, such
-as `EgressRules::name` and `PathList::name`, so callers' messages name their own
-fields.
+as `EgressRules::name`, so callers' messages name their own fields.
 
 ### `nvx::protocol`
 
@@ -936,14 +935,18 @@ action that needs more than 256 rules.
 
 ### `nvx::host::filesystem`
 
-The planner of every NVX caller: `plan` turns an `ExportRequest`, the mapped
-host paths at their guest targets, their denied, allowed, and write paths, and
-the owner, into the `ExportPlan` of host paths through OpenVMM's aggregate
-virtio-fs device, for a root's `ReservedTargets`, the blockless root's or the
-container root's: its children, its ordered binds, which give the host-mapping
-table, and the identities that each start checks again; and `guest_path` (also
-at `nvx::`), the guest path at which the host-path convention places a resolved
-host path.
+The `ExportPlan` of host paths through OpenVMM's aggregate virtio-fs device, for
+a root's `ReservedTargets`, the blockless root's or the container root's: its
+children, its ordered binds, which give the host-mapping table, and the
+identities that each start checks again; `ExportPlan::check`, which checks a
+recorded plan without reading the host, and the plan's OpenVMM options, boot
+token, and mapping table; and `guest_path` (also at `nvx::`), the guest path at
+which the host-path convention places a resolved host path.
+
+The planner, which turns the mapped host paths at their guest targets, their
+denied, allowed, and write paths, and the owner into a plan, and the checks of a
+plan's host objects before each start are the CLI's path rules, private to the
+crate (feature `cli`).
 
 ### `nvx::host::nvxs`
 
@@ -1511,15 +1514,15 @@ which only the CLI uses (feature `cli`), but for the block geometry that
 `nvx::host::vm` and `nvx::host::snapshot` read and the tag of the shares'
 virtio-fs device, which a snapshot's key names: the workload identity that
 `--workload-user` names; the live shares of `--mount`, their guest targets and
-the reserved ones, their access policies and owner, and the checks of their
-host paths, which it plans through `nvx::host::filesystem` for the container
-root; and the checks that `nvx-rs sandbox` and `nvx-rs run` apply to their
-options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write`
-to shares, the systemd entrypoint check and the explicit verification of the
-distro layer, the targets of `nvx-rs run` shares, and the managed exec
-environment. Its image staging, the `layer`, the `distro` and `scratch`
-bindings, and the seals of the private `host::seal` that they record, is
-described in [Distro bindings](#distro-bindings) and
+the reserved ones, their access policies and owner, and the checks of their host
+paths, which it plans through the private planner of `nvx::host::filesystem` for
+the container root; and the checks that `nvx-rs sandbox` and `nvx-rs run` apply
+to their options: the attribution of `--mount-deny`, `--mount-allow`, and
+`--mount-write` to shares, the systemd entrypoint check and the explicit
+verification of the distro layer, the targets of `nvx-rs run` shares, and the
+managed exec environment. Its image staging, the `layer`, the `distro` and
+`scratch` bindings, and the seals of the private `host::seal` that they record,
+is described in [Distro bindings](#distro-bindings) and
 [Images by path](#images-by-path).
 
 The sandbox launch profile specifies its own inputs rather than emulating Python.
