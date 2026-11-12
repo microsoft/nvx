@@ -18174,7 +18174,7 @@ class GuestInitRoutingTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "new-init <4242>\n")
 
-    def test_old_lifecycle_tokens_keep_the_old_layered_init(self):
+    def test_old_lifecycle_tokens_no_longer_select_the_old_layered_init(self):
         for lifecycle in ("managed", "one-shot", ""):
             with self.subTest(lifecycle=lifecycle):
                 result = self._run(
@@ -18182,8 +18182,17 @@ class GuestInitRoutingTests(unittest.TestCase):
                     f"nvx_overlay_upper=ramfs nvx_lifecycle={lifecycle}"
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertTrue(result.stdout.startswith("old-init"), result.stdout)
-                self.assertNotIn("new-init", result.stdout)
+                self.assertEqual(result.stdout, "new-init <4242>\n")
+
+    def test_old_workload_identity_tokens_name_no_identity(self):
+        # Only nvx_identity= names the identity of a one-shot workload.
+        result = self._run(
+            "nvx_workload_uid=4242 nvx_workload_gid=4242 nvx_entrypoint=/bin/true"
+        )
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn(
+            "NVX-WORKLOAD-ERROR: workload UID is unavailable\n", result.stderr
+        )
 
     def test_exec_override_cannot_bypass_the_new_sandbox_init(self):
         result = self._run(
@@ -18191,11 +18200,12 @@ class GuestInitRoutingTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "new-init <4242>\n")
-        for tokens in ("", "nvx_sandbox=1 nvx_lifecycle=managed"):
-            with self.subTest(tokens=tokens):
-                result = self._run(f"{tokens} nvx_exec=/bin/true")
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "")
+        result = self._run("nvx_sandbox=1 nvx_lifecycle=managed nvx_exec=/bin/true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "new-init <4242>\n")
+        result = self._run("nvx_exec=/bin/true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_blockless_platform_and_snapshot_vms_keep_their_routes(self):
         for tokens in ("", "nvx_snapshot_tier=platform", "shellsnap snap"):
@@ -18250,8 +18260,9 @@ class GuestInitRoutingTests(unittest.TestCase):
         self.assertIn("selected guest cannot act as sandbox control", result.stderr)
         self.assertNotIn("old-init", result.stdout)
         result = self._run("nvx_sandbox=1 nvx_lifecycle=managed")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(result.stdout.startswith("old-init"), result.stdout)
+        self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("selected guest cannot act as sandbox control", result.stderr)
+        self.assertNotIn("old-init", result.stdout)
 
 
 class GuestInitWorkloadIdentityTests(unittest.TestCase):

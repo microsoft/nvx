@@ -232,8 +232,8 @@ verification of the pinned OpenVMM release.
 initramfs builds, plus the Azure Linux variants of the container-entry
 scripts. The ten compiled `/sbin/nvx-*` programs live under `nvx-rs/src/guest`
 and `nvx-rs/src/bin`. `init` controls early boot and then starts an
-initramfs program named by `nvx_exec=`, the Alpine-only `nvx-init-agent`
-sandbox profile, `nvx-managed-agent` for a managed workload, a one-shot
+initramfs program named by `nvx_exec=`, `nvx-init` for a layered root,
+`nvx-managed-agent` for a managed workload, a one-shot
 workload named by `nvx_entrypoint=`, a virtio restore probe for benchmark
 profiling, or the interactive shell. On an interactive boot, `init` prints a
 stable distribution boot marker for Alpine and Azure Linux, and
@@ -242,7 +242,8 @@ the container launch and entry scripts that only the Alpine initramfs installs;
 the entry script stages Alpine's musl loader and `setpriv` inside the
 workload's root.
 
-The sandbox scripts resolve fixed virtio-blk roles through sysfs, mount the
+The older sandbox scripts, `nvx-init-agent` and the container scripts, which
+`init` no longer starts, resolve fixed virtio-blk roles through sysfs, mount the
 EROFS `distro` layer as the overlay's only lower layer, under the upper that
 the host declares, an ext4 scratch disk or a tmpfs, place the workload in its
 cgroup before release, construct its mount/PID/UTS namespaces, enter its
