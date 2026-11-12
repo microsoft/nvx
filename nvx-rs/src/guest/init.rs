@@ -30,8 +30,13 @@
 //!   nothing from it;
 //! - ends the VM itself, without another guest program: it writes every file system's modified
 //!   data to its storage, with `sync`, and then stops the VM through OpenVMM's control port with a
-//!   status: 0 after a host `STOP` or `SIGTERM`, or 125, as `nvx-init-agent`'s failures do, after
-//!   a failure, which an `NVX-INIT-ERROR:` line on the console names first.
+//!   status: 0 after a host `STOP` or `SIGTERM`; after its restored activation failed, which a
+//!   deadline that passed before Ready and an activate request that it refused also are, the
+//!   status of `nvx::protocol::status` of the failure's class, such as 54, `ACTIVATION_ROOT`, for
+//!   a root that does not assemble over its upper, or 51, `ACTIVATION_PROTOCOL`, for an activate
+//!   request that changes the accepted one, which an `NVX-INIT-ACTIVATION:` line on the console
+//!   names first; or 125, as `nvx-init-agent`'s failures do, after another failure, which an
+//!   `NVX-INIT-ERROR:` line on the console names first.
 //!
 //! Outside PID 1, `nvx-init` changes nothing: it fails with status 2 and a message.
 
@@ -62,8 +67,8 @@ pub(crate) use boot::{RestoreHandoff, Restored};
 
 /// The process ID of the init process.
 const INIT_PROCESS: i32 = 1;
-/// The VM's exit status after a failure of PID 1 or the end of a helper: that of
-/// `nvx-init-agent`'s failures.
+/// The VM's exit status after a failure of PID 1 or the end of a helper, but for a failed restored
+/// activation's: that of `nvx-init-agent`'s failures.
 const FAILURE: u8 = 125;
 /// The out-of-memory score adjustment of PID 1 and its helpers, Linux's `OOM_SCORE_ADJ_MIN`,
 /// which exempts them from the out-of-memory killer.

@@ -1,6 +1,7 @@
 //! The fixed cold-boot and restored-space setup of the VM's shared layered root.
 
 use std::ffi::{CString, OsStr};
+use std::fmt;
 use std::net::IpAddr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 use crate::activation::{self, View};
 use crate::gpt::Expected;
 use crate::guest::activation::{
-    self as guest_activation, Activation, ActivationAction, ActivationInput, ActivationState,
-    Applied, RootTemplate,
+    self as guest_activation, Activation, ActivationAction, ActivationCause, ActivationFailure,
+    ActivationInput, ActivationState, Applied, ApplyError, RootTemplate,
 };
 use crate::guest::mappings::{Access, Mapper, MappingTable, Reserved, SourceRoot, TargetRoot};
 use crate::guest::root::{self, Assembly, Device, Root, ShareChild, ShareKind};
@@ -22,7 +23,7 @@ use crate::protocol::export::{EXPORT_DIRECTORY, HostExport};
 use crate::protocol::root::{
     DISTRO_MMIO_BASE, ImageFormat, RootLayout, RootUpper, SCRATCH_MMIO_BASE,
 };
-use crate::protocol::{self, ProtocolError};
+use crate::protocol::{self, ProtocolError, status};
 use crate::{Error, Result};
 
 mod account;
@@ -331,6 +332,9 @@ fn share_child(value: &[u8]) -> Result<ShareChild> {
 pub(crate) struct Restored {
     pub(crate) activation: Activation,
     payload: Option<Vec<u8>>,
+    /// The status of the class of an activate request that this refused before its activation
+    /// took the request, which ends the VM.
+    refused: Option<u8>,
     _applied: Option<Applied>,
 }
 
@@ -352,6 +356,7 @@ impl Restored {
         Self {
             activation: Activation::new(repaired, Duration::from_secs(30), now),
             payload: None,
+            refused: None,
             _applied: None,
         }
     }
@@ -369,6 +374,8 @@ impl Restored {
     }
 
     /// Compares the complete retry payload before delegating record replay to the state machine.
+    /// A request that changes the accepted one, before or after Ready, is refused as the
+    /// protocol's failure, and one that does not decode as the record's.
     pub(crate) fn accept(
         &mut self,
         payload: &[u8],
@@ -379,11 +386,15 @@ impl Restored {
             .as_deref()
             .is_some_and(|accepted| accepted != payload)
         {
+            self.refused = Some(status::ACTIVATION_PROTOCOL);
             return Err(Error::unsupported(
                 "the activate request changed after acceptance",
             ));
         }
-        let (_, workload) = protocol::decode_activate_payload(payload).map_err(protocol_error)?;
+        let (_, workload) = protocol::decode_activate_payload(payload).map_err(|error| {
+            self.refused = Some(status::ACTIVATION_RECORD);
+            protocol_error(error)
+        })?;
         let action = self
             .activation
             .input(now, ActivationInput::Activate(&payload[9..]))
@@ -392,6 +403,23 @@ impl Restored {
             self.payload = Some(payload.to_vec());
         }
         Ok((action, workload))
+    }
+
+    /// Returns the status with which nvx-init ends the VM once this activation has failed: that
+    /// of a request that this refused, or else the one that [`class_status`] selects for the
+    /// activation's failure, or `None` while it has not failed. An activation that is not ready
+    /// fails once its deadline has passed at `now`, which this reports, as the session reports
+    /// every other failure where it happens.
+    pub(crate) fn failure_status(&mut self, now: Instant) -> Option<u8> {
+        if self.refused.is_some() {
+            return self.refused;
+        }
+        let reported = self.activation.state() == ActivationState::Failed;
+        let failure = self.activation.tick(now).err()?;
+        if !reported {
+            super::report_activation(&failure);
+        }
+        Some(class_status(&failure))
     }
 
     /// Applies and switches one restored space, retaining its root and handing over its mapper.
@@ -436,12 +464,15 @@ impl Restored {
                     applied.root().path(),
                     (workload.uid, workload.gid),
                     workload.create_account,
-                )?;
+                )
+                .map_err(classed(status::ACTIVATION_WORKLOAD))?;
                 Ok(RestoreHandoff {
                     workload,
                     user,
                     home,
-                    hostname: CString::new(applied.hostname()).map_err(activation_error)?,
+                    hostname: CString::new(applied.hostname())
+                        .map_err(activation_error)
+                        .map_err(classed(status::ACTIVATION_WORKLOAD))?,
                     proxy: applied.proxy().map(str::to_owned),
                     table: u32::try_from(record.configuration().mappings)
                         .ok()
@@ -455,7 +486,8 @@ impl Restored {
             },
             |applied| {
                 if applied.publication() == activation::Publication::Published {
-                    announce(applied.publication(), applied.gateway())?;
+                    announce(applied.publication(), applied.gateway())
+                        .map_err(classed(status::ACTIVATION_NETWORK))?;
                 }
                 Ok(())
             },
@@ -465,6 +497,87 @@ impl Restored {
         self._applied = Some(applied);
         Ok(handoff)
     }
+}
+
+/// Returns the status of `nvx::protocol::status` with which nvx-init ends the VM once its restored
+/// activation failed with `failure`, that of the failure's class:
+///
+/// - [`ACTIVATION_DEADLINE`](status::ACTIVATION_DEADLINE): the deadline passed before the activation
+///   was ready;
+/// - [`ACTIVATION_PROTOCOL`](status::ACTIVATION_PROTOCOL): the host reset the session again, sent a
+///   request before the activation, or an Activate of another transaction, or one that changes
+///   the accepted record;
+/// - [`ACTIVATION_RECORD`](status::ACTIVATION_RECORD): the Activate's record does not decode,
+///   breaks a limit, or is a cold boot's;
+/// - [`ACTIVATION_RESOURCES`](status::ACTIVATION_RESOURCES): the record expects other resources
+///   than the repaired VM has;
+/// - for a failed application of the record, that of its first cause that names a class: the
+///   [`ApplyError`] of the record's application, whose GPT disk and root's assembly are the
+///   root's, [`ACTIVATION_ROOT`](status::ACTIVATION_ROOT), whose machine ID and view are the
+///   workload's, [`ACTIVATION_WORKLOAD`](status::ACTIVATION_WORKLOAD), whose host export is
+///   [`ACTIVATION_EXPORT`](status::ACTIVATION_EXPORT), and whose network settings are
+///   [`ACTIVATION_NETWORK`](status::ACTIVATION_NETWORK); the workload's account and hostname,
+///   `ACTIVATION_WORKLOAD`; the announcer of the network's listeners, `ACTIVATION_NETWORK`; or
+///   else the root's, `ACTIVATION_ROOT`, whose runtime file systems and switch the other steps
+///   are;
+/// - [`ACTIVATION_ORDER`](status::ACTIVATION_ORDER): nvx-init's own order completed an activation
+///   that did not run, or started the workload before the activation was ready.
+fn class_status(failure: &ActivationFailure) -> u8 {
+    match failure.cause() {
+        ActivationCause::Expired => status::ACTIVATION_DEADLINE,
+        ActivationCause::Reset
+        | ActivationCause::Request
+        | ActivationCause::Transaction { .. }
+        | ActivationCause::Changed => status::ACTIVATION_PROTOCOL,
+        ActivationCause::Record(_) | ActivationCause::Cold => status::ACTIVATION_RECORD,
+        ActivationCause::Resources { .. } => status::ACTIVATION_RESOURCES,
+        ActivationCause::Failed(error) => {
+            let error: &(dyn std::error::Error + 'static) = &**error;
+            std::iter::successors(Some(error), |error| error.source())
+                .find_map(|error| match error.downcast_ref::<ApplyError>() {
+                    Some(ApplyError::Gpt(_) | ApplyError::Assembly(_)) => {
+                        Some(status::ACTIVATION_ROOT)
+                    }
+                    Some(ApplyError::MachineId { .. } | ApplyError::View { .. }) => {
+                        Some(status::ACTIVATION_WORKLOAD)
+                    }
+                    Some(ApplyError::Export { .. }) => Some(status::ACTIVATION_EXPORT),
+                    Some(ApplyError::Network { .. }) => Some(status::ACTIVATION_NETWORK),
+                    None => error
+                        .downcast_ref::<Classed>()
+                        .map(|classed| classed.status),
+                })
+                .unwrap_or(status::ACTIVATION_ROOT)
+        }
+        ActivationCause::Completion | ActivationCause::Start => status::ACTIVATION_ORDER,
+    }
+}
+
+/// The failure of a step of a restored space whose class is not the root's, with the status of
+/// its class, which [`class_status`] finds among an application's causes.
+#[derive(Debug)]
+struct Classed {
+    /// The status of the step's class.
+    status: u8,
+    /// The step's failure, whose message and causes this keeps.
+    error: Error,
+}
+
+impl fmt::Display for Classed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for Classed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(&self.error)
+    }
+}
+
+/// Returns a step's failure with its message, classed with `status`.
+fn classed(status: u8) -> impl FnOnce(Error) -> Error {
+    move |error| Error::new(error.code(), error.message()).with_source(Classed { status, error })
 }
 
 /// Closes prepared handles before tearing down a space whose setup failed.
