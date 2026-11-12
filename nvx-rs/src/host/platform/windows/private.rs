@@ -9,7 +9,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::{mem, ptr};
 
-use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GENERIC_ALL, GENERIC_WRITE, HANDLE};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GENERIC_ALL, HANDLE};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION, AclSizeInformation,
     AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
@@ -21,11 +21,11 @@ use windows_sys::Win32::Security::{
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
     WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinCreatorOwnerSid, WinLocalSystemSid,
 };
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
-    MoveFileExW, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    CreateDirectoryW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -198,21 +198,6 @@ pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
     store_dir_problem(path, &CurrentUser::get()?)
 }
 
-/// Creates the directory `path` private to the current user, or checks that an existing one is,
-/// as [`create_store_dir`] does for the directory of a sandbox store.
-pub(crate) fn create_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
-    create_store_dir(path)
-}
-
-/// Returns why the directory `path` is not private to the current user, if it is not, as
-/// [`check_store_dir`] does for the directory of a sandbox store: unless it is a directory, not a
-/// link or any other reparse point, that belongs to the user, or to SYSTEM or the Administrators
-/// group, whose access control list allows no one else, and passes entries on to the files
-/// created in it.
-pub(crate) fn check_owner_only_dir(path: &Path) -> io::Result<Option<String>> {
-    check_store_dir(path)
-}
-
 /// Returns why the directory `path` cannot hold a sandbox store of `user`, if it cannot.
 fn store_dir_problem(path: &Path, user: &CurrentUser) -> io::Result<Option<String>> {
     plain_dir_problem(path, user, Required::PrivateDirectory)
@@ -241,9 +226,9 @@ fn plain_dir_problem(
 /// current user, if it is not: unless it is a directory, not a link or any other reparse point,
 /// that belongs to the user, or to SYSTEM or the Administrators group, whose access control list
 /// is present, holds only entries that allow or deny access, and allows no one but those and the
-/// owner's aliases, as [`check_owner_only_dir`] requires.
+/// owner's aliases, as [`check_store_dir`] requires.
 ///
-/// Unlike [`check_owner_only_dir`], it does not require the directory to pass entries on to the
+/// Unlike [`check_store_dir`], it does not require the directory to pass entries on to the
 /// files created in it: OpenVMM gives the directory, and each file that it publishes in it, a
 /// protected list of their own, which allows SYSTEM and the owner, and the directory's own list
 /// already stops anyone else from creating a file in it.
@@ -374,28 +359,6 @@ pub(crate) fn private_file_problem(file: &fs::File) -> io::Result<Option<String>
     privacy_problem(file, &CurrentUser::get()?, Required::Private)
 }
 
-/// Returns why another user than the current one, SYSTEM, or the Administrators group may change
-/// the file that `file` holds open, if one may: unless it belongs to the user, or to SYSTEM or the
-/// Administrators group, and its access control list allows no one else to write or extend it, to
-/// change its attributes, its list, or its owner, or to delete it. Others may read it.
-pub(crate) fn foreign_writer_problem(file: &fs::File) -> io::Result<Option<String>> {
-    privacy_problem(file, &CurrentUser::get()?, Required::Unwritable)
-}
-
-/// The rights of an access control entry that change a file or directory: write or extend it, or
-/// its extended attributes, delete it or its children, change its attributes, its list, or its
-/// owner, and the generic rights that include those.
-const CHANGE_RIGHTS: u32 = FILE_WRITE_DATA
-    | FILE_APPEND_DATA
-    | FILE_WRITE_EA
-    | FILE_DELETE_CHILD
-    | FILE_WRITE_ATTRIBUTES
-    | DELETE
-    | WRITE_DAC
-    | WRITE_OWNER
-    | GENERIC_WRITE
-    | GENERIC_ALL;
-
 /// What [`privacy_problem`] requires of the access control list of a file or directory, whose
 /// owner the user must trust in any case.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -405,8 +368,6 @@ pub(super) enum Required {
     /// That it allow no one else any access, and pass entries on to the files created in it, as
     /// a directory of a store must.
     PrivateDirectory,
-    /// That it allow no one else any of the [`CHANGE_RIGHTS`].
-    Unwritable,
 }
 
 /// Returns why the file, directory, or other object that `object` holds open is not private to
@@ -478,11 +439,6 @@ pub(super) fn privacy_problem(
             ACCESS_DENIED_ACE_TYPE => {}
             ACCESS_ALLOWED_ACE_TYPE => {
                 let entry = ace.cast::<ACCESS_ALLOWED_ACE>();
-                // SAFETY: an entry that allows access starts as an ACCESS_ALLOWED_ACE.
-                let mask = unsafe { (*entry).Mask };
-                if required == Required::Unwritable && mask & CHANGE_RIGHTS == 0 {
-                    continue;
-                }
                 // SAFETY: an entry that allows access holds its identifier from `SidStart` on.
                 let sid: PSID = unsafe { (&raw mut (*entry).SidStart).cast() };
                 // The creator owner and the owner rights stand for an owner: the owner, or the
@@ -493,13 +449,7 @@ pub(super) fn privacy_problem(
                         || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0
                 };
                 if !owner_alias && !user.trusts(sid) {
-                    return Ok(Some(
-                        match required {
-                            Required::Unwritable => "allows other users to change it",
-                            Required::Private | Required::PrivateDirectory => "allows other users",
-                        }
-                        .to_owned(),
-                    ));
+                    return Ok(Some("allows other users".to_owned()));
                 }
             }
             other => {
@@ -547,6 +497,7 @@ pub(crate) fn make_sparse(file: &fs::File) -> io::Result<()> {
 
 /// Renames `from` to `to` unless `to` exists, which it leaves as it is, failing with
 /// [`io::ErrorKind::AlreadyExists`]: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
+#[cfg(feature = "cli")]
 pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (wide_path(from)?, wide_path(to)?);
     // SAFETY: both names are NUL-terminated.

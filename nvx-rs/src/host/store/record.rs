@@ -45,9 +45,7 @@ pub struct LaunchId(String);
 impl LaunchId {
     /// Draws a fresh launch identity, which a caller reserves for one launch before it begins it
     /// with [`LockedStore::begin_launch`](super::LockedStore::begin_launch), or
-    /// [`supervisor::launch`](crate::host::supervisor::launch), and never uses for another. A
-    /// clone's lease reserves one, as
-    /// [`template::Store::acquire`](crate::host::template::Store::acquire) draws it.
+    /// [`supervisor::launch`](crate::host::supervisor::launch), and never uses for another.
     pub fn generate() -> Result<Self> {
         let mut bytes = [0u8; LAUNCH_ID_BYTES];
         getrandom::fill(&mut bytes)

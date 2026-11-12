@@ -103,7 +103,6 @@ fn an_existing_directory_that_is_not_private_is_refused_and_left_unchanged() {
         );
         assert_eq!(mode(&path), other);
     }
-    assert_eq!(platform::check_owner_only_dir(&path).unwrap(), None);
     assert_eq!(
         platform::tests::store_dir_problem(Uid::from_raw(1001), Mode::S_IRWXU, Uid::from_raw(1000)),
         Some("belongs to user 1001, not to the current user 1000".to_owned())

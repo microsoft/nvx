@@ -10,7 +10,7 @@
 //! through libc's `prctl` too, since `nix` does not wrap seccomp. The Windows platform module
 //! still calls `windows-sys` directly.
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "cli", target_os = "linux"))]
 mod fs;
 #[cfg(feature = "cli")]
 mod interrupt;
@@ -23,7 +23,7 @@ mod socket;
 pub(crate) use nix::errno::Errno;
 use nix::unistd::{getegid, geteuid};
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "cli", target_os = "linux"))]
 pub(crate) use fs::rename_no_replace;
 #[cfg(feature = "cli")]
 pub(crate) use interrupt::{interrupted, watch_interrupts, write_interruptibly};

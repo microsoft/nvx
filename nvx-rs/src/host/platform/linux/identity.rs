@@ -7,9 +7,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use nix::sys::stat::Mode;
-use nix::unistd::Uid;
 
-use super::private::{owner_and_mode, store_dir_problem};
 use crate::host::sys::Errno;
 
 /// Returns the device and inode of a file or directory.
@@ -167,14 +165,5 @@ impl Directory {
     /// Makes the changes to its entries so far durable, such as a file that was removed from it.
     pub(crate) fn sync(&self) -> io::Result<()> {
         self.0.sync_all()
-    }
-
-    /// Returns why the directory cannot hold a sandbox store, as [`check_store_dir`] returns it for
-    /// a path, if it cannot: unless it belongs to the current user with mode 0700.
-    ///
-    /// [`check_store_dir`]: crate::host::platform::linux::check_store_dir
-    pub(crate) fn store_dir_problem(&self) -> io::Result<Option<String>> {
-        let (uid, mode) = owner_and_mode(&self.0.metadata()?);
-        Ok(store_dir_problem(uid, mode, Uid::effective()))
     }
 }

@@ -70,10 +70,10 @@ the key that the vector's bytes decode to.
   `CLASS|NETWORK` of
   `snapshot-key-v1.txt` came to encode its network in place as the template
   captures it, under the complete deny-all policy: the encodings of a key and
-  of a class have not been released, so a template store that an earlier build
-  created is not supported, and is deleted and created again, since nothing
-  migrates it. The snapshot key also drops the obsolete guest-build field and
-  uses the `nvx snapshot key` hash domain in place, and now appends the full
+  of a class have not been released, so no key or class that an earlier build
+  encoded is supported, since nothing migrates it. The snapshot key also drops
+  the obsolete guest-build field and uses the `nvx snapshot key` hash domain in
+  place, and now appends the full
   capture-time contract while its compatibility identity still digests only
   the preceding compatibility fields: no snapshot outlives a deployment,
   and the prior key encoding is not supported.
@@ -99,8 +99,9 @@ command-line tokens of a capture at OpenVMM's platform tier, after the
 constant of the kernel tuning parameters that it admits among them, and
 `microvm_control_tty_command_line.rs`, the constant of
 `openvmm/openvmm_defs/src/microvm.rs` that names the control tty's token, which
-the function reads. The tests of `nvx::host::template` compile them, and check
-each token of a template's kernel command line with OpenVMM's own function.
+the function reads. The tests of `nvx::host::config` compile them, and check
+that its allowlist of a capture's kernel command-line tokens admits each token
+as OpenVMM's own function does.
 
 The tests cannot call OpenVMM's broker or its allowlist: OpenVMM's workspace
 needs a later Rust release than `nvx`'s minimum, and the `nvx-rs` job cannot

@@ -358,10 +358,6 @@ fn the_guest_build_is_not_part_of_a_snapshot_key() {
     assert_eq!(changed, made);
     assert_eq!(changed.to_bytes(), made.to_bytes());
     assert_eq!(changed.identity(), made.identity());
-    assert_eq!(
-        crate::host::template::TemplateKey::from_bytes(&changed.to_bytes()).unwrap(),
-        made
-    );
 }
 
 #[test]
@@ -738,12 +734,6 @@ fn keys_with_the_removed_guest_build_field_are_refused() {
     old.splice(offset..offset, field.finish());
     assert_eq!(
         SnapshotKey::from_bytes(&old).unwrap_err().code(),
-        ErrorCode::Io
-    );
-    assert_eq!(
-        crate::host::template::TemplateKey::from_bytes(&old)
-            .unwrap_err()
-            .code(),
         ErrorCode::Io
     );
 }

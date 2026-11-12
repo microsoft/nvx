@@ -1,7 +1,5 @@
 #[cfg(target_os = "linux")]
-pub(crate) use super::linux::tests::{
-    check_identity, owner_only_problem, start_time_from_stat, store_dir_problem,
-};
+pub(crate) use super::linux::tests::{check_identity, start_time_from_stat, store_dir_problem};
 #[cfg(all(windows, feature = "cli"))]
 pub(crate) use super::windows::tests::disconnect_control;
 #[cfg(windows)]

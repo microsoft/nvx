@@ -3,10 +3,10 @@
 //! versions of OpenVMM's contracts in `nvx::contract`, and the bound of an activation record,
 //! which a restore packet carries.
 //!
-//! The protocol's tests read the copies, and the unit tests of `nvx::host::template` compile or
-//! read the excerpts, because the `nvx-rs` job cannot check out the submodule, whose deploy key
-//! fork pull requests lack. This test is ignored by default: the NVX CLI jobs, which check out the
-//! submodule, run it, and so does an OpenVMM pin promotion.
+//! The protocol's tests read the copies, and the unit tests of `nvx::host::config` compile the
+//! excerpts of OpenVMM's allowlist, because the `nvx-rs` job cannot check out the submodule, whose
+//! deploy key fork pull requests lack. This test is ignored by default: the NVX CLI jobs, which
+//! check out the submodule, run it, and so does an OpenVMM pin promotion.
 
 use std::fs;
 use std::path::Path;

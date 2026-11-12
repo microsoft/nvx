@@ -268,13 +268,13 @@ impl LockedStore {
     /// [`supervisor::reattach`](crate::host::supervisor::reattach) does. It also refuses, with
     /// [`RemovalError::Io`], and removes nothing, once the directory that its path names holds
     /// another lock file than this lock's, as after a link in the path changed. It makes both
-    /// checks, and removes what a clone kept of its launch, as a release does, and the sandbox's
+    /// checks, and removes what a clone kept of its launch, and the sandbox's
     /// [clone binding](CLONE_BINDING_NAME), if it holds one, through one handle of the directory
     /// that it opens, so that no change of a link in the path meanwhile redirects their removal
     /// to another sandbox, whose VM may run. It makes their absence durable before anything else
     /// goes, so that no crash after the removal of the directory, or of one of its ancestors,
-    /// brings back a binding whose lease a retirement may have ended. It then removes the store's
-    /// other files but its lock, the caller's files, its configuration record last, so that an
+    /// brings back a binding. It then removes the store's other files but its lock, the caller's
+    /// files, its configuration record last, so that an
     /// interrupted removal leaves a provisioned sandbox, which can be removed again, and the
     /// temporary files that the store owns. It refuses the entries that are neither the store's
     /// nor the caller's, which it names in the order in which the directory lists them, and keeps
@@ -358,18 +358,17 @@ impl LockedStore {
         }
     }
 
-    /// Removes what the clone of the sandbox kept of its launch, as a release does, and then the
-    /// sandbox's clone binding, if it holds one, and makes their absence durable with `sync`,
+    /// Removes what the clone of the sandbox kept of its launch, and then the sandbox's clone
+    /// binding, if it holds one, and makes their absence durable with `sync`,
     /// before anything else of the sandbox goes, through one handle of the directory that the path
     /// names. Through that handle, it checks first that the directory holds this lock's file, and
     /// refuses otherwise, then that the store records no VM and no launch, and runs `checked` once
     /// both checks pass, before it removes anything. No change of a link in the path meanwhile
     /// redirects these steps to another sandbox, whose VM may run, and whose files then stay.
     ///
-    /// The binding's absence, after this removal or after a release that a crash interrupted
-    /// before its sync, is then durable while the directory, which keeps the sandbox provisioned,
-    /// remains. A binding, or a file of the clone, whose deletion is pending already counts as
-    /// removed.
+    /// The binding's absence, after this removal, is then durable while the directory, which
+    /// keeps the sandbox provisioned, remains. A binding, or a file of the clone, whose deletion
+    /// is pending already counts as removed.
     fn unbind(
         &self,
         checked: &dyn Fn(),
@@ -405,8 +404,8 @@ impl LockedStore {
             }
         }
         checked();
-        // What a clone kept of its launch goes before its binding, as a release removes it, so
-        // that the binding's durable absence makes theirs durable too.
+        // What a clone kept of its launch goes before its binding, so that the binding's durable
+        // absence makes theirs durable too.
         for name in CLONE_FILE_NAMES {
             directory.remove_file(name).map_err(entry_failed(name))?;
         }

@@ -11,8 +11,7 @@ use crate::host::store::{
 use crate::protocol::CAPABILITY_LEN;
 
 /// Launches a VMM in the sandbox of `locked`, through the store's launch journal, as the launch
-/// `reserved`, which the caller reserved with [`LaunchId::generate`], or which the sandbox's lease
-/// reserves, [`Lease::launch`](crate::host::template::Lease::launch), under the runtime identity
+/// `reserved`, which the caller reserved with [`LaunchId::generate`], under the runtime identity
 /// `runtime`, with `capability` on its standard input.
 ///
 /// It begins the launch with [`LockedStore::begin_launch`], asks `command` for the VMM's command,
@@ -26,8 +25,7 @@ use crate::protocol::CAPABILITY_LEN;
 /// cannot be ended then, because its VMM did not exit, keeps its journal for
 /// [`LockedStore::recover`], and the error says so. Fails as [`LockedStore::begin_launch`] does if
 /// the sandbox's VM runs, an interrupted launch has not been recovered, or the sandbox holds a
-/// lease that does not let this lock begin `reserved`: one that reserves another launch, or that
-/// another lock acquired, or whose launch has begun.
+/// lease.
 pub fn launch<'s, 'h>(
     locked: &'s mut LockedStore,
     reserved: &LaunchId,

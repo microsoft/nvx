@@ -27,7 +27,7 @@
 //! A release declares the microVM ABI, time ABI, restore-packet, control-session, and control
 //! contract versions of its artifacts in its `SOURCE-MANIFEST.json`.
 //!
-//! The compatibility key of a template, `nvx::host::template::TemplateKey`, holds the boot and
+//! The compatibility key of a template, `nvx::host::snapshot::SnapshotKey`, holds the boot and
 //! control versions, and the versions of the contracts through which a template's clones are
 //! restored, which no runtime identity records:
 //!

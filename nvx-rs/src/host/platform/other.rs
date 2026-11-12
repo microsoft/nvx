@@ -184,11 +184,6 @@ pub(crate) fn check_store_dir(_path: &Path) -> io::Result<Option<String>> {
 }
 
 /// Fails: this host cannot check who may access a directory.
-pub(crate) fn create_owner_only_dir(_path: &Path) -> io::Result<Option<String>> {
-    Err(unsupported())
-}
-
-/// Fails: this host cannot check who may access a directory.
 pub(crate) fn check_owner_only_dir(_path: &Path) -> io::Result<Option<String>> {
     Err(unsupported())
 }
@@ -203,17 +198,13 @@ pub(crate) fn check_snapshot_dir(path: &Path) -> io::Result<Option<String>> {
     check_owner_only_dir(path)
 }
 
-/// Fails: this host cannot check who may change a file.
-pub(crate) fn foreign_writer_problem(_file: &File) -> io::Result<Option<String>> {
-    Err(unsupported())
-}
-
 /// Fails: this host makes no template's files.
 pub(crate) fn make_sparse(_file: &File) -> io::Result<()> {
     Err(unsupported())
 }
 
 /// Fails: this host makes no template's files.
+#[cfg(feature = "cli")]
 pub(crate) fn rename_no_replace(_from: &Path, _to: &Path) -> io::Result<()> {
     Err(unsupported())
 }

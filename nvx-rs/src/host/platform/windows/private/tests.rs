@@ -41,6 +41,7 @@ fn private_directories_support_long_paths() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn renames_support_long_paths_without_replacing_existing_files() {
     let (_root, parent) = long_directory();
@@ -60,6 +61,7 @@ fn renames_support_long_paths_without_replacing_existing_files() {
     assert_eq!(fs::read(&destination).unwrap(), b"original");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn invalid_paths_do_not_create_or_rename_their_prefix() {
     let root = tempfile::tempdir().unwrap();
