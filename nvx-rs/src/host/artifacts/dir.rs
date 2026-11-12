@@ -9,9 +9,9 @@ use serde::Serialize;
 use super::identity::{provenance_identity, read_metadata, sha256_identity};
 use super::require::required;
 use super::{
-    Artifacts, CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME,
-    KERNEL_PROVENANCE_NAME, OPENVMM_PROVENANCE_NAME, RELEASE_BIN_DIR, RELEASE_GUEST_DIR,
-    REPO_BUILD_DIR, REPO_OPENVMM_DIR, absolute, is_release_dir, openvmm_executable,
+    CHECKSUMS_NAME, Guest, INITRAMFS_PROVENANCE_NAME, KERNEL_NAME, KERNEL_PROVENANCE_NAME,
+    OPENVMM_PROVENANCE_NAME, RELEASE_BIN_DIR, RELEASE_GUEST_DIR, REPO_BUILD_DIR, REPO_OPENVMM_DIR,
+    absolute, is_release_dir, openvmm_executable,
 };
 use crate::error::{Error, Result};
 use crate::host::runtime::{ArtifactIdentity, RuntimeIdentity};
@@ -33,8 +33,8 @@ pub enum Layout {
 /// `scripts/nvx_tools/common.py` give for a checkout.
 ///
 /// Paths are joined to the directory, made absolute, without checking that they exist; the
-/// `require_*` methods check them with the messages of `nvx.py`. Unlike [`Artifacts`], nothing
-/// here reads the release's `SOURCE-MANIFEST.json`, which `nvx.py` does not check either.
+/// `require_*` methods check them with the messages of `nvx.py`. Nothing here reads the release's
+/// `SOURCE-MANIFEST.json`, which `nvx.py` does not check either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactDir {
     /// The absolute directory.
@@ -59,10 +59,12 @@ impl ArtifactDir {
         Self::new(root.as_ref(), Layout::Release)
     }
 
-    /// Uses a directory in the layout that its built artifacts reveal, as
-    /// [`Artifacts::from_dir`] tells them apart: a directory that contains `bin/openvmm[.exe]`,
-    /// `guest/vmlinux`, or `guest/initramfs.cpio.gz` is a release, and any other directory is a
-    /// repository checkout.
+    /// Uses a directory in the layout that its built artifacts reveal.
+    ///
+    /// A repository checkout also has a `guest/` directory, which holds the guest sources, so the
+    /// layouts are told apart by their built artifacts instead: a directory that contains
+    /// `bin/openvmm[.exe]`, `guest/vmlinux`, or `guest/initramfs.cpio.gz` is a release, and any
+    /// other directory is a repository checkout.
     ///
     /// Fails as [`repository`](Self::repository) does.
     pub fn from_dir(directory: impl AsRef<Path>) -> Result<Self> {
@@ -141,16 +143,6 @@ impl ArtifactDir {
             .map(|name| self.artifact(&name))
     }
 
-    /// Checks that the OpenVMM executable is a regular file and returns its path.
-    ///
-    /// Fails with [`ErrorCode::ArtifactMissing`] and the message `OpenVMM release binary not
-    /// found: PATH`.
-    ///
-    /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
-    pub fn require_openvmm(&self) -> Result<PathBuf> {
-        required(self.openvmm(), "OpenVMM release binary")
-    }
-
     /// Checks that the guest kernel is a regular file and returns its path.
     ///
     /// Fails with [`ErrorCode::ArtifactMissing`] and the message `Linux direct kernel not found:
@@ -175,22 +167,6 @@ impl ArtifactDir {
         )
     }
 
-    /// Returns the artifacts of a sandbox, as `nvx-rs sandbox run` and `nvx-rs sandbox start`
-    /// require them: the OpenVMM executable, the kernel, and the Alpine initramfs, in that order,
-    /// located in this directory.
-    ///
-    /// Fails with [`ErrorCode::ArtifactMissing`] for the first one that is not a regular file,
-    /// with the messages of [`require_openvmm`](Self::require_openvmm) and
-    /// [`require_kernel`](Self::require_kernel), or `initramfs not found: PATH`.
-    ///
-    /// [`ErrorCode::ArtifactMissing`]: crate::ErrorCode::ArtifactMissing
-    pub fn sandbox_artifacts(&self) -> Result<Artifacts> {
-        self.require_openvmm()?;
-        self.require_kernel()?;
-        required(self.initramfs(Guest::Alpine), "initramfs")?;
-        Ok(Artifacts::located(self))
-    }
-
     /// Returns the paths of every artifact, for a caller to show or record.
     pub fn paths(&self) -> ArtifactPaths {
         ArtifactPaths {
@@ -212,10 +188,9 @@ impl ArtifactDir {
         }
     }
 
-    /// Returns the identity of the sandbox runtime of this directory, the one that
-    /// [`sandbox_artifacts`](Self::sandbox_artifacts) and [`Artifacts::from_dir`] name: its
-    /// OpenVMM executable, its kernel, and its Alpine initramfs, as the directory's install
-    /// metadata names them, under the contracts that this crate speaks.
+    /// Returns the identity of the sandbox runtime of this directory: its OpenVMM executable, its
+    /// kernel, and its Alpine initramfs, as the directory's install metadata names them, under the
+    /// contracts that this crate speaks.
     ///
     /// The metadata names each artifact by the SHA-256 digest that its build or its package
     /// recorded, so nothing here reads or hashes an artifact:

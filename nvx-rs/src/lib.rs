@@ -27,9 +27,9 @@
 //!   NVX writes and reads, and in the layout in which GPT stores them. It has no dependencies, so
 //!   the host and the guest share it.
 //! - [`Hypervisor`]: the hypervisors that run the VMs.
-//! - [`host`] (feature `host`): artifact discovery, the OpenVMM command line, the lowering of
-//!   network and filesystem policies, the host's NVXS connection, process and platform
-//!   primitives, VMs that a caller creates, starts, reattaches to, and stops in private
+//! - [`host`] (feature `host`): the layouts of NVX's artifacts, the OpenVMM command line, the
+//!   lowering of network and filesystem policies, the host's NVXS connection, process and
+//!   platform primitives, VMs that a caller creates, starts, reattaches to, and stops in private
 //!   directories that it owns, and the manifests and compatibility keys of templates.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
 //!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest
@@ -60,20 +60,27 @@
 //! use std::path::Path;
 //! use std::time::{Duration, Instant};
 //!
+//! use nvx::Hypervisor;
 //! use nvx::activation::{MachineIdMode, View};
 //! use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-//! use nvx::host::runtime::{LaunchOptions, Runtime};
+//! use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 //! use nvx::host::vm::{self, VmDir};
-//! use nvx::{Artifacts, Hypervisor};
 //!
-//! // Locates OpenVMM, the guest kernel, and the Alpine initramfs, with the identity that the
-//! // install metadata of their release or checkout gives them.
-//! let artifacts = Artifacts::discover()?;
+//! // The caller locates OpenVMM, the guest kernel, and the Alpine initramfs, and identifies each
+//! // by the SHA-256 digest that its install metadata records, such as the `SHA256SUMS` of an NVX
+//! // release: here, from the command line.
+//! let arguments: Vec<String> = std::env::args().skip(1).collect();
+//! let [openvmm, kernel, initramfs, openvmm_sha256, kernel_sha256, initramfs_sha256] =
+//!     <[String; 6]>::try_from(arguments).map_err(|_| "expected three paths and three digests")?;
 //! let runtime = Runtime {
-//!     identity: artifacts.runtime_identity()?,
-//!     openvmm: artifacts.openvmm,
-//!     kernel: artifacts.kernel,
-//!     initramfs: artifacts.initrd,
+//!     identity: RuntimeIdentity::new(
+//!         ArtifactIdentity::sha256(&openvmm_sha256)?,
+//!         ArtifactIdentity::sha256(&kernel_sha256)?,
+//!         ArtifactIdentity::sha256(&initramfs_sha256)?,
+//!     ),
+//!     openvmm: openvmm.into(),
+//!     kernel: kernel.into(),
+//!     initramfs: initramfs.into(),
 //!     hypervisor: Hypervisor::from_env_or_default()?,
 //!     cpu_profile: None,
 //!     windows_breakaway: false,
@@ -153,8 +160,6 @@ pub mod testing;
 mod tests;
 
 pub use error::{Error, ErrorCode, ErrorKind, Result};
-#[cfg(feature = "host")]
-pub use host::artifacts::Artifacts;
 #[cfg(feature = "host")]
 pub use host::filesystem::{guest_path, resolve_guest_path};
 pub use hypervisor::Hypervisor;

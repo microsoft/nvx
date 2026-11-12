@@ -1,11 +1,14 @@
-//! Tests of the discovery of artifacts, of the directories that hold them, and of their
+//! Tests of the directories that hold the artifacts, of the guests' artifacts, and of their
 //! identities.
 
-use std::collections::HashMap;
+use std::fs;
+
+use serde_json::Value;
 
 use super::*;
 use crate::ErrorKind;
-use crate::host::runtime::ArtifactIdentity;
+use crate::contract;
+use crate::host::runtime::{ArtifactIdentity, RuntimeIdentity};
 
 const COMPATIBLE_MANIFEST: &str = r#"{"openvmm":{"microvm_abi_version":1,
         "time_abi_version":1,"restore_packet_version":1,
@@ -33,201 +36,45 @@ fn checkout(root: &Path) {
     fs::write(root.join(MANIFEST_NAME), COMPATIBLE_MANIFEST).unwrap();
 }
 
-fn variables(pairs: &[(&str, &Path)]) -> impl Fn(&str) -> Option<OsString> {
-    let map: HashMap<String, OsString> = pairs
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), value.as_os_str().to_owned()))
-        .collect();
-    move |name| map.get(name).cloned()
-}
-
-#[test]
-fn release_layout_names_the_guest_artifacts() {
-    let directory = tempfile::tempdir().unwrap();
-    release(directory.path());
-    let artifacts = Artifacts::from_dir(directory.path()).unwrap();
-    let root = std::path::absolute(directory.path()).unwrap();
-    assert_eq!(
-        artifacts.openvmm,
-        root.join("bin").join(openvmm_executable())
-    );
-    assert_eq!(artifacts.kernel, root.join("guest").join("vmlinux"));
-    assert_eq!(
-        artifacts.initrd,
-        root.join("guest").join("initramfs.cpio.gz")
-    );
-    // A directory that the caller hands over, such as a `TempDir`, lives until the
-    // constructor returns, after it reads the manifest.
-    assert_eq!(Artifacts::from_release_dir(directory).unwrap(), artifacts);
-}
-
 #[test]
 fn repository_layout_is_detected_beside_the_guest_sources() {
     let directory = tempfile::tempdir().unwrap();
     checkout(directory.path());
     let root = std::path::absolute(directory.path()).unwrap();
-    let expected = |artifacts: &Artifacts| {
-        assert_eq!(artifacts.kernel, root.join("build").join("vmlinux"));
+    let expected = |artifacts: &ArtifactDir| {
+        assert_eq!(artifacts.layout(), Layout::Repository);
+        assert_eq!(artifacts.kernel(), root.join("build").join("vmlinux"));
         assert_eq!(
-            artifacts.initrd,
+            artifacts.initramfs(Guest::Alpine),
             root.join("build").join("initramfs.cpio.gz")
         );
         assert_eq!(
-            artifacts.openvmm,
+            artifacts.openvmm(),
             root.join("openvmm")
                 .join("target")
                 .join("release")
                 .join(openvmm_executable())
         );
     };
-    expected(&Artifacts::from_dir(directory.path()).unwrap());
-    expected(&Artifacts::from_repo_layout(directory.path()).unwrap());
+    expected(&ArtifactDir::from_dir(directory.path()).unwrap());
 
     // Build outputs do not turn a checkout into a release.
     let build = directory.path().join("build");
     fs::create_dir_all(&build).unwrap();
     fs::write(build.join("vmlinux"), b"kernel").unwrap();
     fs::write(build.join("initramfs.cpio.gz"), b"initrd").unwrap();
-    expected(&Artifacts::from_dir(directory.path()).unwrap());
-}
-
-#[test]
-fn the_directory_variable_accepts_a_repository_checkout() {
-    let directory = tempfile::tempdir().unwrap();
-    checkout(directory.path());
-    let artifacts =
-        discover_with(variables(&[(Artifacts::ENV_DIR, directory.path())]), None).unwrap();
-    let build = std::path::absolute(directory.path()).unwrap().join("build");
-    assert_eq!(artifacts.kernel, build.join("vmlinux"));
+    expected(&ArtifactDir::from_dir(directory.path()).unwrap());
 }
 
 #[test]
 fn this_repository_uses_the_repository_layout() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     if root.join(MANIFEST_NAME).is_file() {
-        let artifacts = Artifacts::from_dir(root).unwrap();
-        let kernel = std::path::absolute(root).unwrap().join("build");
-        assert_eq!(artifacts.kernel, kernel.join("vmlinux"));
         let directory = ArtifactDir::from_dir(root).unwrap();
         assert_eq!(directory.layout(), Layout::Repository);
-        assert_eq!(directory.kernel(), artifacts.kernel);
+        let build = std::path::absolute(root).unwrap().join("build");
+        assert_eq!(directory.kernel(), build.join("vmlinux"));
     }
-}
-
-#[test]
-fn explicit_variables_win_and_must_be_complete() {
-    let directory = tempfile::tempdir().unwrap();
-    release(directory.path());
-    let (openvmm, kernel, initrd) = (Path::new("o"), Path::new("k"), Path::new("i"));
-    let artifacts = discover_with(
-        variables(&[
-            (Artifacts::ENV_OPENVMM, openvmm),
-            (Artifacts::ENV_KERNEL, kernel),
-            (Artifacts::ENV_INITRD, initrd),
-            (Artifacts::ENV_DIR, directory.path()),
-        ]),
-        None,
-    )
-    .unwrap();
-    assert_eq!(artifacts, Artifacts::new(openvmm, kernel, initrd));
-
-    let error = discover_with(variables(&[(Artifacts::ENV_OPENVMM, openvmm)]), None).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
-}
-
-#[test]
-fn the_directory_variable_precedes_the_executable_directory() {
-    let variable_dir = tempfile::tempdir().unwrap();
-    release(variable_dir.path());
-    let exe_dir = tempfile::tempdir().unwrap();
-    release(&exe_dir.path().join(Artifacts::BESIDE_EXE_DIR));
-
-    let artifacts = discover_with(
-        variables(&[(Artifacts::ENV_DIR, variable_dir.path())]),
-        Some(exe_dir.path()),
-    )
-    .unwrap();
-    assert!(
-        artifacts
-            .kernel
-            .starts_with(std::path::absolute(variable_dir.path()).unwrap())
-    );
-
-    let artifacts = discover_with(variables(&[]), Some(exe_dir.path())).unwrap();
-    assert!(
-        artifacts.kernel.starts_with(
-            std::path::absolute(exe_dir.path().join(Artifacts::BESIDE_EXE_DIR)).unwrap()
-        )
-    );
-}
-
-#[test]
-fn discovery_fails_when_no_source_is_present() {
-    let exe_dir = tempfile::tempdir().unwrap();
-    let error = discover_with(variables(&[]), Some(exe_dir.path())).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
-    assert!(error.message().contains(Artifacts::ENV_DIR));
-    // No build-time bundle remains to suggest.
-    assert!(!error.message().contains("bundled"));
-}
-
-#[test]
-fn incompatible_manifests_are_unavailable() {
-    let directory = tempfile::tempdir().unwrap();
-    let manifest = directory.path().join(MANIFEST_NAME);
-    fs::write(
-        &manifest,
-        r#"{"openvmm":{"microvm_abi_version":1,"time_abi_version":1,
-               "restore_packet_version":1,"control_session_protocol_version":2,
-               "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#,
-    )
-    .unwrap();
-    let error = check_manifest(&manifest).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
-    assert!(
-        error
-            .message()
-            .contains("(control_session_protocol_version: expected 1, found 2)"),
-        "{}",
-        error.message()
-    );
-    // A release of an earlier OpenVMM declares the current control contracts, so the error names
-    // the microVM ABI, time ABI, and restore packet versions that its microVM had.
-    fs::write(
-        &manifest,
-        r#"{"openvmm":{"microvm_abi_version":3,"time_abi_version":2,
-               "restore_packet_version":5,"control_session_protocol_version":1,
-               "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#,
-    )
-    .unwrap();
-    let error = check_manifest(&manifest).unwrap_err();
-    assert!(
-        error.message().contains(
-            "(microvm_abi_version: expected 1, found 3; time_abi_version: expected 1, found 2; \
-             restore_packet_version: expected 1, found 5)"
-        ),
-        "{}",
-        error.message()
-    );
-    // A release from before time ABI 2 declares the current control revision, so the error names
-    // the microVM ABI, time ABI, and restore packet versions that differ.
-    fs::write(
-        &manifest,
-        r#"{"openvmm":{"microvm_abi_version":2,"control_session_protocol_version":1,
-               "control_contract_revision":"nvx-microvm-v2-control-v2"}}"#,
-    )
-    .unwrap();
-    let error = check_manifest(&manifest).unwrap_err();
-    assert!(
-        error.message().contains(
-            "(microvm_abi_version: expected 1, found 2; time_abi_version: expected 1, found \
-             none; restore_packet_version: expected 1, found none)"
-        ),
-        "{}",
-        error.message()
-    );
-    let error = check_manifest(&directory.path().join("missing.json")).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
 }
 
 #[test]
@@ -237,7 +84,10 @@ fn repository_manifest_declares_the_supported_contract() {
         .unwrap()
         .join(MANIFEST_NAME);
     if manifest.is_file() {
-        check_manifest(&manifest).unwrap();
+        let manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+        let mismatches = contract::manifest_mismatches(&manifest);
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 }
 
@@ -248,15 +98,8 @@ fn guests_name_their_artifacts_as_nvx_py_does() {
         ["alpine", "ubuntu", "azurelinux"]
     );
     for guest in Guest::ALL {
-        assert_eq!(Guest::from_name(guest.name()).unwrap(), guest);
         assert_eq!(guest.to_string(), guest.name());
     }
-    let error = Guest::from_name("Ubuntu").unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unsupported);
-    assert_eq!(
-        error.message(),
-        "unsupported guest \"Ubuntu\"; choose alpine, ubuntu, azurelinux"
-    );
     assert_eq!(
         Guest::ALL.map(Guest::distribution),
         ["Alpine Linux", "Ubuntu Base", "Azure Linux"]
@@ -359,14 +202,10 @@ fn a_release_holds_the_guest_artifacts_in_guest() {
         artifacts.distro_layer(Guest::Ubuntu),
         Some(guest.join("ubuntu-distro.erofs"))
     );
-
-    // The release's artifacts are the ones that discovery finds for its directory.
-    let discovered = Artifacts::from_dir(directory.path()).unwrap();
-    assert_eq!(artifacts.sandbox_artifacts().unwrap(), discovered);
 }
 
 #[test]
-fn guest_artifacts_are_required_in_the_order_and_words_of_nvx_py() {
+fn guest_artifacts_are_required_in_the_words_of_nvx_py() {
     let directory = tempfile::tempdir().unwrap();
     checkout(directory.path());
     let artifacts = ArtifactDir::repository(directory.path()).unwrap();
@@ -383,39 +222,11 @@ fn guest_artifacts_are_required_in_the_order_and_words_of_nvx_py() {
         fs::write(path, b"artifact").unwrap();
     };
     missing(
-        artifacts.sandbox_artifacts(),
-        "OpenVMM release binary",
-        artifacts.openvmm(),
-    );
-    create(artifacts.openvmm());
-    missing(
-        artifacts.sandbox_artifacts(),
+        artifacts.require_kernel(),
         "Linux direct kernel",
         artifacts.kernel(),
     );
     create(artifacts.kernel());
-    missing(
-        artifacts.sandbox_artifacts(),
-        "initramfs",
-        artifacts.initramfs(Guest::Alpine),
-    );
-    create(artifacts.initramfs(Guest::Alpine));
-    let located = artifacts.sandbox_artifacts().unwrap();
-    assert_eq!(
-        [&located.openvmm, &located.kernel, &located.initrd],
-        [
-            &artifacts.openvmm(),
-            &artifacts.kernel(),
-            &artifacts.initramfs(Guest::Alpine)
-        ]
-    );
-    assert_eq!(located.artifact_dir(), Some(&artifacts));
-    assert_eq!(
-        located,
-        Artifacts::from_repo_layout(directory.path()).unwrap()
-    );
-
-    assert_eq!(artifacts.require_openvmm().unwrap(), artifacts.openvmm());
     assert_eq!(artifacts.require_kernel().unwrap(), artifacts.kernel());
     missing(
         artifacts.require_initramfs(Guest::Ubuntu),
@@ -682,50 +493,4 @@ fn metadata_that_is_not_a_regular_file_fails_at_once() {
         refused();
         drop(writer);
     }
-}
-
-#[test]
-fn located_artifacts_have_the_identity_of_their_directory() {
-    let directory = tempfile::tempdir().unwrap();
-    release(directory.path());
-    let digests = ["4", "5", "6"].map(|digit| digit.repeat(64));
-    let text: String = [
-        (&digests[0], format!("bin/{}", openvmm_executable())),
-        (&digests[1], "guest/vmlinux".to_owned()),
-        (&digests[2], "guest/initramfs.cpio.gz".to_owned()),
-    ]
-    .iter()
-    .map(|(digest, name)| format!("{digest}  {name}\n"))
-    .collect();
-    fs::write(directory.path().join(CHECKSUMS_NAME), text).unwrap();
-    let located = Artifacts::from_dir(directory.path()).unwrap();
-    assert_eq!(
-        located.artifact_dir(),
-        Some(&ArtifactDir::release(directory.path()).unwrap())
-    );
-    assert_eq!(located.runtime_identity().unwrap(), identity_of(&digests));
-
-    // Artifacts named by path have no install metadata.
-    let named = Artifacts::new(&located.openvmm, &located.kernel, &located.initrd);
-    assert_eq!(named.artifact_dir(), None);
-    let error = named.runtime_identity().unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
-    assert!(
-        error.message().contains("supply their runtime identity"),
-        "{error}"
-    );
-    // Nor does an artifact that replaced one of the directory's.
-    let mut replaced = located.clone();
-    replaced.kernel = directory.path().join("vmlinux");
-    let error = replaced.runtime_identity().unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
-    assert_eq!(
-        error.message(),
-        format!(
-            "the guest kernel {} is not the one of {}, whose install metadata identifies the \
-             artifacts",
-            replaced.kernel.display(),
-            located.artifact_dir().unwrap().root().display()
-        )
-    );
 }
