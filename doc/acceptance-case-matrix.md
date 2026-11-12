@@ -506,7 +506,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/host/transport.rs - host::transport (line 22)` | kept |  |
 | `nvx-rs/src/lib.rs - (line 58)` | kept |  |
 | `nvx-rs/src/protocol/nvxs/mod.rs - protocol::nvxs (line 68)` | kept |  |
-| `nvx-rs/src/host/snapshot/capture.rs - host::snapshot::capture::finish_capture (line 50)` | kept |  |
+| `nvx-rs/src/host/snapshot/capture.rs - host::snapshot::capture::finish_capture (line 48)` | kept |  |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 104)` | kept | The sandbox store leaves (#1121), whose PR retires it |
 | `nvx-rs/README.md`, its Example: an instance through `LaunchSpec` and the sandbox store | rewritten | Nothing compiles it. `nvx-rs/examples/host-workflows.rs` compiles the documented host workflows, and the library's guide (SL6.10a) replaces the example |
 | `nvx-rs/examples/external-launch.rs` | kept | Compiled with the crate's targets, and run by hand on a host |
