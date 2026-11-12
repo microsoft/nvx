@@ -137,7 +137,6 @@ class GuestRustBuildConstants:
     SOURCE_FILES: Final = (
         Path("nvx-rs") / "Cargo.toml",
         Path("nvx-rs") / "Cargo.lock",
-        Path("nvx-rs") / "build.rs",
         Path("rust-toolchain.toml"),
         Path("scripts") / "nvx_tools" / "build_constants.py",
         Path("scripts") / "nvx_tools" / "guest_binaries.py",

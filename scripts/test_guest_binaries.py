@@ -60,10 +60,7 @@ def _write_dep_info(directory: Path, names: list[str], sources: Sequence[Path]) 
 
 @contextlib.contextmanager
 def _fake_guest_build(
-    sources: Sequence[Path] = (
-        BuildConstants.REPO_ROOT / "nvx-rs" / "build.rs",
-        BuildConstants.REPO_ROOT / "nvx-rs" / "src" / "lib.rs",
-    ),
+    sources: Sequence[Path] = (BuildConstants.REPO_ROOT / "nvx-rs" / "src" / "lib.rs",),
 ) -> Generator[MagicMock]:
     """Stand for Cargo, which writes each binary's name as its contents.
 
@@ -120,7 +117,6 @@ class GuestBinaryBuildTests(unittest.TestCase):
         self.assertIn("rust-toolchain.toml", relative)
         self.assertIn("nvx-rs/Cargo.toml", relative)
         self.assertIn("nvx-rs/Cargo.lock", relative)
-        self.assertIn("nvx-rs/build.rs", relative)
         self.assertIn("scripts/nvx_tools/build_constants.py", relative)
         self.assertIn("scripts/nvx_tools/guest_binaries.py", relative)
         # The guest build compiles every source file of the crate but the host
@@ -155,7 +151,6 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 self.assertIn(path, relative)
         for path in (
             "nvx-rs/README.md",
-            "nvx-rs/artifacts.json",
             "nvx-rs/tests/guest_tools.rs",
             "nvx-rs/src/host/mod.rs",
             "nvx-rs/src/testing/mod.rs",
@@ -192,7 +187,6 @@ class GuestBinaryBuildTests(unittest.TestCase):
             )
             others = (
                 "nvx-rs/README.md",
-                "nvx-rs/artifacts.json",
                 "nvx-rs/tests/guest_tools.rs",
                 "nvx-rs/src/host/mod.rs",
                 "nvx-rs/src/host/cli/args.rs",
@@ -268,7 +262,6 @@ class GuestBinaryBuildTests(unittest.TestCase):
             for path in (
                 crate / "Cargo.toml",
                 crate / "Cargo.lock",
-                crate / "build.rs",
                 source / "lib.rs",
                 tools / "build_constants.py",
                 tools / "guest_binaries.py",
@@ -298,7 +291,6 @@ class GuestBinaryBuildTests(unittest.TestCase):
             for path in (
                 crate / "Cargo.toml",
                 crate / "Cargo.lock",
-                crate / "build.rs",
                 crate / "src" / "lib.rs",
                 module / "encode.rs",
                 tools / "build_constants.py",
@@ -339,7 +331,6 @@ class GuestBinaryBuildTests(unittest.TestCase):
             files = {
                 crate / "Cargo.toml": '[package]\nname = "fixture"\n',
                 crate / "Cargo.lock": "# lock\n",
-                crate / "build.rs": "fn main() {}\n",
                 source / "lib.rs": "pub fn fixture() {}\n",
                 recipe_constants: "PROFILE = 'guest'\n",
                 recipe_builder: "def build(): pass\n",
@@ -383,11 +374,7 @@ class GuestBinaryBuildTests(unittest.TestCase):
                 # A file that the build generates in its own target directory
                 # derives from the inputs that the dep-info lists.
                 generated = destination / "build" / "nvx-0" / "out" / "generated.rs"
-                _write_dep_info(
-                    destination,
-                    names,
-                    (crate / "build.rs", source / "lib.rs", generated),
-                )
+                _write_dep_info(destination, names, (source / "lib.rs", generated))
 
             cargo_home = root / "cargo-home"
             with (
@@ -498,8 +485,8 @@ class GuestBinaryBuildTests(unittest.TestCase):
             for case, dependency, message in (
                 (
                     "file in the checkout",
-                    crate / "artifacts.json",
-                    "source identity omits.*: nvx-rs/artifacts.json$",
+                    crate / "README.md",
+                    "source identity omits.*: nvx-rs/README.md$",
                 ),
                 (
                     "host module",

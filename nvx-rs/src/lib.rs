@@ -125,9 +125,6 @@
 //! # Features
 //!
 //! - `host` (default): the [`host`] module. It enables `serde`.
-//! - `bundled`: stages the OpenVMM executable, guest kernel, and control initramfs at build time;
-//!   see `Artifacts::bundled`. The build script downloads the release that `artifacts.json` pins,
-//!   or copies the release directory that `NVX_BUNDLE_DIR` names.
 //! - `testing`: NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM that serves the control
 //!   console without running a VM. It adds no API.
 //! - `cli`: NVX's own `nvx-rs` binary, the command-line interface that runs NVX's microVMs and

@@ -1,9 +1,8 @@
 //! Locating the OpenVMM executable and the NVX guest artifacts.
 //!
 //! [`Artifacts`] names the three files that a VM runs. They come from an extracted NVX release
-//! archive, an NVX repository checkout, explicit paths, or a bundle that the build script staged
-//! with the `bundled` feature. [`Artifacts::discover`] tries these sources in a fixed order so
-//! consumers such as MXC need no NVX-specific configuration.
+//! archive, an NVX repository checkout, or explicit paths. [`Artifacts::discover`] tries these
+//! sources in a fixed order so consumers such as MXC need no NVX-specific configuration.
 //!
 //! [`ArtifactDir`] names every artifact of the guests that `nvx.py` runs, which [`Guest`]
 //! describes, in a repository checkout or an extracted release:
@@ -50,10 +49,6 @@ pub(crate) use self::require::require_existing;
 
 /// Name of the release manifest at the root of a release archive or repository checkout.
 pub const MANIFEST_NAME: &str = "SOURCE-MANIFEST.json";
-
-/// Directory staged by the build script when the `bundled` feature is enabled.
-#[cfg(feature = "bundled")]
-const BUNDLED_DIR: Option<&str> = option_env!("NVX_BUNDLED_ARTIFACTS_DIR");
 
 /// The OpenVMM executable and the NVX guest kernel and initramfs.
 ///
@@ -203,22 +198,6 @@ impl Artifacts {
         Ok(Self::located(directory))
     }
 
-    /// Returns the artifacts staged by the build script, if the crate was built with the
-    /// `bundled` feature for Linux or Windows and the staged directory still exists.
-    ///
-    /// The staged directory lives in Cargo's build output, so it suits development and tests on
-    /// the build host. Deployments copy it next to their executable instead; see
-    /// [`Artifacts::discover`].
-    pub fn bundled() -> Result<Option<Self>> {
-        #[cfg(feature = "bundled")]
-        if let Some(directory) = BUNDLED_DIR.map(Path::new)
-            && directory.is_dir()
-        {
-            return Self::from_release_dir(directory).map(Some);
-        }
-        Ok(None)
-    }
-
     /// Locates the artifacts on this host.
     ///
     /// Sources are tried in this order, and the first one present wins:
@@ -227,10 +206,7 @@ impl Artifacts {
     ///    [`ENV_INITRD`](Self::ENV_INITRD) variables, which must be set together.
     /// 2. The [`ENV_DIR`](Self::ENV_DIR) variable, naming a release or repository directory.
     /// 3. The [`BESIDE_EXE_DIR`](Self::BESIDE_EXE_DIR) directory next to the current executable,
-    ///    in the release layout. Consumers ship the bundle there; with the `bundled` feature the
-    ///    build script exports its staged directory to dependent build scripts as
-    ///    `DEP_NVX_ARTIFACTS_DIR` for this purpose.
-    /// 4. The directory staged by the build script ([`Artifacts::bundled`]).
+    ///    in the release layout. Consumers ship a release there.
     ///
     /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) when no source is
     /// present or the chosen source is unusable. It does not check that the files exist.
@@ -238,7 +214,7 @@ impl Artifacts {
         let exe_dir = env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(Path::to_path_buf));
-        discover_with(|name| env::var_os(name), exe_dir.as_deref(), Self::bundled)
+        discover_with(|name| env::var_os(name), exe_dir.as_deref())
     }
 
     /// Environment variable naming the `openvmm` executable.
@@ -254,11 +230,11 @@ impl Artifacts {
     pub const BESIDE_EXE_DIR: &'static str = "nvx";
 }
 
-/// Implements artifact discovery with injectable environment and bundle sources for tests.
+/// Implements artifact discovery with an injectable environment and executable directory for
+/// tests.
 fn discover_with(
     variable: impl Fn(&str) -> Option<OsString>,
     exe_dir: Option<&Path>,
-    bundled: impl FnOnce() -> Result<Option<Artifacts>>,
 ) -> Result<Artifacts> {
     let explicit = [
         Artifacts::ENV_OPENVMM,
@@ -288,15 +264,11 @@ fn discover_with(
     {
         return Artifacts::from_release_dir(directory);
     }
-    if let Some(artifacts) = bundled()? {
-        return Ok(artifacts);
-    }
     Err(Error::new(
         ErrorCode::ArtifactMissing,
         format!(
             "cannot locate the OpenVMM executable and NVX guest artifacts: set {} or {}, {}, and \
-             {}, place an NVX release in a {:?} directory next to the executable, or build the \
-             nvx crate with the bundled feature",
+             {}, or place an NVX release in a {:?} directory next to the executable",
             Artifacts::ENV_DIR,
             Artifacts::ENV_OPENVMM,
             Artifacts::ENV_KERNEL,

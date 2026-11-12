@@ -46,9 +46,6 @@
 //! also holds the version of the activation contract,
 //! [`activation::VERSION`](crate::activation::VERSION), through which each clone receives the
 //! settings of its own launch.
-//!
-//! The build script includes this file to check bundled artifacts, so it must not depend on the
-//! rest of the crate.
 
 /// OpenVMM microVM ABI version this crate drives.
 ///
