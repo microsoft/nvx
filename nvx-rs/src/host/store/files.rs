@@ -1,16 +1,23 @@
 //! The private files of the store: their creation, atomic replacement, reading, and removal, and
 //! the syncs of their directories.
 //!
+//! The creation of a private file and its atomic replacement are [`platform`]'s: this module
+//! re-exports its `create_new` and `write_private` for its callers until #1121 deletes them.
+//!
 //! The sandbox's store opens, creates, replaces, and reads its lock, its records, its capability,
 //! and its log only as [`StoreFile`]s, each of which holds a file's path with what messages call
 //! it, so that no read or lock of one of them skips the checks that refuse a file that others may
 //! open.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+#[cfg(unix)]
+use crate::host::platform::PRIVATE_FILE_MODE;
+use crate::host::platform::private_options;
+pub(crate) use crate::host::platform::{create_new, write_private};
 use crate::host::{filesystem, platform};
 
 /// Builds an error mapper that keeps an I/O source under `context`.
@@ -21,41 +28,6 @@ pub(super) fn io_error(context: String) -> impl FnOnce(io::Error) -> Error {
 /// Returns the error of a lock, a record, or a capability that is not a regular file.
 fn not_regular() -> io::Error {
     io::Error::other("is not a regular file")
-}
-
-/// Mode of the store's files on Unix: readable and writable by the current user only.
-#[cfg(unix)]
-const PRIVATE_FILE_MODE: u32 = 0o600;
-
-/// Returns options that create a file readable only by the current user (mode 0600 on Unix)
-/// and that open no link that its path names on Unix.
-fn private_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options
-            .mode(PRIVATE_FILE_MODE)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits());
-    }
-    options
-}
-
-/// Creates the file at `path`, which must not exist, readable only by the current user.
-///
-/// On Unix, the umask may clear bits of the mode that the file is created with, even the
-/// current user's permission to read it, so the mode is set again through the new file.
-pub(crate) fn create_new(path: &Path) -> io::Result<File> {
-    let file = private_options().create_new(true).open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
-    }
-    Ok(file)
 }
 
 /// Opens the lock file at `path`, creating it readable only by the current user if it does not
@@ -135,57 +107,6 @@ pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
         }
     }
     Ok(file)
-}
-
-/// Atomically replaces `path` with `contents`, readable only by the current user.
-///
-/// The contents go to a fresh temporary file beside `path`, which is flushed to disk and then
-/// renamed over it, so a reader sees the old contents or the new ones, and a crash leaves at most
-/// the temporary file.
-pub(crate) fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
-    let mut suffix = [0u8; 8];
-    getrandom::fill(&mut suffix)
-        .map_err(|error| Error::other("cannot name a temporary file").with_source(error))?;
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let temporary = path.with_file_name(format!(".{name}.{}.tmp", u64::from_le_bytes(suffix)));
-    let written = (|| -> io::Result<()> {
-        let mut file = create_new(&temporary)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written.map_err(io_error(format!("cannot write {}", path.display())))
-}
-
-/// Makes the changes to the entries of the directory `dir` so far durable, such as files that
-/// were renamed into it or removed from it: a crash that keeps a later change keeps them too, even
-/// one on another filesystem.
-///
-/// On Unix, it syncs the directory. Windows has no portable way to flush a directory, so there a
-/// rename or a removal is as durable as the filesystem makes it, as OpenVMM's publication of a
-/// snapshot assumes.
-pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(dir)
-            .and_then(|directory| directory.sync_all())
-            .map_err(io_error(format!(
-                "cannot sync the directory {}",
-                dir.display()
-            )))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Ok(())
-    }
 }
 
 /// Removes the file at `path` if it exists.
