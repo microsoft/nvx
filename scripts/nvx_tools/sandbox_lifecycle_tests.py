@@ -51,12 +51,9 @@ HOSTNAME = "nvx-lifecycle"
 MEMORY_MIB = 256
 # An identity that the Ubuntu layer's user database lacks.
 UNAVAILABLE_IDENTITY = "4242:4242"
-# The guest agent forwards at most this much output for one exec request, and
-# reads it in chunks of at most OUTPUT_CHUNK_BYTES. It drops the chunk that
-# would exceed the bound, so more than OUTPUT_LIMIT_BYTES - OUTPUT_CHUNK_BYTES
-# bytes reach the host.
-OUTPUT_LIMIT_BYTES = 1024 * 1024
-OUTPUT_CHUNK_BYTES = 32 * 1024
+# More output than the 1 MiB that version 1 of NVXC forwarded for one exec
+# request, which version 2 streams whole.
+STREAMED_OUTPUT_BYTES = 2 * 1024 * 1024
 STATE_PATH = "/tmp/nvx lifecycle state"
 STATE_ARGUMENTS = ("  leading and trailing  ", "tab\tseparated", "line one\nline two")
 STATE_CONTENT = "".join(f"{argument}\n" for argument in STATE_ARGUMENTS).encode()
@@ -831,31 +828,28 @@ class LifecycleAcceptance:
                 )
 
     def check_bounded_results(self) -> None:
-        # The agent stops forwarding output at its bound, and the outcome
+        # The host receives all of the workload's output, and the outcome
         # report carries only the operation, category, and status.
-        report = self.root / "output-limit-outcome.json"
+        report = self.root / "streamed-output-outcome.json"
         result = self.exec(
             "/usr/bin/head",
             "--arg=-c",
-            f"--arg={2 * OUTPUT_LIMIT_BYTES}",
+            f"--arg={STREAMED_OUTPUT_BYTES}",
             "--arg=/dev/zero",
             "--outcome-report",
             str(report),
-            expected=125,
         )
         if (
-            not OUTPUT_LIMIT_BYTES - OUTPUT_CHUNK_BYTES
-            < len(result.stdout)
-            <= OUTPUT_LIMIT_BYTES
+            len(result.stdout) != STREAMED_OUTPUT_BYTES
             or result.stdout.strip(b"\0")
             or result.stderr
         ):
             raise RuntimeError(
-                "the output limit forwarded "
+                "the streamed output forwarded "
                 f"{len(result.stdout)} stdout and {len(result.stderr)} stderr bytes"
             )
-        read_exec_outcome(report, category="output-limit", status_code=125)
-        self.copy_evidence(report, "output-limit-outcome.json")
+        read_exec_outcome(report, category="exit", status_code=0)
+        self.copy_evidence(report, "streamed-output-outcome.json")
 
         # An existing report path fails the request before the workload runs.
         existing = self.root / "existing-outcome.json"
