@@ -1,8 +1,7 @@
 //! GPT disks that the guest's kernel attached as block devices.
 //!
-//! This module is NVX's internal reference code of the guest's space, hidden from the
-//! documentation and unstable: it becomes crate-private once nothing outside NVX uses it.
-//! [`crate::gpt`], which reads and checks the table, stays public.
+//! This module is part of the guest's space, nvx-init's internal reference code, private to the
+//! crate. [`crate::gpt`], which reads and checks the table, stays public.
 //!
 //! [`read_disk`] reads the partition table of a disk through the disk's block device, such as
 //! `/dev/vda`, that the caller opened. It asks the device for its logical block size and its
@@ -14,21 +13,6 @@
 //! moves the file's position. The kernel created the disk's partitions, such as `/dev/vda1`, from
 //! the table that the disk held when the kernel found it; [`read_disk`] neither compares them
 //! with the table that it reads nor asks the kernel to reread the table.
-//!
-//! ```no_run
-//! use std::fs::File;
-//!
-//! use nvx::gpt::Expected;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let device = File::open("/dev/vda")?;
-//! let expected = Expected::new().disk_guid("8d2f3a4e-1c5b-4e7a-9f60-2b3c4d5e6f70".parse()?);
-//! let disk = nvx::guest::gpt::read_disk(&device, &expected)?;
-//! let configuration = disk.read_first_partition(&device, 64 * 1024)?;
-//! println!("the first partition holds {} bytes of configuration", configuration.len());
-//! # Ok(())
-//! # }
-//! ```
 
 use std::fmt;
 use std::fs::File;
@@ -41,7 +25,7 @@ use crate::gpt::{Disk, Expected, GptError};
 /// Reads the partition table of the block device that `device` opened, at the device's logical
 /// block size and size, and checks it and the caller's `expected` values, as the module
 /// describes.
-pub fn read_disk(device: &File, expected: &Expected) -> Result<Disk, DeviceError> {
+pub(crate) fn read_disk(device: &File, expected: &Expected) -> Result<Disk, DeviceError> {
     let logical_block_size = sys::logical_block_size(device.as_fd())
         .map_err(|error| DeviceError::LogicalBlockSize(error.into()))?;
     let size =
@@ -52,7 +36,7 @@ pub fn read_disk(device: &File, expected: &Expected) -> Result<Disk, DeviceError
 /// Why [`read_disk`] failed: an operation on the block device, or its partition table.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum DeviceError {
+pub(crate) enum DeviceError {
     /// The device's logical block size could not be read, as for a file that is not a block
     /// device, which fails with `ENOTTY`.
     LogicalBlockSize(io::Error),
