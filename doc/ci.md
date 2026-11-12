@@ -2100,6 +2100,62 @@ owner triages a new report within a working day:
 To hand triage over or to rotate it, change the workflow's `--assignee`
 options, and reassign the open report.
 
+## New issue labels
+
+The [`label-issues.yml`](../.github/workflows/label-issues.yml) workflow runs
+only when an issue opens.
+[`label_issues.py`](../scripts/label_issues.py) matches its title against the
+area and platform keywords, creates labels that the repository lacks, and
+adds them without removing existing labels or changing their descriptions
+or colors. Editing or reopening an issue does not run it again; a manual
+rerun can re-add a label that a maintainer removed. Issues that
+`GITHUB_TOKEN` creates, such as the
+[nightly failure reports](#nightly-failure-reports), do not trigger it.
+
+The job runs the default branch's code with a token that can read repository
+contents and write issues, without keeping the checkout's credentials.
+It reads the title from the event JSON, not from a shell command.
+
+Matching ignores case and uses whole keywords, with whitespace allowed
+between words in a phrase. A title can match several labels; an unmatched
+title gets none. The labels are initial sorting hints, not verified impact,
+and Windows or Linux alone does not imply a backend.
+
+| Label | Title keywords |
+| --- | --- |
+| `area: openvmm` | openvmm, microvm |
+| `area: guest` | guest, nvx-init |
+| `area: kernel` | kernel |
+| `area: nvx-rs` | nvx-rs |
+| `area: userland` | userland, alpine, ubuntu, azure linux, azurelinux |
+| `area: networking` | network, networking |
+| `area: snapshot` | snapshot, snapshots |
+| `area: ci` | ci |
+| `area: docs` | docs, documentation |
+| `area: security` | security |
+| `platform: kvm` | kvm |
+| `platform: mshv` | mshv |
+| `platform: whp` | whp |
+
+For the one-time backfill, authenticate `gh` with access to the repository
+and preview the labels for all open issues:
+
+```console
+python scripts/label_issues.py --repository microsoft/nvx backfill
+```
+
+The preview makes no writes, including label creation. To apply it:
+
+```console
+python scripts/label_issues.py --repository microsoft/nvx backfill --apply
+```
+
+Both modes exclude pull requests; apply rechecks each issue and skips ones
+that closed. GitHub failures stop the command with an error; earlier writes
+are not rolled back. Do not repeat apply after manual corrections, since
+it can re-add removed matching labels. On Windows, use
+`scripts\label_issues.py` in these commands.
+
 ## Test changes
 
 The [`test-changes.yml`](../.github/workflows/test-changes.yml) workflow flags
@@ -2127,8 +2183,10 @@ from Git's objects: it parses Rust and Python without running them and
 compares the merge base of the pull request's base branch and head with the
 head. A head that moved on since the event exits, since the push starts
 another run. The token can read the repository's contents and write pull
-requests, with which GitHub labels and comments on them, but not issues, which
-only the [nightly failure report](#nightly-failure-reports) writes. A change
+requests, with which GitHub labels and comments on them, but not issues.
+The [nightly failure report](#nightly-failure-reports) and
+[new issue labeling](#new-issue-labels) instead have `issues: write`
+permission, which permits changing issues and their labels. A change
 to the workflow or to the script takes effect once it merges into `dev`, and
 the script itself counts as test policy, so a pull request that changes it is
 flagged once it does.
