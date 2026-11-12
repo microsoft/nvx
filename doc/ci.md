@@ -2445,8 +2445,9 @@ drops as a test module every module whose cfg holds when `test` holds and every
 other condition fails, such as one under `cfg(not(windows))`, so the script
 also reads its analysis with `cfg(test)` and restores those modules, with their
 own uses in place of those that the plain analysis moves to the modules that
-contain them, and stops at a cfg that depends on `test` in another way. Nobody
-edits the diagrams by hand:
+contain them, and stops at a cfg that depends on `test` in another way, but for
+`any(test, feature = "cli")` and its like, whose feature the script enables.
+Nobody edits the diagrams by hand:
 [`module-diagrams.yml`](../.github/workflows/module-diagrams.yml) draws them
 again every night, with the nightly full run of CI, and commits them to `dev`
 when they changed, so that `dev` takes at most one push of them a night outside

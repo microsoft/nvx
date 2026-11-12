@@ -381,6 +381,20 @@ class RestoreTests(unittest.TestCase):
         restored = self.restore(found(imp=('feature = "test"',)))
         self.assertIn("nvx::host::imp", restored.visibility)
 
+    def test_a_test_or_a_feature_that_the_export_enables_builds_outside_tests(self):
+        # As the Linux platform's identity module, under cfg(any(test, feature =
+        # "cli")), which cargo-modules drops as a test module.
+        self.assertIn("cli", diagrams.FEATURES)
+        restored = self.restore(found(imp=('any(test, feature = "cli")',)))
+        self.assertIn("nvx::host::imp", restored.visibility)
+        # Without the feature, the module may build for tests alone.
+        other = 'any(test, feature = "other")'
+        with self.assertRaisesRegex(
+            diagrams.DiagramError,
+            re.escape(f"nvx::host::imp builds under cfg({other})"),
+        ):
+            self.restore(found(imp=(other,)))
+
     def test_a_use_that_only_a_restored_module_makes_counts_once(self):
         # cargo-modules moves the uses of a module that it drops to the module
         # that contains it, so the plain analysis has host use protocol, which
