@@ -16472,6 +16472,13 @@ class MicrovmTests(unittest.TestCase):
             "NVX-TIME-STATUS-EXIT status=0\n"
         )
         with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            config = build / "aarch64" / "Image-debug.config"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                "\n".join(microvm_tests.KernelBuildConstants.DEBUG_WATCHDOG_CONFIG),
+                encoding="utf-8",
+            )
             args = nvx.parse_args(
                 [
                     "test-microvm",
@@ -16512,6 +16519,7 @@ class MicrovmTests(unittest.TestCase):
                 )
 
             with (
+                patch.object(BuildConstants, "BUILD_DIR", build),
                 patch.object(microvm_tests, "validate_openvmm_test_backend"),
                 patch.object(microvm_tests, "require_file", side_effect=require),
                 patch.object(
@@ -16521,6 +16529,67 @@ class MicrovmTests(unittest.TestCase):
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
             run.assert_called_once()
+
+    def test_arm_debug_kernel_requires_each_detector_before_running_scenarios(self):
+        detectors = microvm_tests.KernelBuildConstants.DEBUG_WATCHDOG_CONFIG
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary) / "build"
+            config = build / "aarch64" / "Image-debug.config"
+            config.parent.mkdir(parents=True)
+            for missing in (None, *detectors):
+                with self.subTest(missing=missing):
+                    config.write_text(
+                        "\n".join(option for option in detectors if option != missing),
+                        encoding="utf-8",
+                    )
+                    output = Path(temporary) / (missing or "valid")
+                    args = nvx.parse_args(
+                        [
+                            "test-microvm",
+                            "--backend",
+                            "whp",
+                            "--architecture",
+                            "aarch64",
+                            "--debug-kernel",
+                            "--scenario",
+                            "guest-boot",
+                            "--output-dir",
+                            str(output),
+                        ]
+                    )
+
+                    def require(path: Path, description: str) -> Path:
+                        if description == "microVM debug kernel config":
+                            self.assertEqual(path, config)
+                            return common.require_file(path, description)
+                        return path
+
+                    with (
+                        patch.object(BuildConstants, "BUILD_DIR", build),
+                        patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                        patch.object(
+                            microvm_tests, "require_file", side_effect=require
+                        ) as required,
+                        patch.object(microvm_tests, "_run_scenarios") as run,
+                        redirect_stdout(io.StringIO()),
+                    ):
+                        if missing is None:
+                            self.assertEqual(microvm_tests.run(args), 0)
+                            run.assert_called_once()
+                            self.assertEqual(
+                                run.call_args.kwargs["kernel"],
+                                config.with_suffix(""),
+                            )
+                        else:
+                            with self.assertRaises(common.ScriptError) as raised:
+                                microvm_tests.run(args)
+                            self.assertIn(f"lacks {missing}", str(raised.exception))
+                            run.assert_not_called()
+                            self.assertFalse(output.exists())
+                    self.assertIn(
+                        ((config, "microVM debug kernel config"), {}),
+                        required.call_args_list,
+                    )
 
     def test_invalid_script_counter_architecture_fails_before_process_start(self):
         with (
