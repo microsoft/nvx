@@ -1,91 +1,92 @@
 # nvx
 
-`nvx` is the Rust crate that holds the NVX mechanics: the OpenVMM
-control protocol, and the launch, policy lowering, and supervision of NVX
-microVMs. Its package and library are both called `nvx`; the package was
-called `nvx-rs`, like the directory that holds it. The crate also holds the
-programs that run in NVX's Linux guests, and the `nvx-rs` command-line
-interface, which runs NVX's microVMs and sandboxes, compiles egress policies,
-looks up artifacts, and downloads releases, the runtime steps that the phases of
-[microsoft/nvx#356](https://github.com/microsoft/nvx/issues/356) moved from
-`nvx.py` to Rust.
+`nvx` is NVX's Rust library of mechanisms and value types for the microVMs that
+OpenVMM runs: a VM's configuration and its launch, in a directory that its
+caller owns, for a cold boot, a capture, or a restore; one snapshot type, with
+a strict directory format; a restore that its caller drives with its own I/O;
+verified connections to a running VM, and reattachment to one; the contracts
+that a guest's space reads; and the guest's side of a capture and of a
+restore's activation. It keeps no durable state, runs no workload, and builds
+no guest space: each of its users keeps its own state and policy. The
+[library guide](../doc/library.md) gives the cold-boot, restore, and reattach
+workflows, and what their caller owns, and the
+[guest-agent guidelines](../doc/guest-agent-guidelines.md) what an init agent
+owns in the guest.
 
-An NVX sandbox is a microVM that OpenVMM runs with the managed lifecycle: the
-guest's init starts a managed agent, which runs the workloads that the host
-sends it over an authenticated control console. The crate is published on
-crates.io as a preview, whose API can change in any release: the nightly CI
-run publishes `dev` as the next pre-release, such as `0.1.0-alpha.4`, whenever
-the crate changed; see [crates.io releases](../doc/ci.md#cratesio-releases).
-Cargo resolves a requirement such as `nvx = "0.1.0-alpha.4"` to the newest
+NVX's own programs build on the library and live in its package, private to
+it: the `nvx-rs` command-line interface, which runs NVX's microVMs and
+sandboxes; the [guest binaries](#guest-binaries), among them `nvx-init`, NVX's
+PID 1 for layered roots, and the managed agent; and the fake OpenVMM of the
+tests. So is the code that only they use, such as NVX's own control protocol,
+`NVXC`, the CLI's stores, locks, path rules, and image staging, and nvx-init's
+space. Each binary calls a `main` that `#[doc(hidden)]` hides, and CI checks
+the public API against its snapshots, as [Testing](#testing) describes.
+
+The package and the library are both called `nvx`; the package was called
+`nvx-rs`, like the directory that holds it. The crate is published on crates.io
+as a preview, whose API can change in any release: the nightly CI run publishes
+`dev` as the next pre-release, such as `0.1.0-alpha.4`, whenever the crate
+changed; see [crates.io releases](../doc/ci.md#cratesio-releases). Cargo
+resolves a requirement such as `nvx = "0.1.0-alpha.4"` to the newest
 pre-release of `0.1.0`, so require an exact version, such as
-`nvx = "=0.1.0-alpha.4"`, to keep one. It has a
-`Cargo.lock` of its own; a workspace at the repository root would interact with
-the nested `openvmm/` workspace.
+`nvx = "=0.1.0-alpha.4"`, to keep one. It has a `Cargo.lock` of its own; a
+workspace at the repository root would interact with the nested `openvmm/`
+workspace.
+
+## Features
+
+| Feature | Contents |
+| --- | --- |
+| `host` (default) | The `host` module. It enables `serde` |
+| `guest` | The `guest` module, for Linux guests, and the [guest binaries](#guest-binaries), which the `guest` profile builds as static `x86_64-unknown-linux-musl` executables |
+| `serde` | The serde forms of `Hypervisor` and `net::Ipv4Cidr` |
+| `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
+| `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
+
+Without default features, the crate has only `protocol`, `activation`,
+`contract`, `net`, `gpt`, `uuid`, `Hypervisor`, and `Error`, and depends on
+nothing but `serde` when `serde` is enabled and `nix` and `getrandom` when
+`guest` is.
 
 ## Layout
 
 ```text
 nvx-rs/
 ├── src/
-│   ├── protocol/    NVXS session, NVXC frames, EXEC and MAPS payloads, kernel command-line
-│   │                tokens, and the guest targets that live shares may not take; no
-│   │                dependencies, shared by the host and the guest
+│   ├── protocol/    the NVXS session and its records, the host's mapping table on the wire, the
+│   │                kernel command line and the boot tokens of a guest's root, view, and export,
+│   │                and the guest targets that live shares may not take; no dependencies, shared
+│   │                by the host and the guest; and NVXC, NVX's own protocol, private to the crate
 │   ├── activation/  the activation record of a layered root, its canonical encoding, and what
-│   │                Ready reports about it; no dependencies, shared by the host, the guest, and
-│   │                every adapter's framing
-│   ├── contract.rs  control-contract versions, release-manifest compatibility, and the versions
-│   │                of the contracts through which OpenVMM restores a snapshot
-│   ├── net/         CIDR parsing and subtraction, and hostname and guest-network forms
-│   ├── gpt/         strict reading of GPT disks whose first partition configures an adapter and
-│   │                whose other partitions hold a root's read-only layers; no dependencies,
-│   │                shared by the host and the guest
-│   ├── uuid.rs      UUIDs in their canonical text and in GPT's layout; no dependencies, shared
-│   │                by the host and the guest
+│   │                Ready reports about it; no dependencies, shared by the host and the guest
+│   ├── contract.rs  the versions of the contracts that the crate speaks with OpenVMM and the
+│   │                guest, and the compatibility of releases with them
+│   ├── net/         CIDR networks and their subtraction, hostnames, guest addresses, and gateways
+│   ├── gpt/         strict reading of GPT disks; no dependencies, shared by the host and the guest
+│   ├── uuid.rs      UUIDs in their canonical text and in GPT's layout
 │   ├── hypervisor.rs
 │   ├── error.rs     nvx::Error, its ErrorKind, and the stable codes that the CLI prints
-│   ├── host/        feature `host` (default): the runtime that every launch shares, VM
-│   │                directories and configurations, artifacts, network and egress policy files,
-│   │                filesystem, NVXS connection, session, process, platform, templates'
-│   │                manifests and compatibility keys, outcome reports, file seals, and the
-│   │                sandbox launch profile of `nvx-rs sandbox` and its distro and scratch
-│   │                bindings; with feature `cli`, the `nvx-rs` CLI
-│   ├── testing/     feature `testing`: the fake OpenVMM
-│   ├── guest/       feature `guest`: the programs that run in Linux guests, the guest's NVXS
-│   │                connection, the libraries through which a guest init or agent opens the
-│   │                terminal on which it serves its session, mounts host mappings beneath the
-│   │                descriptors of the roots that it names, assembles and tears down a layered
-│   │                root, reads a GPT disk's partition table through its block device, and
-│   │                prepares a template's guest for a capture before its root's assembly, and
-│   │                the typed calls through which it runs the time ABI's steps and the reseed
-│   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
-├── tests/           fake-OpenVMM, CLI, NVXS session, process and spawn, checked-handoff,
-│                    host-module layering, and guest-binary tests, the CLI's scenario tests and
-│                    their harness, in cli/, the
-│                    hand-written sandbox configurations of every format, the cases of the export
-│                    and root boot tokens, and the template manifests that OpenVMM wrote, in
-│                    fixtures/, and the conformance vectors of the wire formats and of a template's
-│                    key, in vectors/
+│   ├── host/        feature `host` (default): runtimes, VM configurations, VM directories and
+│   │                their launches, snapshots, restores, network and export lowering, verified
+│   │                connections, processes, and outcome reports; and code private to the crate,
+│   │                such as the platform layer and, with feature `cli`, the control session, the
+│   │                restore driver, and the `nvx-rs` CLI
+│   ├── testing/     feature `testing`: NVX's fake OpenVMM
+│   ├── guest/       feature `guest`: the guest's NVXS connection and terminal, the host's mapping
+│   │                table, the time ABI's steps, a capture, a restore's activation, and the
+│   │                reseed; and, private to the crate, NVX's guest programs and nvx-init's space
+│   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries, each of which calls the
+│                    hidden `main` of its program
+├── examples/        the documented host and guest workflows, which only compile, and a cold boot
+│                    through a launcher of the caller's own
+├── tests/           the crate's integration tests, with their fixtures, and the conformance
+│                    vectors of the wire formats and of a snapshot's key, in vectors/
 └── public-api/      the crate's public API on Linux and on Windows, which CI checks
 ```
 
 The [module diagrams](../doc/modules/README.md) show the crate's modules, the
 modules that each contains, and the dependencies between its top-level modules,
 on Linux and Windows.
-
-The [filesystem module](src/host/filesystem/mod.rs) keeps its request types and
-planner together, with private siblings for guest and host paths, access policies,
-OpenVMM limits, and recorded-plan checks and rendering. The CLI's
-[managed sandbox lifecycle](src/host/cli/sandbox/lifecycle/mod.rs) separates state
-directories, outcome reports, start and exec, and stop and deprovision. The
-CLI's own [store](src/host/cli/store/mod.rs) keeps the layout of a sandbox's
-state directory and its documentation, with private siblings for the names of
-its files and its lock. The
-[Linux](src/host/platform/linux/mod.rs) and
-[Windows](src/host/platform/windows/mod.rs) platform modules each separate
-processes, spawns, private directories and files, file identities, the claim of a
-launch's log, and OpenVMM's endpoints, and on Windows, the CLI's Ctrl-C.
-Their `mod.rs` files retain the existing entry points through re-exports; their
-`tests.rs` files keep the unit tests at the same module paths.
 
 The table below says in one line what each module is for, and links to the
 module's section after the table, which holds the module's details. A change to
@@ -97,6 +98,7 @@ changes only when the module's purpose does.
 | [`nvx::protocol`](#nvxprotocol) | The codec of the control console's `NVXS` records and the payloads that the host, the guest agent, and the fake OpenVMM share |
 | [`nvx::protocol::cmdline`](#nvxprotocolcmdline) | The kernel command line as Linux and the guest's init read it, with the virtio-mmio devices and the guest's DNS server that it names |
 | [`nvx::protocol::export`](#nvxprotocolexport) | The boot tokens of the host export, the virtio-fs device from which a guest maps host paths, and the guest's parser of them |
+| [`nvx::protocol::maps`](#nvxprotocolmaps) | The host's mapping table on the wire: its `HostMap` entries, and the `MAPS` payloads that carry them |
 | [`nvx::protocol::nvxs`](#nvxprotocolnvxs) | The NVXS session, independent of any application protocol: its records and the state machines of its host and guest roles |
 | [`nvx::protocol::restore_ready`](#nvxprotocolrestore_ready) | The exact parser of OpenVMM's restore-ready event, including its terminating newline |
 | [`nvx::protocol::root`](#nvxprotocolroot) | The boot tokens that tell the guest which image its layered root assembles, where the root keeps its upper, and how the guest assembles them |
@@ -109,6 +111,7 @@ changes only when the module's purpose does.
 | [`nvx::gpt`](#nvxgpt) | Strict reading of GPT disks whose first partition configures an adapter and whose others hold a root's read-only layers |
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
+| [`nvx::Error`](#nvxerror) | `Error`, `ErrorKind`, and `Result`: the crate's error, which only `nvx` makes, and whose kinds callers act on |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold, capture and restore preparation, owned launch commands, verified detached launch, confirmed stop, and caller-saved reattachment |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshots, post-exit capture finishing, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
@@ -120,7 +123,7 @@ changes only when the module's purpose does.
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::report`](#nvxhostreport) | OpenVMM's outcome report |
-| [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
+| [`nvx::guest`](#nvxguest) | The guest's side of the library, for any guest init or agent, and NVX's guest programs; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
 | [`nvx::guest::terminal`](#nvxguestterminal) | `Terminal`: the terminal on which a guest agent serves its session, such as the VM's control console |
@@ -129,35 +132,25 @@ changes only when the module's purpose does.
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
 
-GPT lower layers use `noload,errors=remount-ro`: the kernel neither loads nor
-replays their journals, because even a journal whose file system does not
-request recovery can cause an unbounded scan. The assembly still refuses any
-layer whose superblock requests recovery, before mounting anything. This
-policy does not change EROFS layers or writable ext4 scratches.
-
-Lowering functions take the names by which messages refer to their inputs, such
-as `EgressRules::name`, so callers' messages name their own fields.
-
 ### `nvx::protocol`
 
-The codec of the control console: `NVXS` outer records, the `MAPS` payloads of
-the host mapping table, and the `nvx_maps=` and `nvx_workload_account=create`
-tokens. NVX's own control protocol, `NVXC`, is private to the crate, gated by
-the features of its users, `cli`, `guest` and `testing`: its application
-frames, and the `EXEC` payload that the host encodes and the guest agent
-decodes. `protocol::app::v2` holds the codec of version 2's frames, NVXC's only
-version, which carry every control path, with version 1's payloads, and stream
-an execution's standard input, output and error. NVX's host, the guest loop
-that nvx-init and the managed agent share, and the fake OpenVMM speak version 2
-alone, and refuse a frame of another version, such as version 1, whose frames
-and `FEATURES` request are gone.
+The codec of the control console's NVXS session, which OpenVMM brokers between
+one host client and the guest's agent: its outer records, which
+`encode_outer` and `decode_outer_header` encode and decode, and the payloads of
+their flow control; and the `MAPS` payloads of the host's mapping table, which
+[`nvx::protocol::maps`](#nvxprotocolmaps) holds and this module re-exports. Any
+application protocol runs over the session's DATA records.
 
-The [conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/nvxc-v1.txt`, and OpenVMM's vectors and cases of the `NVXS`
-session pin the records and the `EXEC` and `MAPS` payloads independently of the
-codec, which the host, the guest agent, and the fake OpenVMM share; version 2
-refuses the frames of version 1 that they hold, their features payloads have
-no codec any longer, and version 2's tests pin its own frames.
+NVX's own control protocol, `NVXC`, is private to the crate: only NVX's
+programs speak it, the CLI, nvx-init, the managed agent, and the fake OpenVMM.
+Its version 2, the only one that they speak, carries every control path, one
+frame per DATA record, and streams an execution's standard input, of which at
+most 64 KiB may wait for the guest's acknowledgement, and its output and error.
+
+The [conformance vectors](tests/vectors/README.md), and OpenVMM's vectors and
+cases of the `NVXS` session, pin the records and the `EXEC` and `MAPS` payloads
+independently of the codec, which the host, the guest, and the fake OpenVMM
+share; version 2's own tests pin its frames.
 
 ### `nvx::protocol::cmdline`
 
@@ -175,10 +168,11 @@ type, and `virtio_mmio_devices` reads every such parameter of a command line.
 it, for the readers of the boot tokens that the init consumes: at spaces, tabs,
 and newlines alone, without quoting, and past a NUL or `--`, with each token's
 name up to its first `=`, which the init compares byte for byte.
-`HostExport::parse`, `RootLayout::parse`, `parse_host_mapping_count`, and the
-time ABI's check of report-only mode read the command line with it, and so does
-the sandbox plans' check of the user's kernel parameters, which also reads the
-kernel's view and compares names as the kernel does in both.
+`HostExport::parse`, `RootLayout::parse`, `view::parse`,
+`parse_host_mapping_count`, and the time ABI's check of report-only mode read
+the command line with it, and so does `VmConfig::check` of a boot's own tokens,
+which also reads the kernel's view of them and compares names as the kernel
+does in both.
 
 `dns_server` reads the guest's DNS server from OpenVMM's `virtnet_dns=` token,
 `DNS_TOKEN`, strictly, as OpenVMM renders and reads it: in a command line split
@@ -204,6 +198,20 @@ init, and no `nvx_share=` token, which binds a live share. It returns the
 `HostExport`, the device's tag and mode, which nvx-init's space mounts, or
 `None`.
 `tests/fixtures/export-tokens.json` holds its cases.
+
+### `nvx::protocol::maps`
+
+The host's mapping table on the wire, which `nvx::protocol` re-exports: the
+`HostMap` entries that `encode_maps_payloads` encodes into `MAPS` payloads of
+at most the caller's length, 1 to `MAX_HOST_MAPPINGS` entries in all, each path
+at most `MAX_MAP_PATH_BYTES` bytes, and the decoders of a payload,
+`decode_maps_payload`, which reads its paths as UTF-8, and
+`decode_guest_maps_payload`, which reads them as a Linux guest's bytes. The
+`nvx_maps=` boot token, `nvx::protocol::MAPS_TOKEN`, announces how many
+mappings the host sends after a cold boot, which
+`nvx::protocol::parse_host_mapping_count` reads, as a restore's activation
+record does after a restore, and the guest's `MappingTable` keeps the account
+of them, as [`nvx::guest::mappings`](#nvxguestmappings) describes.
 
 ### `nvx::protocol::nvxs`
 
@@ -249,12 +257,11 @@ base. `tests/fixtures/root-tokens.json` holds its cases.
 
 ### `nvx::protocol::share`
 
-The guest targets that a sandbox's live shares may not take, which the host's
-`sandbox::mount` and the guest's `root` both refuse: `RESERVED_MOUNT_TARGETS`,
-the trees where the container runtime mounts or binds,
-`RESERVED_EXACT_MOUNT_TARGETS`, the directories that it creates,
-`RESERVED_TARGET_CHARACTERS`, and `reservation`, which tells why a target is
-reserved.
+The guest targets that a sandbox's live shares may not take, which NVX's CLI
+and nvx-init's space both refuse: `RESERVED_MOUNT_TARGETS`, the trees where the
+container runtime mounts or binds, `RESERVED_EXACT_MOUNT_TARGETS`, the
+directories that it creates, `RESERVED_TARGET_CHARACTERS`, and `reservation`,
+which tells why a target is reserved.
 
 ### `nvx::protocol::status`
 
@@ -263,8 +270,8 @@ from which the host classifies a clone's end, with the diagnostic that precedes
 each: the time ABI's own, `TIME_CONFORMANCE`, 193, `TIME_VIOLATION`, 194, and
 `TIME_REPAIR`, 195, which keep their meanings; one for each other class of a
 clone's repair's failures, `REPAIR_RESTORE` to `REPAIR_FINISH`, 40 to 45, which
-`nvx::guest::clone::RepairError::status` selects; and one reserved for each
-class of a clone's activation's failures, `ACTIVATION_DEADLINE` to
+`nvx::guest::activation::RepairError::status` selects; and one reserved for
+each class of a clone's activation's failures, `ACTIVATION_DEADLINE` to
 `ACTIVATION_ORDER`, 50 to 58.
 
 `describe` tells what a status means.
@@ -337,7 +344,7 @@ The OpenVMM microVM ABI, boot contract, broker protocol, and control-contract
 revision that the crate speaks, and when each changes, and
 `manifest_is_compatible` for a release's `SOURCE-MANIFEST.json`; and the
 versions of OpenVMM's snapshot format, saved device state, time ABI, and restore
-packet, which a template's key holds and which an ignored test of
+packet, which a snapshot's key holds and which an ignored test of
 `tests/openvmm_vectors.rs` checks against the OpenVMM submodule.
 
 ### `nvx::net`
@@ -383,6 +390,18 @@ dependencies, so the host and the guest share it.
 
 KVM, MSHV, or WHP, with its serde form behind the `serde` feature.
 
+### `nvx::Error`
+
+`Error`, `ErrorKind`, and `Result`. The crate's fallible calls return an
+`nvx::Error`, which only `nvx` makes: a message that callers can show as is, an
+`ErrorKind`, by which callers tell errors apart, and an optional cause, such as
+the `HostConnectionError` of a session. Its codes and constructors are private
+to the crate. The calls whose failures carry facts of their own return errors
+of their own instead: the restore's `RestoreError`, the guest's, such as its
+`CaptureFailure` and `RepairError`, the codecs', such as `ProtocolError` and
+`ActivationError`, and the I/O errors of most calls of `nvx::host::process`.
+See [Errors](#errors) for what each kind means.
+
 ### `nvx::host::runtime`
 
 `Runtime`: what every launch shares, the paths of the OpenVMM executable, guest
@@ -412,13 +431,11 @@ The directory of a VM, which its caller creates and owns, one for each VM.
 `create_private_dir` creates it private to the current user, and `VmDir::open`
 opens an existing one only if it is private: on Linux, it belongs to the user
 with mode 0700, which OpenVMM requires of the directory of its control socket;
-on Windows, it belongs to the user, and its protected access control list holds
-only entries that allow the user access, one of which allows full access, which
-the files and directories created in it inherit at every depth. Neither changes
-an existing directory: one that others may access fails with `ErrorKind::Io`
-rather than being restricted, since they could still hold its files open.
-Symbolic links and other reparse points are refused, including paths with
-trailing separators or `.` components.
+on Windows, it belongs to the user, and its protected access control list
+allows only the user. Neither changes an existing directory: one that others
+may access fails with `ErrorKind::Io` rather than being restricted, since they
+could still hold its files open. Symbolic links and other reparse points are
+refused.
 
 The library reserves these names in the directory, and every name that starts
 with `.openvmm`, which OpenVMM gives its temporary files, such as
@@ -440,307 +457,123 @@ endpoints are fresh pipes, `//./pipe/openvmm-microvm-` and 32 random
 hexadecimal digits, the prefix that OpenVMM requires of the pipe of a console,
 and a restore awaits its event at a fresh `//./pipe/nvx-restore-ready-` pipe.
 
-`VmOutputs` holds the paths of OpenVMM's log and outcome report, its control
-endpoint, and the optional boot-console endpoint. `Capability` holds the
-credential that the host presents at a VM's control endpoint: `as_bytes`
-returns it, and its `Debug` form hides it. The library never writes it to a
-file; a caller that reconnects after a restart keeps it.
+`create(&runtime, &config, from, &dir)` checks a whole launch and returns a
+`Prepared` one without starting a process: its OpenVMM arguments, its new
+private log, its `Capability`, the credential that the host presents at the
+VM's control endpoint, which the library never writes to a file and whose
+`Debug` form hides it, and its `VmOutputs`, the paths of the log, the outcome
+report, the control endpoint, and the optional boot console. A cold boot needs
+the configuration's `Boot`. A restore, `from` a `Snapshot`, refuses it, checks
+`Snapshot::accepts` at the host's current time, hard-links the snapshot's
+OpenVMM files into a new `openvmm/` in the directory, on the same filesystem,
+and binds the restore-ready listener before any spawn. A capture's `Boot`
+holds a `CaptureConfig`: its root must be blockless and export nothing, and
+creation makes the sparse placeholder image and the dormant scratch that its
+VM attaches. Existing output entries are refused rather than replaced, and a
+failed creation removes only the files that it created.
 
-`SavedVm` bundles the caller's `VmDir`, the original control endpoint,
-capability bytes, `ProcessRef` and `RuntimeIdentity`. The caller owns saving
-and reloading these values; the library neither serializes nor locates them.
-`vm::verify(&saved, &identity)` compares the exact runtime identity, returning
-`RuntimeMismatch` naming the differing parts before opening the process if it
-differs, then returns the verified held `Process` without opening an endpoint
-or reading runtime files.
-`vm::reattach(&saved, &runtime, deadline)` verifies, connects through
-`transport::connect_verified`, and attaches with the saved capability. Its
-`Reattached` holds both the process and authenticated connection. Failures
-retain their original kinds and sources and leave the saved values unchanged.
+`Prepared` gives what a caller inspects or records before a spawn: its
+arguments, capability, and outputs; its effective NIC; a capture's checked
+`snapshot::CaptureContext`; and, for a layered root, the `ActivationRecord` of a
+restore, which `Prepared::activation_record` builds from the launch's own
+resolved settings. `spawn` starts OpenVMM detached and returns a `Launched`
+VM: its verified `Process`, its outputs, its capability, which reaches OpenVMM
+only on its standard input, and a restore's `ReadyListener`. Dropping
+`Launched` closes the handle of the process, not the VM. A caller with a
+launcher of its own takes `Prepared::into_command`, a `VmmCommand` that owns
+the whole launch, and follows the contract that it documents; the
+[external-launch example](examples/external-launch.rs) consumes one with a
+minimal launcher, whose documentation lists what it leaves out.
 
-`stop(process, outputs, graceful, grace, deadline)` waits through the verified
-process, first after the caller's graceful request, then after forced termination
-if needed. It returns `Stopped` only after confirmed exit. `self_exited` records
-confirmation before a forced attempt, and `forced` records that attempt, not
-proof from kill success. An unconfirmed exit is `StillRunning`, and the caller
-keeps the process. The callback receives the bounded grace deadline and must
-respect it; its boolean result is never exit proof.
+`stop` asks the guest to end the VM through the caller's callback, terminates
+OpenVMM's verified process once the grace deadline passes, and returns a
+`Stopped` only once the process exited, with the read of its outcome report
+kept apart, so that a report that can't be read never hides the exit. An exit
+that it cannot confirm fails with `ErrorKind::StillRunning`, and the caller
+keeps the process.
 
-`Stopped::report` retains the outcome-report read's result separately, so report
-failure never hides confirmed exit.
+`SavedVm` bundles what a caller saves to find its VM again: the `VmDir`, the
+control endpoint, the capability's bytes, the process's `ProcessRef`, and the
+`RuntimeIdentity`. The library neither serializes nor locates them. `verify`
+compares the runtime identity, and fails with `ErrorKind::RuntimeMismatch`,
+which names the parts that differ, before it opens the process, then returns
+the held `Process`. `reattach` also connects through
+`transport::connect_verified` and attaches with the saved capability, and
+returns a `Reattached` with the process and the connection. Their failures
+neither signal the VM nor change the saved values.
 
-`vm::create(&runtime, &config, None, &dir)` creates an inspectable cold
-`Prepared` launch without starting a process or binding a listener. It requires
-`config.boot`, rechecks the directory's privacy, and
-creates a new private log. Existing log, outcome and Linux endpoint entries
-are refused rather than replaced. An ordinary cold boot creates only the log
-before a spawn; OpenVMM creates its remaining outputs when it runs. A failed preparation
-closes and removes only its new files, preserving all pre-existing entries and
-caller-owned inputs, and reports a cleanup failure with the original error.
-
-With `Some(snapshot)`, creation refuses `boot`, checks `Snapshot::accepts`
-at the real `HostTime::now`, and hard-links only the existing OpenVMM files
-into a new `<vm_dir>/openvmm/`. A different filesystem fails; there is no
-copy or snapshot-parent fallback. The restore's arguments follow the clone
-launch's rules: the devices at the snapshot's processor capacity,
-`--restore-network-policy` with the restore's own policy in place of `--net`
-and the guest's address, which OpenVMM takes from the snapshot,
-`--restore-absent-scratch` for an upper in RAM, `--restore-processors` only
-when the snapshot records its boot processors, `--restore-memory`, the
-console attachment that the snapshot allows, the snapshot's backend and CPU
-profile, and the launch options, with no kernel, initramfs, command line or
-`--memory`. Creation binds the restore-ready listener before any spawn and
-retains that same owned listener through `Launched::ready` or
-`VmmCommand::ready`, never in the child's inheritance allowlist.
-
-On Linux, the caller holds its per-snapshot lock from creation, including
-adding links, through a peer-verified restore-ready event or verified VM
-exit, and around view removal. NVX takes no lock; Windows needs none.
-A restore whose caller dies before OpenVMM connects the restore-ready
-endpoint cannot complete: OpenVMM checks the snapshot files before that one
-connection, which it does not retry, and the dead caller's endpoint no longer
-listens. After the connection OpenVMM no longer checks those files, so no
-durable in-flight restore record is needed; the caller keeps the VM's process
-as for any launch. A successful view remains caller-owned.
-
-With `boot.capture`, creation requires a blockless root and refuses every
-filesystem export. It creates private sparse `capture-image.raw` and
-`capture-scratch.raw` files, verifies their actual complete geometries, and
-targets `<vm_dir>/openvmm`. A configured NIC keeps its resolved address but
-uses the complete deny-all policy, whatever its configured policy.
-`Prepared::capture_context()` exposes a cloneable, serializable
-`snapshot::CaptureContext` with the checked capture configuration and disk
-geometries, NIC and console devices, runtime identity, hypervisor and CPU
-profile. The caller chooses whether and how to persist it. Creation writes
-no context file, `key.bin` or `snapshot.json`, and does not finish or publish
-a capture.
-
-On Linux, the generated control and boot-console socket names must be valid
-Unicode and shorter than 108 bytes both as supplied and with the directory's
-ancestor links resolved. Supplied names must hold no comma or equals sign,
-which OpenVMM's listener options cannot represent literally. Creation refuses
-these names before creating any output, including the log.
-
-`Prepared::capability()` and `outputs()` return what the caller may journal
-before a spawn. `log()` returns the same opened log, without reopening its
-path. `inherit(resource)` moves an already opened resource into the preparation's
-inheritance allowlist and keeps it open. `arguments()` returns the whole
-configuration's OpenVMM arguments. Creation makes caller-relative runtime
-and block-image paths absolute without resolving links or `..` components,
-so spawning in the VM directory does not change which inputs they name.
-Creation checks the complete Windows
-command line with the actual runtime and VM output paths and no reserve,
-including quoting and the terminating NUL, on every host. Callers keep the
-directory and runtime inputs stable through creation and a later spawn.
-Dropping a successful preparation closes its resources but leaves its output
-paths owned by the caller.
-
-`Prepared::nic()` returns the effective NIC, including NVX's default cold
-address when the caller leaves it unset, or none when no NIC is attached.
-The preparation owns its checked configuration and NIC; later changes to the
-caller's configuration do not affect them. A restore's resolved NIC retains
-its captured presence and address, independently of its new network policy.
-
-`Prepared::activation_record(tx)` builds record v2 from the owned, resolved
-settings and preserves the supplied transaction. It carries the layered root,
-image UUID or disk GUID and bound, upper and RAM cap or journal policy, view,
-export mapping count and expected CPU and memory resources. The effective NIC
-selects the network's presence and IPv4 and derived IPv6 gateways, while the
-launch's policy supplies DNS, publication and proxy. An omitted limit takes the
-record's maximum bound. It reads no host path and opens no snapshot. A
-blockless root or memory that cannot fit the record's byte count fails with
-`ErrorKind::Unsupported`. A restore resolves these settings against the
-captured NIC and its own requested policy.
-
-`Prepared::into_command()` moves the complete launch into `VmmCommand`: its
-program, arguments, working directory, capability, outputs, inherited resources,
-opened log, Windows breakaway setting, and any already-bound ready listener.
-It neither reopens nor duplicates resources, renders again nor rediscovers
-paths. `InheritedHandle` owns its
-resource, converts from and back to `OwnedFd` on Unix or `OwnedHandle` on Windows,
-and also accepts an opened `File`. The command documents the caller's spawn
-contract, including standard streams, allowlisted inheritance, Linux detachment
-and umask, Windows log job and breakaway, and cleanup of a failed child.
-Read the resolved NIC or capture context, or build an activation record,
-before consuming `Prepared` into the command.
-
-The compiled [external-launch example](examples/external-launch.rs) consumes
-this command, starts it with a minimal launcher of its own on `std::process`,
-checks the cold guest's boot marker and shell response, then asks it to exit
-cleanly. Its launcher passes the VMM no descriptor or handle besides its
-standard streams, and starts it neither in a new session with the owner's bits
-cleared from its umask on Linux nor in its log's job on Windows: a production
-launcher adds what the command's contract asks, as `vm::spawn` does, and the
-example's docs list what it leaves out. It holds the VMM through a `ProcessRef`
-whose start time it reads as `ProcessRef` defines it: the `starttime` field of
-`/proc/<pid>/stat` on Linux, and the process's creation time on Windows.
-It requires the VMM's actual exit status 0 and a successful
-outcome with complete teardown. Build with
-`cargo build --locked --example external-launch` and supply the backend, OpenVMM,
-kernel, initramfs, new VM directory, and the three artifact SHA-256 digests from
-their installation metadata, in that order. Artifact paths may be relative to
-the caller's directory.
-Append a snapshot directory and EROFS image to run its restore-ready
-demonstration instead, using a snapshot captured with a disconnected boot
-console, as `nvx-rs snapshot capture` captures it. It uses the public
-peer-verified receiver, then intentionally stops and verifies the VM's exit
-without driving guest activation. Linux callers of the example coordinate on
-the snapshot's `key.bin` lock, taken before opening the snapshot and retained
-through view removal.
-
-`vm::spawn(prepared)` consumes that preparation and returns `Launched` with
-its verified `process`, the same `outputs`, the same `capability`, and a
-restore's same bound `ready` listener. The log
-and inherited resources are passed as already opened objects, never reopened
-by name. The capability reaches OpenVMM only on standard input, then
-end-of-file, not in arguments, environment variables, or a file. A failure
-after child creation terminates that child and confirms its exit; a cleanup
-failure is reported with the original error. Spawn removes no output path.
-Dropping `Launched` closes the process handle but does not stop the VM.
-
-On Linux the detached child gets the caller's umask with the owner's bits
-cleared; the caller's own umask is unchanged. The umask still narrows the
-group's and others' permissions to the files that OpenVMM creates, such as its
-outcome report, its snapshots, and the files that a guest creates in a share,
-but never the owner's, which a umask such as 0400 would clear, so that the
-caller could not read the report, nor OpenVMM use its own files. In a directory
-that has a default POSIX ACL, Linux narrows those permissions by the ACL
-instead of the umask. On Windows it starts without a
-console in its log-named job, refusing a taken or untrusted job name, and
-leaves the caller's job when the runtime requests breakaway. The inheritance
-lock is internal to spawn. Windows callers coordinate their own other spawns,
-for example with their own lock around VM and other process starts: an
-unrelated process started during the inheritance window may inherit handles,
-but never the VM's job claim. Windows' process-creation API limits the VM
-directory, in which OpenVMM starts, to 258 UTF-16 code units in its absolute
-path, including any verbatim prefix and trailing separator: the spawn refuses
-a longer one before it creates a process.
-
-The [VM tests](src/host/vm/tests.rs) cover cleanup after child creation,
-ownership, caller survival, the Linux umask, and Windows job claims, and the
-[spawn tests](src/host/spawn/tests.rs) what the VMM inherits while other
-threads spawn, the working-directory limit, the survival of a VMM whose
-launcher crashed, and the waits and cleanup of its child. Their
-ignored cold-spawn smoke test runs the current library against explicit
-`NVX_VM_SPAWN_OPENVMM`, `NVX_VM_SPAWN_KERNEL`, and `NVX_VM_SPAWN_INITRAMFS`
-paths, using a fresh `NVX_VM_SPAWN_PROOF_DIR` and `NVX_HYPERVISOR` or the
-platform's default hypervisor. It checks a guest boot marker,
-responsive shell input, and a verified clean exit; it downloads no artifact.
+On Linux, the spawned child gets the caller's umask with the owner's bits
+cleared, and the caller's own umask is unchanged. On Windows, it starts without
+a console in its log-named job, and leaves the caller's job when the runtime
+requests breakaway. A process that the caller starts while a spawn runs may
+inherit the VM's handles, so a Windows caller coordinates its other process
+starts with the spawn, for example with a lock of its own around both: the
+spawn's inheritance lock is internal to it. Creation refuses Linux socket
+names that OpenVMM cannot take before it creates any output, and checks the
+whole Windows command line on every host; the spawn refuses a Windows VM
+directory whose path is too long, before it creates a process.
 
 ### `nvx::host::snapshot`
 
-`SnapshotKey` and `SnapshotManifest` own the compatibility key and strict
-OpenVMM manifest reader. `SnapshotManifest::time` and `SnapshotKey::time` expose
-the capture's `TimeContract`, whose `eligibility` checks its restore window at a `HostTime`;
-`HostTime::now` samples the host's clock and identities.
+`Snapshot::open` checks the one strict snapshot format: a private directory of
+exactly `key.bin`, `snapshot.json`, and `openvmm/`, which holds exactly
+`manifest.bin`, `memory.bin`, and `state.bin`, every file regular, not a link,
+and private to its owner, the artifacts' lengths those of OpenVMM's strict
+manifest, and the canonical key consistent with that manifest. `KEY_FILE`,
+`DESCRIPTION_FILE`, and `OPENVMM_DIR` name the root's entries. The description
+must exist, but its contents are never read. Opening retains no file handle or
+lock: the caller keeps the directory and its entries private and immutable
+while it uses the snapshot.
+
+`Snapshot::accepts(&config, &runtime, &now)` checks a restore against the
+snapshot's verified metadata: a layered root; processors and memory between
+what the capture booted with and its capacity; an image that fits the
+placeholder, with its block sizes, and a scratch upper with the dormant
+scratch's geometry, which it reads from the requested disks' metadata; the
+NIC's presence, and its address, which an unnamed address inherits; the boot
+console's captured attachment; and the same backend, CPU profile, and runtime
+identity. Its refusals are `Unsupported`, and a time contract that is not
+eligible at `now` is `Unavailable`. `Snapshot::nic` returns the captured NIC's
+presence and address, never a network policy: each restore supplies its own.
 
 `SnapshotManifest::read` reads the `manifest.bin` that OpenVMM wrote for a
-capture, at most `MAX_MANIFEST_LEN` bytes of a regular file that is not a link
-or other reparse point, and refuses another snapshot format version, an unknown,
-mistyped, or repeated field, truncated bytes, and a capture that is not a
-template's: a platform-tier capture for clones, with a read-only `distro` whose
-identity is unbound, a fresh scratch, and the dormant filesystem slot. Of the
-snapshot ID that OpenVMM's SaveVM records, which a microVM capture leaves zero,
-it checks only the length.
-
-`SnapshotKey` checks that a capture made the machine that its context, the
-`CaptureContext` with which `vm::create` prepared it, requested, and derives
-the template's compatibility key from metadata alone: the runtime and contract
-versions through which its clones are restored, the backend, CPU profile and
-effective CPUID, topology, rates, resources, kernel command line, disks, and
-devices of its machine, with the NIC's addresses and the identity of the
-complete deny-all policy under which the capture attached it, which each
-clone's restore replaces with the clone's own, so that a template with a NIC
-serves the clones of every network policy at its guest's address.
-
-A key has one canonical, versioned encoding, whose domain-separated SHA-256
-digest is its identity, a `KeyIdentity`; the
+capture, strictly: of the snapshot ID that OpenVMM's SaveVM records, which a
+microVM capture leaves zero, it checks only the length. `SnapshotKey` is the
+compatibility key that NVX derives from a capture's context and manifest: the
+runtime and contract versions through which it is restored, the backend, CPU
+profile and effective CPUID, topology, rates, resources, kernel command line,
+disks, and devices of its machine, with the NIC's addresses and the identity of
+the complete deny-all policy under which the capture attached it. A key has one
+canonical, versioned encoding, which ends with the capture's time anchors and
+identities, and a domain-separated SHA-256 digest of the rest, its
+compatibility prefix, is its identity, a `KeyIdentity`; the
 [conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/snapshot-key-v1.txt`, pin its encoding and identity. The key's
-encoding, version 1, leaves the network policy out, since templates capture
-their NIC under the complete deny-all policy.
+`tests/vectors/snapshot-key-v1.txt`, pin its encoding and identity.
+`TimeContract::eligibility` decides whether a VM may restore a capture at a
+host's time, a `HostTime`, which `HostTime::now` samples as OpenVMM does: the
+downtime must not be negative, and the interval by which a restore advances
+the VM's time at most `MAX_DOWNTIME_NS`, 30 days.
 
-The key's canonical encoding and identity use the snapshot names and omit
-`guest_build`. Version 1 changes in place: no snapshot outlives a deployment,
-and no reader or migration of the prior encoding is supported.
-
-The persisted key includes the complete per-snapshot time contract and must
-agree with the manifest's time. Its compatibility identity excludes capture
-anchors, host and boot identities, lineage and cut-to-anchor time: captures
-at different times can have different key bytes and the same `KeyIdentity`.
-The declared rates and time ABI remain compatibility inputs.
-
-`TimeContract::eligibility` decides, apart from compatibility, whether a clone
-may restore a capture at a host's time, a `HostTime`, which `HostTime::now`
-samples as OpenVMM does: within the boot of the capture, by the host's monotonic
-clock, and otherwise by UTC, the downtime must not be negative, and the interval
-by which a restore advances the clone's VM time at most `MAX_DOWNTIME_NS`, 30
-days.
-
-`Snapshot::open` checks exactly `key.bin`, `snapshot.json` and
-`openvmm/{manifest.bin,memory.bin,state.bin}`. Directories are private, files
-are regular and private to their owner, artifact lengths equal the strict
-manifest's, and the canonical key is consistent with that manifest.
-`KEY_FILE`, `DESCRIPTION_FILE` and `OPENVMM_DIR` name the root entries.
-The description must exist, but its contents are never read, parsed or
-trusted. `Snapshot::key` and `manifest` expose the verified metadata.
-Opening also checks that a captured NIC address fits `NicConfig`, refusing
-its network, gateway and broadcast addresses with `Io`, and caches that
-checked value for the infallible `nic` accessor.
-
-`Snapshot::accepts(&config, &runtime, &now)` checks a layered restore against
-the captured boot resources and capacity. Processor counts are 1, 2, 4 or 8;
-an encoded boot count of zero means all capacity processors are already
-online. Memory is between boot and capacity, in multiples of 128 MiB, with
-checked conversion from MiB to bytes. The image fits the placeholder and
-keeps its logical and physical block sizes; a scratch upper matches the
-dormant scratch's complete geometry. These checks read the requested disks'
-real metadata, not the snapshot entries again.
-
-NIC presence must match, and an explicitly named address equals the captured
-one; an unnamed address inherits it. `Snapshot::nic` returns only the captured
-presence and address as an `Option<NicConfig>`, never a network policy.
-Each restore supplies its own policy. The boot console retains its captured
-attachment policy: `recreate-listener` for a listener, or
-`discard-while-disconnected` for a disconnected console. A mismatched,
-missing or unknown policy is refused. These facts come from the same
-validated manifest parse; the control listener and console device do not
-prove that attachment. The runtime uses the same backend and captured CPU
-profile, and has the same runtime identity. An omitted profile or `auto`
-names the snapshot's profile; `host` also names a captured host-derived
-profile. Requested disks must be regular files; on Linux, the geometry
-check refuses a FIFO without waiting for its writer.
-Compatibility refusals are `Unsupported`; an ineligible time contract at
-the supplied `HostTime` is `Unavailable`.
-
-The caller keeps the directory and every entry private and immutable while
-using the snapshot; opening checks them once and retains no file handles
-or lock. `vm::create(..., Some(snapshot), ...)` checks compatibility and
-current-time eligibility, then creates the fixed hard-linked view and
-binds the caller-owned ready listener described above.
-
-`CaptureContext` records a prepared capture's checked configuration and
-effective devices independently of runtime paths or network policy.
-`vm::Prepared::capture_context` returns it for the caller to clone and
-serialize; NVX owns no capture-context store or persistence format.
-
-`finish_capture(&VmDir, &CaptureContext, &Exited)` requires the capture VM's
-proved exit and successful outcome, checks the OpenVMM snapshot against the
-context, and atomically writes `key.bin` and informational `snapshot.json`
-beside `openvmm/`. It returns `CapturedSnapshot { key }`. The caller moves
-only those three entries into its own private, immutable snapshot directory;
-logs, outcomes and other VM files remain where they are. A failure can be
-corrected and retried while the VM directory and capture context stay intact,
-including when one metadata file was already written.
+`finish_capture(&VmDir, &CaptureContext, &Exited)` finishes a capture once its
+VM provably exited: it requires a successful outcome, checks OpenVMM's snapshot
+against the context, and writes `key.bin` and the informational
+`snapshot.json` beside `openvmm/`. The caller moves only those three entries
+into its own private snapshot directory. A failure can be corrected and retried
+while the VM directory and the capture context stay intact. `CaptureContext`,
+which `vm::Prepared::capture_context` returns, records a prepared capture's
+checked configuration and effective devices, which the caller keeps to finish
+the capture after a restart: NVX keeps no store of them.
 
 ### `nvx::host::config`
 
-`VmConfig`: the configuration of a VM as one value, its processors, its memory
-in MiB, its `RootConfig`, the `View` that its workload has of it, its
-`NetworkConfig` if it has a NIC, the `ExportPlan` of the host paths that it
-exports, if any, the `ConsoleAttachment` of its boot console, a `Listener` for a
-client or `Disconnected`, whose device exists either way, and a `Boot`, what
-only a cold boot takes.
+`VmConfig`: the configuration of a VM as one value, for its cold boot, its
+capture, or its restore: its processors, its memory in MiB, its `RootConfig`,
+the `View` that its workload has of it, its `NetworkConfig` if it has a NIC,
+the `ExportPlan` of the host paths that it exports, if any, the
+`ConsoleAttachment` of its boot console, a `Listener` for a client or
+`Disconnected`, whose device exists either way, and a `Boot`, what only a cold
+boot takes: the caller's own kernel command-line tokens and, for a capture, a
+`CaptureConfig`.
 
 A root is `Blockless`, the guest's own system from its initramfs, or `Layered`,
 a `LayeredRoot`: the path of an image and its `RootImage`, EROFS or a GPT disk,
@@ -748,186 +581,78 @@ with the identity that the guest expects, an optional bound of a GPT disk's
 first partition, the `OverlayMode`, and the `UpperConfig` of the overlay's
 upper, a scratch image with its `Journal` policy, or RAM up to a cap of 1 to 90
 percent of the VM's memory, 50 when the caller has no other
-(`UpperConfig::DEFAULT_MAX_MEMORY_PERCENT`).
+(`UpperConfig::DEFAULT_MAX_MEMORY_PERCENT`). A `NetworkConfig` holds the
+`NetworkPolicy` that OpenVMM enforces and the NIC's address, an
+`nvx::net::Ipv4Cidr`, if the caller names one: without one, a cold boot takes
+`DEFAULT_GUEST_NETWORK`, `10.0.0.2/24`, and a restore the snapshot's.
 
-A `NetworkConfig` holds the `NetworkPolicy` that OpenVMM enforces and the NIC's
-address, an `nvx::net::Ipv4Cidr`, if the caller names one: without one, a cold
-boot takes `DEFAULT_GUEST_NETWORK`, `10.0.0.2/24`, and a restore the
-snapshot's. A `NicConfig` is the NIC that a VM
-settled on, with its address. A `Boot` holds the caller's own kernel
-command-line tokens, to which NVX adds those of what it lowers: a VM that boots
-needs one, and a VM that a snapshot restores takes none.
+`VmConfig::check` checks the whole value without reading the host, and fails
+with an `nvx::Error` of kind `Unsupported` that names the first refusal, such
+as a caller's boot token whose name NVX reserves: the root's and the view's
+tokens, `nvx_maps`, and every name beginning `virtfs_`, as both Linux and the
+guest's init read them. `VmConfig::kernel_command_line` renders a cold boot's
+command line: the root's and the view's tokens, `nvx_maps` when an export
+exists, then the caller's text unchanged; a capture's holds only the caller's
+text, whose tokens must be among OpenVMM's platform tokens, and `maxcpus` when
+the capture boots with fewer processors than its capacity.
+`VmConfig::mapping_table` returns the
+export's mapping table, which the caller sends the guest in `MAPS` payloads, or
+an empty one without an export, which it sends not at all.
+`VmConfig::check_command_line` checks the configuration's part of OpenVMM's
+command line against the Windows limit, on every host, with a reserve for the
+runtime's files and the VM's outputs, and `process_command_line_units` and
+`fit_process_command_line` count and check the Windows command line of any
+program against `PROCESS_COMMAND_LINE_LIMIT`. `COMMAND_LINE_BUDGET` is the
+1,024-byte x86 kernel command-line budget, including the terminating NUL.
 
-`VmConfig::kernel_command_line` checks the configuration and requires `Boot`,
-then renders the root's tokens and settings, the view's tokens, and `nvx_maps`
-when an export exists, followed by accepted `Boot.command_line` text unchanged.
-It reads nothing on the host. A restore has no kernel command line from this
-method and fails with kind `Unsupported`.
-
-`VmConfig::check` checks the whole value without reading the host: it opens no
-path and checks no support of the host. It fails with an `nvx::Error` of kind
-`Unsupported` that names the first refusal: no processor or no memory; a layered
-root without an image or a scratch path, with a bound of an EROFS image or of 0,
-or with a RAM upper's cap outside 1 to 90 percent; a hostname that an activation
-record refuses; an export that `ExportPlan::check` refuses for the guest targets
-that the root reserves; a boot's capture that `CaptureConfig::check` refuses;
-or caller boot tokens that use a reserved name. The network's policy is checked
-where it is lowered, with the guest's address.
-
-The reserved boot names are the root's `nvx_layer`, `nvx_scratch`,
-`nvx_overlay_upper`, `nvx_overlay_mode`, `nvx_scratch_journal`,
-`nvx_first_partition_bound` and `nvx_ram_upper_percent`; the view's
-`nvx_hostname` and `nvx_machine_id`; `nvx_maps`; and every name beginning
-`virtfs_`. The check reads tokens as both Linux and the guest's init read them,
-with dashes and underscores matching as Linux matches parameter names.
-Reserved names stay reserved after `--` and when init's splitting exposes them
-inside quoted text. Every other token stays caller-owned, including
-`nvx_entrypoint`, `nvx_arg` and `nvx_share`.
-
-`VmConfig::mapping_table` returns exactly the configured
-`ExportPlan::guest_table`, in its order, without reading host paths or
-revalidating the plan. Without an export it returns an empty table and the
-kernel command line omits `nvx_maps`; with an export the token counts those
-entries. The table's `HostMap` and its wire codecs are accessible through
-`nvx::protocol::maps`, and remain re-exported from `nvx::protocol`.
-
-`COMMAND_LINE_BUDGET`, in `nvx::host::config`, is the 1,024-byte x86 kernel
-command-line budget, including the terminating NUL. The CLI checks the command
-lines that it launches against it.
-
-The internal whole-config renderer used by `vm::create` renders a cold boot's
-OpenVMM arguments from `Runtime` and `VmConfig`. Its borrowed control endpoint,
-report path, and optional boot-console endpoint are already chosen output names, not additional
-launch settings. It opens no path, allocates no endpoint, and starts no process.
-It renders processors, memory without narrowing it, kernel and initramfs paths,
-the kernel command line, layered-root block devices by path, network and export
-arguments, console attachment, the CPU profile, and every `LaunchOptions` value.
-A configured NIC remains attached even under deny-all policy. A listener needs
-its supplied console name; a disconnected attachment retains the device and
-discards its output. Listener names are nonempty and contain no NUL, comma, or
-equals sign, which OpenVMM's serial options cannot hold literally.
-The renderer emits neither `--microvm-lifecycle` nor
-`--microvm-workload-identity`. Callers inspect the complete arguments through
-`Prepared::arguments()`.
-
-For a capture, `CaptureConfig` supplies the processor capacity, the boot-online
-processor limit, and the boot memory and its capacity; the ordinary VM's cold
-resource counts need not match. Boot memory must be aligned to 128 MiB.
-The kernel text omits root, view, mapping and workload tokens and admits only
-OpenVMM's named platform allowlist. Caller-supplied tier, processor, console,
-device and network tokens are refused by name even when allowlisted: the
-builder owns them. OpenVMM adds exactly one `nvx_snapshot_tier=platform` from
-`--snapshot-tier platform`; callers may not supply or duplicate it.
-Non-Unicode export child roots are still refused rather than lossily rendered.
-
-`VmConfig::check_command_line()` checks the configuration's known arguments on
-every host, before any host change, with 2048 UTF-16 code units reserved for the
-runtime's files, launch options, and VM output names. The reserve foresees file
-and endpoint names of up to 260 code units, not arbitrary runtime paths or
-CPU-profile strings. The whole renderer checks the complete actual command
-line without a reserve too. `process_command_line_units`, in
-`nvx::host::config`, counts the Windows command line that runs a program with
-its arguments, in UTF-16 code units, as Windows quotes them, with the
-terminating NUL, and `fit_process_command_line` checks it against
-`PROCESS_COMMAND_LINE_LIMIT`, on every host, with the reserve that its caller
-keeps.
-
-A `Boot` may also hold a `CaptureConfig`, what a capture of the VM adds to the
-VM's configuration, which keeps the rest, such as the NIC, the console, and the
-export: a `DiskCapture`, so far only `Fresh`, the `BlockGeometry`, length and
-block sizes, of the placeholder of the image and of the dormant scratch that a
+A capture's `CaptureConfig` gives the processors and the memory that its VM
+boots with and that a restore may grow it to, each a `Capacity`; the
+`BlockGeometry` of the placeholder image and of the dormant scratch that a
 fresh capture of a blockless VM attaches, which each restore replaces with its
-own; its processors and its memory in MiB, each a `Capacity`, what the VM boots
-with and what a restore may grow it to; and the caller's `Invariants`, at most
-64 settings that NVX keeps without interpreting them, each named by 1 to 64
-lowercase ASCII letters, digits, `.`, `-`, and `_` from a letter, with a value
-of at most 256 printable ASCII characters. `Invariants` and `BlockGeometry`
-belong here.
-
-`CaptureConfig::check` checks a capture without reading the host. It fails with
-an `nvx::Error` of kind `Unsupported` for processors at boot or a capacity other
-than 1, 2, 4, or 8, more processors at boot than the capacity, no memory at
-boot, a memory capacity below it or not a multiple of 128 MiB, or a disk whose
-geometry the template's manifest would refuse: a logical block size that is not
-a power of two of at least 512 bytes, a physical one that is not a power of two
-of at least the logical one, or a length that is not a nonzero multiple of the
-logical one.
-
-`CaptureConfig::identity` returns the `CaptureIdentity` that names the
-snapshots of a capture of a VM of a `VmConfig` on a `Runtime`: the SHA-256
-digest, after the domain `nvx capture` and a NUL, of a fixed encoding of what
-tells captures apart, which displays and serializes as 64 lowercase hexadecimal
-digits. It identifies the captures that NVX supports, fresh captures of a
-blockless VM, from the values alone: it reads nothing on the host and refuses
-no configuration, which creating the capture checks. It digests the runtime's
-identity, the versions of this crate's contracts, the hypervisor, and the
-requested CPU profile; the capture's disks, processors, memory, and invariants;
-and the VM's NIC's address, `DEFAULT_GUEST_NETWORK` when the configuration
-names none, its console attachment, whether it exports host paths, and its
-boot's command line. No path, launch option, view, network policy, or anything
-of the VM's root is part of it, nor the VM's own processors and memory, for
-which the capture's count.
+own; and the caller's `Invariants`, at most 64 settings that NVX keeps without
+interpreting them. `CaptureConfig::check` checks it without reading the host,
+and `CaptureConfig::identity` returns the `CaptureIdentity` that names the
+snapshots of a capture of a `VmConfig` on a `Runtime`: a SHA-256 digest of what
+tells captures apart, from the values alone.
 
 ### `nvx::host::restore`
 
-`RestoreMachine::new(&ActivationRecord)` latches one canonical record and its
-transaction. After `Spawned`, its actions await the restore-ready event,
-connect a verified control session, and send the same activation bytes on
-every session. `ActivateSent` marks a completed write before waiting for
-Ready; a caller that combines the write and Ready read may supply `GuestReady`
-directly. `GuestReady` must echo the transaction. A lost session offers
-`Connect` again, with no built-in retry count, delay or deadline; the caller
-may instead feed `Expired` or `Cancelled`.
+`RestoreMachine::new(&ActivationRecord)` orders a restore to its guest's Ready
+without I/O, a clock, or a retry budget. Once the caller reports
+`RestoreInput::Spawned`, its `RestoreAction`s ask for the restore-ready event,
+a verified control session, and the sending of the same canonical activation
+bytes in every session, and it checks that the guest's Ready echoes the
+record's transaction. The caller performs each action with its own I/O and
+protocol and reports what it observed, such as a lost session, after which
+`Connect` comes again, the VM's verified exit, with its outcome report, or its
+own expired deadline or cancellation. A matching Ready ends at `Done`, before
+any mappings or workload. A failure is a `RestoreError`, with the
+`RestorePhase` that failed, its `RestoreEvidence`, the `Attribution` that the
+evidence supports, whether the guest may have run, and the original cause: it
+stops no process and writes no record, and the VM stays the caller's.
 
-The caller drives every I/O operation and peer check and supplies verified
-`Exited` events. `OperationFailed` keeps its explicit `RestorePhase`,
-`RestoreEvidence` and original error source in `RestoreError`; expiry,
-cancellation and exit fail every pending phase. Failure stops no process and
-writes no record. A matching Ready ends at `Done`, without sending mappings or
-Start. Terminal results are offered once and absorb later inputs.
+`ReadyListener` owns a restore's restore-ready endpoint, which `vm::create`
+binds before the spawn: a mode-0600 Unix socket in the private VM directory on
+Linux, or a fresh first-instance named pipe with an owner-only protected
+access control list on Windows. `ReadyListener::receive` accepts only the held
+VM process as its client: on Linux, through the socket's original peer, with
+`SO_PEERPIDFD`, which needs Linux 6.5 or a backport, and without which it fails
+with `ErrorKind::Unavailable` rather than trust a numeric PID. An exited held
+VM is refused too. `ReadyListener::into_std` hands the same native listener to
+a caller that drives its own I/O, which then checks its client as the module
+documents, and `protocol::restore_ready::parse_ready_event` parses the event.
 
 NVX's own binaries drive the machine with a blocking driver, private to the
-crate, beside the control session. It checks that the restore-ready client and
-the control server are the VM's held process, sends the same activate message,
-the record and the workload's identity, in at most three sessions, and allows
-60 seconds to Ready, then 30 more for the mapping table and the workload's
-Start. The caller's cancellation and the VM's exit end any pending accept, read
-or write.
-
-`ReadyListener` owns a restore-ready endpoint: a mode-0600 Unix socket in the
-private VM directory on Linux, or a fresh first-instance named pipe with an
-owner-only protected access control list on Windows. Its public `receive`
-checks the connecting client's process ID against the held VM process. On
-Linux it also checks the socket's original peer through `SO_PEERPIDFD`, so
-a reaped client's queued event cannot impersonate a VM that reuses its ID.
-This requires Linux 6.5 or a backport of that option; if the host cannot
-provide it, receive fails with `ErrorKind::Unavailable`, without a numeric-PID
-fallback. An exited held VM is refused too.
-
-`into_std()` transfers the same nonblocking `UnixListener` on Linux, or the
-same overlapped first pipe instance as an `OwnedHandle` on Windows, without
-reopening or duplicating it. Transfer precedes acceptance; transferring after
-the receiver accepted a client fails with `ErrorKind::Unsupported`. A caller
-that drives the native object owns its I/O. On Linux it checks the original
-socket peer through `SO_PEERPIDFD`, refuses an exited peer, and matches its
-credentials against the held VM process: opening a pidfd from the cached
-numeric PID is not authentication. On Windows it checks the named-pipe client
-process ID. After matching the peer, it checks `Process::has_exited` and
-refuses an exited VM. Only `vm::create` constructs a listener, for a restore,
-and hands it over through `VmmCommand::ready` or `Launched::ready`.
-
-The Linux PID-reuse regression runs a separate helper in private PID and mount
-namespaces with Bash as its reaper. If the host refuses unprivileged user
-namespaces, it uses passwordless `sudo` only for that isolated helper, not the
-test suite or build. If neither route works, the test fails; it never changes
-host namespace policy or skips the identity assertions.
+crate.
 
 ### `nvx::host::network`
 
 `NetworkPolicy` and `openvmm_arguments`, the one lowering of a network posture
 into OpenVMM options, for the CLI and external orchestrators: the egress default
 and rules, ingress, `HostLoopback` access, denied, `Outbound` from the guest
-alone, or both ways, and its forwards.
+alone, or both ways, and its forwards. The lowering takes the names by which
+messages refer to its inputs, such as `EgressRules::name`, so that callers'
+messages name their own fields.
 
 A proxy-only policy, `NetworkPolicy::proxy_only`, has one way out, a
 `NetworkProxy` that listens on a port of host loopback, which the guest reaches
@@ -935,12 +660,12 @@ at the same port of its gateway, and whose URL as the guest sees it
 `NetworkProxy::url` gives; the lowering refuses a proxy beside any other way
 out.
 
-Egress rules are lowered exactly into OpenVMM's IPv4 and IPv6 rules by the
-lowering of egress policy files, with at most 256 rules for each action.
-`NetworkPolicy::native_egress_rules` returns a policy's lowered rules, a
-`NativeEgressRules` of its allow and deny lists, without reading anything on
-the host, and fails with an `Unsupported` error for a malformed rule or for an
-action that needs more than 256 rules.
+Egress rules are lowered exactly into OpenVMM's IPv4 and IPv6 rules, as the
+CLI's [egress policy files](#egress-policy-files) are, with at most 256 rules
+for each action. `NetworkPolicy::native_egress_rules` returns a policy's
+lowered rules, a `NativeEgressRules` of its allow and deny lists, without
+reading anything on the host, and fails with an `Unsupported` error for a
+malformed rule or for an action that needs more than 256 rules.
 
 ### `nvx::host::filesystem`
 
@@ -996,29 +721,16 @@ and another transport failure `Io`. Original I/O and protocol causes are
 retained directly; attachment refusal, reset and ended-connection details
 remain available as sources.
 
-`Transport` and `TransportHandle` re-export the types of the crate's private
-platform layer, with one definition beneath the OS adapters. Timed reads and
-writes, native-handle duplication and `unread` are unchanged: Linux reports
-Unix `SIOCOUTQ` charges, and Windows reports `None`. The old
-`session::connect`, private to the crate like the session, remains a
-compatibility wrapper for the CLI.
-
-A `Transport` to an OpenVMM control endpoint reads and writes with deadlines,
-and tells, through `Transport::unread`, what the endpoint has not read yet of
-what it wrote, where the platform tells: on Linux, what `SIOCOUTQ` reports of
-its Unix socket, the kernel's charge for the buffers of each write until
-OpenVMM read each whole, which a read of part of a buffer leaves as it was, and
-which is zero once OpenVMM read everything. A named pipe tells its writer
-nothing of the kind, so on Windows, and for a transport that does not tell, it
-is `None`.
-
-On Linux and Windows, `Transport::try_clone_handle` optionally returns an
-owned native handle to the same peer-verified connection, not a reconnect:
-an `OwnedFd` for the Unix socket or an `OwnedHandle` for the overlapped pipe.
-An adapter must drop the blocking transport before using or registering the
-duplicate with an I/O runtime, or changing the shared blocking mode. The
-default is `Ok(None)`, so transports without native handles need not implement
-it, and NVX does not depend on an asynchronous I/O runtime.
+A `Transport`, the timed byte stream of a verified connection, whose
+definitions the crate's private platform layer holds, reads and writes with
+deadlines. `Transport::unread` tells what the endpoint has not read yet of what
+it wrote where the platform tells, on Linux, from what `SIOCOUTQ` reports of
+its Unix socket; on Windows, and for a transport that does not tell, it is
+`None`. On Linux and Windows, `Transport::try_clone_handle` returns an owned
+native handle to the same connection, not a reconnect, for an adapter that
+registers it with an I/O runtime of its own once it dropped the blocking
+transport; a transport without one returns `Ok(None)`, and NVX depends on no
+asynchronous runtime.
 
 ### `nvx::host::process`
 
@@ -1035,88 +747,45 @@ user cannot check makes `Process::open` fail rather than report an exit.
 Linux hosts without pidfds poll the reference instead, and cannot terminate
 the process.
 
-On Linux and Windows, `Process::exit_handle()` returns
-`Result<Option<ExitHandle>>`: an independently owned duplicate of the pidfd
-or process handle, or `Ok(None)` only on a polling-only Linux host. Callers
-register the standard owned descriptor or handle with their own runtime;
-dropping the original `Process` or another duplicate leaves it valid.
-On Windows, the duplicate retains the original handle's access rights.
-Duplication failures have kind `Io` and retain their original I/O source.
-No watcher thread, future or callback is created by the library.
-
 `Process::wait(deadline)` returns `Some(Exited)` only after verified exit, or
 `None` when the deadline passes without confirmation. `Exited` proves exit,
-not an exit status, and cannot be made by a caller.
+not an exit status, and cannot be made by a caller. `Process::exit_handle`
+returns an independently owned duplicate of the pidfd or process handle, which
+a caller registers with its own runtime, or none on a host that only polls.
 
 `Process::bytes_read` reports how many bytes the process has read through the
-operating system's read calls, whether the host's cache served them or not:
-`rchar` of `/proc/<pid>/io` on Linux, which it reads only while the process
-still runs with its reference's identity, and the `ReadTransferCount` of
-`GetProcessIoCounters` on Windows. `own_bytes_read` reports the calling
-process's. Neither counts what a process maps from a file, as OpenVMM maps the
-memory of a snapshot that it restores, nor, on Linux, what it reads through
-io_uring, as OpenVMM reads a sandbox's block devices. On Linux, the count also
-holds what the process's children read once it reaped them, as the kernel
-accounts them to their parent, while Windows counts the process's own reads
-alone.
+operating system's read calls, and `own_bytes_read` how many the calling
+process has, on Linux with what the children that a process reaped read.
+Neither counts what a process maps from a file, as OpenVMM maps the memory of
+a snapshot that it restores.
+
+`Process::exit_handle` fails with an `nvx::Error` of kind `Io`, and the other
+calls with the I/O errors of the operating system.
 
 ### `nvx::host::report`
 
-OpenVMM's outcome report. The Linux and Windows primitives are private to the
-crate, in `host::platform`, and so is the authenticated control session, which
-carries NVX's own control protocol, `NVXC`, one frame per DATA record of a
-`HostConnection`: the CLI and its restore driver use it, with the `cli`
-feature. The session speaks version 2 alone, and requires the guest's `READY`
-to name that version. It streams an execution's standard input, with an
-explicit end, and keeps at most 64 KiB of it that the guest has not
-acknowledged writing, and receives the execution's output without a total
-limit; a `STOP` ends an execution that runs.
-
-`report::read` returns `Ok(None)` for a missing report, and an `Io` error for an
-unreadable or malformed report, retaining the underlying error. It keeps today's
-summary of the outcome category, status code and teardown steps, not free-form
-fields.
+`read` returns OpenVMM's outcome report of a VM: a `Report` of its outcome's
+category and status code and of whether its teardown completed, without the
+report's free-form fields. A missing report is `Ok(None)`, and an unreadable or
+malformed one an `Io` error, which retains the underlying error.
 
 ### `nvx::guest`
 
-The programs that run in Linux guests; see [Guest binaries](#guest-binaries).
+The guest's side of the library, for any guest init or agent on Linux: the
+modules below, and `GenerationId`, a VM's generation ID. `nvx` builds no guest
+space and runs no execution: each init does both, as the
+[guest-agent guidelines](../doc/guest-agent-guidelines.md) describe, and
+nvx-init does both for NVX. The module also holds NVX's guest programs, in
+modules that `#[doc(hidden)]` hides, whose `main` each guest binary calls; see
+[Guest binaries](#guest-binaries).
 
 ### `nvx::guest::mappings`
 
 The mapping values, `Mapping`, `Access`, `Kind`, `InvalidMapping`, and
-`MAX_PATH_BYTES`, and `MappingTable` are public. The mapper, in the `mapper`
-module, is part of the guest's space, nvx-init's internal reference code,
-private to the crate, which re-exports the items that NVX's programs use here.
-
-`Mapper`: applies host mappings beneath the
-descriptor of a `TargetRoot`, the root of a mount of a whole file system, which
-`statmount` tells from a bind of a directory below it, such as a layered root's
-overlay or a guest's `/`, from a `SourceRoot`, such as the guest's mount of the
-host's export.
-
-A `Mapping` names a relative source, or an empty one for the source root itself,
-such as a directory export's root, which the mapper opens as `.` beneath it with
-the same flags, an absolute target, its `Access`, and optionally the `Kind` that
-its source must have.
-
-The mapper opens each component with `openat2`, through no symbolic link or
-magic link, creates what a target lacks only on the root's own mounts, which
-`statx` tells apart by their unique mount IDs, never inside another mapping, and
-checks kinds, overlaps, and the targets that the root profile's `Reserved` set
-holds, with the `/run/nvx/time` tree and its ancestors always.
-
-It attaches each mapping as a detached copy of its source's mount, `open_tree`,
-restricted `nosuid`, `nodev`, and read-only when asked, `mount_setattr`, before
-`move_mount` puts it at its target, then checks that it is there. Zero mappings
-do no work; the first that fails is reported with its index as an `ApplyError`,
-and latches the mapper.
-
-A layered root's teardown, which unmounts its mapper's mappings, first detaches
-a mapping that a rename moved and that the attach failed to detach, then
-unmounts the mappings in reverse order, and reports each failure.
-
-A runtime bind, such as the view's machine ID, goes through the same walk and
-attach.
+`MAX_PATH_BYTES`, and `MappingTable`. A `Mapping` names a relative source, or
+an empty one for the source root itself, such as a directory export's root, an
+absolute target, its `Access`, and optionally the `Kind` that its source must
+have.
 
 `MappingTable` keeps a guest agent's account of a host mapping table: the
 mappings that the host hands the agent in `MAPS` parts once it is ready, after
@@ -1128,16 +797,17 @@ decode, holds no entry, does not continue the table, ends past the
 announcement, or maps the export's root, which an empty source names, as a
 `TableError::Refused` at the entry that it expects next, which changes nothing.
 It hands the part's mappings to the caller, which applies them beneath the root
-of its choice, such as through its own mapper; the first that
-fails latches the table, which reports it as a `TableError::Failed` with its
-entry, and refuses every later part. The table is complete once every announced
-mapping is applied, and none failed, and the caller's teardown tears it down.
+of its choice, through its own mapper; the first that fails latches the table,
+which reports it as a `TableError::Failed` with its entry, and refuses every
+later part. The table is complete once every announced mapping is applied, and
+none failed, and an init starts no workload before then, as the
+[guidelines](../doc/guest-agent-guidelines.md#the-hosts-mapping-table) require.
 
-Linux 6.8 or later. NVX's managed agent applies its host mapping table through
-a `MappingTable` and a mapper, beneath `/` in direct mode; the table refuses an
+The mapper through which nvx-init and NVX's managed agent apply the table is
+part of [nvx-init's space](#nvx-inits-space), private to the crate. The managed
+agent applies its table beneath `/` in direct mode, and the table refuses an
 empty source, since the export is an aggregate, whose root lists its children,
-and NVX's hosts, whose exports are all aggregates, send none. nvx-init's
-layered root mounts its live shares through a mapper.
+and NVX's hosts, whose exports are all aggregates, send none.
 
 ### `nvx::guest::nvxs`
 
@@ -1218,12 +888,10 @@ the activation record.
 
 ### `nvx::guest::activation`
 
-x86_64: the activation of each clone that a restore of a template's snapshot
-starts, once `nvx::guest::snapshot::capture` repaired it, for a guest init or
-agent, whether or not it is PID 1.
-
-`nvx::guest::clone` remains a compatibility alias. Activation itself holds no
-admission fence and starts no process.
+x86_64: the activation of each clone that a restore of a snapshot starts, once
+`nvx::guest::snapshot::capture` repaired it, for a guest init or agent, whether
+or not it is PID 1. `nvx::guest::clone` remains a compatibility alias.
+Activation itself holds no admission fence and starts no process.
 
 In a clone, the capture repairs the restore before it returns: it checks that
 the online CPUs are a prefix that the restore's processor target does not
@@ -1253,52 +921,21 @@ time daemon enforces it.
 
 An `Activation` of the `Repaired` clone, or, with `Activation::with_resources`,
 of the resources and the instant of the acknowledgement that a repair reports,
-as in an adapter's tests, then takes
-the clone's own configuration from the host, in one Activate, on a restricted
-control session: a state machine without I/O, independent of any framing, to
-which the adapter passes what its session receives, as an `ActivationInput`, and
-which returns the `ActivationAction` that the adapter takes.
+as in an adapter's tests, then takes the clone's own configuration from the
+host, in one Activate, on a restricted control session: a state machine without
+I/O, independent of any framing, to which the adapter passes what its session
+receives, as an `ActivationInput`, and which returns the `ActivationAction`
+that the adapter takes.
 
 `Activation::accept` decodes the record with `ActivationRecord::decode`, and
 accepts only a clone's, with a restore section, that expects the CPU count and
 the memory size that the repair reports, before any side effect, while an
 Activate whose record the adapter's framing refused unread, as longer than a
 record can be, fails as a record that long does; the adapter applies the record
-in its own space, by the activation's deadline.
-
-nvx-init applies it with its own space, NVX's internal reference code, private
-to the crate, as at a cold boot: it assembles the root with the record's image,
-an EROFS image whose UUID it checks if the record expects one, or a GPT disk
-whose GUID it checks if the record expects one, its upper, a tmpfs or the
-scratch with the record's journal policy, and its overlay mode, and with the
-inputs that the guest's own configuration holds, which its template captured:
-the runtime directory, the block devices, the timeout, the host filesystem
-device's virtio-fs tag, and the gateway of the template's NIC, if it has one,
-but waits for no device past the activation's deadline, so that the
-application ends by then.
-
-For a GPT disk, it first asks the kernel to reread the disk's partition table
-with `BLKRRPART`, since the kernel created the block devices of partitions for
-the template's placeholder. Whatever the image, it requires a fresh upper, whose
-`upper` and `work` directories are missing or empty, in a bounded check that
-reads no file, while a cold sandbox's scratch keeps its upper across boots. It
-uses no execution identity from the record, which carries none: each execution
-names its own identity, as in a sandbox without a workload identity at a cold
-boot. With the record's export, it mounts the host export through that
-filesystem device, read-write, at `hostfs/root` in the runtime directory,
-outside the root, since the record names no mode and OpenVMM limits each child
-to its own access. It applies the record's VM-wide view, with the record's own
-DNS server. The view sets the hostname and, when requested, generates a machine
-ID after repair's reseed. The root owns the machine-ID and resolver binds,
-including those made before a later failure. Application starts no announcer
-and no other process. nvx-init keeps the root and workload that it activated:
-the export's root, from which it maps the host's mapping table once the clone
-is ready, the network's proxy endpoint, which it tells its workloads as at a
-cold boot, and the publication and gateway, from which it starts and supervises
-ingress. Their teardown closes the export's root, then tears the root down with
-its view binds. A switched root unmounts nothing. After a failure, of the
-export or the network among others, nothing that the application mounted or
-bound stays mounted unless the failure reports the unmounts that failed.
+in its own space, by the activation's deadline, as nvx-init applies it with
+[its space](#nvx-inits-space). `MACHINE_ID_FILE` and `RESOLVER_FILE` name the
+generated machine ID's file and the resolver file in a root's runtime
+directory.
 
 Once the adapter passed the activation what the session received while the
 application ran, which came before Ready, `Activation::complete` returns the
@@ -1455,12 +1092,12 @@ launches OpenVMM, which opens the layer at its path; see
 [Images by path](#images-by-path). `run` and `start`
 launch the image of the format and the identity that the binding records, an
 EROFS layer or a GPT disk, over a scratch or a RAM upper, the layered root that
-nvx-init assembles. A configuration
-without a binding, as `nvx.py` wrote, fails with `sandbox configuration has no
-distro binding`, and a stale binding with what changed, such as `LAYER changed
-after its distro binding was made: its length differs`; both add `deprovision
-the sandbox and provision it again`, since a new provision verifies the layer
-again.
+nvx-init assembles. A configuration of the current format without a binding
+fails with `sandbox configuration has no distro binding`, one of an earlier
+format, as `nvx.py` wrote, as an unsupported format, and a stale binding with
+what changed, such as `LAYER changed after its distro binding was made: its
+length differs`; each adds `deprovision the sandbox and provision it again`,
+since a new provision verifies the layer again.
 
 ## Images by path
 
@@ -1526,8 +1163,9 @@ deprovision the sandbox and provision it again`, and one that another sandbox
 claims with `another sandbox claims the ext4 scratch image IMAGE`. `run` binds
 the scratch image itself, checks the binding and claims the image as `start`
 does, and holds the claim until its VM exits. A sandbox whose upper is in RAM,
-`--upper ram`, has no scratch image: `provision` records `null` for the image
-and its binding, and neither `start` nor `run` binds or claims one.
+`--upper ram`, has no scratch image: `provision` records its `upper` as RAM,
+with its cap, and `null` for `scratch_binding`, and neither `start` nor `run`
+binds or claims one.
 ## Sandbox input contract
 
 The crate's private `host::sandbox` is the launch profile of `nvx-rs sandbox`,
@@ -1552,8 +1190,7 @@ underscores, or Unicode digits, and is in `1..4294967294`. A layer UUID is
 canonical lowercase hyphenated text; braces, a prefix, uppercase, and
 unhyphenated forms are refused.
 
-API change: `nvx::host::sandbox::{Int, IntError}` are no longer exported. The
-CLI's sandbox configuration records hold no resource limits: the VM is the
+The CLI's sandbox configuration records hold no resource limits: the VM is the
 limit of a sandbox's workload. See [Specification tests](#specification-tests).
 
 Managed exec environment files and distro manifests are strict UTF-8 JSON,
@@ -1955,7 +1592,7 @@ provision it again:
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `exec.lock` | The exec lock, which an `exec` holds from before it finds the running VM until its workload ends, so that one `exec` at a time runs in the sandbox; it stays from the first `exec` until `deprovision` |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |
-| `runtime.json` | The store's runtime record of the running VM, in its format 4: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |
+| `runtime.json` | The store's runtime record of the running VM, which it reads strictly: the OpenVMM process, by its ID, its start time, and the host's boot, its control endpoint, `STATE/control.sock` or `//./pipe/openvmm-microvm-HEX` on Windows, and the [runtime identity](#runtime-identity) of its start |
 | `control.capability` | The 32-byte capability of the running OpenVMM, with mode 0600 |
 | `control.sock` | The control endpoint on POSIX hosts |
 | `openvmm.log` | OpenVMM's output, which each start replaces |
@@ -2023,10 +1660,11 @@ OpenVMM publishes no outcome report. An OpenVMM that does not exit in time, or
 whose identity the stop cannot determine, keeps the runtime record, as does a
 stop whose wait Ctrl-C ends, and the next `stop` retries.
 
-The store reads runtime records of its format alone. A sandbox that a build
-with another format started, such as one whose `runtime.json` has format 1,
-fails every transition with a message that names that format: stop every
-running sandbox with the build that started it before you switch builds. An
+The store reads only runtime records of its own strict form. A sandbox that an
+earlier build started, such as one whose `runtime.json` has the `format` 1 of
+the CLI before its store, fails every transition with `cannot parse PATH`, an
+`io` error, and keeps its record: stop every running sandbox with the build
+that started it before you switch builds. An
 OpenVMM that a start of such a build left behind when it was interrupted has no
 record, and that build asked for it to be ended by hand: end it before the
 switch too, since this build finds no VM in that sandbox.
@@ -2134,7 +1772,8 @@ intended changes of behavior.
   [Live host shares](../doc/run.md#live-host-shares) describes, where `nvx.py`
   shared them.
 - The state directory holds the store's files: `sandbox.lock` replaces the
-  `lifecycle.lock` of `nvx.py`, `runtime.json` has the store's format, and each
+  `lifecycle.lock` of `nvx.py`, `runtime.json` holds the store's runtime
+  record, and each
   start replaces `openvmm.log`, which `nvx.py` appended to. `exec` holds the
   lock while it finds the running VM, which `nvx.py` did not, and holds
   `exec.lock` until its workload ends, so that one `exec` at a time runs in a
@@ -2150,12 +1789,13 @@ intended changes of behavior.
   guest refuses the form without a format that `nvx.py` wrote; see
   `nvx::protocol::root`.
 - `run` and `provision` read the network options into one typed
-  `NetworkPolicy`, which the plan holds and `nvx::host::network` lowers, where
-  `nvx.py` passed them to OpenVMM. Invalid values and combinations fail before
+  `NetworkPolicy`, which `nvx::host::network` lowers, where `nvx.py` passed
+  them to OpenVMM; `provision` records the options, from which each `start`
+  builds the policy again. Invalid values and combinations fail before
   OpenVMM runs and before `provision` records anything, with status 1, where
   OpenVMM refused them, or never checked them, as for a proxy beside any other
   way out. The command spells out OpenVMM's defaults and the rules in their
-  canonical form, with the network options after the plan's other options; see
+  canonical form; see
   [Sandbox networking](../doc/run.md#sandbox-networking).
 - A sandbox's scratch image is claimed while its VM runs, so a second
   sandbox, or a `run`, on the same image fails; see
@@ -2257,114 +1897,20 @@ Whoever runs the tests, the checks that refuse a command line also check that
 `sandbox run` and `provision` refuse to share `/`, which root owns, with the
 caller owner.
 
-## Features
-
-| Feature | Contents |
-| --- | --- |
-| `host` (default) | The `host` module. It enables `serde`, and `sha2`, which names the children of a sandbox's aggregate share and hashes distro layers in their explicit verification |
-| `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
-| `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
-| `serde` | The serde forms of `Hypervisor` and `net::Ipv4Cidr` |
-| `guest` | The `guest` module and the guest binaries; see [Guest binaries](#guest-binaries) |
-
-Without default features, the crate has only `protocol`, `activation`, `exec`,
-`contract`, `net`, `gpt`, `uuid`, `Hypervisor`, and `Error`, and depends on
-nothing but `serde` when `serde` is enabled and `nix` and `getrandom` when
-`guest` is.
-
-## Example
-
-A cold boot through `nvx::host::vm`, in a private directory that the caller
-owns, and the VM's stop.
-[`examples/host-workflows.rs`](examples/host-workflows.rs) also captures a VM,
-restores one, and finds one again after its caller restarts.
-
-```rust,no_run
-use std::path::Path;
-use std::time::{Duration, Instant};
-
-use nvx::Hypervisor;
-use nvx::activation::{MachineIdMode, View};
-use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-use nvx::host::vm::{self, VmDir};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // The caller locates OpenVMM, the guest kernel, and the Alpine initramfs, and identifies each
-    // by the SHA-256 digest that its install metadata records, such as the `SHA256SUMS` of an NVX
-    // release: here, from the command line.
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let [openvmm, kernel, initramfs, openvmm_sha256, kernel_sha256, initramfs_sha256] =
-        <[String; 6]>::try_from(arguments).map_err(|_| "expected three paths and three digests")?;
-    let runtime = Runtime {
-        identity: RuntimeIdentity::new(
-            ArtifactIdentity::sha256(&openvmm_sha256)?,
-            ArtifactIdentity::sha256(&kernel_sha256)?,
-            ArtifactIdentity::sha256(&initramfs_sha256)?,
-        ),
-        openvmm: openvmm.into(),
-        kernel: kernel.into(),
-        initramfs: initramfs.into(),
-        hypervisor: Hypervisor::from_env_or_default()?,
-        cpu_profile: None,
-        windows_breakaway: false,
-        options: LaunchOptions::default(),
-    };
-    let config = VmConfig {
-        processors: 1,
-        memory_mib: 256,
-        root: RootConfig::Blockless,
-        view: View {
-            hostname: b"example".to_vec(),
-            machine_id: MachineIdMode::Image,
-        },
-        network: None,
-        filesystem: None,
-        console: ConsoleAttachment::Disconnected,
-        boot: Some(Boot {
-            command_line: "quiet".to_owned(),
-            memory_capacity_mib: None,
-            capture: None,
-        }),
-    };
-    // The caller creates and owns the VM's private directory.
-    let directory = Path::new("example-vm");
-    vm::create_private_dir(directory)?;
-    let dir = VmDir::open(directory)?;
-    // Creation checks the whole launch and creates its log, but starts nothing; the spawn starts
-    // OpenVMM detached, and returns its verified process.
-    let launched = vm::spawn(vm::create(&runtime, &config, None, &dir)?)?;
-    // The caller speaks its own protocol with its guest at `launched.outputs.endpoint`, with the
-    // secret `launched.capability`. To stop the VM, the callback would ask the guest in that
-    // protocol to end it, and return whether it sent the request; this one sends none, so the
-    // stop ends OpenVMM's verified process once the grace period has passed, unless it exited.
-    let grace = Instant::now() + Duration::from_secs(10);
-    let stopped = vm::stop(
-        &launched.process,
-        &launched.outputs,
-        |_| false,
-        grace,
-        grace + Duration::from_secs(10),
-    )?;
-    println!("forced: {}, report: {:?}", stopped.forced, stopped.report?);
-    Ok(())
-}
-```
-
 ## Errors
 
-Every fallible operation returns `nvx::Error`, which only `nvx` makes: a
-message that callers can show as is, an `ErrorKind`, and an optional cause.
-Callers tell errors apart by their kinds, and by stable fragments of their
-messages, such as the names of options, fields, files, and processes, since the
-wording of a message may change.
+Most fallible operations return `nvx::Error`, which only `nvx` makes: a
+message that callers can show as is, an `ErrorKind`, and an optional cause;
+[`nvx::Error`](#nvxerror) names those that return errors of their own.
+Callers of the library tell errors apart by their kinds alone, since the
+wording of a message may change; callers of the CLI also have its codes.
 
 | `ErrorKind` | Meaning |
 | --- | --- |
 | `Unavailable` | A missing or unusable artifact, hypervisor, or release, or an unsupported host |
 | `Unsupported` | A request that NVX refuses: a value that it does not accept, such as a malformed or out-of-range one, options that it cannot combine, or a request that it cannot represent or enforce, such as a policy beyond a limit of OpenVMM or the guest agent |
 | `Exited` | The VM's OpenVMM process exited |
-| `StillRunning` | A stop could not confirm the VM process's exit, so the caller keeps its verified process |
+| `StillRunning` | The exit of a VM's process could not be confirmed, so the VM may still run: a stop's, whose caller keeps its verified process, or that of the process that a failed spawn started and tried to end |
 | `Io` | A host I/O failure, or state that NVX recorded on the host and cannot read |
 | `NotFound` | State that an operation names and that does not exist on the host, such as the store of a sandbox that was never created or that a removal deleted |
 | `Protocol` | A control session that failed, or a request that the guest agent refused |
@@ -2394,7 +1940,7 @@ has.
 | `unavailable` | `Unavailable` | A dependency is missing or unusable, other than as a finer code says: install metadata, the hypervisor, a release, a distro layer or scratch image that the request names, or a host that NVX does not support |
 | `unsupported` | `Unsupported` | NVX refuses the request: options that it cannot combine, a value that it does not accept, or a policy that it cannot represent or enforce. The message names the option or field |
 | `exited` | `Exited` | OpenVMM exited, as when a start fails, whose message names the category and status of OpenVMM's outcome report when it has one |
-| `still-running` | `StillRunning` | A stop could not confirm the VM process's exit, so the caller keeps its verified process |
+| `still-running` | `StillRunning` | The exit of a VM's process could not be confirmed, as by a stop or after a start whose launch failed, so the VM may still run |
 | `io` | `Io` | A host I/O operation failed, or state that NVX recorded on the host is unreadable or malformed |
 | `not-found` | `NotFound` | Other state that the operation names does not exist on the host |
 | `protocol` | `Protocol` | The control session failed otherwise: the peer violated the protocol, reset the session, or failed authentication |
@@ -2412,8 +1958,8 @@ has.
 | `sandbox-busy` | `TimedOut` | Another lifecycle transition, or `exec`, of the sandbox held its lock until the deadline passed |
 | `runtime-mismatch` | `RuntimeMismatch` | The sandbox's VM runs under another runtime identity than the artifacts', whose differing parts the message names, so only a stop, which terminates it, applies |
 | `vmm-indeterminate` | `Other` | Whether the OpenVMM process of the sandbox runs cannot be determined, so its records remain for a later attempt |
-| `format-unsupported` | `Io` | A record or report has a format or schema version that this build does not read, such as the state of a sandbox that another build provisioned or started |
-| `foreign-files` | `Other` | A directory of NVX's state, such as a sandbox's state directory or a template store, holds files that NVX does not own, which the message names and NVX keeps |
+| `format-unsupported` | `Io` | A record or report has a format or schema version that this build does not read, such as the configuration of a sandbox that another build provisioned, or a snapshot's key or manifest |
+| `foreign-files` | `Other` | A directory of NVX's state, such as a sandbox's state directory or a restored sandbox's view of its snapshot, holds files that NVX does not own, which the message names and NVX keeps |
 | `outcome-report-exists` | `Other` | A file exists at the path of the outcome report to write |
 | `scratch-claimed` | `TimedOut` | Another sandbox claims the scratch image |
 | `exec-refused` | `Protocol` | The guest agent refused the workload, as for a working directory that it cannot use |
@@ -2421,24 +1967,21 @@ has.
 
 ## Guest binaries
 
-The `guest` feature adds the programs that run in NVX's Linux guests: the
-`nvx::guest` module and one binary per program. The Alpine, Ubuntu, and Azure
-Linux images ship all ten at their established `/sbin/nvx-*` paths. The
-module's libraries are not programs: `terminal` opens the terminal on which an
-agent serves its session, and `mappings` describes host mappings and keeps the
-account of a host's mapping table. NVX's own guest space is nvx-init's internal
+The `guest` feature adds the programs that run in NVX's Linux guests, one
+binary per program, each of which calls the hidden `main` of its program's
+module of `nvx::guest`. The Alpine, Ubuntu, and Azure Linux images ship all ten
+at their established `/sbin/nvx-*` paths. The rest of `nvx::guest` is the
+library on which they and any other guest init or agent build, as the
+[module table](#layout) lists, and NVX's own guest space is nvx-init's internal
 reference code, private to the crate, as [nvx-init's space](#nvx-inits-space)
-tells: the mapper of `mappings` mounts host mappings beneath the descriptors of
-the roots that its caller names, and `root` assembles a layered root, mounts
-live shares in it through the mapper, and tears it down.
+tells.
 `nvx-managed-agent` opens its control terminal and runs direct workloads through
 nvx-init's plain-process core: each child resets its priority, drops its
 credentials and capabilities, and enters its working directory before exec.
 Each execution ends its process group, including on normal completion, without
 cgroups, namespaces, limits, or a privilege-dropping helper. It applies its
 host mapping table through the table of `mappings` and nvx-init's mapper, from
-its mount of the host's export, beneath `/` in direct mode, and any other guest
-init or agent can use the table and the mapping values too.
+its mount of the host's export, beneath `/` in direct mode.
 Any guest init or agent can also run the boot steps of `nvx-time` and the steps
 of `nvx-reseed` in its own process, through the
 `nvx::guest::time` and `nvx::guest::reseed` calls, on which both programs run,
@@ -2447,8 +1990,6 @@ and a template's guest captures before its root's assembly through
 and, in each clone, repairs its restore: it activates the restore's memory
 target, reseeds the kernel's random number generator, and finishes the restore,
 as `nvx-snapshot` does.
-Nor is the private `gpt` module a program: it reads the partition table of a GPT
-disk's block device.
 
 | Binary | Program |
 | --- | --- |
@@ -2513,130 +2054,25 @@ select.
 ### nvx-init's space
 
 nvx-init's space, the root that it assembles and what it mounts in it, is NVX's
-internal reference code, private to the crate: `nvx::guest::root`,
-`nvx::guest::view`, `nvx::guest::gpt`, the mapper of `nvx::guest::mappings`, and
-the application of `nvx::guest::activation`, which nvx-init and NVX's managed
-agent use. The
-[guest-agent guidelines](../doc/guest-agent-guidelines.md#build-the-space) give
-the rules that it keeps, which another init's space may adapt.
+internal reference code, private to the crate, which nvx-init and NVX's managed
+agent use: `guest::root` assembles a layered root over its upper, mounts the
+runtime's file systems and live shares in it and the host's export beside it,
+switches into it once, and tears it down; `guest::view` sets the VM-wide
+hostname, machine ID, and resolver file, whose binds the root owns;
+`guest::gpt` reads the partition table of a GPT disk through its block device,
+with `nvx::gpt`; the mapper of `guest::mappings` mounts host mappings beneath
+the descriptors of the roots that its caller names; and the application of
+`guest::activation` assembles a restored VM's root and applies its view from
+its activation record, without starting a process. The
+[guest-agent guidelines](../doc/guest-agent-guidelines.md#build-the-space)
+give its interface and the rules that it keeps, which another init's space may
+adapt.
 
-#### `nvx::guest::root`
-
-The operations of a layered root, whether or not their caller is PID 1.
-
-`assemble`: the `Assembly`'s block devices, found by their MMIO windows, checked
-against their roles' access modes and their expected sizes, and flushed, and the
-`Root` that it mounts, at a runtime directory, a canonical path that no symbolic
-link leads through, that it holds exclusively until its teardown, where nothing
-is mounted already, once it has checked everything: the read-only layers of the
-`Image` that the caller names, which it never probes: an EROFS image, whose
-expected `nvx::uuid::Uuid` it checks in its superblock, or a GPT disk whose
-partition table it reads and checks with `nvx::guest::gpt::read_disk`, against
-the caller's `nvx::gpt::Expected` values, whose first partition it reads, up to
-the caller's bound, as opaque bytes that it never mounts, and whose later
-partitions, at least one, hold ext4 layers that it mounts `ro,nosuid,nodev` with
-`errors=remount-ro`, so that an error that the kernel finds in a layer fails the
-operation that found it, rather than panic the guest, as the layer's superblock
-may ask, from the block devices that the kernel created when it found the disk,
-once their superblocks show that no journal needs a recovery, which their
-read-only device can't take, partition 2's at the overlay's base and the last
-partition's at its top, under an overlay mounted `nosuid,nodev` with the one
-option set of the caller's `OverlayMode`, `metacopy=on,xino=on` or, for lowers
-that may carry untrusted overlay xattrs, `metacopy=off,redirect_dir=nofollow`,
-with no fallback, whose upper and work directories are on the `Upper`: an ext4
-scratch mounted `nosuid,nodev`, whose superblock it checks for a journal that
-the caller's `Journal` policy forbids, or a tmpfs mounted `nosuid,nodev` with
-`size=N%` for the caller's cap of N percent of the guest's memory, which it
-refuses outside 1 to 90 before anything changes, or else at the kernel's
-default size. It refuses overlay options longer than
-`MOUNT_OPTIONS_LIMIT`, the most that a mount passes, which, below `/run/nvx`,
-fit up to 195 layers of a GPT disk, and an overlay that the kernel's mount table
-shows read-only or without the mode's options in effect, since the kernel mounts
-one so, rather than fail, when its upper can't hold its work directory or its
-extended attributes.
-
-`Root::mount_share` and `Root::mount_aggregate`: virtio-fs live shares at
-targets in the root that it checks, against the targets that `protocol::share`
-reserves among others, with one aggregate per root, which it attaches through
-its `mappings::Mapper` beneath the overlay, with NVX's container root's reserved
-targets: a share's device mounted out of the root, then moved onto its target,
-and a copy of each child's entry of the aggregate.
-
-`Root::mount_export`: the host export, the aggregate device of
-`protocol::export`, one per root, mounted `nosuid,nodev` with the access of its
-`ExportMode` at `hostfs/root` in the runtime directory, out of the root, below a
-directory that only root may enter, whose root it returns as the `SourceRoot` of
-the caller's mappings, which the caller's own mapper applies. A share, a child,
-or the export that fails latches the root.
-
-`Root::mount_runtime`: the runtime's file systems, which an init mounts once
-for its VM, before the root's first live share, after it makes every
-mount of the root's tree `nosuid,nodev`: procfs at `/proc`, sysfs at `/sys`,
-read-only, a tmpfs at `/dev` with an execution's device nodes and links, devpts
-at `/dev/pts`, and tmpfs at `/dev/shm` and `/run`, with an execution's options,
-then the time status's directory, when the caller names one, bound read-only at
-`/run/nvx/time`. It refuses a mount point that leads through a symbolic link or
-where something is mounted already, and, before it changes anything, a call
-while the root holds the runtime's mounts, whose `/dev` and `/dev/pts` a second
-restriction would make `nodev`, or a live share, since the `/run`
-tmpfs would hide one beneath `/run` from the teardown. A call that fails
-unmounts what it mounted. A later share beneath `/run` is on that
-tmpfs, which the root's mapper owns, as a guest's mapper owns its `/tmp`.
-Each attachment is checked at its named target before it is recorded. A runtime
-mount whose attachment fails and which cannot be detached keeps its mount
-descriptor, so rollback and teardown can retry cleanup without trusting its
-original path.
-
-`Root::switch`: the switch into the root, which an init makes once for its VM:
-it moves the root's mount onto `/`, then makes the root the caller's root
-directory with `chroot`, and its working directory with `chdir`. Once the mount
-is on `/`, the root has switched for good: a second switch and the teardown are
-refused, and dropping the root unmounts nothing, while descriptors opened before
-the switch, such as a `TargetRoot` and a `SourceRoot`, still map. A move that
-fails leaves the root where it was.
-
-`Root::teardown`: the view's binds, then the shares in reverse order, a runtime mount whose
-attachment failed and which could not be detached, then the mounts of an
-aggregate, of the export, and of the runtime, the later first, the overlay,
-the layers from the top down, and the upper, with every failed sync or unmount
-reported. An
-ext4 scratch's file system is synced before its unmount, since a mount namespace
-that copied the root's mounts keeps them, unsynced, after this one unmounts
-them, and a scratch whose sync fails stays mounted.
-
-Each failure is a typed `Error`, or a `SwitchError` for the switch. The
-operations collect no child's status, change the caller's root only by the
-switch and never its credentials, start no async runtime, and never power the VM
-off.
-
-#### `nvx::guest::view`
-
-`apply(&mut Root, &activation::View, dns)` sets the current UTS namespace's
-hostname from the view's bytes. Image mode leaves `/etc/machine-id` untouched;
-generated mode writes a new UUID at `MACHINE_ID_FILE` in the runtime directory
-and binds it read-only over the image's ID. Optional DNS writes one server in
-`RESOLVER_FILE` and binds it read-only over `/etc/resolv.conf`.
-`nvx::guest::activation` re-exports both file constants.
-
-The root owns every bind, including an attachment left by a failed call.
-Teardown before the switch removes them; after the switch teardown refuses
-and drop unmounts nothing. A view is attempted once per root, before its
-switch. Refusals return the crate's `Error` with kind `Unsupported`, and
-system failures with kind `Io`; an error does not restore the old hostname
-or remove generated files. The activation record's hostname limit and
-machine-ID modes are unchanged.
-
-#### `nvx::guest::gpt`
-
-`read_disk`, through which `nvx::guest::root` reads its disks: the partition
-table of a GPT disk, read and checked with
-`nvx::gpt`'s `Disk::read` through the disk's block device, which the caller
-opened, at the logical block size and size that `BLKSSZGET` and `BLKGETSIZE64`
-report, with the caller's `Expected` values, such as the disk GUID that a boot
-parameter names. It only reads the device, at explicit offsets, so it never
-moves the file's position. It neither compares the partitions that the kernel
-created with the table nor asks the kernel to reread the table. Each failure is
-a typed `DeviceError`.
+GPT lower layers use `noload,errors=remount-ro`: the kernel neither loads nor
+replays their journals, because even a journal whose file system does not
+request recovery can cause an unbounded scan. The assembly still refuses any
+layer whose superblock requests recovery, before mounting anything. This
+policy does not change EROFS layers or writable ext4 scratches.
 
 ## Testing
 
@@ -2702,20 +2138,24 @@ python3 ../scripts/nvx.py test-guest-binaries \
 ```
 
 The [security checklist](tests/security_checklist.rs) checks, through the
-public API alone and without a VM, each security requirement that the host's
-documentation states: the guest targets of an export and a read-only path
-inside a writable one, the exported objects that each start checks again, a
-VM's private directory and its new private log, and a snapshot's strict
-directory. The exit proof of a saved VM, the owner of its endpoint, and its
-recovery from the saved values need a process that the test names by its start
-time, which only the crate's private platform layer reads, so the unit tests of
-`nvx::host::vm` check them, with an idle copy of their test binary as the VM's
-process. The checks that NVX makes of a restore need a captured snapshot,
-so the unit tests of `nvx::host::vm`, `nvx::host::snapshot`, and
-`nvx::host::restore` check them. The checks of a staged image and the claim of
-a scratch image, which the CLI keeps in directories that only its own account
-can write, are private to the crate, so the unit tests of its distro and
-scratch bindings check them.
+public API alone and without a VM, the security requirements that the host's
+documentation states of a VM's directory and outputs and of a snapshot's
+directory: a VM's directory is private, and creating or opening a shared one
+fails and leaves it as it was; a launch takes a new private log, and keeps every
+entry that it did not create; and a snapshot opens only from a snapshot's
+directory, and changes nothing. The checks of an export's guest targets, its read-only paths inside
+writable ones, and its owner, and of the exported objects that each start
+checks again, which only NVX's CLI plans and checks, are unit tests of
+`nvx::host::filesystem`. The exit proof of a saved VM, the owner of its
+endpoint, and its recovery from the saved values need a process that the test
+names by its start time, which only the crate's private platform layer reads,
+so the unit tests of `nvx::host::vm` check them, with an idle copy of their
+test binary as the VM's process. The checks that NVX makes of a restore need a
+captured snapshot, so the unit tests of `nvx::host::vm`, `nvx::host::snapshot`,
+and `nvx::host::restore` check them. The checks of a staged image and the claim
+of a scratch image, which the CLI keeps in directories that only its own
+account can write, are private to the crate, so the unit tests of its distro
+and scratch bindings check them.
 
 Two examples compile the documented workflows through the public API alone,
 and nothing runs them: [`host-workflows`](examples/host-workflows.rs), a cold
