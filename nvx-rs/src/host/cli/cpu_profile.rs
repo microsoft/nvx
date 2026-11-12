@@ -7,7 +7,9 @@
 //! OpenVMM submodule: its ID, the vendor of its CPUs, and its generation's name and CPU models,
 //! each a display family, a display model, and the first and last of its steppings. The revisions
 //! of a generation's profile share its generation, which the guidance lists once.
-//! `tests/openvmm_cpu_profiles.rs` compares the copy with the submodule's documents.
+//! ARM identities retain their own schema and digest in the same copy; they are not CPUID
+//! generations and do not enter this x86 guidance. `tests/openvmm_cpu_profiles.rs` compares both
+//! kinds of identity with the submodule's documents.
 //! [`HostCpu::current`] identifies the host CPU with CPUID, as OpenVMM does.
 //!
 //! On an Intel or AMD CPU that no built-in profile serves, `--cpu-profile auto`, the default, falls
@@ -117,7 +119,16 @@ impl Profile {
 
 /// Returns the built-in CPU profiles of [`CATALOG`].
 fn catalog() -> Vec<Profile> {
-    serde_json::from_str(CATALOG).expect("cpu_generations.json lists the built-in CPU profiles")
+    let documents: Vec<serde_json::Value> = serde_json::from_str(CATALOG)
+        .expect("cpu_generations.json lists the built-in CPU profiles");
+    documents
+        .into_iter()
+        .filter(|document| document["profile"]["schema"] != "nvx.arm64.cpu.v1")
+        .map(|document| {
+            serde_json::from_value(document)
+                .expect("cpu_generations.json lists valid CPUID profile identities")
+        })
+        .collect()
 }
 
 /// Returns the generations of the built-in profiles in `catalog` as the guidance lists them, such

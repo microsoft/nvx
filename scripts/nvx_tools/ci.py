@@ -34,16 +34,19 @@ REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "nvx-rs": "NVX_RS_RESULT",
     "build-nvx-rs-linux-musl": "BUILD_NVX_RS_LINUX_MUSL_RESULT",
     "build-nvx-rs-windows-msvc": "BUILD_NVX_RS_WINDOWS_MSVC_RESULT",
+    "build-nvx-rs-windows-aarch64-msvc": "BUILD_NVX_RS_WINDOWS_AARCH64_MSVC_RESULT",
     "nvx-cli-linux": "NVX_CLI_LINUX_RESULT",
     "nvx-cli-windows": "NVX_CLI_WINDOWS_RESULT",
     "openvmm-changes": "CHANGES_RESULT",
     "artifacts": "ARTIFACTS_RESULT",
     "distro-artifacts": "DISTRO_ARTIFACTS_RESULT",
+    "artifacts-aarch64": "ARTIFACTS_AARCH64_RESULT",
     "debug-kernel": "DEBUG_KERNEL_RESULT",
     "guest-artifact-reuse": "GUEST_ARTIFACT_REUSE_RESULT",
     "build-openvmm-linux-gnu": "BUILD_LINUX_GNU_RESULT",
     "build-openvmm-linux-musl": "BUILD_LINUX_MUSL_RESULT",
     "build-openvmm-windows-msvc": "BUILD_WINDOWS_MSVC_RESULT",
+    "build-openvmm-windows-aarch64-msvc": "BUILD_WINDOWS_AARCH64_MSVC_RESULT",
     "openvmm-ci": "OPENVMM_CI_RESULT",
     "nvx-microvm-tests-kvm": "MICROVM_KVM_RESULT",
     "nvx-microvm-tests-mshv": "MICROVM_MSHV_RESULT",
@@ -52,6 +55,9 @@ REQUIRED_CI_RESULT_ENVIRONMENTS = {
     "nvx-microvm-guests-mshv": "MICROVM_GUESTS_MSHV_RESULT",
     "nvx-microvm-guests-whp": "MICROVM_GUESTS_WHP_RESULT",
     "nvx-microvm-adapter-whp": "MICROVM_ADAPTER_WHP_RESULT",
+    "nvx-microvm-tests-whp-aarch64": "MICROVM_WHP_AARCH64_RESULT",
+    "nvx-microvm-adapter-whp-aarch64": "MICROVM_ADAPTER_WHP_AARCH64_RESULT",
+    "nvx-microvm-repeat-whp-aarch64": "MICROVM_REPEAT_WHP_AARCH64_RESULT",
     "nvx-microvm-debug-kvm": "MICROVM_DEBUG_KVM_RESULT",
     "nvx-microvm-debug-mshv": "MICROVM_DEBUG_MSHV_RESULT",
     "nvx-microvm-debug-whp": "MICROVM_DEBUG_WHP_RESULT",
@@ -94,6 +100,11 @@ REQUIRED_CI_MICROVM_TEST_JOBS = (
     "nvx-microvm-guests-whp",
     "nvx-microvm-adapter-whp",
 )
+REQUIRED_CI_ARM_MICROVM_JOBS = (
+    "nvx-microvm-tests-whp-aarch64",
+    "nvx-microvm-adapter-whp-aarch64",
+)
+REQUIRED_CI_ARM_REPETITION_JOB = "nvx-microvm-repeat-whp-aarch64"
 # Pull requests run the CI debug kernel on MSHV, merge groups run it on KVM,
 # and dev pushes and full runs run it on every backend.
 REQUIRED_CI_MICROVM_DEBUG_JOBS = ("nvx-microvm-debug-mshv",)
@@ -437,6 +448,30 @@ def required_ci_expected_results(
         REQUIRED_CI_DISTRO_ARTIFACT_JOB: (
             "success" if run_guest_artifacts else "skipped"
         ),
+        "artifacts-aarch64": (
+            "success"
+            if changes.run_microvm_tests and run_guest_artifacts
+            else "skipped"
+        ),
+        "build-openvmm-windows-aarch64-msvc": (
+            "success"
+            if repository_jobs_enabled
+            and changes.run_microvm_tests
+            and run_openvmm_binaries
+            else "skipped"
+        ),
+        "build-nvx-rs-windows-aarch64-msvc": (
+            "success"
+            if repository_jobs_enabled and changes.run_microvm_tests
+            else "skipped"
+        ),
+        REQUIRED_CI_ARM_REPETITION_JOB: (
+            "success"
+            if event_name in CI_FULL_RUN_EVENTS
+            and repository_jobs_enabled
+            and run_microvm_tests
+            else "skipped"
+        ),
         REQUIRED_CI_DEBUG_KERNEL_JOB: "success" if run_guest_artifacts else "skipped",
         # A merge group skips the rehearsal, which its pull request's run made.
         REQUIRED_CI_GUEST_ARTIFACT_REUSE_JOB: (
@@ -480,6 +515,14 @@ def required_ci_expected_results(
                 else "skipped"
             )
             for job in REQUIRED_CI_MICROVM_TEST_JOBS
+        }
+    )
+    expected.update(
+        {
+            job: "success"
+            if repository_jobs_enabled and run_microvm_tests
+            else "skipped"
+            for job in REQUIRED_CI_ARM_MICROVM_JOBS
         }
     )
     if event_name == "pull_request":

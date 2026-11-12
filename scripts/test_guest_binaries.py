@@ -6,12 +6,13 @@ import io
 import json
 import os
 import re
+import shlex
 import struct
 import sys
 import tempfile
 import unittest
 from collections.abc import Generator, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,7 @@ from nvx_tools import (  # noqa: E402
     managed_exec_tests,
     microvm_tests,
     sandbox_lifecycle_tests,
+    time_abi,
     ubuntu,
 )
 from nvx_tools.build_constants import (  # noqa: E402
@@ -1193,18 +1195,27 @@ class GuestBinaryArchitectureTests(unittest.TestCase):
                 ),
             )
 
-    def test_arm_cold_boot_inventory_keeps_required_time_and_omits_diagnostics(self):
+    def test_arm_cold_boot_inventory_keeps_time_and_warp_but_omits_x86_io(self):
         self.assertIs(
             guest_binaries.guest_binary_inventory(),
             GuestRustBuildConstants.BINARIES,
         )
         inventory = guest_binaries.guest_binary_inventory("aarch64")
-        self.assertEqual(len(inventory), 7)
+        self.assertEqual(len(inventory), 8)
         self.assertIn("nvx-time", inventory)
+        self.assertIn("nvx-time-probe", inventory)
         self.assertIn("nvx-init", inventory)
         self.assertIn("nvx-exit", inventory)
-        for binary in ("nvx-mmio-write", "nvx-device-io", "nvx-time-probe"):
+        for binary in ("nvx-mmio-write", "nvx-device-io"):
             self.assertNotIn(binary, inventory)
+
+    def test_guest_producers_include_the_shared_doctor_and_smp_warp_dependency(self):
+        executable = PurePosixPath(shlex.split(time_abi.warp_probe_command())[0]).name
+        for architecture in ("x86_64", "aarch64"):
+            with self.subTest(architecture=architecture):
+                self.assertIn(
+                    executable, guest_binaries.guest_binary_inventory(architecture)
+                )
 
     def test_docker_architecture_input_reuses_the_shared_producer_and_export(self):
         dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(

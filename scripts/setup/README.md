@@ -94,8 +94,22 @@ $token = $null
 
 Both scripts verify the Actions runner package against the manifest's
 checksum. Linux runner labels start with `linux`, the selected backend, and
-`virtual-machine`; Windows labels start with `windows`, `whp`, and
-`virtual-machine`. The scripts also assign exactly one runner role. By default
+`virtual-machine`; Windows labels start with `windows`, `whp`, and the selected
+`-HostType` (`virtual-machine` by default on x86). Windows ARM64 runner setup
+requires an explicit `-HostType baremetal` or `-HostType virtual-machine`; it
+never infers the host type from the ISA. Windows setup selects native pinned
+ARM64 or x64 tools and Visual Studio targets from the OS architecture, and
+rejects an emulated PowerShell process. GitHub also supplies its native `ARM64`
+or `X64` runner label. Use that label in job selectors rather than relying on
+the OS/backend labels to distinguish architectures. ARM64 cold microVM jobs
+do not require the x86 PCAT/SVGA firmware check.
+
+These are provisioning capabilities, not evidence that an ARM64 runner is
+registered, service-qualified, or admitted by repository policy. Runner
+registration and required-check deployment need the corresponding maintainer
+permissions and a separately qualified service environment.
+
+The scripts also assign exactly one runner role. By default
 they add `general`, which every non-benchmark backend job requires.
 `--benchmark-runner` on Linux and `-BenchmarkRunner` on Windows add
 `benchmark` instead, never `general`. Exactly one runner of each backend's pool

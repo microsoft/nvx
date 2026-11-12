@@ -2834,6 +2834,7 @@ def run_guest_script(
     host_state_on_timeout: Callable[[subprocess.Popen[bytes]], str] | None = None,
     on_stderr: Callable[[bytes], None] | None = None,
     expected_exit_status: int = 0,
+    architecture: str | None = None,
 ) -> GuestCommandResult:
     """Run ``script`` once the guest boots and wait for ``completion_marker``.
 
@@ -2857,6 +2858,7 @@ def run_guest_script(
     then holds alone, and the log and the error reports interleave the two
     streams by whole lines. ``SeparatedOutput`` keeps the last MiB of each.
     """
+    monitor = TimeAbiMonitor(command, architecture=architecture)
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     started_ns = time.perf_counter_ns()
@@ -2867,7 +2869,6 @@ def run_guest_script(
         separate_stderr=on_stderr is not None,
     )
     process = interaction.process
-    monitor = TimeAbiMonitor(command)
     query_status = time_abi_status and monitor.cold_boot
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)
@@ -4073,15 +4074,23 @@ def benchmark_device_io_workload(
 def smp_probe_script(
     processors: int,
     *,
+    architecture: str = "x86_64",
     exit_guest: bool = True,
     network_gateway: str | None = None,
     ioapic_irq: int | None = None,
 ) -> str:
     if processors not in (1, 2, 4, 8):
         raise ValueError("microVM SMP probe supports 1, 2, 4, or 8 vCPUs")
+    if architecture not in ("x86_64", "aarch64"):
+        raise ValueError(f"unsupported SMP probe architecture: {architecture}")
     if (network_gateway is None) != (ioapic_irq is None):
         raise ValueError("network gateway and IOAPIC IRQ must be specified together")
-    apic_ids = ",".join(str(cpu) for cpu in range(processors))
+    if architecture == "aarch64" and network_gateway is not None:
+        raise ValueError("the IOAPIC SMP network probe is x86-only")
+    apic_ids = ",".join(
+        f"0x{cpu:016x}" if architecture == "aarch64" else str(cpu)
+        for cpu in range(processors)
+    )
     network_probe = ""
     if network_gateway is not None and ioapic_irq is not None:
         network_probe = _render_benchmark_script(
@@ -4091,6 +4100,8 @@ def smp_probe_script(
         )
     rendered = _render_benchmark_script(
         "smp-probe.sh.in",
+        ARCHITECTURE=architecture,
+        IDENTITY_LIST_NAME="dt_mpidrs" if architecture == "aarch64" else "apic_ids",
         PROCESSORS=str(processors),
         APIC_IDS=apic_ids,
         NETWORK_PROBE=network_probe,

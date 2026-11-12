@@ -151,12 +151,12 @@ pub(crate) use rooted::{
     set_mount_attributes, unmount_beneath,
 };
 pub(crate) use scheduler::{
-    AffinityGuard, IdlePriority, pin_current_thread, promote_all_threads, thread_count,
+    AffinityGuard, IdlePriority, current_affinity, pin_current_thread, promote_all_threads,
+    thread_count,
 };
 #[cfg(target_arch = "x86_64")]
 pub(crate) use scheduler::{
-    SchedulingPolicy, current_affinity, current_cpu, current_thread, scheduling_policy,
-    set_scheduling_policy,
+    SchedulingPolicy, current_cpu, current_thread, scheduling_policy, set_scheduling_policy,
 };
 pub(crate) use secret::zeroize;
 #[cfg(any(target_arch = "x86_64", test))]

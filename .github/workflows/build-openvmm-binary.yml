@@ -3,6 +3,11 @@ name: Build OpenVMM binary
 on:
   workflow_call:
     inputs:
+      architecture:
+        description: Native build runner ISA
+        required: false
+        type: string
+        default: x86_64
       display-name:
         description: Platform name shown in the job list
         required: true
@@ -46,6 +51,7 @@ jobs:
         uses: ./.github/actions/validate-runner
         with:
           backend: ${{ inputs.backend }}
+          architecture: ${{ inputs.architecture }}
 
       - name: Prepare sccache
         uses: ./.github/actions/sccache
@@ -58,6 +64,7 @@ jobs:
           ssh-key: ${{ secrets.OPENVMM_DEPLOY_KEY }}
           backend: ${{ inputs.backend }}
           binary-path: ${{ inputs.binary }}
+          architecture: ${{ inputs.architecture }}
 
       - name: Report sccache
         if: always()

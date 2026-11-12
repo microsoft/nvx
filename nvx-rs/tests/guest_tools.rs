@@ -1245,7 +1245,7 @@ fn ingress_start_fails_when_the_announcer_does_not_start() {
     );
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 /// Returns the first CPU that this process may run on.
 fn first_allowed_cpu() -> usize {
     let affinity = nix::sched::sched_getaffinity(nix::unistd::Pid::from_raw(0)).unwrap();
@@ -2150,6 +2150,27 @@ fn time_test_mode_covers_checks_events_records_and_workers() {
                 .any(|window| window == b"code=G_CONFORMANCE_C9")
         );
     }
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_coldboot_warp_has_a_real_cli_entrypoint() {
+    assert_eq!(
+        run("nvx-time-probe", ["version"]),
+        (Some(0), b"nvx-time-probe 1.1\n".to_vec(), Vec::new())
+    );
+    let cpu = first_allowed_cpu().to_string();
+    let (status, stdout, stderr) = run(
+        "nvx-time-probe",
+        ["warp", "--duration-ms", "1", "--cpus", &cpu],
+    );
+    assert_eq!(status, Some(0), "{}", String::from_utf8_lossy(&stderr));
+    assert!(stderr.is_empty());
+    let text = String::from_utf8(stdout).unwrap();
+    assert!(text.contains("counter_hz_source=cntfrq_el0"));
+    assert!(!text.contains("tsc_hz"));
+    assert!(text.contains("pairs=0 verdict=PASS bound_ns=1000"));
+    assert!(text.contains("conclusive=1"));
 }
 
 #[test]

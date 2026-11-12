@@ -405,7 +405,19 @@ class MicrovmTestParserTests(unittest.TestCase):
         args = nvx.parse_args(["test-microvm", "--backend", "mshv"])
 
         self.assertIsNone(args.scenario)
-        self.assertEqual(args.processors, [1, 2, 4, 8])
+        self.assertIsNone(args.processors)
+        self.assertEqual(args.managed_root, "initramfs")
+        self.assertFalse(args.cold_only)
+        self.assertIsNone(args.start_stop_cycles)
+        self.assertEqual(
+            set(microvm_tests.MICROVM_TEST_SCENARIOS),
+            microvm_tests.COLD_ONLY_SCENARIOS
+            | set(microvm_tests.COLD_DEFERRED_SCENARIOS),
+        )
+        self.assertFalse(
+            microvm_tests.COLD_ONLY_SCENARIOS
+            & set(microvm_tests.COLD_DEFERRED_SCENARIOS)
+        )
         self.assertEqual(args.guest, "alpine")
         self.assertIsNone(args.memory_mib)
         self.assertEqual(args.timeout, 60.0)
@@ -430,6 +442,54 @@ class MicrovmTestParserTests(unittest.TestCase):
         self.assertEqual(args.scenario, ["smp"])
         self.assertEqual(args.processors, [2, 8])
         self.assertEqual(args.output_dir, Path("results"))
+        cold = nvx.parse_args(
+            [
+                "test-microvm",
+                "--backend",
+                "whp",
+                "--architecture",
+                "aarch64",
+                "--scenario",
+                "interrupt-map",
+                "--cold-only",
+            ]
+        )
+        self.assertTrue(cold.cold_only)
+        self.assertEqual(cold.architecture, "aarch64")
+        for scenario, cycles in (("smp", 10), ("sandbox-ram-upper", 1)):
+            rejected = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--scenario",
+                    scenario,
+                    "--start-stop-cycles",
+                    str(cycles),
+                ]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file") as require_file,
+                self.assertRaisesRegex(
+                    microvm_tests.ScriptError, "requires explicit|at least two"
+                ),
+            ):
+                microvm_tests.run(rejected)
+            require_file.assert_not_called()
+        for selection in ([], ["--scenario", "snapshot-tiers"]):
+            rejected = nvx.parse_args(
+                ["test-microvm", "--backend", "whp", "--cold-only", *selection]
+            )
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file") as require_file,
+                self.assertRaisesRegex(
+                    microvm_tests.ScriptError, "requires explicit|no maintained cold"
+                ),
+            ):
+                microvm_tests.run(rejected)
+            require_file.assert_not_called()
 
     def test_parser_accepts_ubuntu_guest_profile(self):
         args = nvx.parse_args(
@@ -1538,7 +1598,9 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
         for (_, _, name, field), digit in zip(_RUNTIME_PROVENANCE, "123", strict=True)
     }
 
-    def _run(self, root: Path, fake: _FakeSandboxCli) -> Path:
+    def _run(
+        self, root: Path, fake: _FakeSandboxCli, *, start_stop_cycles: int | None = None
+    ) -> Path:
         distro = root / "ubuntu-distro.erofs"
         distro.write_bytes(b"distro")
         template = root / "ubuntu-smoke-scratch.ext4"
@@ -1593,7 +1655,10 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
             ),
         ):
             sandbox_lifecycle_tests.run_sandbox_lifecycle(
-                "whp", timeout=2, output_dir=output_dir
+                "whp",
+                timeout=2,
+                output_dir=output_dir,
+                start_stop_cycles=1 if start_stop_cycles is None else start_stop_cycles,
             )
         return output_dir
 
@@ -1666,6 +1731,37 @@ class PublicSandboxLifecycleTests(unittest.TestCase):
         self.assertIn(
             b"NVX-UBUNTU-SANDBOX-ENTRY-OK", evidence["sandbox-lifecycle-probe.log"]
         )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = _FakeSandboxCli()
+            output_dir = self._run(root, fake, start_stop_cycles=10)
+            repeated = json.loads(
+                (output_dir / "sandbox-lifecycle-checks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            cycle_checks = [record for record in repeated if "cycle" in record]
+            for cycle in range(1, 11):
+                operations = [
+                    record["operation"]
+                    for record in cycle_checks
+                    if record["cycle"] == cycle
+                    and record["expected_returncode"] == 0
+                    and record["operation"] in ("start", "stop")
+                ]
+                self.assertEqual(operations, ["start", "stop"])
+                self.assertTrue(
+                    (
+                        output_dir / f"sandbox-lifecycle-cycle-{cycle:03}-outcome.json"
+                    ).is_file()
+                )
+            states = {
+                record["argv"][record["argv"].index("--state-dir") + 1]
+                for record in cycle_checks
+            }
+            self.assertEqual(len(states), 1)
+            self.assertFalse(any(fake.running.values()))
+            self.assertEqual(list(root.glob("nvx-public-lifecycle-*")), [])
 
     def test_acceptance_detects_lifecycle_regressions(self):
         regressions = {
@@ -2808,7 +2904,13 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
         "deprovision",
     ]
 
-    def _run(self, root: Path, fake: _FakeRamUpperSandboxCli) -> Path:
+    def _run(
+        self,
+        root: Path,
+        fake: _FakeRamUpperSandboxCli,
+        *,
+        start_stop_cycles: int | None = None,
+    ) -> Path:
         distro = root / "ubuntu-distro.erofs"
         distro.write_bytes(b"distro")
         template = root / "ubuntu-smoke-scratch.ext4"
@@ -2857,7 +2959,10 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
             ),
         ):
             sandbox_ram_upper_tests.run_sandbox_ram_upper(
-                "mshv", timeout=2, output_dir=output_dir
+                "mshv",
+                timeout=2,
+                output_dir=output_dir,
+                start_stop_cycles=2 if start_stop_cycles is None else start_stop_cycles,
             )
         return output_dir
 
@@ -2905,6 +3010,36 @@ class PublicSandboxRamUpperTests(unittest.TestCase):
         self.assertEqual(
             ["--scratch" in argv for argv in launches], [True, False, False]
         )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = _FakeRamUpperSandboxCli()
+            output_dir = self._run(root, fake, start_stop_cycles=10)
+            repeated = json.loads(
+                (output_dir / "sandbox-ram-upper-checks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            cycle_checks = [record for record in repeated if "cycle" in record]
+            for cycle in range(1, 11):
+                operations = [
+                    record["operation"]
+                    for record in cycle_checks
+                    if record["cycle"] == cycle
+                    and record["operation"] in ("start", "stop")
+                ]
+                self.assertEqual(operations, ["start", "stop"])
+                self.assertTrue(
+                    (
+                        output_dir / f"sandbox-ram-upper-cycle-{cycle:03}-outcome.json"
+                    ).is_file()
+                )
+            states = {
+                record["argv"][record["argv"].index("--state-dir") + 1]
+                for record in cycle_checks
+            }
+            self.assertEqual(len(states), 1)
+            self.assertFalse(any(fake.running.values()))
+            self.assertEqual(list(root.glob("nvx-public-ram-upper-*")), [])
 
     def test_acceptance_detects_ram_upper_regressions(self):
         regressions = {
@@ -3489,6 +3624,7 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
         guest_writes_toolcache: bool = False,
         guest_links_children: bool = False,
         guest_writes_settings: bool = False,
+        cold_only: bool = False,
     ) -> list[list[str]]:
         launched: list[list[str]] = []
         children = self._children
@@ -3625,6 +3761,7 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
                 memory_mib=128,
                 timeout=40,
                 output_dir=Path(temporary),
+                cold_only=cold_only,
             )
         link, target = symlink.call_args.args
         self.assertEqual(
@@ -3713,6 +3850,11 @@ class FilesystemSharesScenarioTests(unittest.TestCase):
         self.assertIn("--mount", launched[14])
         self.assertEqual(self._children(launched[15]), every)
         self.assertEqual(self._children(launched[16]), every)
+        cold = self._run(cold_only=True)
+        self.assertEqual(len(cold), 10)
+        for command in cold:
+            self.assertNotIn("--snapshot-destination", command)
+            self.assertNotIn("--restore-snapshot", command)
 
     def test_scenario_rejects_a_write_to_the_read_only_share(self):
         with self.assertRaisesRegex(RuntimeError, "modified the read-only share"):
@@ -3742,7 +3884,9 @@ class FilesystemPolicyScenarioTests(unittest.TestCase):
             command[index + 1] for index, value in enumerate(command) if value == option
         ]
 
-    def _run(self, *, guest_writes_outside: bool = False) -> list[list[str]]:
+    def _run(
+        self, *, guest_writes_outside: bool = False, cold_only: bool = False
+    ) -> list[list[str]]:
         launched: list[list[str]] = []
         values = self._values
 
@@ -3834,6 +3978,7 @@ class FilesystemPolicyScenarioTests(unittest.TestCase):
                 memory_mib=128,
                 timeout=40,
                 output_dir=Path(temporary),
+                cold_only=cold_only,
             )
         link, target = symlink.call_args.args
         self.assertEqual((link.name, target), ("seed-link", "../seed"))
@@ -3881,6 +4026,11 @@ class FilesystemPolicyScenarioTests(unittest.TestCase):
             self._values(launched[9], "--mount-allow"),
             self._values(boot, "--mount-allow"),
         )
+        cold = self._run(cold_only=True)
+        self.assertEqual(len(cold), 6)
+        for command in cold:
+            self.assertNotIn("--snapshot-destination", command)
+            self.assertNotIn("--restore-snapshot", command)
 
     def test_scenario_rejects_a_write_outside_the_writable_paths(self):
         with self.assertRaisesRegex(RuntimeError, "outside its writable paths"):
@@ -4417,6 +4567,9 @@ class MicrovmTests(unittest.TestCase):
         self.assertEqual(preserved, self._managed_report())
 
     def test_managed_layered_inputs_reuse_the_same_authenticated_test(self):
+        def require(path: Path, _description: str) -> Path:
+            return path
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             artifacts = microvm_tests.WorkloadArtifacts(
@@ -4465,6 +4618,113 @@ class MicrovmTests(unittest.TestCase):
                     environment["NVX_MANAGED_LIFECYCLE_PREVIOUS_STATE"],
                     "present" if scratch else "absent",
                 )
+            artifacts.scratch_template.write_bytes(bytes(2048))
+            for mode, counts in itertools.product(
+                ("initramfs", "scratch", "ram"), (None, [1, 8])
+            ):
+                output = (
+                    root / f"dispatch-{mode}-{'default' if counts is None else '1-8'}"
+                )
+                options = [] if counts is None else ["--processors", "1", "8"]
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "whp",
+                        "--architecture",
+                        "aarch64",
+                        "--guest",
+                        "ubuntu",
+                        "--scenario",
+                        "managed-lifecycle",
+                        "--managed-root",
+                        mode,
+                        "--output-dir",
+                        str(output),
+                        *options,
+                    ]
+                )
+                with (
+                    patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                    patch.object(microvm_tests, "require_file", side_effect=require),
+                    patch.object(
+                        microvm_tests, "load_workload_artifacts", return_value=artifacts
+                    ) as load,
+                    patch.object(microvm_tests, "run_managed_lifecycle") as run,
+                ):
+                    self.assertEqual(microvm_tests.run(args), 0)
+                expected_counts = counts or [1]
+                states = (
+                    [None]
+                    if mode == "initramfs"
+                    else ["absent", "present" if mode == "scratch" else "absent"]
+                )
+                self.assertEqual(
+                    [call.kwargs["processors"] for call in run.call_args_list],
+                    [cpu for cpu in expected_counts for _ in states],
+                )
+                self.assertEqual(
+                    [
+                        call.kwargs["expected_previous_state"]
+                        for call in run.call_args_list
+                    ],
+                    states * len(expected_counts),
+                )
+                if mode == "initramfs":
+                    load.assert_not_called()
+                    self.assertTrue(
+                        all(
+                            call.kwargs["layered"] is None
+                            for call in run.call_args_list
+                        )
+                    )
+                    if counts is None:
+                        self.assertEqual(run.call_args.kwargs["output_dir"], output)
+                else:
+                    load.assert_called_once_with(architecture="aarch64")
+                    self.assertTrue(
+                        all(
+                            call.kwargs["layered"] == artifacts
+                            for call in run.call_args_list
+                        )
+                    )
+                for call in run.call_args_list:
+                    bootstrap = microvm_tests.BuildConfig.initramfs_config(
+                        "alpine" if mode != "initramfs" else "ubuntu", "aarch64"
+                    ).output
+                    self.assertEqual(call.args[2], bootstrap)
+                    scratch = call.kwargs["scratch"]
+                    if mode == "scratch":
+                        self.assertNotEqual(scratch, artifacts.scratch_template)
+                        self.assertEqual(scratch.read_bytes(), bytes(2048))
+                    else:
+                        self.assertIsNone(scratch)
+                executions = [
+                    record
+                    for record in _read_report(output / microvm_durations.REPORT_NAME)
+                    if record["record"] == "scenario"
+                ]
+                self.assertEqual(len(executions), len(expected_counts) * len(states))
+                self.assertTrue(
+                    all(
+                        record["architecture"] == "aarch64"
+                        and record["outcome"] == "passed"
+                        for record in executions
+                    )
+                )
+                self.assertEqual(
+                    [record["processors"] for record in executions],
+                    [[cpu] for cpu in expected_counts for _ in states],
+                )
+                if mode != "initramfs":
+                    self.assertEqual(
+                        [record["variant"] for record in executions],
+                        [
+                            f"{mode}-boot-{index}-{state}"
+                            for _ in expected_counts
+                            for index, state in enumerate(states, 1)
+                        ],
+                    )
 
     def test_managed_lifecycle_hands_the_test_an_absolute_pid_journal(self):
         # The nvx-rs test records OpenVMM in an adversarial campaign's journal
@@ -5085,6 +5345,50 @@ class MicrovmTests(unittest.TestCase):
         snapshot = process.call_args.args[0]
         self.assertIn("--snapshot-destination", snapshot)
         self.assertEqual(snapshot[snapshot.index("--network-ingress") + 1], "allow")
+
+    def test_private_network_ingress_cold_projection_keeps_all_three_policies(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(microvm_tests, "_private_ingress_port", return_value=12345),
+            patch.object(microvm_tests.socket, "socket") as listener,
+            patch.object(microvm_tests, "_run_private_ingress_guest") as guest,
+            patch.object(microvm_tests, "OpenvmmProcess") as process,
+            patch.object(
+                microvm_tests,
+                "workload_boot_command",
+                side_effect=_fresh_openvmm_command,
+            ),
+        ):
+            listener.return_value.getsockname.return_value = ("127.0.0.1", 12346)
+            listener.return_value.accept.side_effect = TimeoutError
+            microvm_tests.run_private_network_ingress(
+                Path("openvmm"),
+                Path("kernel"),
+                Path("initrd"),
+                "whp",
+                memory_mib=128,
+                timeout=5,
+                output_dir=Path(temporary),
+                cold_only=True,
+            )
+        self.assertEqual(guest.call_count, 3)
+        self.assertEqual(
+            [
+                (call.kwargs["ingress"], call.kwargs["expect"])
+                for call in guest.call_args_list
+            ],
+            [("allow", "reached"), ("allow", "unreached"), ("deny", "unreached")],
+        )
+        process.assert_not_called()
+        self.assertTrue(
+            all(
+                "--snapshot-destination" not in call.args[0]
+                for call in guest.call_args_list
+            )
+        )
+        self.assertIn(
+            "private-network-ingress", microvm_tests.COLD_PROJECTION_SCENARIOS
+        )
 
     def test_private_network_ingress_snapshot_must_be_rejected_before_boot(self):
         diagnostic = b"microVM snapshots do not support --network-ingress allow"
@@ -7674,15 +7978,7 @@ class MicrovmTests(unittest.TestCase):
         shell = _posix_shell()
         if shell is None:
             self.skipTest("POSIX shell is unavailable")
-        worker = (
-            benchmark.smp_probe_script(2)
-            .split("<<'NVX_SMP_WORKER'\n", 1)[1]
-            .split("\nNVX_SMP_WORKER", 1)[0]
-        )
-        worker = worker.replace("/proc/interrupts", "interrupts").replace(
-            "timer_attempts=10000", "timer_attempts=8"
-        )
-        for name, initial, advanced, advance_read, actual, status, reads in (
+        cases = (
             ("frozen", "LOC: 100 100", "LOC: 100 100", 3, 1, 88, 9),
             ("other-cpu", "LOC: 100 100", "LOC: 101 100", 3, 1, 88, 9),
             ("delayed", "LOC: 100 100", "LOC: 100 101", 4, 1, 0, 4),
@@ -7691,12 +7987,37 @@ class MicrovmTests(unittest.TestCase):
             ("backwards", "LOC: 100 100", "LOC: 100 99", 3, 1, 88, 9),
             ("missing", "RES: 1 1", "RES: 1 1", 0, 1, 87, 2),
             ("wrong-cpu", "LOC: 100 100", "LOC: 100 101", 3, 0, 87, 0),
-        ):
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+        )
+        for architecture, case in itertools.product(("x86_64", "aarch64"), cases):
+            name, initial, advanced, advance_read, actual, status, reads = case
+            worker = (
+                benchmark.smp_probe_script(2, architecture=architecture)
+                .split("<<'NVX_SMP_WORKER'\n", 1)[1]
+                .split("\nNVX_SMP_WORKER", 1)[0]
+                .replace("/proc/interrupts", "interrupts")
+                .replace("timer_attempts=10000", "timer_attempts=8")
+            )
+            identity = "1"
+            timer_failure = "SMP-LAPIC-FAIL"
+            if architecture == "aarch64":
+                initial = initial.replace("LOC:", "11:") + (
+                    " GICv3 27 Level arch_timer" if initial.startswith("LOC:") else ""
+                )
+                advanced = advanced.replace("LOC:", "11:") + (
+                    " GICv3 27 Level arch_timer" if advanced.startswith("LOC:") else ""
+                )
+                identity = "0x0000000000000001"
+                timer_failure = "SMP-TIMER-FAIL"
+            with (
+                self.subTest(architecture=architecture, name=name),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 root = Path(temporary)
-                (root / "interrupts").write_text(initial + "\n", encoding="ascii")
+                (root / "interrupts").write_text(
+                    initial + "\n", encoding="ascii", newline="\n"
+                )
                 result = subprocess.run(
-                    [shell, "-s", "--", "1", "result", "1"],
+                    [shell, "-s", "--", "1", "result", identity, architecture],
                     cwd=root,
                     input=(
                         "loc_reads=0\n"
@@ -7723,13 +8044,13 @@ class MicrovmTests(unittest.TestCase):
                 if status:
                     self.assertFalse((root / "result").exists())
                     self.assertIn(
-                        "SMP-WORKER-FAIL" if name == "wrong-cpu" else "SMP-LAPIC-FAIL",
+                        "SMP-WORKER-FAIL" if name == "wrong-cpu" else timer_failure,
                         result.stdout,
                     )
                 else:
                     self.assertEqual(
                         (root / "result").read_text(encoding="ascii").split(),
-                        ["1", "101", "1"],
+                        ["1", "101", identity],
                     )
 
     def test_snapshot_core_waits_for_no_destination_marker_line_before_exit(self):
@@ -8558,7 +8879,7 @@ class MicrovmTests(unittest.TestCase):
             self.skipTest("POSIX shell is unavailable")
 
         script = microvm_tests._read_script("lifecycle.sh")
-        prologue, separator, _ = script.partition("\nprintf '\\013' | dd")
+        prologue, separator, _ = script.partition("\narchitecture=")
         self.assertTrue(separator)
         prologue = prologue.replace("nvx-exit", "record_exit")
         result = subprocess.run(
@@ -8609,7 +8930,7 @@ class MicrovmTests(unittest.TestCase):
             self.skipTest("POSIX shell is unavailable")
         script = microvm_tests._read_script("lifecycle.sh")
         # The scenario runs the function that this test runs.
-        self.assertIn("\ncheck_early_console\n", script)
+        self.assertIn('\ncheck_early_console "$early_console"\n', script)
         start = script.index("check_early_console() {\n")
         end = script.index("\n}\n", start) + len("\n}\n")
         function = script[start:end]
@@ -8699,7 +9020,9 @@ class MicrovmTests(unittest.TestCase):
             "quiet loglevel=0",
             processors=4,
         )
-        smp_probe_script.assert_called_once_with(4, exit_guest=False)
+        smp_probe_script.assert_called_once_with(
+            4, exit_guest=False, architecture="x86_64"
+        )
         run_guest_script.assert_called_once_with(
             ["openvmm", "boot"],
             "probe\n" + time_abi.warp_probe_script() + "nvx-exit 0\n",
@@ -11180,8 +11503,69 @@ class MicrovmTests(unittest.TestCase):
                 timeout=60.0,
                 output_dir=Path(temporary),
                 guest="alpine",
+                cold_only=False,
             )
         self.assertIn("ipv6-egress-policy", microvm_tests.MICROVM_TEST_SCENARIOS)
+
+    def test_fixed_virtio_discovery_uses_named_kernel_resources_and_dt_binding(self):
+        shell = _posix_shell()
+        if shell is None:
+            self.skipTest("POSIX shell is unavailable")
+        script = microvm_tests._read_script("virtio-mmio.sh")
+        script = (
+            script.replace("/proc/iomem", "iomem")
+            .replace("/proc/cmdline", "cmdline")
+            .replace("/sys/bus/virtio/devices", "virtio")
+        )
+        for architecture, size, spi, command, status in (
+            ("aarch64", 4096, 1, "fixed_virtio_present d0001000 17", 0),
+            ("aarch64", 8192, 1, "fixed_virtio_present d0001000 17", 1),
+            ("aarch64", 4096, 2, "fixed_virtio_present d0001000 17", 1),
+            ("aarch64", 4096, 1, "fixed_virtio_absent d0001000", 1),
+            ("aarch64", 4096, 1, "fixed_virtio_absent d0004000", 0),
+            ("x86_64", 4096, 1, "fixed_virtio_present d0001000 17", 0),
+            ("x86_64", 4096, 1, "fixed_virtio_present d0001000 18", 1),
+        ):
+            with (
+                self.subTest(
+                    architecture=architecture, size=size, spi=spi, command=command
+                ),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                node = root / "platform" / "d0001000.virtio" / "of_node"
+                node.mkdir(parents=True)
+                (root / "virtio" / "virtio0").mkdir(parents=True)
+                (root / "iomem").write_text(
+                    f"d0001000-{0xD0001000 + size - 1:08x} : d0001000.virtio\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                (root / "cmdline").write_text(
+                    "virtio_mmio.device=0x1000@0xd0001000:17\n",
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                (node / "compatible").write_bytes(b"virtio,mmio\0")
+                (node / "interrupts").write_bytes(
+                    b"".join(value.to_bytes(4, "big") for value in (0, spi, 1))
+                )
+                result = subprocess.run(
+                    [shell],
+                    input=(
+                        f"uname() {{ echo {architecture}; }}\n"
+                        "readlink() { echo platform/d0001000.virtio/virtio0; }\n"
+                        + script
+                        + "\n"
+                        + command
+                        + "\n"
+                    ),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    cwd=root,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
 
     def test_sandbox_blocks_use_fixed_roles_and_access(self):
         with (
@@ -11453,6 +11837,7 @@ class MicrovmTests(unittest.TestCase):
         shared: str = "",
         unhandled: Mapping[int, int] | None = None,
         errors: tuple[int, int, int] | None = (0, 0, 0),
+        architecture: str = "x86_64",
     ) -> str:
         """Returns the interrupt-map scenario's report of `steps`: after each
         step, each device by the base of its window, with its name, interrupt,
@@ -11463,16 +11848,28 @@ class MicrovmTests(unittest.TestCase):
         for step, devices in steps.items():
             for base, (name, irq, count) in devices.items():
                 actions = name + (f",{shared}" if shared else "")
+                slot = (base - 0xD000_0000) // 0x1000
+                hwirq = 32 + slot if architecture == "aarch64" else irq
+                binding = (
+                    f" dt_interrupts=00000000{slot:08x}00000001"
+                    if architecture == "aarch64"
+                    else ""
+                )
                 lines.append(
                     f"NVX-INTERRUPT-MAP step={step} base={base:#x} device={name} "
-                    f"irq={irq} chip={chip} hwirq={irq} type={trigger} "
+                    f"irq={irq} chip={chip} hwirq={hwirq} type={trigger} "
                     f"actions={actions} count={count} "
-                    f"unhandled={(unhandled or {}).get(base, 0)}\r"
+                    f"unhandled={(unhandled or {}).get(base, 0)}{binding}\r"
                 )
         if errors is not None:
             lines.append(
-                f"NVX-INTERRUPT-MAP-ERRORS err={errors[0]} mis={errors[1]} "
-                f"spu={errors[2]}\r"
+                f"NVX-INTERRUPT-MAP-ERRORS err={errors[0]}"
+                + (
+                    ""
+                    if architecture == "aarch64"
+                    else f" mis={errors[1]} spu={errors[2]}"
+                )
+                + "\r"
             )
         lines.append("NVX-INTERRUPT-MAP-OK\r")
         return "\n".join(lines) + "\n"
@@ -11630,6 +12027,55 @@ class MicrovmTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "is reported twice after step boot"):
             microvm_tests.parse_interrupt_map(report + report)
 
+        arm_steps = {
+            step: {
+                base: (name, 100 + (base - 0xD000_0000) // 0x1000, count)
+                for base, (name, _irq, count) in devices.items()
+            }
+            for step, devices in accepted.items()
+        }
+        arm_report = self._interrupt_report(
+            arm_steps, chip="GICv3", architecture="aarch64"
+        )
+        steps, errors = microvm_tests.parse_interrupt_map(
+            arm_report, architecture="aarch64"
+        )
+        microvm_tests.check_interrupt_map(
+            steps, errors, bases, before="boot", architecture="aarch64"
+        )
+        for bad, problem in (
+            (arm_report.replace("hwirq=32 ", "hwirq=16 "), "not GICv3 INTID 32"),
+            (arm_report.replace("hwirq=32 ", "hwirq=64 "), "not GICv3 INTID 32"),
+            (arm_report.replace("chip=GICv3", "chip=IO-APIC"), "not GICv3"),
+            (
+                arm_report.replace(
+                    "000000000000000000000001", "000000000000002000000001"
+                ),
+                "DT interrupt cells",
+            ),
+            (
+                arm_report.replace(
+                    "000000000000000600000001", "000000000000000600000004"
+                ),
+                "EDGE_RISING",
+            ),
+            (arm_report.replace("type=edge", "type=level"), "level-triggered"),
+            (
+                arm_report.replace("actions=virtio0 ", "actions=virtio0,rtc0 "),
+                "shares IRQ",
+            ),
+            (arm_report.replace("err=0", "err=2"), "2 GIC errors"),
+            (arm_report.replace("irq=106 ", "irq=100 "), "invalid or shared"),
+        ):
+            with self.subTest(arm=problem):
+                steps, errors = microvm_tests.parse_interrupt_map(
+                    bad, architecture="aarch64"
+                )
+                with self.assertRaisesRegex(RuntimeError, problem):
+                    microvm_tests.check_interrupt_map(
+                        steps, errors, bases, before="boot", architecture="aarch64"
+                    )
+
     def test_interrupt_map_boots_every_device_and_restores_the_nic_share_and_console(
         self,
     ):
@@ -11721,6 +12167,45 @@ class MicrovmTests(unittest.TestCase):
             "echo NVX-INTERRUPT-MAP-CAPTURE\nnvx-snapshot\nreport restore\n", staged[0]
         )
 
+        launched.clear()
+        arm_steps = {
+            step: {
+                base: (name, 100 + (base - 0xD000_0000) // 0x1000, count)
+                for base, (name, _irq, count) in devices.items()
+            }
+            for step, devices in {
+                **self._documented_interrupts(bases, "boot", 1),
+                **self._documented_interrupts(bases, "traffic", 5),
+            }.items()
+        }
+        arm_cold = self._interrupt_report(
+            arm_steps, chip="GICv3", architecture="aarch64"
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                microvm_tests,
+                "run_guest_script",
+                return_value={"text": arm_cold, "output": arm_cold},
+            ) as cold_guest,
+            patch.object(microvm_tests, "OpenvmmProcess", FakeProcess),
+        ):
+            microvm_tests.run_interrupt_map(
+                Path("openvmm"),
+                Path("Image"),
+                Path("initrd"),
+                "whp",
+                memory_mib=128,
+                timeout=60,
+                output_dir=Path(temporary),
+                architecture="aarch64",
+                cold_only=True,
+            )
+        self.assertEqual(launched, [])
+        self.assertEqual(cold_guest.call_count, 1)
+        self.assertIn("architecture=aarch64", cold_guest.call_args.args[1])
+        self.assertIn('"$platform/of_node/interrupts"', cold_guest.call_args.args[1])
+
         # A restore whose interrupts differ from those before the capture fails.
         restored = restored.replace("irq=17 ", "irq=21 ").replace(
             "hwirq=17", "hwirq=21"
@@ -11773,7 +12258,7 @@ class MicrovmTests(unittest.TestCase):
             len(microvm_tests.INTERRUPT_MAP_SNAPSHOT_DEVICES),
         ):
             script = microvm_tests._interrupt_map_script(devices, capture="")
-            self.assertNotIn("@", script)
+            self.assertNotRegex(script, r"@[A-Z][A-Z_]*@")
             # The control console's step writes the record, once, to the
             # console held open, raw, and silent until its interrupt.
             steps = re.findall(
@@ -15583,7 +16068,14 @@ class MicrovmTests(unittest.TestCase):
             args = argparse.Namespace(
                 backend="whp",
                 guest="alpine",
-                scenario=["smp", "smp", "smp-lapic", "smp-lapic"],
+                scenario=[
+                    "guest-boot",
+                    "guest-boot",
+                    "smp",
+                    "smp",
+                    "smp-lapic",
+                    "smp-lapic",
+                ],
                 processors=[2, 2, 8],
                 memory_mib=128,
                 timeout=60.0,
@@ -15601,11 +16093,16 @@ class MicrovmTests(unittest.TestCase):
                     side_effect=require,
                 ),
                 patch.object(microvm_tests, "run_lifecycle") as run_lifecycle,
+                patch.object(microvm_tests, "run_guest_boot") as run_guest_boot,
                 patch.object(microvm_tests, "run_smp") as run_smp,
             ):
                 self.assertEqual(microvm_tests.run(args), 0)
 
         run_lifecycle.assert_not_called()
+        self.assertEqual(
+            [entry.kwargs["processors"] for entry in run_guest_boot.call_args_list],
+            [2, 8],
+        )
         self.assertEqual(
             [entry.args[4] for entry in run_smp.call_args_list],
             [2, 8, 2, 8],
@@ -16252,8 +16749,8 @@ class MicrovmTests(unittest.TestCase):
             stack.enter_context(redirect_stdout(stdout))
             self.assertEqual(microvm_tests.run(args), 0)
 
-        # console-exit, smp, and smp-lapic run once per processor count.
-        self.assertEqual(len(progress), len(scenarios) + 3)
+        # Boot, managed lifecycle, console exit and both SMP variants honor the explicit VPs.
+        self.assertEqual(len(progress), len(scenarios) + 5)
         for line in progress:
             self.assertRegex(line, r"^Running .+ on OpenVMM/kvm$")
 
@@ -16307,7 +16804,13 @@ class MicrovmTests(unittest.TestCase):
         # Each execution names the processor counts that it covers, if any.
         expected: list[tuple[str, list[int] | None]] = []
         for scenario in scenarios:
-            if scenario in ("console-exit", "smp", "smp-lapic"):
+            if scenario in (
+                "guest-boot",
+                "managed-lifecycle",
+                "console-exit",
+                "smp",
+                "smp-lapic",
+            ):
                 expected.extend((scenario, [processors]) for processors in (2, 1))
             elif scenario in (
                 "smp-snapshot",
@@ -17461,7 +17964,13 @@ class DurationReportTests(unittest.TestCase):
         self.assertEqual(written, [1, 2, 3, 4])
         self.assertNotIn(b"\r", raw)
         self.assertEqual(stdout.getvalue(), "Running smp\nRunning lifecycle\n")
-        dimensions = {"guest": "alpine", "backend": "kvm", "kernel": "debug"}
+        dimensions = {
+            "guest": "alpine",
+            "backend": "kvm",
+            "kernel": "debug",
+            "architecture": "x86_64",
+            "scope": "full",
+        }
         passed = {"outcome": "passed", "error": None}
         self.assertEqual(
             records,
@@ -18140,6 +18649,17 @@ class MicrovmShardTests(unittest.TestCase):
                 "kvm",
                 smp,
                 teardown=False,
+            )
+            arm = _write_durations(
+                root / "arm" / microvm_durations.REPORT_NAME,
+                "whp",
+                smp,
+            )
+            arm.write_text(
+                arm.read_text(encoding="utf-8").replace(
+                    '"guest": "alpine"', '"guest": "alpine", "architecture": "aarch64"'
+                ),
+                encoding="utf-8",
             )
             _write_durations(
                 root / "whp" / microvm_durations.REPORT_NAME,

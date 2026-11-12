@@ -9,9 +9,15 @@
 - Mapped fork tip: `7677ad8d56a59864475012b63b6f01a22575c30d`, position 131. The graph, PR
   summary, and commit mapping below cover positions 001-131, the PR09 fixups at positions
   241-243, and the PR13 fixup at position 247.
-- NVX's pinned OpenVMM revision: `61cdd63978ea58ce045d159208ed4ca22f30cbb8`, position 247, the
-  head of microsoft/openvmm#5022, whose commit follows position 246, `cd5cd3814`, the head of
-  `feature/microvm/dev`, which microsoft/openvmm#5016 merged after position 245, `a8a0e3517`, which
+- NVX's pinned OpenVMM revision: `38016f6637f0c61fb55c9ee31033ceec428e346c`, position 253,
+  the published head of microsoft/openvmm#5045 from `ahuja-gautam/openvmm`. Its ARM verifier
+  follows the same PR's ARM cold-boot foundation at position 252, `ca913105d`, which follows
+  position 251, `174da3a0d`, which microsoft/openvmm#5042 merged after position 250,
+  `23136b647`, which microsoft/openvmm#5041 merged after position 249, `fb4f34126`, which
+  microsoft/openvmm#5038 merged after position 248, `58d3c3b1d`, which microsoft/openvmm#5026
+  merged after the previous NVX pin at position 247, `61cdd6397`, which microsoft/openvmm#5022
+  merged after position 246, `cd5cd3814`, which microsoft/openvmm#5016 merged after position 245,
+  `a8a0e3517`, which
   microsoft/openvmm#5013 merged with positions 243 and 244 after position 242, `6ddd6ca50`, which
   microsoft/openvmm#5012 merged with position 241 after position 240, `4c2697aef`, which
   microsoft/openvmm#5010 merged with
@@ -36,10 +42,16 @@
   position 221 into positions 035 and 036, and combined v5.1 positions 222 and 223, the two commits
   of microsoft/openvmm#4984, into position 220. Positions 001-147 keep their positions, v5.1
   positions 149-220 are positions 148-219, and the tree of position 220 is the tree of
-  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 116 commits past
-  the mapped tip on the same first-parent chain. Positions 132-240 and 244-246 are not yet
+  `3f2ab4c2f`; see [The v6.0 reorganization](#the-v60-reorganization). The pin is 122 commits past
+  the mapped tip on the same first-parent chain. Positions 132-240, 244-246, and 248-253 are not yet
   assigned to PRs, positions 241-243 are PR09 fixups, and position 247 is a PR13 fixup; see
   [Commits after the mapped tip](#commits-after-the-mapped-tip).
+  The selected revision is fetchable from upstream's `refs/pull/5045/head`; it is not a
+  synthetic merge or an update to `feature/microvm/dev`. Its ARM support is cold-boot-only;
+  the existing `--x-time-abi-verify` now reports ARM admission through the shared verifier
+  path without executing guest instructions, although partition/VP objects may be created. Reachability
+  does not satisfy NVX's separate OpenVMM CI gate, which currently rejects fork-head workflow
+  evidence; no CI trust-policy exception is implied by this pin.
 - Upstream main: `ba105dd7f00499acc1862456c179c0930cb2c8f7` (2026-11-06), the fork base itself;
   see [Upstream main past the fork base](#upstream-main-past-the-fork-base).
 
@@ -1011,7 +1023,13 @@ ba105dd7f
   -> state changes failed rather than panicking on a lost unit [244-245]
   -> PCI restore tests before the first start [246]
   -> PR13 fixup [247]
-  -> 61cdd6397 (NVX pin)
+  -> decoded network prefixes checked against /1 through /30 [248]
+  -> decoded snapshot RAM ranges checked for alignment and order [249]
+  -> paired scratch checked when opening a snapshot [250]
+  -> direct-claimed scratch attached in place [251]
+  -> governed ARM64 cold boot on WHP [252]
+  -> ARM admission through the existing shared time ABI verifier [253]
+  -> 38016f663 (NVX pin)
 ```
 
 For upstream review, PR01-PR06 and PR14 can be rebased independently onto current upstream main,
@@ -1038,14 +1056,14 @@ sentence of the snapshot guide into PR20's position 095, which adds the post-res
 
 ## Commits after the mapped tip
 
-The NVX pin extends the chain past position 131 without merges. Of the 116 later commits,
+The NVX pin extends the chain past position 131 without merges. Of the 122 later commits,
 positions 241-243 are PR09 fixups, position 247 is a PR13 fixup, and the others are not yet
-classified or assigned to PRs.
+classified or assigned to PRs: positions 132-240, 244-246, and 248-253.
 Each of positions 132-186 combines the v2.4 commits that the table lists, as v3.0 positions 145-160
 and 162-200 did, which developed one concept; "(part)" marks a v2.4 fixup that split across
 commits. Positions 187-191 followed the v3.0 reorganization, positions 192-205 are the ABI restart
 of the v4.0 reorganization, positions 206-211 followed it, positions 212-218 followed the v5.0
-reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-247 followed the
+reorganization, positions 219 and 220 followed the v5.1 rebase, and positions 221-253 followed the
 v6.0 reorganization, so they combine none, apart from position 220, which combines v5.1 positions
 222 and 223. Each commit has the position that it
 had in v5.1 through position 147, and one less from v5.1 position 149 on; see
@@ -1170,9 +1188,28 @@ at `e1ca353eb`, whose first 210 commits are those of `feature/microvm/release/v4
 | 245 | `a8a0e3517` | - | - | - | - | state_unit: fail a reset, save, restore, or time advance on a lost unit (microsoft/openvmm#5013) |
 | 246 | `cd5cd3814` | - | - | - | - | virtio: test PCI re-save before start and missing queue progress (microsoft/openvmm#5016) |
 | 247 | `61cdd6397` | - | - | - | - | virtio: keep a held input gate across a device reset (microsoft/openvmm#5022); fold into 043 and 048, its virtio-fs change into 088 |
+| 248 | `58d3c3b1d` | - | - | - | - | microVM: refuse a decoded network prefix outside /1 to /30 (microsoft/openvmm#5026) |
+| 249 | `fb4f34126` | - | - | - | - | microVM: refuse an unaligned or reversed decoded snapshot RAM range (microsoft/openvmm#5038) |
+| 250 | `23136b647` | - | - | - | - | openvmm_helpers: check paired scratch when opening a snapshot (microsoft/openvmm#5041) |
+| 251 | `174da3a0d` | - | - | - | - | microVM: attach direct-claimed scratch in place instead of linking it (microsoft/openvmm#5042) |
+| 252 | `ca913105d` | - | - | - | - | microvm: enable governed ARM64 cold boot on WHP (microsoft/openvmm#5045) |
+| 253 | `38016f663` | - | - | - | - | microvm: verify ARM CPU/time admission through the shared TimeAbiReport and existing verifier, preserving x86 output and rejecting ARM fault hooks (microsoft/openvmm#5045) |
 
 The remarks that say whether commits apply to upstream main record what the v3.0 reorganization
 found on its base, `b2676222b`, at the positions that the commits have now.
+
+Positions 248-251 harden the existing snapshot network, RAM, paired-scratch, and attachment
+paths. Position 252 adds ARM CPU/time admission, fixed devices, direct boot, and platform
+control to the existing microVM modules, sharing the loader, device-tree, hypervisor, CPU
+profile, and time ABI files with the earlier chain. These are additions to the fork's
+microVM foundations, not a separate runtime. Replaying positions 248-252 together onto the
+recorded upstream main, `ba105dd7f`, conflicts, including modifications of fork-only microVM
+files absent upstream; they are not an independently applicable upstream change. No
+upstream package build is claimed for that conflicted replay.
+Position 253 extends position 252's ARM backend and effective-ID readbacks through the
+existing CPU/time preflight, worker inspection, and verifier controller, sharing one
+`TimeAbiReport` with x86. It depends on that ARM foundation; it is not a UTC-discipline
+check, an ARM snapshot implementation, or an expansion of legacy CPU fingerprinting.
 
 Some of these commits change mapped work rather than add to it. Position 147 removes the
 legacy microVM clock paths, changing files that PR10 and PR17 also change, and makes manifest
