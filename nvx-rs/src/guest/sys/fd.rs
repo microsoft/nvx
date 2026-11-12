@@ -7,9 +7,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub(crate) use nix::fcntl::OFlag as OpenFlags;
-use nix::fcntl::{FcntlArg, FdFlag, Flock, FlockArg, fcntl};
+use nix::fcntl::{FcntlArg, Flock, FlockArg, fcntl};
 use nix::poll::{PollFd, PollFlags};
-use nix::sys::socket::{AddressFamily, Shutdown, SockFlag, SockType, shutdown, socketpair};
 pub(crate) use nix::sys::stat::Mode;
 use nix::sys::stat::SFlag;
 use nix::unistd::Whence;
@@ -139,12 +138,6 @@ impl FileDescriptor {
         nix::sys::stat::fchmod(&self.0, mode)
     }
 
-    /// Shuts down the sending direction of this connected socket, so that its peer reads end of
-    /// file, which closing it would not tell while another process holds a copy of it.
-    pub(crate) fn shut_down_sending(&self) -> Result<(), Errno> {
-        shutdown(self.0.as_raw_fd(), Shutdown::Write)
-    }
-
     /// Waits at most `timeout_ms` milliseconds for data to read, with one `poll` call.
     ///
     /// Returns whether `poll` reported `POLLIN`. An interrupted call is an error, not a retry.
@@ -167,27 +160,6 @@ impl FileDescriptor {
     pub(crate) fn set_nonblocking(&self) -> Result<(), Errno> {
         let flags = fcntl(&self.0, FcntlArg::F_GETFL).map(OpenFlags::from_bits_retain)?;
         fcntl(&self.0, FcntlArg::F_SETFL(flags | OpenFlags::O_NONBLOCK)).map(|_| ())
-    }
-
-    /// Checks that this is an end of a pipe, which reads unless `writes`, and makes it
-    /// nonblocking and close-on-exec, as the ends of the pipes that an execution creates are. An
-    /// end of another kind of file, or one open for the other direction, is `EINVAL`.
-    pub(crate) fn take_pipe_end(&self, writes: bool) -> Result<(), Errno> {
-        let status = nix::sys::stat::fstat(&self.0)?;
-        if SFlag::from_bits_truncate(status.st_mode) & SFlag::S_IFMT != SFlag::S_IFIFO {
-            return Err(Errno::EINVAL);
-        }
-        let flags = fcntl(&self.0, FcntlArg::F_GETFL).map(OpenFlags::from_bits_retain)?;
-        let access = if writes {
-            OpenFlags::O_WRONLY
-        } else {
-            OpenFlags::O_RDONLY
-        };
-        if flags & OpenFlags::O_ACCMODE != access {
-            return Err(Errno::EINVAL);
-        }
-        fcntl(&self.0, FcntlArg::F_SETFL(flags | OpenFlags::O_NONBLOCK))?;
-        fcntl(&self.0, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map(|_| ())
     }
 
     /// Moves this descriptor to the end of its file. On the kernel log device, it skips the
@@ -243,7 +215,8 @@ impl io::Write for FileDescriptor {
     }
 }
 
-/// Gives up the descriptor to its new owner, which `crate::guest::spawn` hands to a child.
+/// Gives up the descriptor to its new owner, such as a socket that takes over an inherited
+/// descriptor.
 impl From<FileDescriptor> for OwnedFd {
     fn from(descriptor: FileDescriptor) -> Self {
         descriptor.0
@@ -255,32 +228,10 @@ pub(crate) fn open(path: &CStr, flags: OpenFlags, mode: Mode) -> Result<FileDesc
     nix::fcntl::open(path, flags, mode).map(FileDescriptor)
 }
 
-/// Opens `name` in the directory that `directory` refers to, whatever path names that directory
-/// now, with typed `flags` and `mode`.
-pub(crate) fn open_at(
-    directory: &FileDescriptor,
-    name: &CStr,
-    flags: OpenFlags,
-    mode: Mode,
-) -> Result<FileDescriptor, Errno> {
-    nix::fcntl::openat(&directory.0, name, flags, mode).map(FileDescriptor)
-}
-
 /// Creates a close-on-exec pipe and returns its owned read and write ends.
 pub(crate) fn create_pipe() -> Result<(FileDescriptor, FileDescriptor), Errno> {
     nix::unistd::pipe2(OpenFlags::O_CLOEXEC)
         .map(|(reader, writer)| (FileDescriptor(reader), FileDescriptor(writer)))
-}
-
-/// Creates a connected pair of close-on-exec Unix stream sockets and returns its owned ends.
-pub(crate) fn create_socket_pair() -> Result<(FileDescriptor, FileDescriptor), Errno> {
-    socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::SOCK_CLOEXEC,
-    )
-    .map(|(first, second)| (FileDescriptor(first), FileDescriptor(second)))
 }
 
 /// Makes the null device the standard input, output, and error, and closes every other

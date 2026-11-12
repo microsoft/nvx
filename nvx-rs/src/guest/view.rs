@@ -10,8 +10,6 @@ use std::net::IpAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-#[cfg(doc)]
-use super::entry::Entry;
 use super::root::Root;
 use super::sys::{self, Mode, OpenFlags};
 use crate::activation::{self, MachineIdMode, View};
@@ -42,9 +40,8 @@ pub enum MachineId {
     /// The image's own `/etc/machine-id`, left untouched.
     #[default]
     Image,
-    /// The ID in this regular file, bound read-only over `/etc/machine-id`, as
-    /// [`Entry::bind_runtime`] also does. Rewriting the file in place, such as after a restore,
-    /// reaches every execution that sees the bind.
+    /// The ID in this regular file, bound read-only over `/etc/machine-id`. Rewriting the file in
+    /// place, such as after a restore, reaches every execution that sees the bind.
     Generated(PathBuf),
 }
 

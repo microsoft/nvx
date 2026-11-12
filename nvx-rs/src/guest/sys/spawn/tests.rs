@@ -20,10 +20,7 @@ pub(crate) const CAP_SETGID: u32 = 6;
 #[cfg(feature = "cli")]
 pub(crate) const CAP_SETUID: u32 = 7;
 
-/// Capability to change the root directory.
-pub(crate) const CAP_SYS_CHROOT: u32 = 18;
-
-/// Capability to mount, and to enter new namespaces, which an execution's entry needs.
+/// Capability to mount, and to enter new namespaces.
 pub(crate) const CAP_SYS_ADMIN: u32 = 21;
 
 /// Capability to lower nice values.
@@ -161,10 +158,6 @@ fn invalid_specs_are_refused_before_forking() {
     assert_eq!(PreparedChild::new(spec).err(), Some(Errno::EINVAL));
 
     let mut spec = shell("exit 0");
-    spec.credentials = Some((1000, 1000));
-    assert_eq!(PreparedChild::new(spec).err(), Some(Errno::EINVAL));
-
-    let mut spec = shell("exit 0");
     spec.physical_pwd = true;
     assert_eq!(PreparedChild::new(spec).err(), Some(Errno::EINVAL));
 }
@@ -189,19 +182,10 @@ fn stream_sources_below_the_standard_streams_are_raised_and_kept_from_the_progra
     let mut spec = shell("printf placed; test ! -e /proc/self/fd/0");
     spec.streams[1] = Some(FileDescriptor::from_owned(file.into()));
     let outcome = run(spec);
-
-    // An inherited descriptor keeps its number, which must not be a standard stream's.
-    let file = std::fs::File::open(output.path()).unwrap();
-    assert_eq!(file.as_raw_fd(), 0);
-    let mut spec = shell("exit 0");
-    spec.inherited
-        .push(FileDescriptor::from_owned(OwnedFd::from(file)));
-    let refused = PreparedChild::new(spec).err();
     drop(streams);
 
     assert_eq!(outcome, (None, Some(ChildStatus::Exited(0))));
     assert_eq!(std::fs::read(output.path()).unwrap(), b"placed");
-    assert_eq!(refused, Some(Errno::EINVAL));
 }
 
 #[test]
@@ -251,46 +235,6 @@ fn a_new_process_group_is_led_by_the_child() {
         assert_eq!(sys::wait(process), Some(ChildStatus::Exited(0)));
         assert_eq!(group, Ok(expected), "{process_group}");
     }
-}
-
-#[test]
-fn a_child_enters_its_root_or_reports_why_not() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("inside")).unwrap();
-    let mut spec = ChildSpec::new(c"/bin/sh".to_owned(), vec![c"sh".to_owned()]);
-    spec.root = Some(
-        sys::open(
-            &sys::path_c_string(root.path()).unwrap(),
-            sys::OpenFlags::O_RDONLY | sys::OpenFlags::O_DIRECTORY | sys::OpenFlags::O_CLOEXEC,
-            sys::Mode::empty(),
-        )
-        .unwrap(),
-    );
-    spec.directory = Some(c"/inside".to_owned());
-    let (report, status) = run(spec);
-    assert_eq!(status, Some(ChildStatus::Exited(LAUNCH_FAILURE_STATUS)));
-    // Without the privilege to change its root, the child stops there. With it, the child
-    // finds `/inside` in the new root, which has no `/bin/sh`.
-    let (stage, error) = if holds_capability(CAP_SYS_CHROOT).unwrap() {
-        (LaunchStage::Exec, Errno::ENOENT)
-    } else {
-        (LaunchStage::Root, Errno::EPERM)
-    };
-    assert_eq!(report, Some((stage.code(), error as i32)));
-}
-
-#[test]
-fn the_check_s_credentials_keep_the_parent_s_supplementary_groups() {
-    let mut spec = shell("exit 0");
-    spec.directory = Some(c"/".to_owned());
-    spec.credentials = Some((1000, 1001));
-    let prepared = PreparedChild::new(spec).unwrap();
-    let credentials = prepared.credentials.as_ref().unwrap();
-    assert_eq!(credentials.groups, nix::unistd::getgroups().unwrap());
-    assert_eq!(
-        (credentials.uid, credentials.gid),
-        (Uid::from_raw(1000), Gid::from_raw(1001))
-    );
 }
 
 /// Returns a spec that records the physical path of the working directory that the child
@@ -376,11 +320,9 @@ fn a_working_directory_outside_the_root_has_no_physical_path() {
 #[test]
 fn the_launch_descriptors_are_close_on_exec() {
     let mut spec = shell("exit 0");
-    spec.cgroup = Some(descriptor());
     spec.streams[2] = Some(descriptor());
     let prepared = PreparedChild::new(spec).unwrap();
     for descriptor in [
-        prepared.cgroup.as_ref().unwrap(),
         prepared.streams[2].as_ref().unwrap(),
         &prepared.report_reader,
         &prepared.report_writer,
@@ -507,31 +449,5 @@ fn the_kernel_refuses_every_path_that_a_search_s_buffer_cannot_hold() {
             ),
             "{length}"
         );
-    }
-}
-
-#[test]
-fn an_entry_leads_a_session_and_keeps_its_barrier_from_the_program() {
-    if crate::guest::sys::tests::isolate_process_test(
-        "NVX_SPAWN_ENTRY_BARRIER_TEST_CHILD",
-        "guest::sys::spawn::tests::an_entry_leads_a_session_and_keeps_its_barrier_from_the_program",
-    ) {
-        return;
-    }
-    // With the standard streams closed, the barrier's ends take their numbers.
-    let streams = ClosedStreams::new(&[0, 1, 2]);
-    let mut spec = shell("exit 0");
-    spec.barrier = true;
-    spec.entry = Some(EntryChild::default());
-    let prepared = PreparedChild::new(spec);
-    drop(streams);
-    let prepared = prepared.unwrap();
-    assert!(prepared.session && !prepared.process_group);
-    assert!(prepared.entry.is_some());
-    let (reader, writer) = prepared.barrier.as_ref().unwrap();
-    for descriptor in [reader, writer] {
-        assert!(descriptor.raw() >= FIRST_NONSTANDARD);
-        let flags = nix::fcntl::fcntl(descriptor.borrowed(), FcntlArg::F_GETFD).unwrap();
-        assert!(FdFlag::from_bits_retain(flags).contains(FdFlag::FD_CLOEXEC));
     }
 }

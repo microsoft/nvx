@@ -7,7 +7,7 @@ use super::parse::parse_decimal;
 use super::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
 
 /// The largest account database, `/etc/passwd` or `/etc/group`, that existing-account mode reads.
-pub const MAX_ACCOUNT_DATABASE_BYTES: u64 = 1 << 20;
+pub(crate) const MAX_ACCOUNT_DATABASE_BYTES: u64 = 1 << 20;
 /// The path of the passwd database below the root.
 const PASSWD: &std::ffi::CStr = c"etc/passwd";
 /// The path of the group database below the root.
@@ -15,7 +15,7 @@ const GROUP: &std::ffi::CStr = c"etc/group";
 
 /// The account of an identity, as its passwd entry names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Account {
+pub(crate) struct Account {
     /// The user name.
     name: Vec<u8>,
     /// The home directory.
@@ -24,19 +24,19 @@ pub struct Account {
 
 impl Account {
     /// Returns the user name, as bytes, since passwd entries need not be UTF-8.
-    pub fn name(&self) -> &[u8] {
+    pub(crate) fn name(&self) -> &[u8] {
         &self.name
     }
 
     /// Returns the home directory, an absolute path.
-    pub fn home(&self) -> &[u8] {
+    pub(crate) fn home(&self) -> &[u8] {
         &self.home
     }
 }
 
 /// An account database of existing-account mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Database {
+pub(crate) enum Database {
     /// `/etc/passwd`.
     Passwd,
     /// `/etc/group`.
@@ -56,7 +56,7 @@ impl fmt::Display for Database {
 /// Why existing-account mode refused an identity.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum AccountError {
+pub(crate) enum AccountError {
     /// The database cannot be opened or read below the root, which a symbolic link on its path
     /// fails too.
     Read(Database, io::Error),

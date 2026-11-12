@@ -26,12 +26,11 @@
 //! which reach libc through `nix`'s re-export: a spawned child, which may neither allocate nor
 //! drop an owner, fills its preallocated `PWD` entry with the `getcwd` system call, closes the
 //! descriptors that it does not use with the `close_range` system call, and executes and exits
-//! through libc; an execution's entry starts its child with `clone3`, and the child changes its
-//! credentials, capabilities, hostname, and umask, and mounts its view and enters its working
-//! directory with the new mount API and `openat2`, through libc's `syscall`, as the entry's
-//! module describes, because libc does not know of that child; the agent's wait-status decoding,
-//! the waits for one named child, and an execution's signal to its program's process group by the
-//! group's ID, before Linux 6.9, keep the real-time signals that `nix`'s `Signal` cannot represent;
+//! through libc; a workload's child changes its credentials and capabilities, the VM's hostname
+//! is set, and a layered root's runtime file systems are mounted with the new mount API, through
+//! libc's `syscall`, as the entry module describes; the agent's wait-status decoding, the waits
+//! for one named child, and a signal to a process group by the group's ID keep the real-time
+//! signals that `nix`'s `Signal` cannot represent;
 //! a pidfd is opened with the `pidfd_open` system call, and signals are sent through it with
 //! `pidfd_send_signal`, which neither `nix` nor musl wraps; a write to an execution's input
 //! takes back the `SIGPIPE` that a closed reader raises with `sigtimedwait`, once `sigpending`
@@ -43,9 +42,9 @@
 //! and `getpid` system calls, which the latency probe measures without the vDSO's or libc's
 //! shortcuts. The guest mappings need `statx`, for the kinds and unique mount IDs of open files,
 //! and the mount API's `open_tree`, `mount_setattr`, and `move_mount`, which neither `nix` nor
-//! musl wraps. The tests trace a child with libc's `ptrace`, and lower the process's descriptor
-//! limit with libc's `setrlimit`, as the crate enables neither for `nix`, and deny a system call
-//! to a thread with libc's `prctl`, as `nix` does not wrap seccomp. Each such call says why.
+//! musl wraps. The tests lower a resource limit with libc's `setrlimit`, as the crate does not
+//! enable it for `nix`, and deny a system call to a thread with libc's `prctl`, as `nix` does not
+//! wrap seccomp. Each such call says why.
 //!
 //! The x86 instructions of the time tools are `core::arch` intrinsics, except the port
 //! instructions, which only `port` executes, as inline assembly. The constants of the kernel's
@@ -90,14 +89,14 @@ pub(crate) use clock::{Clock, clock_time, monotonic_ms, sleep_once, sleep_until_
 pub(crate) use clock::{monotonic_ns, syscall_monotonic_nanoseconds};
 pub(crate) use discipline::{ClockAdjustment, ClockDiscipline, FrequencyHold, adjust_clock};
 pub(crate) use entry::{
-    DEV, DEV_PTS, DEV_SHM, EntryChild, FileSystem, PROC, RUN, SYS, create_devices, file_size,
-    mount_detached, restrict_tree, set_hostname,
+    DEV, DEV_PTS, DEV_SHM, FileSystem, PROC, RUN, SYS, create_devices, file_size, mount_detached,
+    restrict_tree, set_hostname,
 };
 #[cfg(target_arch = "x86_64")]
 pub(crate) use fd::close_inherited_descriptors;
 pub(crate) use fd::{
     CreatedFile, FileDescriptor, FileLock, Mode, OpenFlags, create_directory, create_pipe,
-    create_socket_pair, lock_file, open, open_at, page_size, try_lock_directory, unlink,
+    lock_file, open, page_size, try_lock_directory, unlink,
 };
 pub(crate) use filesystem::{
     MountFlags, PATH_MAX, ScratchDirectory, TmpfsMount, check_exists, chmod, chown,
@@ -117,11 +116,10 @@ pub(crate) use port::{PORT_DEVICE, Port};
 pub(crate) use port::{PortAccess, PortError, check_released, power_off, probe_port};
 pub(crate) use process::set_command_name;
 pub(crate) use process::{
-    ChildStatus, DirectStdout, ForkResult, ProcessId, Stdout, WaitTarget, current_process, detach,
-    exec, exit_immediately, fork, ignore_interrupt_and_hangup, is_unreaped, kill_process,
-    kill_process_group, kill_through_pidfd, open_pidfd, process_exists, process_group_of,
-    process_name, reap_any_nonblocking, restore_sigpipe, signal_process_group,
-    signal_through_pidfd, take_inherited_descriptor, try_wait, wait, wait_named,
+    ChildStatus, DirectStdout, ForkResult, ProcessId, Stdout, current_process, detach, exec,
+    exit_immediately, fork, ignore_interrupt_and_hangup, is_unreaped, kill_process,
+    kill_process_group, kill_through_pidfd, open_pidfd, process_exists, process_name,
+    reap_any_nonblocking, restore_sigpipe, take_inherited_descriptor, try_wait, wait,
     write_port_diagnostic, write_standard_error,
 };
 #[cfg(target_arch = "x86_64")]

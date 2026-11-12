@@ -139,12 +139,12 @@ fn a_write_takes_back_its_own_sigpipe_beside_one_pending_for_the_process() {
             crate::guest::sys::exit_immediately(check().err().unwrap_or(0))
         }
         nix::unistd::ForkResult::Parent { child } => {
-            let id = child.as_raw().unsigned_abs();
-            let status = crate::guest::process::Child::new(id)
-                .unwrap()
-                .wait()
-                .unwrap();
-            assert_eq!(status.code(), Some(0), "{status:?}");
+            let status = crate::guest::sys::wait(ProcessId::from_pid(child));
+            assert_eq!(
+                status,
+                Some(crate::guest::sys::ChildStatus::Exited(0)),
+                "{status:?}"
+            );
         }
     }
 }

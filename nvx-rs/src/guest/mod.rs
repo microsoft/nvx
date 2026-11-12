@@ -1,13 +1,8 @@
 //! The programs that run in NVX's Linux guests, which ship as `/sbin/nvx-*`, and the libraries
 //! on which any guest init or agent builds: [`nvxs`], the guest's I/O driver of the NVXS session;
-//! [`terminal`], the terminal on which it serves that session; [`spawn`], through which it starts
-//! a program; [`entry`], through which a program that it starts enters an execution's
-//! namespaces, view, root, and identity; [`process`], through which it collects the status of
-//! each child that it names, and of no other; [`cgroup`], through which it places, accounts,
-//! kills, and settles the processes of its executions; [`mappings`], the host mappings that it
-//! mounts, and its account of a host's mapping table; [`exec`], which drives each program as one
-//! execution, with its launch, its bounded output and input, its ending, and its outcome; and,
-//! on x86-64, [`snapshot`], which composes a strictly checked Fresh capture by one caller deadline,
+//! [`terminal`], the terminal on which it serves that session; [`mappings`], the host mappings
+//! that it mounts, and its account of a host's mapping table; and, on x86-64, [`snapshot`], which
+//! composes a strictly checked Fresh capture by one caller deadline,
 //! without execution control, with nothing mounted from the devices that a template's clones
 //! replace, and which repairs each clone that a restore of the snapshot starts before it returns:
 //! it activates the restore's memory target, reseeds the kernel's random number generator, and
@@ -23,8 +18,8 @@
 //! The guest's space, the root that an init assembles and what it mounts in it, is each init's
 //! own. NVX's own space is internal reference code, which NVX's guest programs use: it is hidden
 //! from this documentation and unstable, and it becomes crate-private once nothing outside NVX
-//! uses it. It is `root`, which bootstraps the guest for a layered root, assembles the root,
-//! mounts live shares and mappings in it, and tears it down; `view`, which sets the VM's hostname,
+//! uses it. It is `root`, which assembles a layered root, mounts live shares and mappings in it,
+//! and tears it down; `view`, which sets the VM's hostname,
 //! machine ID, and resolver file, whose binds the root owns; `gpt`, which reads the partition
 //! table of a GPT disk that the kernel attached as a block device; the mapper of `mappings`, which
 //! mounts host mappings beneath the descriptors of the roots that it names; and the activation's
@@ -127,7 +122,6 @@ pub use generation::GenerationId;
 
 #[cfg(target_arch = "x86_64")]
 pub mod activation;
-pub mod cgroup;
 /// Compatibility name for the guest's activation.
 #[cfg(target_arch = "x86_64")]
 pub use activation as clone;
@@ -136,8 +130,6 @@ pub mod console_pending;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod device_io;
-pub mod entry;
-pub mod exec;
 #[cfg(target_arch = "x86_64")]
 #[doc(hidden)]
 pub mod exit;
@@ -156,13 +148,11 @@ pub mod mappings;
 #[doc(hidden)]
 pub mod mmio_write;
 pub mod nvxs;
-pub mod process;
 pub mod reseed;
 #[doc(hidden)]
 pub mod root;
 #[cfg(target_arch = "x86_64")]
 pub mod snapshot;
-pub mod spawn;
 pub mod terminal;
 #[cfg(target_arch = "x86_64")]
 pub mod time;

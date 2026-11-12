@@ -741,13 +741,13 @@ fn a_stolen_or_auto_reaped_status_is_reported_once_and_never_reclassified_by_an_
             let mut values = request("printf retained; exit 7");
             values.timeout = Some(Duration::from_secs(30));
             let mut execution = Exec::start_simulated(values, None).unwrap();
-            let status = if automatic.is_some() {
-                7 << 8
-            } else {
-                sys::wait_named(sys::WaitTarget::Process(execution.leader), true)
-                    .unwrap()
-                    .unwrap()
-            };
+            if automatic.is_none() {
+                assert_eq!(
+                    sys::wait(execution.leader),
+                    Some(sys::ChildStatus::Exited(7))
+                );
+            }
+            let status = 7 << 8;
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 match execution.next_event(&mut []) {
@@ -1248,7 +1248,11 @@ fn privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers() {
                         .unwrap();
                     let escaped = pid(escaped);
                     let deadline = Instant::now() + Duration::from_secs(5);
-                    while sys::process_group_of(escaped).unwrap() != escaped {
+                    while nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(escaped.raw())))
+                        .unwrap()
+                        .as_raw()
+                        != escaped.raw()
+                    {
                         assert!(Instant::now() < deadline);
                         std::thread::sleep(Duration::from_millis(1));
                     }
@@ -1266,7 +1270,11 @@ fn privileged_capture_sweep_kills_setsid_escapees_and_spares_both_helpers() {
                         .parse()
                         .unwrap());
                     let deadline = Instant::now() + Duration::from_secs(5);
-                    while sys::process_group_of(held_id).unwrap() != held_id {
+                    while nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(held_id.raw())))
+                        .unwrap()
+                        .as_raw()
+                        != held_id.raw()
+                    {
                         assert!(Instant::now() < deadline);
                         std::thread::sleep(Duration::from_millis(1));
                     }

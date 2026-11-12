@@ -53,13 +53,8 @@ forks a child, which waits for a grandchild that forces an RCU grace period,
 and collects only the child, so a grandchild that outlives the RCU stall
 timeout passes to PID 1, or to the nearest subreaper. No call starts the
 announcer, which is a program, `/sbin/nvx-ingress`: an init runs it itself,
-or has `nvx-ingress start` run it from a socket that it binds for it. Until
-the nvx-rs slimming
-([microsoft/nvx#1076](https://github.com/microsoft/nvx/issues/1076)) removes
-them, the crate also keeps the older process
-modules, `guest::{exec, spawn, entry, cgroup, process}`, which NVX's older
-guest agents use. nvx-init uses none of these modules, and its time daemon
-runs for the VM's life.
+or has `nvx-ingress start` run it from a socket that it binds for it.
+nvx-init's time daemon runs for the VM's life.
 
 ## Build the space
 
