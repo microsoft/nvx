@@ -1199,6 +1199,9 @@ traffic, trigger, and exclusive-handler checks; ARM additionally checks the
 DT's SPI index and rising-edge cells against the GIC hardware INTID, not Linux's
 dynamically allocated IRQ number. ARM requires `--cold-only` for these mixed
 scenarios. Snapshot-only cases are not silently replaced or reported as passing.
+`virtio-net` retains the original x86 fixed-window command-line assertion,
+without adding an IRQ-number constraint; ARM checks the MMIO resource and
+DT binding.
 The maintained cold inventory includes `command-line-limit`, whose effective
 command line uses the shared 2,048-byte binding on both ISAs. The complete
 inventory and explicit deferral reasons are
@@ -1249,9 +1252,11 @@ the boot to the managed agent, and runs the ignored `nvx-rs` test
 scenario's command line and drives the guest's control session; the scenario
 then checks OpenVMM's outcome report and the guest console. The
 default managed fixture remains a single-vCPU initramfs boot. Explicit
-`--processors` counts also select its and `guest-boot`'s VP counts, without changing the existing
-SMP/restore defaults of 1, 2, 4 and 8. `--managed-root scratch` and
-`--managed-root ram` require `--guest ubuntu` and reuse its maintained EROFS
+`--processors` counts also select its and `guest-boot`'s VP counts on ARM.
+On x86, both scenarios retain their one-VP execution even when explicit counts
+select SMP/restore tests, whose defaults remain 1, 2, 4 and 8.
+`--managed-root scratch` and `--managed-root ram` require `--guest ubuntu`
+and reuse its maintained EROFS
 layer and the same authenticated Rust test. Both make two cold boots per VP
 count: scratch requires absent/present previous state and a clean journal
 after each boot; RAM requires absent/absent state and attaches no scratch.
@@ -1490,6 +1495,9 @@ from `--guest-agent` (default
 `tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest`),
 and fails unless each of them ran and passed. `--check-only` checks the names
 alone, and needs neither a hypervisor nor the guest agent.
+The default x86 path retains its guest-agent file admission. Selecting ARM
+additionally requires a matching native Windows/WHP host and a static ARM ELF
+guest agent; runtime execution requires explicit `--cold-only`.
 
 ### `test-adversarial`
 

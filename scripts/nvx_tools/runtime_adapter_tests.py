@@ -320,7 +320,7 @@ def command_test_runtime_adapter(args: argparse.Namespace) -> int:
     check_only = cast(bool, args.check_only)
     architecture = getattr(args, "architecture", "x86_64")
     cold_only = getattr(args, "cold_only", False)
-    if architecture != host_architecture():
+    if architecture == "aarch64" and architecture != host_architecture():
         raise ScriptError("runtime adapter validation requires its native host ISA")
     if architecture == "aarch64" and (backend != "whp" or sys.platform != "win32"):
         raise ScriptError(
@@ -372,12 +372,13 @@ def command_test_runtime_adapter(args: argparse.Namespace) -> int:
             cast(Path | None, args.guest_agent) or GUEST_AGENTS[architecture],
             "runtime adapter guest agent",
         )
-        try:
-            check_static_executables([guest], architecture=architecture)
-        except ValueError as error:
-            raise ScriptError(
-                f"invalid runtime adapter guest agent: {error}"
-            ) from error
+        if architecture == "aarch64":
+            try:
+                check_static_executables([guest], architecture=architecture)
+            except ValueError as error:
+                raise ScriptError(
+                    f"invalid runtime adapter guest agent: {error}"
+                ) from error
         environment["NVX_HYPERVISOR"] = backend
         # Cargo runs the tests in the adapter's directory, so a relative directory of
         # artifacts is the caller's, and NVX takes an empty one for none.
