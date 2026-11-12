@@ -1,29 +1,19 @@
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 
-use crate::guest::entry::{self, Entry, Prepared};
 use crate::guest::init;
 use crate::guest::mappings::{Kernel as MappingKernel, SystemKernel};
-use crate::guest::spawn::{Command, Spawned};
 use crate::guest::sys::{self, Errno, FileDescriptor, Mode, OpenFlags};
 
 /// Production paths used by the managed agent and replaceable paths used by tests.
 #[derive(Clone, Debug)]
 pub(crate) struct Paths {
-    /// Unified cgroup-v2 root of the legacy sandbox agent and its workloads.
-    pub(crate) cgroup_root: PathBuf,
     /// Parent of OpenVMM's aggregate host-filesystem exports.
     pub(crate) hostfs_dir: PathBuf,
     /// Kernel command line containing the announced mapping count.
     pub(crate) proc_cmdline: PathBuf,
     /// Port device used for fatal diagnostics.
     pub(crate) diagnostic_port: PathBuf,
-    /// Null device used for child standard input.
-    pub(crate) null_device: PathBuf,
-    /// The machine ID that the sandbox agent generates once, and binds for its executions.
-    pub(crate) machine_id: PathBuf,
-    /// The guest's time status, which the sandbox agent binds for its executions.
-    pub(crate) time_status: PathBuf,
     /// VM exit helper.
     pub(crate) exit: PathBuf,
 }
@@ -32,13 +22,9 @@ impl Default for Paths {
     /// Returns the paths installed in production guest images.
     fn default() -> Self {
         Self {
-            cgroup_root: "/sys/fs/cgroup".into(),
             hostfs_dir: "/run/nvx/hostfs".into(),
             proc_cmdline: "/proc/cmdline".into(),
             diagnostic_port: "/dev/port".into(),
-            null_device: "/dev/null".into(),
-            machine_id: "/run/nvx/workload-machine-id".into(),
-            time_status: "/run/nvx/time".into(),
             exit: "/sbin/nvx-exit".into(),
         }
     }
@@ -75,8 +61,6 @@ pub(crate) trait System {
         arguments: &[CString],
         environment: Option<&[CString]>,
     ) -> Result<(), Errno>;
-    /// Spawns one workload's launch command.
-    fn spawn(&mut self, command: Command) -> Result<Spawned, Errno>;
     /// Starts a direct workload through init's native plain-process core.
     fn start_direct(
         &mut self,
@@ -84,12 +68,6 @@ pub(crate) trait System {
     ) -> Result<init::Exec, init::StartFailure> {
         init::Exec::start(request)
     }
-    /// Prepares one execution of the sandbox agent's `entry`.
-    fn prepare_entry(&mut self, entry: &Entry) -> Result<Prepared, entry::Error>;
-    /// Moves the sandbox agent into a mount namespace of its own, and binds `entry`'s runtime
-    /// files into its root there, once, for every execution, whose namespace starts as a copy of
-    /// the agent's. The binds end with the agent, before the init agent unmounts the root.
-    fn bind_runtime(&mut self, entry: &Entry) -> Result<(), Errno>;
 }
 
 /// Production implementation backed exclusively by safe `guest::sys` APIs.
@@ -156,36 +134,6 @@ impl System for RealSystem {
         environment: Option<&[CString]>,
     ) -> Result<(), Errno> {
         Err(sys::exec(path, arguments, environment))
-    }
-
-    fn spawn(&mut self, command: Command) -> Result<Spawned, Errno> {
-        command.spawn().map_err(|error| sys::errno_of(&error))
-    }
-
-    fn prepare_entry(&mut self, entry: &Entry) -> Result<Prepared, entry::Error> {
-        entry.prepare()
-    }
-
-    fn bind_runtime(&mut self, entry: &Entry) -> Result<(), Errno> {
-        sys::enter_private_mount_namespace()?;
-        // The binds end with the agent's mount namespace, before the init agent unmounts the
-        // root, so the agent leaves them mounted.
-        entry
-            .bind_runtime()
-            .map(drop)
-            .map_err(|error| runtime_errno(&error))
-    }
-}
-
-/// Returns the errno of a failure of [`Entry::bind_runtime`], that of the bind that failed.
-fn runtime_errno(error: &entry::Error) -> Errno {
-    match error {
-        entry::Error::Root(error) => sys::errno_of(error),
-        entry::Error::MachineId(error)
-        | entry::Error::TimeStatus(error)
-        | entry::Error::Resolver(error) => Errno::from_raw(error.raw_os_error()),
-        entry::Error::Rollback { error, .. } => runtime_errno(error),
-        _ => Errno::EINVAL,
     }
 }
 

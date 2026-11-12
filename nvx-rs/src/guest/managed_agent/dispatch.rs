@@ -36,15 +36,11 @@ impl AgentConfig {
         launch::parse_id(uid)?;
         launch::parse_id(gid)?;
         Ok(Self {
-            rootfs: c"-".to_owned(),
-            hostname: c"nvx-managed".to_owned(),
             uid: sys::c_string(uid)?,
             gid: sys::c_string(gid)?,
             user,
             home,
             restored_proxy: None,
-            direct: true,
-            entry: None,
         })
     }
 
@@ -66,15 +62,11 @@ impl AgentConfig {
         control: FileDescriptor,
     ) -> Result<u8, String> {
         let config = Self {
-            rootfs: c"-".to_owned(),
-            hostname: c"".to_owned(),
             uid: c"0".to_owned(),
             gid: c"0".to_owned(),
             user: c"".to_owned(),
             home: c"".to_owned(),
             restored_proxy: None,
-            direct: true,
-            entry: None,
         };
         config.serve_init(runtime, control, HostMappings::default(), true)
     }
@@ -221,15 +213,11 @@ fn handle_data(
             if let Some(handoff) = session.activate(request)? {
                 *mappings = HostMappings::layered(handoff.table, handoff.mapper, handoff.export)?;
                 *restored = Some(AgentConfig {
-                    rootfs: c"-".to_owned(),
-                    hostname: handoff.hostname,
                     uid: CString::new(handoff.workload.uid.to_string()).expect("decimal UID"),
                     gid: CString::new(handoff.workload.gid.to_string()).expect("decimal GID"),
                     user: handoff.user,
                     home: handoff.home,
                     restored_proxy: Some(handoff.proxy),
-                    direct: true,
-                    entry: None,
                 });
             }
         }
@@ -281,12 +269,12 @@ fn handle_data(
         }
         APP_FEATURES => {
             if request.payload.is_empty() {
-                let features = if config.direct {
-                    GuestFeatures::DIRECT_AGENT
-                } else {
-                    GuestFeatures::SANDBOX_AGENT
-                };
-                session.send_app(APP_READY, request.request_id, 0, &features.encode())?;
+                session.send_app(
+                    APP_READY,
+                    request.request_id,
+                    0,
+                    &GuestFeatures::DIRECT_AGENT.encode(),
+                )?;
             } else {
                 session.send_error(request.request_id, Errno::EINVAL as i32, INVALID_REQUEST)?;
             }

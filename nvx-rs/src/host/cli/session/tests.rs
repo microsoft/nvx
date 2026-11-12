@@ -1064,10 +1064,7 @@ fn output_beyond_the_guest_limit_breaks_the_protocol() {
     worker.join().unwrap();
 }
 
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
+#[cfg(feature = "testing")]
 #[test]
 fn features_of_a_guest_that_predates_them_are_none() {
     let (mut session, worker) = session_with(|guest| {

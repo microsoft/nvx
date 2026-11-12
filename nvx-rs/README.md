@@ -1187,11 +1187,10 @@ entry, and refuses every later part. The table is complete once every announced
 mapping is applied, and none failed, and the root's teardown tears it down.
 
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
-a `MappingTable` and a mapper, beneath `/` in direct mode and beneath the
-container's assembled root in sandbox mode; the table refuses an empty source,
-since the export is an aggregate, whose root lists its children, and NVX's
-hosts, whose exports are all aggregates, send none. A layered `Root` applies its
-live shares and mappings through a mapper.
+a `MappingTable` and a mapper, beneath `/` in direct mode; the table refuses an
+empty source, since the export is an aggregate, whose root lists its children,
+and NVX's hosts, whose exports are all aggregates, send none. A layered `Root`
+applies its live shares and mappings through a mapper.
 
 ### `nvx::guest::nvxs`
 
@@ -1223,8 +1222,6 @@ Its `LaunchReport` tells whether the program started, or which `LaunchStage`
 failed and why. Each stage keeps its number, `LaunchStage::code`, which
 `LaunchStage::from_code` turns back into the stage, and a new stage takes a
 number of its own.
-
-NVX's managed agent is one caller.
 
 ### `nvx::guest::entry`
 
@@ -1305,8 +1302,6 @@ It closes the program's input once the program has ended. It waits for its
 program alone, by a pidfd, or takes the status from the caller's collector with
 `observe`; with `Options::caller_reaps`, that collector is the program's only
 one.
-
-NVX's managed agent is one caller.
 
 ### `nvx::guest::time`
 
@@ -2323,8 +2318,7 @@ fails with
 which names the missing features. `nvx.py` does not ask; this, the checks of
 the [distro binding](#distro-bindings) and of the
 [scratch binding](#images-by-path), and the claim of the scratch image are the
-intended changes of behavior. The
-guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
+intended changes of behavior.
 
 #### Other differences from nvx.py
 
@@ -2710,14 +2704,11 @@ through the mapper, and tears it down.
 nvx-init's plain-process core: each child resets its priority, drops its
 credentials and capabilities, and enters its working directory before exec.
 Each execution ends its process group, including on normal completion, without
-cgroups, namespaces, limits, or a privilege-dropping helper. The legacy sandbox
-mode keeps its root entry, launch barrier, and cgroup placement. Both apply
-their host mapping table through
-`mappings`, from its mount of the host's export, beneath `/` in direct mode and
-beneath the container's assembled root in sandbox mode, where it unmounts the
-table before it returns to the init agent, and any other guest init or agent
-can use them too. Any guest init or agent can also run the boot steps of
-`nvx-time` and the steps of `nvx-reseed` in its own process, through the
+cgroups, namespaces, limits, or a privilege-dropping helper. It applies its
+host mapping table through `mappings`, from its mount of the host's export,
+beneath `/` in direct mode, and any other guest init or agent can use them too.
+Any guest init or agent can also run the boot steps of `nvx-time` and the steps
+of `nvx-reseed` in its own process, through the
 `nvx::guest::time` and `nvx::guest::reseed` calls, on which both programs run,
 and a template's guest captures before its root's assembly through
 `nvx::guest::snapshot::capture`, which runs the steps of `nvx-time pre-capture`

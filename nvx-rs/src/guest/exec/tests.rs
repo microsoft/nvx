@@ -698,8 +698,8 @@ fn ending_the_program_ends_the_process_group_that_it_leads() {
 fn a_status_that_another_collector_took_first_is_left_to_it() {
     let temporary = tempfile::tempdir().unwrap();
     let file = temporary.path().join("descendant");
-    // Before the execution looks for the status itself, the caller may cancel it, or wait for it.
-    for (cancel_first, wait_first) in [(false, false), (true, false), (false, true)] {
+    // Before the execution looks for the status itself, the caller may cancel it.
+    for cancel_first in [false, true] {
         let mut execution = start(
             leave_a_descendant(&file, 5),
             false,
@@ -713,10 +713,6 @@ fn a_status_that_another_collector_took_first_is_left_to_it() {
         let descendant = Descendant::open(&file);
         if cancel_first {
             assert!(!execution.cancel(), "nothing to cancel");
-        }
-        if wait_first {
-            let error = execution.wait().unwrap_err();
-            assert_eq!(error.raw_os_error(), Some(Errno::ECHILD as i32));
         }
         execution.grant(Stream::Stdout, MAX_EVENT_BYTES);
         execution.grant(Stream::Stderr, MAX_EVENT_BYTES);
@@ -741,12 +737,8 @@ fn a_status_that_another_collector_took_first_is_left_to_it() {
             }
         }
         assert!(execution.next_event(&mut buffer).unwrap().is_none());
-        // Collecting fails once, unless the cancellation or the wait found the status gone first.
-        assert_eq!(
-            failures,
-            usize::from(!cancel_first && !wait_first),
-            "{cancel_first} {wait_first}"
-        );
+        // Collecting fails once, unless the cancellation found the status gone first.
+        assert_eq!(failures, usize::from(!cancel_first), "{cancel_first}");
         assert!(execution.status().is_none());
         assert!(execution.deadline().is_none());
         assert!(
