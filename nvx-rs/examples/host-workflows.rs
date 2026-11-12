@@ -26,9 +26,10 @@ use nvx::host::restore::{
     ReadyListener, RestoreAction, RestoreEvidence, RestoreInput, RestoreMachine, RestorePhase,
 };
 use nvx::host::runtime::Runtime;
-use nvx::host::session::{self, ControlSession, SessionError};
 use nvx::host::snapshot::{self, Snapshot};
+use nvx::host::transport::{self, HostConnection, HostConnectionError};
 use nvx::host::vm::{self, Launched, Prepared, Reattached, SavedVm, Stopped, VmDir, VmOutputs};
+use nvx::protocol::nvxs::SessionError;
 
 /// One byte past OpenVMM's 25-byte restore-ready event, so that a longer event fails to parse.
 const READY_LIMIT: usize = 26;
@@ -36,7 +37,7 @@ const READY_LIMIT: usize = 26;
 /// How long a failed capture or restore waits for the exit of the VM that it ends.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a lost session's VM has to show its exit.
+/// How long a lost connection's VM has to show its exit.
 const EXIT_PAUSE: Duration = Duration::from_millis(50);
 
 fn main() {}
@@ -105,13 +106,13 @@ pub fn cold_boot(
 /// directory, moves it to `snapshot_dir`, another, which must be empty, and opens it there.
 ///
 /// `request` asks the guest for a snapshot, in the caller's own protocol with its guest, on a
-/// control session that only the VM's own process may serve, and returns once the guest answered.
-/// The guest then captures the VM, as the guest example shows, and the VM exits once the capture
-/// commits. The caller finishes the capture with the proof of that exit, then moves the
-/// snapshot's three entries, and nothing else, out of the VM directory. It keeps them private
-/// and immutable while it restores from them. When the request fails, or the VM doesn't exit by
-/// `deadline`, the caller finishes no snapshot: it ends the VM, or keeps it in an [`Unstopped`]
-/// error.
+/// connection to the VM's control endpoint that only the VM's own process may serve, and returns
+/// once the guest answered. The guest then captures the VM, as the guest example shows, and the
+/// VM exits once the capture commits. The caller finishes the capture with the proof of that
+/// exit, then moves the snapshot's three entries, and nothing else, out of the VM directory. It
+/// keeps them private and immutable while it restores from them. When the request fails, or the
+/// VM doesn't exit by `deadline`, the caller finishes no snapshot: it ends the VM, or keeps it in
+/// an [`Unstopped`] error.
 pub fn capture<R>(
     runtime: &Runtime,
     config: &VmConfig,
@@ -121,7 +122,7 @@ pub fn capture<R>(
     deadline: Instant,
 ) -> Result<Snapshot, Box<dyn Error>>
 where
-    R: FnOnce(&mut ControlSession, Instant) -> Result<(), SessionError>,
+    R: FnOnce(&mut HostConnection, Instant) -> nvx::Result<()>,
 {
     vm::create_private_dir(snapshot_dir)?;
     if fs::read_dir(snapshot_dir)?.next().is_some() {
@@ -136,15 +137,13 @@ where
         .cloned()
         .ok_or("the configuration's boot has no capture")?;
     let launched = start(prepared)?;
-    let process = launched.process.reference();
-    let requested = session::connect(
+    let requested = transport::connect_verified(
         &launched.outputs.endpoint,
-        process.pid,
-        process.start_time,
+        launched.process.reference(),
         deadline,
     )
-    .and_then(|stream| ControlSession::attach(stream, launched.capability.as_bytes(), deadline))
-    .and_then(|mut session| request(&mut session, deadline));
+    .and_then(|stream| HostConnection::attach(stream, launched.capability.as_bytes(), deadline))
+    .and_then(|mut connection| request(&mut connection, deadline));
     if let Err(error) = requested {
         return Err(end(launched, error.into()));
     }
@@ -168,7 +167,7 @@ where
 }
 
 /// Restores `snapshot` with `config`, which has no `boot`, in `directory`, a new private
-/// directory, and returns the running VM and its control session once its guest is Ready.
+/// directory, and returns the running VM and its connection to the guest once the guest is Ready.
 ///
 /// Creation hard-links the snapshot's OpenVMM files into the VM directory, a view that the
 /// caller removes once the VM exited. On Linux, the caller holds its own lock of the snapshot,
@@ -188,9 +187,9 @@ pub fn restore<A>(
     transaction: TransactionId,
     activate: A,
     deadline: Instant,
-) -> Result<(Launched, ControlSession), Box<dyn Error>>
+) -> Result<(Launched, HostConnection), Box<dyn Error>>
 where
-    A: FnMut(&mut ControlSession, &[u8], Instant) -> Result<ReadyActivation, SessionError>,
+    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<ReadyActivation>,
 {
     vm::create_private_dir(directory)?;
     let dir = VmDir::open(directory)?;
@@ -198,25 +197,25 @@ where
     let record = prepared.activation_record(transaction)?;
     let mut launched = start(prepared)?;
     match drive(&mut launched, &record, activate, deadline) {
-        Ok(session) => Ok((launched, session)),
+        Ok(connection) => Ok((launched, connection)),
         Err(error) => Err(end(launched, error)),
     }
 }
 
-/// Drives a launched restore to its guest's Ready, and returns the session in which it came.
+/// Drives a launched restore to its guest's Ready, and returns the connection in which it came.
 ///
 /// The restore's machine says what to do next and checks what the caller observed: the
-/// restore-ready event, which only the VM's own process may send, a control session, which only
-/// it may serve, and the guest's Ready, which must echo the record's transaction. A lost session
-/// is replaced, with the same record, until the deadline.
+/// restore-ready event, which only the VM's own process may send, a connection to the VM's
+/// control endpoint, which only it may serve, and the guest's Ready, which must echo the record's
+/// transaction. A lost connection is replaced, with the same record, until the deadline.
 fn drive<A>(
     launched: &mut Launched,
     record: &ActivationRecord,
     mut activate: A,
     deadline: Instant,
-) -> Result<ControlSession, Box<dyn Error>>
+) -> Result<HostConnection, Box<dyn Error>>
 where
-    A: FnMut(&mut ControlSession, &[u8], Instant) -> Result<ReadyActivation, SessionError>,
+    A: FnMut(&mut HostConnection, &[u8], Instant) -> nvx::Result<ReadyActivation>,
 {
     let mut machine = RestoreMachine::new(record);
     machine.input(RestoreInput::Spawned(launched.process.reference().clone()));
@@ -224,7 +223,7 @@ where
     while let Some(action) = machine.next_action() {
         let input = match action {
             RestoreAction::Done => {
-                return current.ok_or_else(|| "a restore that is Ready has its session".into());
+                return current.ok_or_else(|| "a restore that is Ready has its connection".into());
             }
             RestoreAction::Fail(error) => return Err(error.into()),
             _ if Instant::now() >= deadline => RestoreInput::Expired,
@@ -251,26 +250,26 @@ where
                 }
             }
             RestoreAction::Connect => {
-                // A session that was lost closes before another replaces it.
+                // A connection that was lost closes before another replaces it.
                 current = None;
                 let process = launched.process.reference();
                 let endpoint = &launched.outputs.endpoint;
                 let capability = launched.capability.as_bytes();
-                match session::connect(endpoint, process.pid, process.start_time, deadline)
-                    .and_then(|stream| ControlSession::attach(stream, capability, deadline))
+                match transport::connect_verified(endpoint, process, deadline)
+                    .and_then(|stream| HostConnection::attach(stream, capability, deadline))
                 {
-                    Ok(session) => {
-                        current = Some(session);
+                    Ok(connection) => {
+                        current = Some(connection);
                         RestoreInput::Connected
                     }
                     Err(error) => failed(launched, RestorePhase::Connect, error),
                 }
             }
             RestoreAction::SendActivate(bytes) => {
-                let session = current
+                let connection = current
                     .as_mut()
-                    .ok_or("a restore activates in its session")?;
-                match activate(session, &bytes, deadline) {
+                    .ok_or("a restore activates in its connection")?;
+                match activate(connection, &bytes, deadline) {
                     Ok(ready) => RestoreInput::GuestReady(ready),
                     Err(error) => failed(launched, RestorePhase::Activate, error),
                 }
@@ -301,45 +300,60 @@ fn ready_event(
     Ok(Some(event))
 }
 
-/// What a control session's failure in `phase` tells the restore: the VM's exit, a lost session,
-/// which another may replace, an expired deadline, or a final failure.
+/// What a failure of the connection to the guest in `phase` tells the restore: the VM's exit, a
+/// lost connection, which another may replace, an expired deadline, or a final failure.
 ///
-/// A VM that exits ends its sessions before its exit shows, so a lost session's VM has a moment
-/// to show its exit first.
-fn failed(launched: &Launched, phase: RestorePhase, error: SessionError) -> RestoreInput {
-    let lost = match &error {
-        SessionError::Closed | SessionError::Reset => true,
-        SessionError::Io(error) => matches!(
-            error.kind(),
-            io::ErrorKind::BrokenPipe
-                | io::ErrorKind::ConnectionAborted
-                | io::ErrorKind::ConnectionReset
-                | io::ErrorKind::UnexpectedEof
-                | io::ErrorKind::WriteZero
-        ),
-        _ => false,
-    };
+/// A VM that exits ends its connections before its exit shows, so a lost connection's VM has a
+/// moment to show its exit first.
+fn failed(launched: &Launched, phase: RestorePhase, error: nvx::Error) -> RestoreInput {
+    // The broker closed or reset the session, or the stream ended inside a record.
+    let closed = error.source().is_some_and(|cause| {
+        matches!(
+            cause.downcast_ref(),
+            Some(HostConnectionError::Closed | HostConnectionError::Reset(_))
+        ) || matches!(cause.downcast_ref(), Some(SessionError::Truncated { .. }))
+    });
+    let lost = closed
+        || io_cause(&error).is_some_and(|cause| {
+            matches!(
+                cause.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::WriteZero
+            )
+        });
     let gone = lost
         && launched
             .process
             .wait(Instant::now() + EXIT_PAUSE)
             .is_ok_and(|exit| exit.is_some());
-    let evidence = match error {
-        SessionError::ProcessExited => return exited(&launched.outputs, phase),
+    let evidence = match error.kind() {
+        ErrorKind::Exited => return exited(&launched.outputs, phase),
         _ if gone => return exited(&launched.outputs, phase),
         _ if lost => return RestoreInput::SessionLost,
-        SessionError::TimedOut => return RestoreInput::Expired,
-        SessionError::Refused(_) => RestoreEvidence::PeerMismatch,
-        SessionError::Protocol(_) | SessionError::AuthenticationFailed => {
-            RestoreEvidence::Malformed
+        ErrorKind::TimedOut => return RestoreInput::Expired,
+        // `transport::connect_verified` refuses an endpoint that another process serves.
+        ErrorKind::Protocol
+            if io_cause(&error)
+                .is_some_and(|cause| cause.kind() == io::ErrorKind::PermissionDenied) =>
+        {
+            RestoreEvidence::PeerMismatch
         }
+        ErrorKind::Protocol => RestoreEvidence::Malformed,
         _ => RestoreEvidence::Io,
     };
     RestoreInput::OperationFailed {
         phase,
         evidence,
-        source: Some(Box::new(error)),
+        source: Some(error.into()),
     }
+}
+
+/// The I/O error that caused `error`, if one did.
+fn io_cause(error: &nvx::Error) -> Option<&io::Error> {
+    error.source()?.downcast_ref()
 }
 
 /// The VM's exit, with the outcome report that tells what the failure is attributed to.

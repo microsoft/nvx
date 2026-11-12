@@ -23,7 +23,7 @@ use nvx::host::network::{Access, NetworkPolicy};
 use nvx::host::platform::Transport;
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::supervisor::{self, Inherited};
-use nvx::host::{artifacts, report, session, snapshot, vm};
+use nvx::host::{artifacts, report, snapshot, transport, vm};
 use nvx::protocol::root::RootImage;
 
 /// One byte past OpenVMM's 25-byte restore-ready event, so that a longer event fails to parse.
@@ -180,12 +180,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let console = outputs.console.as_deref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "no prepared boot console")
         })?;
-        let mut console = session::connect(
-            console,
-            process.reference().pid,
-            process.reference().start_time,
-            deadline,
-        )?;
+        let mut console = transport::connect_verified(console, process.reference(), deadline)?;
         read_until(console.as_mut(), b"NVX-GUEST-BOOT-OK:", deadline)?;
         console.write_all(
             b"printf 'NVX-EXTERNAL-LAUNCH-OK\\n'; /sbin/nvx-exit 0\n",
