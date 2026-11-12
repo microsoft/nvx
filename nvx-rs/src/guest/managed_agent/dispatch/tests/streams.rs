@@ -1,8 +1,9 @@
-//! NVXC version 2 through the shared loop: its requests beside version 1's, with `READY`'s
-//! version; one execution at a time, with `BUSY` for another, and `CANCEL` and `STOP` while it
-//! runs; its standard input, which the agent acknowledges once its pipe took it, under the
-//! window, until its explicit end; its output past version 1's cap; and the send queue, while
-//! which is full the agent reads no output and still serves control requests.
+//! NVXC version 2 through the shared loop: its requests, with `READY`'s version, and the
+//! refusal of a frame of version 1; one execution at a time, with `BUSY` for another, and
+//! `CANCEL` and `STOP` while it runs; its standard input, which the agent acknowledges once its
+//! pipe took it, under the window, until its explicit end; its output past version 1's cap; and
+//! the send queue, while which is full the agent reads no output and still serves control
+//! requests.
 
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
@@ -146,7 +147,7 @@ fn shell(script: &str) -> Vec<u8> {
 }
 
 #[test]
-fn version_2_serves_ping_and_the_mapping_table_beside_version_1() {
+fn version_2_serves_ping_and_the_mapping_table() {
     let (temporary, system) = TestSystem::with_host_export();
     let export = system.paths.hostfs_dir.join("root").canonicalize().unwrap();
     let source = temporary.path().canonicalize().unwrap().join("guest/src");
@@ -169,16 +170,6 @@ fn version_2_serves_ping_and_the_mapping_table_beside_version_1() {
     );
     harness.send_v2(3, Frame::Maps(&maps));
     assert_eq!(harness.next_v2(), Reply::Ready(3, Vec::new()));
-    // The same session still serves version 1, its features request included.
-    assert_eq!(
-        harness.request(APP_PING, &[]),
-        response(APP_READY, 42, 0, b"")
-    );
-    let features = harness.request(APP_FEATURES, &[]);
-    assert_eq!(
-        GuestFeatures::decode(&features.payload),
-        Ok(GuestFeatures::DIRECT_AGENT)
-    );
     let system = harness.stop_v2(4);
     assert_eq!(
         system.kernel.calls(),
@@ -186,6 +177,26 @@ fn version_2_serves_ping_and_the_mapping_table_beside_version_1() {
     );
     assert_eq!(system.tty_drained, 1);
     assert!(system.diagnostics.is_empty());
+}
+
+/// A request of version 1, as its conformance vector holds it, ends the session as a malformed
+/// request does.
+#[test]
+fn a_request_of_version_1_ends_the_session() {
+    let frame = crate::tests::vector(crate::tests::NVXC_V1, "FRAME", "PING").bytes;
+    let diagnostics =
+        Harness::new().fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap());
+    let line =
+        |stage: &str, status: i32| format!("NVX-MANAGED-ERROR: stage={stage} status={status}\n");
+    assert_eq!(
+        diagnostics,
+        [
+            line("data-application", 24),
+            line("data", Errno::EPROTO as i32)
+        ]
+        .concat()
+        .as_bytes()
+    );
 }
 
 #[test]
@@ -220,7 +231,7 @@ fn version_2_carries_capture_and_activation_with_their_payloads() {
         Reply::Error(1, Errno::ENOTSUP as i32, b"unsupported-operation".to_vec())
     );
     // Outside PID 1, the capture's preparation fails, which the agent reports as version 1
-    // does.
+    // did.
     harness.send_v2(2, Frame::Capture(&[0]));
     assert_eq!(
         harness.next_v2(),
@@ -399,7 +410,7 @@ fn a_version_2_execution_forwards_output_past_the_old_cap() -> TestResult {
     }
     let _process = super::super::super::tests::PROCESS_TEST_LOCK.lock()?;
     let (_temporary, mut harness) = direct_harness();
-    let total = protocol::MAX_OUTPUT_BYTES * 3 / 2;
+    let total = 3 * 1024 * 1024 / 2;
     harness.send_v2(
         42,
         Frame::Exec(&shell(&format!("head -c {total} /dev/zero"))),

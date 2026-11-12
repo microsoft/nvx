@@ -100,22 +100,24 @@ impl Drop for Started {
     }
 }
 
-/// The NVXC frame of `kind` for the request `request`, with status 0 and no payload: the magic,
-/// the version, 1, the kind, two zero flag bytes, the request's ID, the status, and the payload's
-/// length, each integer little-endian, as `tests/vectors/nvxc-v1.txt` pins them.
-fn frame(kind: u8, request: u64) -> Vec<u8> {
+/// The NVXC frame of `kind` for the request `request`, with status 0 and `payload`: the magic, the
+/// version, 2, the kind, two zero flag bytes, the request's ID, the status, and the payload's
+/// length, each integer little-endian, as version 2 of NVXC defines them.
+fn frame(kind: u8, request: u64, payload: &[u8]) -> Vec<u8> {
+    let length = u32::try_from(payload.len()).expect("a payload fits a frame");
     [
         &b"NVXC"[..],
-        &[1, kind, 0, 0],
+        &[2, kind, 0, 0],
         &request.to_le_bytes(),
         &0i32.to_le_bytes(),
-        &0u32.to_le_bytes(),
+        &length.to_le_bytes(),
+        payload,
     ]
     .concat()
 }
 
 /// Sends the request `kind` of the caller's own protocol with its guest, and checks that the guest
-/// acknowledges it with `reply` by `deadline`.
+/// acknowledges it with `reply` by `deadline`; a `READY` names the protocol version, 2.
 ///
 /// `nvx` carries the bytes of whatever protocol a caller speaks with its guest over the
 /// `HostConnection` that `vm::reattach` returns, and leaves the protocol to the caller. This
@@ -130,14 +132,15 @@ fn acknowledged(
     deadline: Instant,
 ) {
     connection
-        .send(&frame(kind, request), Some(deadline))
+        .send(&frame(kind, request, &[]), Some(deadline))
         .expect("the guest takes the request");
     let response = connection
         .receive(Some(deadline))
         .expect("the guest answers the request");
+    let version: &[u8] = if reply == READY { &[2] } else { &[] };
     assert_eq!(
         response,
-        frame(reply, request),
+        frame(reply, request, version),
         "the guest acknowledges request {kind}"
     );
 }

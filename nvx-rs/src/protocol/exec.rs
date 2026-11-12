@@ -29,12 +29,6 @@ pub(crate) const MAX_ARGUMENT_BYTES: usize = 4096;
 pub(crate) const MAX_GUEST_CWD_BYTES: usize = MAX_ARGUMENT_BYTES;
 /// Largest number of workload environment entries.
 pub(crate) const MAX_ENVIRONMENT: usize = 256;
-/// Largest combined stdout and stderr volume the guest agent forwards for one execution.
-#[cfg(any(
-    feature = "testing",
-    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-))]
-pub(crate) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Extension field of a payload that carries flags, a working directory, and an environment.
 pub(crate) const EXEC_EXTENDED: u16 = 1;
