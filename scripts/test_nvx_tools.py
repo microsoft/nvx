@@ -2452,21 +2452,49 @@ class NvxRsTests(unittest.TestCase):
     @unittest.skipUnless(
         os.environ.get("NVX_RS"), "set NVX_RS to an nvx-rs executable to run"
     )
-    def test_run_help_states_each_guest_memory_default(self):
+    def test_run_boots_each_guest_with_its_default_memory(self):
         # nvx-rs run boots each guest with the memory that guests.py gives
-        # test-microvm, and its help says so.
-        completed = subprocess.run(
-            [os.environ["NVX_RS"], "run", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        )
-        help_text = " ".join(completed.stdout.split())
-        for name in guests.GUEST_NAMES:
-            default = guests.guest_descriptor(name).default_memory_mib
-            with self.subTest(guest=name):
-                self.assertIn(f"{name} {default}", help_text)
+        # test-microvm, as the OpenVMM command of its dry run shows. A dry run
+        # launches nothing, so placeholders stand in for the artifacts.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            build_dir = BuildConstants.BUILD_DIR.relative_to(BuildConstants.REPO_ROOT)
+            for relative in (
+                common.openvmm_binary_path().relative_to(BuildConstants.REPO_ROOT),
+                build_dir / KernelBuildConstants.BINARY_NAME,
+                *(
+                    build_dir / guests.guest_descriptor(name).initramfs_name
+                    for name in guests.GUEST_NAMES
+                ),
+            ):
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_bytes(b"placeholder\n")
+            with patch.dict(os.environ):
+                os.environ.pop("NVX_OPENVMM", None)
+                for name in guests.GUEST_NAMES:
+                    default = guests.guest_descriptor(name).default_memory_mib
+                    with self.subTest(guest=name):
+                        completed = subprocess.run(
+                            nvx_rs.command_line(
+                                ("run", "--guest", name, "--dry-run"), root=root
+                            ),
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                            check=True,
+                        )
+                        command = completed.stdout.splitlines()[0]
+                        self.assertTrue(command.startswith(">> "), command)
+                        words = command.split()
+                        self.assertEqual(
+                            [
+                                value
+                                for option, value in itertools.pairwise(words)
+                                if option == "--memory"
+                            ],
+                            [f"{default}M"],
+                        )
 
     def test_egress_policies_compile_to_the_rules_that_nvx_rs_prints(self):
         with patch.object(
@@ -2521,11 +2549,14 @@ class NvxRsTests(unittest.TestCase):
                         allow=("192.0.2.0/25",), deny=("198.51.100.0/24:icmp",)
                     ),
                 )
+                # nvx-rs refuses a policy that is not an object with the stable
+                # code of its error, and nvx.py reads the message, one line
+                # without that code, whatever its wording.
                 policy.write_text("[]", encoding="utf-8")
-                with self.assertRaisesRegex(
-                    common.ScriptError, "^egress policy must be an object$"
-                ):
+                with self.assertRaises(nvx_rs.NvxRsError) as refused:
                     nvx_rs.compile_egress_policy(policy)
+                self.assertEqual(refused.exception.code, "unsupported")
+                self.assertRegex(str(refused.exception), r"\A(?!error\[)[^\r\n]+\Z")
                 # A caller may pass a path as a command line gave it, which may
                 # be relative and start with "-".
                 (root / "-policy.json").write_text(
