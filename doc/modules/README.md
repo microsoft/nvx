@@ -2,22 +2,23 @@
 
 # Module diagrams
 
-The modules of the [`nvx` crate](../../nvx-rs/README.md), the modules that each
-contains, and the dependencies between them, as
+The public modules of the [`nvx` crate](../../nvx-rs/README.md), the modules
+that each contains, and the dependencies between them, as
 [cargo-modules](https://github.com/regexident/cargo-modules) 0.27.0 finds them
-and Graphviz 2.43.0 draws them. They cover the crate's library with its `cli`,
-`testing`, and `guest` features, on Linux (`x86_64-unknown-linux-musl`) and
-Windows (`x86_64-pc-windows-msvc`). CI draws them again after every merge to
-`dev` that changes the crate, and commits them when they change; see [Module
+and Graphviz 2.43.0 draws them. They cover the crate's public API, as its
+library builds with its `cli`, `testing`, and `guest` features, on Linux
+(`x86_64-unknown-linux-musl`) and Windows (`x86_64-pc-windows-msvc`): each
+module that is public, as are the modules that contain it, but the modules of
+NVX's own programs, which the crate hides. CI draws them again every night, and
+commits them to `dev` when they change; see [Module
 diagrams](../ci.md#module-diagrams).
 
-Each box is a module, colored by the part of the crate that holds it: blue for
-the modules that the host and the guest share, purple for the host, teal for
-the guest, and amber for the test doubles. A solid box is a public module, and
-a dashed box a private one, unless it names another visibility, such as
-`pub(crate)`. A box that names platforms, as in *Linux only*, is a module that
-only they build, as are the modules that it contains. The diagrams leave out
-the crate's tests and binaries, and other crates.
+Each box is a public module, colored by the part of the crate that holds it:
+blue for the modules that the host and the guest share, purple for the host,
+and teal for the guest. A box that names platforms, as in *Linux only*, is a
+module that only they build, as are the modules that it contains. The diagrams
+leave out the crate's private modules, its tests and binaries, and other
+crates.
 
 ## Overview
 
@@ -34,7 +35,8 @@ uses the second, as cargo-modules finds them: a module uses another whose items
 it imports, re-exports included, or whose items the definitions of its own
 items name, which counts the implementations of a type's traits toward the
 type's module, wherever they are. The crate's own arrows are its re-exports.
-The uses within a top-level module are left out.
+The uses within a top-level module, and those of the modules that the diagrams
+leave out, are left out.
 
 ![Dependencies](dependencies.svg)
 
@@ -43,32 +45,17 @@ The uses within a top-level module are left out.
 The modules that each top-level module contains. An arrow points from a module
 to a module that it contains.
 
-### `nvx::activation`
-
-`nvx::activation`, in
-[`nvx-rs/src/activation/mod.rs`](../../nvx-rs/src/activation/mod.rs), contains
-2 modules.
-
-![The modules that nvx::activation contains](nvx-activation.svg)
-
-### `nvx::gpt`
-
-`nvx::gpt`, in [`nvx-rs/src/gpt/mod.rs`](../../nvx-rs/src/gpt/mod.rs), contains
-5 modules.
-
-![The modules that nvx::gpt contains](nvx-gpt.svg)
-
 ### `nvx::guest`
 
 `nvx::guest`, in [`nvx-rs/src/guest/mod.rs`](../../nvx-rs/src/guest/mod.rs),
-contains 98 modules.
+contains 7 modules.
 
 ![The modules that nvx::guest contains](nvx-guest.svg)
 
 ### `nvx::host`
 
 `nvx::host`, in [`nvx-rs/src/host/mod.rs`](../../nvx-rs/src/host/mod.rs),
-contains 135 modules.
+contains 11 modules.
 
 ![The modules that nvx::host contains](nvx-host.svg)
 
@@ -82,15 +69,7 @@ contains 135 modules.
 ### `nvx::protocol`
 
 `nvx::protocol`, in
-[`nvx-rs/src/protocol/mod.rs`](../../nvx-rs/src/protocol/mod.rs), contains 15
+[`nvx-rs/src/protocol/mod.rs`](../../nvx-rs/src/protocol/mod.rs), contains 9
 modules.
 
 ![The modules that nvx::protocol contains](nvx-protocol.svg)
-
-### `nvx::testing`
-
-`nvx::testing`, in
-[`nvx-rs/src/testing/mod.rs`](../../nvx-rs/src/testing/mod.rs), contains 1
-module.
-
-![The modules that nvx::testing contains](nvx-testing.svg)
