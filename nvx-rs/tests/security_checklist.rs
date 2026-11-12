@@ -19,19 +19,33 @@ use std::process::{Command, Stdio};
 
 use nvx::activation::{MachineIdMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-#[cfg(windows)]
-use nvx::host::filesystem::Owner;
-use nvx::host::filesystem::{self, ExportRequest, Mapping, ReservedTargets, Target};
+use nvx::host::filesystem::{
+    self, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
+};
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::{snapshot, vm};
 use nvx::{ErrorKind, Hypervisor};
 
+/// Returns the request that maps `mappings` into the blockless root as `owner`, without denied,
+/// allowed, or write paths.
+fn request<'a>(mappings: &'a [Mapping<'a>], owner: Owner) -> ExportRequest<'a> {
+    let none = PathList {
+        name: "",
+        paths: &[],
+    };
+    ExportRequest {
+        mappings,
+        denied: none,
+        allowed: none,
+        write: none,
+        owner,
+        reserved: ReservedTargets::BLOCKLESS_ROOT,
+    }
+}
+
 /// Plans the export of `mappings` into the blockless root.
 fn plan(mappings: &[Mapping<'_>]) -> nvx::Result<Option<filesystem::ExportPlan>> {
-    filesystem::plan(&ExportRequest::new(
-        mappings,
-        ReservedTargets::BLOCKLESS_ROOT,
-    ))
+    filesystem::plan(&request(mappings, Owner::Vmm))
 }
 
 #[test]
@@ -94,10 +108,10 @@ fn an_export_refuses_a_read_only_path_inside_a_writable_directory() {
 #[cfg(windows)]
 #[test]
 fn the_caller_owner_is_refused_on_windows() {
-    let mut request = ExportRequest::new(&[], ReservedTargets::BLOCKLESS_ROOT);
-    request.owner = Owner::Caller;
     assert_eq!(
-        filesystem::plan(&request).unwrap_err().kind(),
+        filesystem::plan(&request(&[], Owner::Caller))
+            .unwrap_err()
+            .kind(),
         ErrorKind::Unsupported
     );
 }

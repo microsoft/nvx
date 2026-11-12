@@ -937,13 +937,13 @@ action that needs more than 256 rules.
 ### `nvx::host::filesystem`
 
 The planner of every NVX caller: `plan` turns an `ExportRequest`, the mapped
-host paths at explicit guest targets or at those of the host-path convention,
-their denied, allowed, and write paths, and the owner, into the `ExportPlan` of
-host paths through OpenVMM's aggregate virtio-fs device, for a root's
-`ReservedTargets`, the blockless root's or the container root's: its children,
-its ordered binds, which give the host-mapping table, and the identities that
-each start checks again; and `guest_path` and `resolve_guest_path` (also at
-`nvx::`).
+host paths at their guest targets, their denied, allowed, and write paths, and
+the owner, into the `ExportPlan` of host paths through OpenVMM's aggregate
+virtio-fs device, for a root's `ReservedTargets`, the blockless root's or the
+container root's: its children, its ordered binds, which give the host-mapping
+table, and the identities that each start checks again; and `guest_path` (also
+at `nvx::`), the guest path at which the host-path convention places a resolved
+host path.
 
 ### `nvx::host::nvxs`
 
