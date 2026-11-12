@@ -1806,7 +1806,6 @@ pub(crate) mod windows {
     use std::thread;
     use std::time::Duration;
 
-    use nvx::host::store::SandboxStore;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
         DELETE, FILE_DISPOSITION_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -1821,7 +1820,7 @@ pub(crate) mod windows {
     /// lock file.
     fn unprovisioned(root: &Root, state: &str) -> PathBuf {
         let dir = root.below(state);
-        SandboxStore::create(&dir).unwrap();
+        nvx::host::vm::create_private_dir(&dir).unwrap();
         dir.join("sandbox.lock")
     }
 

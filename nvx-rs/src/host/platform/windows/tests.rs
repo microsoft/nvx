@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::mem;
+#[cfg(feature = "cli")]
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsHandle;
 use std::path::Path;
@@ -10,10 +11,11 @@ use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
 use windows_sys::Win32::Foundation::{
     CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ACCESS_DENIED,
-    ERROR_INVALID_PARAMETER, ERROR_SHARING_VIOLATION, GetHandleInformation, HANDLE_FLAG_INHERIT,
-    SetHandleInformation,
+    ERROR_INVALID_PARAMETER, GetHandleInformation, HANDLE_FLAG_INHERIT, SetHandleInformation,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
@@ -26,7 +28,9 @@ use windows_sys::Win32::System::Threading::{
 pub(crate) use super::endpoint::tests::disconnect_control;
 pub(crate) use super::endpoint::tests::{accept_control, control_server};
 use super::identity::status_error;
-use super::log_claim::{local_directory, log_job_id, log_job_name, log_job_processes, object_name};
+#[cfg(feature = "cli")]
+use super::log_claim::log_job_processes;
+use super::log_claim::{local_directory, log_job_id, log_job_name, object_name};
 pub(crate) use super::private::tests::set_access;
 pub(crate) use super::private::tests::{access, user_sid};
 use super::process::{end_process, wait_step};
@@ -131,7 +135,11 @@ fn a_restore_ready_client_that_closed_before_its_connection_was_accepted_is_read
     };
     // A fresh endpoint and its listener, as a restore binds them.
     let listen = || {
-        let endpoint = control_endpoint(Path::new("unused")).unwrap();
+        let endpoint = format!(
+            r"\\.\pipe\nvx-restore-ready-{}-{}",
+            std::process::id(),
+            crate::host::tests::unique_suffix()
+        );
         let listener = ReadyListener::bind(&endpoint).unwrap();
         (endpoint, listener)
     };
@@ -581,6 +589,7 @@ fn spawn_locked(command: &mut std::process::Command) -> io::Result<std::process:
 /// A spawn of a stand-in VMM, with a log as its standard output and error, as
 /// `supervisor::spawn` passes the VMM its launch's log, that another thread runs and holds in
 /// its window, with the log's handles inheritable, until it is released.
+#[cfg(feature = "cli")]
 struct HeldSpawn {
     /// The log.
     log: std::path::PathBuf,
@@ -592,6 +601,7 @@ struct HeldSpawn {
     spawn: thread::JoinHandle<io::Result<LaunchedProcess>>,
 }
 
+#[cfg(feature = "cli")]
 impl HeldSpawn {
     /// Starts the spawn of `cmd /c exit 0`, outside any job, with its log in `directory`, and
     /// returns once it is in its window.
@@ -682,6 +692,7 @@ impl HeldSpawn {
 
 /// Returns whether the claim on the log `log`, the file `identity`, is released within
 /// `timeout`.
+#[cfg(feature = "cli")]
 pub(crate) fn claim_released_within(log: &Path, identity: (u64, u64), timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -695,6 +706,7 @@ pub(crate) fn claim_released_within(log: &Path, identity: (u64, u64), timeout: D
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_process_spawned_under_the_spawn_lock_does_not_inherit_a_vmms_log() {
     let directory = tempfile::tempdir().unwrap();
@@ -724,6 +736,7 @@ fn a_process_spawned_under_the_spawn_lock_does_not_inherit_a_vmms_log() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_process_spawned_without_the_spawn_lock_in_a_window_holds_the_vmms_log() {
     let directory = tempfile::tempdir().unwrap();
@@ -745,6 +758,7 @@ fn a_process_spawned_without_the_spawn_lock_in_a_window_holds_the_vmms_log() {
     assert!(released, "the log stayed held after the process exited");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_process_spawned_in_the_window_of_a_vmm_in_its_logs_job_holds_the_log_but_not_its_claim() {
     let directory = tempfile::tempdir().unwrap();
@@ -826,6 +840,7 @@ fn job_with_descriptor(name: &[u16], sddl: &str) -> OwnedHandle {
     job.unwrap_or_else(|| panic!("cannot create a job: {}", io::Error::last_os_error()))
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_job_that_is_not_the_users_under_the_name_of_a_logs_job_is_not_the_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -849,6 +864,7 @@ fn a_job_that_is_not_the_users_under_the_name_of_a_logs_job_is_not_the_logs() {
     assert!(!log_claim_held(&path, identity).unwrap());
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn an_object_of_another_type_under_the_name_of_a_logs_job_is_not_the_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -1005,6 +1021,7 @@ fn vm_spawns_refuse_untrusted_log_job_names_before_creating_a_child() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn what_a_link_under_the_name_of_a_logs_job_leads_to_is_not_the_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -1060,6 +1077,7 @@ fn what_a_link_under_the_name_of_a_logs_job_leads_to_is_not_the_logs() {
     assert!(!log_claim_held(&path, identity).unwrap());
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_vmm_never_starts_outside_a_job_that_a_claim_check_takes_for_its_logs() {
     let directory = tempfile::tempdir().unwrap();
@@ -1087,6 +1105,7 @@ fn a_vmm_whose_log_is_no_file_of_a_disk_volume_starts_without_a_job() {
     assert!(create_log_job(&pipe).unwrap().is_none());
     // A pipe has an identity that a claim check can match, but no file ID: a claim check, as
     // a spawn does, takes it for a log without a job.
+    #[cfg(feature = "cli")]
     assert!(opened_file_identity(&pipe).is_ok());
     assert_eq!(log_job_id(&null).unwrap(), None);
     assert_eq!(log_job_id(&pipe).unwrap(), None);
@@ -1122,68 +1141,13 @@ fn the_jobs_of_logs_whose_file_ids_share_their_low_64_bits_are_distinct() {
 
 /// Returns whether any process holds the file at `path` open: an open that shares nothing
 /// then fails with a sharing violation.
+#[cfg(feature = "cli")]
 fn held_open(path: &Path) -> bool {
     match OpenOptions::new().read(true).share_mode(0).open(path) {
         Ok(_) => false,
         Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => true,
         Err(error) => panic!("cannot open {}: {error}", path.display()),
     }
-}
-
-#[test]
-fn a_launch_whose_vmm_exited_ends_while_a_process_spawned_in_its_window_holds_its_log() {
-    use crate::host::store::{ArtifactIdentity, LaunchId, Recovery, RuntimeIdentity, SandboxStore};
-    use crate::host::supervisor::{self, VmmCommand};
-    use crate::protocol::CAPABILITY_LEN;
-
-    let directory = tempfile::tempdir().unwrap();
-    let store = SandboxStore::create(directory.path().join("sandbox")).unwrap();
-    let artifact = |digit: char| ArtifactIdentity::sha256(&digit.to_string().repeat(64)).unwrap();
-    let runtime = RuntimeIdentity::new(artifact('a'), artifact('b'), artifact('c'));
-    let capability = [7; CAPABILITY_LEN];
-    let mut locked = store.lock(None).unwrap();
-    let mut launch = locked
-        .begin_launch(&LaunchId::generate().unwrap(), &runtime, &capability)
-        .unwrap();
-    let system = std::env::var_os("SystemRoot").unwrap();
-    let cmd = Path::new(&system).join("System32").join("cmd.exe");
-    let command = VmmCommand::new(
-        cmd,
-        ["/c", "exit", "0"].map(OsString::from).to_vec(),
-        store.dir(),
-    );
-    // While the VMM is created, another part of the caller spawns a process without the
-    // spawn lock, as `std::process::Command` spawns one, which inherits the VMM's log.
-    let other = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let spawned = std::rc::Rc::clone(&other);
-    IN_WINDOW.set(Some(Box::new(move || {
-        *spawned.borrow_mut() = Some(sleeper().spawn().map(Running));
-    })));
-    let launched = supervisor::spawn(&command, &capability, launch.take_log().unwrap());
-    IN_WINDOW.set(None);
-    let launched = launched.unwrap();
-    let mut other = other
-        .take()
-        .expect("no process was spawned in the window")
-        .unwrap();
-    let vmm = launch.record_process(&launched).unwrap();
-    launched.detach();
-    assert!(
-        vmm.wait(Instant::now() + WINDOW_TIMEOUT).unwrap().is_some(),
-        "the stand-in did not exit"
-    );
-    // The VMM has exited, so the launch ends, whatever the other process holds.
-    let ended = launch.abandon().unwrap();
-    let holds = held_open(&store.log_path());
-    let running = other.0.try_wait().unwrap().is_none();
-    drop(other);
-    assert!(running, "the process spawned in the window exited early");
-    assert!(
-        holds,
-        "the process spawned in the window did not hold the log"
-    );
-    assert_eq!(ended, Recovery::Exited);
-    assert!(store.journal().unwrap().is_none());
 }
 
 #[test]

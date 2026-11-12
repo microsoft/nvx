@@ -1,6 +1,0 @@
-{
-  "control_endpoint": "/var/lib/sandboxes/example/control.sock",
-  "format": 1,
-  "pid": 4242,
-  "start_time": 1234567
-}

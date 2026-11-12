@@ -1,8 +1,0 @@
-{
-  "format": 3,
-  "endpoint": "/var/lib/sandboxes/example/control.sock",
-  "process": {
-    "pid": 4242,
-    "startTime": 1234567
-  }
-}

@@ -1693,9 +1693,9 @@ lock, so it proceeds while a workload runs. A provisioned state directory keeps
 removes them with NVX's other files. A
 transition that leaves a state directory without `config.json`, such as one of
 a sandbox that was never provisioned, removes `sandbox.lock` as it releases the
-lock. These are the rules of the sandbox store, which other orchestrators of
-sandboxes share through `nvx-rs`. On NFS, where a removed file that is still
-open, such as a lock file, stays as `.nfs*` until its last handle closes, and
+lock. These are the rules of the CLI's own store of a sandbox. On NFS, where a
+removed file that is still open, such as a lock file, stays as `.nfs*` until
+its last handle closes, and
 on Windows file systems without POSIX deletion such as ReFS, where a removed
 lock file stays under its name, such files keep the emptied directory, so
 `deprovision` then releases the lock before it removes the directory. A

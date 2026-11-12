@@ -3,17 +3,17 @@
 
 use std::io;
 use std::os::windows::io::OwnedHandle;
-use std::path::Path;
 use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA,
-    ERROR_OPERATION_ABORTED, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED,
-    ERROR_SEM_TIMEOUT, GENERIC_READ, GENERIC_WRITE, HANDLE, WAIT_EVENT, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_NO_DATA, ERROR_OPERATION_ABORTED,
+    ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GENERIC_READ, GENERIC_WRITE,
+    HANDLE, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SEM_TIMEOUT};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ALL_ACCESS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
     OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
@@ -32,14 +32,6 @@ use super::private::{CurrentUser, with_owner_only_attributes};
 use super::process::wait_step;
 use super::{last_error, owned, raw, wide};
 use crate::host::platform::{Transport, TransportHandle, time_left};
-
-/// Returns a fresh named-pipe endpoint for OpenVMM to listen on.
-pub(crate) fn control_endpoint(_socket_path: &Path) -> io::Result<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
-    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!("//./pipe/openvmm-microvm-{suffix}"))
-}
 
 /// The bytes that the inbound buffer of a restore-ready pipe holds, more than OpenVMM's event.
 const READY_BUFFER_LEN: u32 = 4096;
@@ -249,16 +241,13 @@ pub(crate) fn interrupt_transfers(handle: &TransportHandle) -> io::Result<()> {
     Ok(())
 }
 
-/// Returns the process that serves a named-pipe endpoint, or `None` if the pipe does not exist.
+/// Returns the process that serves a named-pipe endpoint, or `None` if the pipe does not exist, by
+/// the caller's absolute deadline.
 ///
 /// OpenVMM keeps one pipe instance for its whole lifetime, so a missing pipe means no OpenVMM
 /// serves the endpoint. The instance is busy while a client is attached and briefly between
-/// clients, which is waited out for up to five seconds.
-pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
-    endpoint_server_pid_until(endpoint, Instant::now() + Duration::from_secs(5))
-}
-
-/// Looks up the endpoint owner within the caller's absolute deadline.
+/// clients, which is waited out until the deadline.
+#[cfg(feature = "cli")]
 pub(crate) fn endpoint_server_pid_until(
     endpoint: &str,
     deadline: Instant,
