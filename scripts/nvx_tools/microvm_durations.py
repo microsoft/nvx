@@ -113,6 +113,8 @@ class DurationReport:
         kernel: str,
         processors: Sequence[int],
         scenarios: Sequence[str],
+        architecture: str = "x86_64",
+        scope: str = "full",
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         started: float | None = None,
@@ -127,7 +129,13 @@ class DurationReport:
         self._offset = wall_clock() - now
         if started is None:
             started = now - max(0.0, process_age_seconds() or 0.0)
-        self._dimensions = {"guest": guest, "backend": backend, "kernel": kernel}
+        self._dimensions = {
+            "guest": guest,
+            "backend": backend,
+            "kernel": kernel,
+            "architecture": architecture,
+            "scope": scope,
+        }
         self._span: dict[str, object] = {"record": "setup"}
         self._span_started = started
         self._write(
@@ -150,6 +158,7 @@ class DurationReport:
         message: str,
         *,
         processors: Sequence[int] | None = None,
+        variant: str | None = None,
     ) -> None:
         """End the open span, print `message` at once, and time `scenario`,
         which runs on `processors` if it takes processor counts."""
@@ -160,6 +169,8 @@ class DurationReport:
             **self._dimensions,
             "processors": None if processors is None else [*dict.fromkeys(processors)],
         }
+        if variant is not None:
+            self._span["variant"] = variant
         self._write(ended)
         print(message, flush=True)
 

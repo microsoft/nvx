@@ -134,6 +134,6 @@ pub mod spawn;
 pub mod terminal;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod time;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[doc(hidden)]
 pub mod time_probe;

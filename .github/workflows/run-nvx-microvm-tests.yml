@@ -3,6 +3,61 @@ name: Run NVX microVM tests
 on:
   workflow_call:
     inputs:
+      architecture:
+        description: Native guest and runner ISA
+        required: false
+        type: string
+        default: x86_64
+      scenarios:
+        description: JSON array of explicit existing scenario names
+        required: false
+        type: string
+        default: "[]"
+      cold-only:
+        description: Run maintained cold projections, not snapshot tails
+        required: false
+        type: boolean
+        default: false
+      guest:
+        description: Guest used by the selected correctness scenarios
+        required: false
+        type: string
+        default: alpine
+      processors:
+        description: JSON array of explicit processor counts; empty preserves defaults
+        required: false
+        type: string
+        default: "[]"
+      managed-root:
+        description: Existing managed lifecycle root, initramfs, scratch, or ram
+        required: false
+        type: string
+        default: initramfs
+      cycles:
+        description: Serial Windows repetitions with separate evidence directories
+        required: false
+        type: number
+        default: 1
+      start-stop-cycles:
+        description: Start/Stop cycles of one provisioned public scratch/RAM sandbox; zero keeps the existing case
+        required: false
+        type: number
+        default: 0
+      memory-mib:
+        description: Guest memory; zero keeps the selected guest's existing default
+        required: false
+        type: number
+        default: 0
+      output-dir:
+        description: Optional ISA/root-qualified correctness evidence directory
+        required: false
+        type: string
+        default: ""
+      result-id:
+        description: Distinct ISA/VP/root/cycle evidence suffix for matrix cells
+        required: false
+        type: string
+        default: ""
       display-name:
         description: Platform name shown in the job list
         required: true
@@ -100,6 +155,96 @@ jobs:
       - name: Set up retrying curl
         uses: ./.github/actions/setup-curl
 
+      - name: Bind shared correctness arguments
+        id: correctness
+        shell: bash
+        env:
+          ARCHITECTURE: ${{ inputs.architecture }}
+          BACKEND: ${{ inputs.backend }}
+          SCENARIOS: ${{ inputs.scenarios }}
+          PROCESSORS: ${{ inputs.processors }}
+          COLD_ONLY: ${{ inputs.cold-only }}
+          GUEST: ${{ inputs.guest }}
+          MANAGED_ROOT: ${{ inputs.managed-root }}
+          CYCLES: ${{ inputs.cycles }}
+          START_STOP_CYCLES: ${{ inputs.start-stop-cycles }}
+          MEMORY_MIB: ${{ inputs.memory-mib }}
+          OUTPUT_DIRECTORY: ${{ inputs.output-dir }}
+          DEBUG_KERNEL: ${{ inputs.debug-kernel }}
+          GUESTS_AND_SANDBOXES: ${{ inputs.guests-and-sandboxes }}
+          RUNTIME_ADAPTER: ${{ inputs.runtime-adapter }}
+          SHARD: ${{ inputs.shard }}
+          SHARD_COUNT: ${{ inputs.shard-count }}
+          RESULT_ID: ${{ inputs.result-id }}
+        run: |
+          ${{ runner.os == 'Windows' && 'python' || 'python3' }} - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          import nvx
+          from nvx_tools.microvm_tests import PUBLIC_SANDBOX_SCENARIOS
+
+          architecture, backend = os.environ["ARCHITECTURE"], os.environ["BACKEND"]
+          if os.environ["RESULT_ID"] and re.fullmatch(r"[A-Za-z0-9_.-]+", os.environ["RESULT_ID"]) is None:
+              raise SystemExit("result-id must be an artifact-safe cell identifier")
+          scenarios = json.loads(os.environ["SCENARIOS"])
+          processors = json.loads(os.environ["PROCESSORS"])
+          if not isinstance(scenarios, list) or not all(isinstance(s, str) for s in scenarios):
+              raise SystemExit("scenarios must be a JSON string array")
+          if not isinstance(processors, list) or not all(type(p) is int for p in processors):
+              raise SystemExit("processors must be a JSON integer array")
+          cycles = int(os.environ["CYCLES"])
+          if cycles < 1 or (os.environ["RUNNER_OS"] != "Windows" and cycles != 1):
+              raise SystemExit("serial cycles require Windows and a positive integer")
+          cold = os.environ["COLD_ONLY"] == "true"
+          debug = os.environ["DEBUG_KERNEL"] == "true"
+          if architecture == "aarch64":
+              if backend != "whp" or not cold or debug or os.environ["GUESTS_AND_SANDBOXES"] == "true":
+                  raise SystemExit("ARM correctness requires the explicit Windows/WHP cold scope")
+              if not scenarios and os.environ["RUNTIME_ADAPTER"] != "true":
+                  raise SystemExit("ARM correctness requires explicit existing scenarios")
+          arguments = ["test-microvm", "--backend", backend, "--architecture", architecture,
+                       "--guest", os.environ["GUEST"]]
+          for scenario in scenarios:
+              arguments += ["--scenario", scenario]
+          if processors:
+              arguments += ["--processors", *map(str, processors)]
+          for name, option in (("START_STOP_CYCLES", "--start-stop-cycles"), ("MEMORY_MIB", "--memory-mib")):
+              value = int(os.environ[name])
+              if value < 0:
+                  raise SystemExit(f"{option} must be nonnegative; zero preserves the default")
+              if value:
+                  arguments += [option, str(value)]
+          if cold:
+              arguments += ["--cold-only"]
+          if debug:
+              arguments += ["--debug-kernel"]
+          if int(os.environ["SHARD"]):
+              arguments += ["--shard", f'{os.environ["SHARD"]}/{os.environ["SHARD_COUNT"]}']
+          if os.environ["MANAGED_ROOT"] != "initramfs":
+              arguments += ["--managed-root", os.environ["MANAGED_ROOT"]]
+          nvx.parse_args(arguments)
+          isa = "" if architecture == "x86_64" else f"-{architecture}"
+          directory = os.environ["OUTPUT_DIRECTORY"] or f"build/test-results/microvm{isa}-{backend}" + ("-debug" if debug else "")
+          workload_artifacts = not debug and (
+              (not scenarios and not int(os.environ["SHARD"]))
+              or bool(set(scenarios) & PUBLIC_SANDBOX_SCENARIOS)
+              or os.environ["MANAGED_ROOT"] != "initramfs"
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"workload-artifacts={str(workload_artifacts).lower()}\n")
+          Path("build").mkdir(exist_ok=True)
+          Path("build/nvx-correctness-arguments.json").write_text(
+              json.dumps({"arguments": arguments, "cycles": cycles, "output_dir": directory,
+                          "workload_artifacts": workload_artifacts}),
+              encoding="utf-8",
+          )
+          PY
+
       # The guest artifacts that the steps below boot or read. Every job
       # qualifies its runner with the kernel and the Alpine initramfs, the
       # shards of the default suite boot only those, and the debug-kernel jobs
@@ -110,14 +255,14 @@ jobs:
       - name: Download guest kernel
         uses: actions/download-artifact@v8
         with:
-          name: guest-kernel
-          path: build
+          name: ${{ inputs.architecture == 'aarch64' && 'guest-aarch64-kernel' || 'guest-kernel' }}
+          path: ${{ inputs.architecture == 'aarch64' && 'build/aarch64' || 'build' }}
 
       - name: Download Alpine initramfs
         uses: actions/download-artifact@v8
         with:
-          name: guest-alpine
-          path: build
+          name: ${{ inputs.architecture == 'aarch64' && 'guest-aarch64-alpine' || 'guest-alpine' }}
+          path: ${{ inputs.architecture == 'aarch64' && 'build/aarch64' || 'build' }}
 
       - name: Download guest debug kernel
         if: inputs.debug-kernel
@@ -127,27 +272,27 @@ jobs:
           path: build
 
       - name: Download Ubuntu initramfs
-        if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
+        if: ${{ (inputs.guests-and-sandboxes || inputs.guest == 'ubuntu') && !inputs.debug-kernel }}
         uses: actions/download-artifact@v8
         with:
-          name: guest-ubuntu
-          path: build
+          name: ${{ inputs.architecture == 'aarch64' && 'guest-aarch64-ubuntu' || 'guest-ubuntu' }}
+          path: ${{ inputs.architecture == 'aarch64' && 'build/aarch64' || 'build' }}
 
       - name: Download Ubuntu distro layer
         if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
         uses: actions/download-artifact@v8
         with:
-          name: guest-ubuntu-distro
-          path: build
+          name: ${{ inputs.architecture == 'aarch64' && 'guest-aarch64-ubuntu-distro' || 'guest-ubuntu-distro' }}
+          path: ${{ inputs.architecture == 'aarch64' && 'build/aarch64' || 'build' }}
 
       # The layer, its manifest, and the sandbox scratch template, which the
       # public sandbox scenarios of an unsharded default run read.
       - name: Download Ubuntu distro layer for the whole default run
-        if: ${{ !inputs.guests-and-sandboxes && !inputs.runtime-adapter && !inputs.debug-kernel && !inputs.shard }}
+        if: ${{ !inputs.guests-and-sandboxes && !inputs.runtime-adapter && !inputs.debug-kernel && !inputs.shard && steps.correctness.outputs.workload-artifacts == 'true' }}
         uses: actions/download-artifact@v8
         with:
-          name: guest-ubuntu-distro
-          path: build
+          name: ${{ inputs.architecture == 'aarch64' && 'guest-aarch64-ubuntu-distro' || 'guest-ubuntu-distro' }}
+          path: ${{ inputs.architecture == 'aarch64' && 'build/aarch64' || 'build' }}
 
       # The layer, its manifest, and the sandbox scratch template, from which
       # the layered runtime adapter scenarios boot their roots, in a job that
@@ -156,8 +301,8 @@ jobs:
         if: ${{ inputs.runtime-adapter && !inputs.guests-and-sandboxes && !inputs.debug-kernel }}
         uses: actions/download-artifact@v8
         with:
-          name: guest-ubuntu-distro
-          path: build
+          name: ${{ inputs.architecture == 'aarch64' && 'guest-aarch64-ubuntu-distro' || 'guest-ubuntu-distro' }}
+          path: ${{ inputs.architecture == 'aarch64' && 'build/aarch64' || 'build' }}
 
       - name: Download Azure Linux initramfs
         if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
@@ -203,6 +348,7 @@ jobs:
         with:
           backend: ${{ inputs.backend }}
           verify-openvmm: "true"
+          architecture: ${{ inputs.architecture }}
 
       # The runner signals only a step's shell when the job is cancelled, so
       # the Linux steps exec the test harness, which can then stop OpenVMM and
@@ -210,22 +356,33 @@ jobs:
       - name: Run NVX microVM tests on Linux
         if: runner.os != 'Windows' && !inputs.guests-and-sandboxes && !inputs.runtime-adapter
         shell: bash
-        run: >-
-          exec python3 scripts/nvx.py test-microvm
-          --backend "${{ inputs.backend }}"
-          ${{ inputs.debug-kernel && '--debug-kernel' || '' }}
-          ${{ inputs.shard && format('--shard {0}/{1}', inputs.shard, inputs.shard-count) || '' }}
-          --output-dir "build/test-results/microvm-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}"
+        run: |
+          exec python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+          selected = json.loads(Path("build/nvx-correctness-arguments.json").read_bytes())
+          os.execv(sys.executable, [sys.executable, "scripts/nvx.py", *selected["arguments"],
+                                   "--output-dir", selected["output_dir"]])
+          PY
 
       - name: Run NVX microVM tests on Windows
         if: runner.os == 'Windows' && !inputs.guests-and-sandboxes && !inputs.runtime-adapter
         shell: powershell
-        run: >-
-          python scripts\nvx.py test-microvm
-          --backend "${{ inputs.backend }}"
-          ${{ inputs.debug-kernel && '--debug-kernel' || '' }}
-          ${{ inputs.shard && format('--shard {0}/{1}', inputs.shard, inputs.shard-count) || '' }}
-          --output-dir "build/test-results/microvm-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}"
+        run: |
+          $ErrorActionPreference = "Stop"
+          $selected = Get-Content -LiteralPath "build/nvx-correctness-arguments.json" -Raw |
+            ConvertFrom-Json
+          $arguments = @($selected.arguments)
+          for ($cycle = 1; $cycle -le $selected.cycles; $cycle++) {
+            $directory = $selected.output_dir
+            if ($selected.cycles -gt 1) {
+              $directory = Join-Path $directory ("cycle-{0:D3}" -f $cycle)
+            }
+            python scripts\nvx.py @arguments --output-dir $directory
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Run public managed sandbox acceptance on Linux
         if: runner.os != 'Windows' && inputs.guests-and-sandboxes && !inputs.debug-kernel
@@ -1318,13 +1475,15 @@ jobs:
         run: >-
           python3 scripts/nvx.py test-runtime-adapter
           --backend "${{ inputs.backend }}"
+          --architecture "${{ inputs.architecture }}"
+          ${{ inputs.cold-only && '--cold-only' || '' }}
           --guest-agent tests/runtime-adapter/target/x86_64-unknown-linux-musl/release/runtime-adapter-guest
 
       - name: Download the runtime adapter's guest agent on Windows
         if: runner.os == 'Windows' && inputs.runtime-adapter && !inputs.debug-kernel
         uses: actions/download-artifact@v8
         with:
-          name: runtime-adapter-guest
+          name: ${{ inputs.architecture == 'aarch64' && 'runtime-adapter-guest-aarch64' || 'runtime-adapter-guest' }}
           path: build/runtime-adapter
 
       - name: Run runtime adapter scenarios on Windows
@@ -1333,6 +1492,8 @@ jobs:
         run: >-
           python scripts\nvx.py test-runtime-adapter
           --backend "${{ inputs.backend }}"
+          --architecture "${{ inputs.architecture }}"
+          ${{ inputs.cold-only && '--cold-only' || '' }}
           --guest-agent build\runtime-adapter\runtime-adapter-guest
 
       # A job that runs the runtime adapter scenarios alone runs no
@@ -1342,7 +1503,7 @@ jobs:
         if: failure() && (inputs.guests-and-sandboxes || !inputs.runtime-adapter)
         uses: actions/upload-artifact@v7
         with:
-          name: nvx-microvm-tests-${{ inputs.backend }}${{ inputs.debug-kernel && '-debug' || '' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}
+          name: nvx-microvm-tests-${{ inputs.backend }}${{ inputs.architecture == 'aarch64' && format('-aarch64-{0}', inputs.managed-root) || '' }}${{ inputs.result-id && format('-{0}', inputs.result-id) || '' }}${{ inputs.debug-kernel && '-debug' || '' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}
           path: |
             build/test-results/public-exec-${{ inputs.backend }}
             build/test-results/microvm-${{ inputs.backend }}
@@ -1350,6 +1511,8 @@ jobs:
             build/test-results/ubuntu-${{ inputs.backend }}
             build/test-results/ubuntu-kvm-extended
             build/test-results/azurelinux-${{ inputs.backend }}
+            build/test-results/microvm-aarch64-${{ inputs.backend }}
+            ${{ inputs.output-dir }}
           if-no-files-found: warn
 
       # Each job and attempt keeps the scenario duration report of every
@@ -1360,7 +1523,7 @@ jobs:
         if: always() && (inputs.guests-and-sandboxes || !inputs.runtime-adapter)
         uses: actions/upload-artifact@v7
         with:
-          name: nvx-microvm-durations-${{ runner.os }}-${{ inputs.backend }}-${{ inputs.debug-kernel && 'debug' || 'default' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/test-results/*/scenario-durations.jsonl
+          name: nvx-microvm-durations-${{ runner.os }}-${{ inputs.backend }}-${{ inputs.debug-kernel && 'debug' || 'default' }}${{ inputs.architecture == 'aarch64' && format('-aarch64-{0}', inputs.managed-root) || '' }}${{ inputs.result-id && format('-{0}', inputs.result-id) || '' }}${{ inputs.guests-and-sandboxes && '-guests' || '' }}${{ inputs.shard && format('-shard-{0}', inputs.shard) || '' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/test-results/**/scenario-durations.jsonl
           if-no-files-found: warn
           retention-days: 30

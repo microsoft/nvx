@@ -200,7 +200,7 @@ jobs:
           retention-days: 1
 
   build-nvx-rs-windows-msvc:
-    name: nvx-rs binary / Windows MSVC
+    name: nvx-rs binary / Windows MSVC${{ matrix.architecture == 'aarch64' && ' / ARM64' || '' }}
     if: >-
       ${{
         (
@@ -212,9 +212,17 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         )
       }}
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: nvx-rs-windows-msvc
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
-    steps:
+    steps: &windows-nvx-rs-build
       - name: Checkout
         uses: actions/checkout@v5
         with:
@@ -229,6 +237,7 @@ jobs:
       # The next step builds nvx-rs with the release that rust-toolchain.toml
       # pins, which rustup would otherwise install with its default profile.
       - name: Install the pinned Rust release
+        if: matrix.architecture == 'x86_64'
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -241,6 +250,21 @@ jobs:
             --profile minimal --no-self-update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Verify native Windows build tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = if ("${{ matrix.architecture }}" -eq "aarch64") { "Arm64" } else { "X64" }
+          $runtime = [System.Runtime.InteropServices.RuntimeInformation]
+          if ($runtime::OSArchitecture.ToString() -ne $expected -or
+              $runtime::ProcessArchitecture.ToString() -ne $expected) {
+            throw "Windows build OS and process must be native $expected"
+          }
+          $hostTarget = (rustc -vV | Select-String '^host: ').Line.Substring(6)
+          if ($hostTarget -ne "${{ matrix.target }}") {
+            throw "Rust host $hostTarget is not native ${{ matrix.target }}"
+          }
+
       # As on Linux. The static C runtime spares the self-hosted runners the
       # Visual C++ redistributable.
       - name: Build nvx-rs
@@ -249,19 +273,30 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml
+          if ("${{ matrix.architecture }}" -eq "aarch64") {
+            cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml `
+              --target "${{ matrix.target }}"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            New-Item -ItemType Directory -Path "nvx-rs\target\release" -Force | Out-Null
+            Copy-Item -LiteralPath "nvx-rs\target\${{ matrix.target }}\release\nvx-rs.exe" `
+              -Destination "nvx-rs\target\release\nvx-rs.exe"
+          } else {
+            cargo build --release --locked --features cli --manifest-path nvx-rs/Cargo.toml
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Record nvx-rs provenance
         shell: powershell
         run: |
-          python scripts\nvx.py record-nvx-rs-provenance --target x86_64-pc-windows-msvc
+          python -c "import sys; sys.path.insert(0, 'scripts'); from nvx_tools.common import require_pe_architecture; from nvx_tools.nvx_rs import binary_path; require_pe_architecture(binary_path(), '${{ matrix.architecture }}')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts\nvx.py record-nvx-rs-provenance --target "${{ matrix.target }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload nvx-rs executable
         uses: actions/upload-artifact@v7
         with:
-          name: nvx-rs-windows-msvc-executable
+          name: ${{ matrix.artifact }}-executable
           path: nvx-rs/target/release/nvx-rs.exe
           if-no-files-found: error
           overwrite: true
@@ -270,11 +305,34 @@ jobs:
       - name: Upload nvx-rs provenance
         uses: actions/upload-artifact@v7
         with:
-          name: nvx-rs-windows-msvc-provenance
+          name: ${{ matrix.artifact }}-provenance
           path: build/nvx-rs.provenance.json
           if-no-files-found: error
           overwrite: true
           retention-days: 1
+
+  # Same steps and profile as x86; this adds only native ISA/runner/identity.
+  build-nvx-rs-windows-aarch64-msvc:
+    name: nvx-rs binary / Windows ARM64 MSVC
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+        (needs.openvmm-changes.result != 'success' || needs.openvmm-changes.outputs.run-microvm-tests == 'true')
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: aarch64
+            runner: ["self-hosted", "Windows", "ARM64", "Baremetal"]
+            target: aarch64-pc-windows-msvc
+            artifact: nvx-rs-windows-aarch64-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps: *windows-nvx-rs-build
 
   # The NVX CLI tests do not depend on the backend, so they run once per OS on
   # GitHub-hosted runners rather than in every hypervisor job, with the nvx-rs
@@ -719,6 +777,102 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # ARM uses the same native producers, without x86 cache/release identities.
+  # This is a build context, not native WHP or restricted-service proof.
+  artifacts-aarch64:
+    name: Build ARM64 cold guest artifacts
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          (
+            needs.openvmm-changes.outputs.run-guest-artifacts == 'true' &&
+            needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+          )
+        )
+      }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Build guest artifacts
+        uses: ./.github/actions/build-guest-artifacts
+        with:
+          architecture: aarch64
+          components: kernel alpine ubuntu
+          save-cache: "false"
+
+      - name: Upload ARM kernel
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-aarch64-kernel
+          path: |
+            build/aarch64/Image
+            build/aarch64/Image.config
+            build/aarch64/Image.provenance.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload ARM Alpine initramfs
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-aarch64-alpine
+          path: |
+            build/aarch64/initramfs.cpio.gz
+            build/aarch64/initramfs.cpio.gz.packages.json
+            build/aarch64/initramfs.provenance.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload ARM Ubuntu initramfs
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-aarch64-ubuntu
+          path: |
+            build/aarch64/initramfs-ubuntu.cpio.gz
+            build/aarch64/initramfs-ubuntu.cpio.gz.packages.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload ARM Ubuntu distro layer
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-aarch64-ubuntu-distro
+          path: |
+            build/aarch64/ubuntu-distro.erofs
+            build/aarch64/ubuntu-distro.erofs.manifest.json
+            build/aarch64/ubuntu-smoke-scratch.ext4
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Build the runtime adapter's native ARM guest agent
+        shell: bash
+        working-directory: tests/runtime-adapter
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' ../../rust-toolchain.toml)
+          test -n "${toolchain}"
+          rustup toolchain install "${toolchain}" --profile minimal --no-self-update \
+            --target aarch64-unknown-linux-musl
+          test "$(rustc "+${toolchain}" -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+          cargo "+${toolchain}" build --locked --release --features guest \
+            --target aarch64-unknown-linux-musl --bin runtime-adapter-guest
+
+      - name: Upload the ARM runtime adapter guest agent
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-adapter-guest-aarch64
+          path: tests/runtime-adapter/target/aarch64-unknown-linux-musl/release/runtime-adapter-guest
+          if-no-files-found: error
+          retention-days: 1
+
   # A dev push and a merge group reuse the guest artifact components that the
   # pull request that they merge built (see build-guest-artifacts). A
   # same-repository pull request rehearses that selection and check on the
@@ -914,6 +1068,33 @@ jobs:
     secrets:
       OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
 
+  build-openvmm-windows-aarch64-msvc:
+    name: OpenVMM binary / Windows ARM64 MSVC
+    needs: [openvmm-changes]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          (
+            needs.openvmm-changes.outputs.run-openvmm-binaries == 'true' &&
+            needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+          )
+        )
+      }}
+    uses: ./.github/workflows/build-openvmm-binary.yml
+    with:
+      display-name: Windows ARM64 MSVC
+      runner: '["self-hosted", "Windows", "ARM64", "Baremetal"]'
+      architecture: aarch64
+      backend: whp
+      artifact: openvmm-windows-aarch64-msvc
+      binary: openvmm/target/release/openvmm.exe
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
   # OpenVMM's own checkin gates test the revision that NVX pins, on each pull
   # request into feature/microvm/dev and on each push to it, so CI runs none of
   # OpenVMM's tests: this job checks that those gates passed the jobs that
@@ -961,6 +1142,7 @@ jobs:
             }}
         run: >-
           python3 scripts/nvx.py check-openvmm-ci
+          --architecture aarch64
           --wait-minutes "${WAIT_MINUTES}"
           --summary "${GITHUB_STEP_SUMMARY}"
 
@@ -1097,6 +1279,199 @@ jobs:
   # adapter scenarios take about twice as long as on KVM and MSHV, runs them
   # in a third job beside the other two, so that its guest and sandbox job no
   # longer ends last in most runs (doc/ci.md#job-graph-and-runner-capacity).
+  # ARM uses the same caller and assertions, with explicit cold capability.
+  # Pool access and restricted-service admission remain prerequisites.
+  nvx-microvm-tests-whp-aarch64:
+    name: NVX ARM64/WHP cold cells / ${{ matrix.cell }}
+    needs:
+      - openvmm-changes
+      - artifacts-aarch64
+      - build-openvmm-windows-aarch64-msvc
+      - build-nvx-rs-windows-aarch64-msvc
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        needs.artifacts-aarch64.result == 'success' &&
+        needs.build-openvmm-windows-aarch64-msvc.result == 'success' &&
+        needs.build-nvx-rs-windows-aarch64-msvc.result == 'success' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          (
+            needs.openvmm-changes.outputs.run-guest-artifacts == 'true' &&
+            needs.openvmm-changes.outputs.run-openvmm-binaries == 'true' &&
+            needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+          )
+        )
+      }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - cell: cold
+            guest: alpine
+            root: initramfs
+            memory: 256
+            scenarios: >-
+              ["command-line-limit","directional-network-policy","denied-filesystem-paths",
+               "filesystem-comma-paths","filesystem-owner","filesystem-policy",
+               "filesystem-shares","guest-boot","guest-identity","host-loopback-policy",
+               "interrupt-map","ipv6-egress-policy","lifecycle","l3-l4-egress-policy",
+               "l3-l4-egress-port-ranges","l3-l4-egress-protocols",
+               "managed-exec-config","private-network-ingress","sandbox-blocks",
+               "sandbox-lifecycle","sandbox-proxy-only","sandbox-ram-upper","smp",
+               "structured-outcome","virtio-features","virtio-net","workload-identity"]
+          - cell: blockless
+            guest: alpine
+            root: initramfs
+            memory: 1024
+            scenarios: '["managed-lifecycle"]'
+          - cell: scratch
+            guest: ubuntu
+            root: scratch
+            memory: 1024
+            scenarios: '["managed-lifecycle"]'
+          - cell: ram
+            guest: ubuntu
+            root: ram
+            memory: 1024
+            scenarios: '["managed-lifecycle"]'
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: ARM64/WHP cold / ${{ matrix.cell }}
+      runner: '["self-hosted", "Windows", "ARM64", "Baremetal"]'
+      architecture: aarch64
+      backend: whp
+      openvmm-artifact: openvmm-windows-aarch64-msvc
+      nvx-rs-artifact: nvx-rs-windows-aarch64-msvc
+      scenarios: ${{ matrix.scenarios }}
+      cold-only: true
+      guest: ${{ matrix.guest }}
+      managed-root: ${{ matrix.root }}
+      memory-mib: ${{ matrix.memory }}
+      processors: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[1,2,4,8]' || '[1,8]' }}
+      output-dir: build/test-results/microvm-aarch64-whp-${{ matrix.cell }}
+      result-id: ${{ matrix.cell }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'vp1-2-4-8' || 'vp1-8' }}
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-adapter-whp-aarch64:
+    name: NVX ARM64/WHP cold runtime adapter
+    needs:
+      - openvmm-changes
+      - artifacts-aarch64
+      - build-openvmm-windows-aarch64-msvc
+      - build-nvx-rs-windows-aarch64-msvc
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        needs.artifacts-aarch64.result == 'success' &&
+        needs.build-openvmm-windows-aarch64-msvc.result == 'success' &&
+        needs.build-nvx-rs-windows-aarch64-msvc.result == 'success' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          (
+            needs.openvmm-changes.outputs.run-guest-artifacts == 'true' &&
+            needs.openvmm-changes.outputs.run-openvmm-binaries == 'true' &&
+            needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+          )
+        )
+      }}
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: ARM64/WHP cold runtime adapter
+      runner: '["self-hosted", "Windows", "ARM64", "Baremetal"]'
+      architecture: aarch64
+      backend: whp
+      openvmm-artifact: openvmm-windows-aarch64-msvc
+      nvx-rs-artifact: nvx-rs-windows-aarch64-msvc
+      cold-only: true
+      runtime-adapter: true
+      result-id: cold-adapter
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
+  nvx-microvm-repeat-whp-aarch64:
+    name: NVX ARM64/WHP serial repetition / ${{ matrix.cell }}
+    needs:
+      - openvmm-changes
+      - artifacts-aarch64
+      - build-openvmm-windows-aarch64-msvc
+      - build-nvx-rs-windows-aarch64-msvc
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.artifacts-aarch64.result == 'success' &&
+        needs.build-openvmm-windows-aarch64-msvc.result == 'success' &&
+        needs.build-nvx-rs-windows-aarch64-msvc.result == 'success' &&
+        (
+          needs.openvmm-changes.result != 'success' ||
+          (
+            needs.openvmm-changes.outputs.run-guest-artifacts == 'true' &&
+            needs.openvmm-changes.outputs.run-openvmm-binaries == 'true' &&
+            needs.openvmm-changes.outputs.run-microvm-tests == 'true'
+          )
+        )
+      }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - cell: cold-1vp-50
+            scenarios: '["guest-boot"]'
+            processors: "[1]"
+            cycles: 50
+            start-stop: 0
+          - cell: cold-8vp-50
+            scenarios: '["guest-boot"]'
+            processors: "[8]"
+            cycles: 50
+            start-stop: 0
+          - cell: public-lifecycle-25
+            scenarios: '["sandbox-lifecycle"]'
+            processors: "[1]"
+            cycles: 25
+            start-stop: 0
+          - cell: scratch-start-stop-10
+            scenarios: '["sandbox-lifecycle"]'
+            processors: "[1]"
+            cycles: 1
+            start-stop: 10
+          - cell: ram-start-stop-10
+            scenarios: '["sandbox-ram-upper"]'
+            processors: "[1]"
+            cycles: 1
+            start-stop: 10
+          - cell: mixed-1-2-4-8vp
+            scenarios: '["smp","managed-lifecycle"]'
+            processors: "[1,2,4,8]"
+            cycles: 1
+            start-stop: 0
+    uses: ./.github/workflows/run-nvx-microvm-tests.yml
+    with:
+      display-name: ARM64/WHP serial / ${{ matrix.cell }}
+      runner: '["self-hosted", "Windows", "ARM64", "Baremetal"]'
+      architecture: aarch64
+      backend: whp
+      openvmm-artifact: openvmm-windows-aarch64-msvc
+      nvx-rs-artifact: nvx-rs-windows-aarch64-msvc
+      scenarios: ${{ matrix.scenarios }}
+      processors: ${{ matrix.processors }}
+      cycles: ${{ matrix.cycles }}
+      start-stop-cycles: ${{ matrix.start-stop }}
+      cold-only: true
+      memory-mib: 1024
+      output-dir: build/test-results/microvm-aarch64-whp-repeat-${{ matrix.cell }}
+      result-id: repeat-${{ matrix.cell }}
+    secrets:
+      OPENVMM_DEPLOY_KEY: ${{ secrets.OPENVMM_DEPLOY_KEY }}
+
   nvx-microvm-guests-kvm:
     name: NVX microVM tests / Linux / KVM / Guests and sandboxes
     needs: [artifacts, distro-artifacts, build-openvmm-linux-gnu, build-nvx-rs-linux-musl, openvmm-changes]
@@ -1719,16 +2094,19 @@ jobs:
       - nvx-rs
       - build-nvx-rs-linux-musl
       - build-nvx-rs-windows-msvc
+      - build-nvx-rs-windows-aarch64-msvc
       - nvx-cli-linux
       - nvx-cli-windows
       - openvmm-changes
       - artifacts
       - distro-artifacts
+      - artifacts-aarch64
       - debug-kernel
       - guest-artifact-reuse
       - build-openvmm-linux-gnu
       - build-openvmm-linux-musl
       - build-openvmm-windows-msvc
+      - build-openvmm-windows-aarch64-msvc
       - openvmm-ci
       - nvx-microvm-tests-kvm
       - nvx-microvm-tests-mshv
@@ -1737,6 +2115,9 @@ jobs:
       - nvx-microvm-guests-mshv
       - nvx-microvm-guests-whp
       - nvx-microvm-adapter-whp
+      - nvx-microvm-tests-whp-aarch64
+      - nvx-microvm-adapter-whp-aarch64
+      - nvx-microvm-repeat-whp-aarch64
       - nvx-microvm-debug-kvm
       - nvx-microvm-debug-mshv
       - nvx-microvm-debug-whp
@@ -1774,16 +2155,19 @@ jobs:
           NVX_RS_RESULT: ${{ needs.nvx-rs.result }}
           BUILD_NVX_RS_LINUX_MUSL_RESULT: ${{ needs.build-nvx-rs-linux-musl.result }}
           BUILD_NVX_RS_WINDOWS_MSVC_RESULT: ${{ needs.build-nvx-rs-windows-msvc.result }}
+          BUILD_NVX_RS_WINDOWS_AARCH64_MSVC_RESULT: ${{ needs.build-nvx-rs-windows-aarch64-msvc.result }}
           NVX_CLI_LINUX_RESULT: ${{ needs.nvx-cli-linux.result }}
           NVX_CLI_WINDOWS_RESULT: ${{ needs.nvx-cli-windows.result }}
           CHANGES_RESULT: ${{ needs.openvmm-changes.result }}
           ARTIFACTS_RESULT: ${{ needs.artifacts.result }}
           DISTRO_ARTIFACTS_RESULT: ${{ needs.distro-artifacts.result }}
+          ARTIFACTS_AARCH64_RESULT: ${{ needs.artifacts-aarch64.result }}
           DEBUG_KERNEL_RESULT: ${{ needs.debug-kernel.result }}
           GUEST_ARTIFACT_REUSE_RESULT: ${{ needs.guest-artifact-reuse.result }}
           BUILD_LINUX_GNU_RESULT: ${{ needs.build-openvmm-linux-gnu.result }}
           BUILD_LINUX_MUSL_RESULT: ${{ needs.build-openvmm-linux-musl.result }}
           BUILD_WINDOWS_MSVC_RESULT: ${{ needs.build-openvmm-windows-msvc.result }}
+          BUILD_WINDOWS_AARCH64_MSVC_RESULT: ${{ needs.build-openvmm-windows-aarch64-msvc.result }}
           OPENVMM_CI_RESULT: ${{ needs.openvmm-ci.result }}
           MICROVM_KVM_RESULT: ${{ needs.nvx-microvm-tests-kvm.result }}
           MICROVM_MSHV_RESULT: ${{ needs.nvx-microvm-tests-mshv.result }}
@@ -1792,6 +2176,9 @@ jobs:
           MICROVM_GUESTS_MSHV_RESULT: ${{ needs.nvx-microvm-guests-mshv.result }}
           MICROVM_GUESTS_WHP_RESULT: ${{ needs.nvx-microvm-guests-whp.result }}
           MICROVM_ADAPTER_WHP_RESULT: ${{ needs.nvx-microvm-adapter-whp.result }}
+          MICROVM_WHP_AARCH64_RESULT: ${{ needs.nvx-microvm-tests-whp-aarch64.result }}
+          MICROVM_ADAPTER_WHP_AARCH64_RESULT: ${{ needs.nvx-microvm-adapter-whp-aarch64.result }}
+          MICROVM_REPEAT_WHP_AARCH64_RESULT: ${{ needs.nvx-microvm-repeat-whp-aarch64.result }}
           MICROVM_DEBUG_KVM_RESULT: ${{ needs.nvx-microvm-debug-kvm.result }}
           MICROVM_DEBUG_MSHV_RESULT: ${{ needs.nvx-microvm-debug-mshv.result }}
           MICROVM_DEBUG_WHP_RESULT: ${{ needs.nvx-microvm-debug-whp.result }}

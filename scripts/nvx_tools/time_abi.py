@@ -179,6 +179,60 @@ def describe_cpu_generations(
 OPENVMM_CPU_PROFILES = Path("vmm_core", "cpu_profile", "profiles")
 
 
+@dataclass(frozen=True)
+class ArmCpuProfile:
+    """The ISA-specific identity of a pinned ARM profile, not a CPUID generation."""
+
+    profile_id: str
+    vendor: str
+    sha256: str
+    physical_address_bits: int
+    registers: tuple[str, ...]
+
+
+def arm_cpu_profile(document: object) -> ArmCpuProfile | None:
+    """Read an ARM identity; leave CPUID documents to their existing reader."""
+    if not isinstance(document, dict) or "profile" not in document:
+        return None
+    document = cast(dict[str, object], document)
+    profile_value = document["profile"]
+    if not isinstance(profile_value, dict):
+        raise ValueError("its ARM profile is not a JSON object")
+    profile = cast(dict[str, object], profile_value)
+    if profile.get("schema") != "nvx.arm64.cpu.v1":
+        raise ValueError("its ARM profile schema is unsupported")
+    profile_id = profile.get("id")
+    vendor = document.get("vendor")
+    sha256 = document.get("sha256")
+    bits = _profile_int(profile.get("physical_address_bits"), "physical address bits")
+    fields = profile.get("fields")
+    if not isinstance(fields, list) or not fields:
+        raise ValueError("its ARM profile names no ID registers")
+    registers: list[str] = []
+    for entry in cast(list[object], fields):
+        if not isinstance(entry, dict):
+            raise ValueError("its ARM ID register is not a JSON object")
+        register = cast(dict[str, object], entry).get("register")
+        if (
+            not isinstance(register, str)
+            or re.fullmatch(r"ID_AA64[A-Z0-9]+_EL1", register) is None
+            or register in registers
+        ):
+            raise ValueError("its ARM ID register is malformed or repeated")
+        registers.append(register)
+    if (
+        not isinstance(profile_id, str)
+        or _PROFILE_ID.fullmatch(profile_id) is None
+        or not isinstance(vendor, str)
+        or not vendor
+        or not isinstance(sha256, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", sha256) is None
+        or bits not in (32, 36, 40, 42, 44, 48, 52)
+    ):
+        raise ValueError("its ARM profile identity is malformed")
+    return ArmCpuProfile(profile_id, vendor, sha256[7:], bits, tuple(registers))
+
+
 def _profile_int(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"its {name} is not an integer")
@@ -229,7 +283,7 @@ def _profile_generation(document: object) -> CpuGeneration:
 
 
 def openvmm_cpu_generations(openvmm_dir: Path) -> tuple[CpuGeneration, ...]:
-    """Return the generations of the pinned CPU profiles in the OpenVMM
+    """Return the x86 CPUID generations of the pinned CPU profiles in the OpenVMM
     checkout ``openvmm_dir``, from which the OpenVMM that it builds selects
     with ``--cpu-profile auto``, each once.
 
@@ -239,7 +293,10 @@ def openvmm_cpu_generations(openvmm_dir: Path) -> tuple[CpuGeneration, ...]:
     generations: list[CpuGeneration] = []
     for path in sorted(directory.glob("*.json")):
         try:
-            generation = _profile_generation(json.loads(path.read_bytes()))
+            document = json.loads(path.read_bytes())
+            if arm_cpu_profile(document) is not None:
+                continue
+            generation = _profile_generation(document)
         except (OSError, ValueError) as error:
             raise ValueError(f"cannot read the CPU profile {path}: {error}") from error
         if generation not in generations:
@@ -604,6 +661,13 @@ def _counter_architecture(command: Sequence[str]) -> str:
     )
 
 
+def counter_hz_is_valid(hz: int | float, *, architecture: str = "x86_64") -> bool:
+    """Apply the existing TSC or architected CNTFRQ contract."""
+    if architecture == "aarch64":
+        return 0 < hz <= 0xFFFFFFFF
+    return architecture == "x86_64" and MIN_TSC_HZ <= hz <= MAX_TSC_HZ
+
+
 def _validate_marker(
     fields: Mapping[str, str],
     *,
@@ -622,13 +686,13 @@ def _validate_marker(
     try:
         tsc_hz = int(fields.get("tsc_hz", ""))
         if architecture == "aarch64":
-            if not 0 < tsc_hz <= 0xFFFFFFFF:
+            if not counter_hz_is_valid(tsc_hz, architecture=architecture):
                 problems.append(
                     f"counter frequency={tsc_hz} is not a nonzero CNTFRQ value"
                 )
         elif architecture != "x86_64":
             problems.append(f"unknown counter architecture {architecture!r}")
-        elif not MIN_TSC_HZ <= tsc_hz <= MAX_TSC_HZ:
+        elif not counter_hz_is_valid(tsc_hz, architecture=architecture):
             problems.append(f"tsc_hz={tsc_hz} is outside 500 MHz to 10 GHz")
     except ValueError:
         problems.append(f"tsc_hz={fields.get('tsc_hz')!r} is not an integer")

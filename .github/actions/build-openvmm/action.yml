@@ -2,6 +2,10 @@ name: Build OpenVMM
 description: Checkout and cache or build one reusable OpenVMM binary
 
 inputs:
+  architecture:
+    description: Required native executable ISA
+    required: false
+    default: x86_64
   ssh-key:
     description: SSH deploy key used to checkout OpenVMM
     required: true
@@ -151,6 +155,8 @@ runs:
         if (-not (Test-Path -LiteralPath "${{ inputs.binary-path }}" -PathType Leaf)) {
           throw "OpenVMM binary was not produced: ${{ inputs.binary-path }}"
         }
+        python -c "import sys; from pathlib import Path; sys.path.insert(0, 'scripts'); from nvx_tools.common import require_pe_architecture; require_pe_architecture(Path('${{ inputs.binary-path }}'), '${{ inputs.architecture }}')"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     - name: Verify OpenVMM provenance on Linux
       if: runner.os != 'Windows'

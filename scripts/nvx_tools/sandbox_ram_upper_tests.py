@@ -20,12 +20,15 @@ import tempfile
 from pathlib import Path
 from typing import cast
 
+from .common import ScriptError
 from .managed_exec_tests import load_workload_artifacts
 from .sandbox_lifecycle_tests import (
     CONFIG,
+    LOG,
     OUTCOME,
     PROBE,
     PROVISIONED_ENTRIES,
+    RUNTIME,
     STOPPED_ENTRIES,
     LifecycleAcceptance,
     Refusal,
@@ -188,6 +191,10 @@ class RamUpperAcceptance(LifecycleAcceptance):
     def check_managed(self) -> None:
         """A managed sandbox records the RAM upper without a scratch image, and
         its upper holds the workload's writes until the sandbox stops."""
+        if self.start_stop_cycles < 2:
+            raise ScriptError(
+                "RAM-upper acceptance requires at least two Start/Stop cycles"
+            )
         self.invoke("provision", *self.ram_options(), state=self.state)
         self.require_entries(self.state, PROVISIONED_ENTRIES, "after provision")
         config = json.loads((self.state / CONFIG).read_text(encoding="utf-8"))
@@ -202,7 +209,11 @@ class RamUpperAcceptance(LifecycleAcceptance):
             "scratch_binding": None,
         }:
             raise RuntimeError(f"provision recorded the RAM upper as {recorded!r}")
+        if self.start_stop_cycles > 2:
+            self.cycle = 1
         self.start(description="first start")
+        if self.cycle is not None:
+            self.copy_evidence(self.state / RUNTIME, "cycle-001-runtime.json")
         result = self.exec(PROBE, "--arg=entry")
         self.save_evidence("probe.log", result.stdout + result.stderr)
         for marker in probe_markers(entry=True):
@@ -221,13 +232,32 @@ class RamUpperAcceptance(LifecycleAcceptance):
         result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
         self.require_output(result, STATE_CONTENT, "the RAM upper's state")
         self.stop_sandbox("first stop")
-        # A new start begins with an empty upper.
-        self.start(description="start after the stop")
-        result = self.exec(
-            "/bin/sh", "--arg=-c", f"--arg=test ! -e {STATE_PATH}", expected=None
-        )
-        self.require_output(result, b"", "the restarted sandbox's empty upper")
-        self.stop_sandbox("second stop")
+        for cycle in range(2, self.start_stop_cycles + 1):
+            if self.start_stop_cycles > 2:
+                self.cycle = cycle
+            self.start(description="start after the stop")
+            if self.cycle is not None:
+                self.copy_evidence(
+                    self.state / RUNTIME, f"cycle-{cycle:03}-runtime.json"
+                )
+            result = self.exec(
+                "/bin/sh", "--arg=-c", f"--arg=test ! -e {STATE_PATH}", expected=None
+            )
+            self.require_output(result, b"", "the restarted sandbox's empty upper")
+            if cycle < self.start_stop_cycles:
+                result = self.exec(
+                    "/bin/sh",
+                    "--arg=-c",
+                    f"--arg=printf 'kept in RAM\\n' >{STATE_PATH}",
+                    expected=None,
+                )
+                self.require_output(result, b"", f"RAM state in cycle {cycle}")
+            self.stop_sandbox(
+                "second stop"
+                if self.start_stop_cycles == 2
+                else f"cycle-{cycle:03}-stop"
+            )
+        self.cycle = None
         self.invoke("deprovision", state=self.state)
         if self.state.exists():
             raise RuntimeError("deprovision kept the RAM-upper sandbox's state")
@@ -257,11 +287,25 @@ class RamUpperAcceptance(LifecycleAcceptance):
         )
         check_managed_report(managed_report(self.state), self.backend)
         self.require_processes((), f"after the {description}")
+        if self.cycle is not None:
+            self.copy_evidence(
+                self.state / OUTCOME, f"cycle-{self.cycle:03}-outcome.json"
+            )
+            self.copy_evidence(self.state / LOG, f"cycle-{self.cycle:03}-openvmm.log")
 
 
 def run_sandbox_ram_upper(
-    backend: str, *, timeout: float, output_dir: Path, architecture: str = "x86_64"
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+    architecture: str = "x86_64",
+    start_stop_cycles: int = 2,
 ) -> None:
+    if start_stop_cycles < 2:
+        raise ScriptError(
+            "RAM-upper acceptance requires at least two Start/Stop cycles"
+        )
     artifacts = load_workload_artifacts(architecture=architecture)
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-ram-upper-"))
@@ -273,5 +317,6 @@ def run_sandbox_ram_upper(
             artifacts=artifacts,
             root=root,
             architecture=architecture,
+            start_stop_cycles=start_stop_cycles,
         )
     )

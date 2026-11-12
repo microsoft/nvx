@@ -61,8 +61,8 @@ does not establish ARM guest-platform support or native microVM qualification.
 The existing Docker `guest-binaries` stage accepts
 `--build-arg NVX_ARCHITECTURE=aarch64`. Its `guest-binary-artifacts`
 target uses BuildKit's existing local output. Select `--platform linux/arm64`
-and a separate output directory for ARM builds. The seven-helper cold-boot
-inventory includes the real ARM `nvx-time` entry point; missing required
+and a separate output directory for ARM builds. The eight-helper cold-boot
+inventory includes the real ARM `nvx-time` and `nvx-time-probe` entry points; missing required
 helpers and stale diagnostic exports fail source/manifest inspection.
 Compilation and ELF identity do not establish native product qualification.
 The architecture argument is not a CPU-profile
@@ -70,11 +70,14 @@ selector. An ARM platform flag on an x86 engine may use emulation and is not
 native build evidence.
 
 The ARM cold-boot inventory uses that same producer without the
-snapshot-only MMIO kick helper, device-I/O benchmark helper, or x86 time
-probe. It still requires real `nvx-time` before normal `/init` can announce
-readiness. Omitting unrelated diagnostics neither omits boot-time enforcement
-nor qualifies ARM counter/timer probes. The default x86 inventory remains all
-ten executables.
+snapshot-only MMIO kick helper or device-I/O benchmark helper. It still
+requires real `nvx-time` before normal `/init` can announce readiness.
+Its `nvx-time-probe warp` shares x86's pairwise algorithm, bounds, and
+verdicts, reading the fenced virtual counter and each selected CPU's actual
+`CNTFRQ_EL0`. Its reports name `counter_hz` rather than TSC, and it rejects
+x86-only latency/clock diagnostics and frequency overrides. Including the
+probe does not qualify its measurements on a host. The default x86 inventory
+and diagnostic output remain unchanged: all ten executables.
 
 Existing x86-only production helpers remain available to shared unit tests
 on ARM through their architecture-or-test compilation guards. The exact
@@ -377,7 +380,7 @@ Both commands need the standard guest build outputs above. The second writes
 complete per-scenario logs under
 `build/test-results/microvm` by default.
 
-All three initramfses install the same ten Rust executables under `/sbin`:
+The x86 initramfses install the same ten Rust executables under `/sbin`:
 `nvx-console-pending`, `nvx-device-io`, `nvx-exit`, `nvx-ingress`, `nvx-init`,
 `nvx-managed-agent`, `nvx-mmio-write`, `nvx-reseed`, `nvx-time`, and
 `nvx-time-probe`. Docker builds them once in a Rust

@@ -1,14 +1,18 @@
 //! `nvx-time-probe`, the guest-side diagnostics for the NVX time ABI.
 //!
-//! It keeps the commands, output, and exit statuses of the C program that it replaced: 0 on
+//! On x86 it keeps the commands and output of the C program that it replaced. ARM shares
+//! the warp algorithm using the architectural virtual counter, without x86-only commands.
+//! Both keep the exit statuses: 0 on
 //! success, 1 for a warp check that fails, 2 for an invalid command line, and 3 for a
 //! measurement that could not run. Its numeric options are plain decimal, or `0x`-prefixed
 //! hexadecimal for the integers, and its rate options decimal floating point, as the other guest
 //! programs read their arguments. It reads the kernel's numbers, such as `/proc/cpuinfo`'s
 //! rates, only in the form in which the kernel writes them.
 
+#[cfg(target_arch = "x86_64")]
 mod clock;
 mod format;
+#[cfg(target_arch = "x86_64")]
 mod latency;
 mod support;
 mod warp;
@@ -26,6 +30,7 @@ pub(super) const VERSION: &str = "1.1";
 pub(super) const MAX_CPUS: usize = 1024;
 
 /// Byte-exact command help and exit-status contract.
+#[cfg(target_arch = "x86_64")]
 const USAGE: &[u8] = br#"usage: nvx-time-probe COMMAND [OPTIONS]
 
 Commands:
@@ -48,6 +53,21 @@ Commands:
 
 The TSC rate comes from --tsc-hz, sysfs tsc_freq_khz, the kernel log, or
 /proc/cpuinfo, in that order, and is measured as a last resort.
+Exit status: 0 success, 1 warp FAIL, 2 usage error, 3 runtime error.
+"#;
+
+/// ARM keeps the pairwise algorithm without advertising x86-only diagnostics.
+#[cfg(target_arch = "aarch64")]
+const USAGE: &[u8] = br#"usage: nvx-time-probe COMMAND [OPTIONS]
+
+Commands:
+  warp [--duration-ms N] [--cpus LIST] [--bound-ns N]
+      Pairwise cross-CPU CNTVCT_EL0 checks: spinlock monotonicity and
+      ping-pong offset bounds, each running N ms per pair (default 100).
+      LIST looks like 0-3,6 (default: every CPU in the affinity mask).
+      The bound defaults to 1000 ns; the rate is read from CNTFRQ_EL0.
+  version
+
 Exit status: 0 success, 1 warp FAIL, 2 usage error, 3 runtime error.
 "#;
 
@@ -77,8 +97,10 @@ fn run(
         return Err(CommandError::Usage);
     };
     match command {
+        #[cfg(target_arch = "x86_64")]
         b"latency" => latency::run(rest, out, err),
         b"warp" => warp::run(rest, out, err),
+        #[cfg(target_arch = "x86_64")]
         b"clock" => clock::run(rest, out, err),
         b"version" | b"--version" => {
             let _ = writeln!(out, "nvx-time-probe {VERSION}");

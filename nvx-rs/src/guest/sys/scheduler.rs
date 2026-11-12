@@ -21,10 +21,8 @@ const PROMOTION_PASSES: usize = 2;
 
 /// A CPU affinity mask.
 #[derive(Clone, Debug)]
-#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) struct CpuAffinity(CpuSet);
 
-#[cfg(any(target_arch = "x86_64", test))]
 impl CpuAffinity {
     /// Returns whether the mask contains `cpu`.
     pub(crate) fn contains(&self, cpu: usize) -> bool {
@@ -40,7 +38,6 @@ impl CpuAffinity {
 }
 
 /// Returns the calling thread's CPU affinity mask.
-#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn current_affinity() -> Result<CpuAffinity, Errno> {
     sched_getaffinity(CALLING_THREAD).map(CpuAffinity)
 }

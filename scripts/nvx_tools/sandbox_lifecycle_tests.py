@@ -411,6 +411,7 @@ class LifecycleAcceptance:
         artifacts: WorkloadArtifacts,
         root: Path,
         architecture: str = "x86_64",
+        start_stop_cycles: int = 1,
     ) -> None:
         self.backend = backend
         self.timeout = timeout
@@ -418,6 +419,10 @@ class LifecycleAcceptance:
         self.artifacts = artifacts
         self.root = root
         self.architecture = architecture
+        if start_stop_cycles < 1:
+            raise ScriptError("sandbox Start/Stop cycles must be positive")
+        self.start_stop_cycles = start_stop_cycles
+        self.cycle: int | None = None
         self.state = root / "state"
         self.identity_state = root / "identity-state"
         self.scratch = root / "scratch.ext4"
@@ -476,6 +481,7 @@ class LifecycleAcceptance:
                 "stdout_bytes": len(result.stdout),
                 "stderr_bytes": len(result.stderr),
                 "state_entries": None if state is None else state_entries(state),
+                **({"cycle": self.cycle} if self.cycle is not None else {}),
             }
         )
 
@@ -576,13 +582,32 @@ class LifecycleAcceptance:
         self.check_identity_admission()
         self.check_unprovisioned()
         self.provision()
+        if self.start_stop_cycles > 1:
+            self.cycle = 1
         runtime = self.start(description="first start")
+        if self.cycle is not None:
+            self.copy_evidence(self.state / RUNTIME, "cycle-001-runtime.json")
         self.check_running_transitions(runtime)
         self.check_warm_state()
         self.check_security_profile()
         self.check_bounded_results()
         self.check_deprovision_while_running(runtime)
         self.stop(runtime, layer_digest)
+        if self.start_stop_cycles > 1:
+            self.copy_evidence(self.state / OUTCOME, "cycle-001-outcome.json")
+            self.copy_evidence(self.state / LOG, "cycle-001-openvmm.log")
+        for cycle in range(2, self.start_stop_cycles + 1):
+            self.cycle = cycle
+            runtime = self.start(description=f"Start/Stop cycle {cycle}")
+            self.copy_evidence(self.state / RUNTIME, f"cycle-{cycle:03}-runtime.json")
+            result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
+            self.require_output(
+                result, STATE_CONTENT, f"scratch state in cycle {cycle}"
+            )
+            self.stop(runtime, layer_digest)
+            self.copy_evidence(self.state / OUTCOME, f"cycle-{cycle:03}-outcome.json")
+            self.copy_evidence(self.state / LOG, f"cycle-{cycle:03}-openvmm.log")
+        self.cycle = None
         restarted = self.start_overlapping()
         result = self.exec("/bin/cat", f"--arg={STATE_PATH}", expected=None)
         self.require_output(result, STATE_CONTENT, "the restarted sandbox's state")
@@ -1111,8 +1136,15 @@ def run_acceptance(acceptance: LifecycleAcceptance) -> None:
 
 
 def run_sandbox_lifecycle(
-    backend: str, *, timeout: float, output_dir: Path, architecture: str = "x86_64"
+    backend: str,
+    *,
+    timeout: float,
+    output_dir: Path,
+    architecture: str = "x86_64",
+    start_stop_cycles: int = 1,
 ) -> None:
+    if start_stop_cycles < 1:
+        raise ScriptError("sandbox Start/Stop cycles must be positive")
     artifacts = load_workload_artifacts(architecture=architecture)
     output_dir.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="nvx-public-lifecycle-"))
@@ -1124,5 +1156,6 @@ def run_sandbox_lifecycle(
             artifacts=artifacts,
             root=root,
             architecture=architecture,
+            start_stop_cycles=start_stop_cycles,
         )
     )
