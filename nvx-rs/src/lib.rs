@@ -1,22 +1,31 @@
-//! NVX mechanics: the OpenVMM control protocol, and the launch, policy lowering, and supervision
-//! of NVX microVMs.
+//! Mechanisms and value types with which a program runs NVX microVMs on OpenVMM: a VM's
+//! configuration and its launch, in a directory that the program owns, for a cold boot, a
+//! capture, or a restore; one snapshot type, with a strict directory format; a restore that the
+//! program drives with its own I/O; verified connections to a running VM, and reattachment to
+//! one; the contracts that a guest's space reads; and the guest's side of a capture and of a
+//! restore's activation.
 //!
-//! An NVX sandbox is a microVM that OpenVMM runs with the managed lifecycle: the guest's init
-//! starts a managed agent, which runs workloads that the host sends it over an authenticated
-//! control console. This crate holds everything it takes to drive one:
+//! The library keeps no durable state, runs no workload, and builds no guest space. On the host,
+//! it starts OpenVMM, and no other process, and supervises no VM: the program stops each VM that
+//! it launched, or keeps its reference to stop it later. Whatever a deployment needs beyond the
+//! mechanisms, the program owns: the runtime's files and the images that it launches, the
+//! records with which it finds its VMs and snapshots again, its locks, its protocol with its
+//! guest, its deadlines, and its recovery, as the [library guide] lists under
+//! [What the caller owns], beside the cold-boot, restore, and reattach workflows. In the guest,
+//! each init owns its space and its executions, as the [guest-agent guidelines] describe.
 //!
-//! - [`protocol`]: the codec of the control console and the `NVXS` session that OpenVMM brokers,
-//!   which carries any application protocol, the guest targets that a sandbox's live shares may
-//!   not take, and the exit statuses with which a clone's guest fails fast. NVX's own control
-//!   protocol, `NVXC`, is private to the crate. It has no dependencies, so the host, the guest,
-//!   and test doubles share it.
+//! - [`protocol`]: the `NVXS` session that OpenVMM brokers between a host and its guest, which
+//!   carries any application protocol; the host's mapping table on the wire; the kernel
+//!   command-line tokens of a guest's root, view, and export; the guest targets that live shares
+//!   may not take; and the exit statuses with which a clone's guest fails fast. It has no
+//!   dependencies, so the host and the guest share it.
 //! - [`activation`]: the activation record of a layered root, the bounded, versioned, non-secret
-//!   record of the settings that its activation applies, which a clone restored from a template
+//!   record of the settings that its activation applies, which a clone restored from a snapshot
 //!   reads in place of its captured configuration, and what Ready reports about the activation.
 //!   It needs no features, so the host, the guest, and every adapter's framing share it.
-//! - [`contract`]: the control-contract versions that this crate speaks and the compatibility of
-//!   NVX releases with them, and the versions of the contracts through which OpenVMM restores a
-//!   snapshot.
+//! - [`contract`]: the versions of the contracts that this crate speaks with OpenVMM and the
+//!   guest, and the compatibility of NVX releases with them, with the versions of the contracts
+//!   through which OpenVMM restores a snapshot.
 //! - [`net`]: IP networks in CIDR notation and their subtraction, and the forms of a VM's
 //!   hostname and guest network address.
 //! - [`gpt`]: GUID Partition Table disks whose first partition configures an adapter and whose
@@ -26,23 +35,28 @@
 //! - [`uuid`]: UUIDs, such as the GUIDs of a GPT disk, in their canonical text, the one form that
 //!   NVX writes and reads, and in the layout in which GPT stores them. It has no dependencies, so
 //!   the host and the guest share it.
-//! - [`Hypervisor`]: the hypervisors that run the VMs.
-//! - [`host`] (feature `host`): the OpenVMM command line, the lowering of network and filesystem
-//!   policies, the host's NVXS connection, process and platform primitives, VMs that a caller
-//!   creates, starts, reattaches to, and stops in private directories that it owns, and the
-//!   manifests and compatibility keys of templates.
-//! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
-//!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest
-//!   init or agent opens the terminal on which it serves its session (`guest::terminal`), and
-//!   describes host mappings and keeps the account of a host's mapping table
-//!   (`guest::mappings`), the typed calls through
-//!   which it runs the time ABI's steps (`guest::time`) and reseeds after a restore
-//!   (`guest::reseed`) in its own process,
-//!   and the capture of a template's guest, which repairs its clones (`guest::snapshot`), and
-//!   their activation (`guest::activation`). The crate's `nvx-*` guest binaries run the programs.
-//!   NVX's own guest space, which assembles a layered root, reads GPT disks, mounts host mappings,
-//!   and applies a clone's activation, is nvx-init's internal reference code, private to the
-//!   crate.
+//! - [`Hypervisor`]: the hypervisors that run the VMs, and [`Error`]: the crate's error, whose
+//!   [`ErrorKind`]s callers act on.
+//! - [`host`] (feature `host`): a VM's runtime and configuration; its launch, stop, and
+//!   reattachment in a private directory that its caller owns; snapshots, their capture's finish,
+//!   and the restores that their caller drives; the lowering of network and filesystem policies;
+//!   and verified connections to a VM's endpoint, verified process references, and OpenVMM's
+//!   outcome reports.
+//! - `guest` (feature `guest`, Linux): the guest's side, for any guest init or agent: its NVXS
+//!   connection and the terminal on which it serves it (`guest::nvxs`, `guest::terminal`), the
+//!   account of a host's mapping table (`guest::mappings`), the time ABI's steps in its own
+//!   process (`guest::time`), a capture that repairs each restore of its snapshot
+//!   (`guest::snapshot`), a restore's activation (`guest::activation`), and its reseed
+//!   (`guest::reseed`).
+//!
+//! NVX's own programs, its `nvx-rs` command-line interface, its guest binaries, and the fake
+//! OpenVMM of its tests, build on the library and live in this crate, private to it, with the
+//! code that only they use, such as NVX's own control protocol. Each binary calls an entry point
+//! that `#[doc(hidden)]` hides, which is no part of the API.
+//!
+//! [library guide]: https://github.com/microsoft/nvx/blob/dev/doc/library.md
+//! [What the caller owns]: https://github.com/microsoft/nvx/blob/dev/doc/library.md#what-the-caller-owns
+//! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
 //!
 //! # Example
 //!

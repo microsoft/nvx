@@ -1,9 +1,8 @@
 //! Codec of the OpenVMM control-console protocol.
 //!
 //! OpenVMM brokers an authenticated stream of outer records (magic `NVXS`) between one host
-//! client and the guest's agent. Data records carry the bytes of an application protocol. NVX's
-//! own, `NVXC`, with its frames and its `EXEC` payloads, is private to this crate: only NVX's
-//! programs speak it, the CLI, nvx-init, the managed agent and the fake OpenVMM. All integers are
+//! client and the guest's agent. Data records carry the bytes of an application protocol, which
+//! the host and its guest choose: NVX's own is private to this crate. All integers are
 //! little-endian.
 //!
 //! - Outer records: [`encode_outer`] and [`decode_outer_header`], and the `OUTER_*` record types.
