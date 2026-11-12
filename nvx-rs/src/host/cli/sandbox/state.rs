@@ -610,11 +610,6 @@ impl Config {
         }
     }
 
-    /// Returns the workload's hostname.
-    pub(crate) fn hostname(&self) -> &str {
-        &self.hostname
-    }
-
     /// Returns the workload's UID and GID.
     pub(crate) fn workload_identity(&self) -> (u32, u32) {
         (self.workload_uid, self.workload_gid)

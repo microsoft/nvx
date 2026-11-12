@@ -1034,10 +1034,11 @@ treats as whitespace, including `0xa0`, while the workload's entrypoint and
 arguments, which nvx-init receives over the control session, may.
 Sandbox `--cmdline` uses Linux's quote and separator rules, and refuses reserved
 names even when quoted or written with hyphens instead of underscores. Validation
-uses the same trimmed text that is rendered and also checks the guest bootstrap's
-whitespace-only view, so reserved settings inside quoted values cannot override
-the generated settings. It also
-refuses a `--` or unclosed quote that hides the generated root tokens.
+reads the text that the kernel command line holds, after the generated settings,
+and also checks the guest bootstrap's whitespace-only view, so reserved settings
+inside quoted values cannot override the generated settings. It also refuses a
+`--` or unclosed quote that hides the tokens that OpenVMM appends, and double
+quotes, which the VM control console cannot represent.
 nvx-init runs the workload as a plain process in the VM's root, with no
 capabilities and `no_new_privs`, as it runs every
 [managed](#managed-lifecycle) execution. The workload always runs as the fixed
