@@ -2361,7 +2361,7 @@ optional cause.
 
 | `ErrorKind` | Meaning |
 | --- | --- |
-| `Unavailable` | A missing or unusable artifact, hypervisor, or release, a guest image without a required control feature, or an unsupported host |
+| `Unavailable` | A missing or unusable artifact, hypervisor, or release, or an unsupported host |
 | `Unsupported` | A request that NVX refuses: a value that it does not accept, such as a malformed or out-of-range one, options that it cannot combine, or a request that it cannot represent or enforce, such as a policy beyond a limit of OpenVMM or the guest agent |
 | `Exited` | The VM's OpenVMM process exited |
 | `StillRunning` | A stop could not confirm the VM process's exit, so the caller keeps its verified process |
@@ -2404,7 +2404,6 @@ usage errors, which no library error has.
 | `argument-missing` | `Unsupported` | A usage error: a required argument, or the value of an option, is missing |
 | `argument-invalid` | `Unsupported` | A usage error: an argument has an invalid value, such as one that is not among its choices, not a number, not of its form, or not valid Unicode |
 | `artifact-missing` | `Unavailable` | An artifact that the operation runs, such as OpenVMM, the guest kernel, or an initramfs, does not exist, or no artifact root holds them |
-| `guest-features-missing` | `Unavailable` | The guest image lacks control features that the operation needs, which the message names |
 | `sandbox-not-provisioned` | `NotFound` | No sandbox is provisioned at its state directory, which does not exist, is not a plain directory, or holds no configuration |
 | `sandbox-provisioned` | `Other` | The sandbox is provisioned already, or was provisioned again while a removal deleted it |
 | `sandbox-not-running` | `Other` | The operation needs the sandbox's VM, which is not running |
