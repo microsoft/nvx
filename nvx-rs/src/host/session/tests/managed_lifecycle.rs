@@ -29,16 +29,15 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::host::platform::{Transport, process_start_time};
 use crate::host::session::{self, ControlSession, ExecEvent};
-use crate::protocol::{
-    self, APP_ERROR, APP_MAPS, APP_READY, CAPABILITY_LEN, ExitCategory, HostMap, Workload,
-    WorkloadEnvironment,
-};
+use crate::protocol::v2::{self, Frame};
+use crate::protocol::{self, CAPABILITY_LEN, HostMap, Workload, WorkloadEnvironment};
 
 /// The categories with which the guest refuses a working directory that the workload cannot
 /// enter, a malformed request, and a workload before it applied every host mapping: NVXC's wire
@@ -86,7 +85,7 @@ impl Drop for OpenVmm {
 #[derive(Debug, Default)]
 struct Outcome {
     /// How it exited, and its status, if it ran.
-    exit: Option<(ExitCategory, i32)>,
+    exit: Option<(v2::Outcome, i32)>,
     /// The guest's error number and category, if the guest refused it.
     refusal: Option<(i32, String)>,
     /// Its standard output.
@@ -98,10 +97,16 @@ struct Outcome {
 impl Outcome {
     /// Returns whether the workload exited with status 0 and printed exactly `stdout`.
     fn printed(&self, stdout: &str) -> bool {
-        self.exit == Some((ExitCategory::Exit, 0))
+        self.exit == Some((v2::Outcome::Exit, 0))
             && self.stdout == stdout.as_bytes()
             && self.stderr.is_empty()
     }
+}
+
+/// Returns a request ID that no earlier request of the test took.
+fn request_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The control session of the guest that OpenVMM `pid` runs.
@@ -128,7 +133,7 @@ impl Guest {
             .expect("the control endpoint accepts the capability")
     }
 
-    /// Runs `argv` in `session` and returns how it ended.
+    /// Runs `argv` in `session`, which ends its standard input at once, and returns how it ended.
     fn exec(
         &self,
         session: &mut ControlSession,
@@ -145,8 +150,11 @@ impl Guest {
         };
         // The longest wait bounds the whole exchange, so the workloads must end well before it.
         let deadline = Instant::now() + self.timeout;
-        let request = session
-            .start_exec(&workload, deadline)
+        let request = request_id();
+        let payload = protocol::encode_exec_payload(&workload).expect("the workload fits a frame");
+        session
+            .start_exec(request, &payload, deadline)
+            .and_then(|()| session.close_stdin(request, deadline))
             .expect("the guest accepts the request");
         let mut outcome = Outcome::default();
         loop {
@@ -156,6 +164,7 @@ impl Guest {
             {
                 ExecEvent::Stdout(chunk) => outcome.stdout.extend(chunk),
                 ExecEvent::Stderr(chunk) => outcome.stderr.extend(chunk),
+                ExecEvent::Acknowledged(count) => panic!("{argv:?} acknowledged {count} bytes"),
                 ExecEvent::Exit { category, status } => {
                     outcome.exit = Some((category, status));
                     return outcome;
@@ -394,14 +403,21 @@ fn layered_mapping_session(
     let send = |session: &mut ControlSession, payload: &[u8], accepted| {
         let deadline = Instant::now() + guest.timeout;
         session
-            .send_request(APP_MAPS, 900, payload, deadline)
+            .send(900, Frame::Maps(payload), Some(deadline))
             .unwrap();
+        let reply = session.receive(Some(deadline)).unwrap();
         let expected = if accepted {
-            (APP_READY, 900, 0, Vec::new())
+            Frame::Ready {
+                version: v2::VERSION,
+                activation: &[],
+            }
         } else {
-            (APP_ERROR, 900, 22, INVALID_REQUEST.as_bytes().to_vec())
+            Frame::Error {
+                status: 22,
+                category: INVALID_REQUEST.as_bytes(),
+            }
         };
-        assert_eq!(session.read_response(Some(deadline)).unwrap(), expected);
+        assert_eq!(Frame::decode(&reply).unwrap(), (900, expected));
     };
     if count == 0 {
         send(&mut session, &parts[0], false);
@@ -460,16 +476,16 @@ fn layered_mapping_session(
         );
         assert!(mapped.printed("sl76b-real-export\n"), "{path}: {mapped:?}");
     }
-    let request = session
-        .start_exec(
-            &Workload {
-                argv: vec!["/bin/sleep".to_owned(), "30".to_owned()],
-                timeout_ms: 0,
-                cwd: None,
-                environment: WorkloadEnvironment::Default,
-            },
-            Instant::now() + guest.timeout,
-        )
+    let request = request_id();
+    let payload = protocol::encode_exec_payload(&Workload {
+        argv: vec!["/bin/sleep".to_owned(), "30".to_owned()],
+        timeout_ms: 0,
+        cwd: None,
+        environment: WorkloadEnvironment::Default,
+    })
+    .unwrap();
+    session
+        .start_exec(request, &payload, Instant::now() + guest.timeout)
         .unwrap();
     session
         .cancel_exec(request, Instant::now() + guest.timeout)
@@ -479,7 +495,7 @@ fn layered_mapping_session(
             .next_exec_event(request, Some(Instant::now() + guest.timeout))
             .unwrap(),
         ExecEvent::Exit {
-            category: ExitCategory::Cancelled,
+            category: v2::Outcome::Cancelled,
             status: 137
         }
     ));
@@ -648,7 +664,7 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
     );
     assert_eq!(
         timed_out.exit,
-        Some((ExitCategory::Timeout, 124)),
+        Some((v2::Outcome::Timeout, 124)),
         "{timed_out:?}"
     );
     let after_timeout = guest.exec(

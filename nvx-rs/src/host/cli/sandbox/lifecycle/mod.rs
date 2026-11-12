@@ -44,7 +44,6 @@ use crate::host::runtime::{IdentityPart, LaunchOptions, Runtime, RuntimeIdentity
 use crate::host::sandbox::layer::SandboxLayer;
 use crate::host::sandbox::require_file;
 use crate::host::vm::SavedVm;
-use crate::protocol::GuestFeatures;
 
 pub(crate) use self::directory::{create_state_directory, prepare_state_directory};
 pub(crate) use self::outcome::{
@@ -80,10 +79,6 @@ pub(crate) struct ProvisionConfig<'a> {
     /// The network options, or `None` without `--net`.
     pub(crate) network: Option<&'a NetworkRecord>,
 }
-
-/// The control features that the layered sandbox root must provide for the requests of
-/// `nvx-rs sandbox`.
-pub(crate) const REQUIRED_FEATURES: GuestFeatures = GuestFeatures::LAYERED_SANDBOX;
 
 /// Records the launch of the distro layer `distro`, at the path at which it was verified, with
 /// the layer's binding, over `scratch`, the scratch image of an upper on scratch, with the options

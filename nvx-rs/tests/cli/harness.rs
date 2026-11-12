@@ -381,6 +381,36 @@ impl Root {
         Outcome::new(arguments, output)
     }
 
+    /// Runs `nvx-rs --root ROOT ARGUMENTS` in the root, as [`nvx_rs`](Self::nvx_rs) does, but with
+    /// `input` as its standard input, which then ends.
+    pub(crate) fn nvx_rs_with_input<S: AsRef<str>>(
+        &self,
+        arguments: &[S],
+        input: &[u8],
+    ) -> Outcome {
+        let arguments: Vec<String> = arguments
+            .iter()
+            .map(|argument| self.expand(argument.as_ref()))
+            .collect();
+        let mut child = self
+            .command(&arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let input = input.to_vec();
+        // A command that ends before it reads its whole input breaks the pipe, which the run's
+        // outcome then shows.
+        let writer = std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut stdin, &input);
+        });
+        let output = child.wait_with_output().unwrap();
+        writer.join().unwrap();
+        Outcome::new(arguments, output)
+    }
+
     /// Runs `nvx-rs --root ROOT ARGUMENTS` in the root, as [`nvx_rs`](Self::nvx_rs) does, but
     /// with the umask `umask`, rather than this process's, which the tests running in parallel
     /// share.

@@ -16,9 +16,10 @@ use crate::host::process::{BootId, Opened, ProcessRef};
 use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, context};
 use crate::host::snapshot::{MANIFEST_NAME, Snapshot};
 use crate::host::spawn::{self, VmmCommand};
+use crate::protocol::v2::{self, Frame};
 use crate::protocol::{
-    APP_CAPTURE, APP_ERROR, APP_READY, CAPABILITY_LEN, OUTER_DATA, OUTER_HEADER_LEN,
-    OUTER_HOST_ATTACH, OUTER_READY, decode_app, decode_outer_header, encode_app, encode_outer,
+    CAPABILITY_LEN, OUTER_DATA, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY,
+    decode_outer_header, encode_outer,
 };
 
 const HELPER: &str = "host::cli::snapshots::capture::tests::capture_helper";
@@ -834,14 +835,21 @@ fn respond(stream: &mut (impl Read + Write), capability: &[u8], refused: bool) {
         .unwrap();
     let (kind, payload) = read_record(stream);
     assert_eq!(kind, OUTER_DATA);
-    let request = decode_app(&payload).unwrap();
-    assert_eq!(request.kind, APP_CAPTURE);
-    assert_eq!(request.payload, [0]);
+    // The capture request of NVXC version 2, with its flag that keeps the executions.
+    let (request_id, frame) = Frame::decode(&payload).unwrap();
+    assert_eq!(frame, Frame::Capture(&[0]));
     let reply = if refused {
-        encode_app(APP_ERROR, request.request_id, 22, b"capture-failed")
+        Frame::Error {
+            status: 22,
+            category: b"capture-failed",
+        }
     } else {
-        encode_app(APP_READY, request.request_id, 0, &[])
+        Frame::Ready {
+            version: v2::VERSION,
+            activation: &[],
+        }
     };
+    let reply = reply.encode(request_id).unwrap();
     stream
         .write_all(&encode_outer(OUTER_DATA, &[7; 16], 1, 1, &reply).unwrap())
         .unwrap();

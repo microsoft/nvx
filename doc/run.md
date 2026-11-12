@@ -923,11 +923,12 @@ VM directory, and prints its OpenVMM command as `>> COMMAND`. Once nvx-init is
 ready and has mapped the shares, the run executes its workload once over the
 control session, as [`sandbox exec`](#managed-lifecycle) does, with the same
 `--cwd`, `--environment`, `--environment-file`,
-`--inherit-default-environment`, and `--exec-timeout-ms` options. It then asks
+`--inherit-default-environment`, and `--exec-timeout-ms` options, and streams
+its standard input, output and error as `sandbox exec` does. It then asks
 nvx-init to stop the VM, terminates OpenVMM if it does not exit within
 `--timeout` seconds, warning that it did, and removes the VM directory, and
-finally prints the workload's standard output and standard error and exits
-with its status. A VM that exits before nvx-init is ready, as when the guest
+finally exits with the workload's status. A VM that exits before nvx-init is
+ready, as when the guest
 refuses the workload identity, fails the run as it fails a `start`, with the
 category and status of the outcome report that OpenVMM published, such as
 `guest-exit status 125`. `--outcome-report` forwards that report, of the VM's
@@ -1753,10 +1754,11 @@ rejects `--state-dir`.
 Environment files are limited to 1 MiB of UTF-8 JSON. Environments contain at
 most 256 unique, nonempty names. Each `KEY=VALUE` entry and working-directory
 path is limited to 4096 UTF-8 bytes; the combined execution request must also
-fit the existing 64 KiB control-payload bound. A managed `exec` forwards at
-most 1 MiB of combined standard output and standard error; the guest agent
-kills a workload that writes more, and `exec` exits with status 125 and reports
-the `output-limit` category.
+fit the existing 64 KiB control-payload bound. A managed `exec` streams its
+standard input to the workload, which sees it end when the command's own
+input ends, and the workload's standard output and standard error back as
+they arrive, without a limit on their size. Ctrl-C cancels the workload, and
+`exec` exits with status 130.
 
 The `managed-exec-config` scenario of `test-microvm --backend BACKEND` is the
 authoritative acceptance for these public options. It invokes
