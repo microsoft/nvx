@@ -5571,28 +5571,10 @@ class _FakeOpenVMMCiApi:
     jobs of each run, one look after another, raises each look that is an
     exception instead, and records each request."""
 
-    def __init__(
-        self,
-        *looks: _OpenVMMLook | Exception,
-        revision: str = _OPENVMM_REVISION,
-        documents: Mapping[str, Any] | None = None,
-    ) -> None:
+    def __init__(self, *looks: _OpenVMMLook | Exception) -> None:
         self.looks = list(looks)
         self.look = -1
         self.requests: list[str] = []
-        self.revision = revision
-        self.documents = dict(documents or {})
-
-    def get(self, path: str, params: Mapping[str, str] | None = None) -> object:
-        self.requests.append(f"get {path}")
-        if "/contents/" in path:
-            assert params == {"ref": self.revision}, params
-        else:
-            assert params is None, params
-        document = self.documents[path]
-        if isinstance(document, Exception):
-            raise document
-        return document
 
     def get_all(
         self,
@@ -5604,7 +5586,7 @@ class _FakeOpenVMMCiApi:
     ) -> list[object]:
         assert deadline is None
         if path == "/repos/microsoft/openvmm/actions/runs":
-            assert params == {"head_sha": self.revision}, params
+            assert params == {"head_sha": _OPENVMM_REVISION}, params
             assert key == "workflow_runs", key
             self.look = min(self.look + 1, len(self.looks) - 1)
             self.requests.append("runs")
@@ -6124,203 +6106,6 @@ class OpenVMMCiTests(unittest.TestCase):
                     self.assertEqual(
                         sum(line.startswith("passed:") for line in verdicts), 7
                     )
-
-    @staticmethod
-    def _trial_api() -> _FakeOpenVMMCiApi:
-        revision = "38016f6637f0c61fb55c9ee31033ceec428e346c"
-        identifier = 43109699910
-        run = {
-            **_openvmm_run(
-                identifier,
-                head_sha=revision,
-                head_repository="ahuja-gautam/openvmm",
-            ),
-            "repository": {"full_name": "microsoft/openvmm"},
-            "head_branch": "openvmm-arm64-microvm-dev-20261111",
-            "event": "pull_request",
-            "conclusion": "failure",
-        }
-        jobs = _openvmm_gate_jobs(identifier) + [
-            _openvmm_job(identifier, name)
-            for name in openvmm_ci.OPENVMM_CI_ARM64_REQUIRED_JOBS
-        ]
-        return _FakeOpenVMMCiApi(
-            ([run], {identifier: jobs}),
-            revision=revision,
-            documents={
-                f"/repos/microsoft/openvmm/actions/runs/{identifier}": dict(run),
-                "/repos/microsoft/openvmm/pulls/5045": {
-                    "number": 5045,
-                    "state": "open",
-                    "merged": False,
-                    "head": {
-                        "sha": revision,
-                        "ref": "openvmm-arm64-microvm-dev-20261111",
-                        "repo": {"full_name": "ahuja-gautam/openvmm"},
-                    },
-                    "base": {
-                        "ref": "feature/microvm/dev",
-                        "repo": {"full_name": "microsoft/openvmm"},
-                        "sha": "9f10ce7a8e9632d79b1d26f5a18ea899481856bf",
-                    },
-                },
-                "/repos/microsoft/openvmm/contents/.github/workflows/openvmm-pr.yaml": {
-                    "type": "file",
-                    "path": ".github/workflows/openvmm-pr.yaml",
-                    "sha": "2cabb910cd6d8c974b809a30870502f69ac68e83",
-                    "size": 421776,
-                },
-            },
-        )
-
-    def test_temporary_trial_admits_only_pinned_proof_with_all_selected_jobs(self):
-        for architecture, count in (("x86_64", 6), ("aarch64", 8)):
-            with self.subTest(architecture=architecture):
-                api = self._trial_api()
-                args = nvx.parse_args(
-                    [
-                        "check-openvmm-ci",
-                        "--revision",
-                        api.revision,
-                        "--architecture",
-                        architecture,
-                    ]
-                )
-                with (
-                    patch.object(openvmm_ci, "GitHubClient", return_value=api),
-                    contextlib.redirect_stdout(io.StringIO()) as output,
-                ):
-                    args.handler(args)
-                self.assertEqual(output.getvalue().count("passed:"), count)
-                self.assertIn("TEMPORARY OpenVMM CI evidence trial", output.getvalue())
-                self.assertEqual(api.requests[-1], "jobs 43109699910")
-
-    def test_temporary_trial_rejects_mismatched_or_malformed_proof(self):
-        run_path = "/repos/microsoft/openvmm/actions/runs/43109699910"
-        pull_path = "/repos/microsoft/openvmm/pulls/5045"
-        workflow_path = (
-            "/repos/microsoft/openvmm/contents/.github/workflows/openvmm-pr.yaml"
-        )
-        cases: tuple[tuple[str, tuple[str, ...], object], ...] = (
-            (run_path, ("id",), 43109699911),
-            (run_path, ("id",), 43109699910.0),
-            (run_path, ("head_sha",), "b" * 40),
-            (run_path, ("head_branch",), "another-branch"),
-            (run_path, ("head_repository", "full_name"), "another/openvmm"),
-            (run_path, ("repository", "full_name"), "ahuja-gautam/openvmm"),
-            (run_path, ("event",), "pull_request_target"),
-            (run_path, ("path",), ".github/workflows/openvmm-ci.yaml"),
-            (run_path, ("head_repository",), None),
-            (pull_path, ("number",), 5046),
-            (pull_path, ("number",), 5045.0),
-            (pull_path, ("state",), "closed"),
-            (pull_path, ("merged",), True),
-            (pull_path, ("merged",), None),
-            (pull_path, ("head", "sha"), "b" * 40),
-            (pull_path, ("head", "ref"), "another-branch"),
-            (pull_path, ("head", "repo", "full_name"), "another/openvmm"),
-            (pull_path, ("base", "repo", "full_name"), "another/openvmm"),
-            (pull_path, ("base", "ref"), "main"),
-            (pull_path, ("head",), []),
-            (workflow_path, ("sha",), "b" * 40),
-            (workflow_path, ("sha",), None),
-            (workflow_path, ("type",), "symlink"),
-            (workflow_path, ("path",), ".github/workflows/another.yaml"),
-            (workflow_path, ("size",), 0),
-            (workflow_path, ("size",), 421776.0),
-        )
-        for path, fields, value in cases:
-            with self.subTest(path=path, fields=fields, value=value):
-                api = self._trial_api()
-                document = api.documents[path]
-                for field in fields[:-1]:
-                    document = document[field]
-                document[fields[-1]] = value
-                with self.assertRaises(common.ScriptError):
-                    openvmm_ci.openvmm_ci_runs(api, api.revision)
-                self.assertNotIn("jobs 43109699910", api.requests)
-        malformed: tuple[object, ...] = (
-            None,
-            {},
-            common.ScriptError("proof unavailable"),
-        )
-        for path in (run_path, pull_path, workflow_path):
-            for document in malformed:
-                with self.subTest(path=path, document=document):
-                    api = self._trial_api()
-                    api.documents[path] = document
-                    with self.assertRaises(common.ScriptError):
-                        openvmm_ci.check_openvmm_ci(api, api.revision, wait_seconds=0)
-                    self.assertNotIn("jobs 43109699910", api.requests)
-
-    def test_temporary_trial_never_admits_another_listed_run_or_revision(self):
-        for changes, revision in (
-            ({"id": 43109699911}, None),
-            ({"id": "43109699910"}, None),
-            ({"head_sha": "b" * 40}, None),
-            ({"path": ".github/workflows/openvmm-pr.yaml@refs/heads/main"}, None),
-            ({}, "b" * 40),
-        ):
-            with self.subTest(changes=changes, revision=revision):
-                api = self._trial_api()
-                look = api.looks[0]
-                assert not isinstance(look, Exception)
-                run = dict(look[0][0])
-                run.update(changes)
-                api.looks[0] = ([run], look[1])
-                if revision is not None:
-                    api.revision = revision
-                if changes.get("head_sha") or changes.get("path"):
-                    with self.assertRaises(common.ScriptError):
-                        openvmm_ci.openvmm_ci_runs(api, api.revision)
-                else:
-                    self.assertEqual(openvmm_ci.openvmm_ci_runs(api, api.revision), [])
-                self.assertNotIn("jobs 43109699910", api.requests)
-
-    def test_temporary_trial_preserves_every_required_latest_job_verdict(self):
-        required = (
-            openvmm_ci.OPENVMM_CI_REQUIRED_JOBS
-            + openvmm_ci.OPENVMM_CI_ARM64_REQUIRED_JOBS
-        )
-        for target in required:
-            for state in ("failure", "skipped", "missing", "pending"):
-                with self.subTest(target=target, state=state):
-                    api = self._trial_api()
-                    look = api.looks[0]
-                    assert not isinstance(look, Exception)
-                    jobs: list[Mapping[str, Any]] = []
-                    for job in look[1][43109699910]:
-                        if openvmm_ci.covers(job["name"], target):
-                            if state == "missing":
-                                continue
-                            job = {
-                                **job,
-                                "status": "in_progress"
-                                if state == "pending"
-                                else "completed",
-                                "conclusion": None if state == "pending" else state,
-                            }
-                        jobs.append(job)
-                    api.looks[0] = (look[0], {43109699910: jobs})
-                    args = nvx.parse_args(
-                        [
-                            "check-openvmm-ci",
-                            "--revision",
-                            api.revision,
-                            "--architecture",
-                            "aarch64",
-                        ]
-                    )
-                    with (
-                        patch.object(openvmm_ci, "GitHubClient", return_value=api),
-                        contextlib.redirect_stdout(io.StringIO()) as output,
-                        self.assertRaises(common.ScriptError),
-                    ):
-                        args.handler(args)
-                    expected = "failed" if state in ("failure", "skipped") else state
-                    self.assertIn(f"{expected}: {target}:", output.getvalue())
-                    self.assertEqual(output.getvalue().count("passed:"), 7)
-                    self.assertEqual(api.requests[-1], "jobs 43109699910")
 
     def test_command_checks_the_pin_with_any_token(self):
         args = nvx.parse_args(["check-openvmm-ci"])
