@@ -11389,8 +11389,13 @@ def run(args: argparse.Namespace) -> int:
         args.memory_mib = descriptor.default_memory_mib
     executable = require_file(openvmm_binary_path(), "OpenVMM release binary")
     if architecture != "x86_64":
+        selected = KernelBuildConfig.for_architecture(architecture, debug=debug_kernel)
+        if debug_kernel:
+            require_debug_kernel(
+                selected.output.with_name(f"{selected.output.name}.config")
+            )
         kernel = require_file(
-            KernelBuildConfig.for_architecture(architecture, debug=debug_kernel).output,
+            selected.output,
             "microVM Linux direct kernel",
         )
     elif debug_kernel:
