@@ -1,68 +1,61 @@
-//! The host side of NVX.
+//! The host's side of the library: a VM's runtime and configuration, its launch in a private
+//! directory that its caller owns, for a cold boot, a capture, or a restore, its stop and its
+//! reattachment, its snapshots and their restores, and verified connections to it.
 //!
-//! - The private `artifacts` locates, for the CLI, the OpenVMM executable and the guest kernel and
-//!   initramfs, and every artifact of the guests that `nvx.py` runs, in a repository checkout or
-//!   a release.
-//! - [`runtime`] holds what every launch shares: the paths of those three files and their
-//!   [`RuntimeIdentity`](runtime::RuntimeIdentity), the hypervisor, which
-//!   [`probe_hypervisor`](runtime::probe_hypervisor) checks, and the
+//! - [`runtime`] holds what every launch shares: the paths of the OpenVMM executable and the
+//!   guest kernel and initramfs, and their [`RuntimeIdentity`](runtime::RuntimeIdentity), the
+//!   hypervisor, which [`probe_hypervisor`](runtime::probe_hypervisor) checks, and the
 //!   [`LaunchOptions`](runtime::LaunchOptions).
 //! - [`config`] holds the configuration of a VM as one value, a [`VmConfig`](config::VmConfig),
 //!   which it checks without reading the host: the VM's processors and memory, its root, the view
 //!   that its workload has of it, its network, its export, its boot console, and what only its
 //!   cold boot takes, with what a capture of it adds, a [`CaptureConfig`](config::CaptureConfig),
 //!   whose identity names the capture's snapshots.
-//! - [`network`] lowers egress rules into OpenVMM's rules, as its private `policy` (feature `cli`)
-//!   lowers the egress policy files that `nvx-rs run` and `nvx-rs sandbox` accept, and
-//!   [`filesystem`] checks and lowers the export of host paths through OpenVMM's aggregate
-//!   virtio-fs device, which its private planner (feature `cli`) plans for the CLI.
-//! - [`report`] reads OpenVMM's outcome report.
-//! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
-//!   from a capture's context and [`SnapshotManifest`](snapshot::SnapshotManifest),
-//!   the strict manifest reader, and the capture's public time and eligibility information.
-//! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session for it,
-//!   for any application protocol, over a platform transport. The private `session` (feature
-//!   `cli`) speaks NVX's own control protocol, `NVXC`, over it for NVX's programs. [`nvxs`]
-//!   retains compatibility paths. The private `platform` module holds the primitives of Linux and
-//!   Windows hosts. Other hosts compile but report NVX as unavailable.
-//! - [`process`] names processes by verified references: their ID, start time, and host boot,
-//!   through which a pidfd or a process handle holds them, so that waits sleep until a process
-//!   exits and termination reaches only it, whether or not the caller started it.
-//! - The private `sandbox` is the launch profile of `nvx-rs sandbox`, for the CLI (feature
-//!   `cli`): a container over read-only EROFS layers and a private ext4 scratch disk, with live
-//!   shares, and the checks of its options. Its `distro` binds a distro layer to what explicit
-//!   verification found, so that the CLI's launches check the layer through the private `seal`,
-//!   which seals open files from their metadata alone, and its `scratch` binds and claims a
-//!   scratch image. Outside the CLI, [`vm`] and [`snapshot`] read the block geometry of an image
-//!   through it, and a snapshot's key names the tag of its shares' virtio-fs device.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
 //!   its files and endpoints, and a checked cold, capture or restore [`Prepared`](vm::Prepared)
 //!   launch with its opened log and control credential, which the library never writes. A
 //!   restore from a [`Snapshot`](snapshot::Snapshot) hard-links the snapshot's OpenVMM files into
-//!   the VM directory and binds its restore-ready listener before any spawn.
+//!   the VM directory and binds its restore-ready listener before any spawn. [`vm::spawn`]
+//!   starts OpenVMM, detached, [`vm::stop`] ends a VM, and [`vm::verify`] and [`vm::reattach`]
+//!   find one again from the [`SavedVm`](vm::SavedVm) that its caller saved.
+//! - [`snapshot`] holds the strict snapshot directory, [`Snapshot`](snapshot::Snapshot), the
+//!   finish of a capture, [`finish_capture`](snapshot::finish_capture), the compatibility key,
+//!   [`SnapshotKey`](snapshot::SnapshotKey), derived from a capture's context and
+//!   [`SnapshotManifest`](snapshot::SnapshotManifest), the strict manifest reader, and the
+//!   capture's public time and eligibility information.
 //! - [`restore`] orders caller-driven activation to Ready without I/O or a clock, and listens for
-//!   OpenVMM's restore-ready event from the held VM process. The private `restore_driver` (feature
-//!   `cli`) drives it over the private `session` for NVX's blocking callers, through Ready, the
-//!   mapping table and the workload's start.
-//! - `cli` (feature `cli`) is the `nvx-rs` command-line interface, which runs microVMs and
-//!   sandboxes, looks up and downloads artifacts, and compiles egress policies.
+//!   OpenVMM's restore-ready event from the held VM process.
+//! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session for it,
+//!   for any application protocol, over a platform transport. [`nvxs`] retains compatibility
+//!   paths to it.
+//! - [`process`] names processes by verified references: their ID, start time, and host boot,
+//!   through which a pidfd or a process handle holds them, so that waits sleep until a process
+//!   exits and termination reaches only it, whether or not the caller started it.
+//! - [`report`] reads OpenVMM's outcome report.
+//! - [`network`] lowers a network posture and its egress rules into OpenVMM's options, and
+//!   [`filesystem`] checks and lowers the export of host paths through OpenVMM's aggregate
+//!   virtio-fs device.
 //!
-//! The private `paths` module makes host paths absolute and resolves their links, with
-//! `std::path` and `std::fs`, for the sandbox launch profile and the CLI. The private `spawn`
-//! module starts a VMM for [`vm`], detached, passing it only the descriptors or handles that the
-//! caller allows, and no other descriptor or handle of the caller's.
+//! The library keeps no record of VMs, launches, captures, or snapshots, and takes no lock that
+//! its caller sees. It starts OpenVMM, in [`vm::spawn`], and no other process, and supervises no
+//! VM: it ends a process on its own only when its spawn fails. The caller saves what it needs to
+//! find its VMs again, orders its own operations on each VM and each snapshot, and stops each VM
+//! that it launched, with [`vm::stop`], or keeps its reference to stop it later. Linux and
+//! Windows hosts run VMs; other hosts compile the module but report NVX as unavailable.
 //!
 //! The children of `host` depend on one another without cycles: each builds only on children
-//! beneath it, as [`vm`] does on `spawn`, and `spawn` on `platform`. An item that
-//! a lower child needs from a higher one moves down, and the higher child re-exports it where it
-//! was. `tests/host_modules.rs` reads the crate's sources and fails on a cycle, which it lists
-//! with a reference for each of its dependencies.
+//! beneath it, as [`vm`] does on the private `spawn`, which starts a VMM, detached, passing it
+//! only the descriptors or handles that the caller allows, and `spawn` on the private
+//! `platform`, which holds the primitives of Linux and Windows hosts. An item that a lower child
+//! needs from a higher one moves down, and the higher child re-exports it where it was.
+//! `tests/host_modules.rs` reads the crate's sources and fails on a cycle, which it lists with a
+//! reference for each of its dependencies.
 //!
 //! The host modules deny unsafe code. On Unix, the private `sys` module confines the system calls
 //! that the standard library lacks behind documented safe functions, which call `nix`. The
-//! Windows platform module and the Windows module of `seal` still call `windows-sys` directly,
-//! and the CLI's identification of the host CPU executes `CPUID` through its `core::arch`
-//! intrinsic, which the crate's minimum Rust version still marks unsafe.
+//! Windows platform module and the Windows module of the private `seal` still call `windows-sys`
+//! directly, and the CLI's identification of the host CPU executes `CPUID` through its
+//! `core::arch` intrinsic, which the crate's minimum Rust version still marks unsafe.
 #![deny(unsafe_code)]
 
 pub(crate) mod artifacts;
