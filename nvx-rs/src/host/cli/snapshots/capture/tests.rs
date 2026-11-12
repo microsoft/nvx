@@ -13,7 +13,7 @@ use super::*;
 use crate::host::config::NicConfig;
 use crate::host::platform;
 use crate::host::process::{BootId, Opened, ProcessRef};
-use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, class};
+use crate::host::snapshot::tests::{ManifestSpec, SnapshotFixture, context};
 use crate::host::snapshot::{MANIFEST_NAME, Snapshot};
 use crate::host::spawn::{self, VmmCommand};
 use crate::protocol::{
@@ -188,7 +188,7 @@ fn runtime(root: &Path) -> Runtime {
         openvmm: std::env::current_exe().unwrap(),
         kernel: root.join("fake-kernel"),
         initramfs: root.join("fake-initramfs"),
-        identity: class().runtime,
+        identity: context().runtime,
         hypervisor: if cfg!(windows) {
             crate::Hypervisor::Whp
         } else {

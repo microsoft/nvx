@@ -19,7 +19,7 @@
 //!   paths through OpenVMM's aggregate virtio-fs device.
 //! - [`report`] reads OpenVMM's outcome report.
 //! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
-//!   from a [`CaptureClass`](snapshot::CaptureClass) and [`SnapshotManifest`](snapshot::SnapshotManifest),
+//!   from a capture's context and [`SnapshotManifest`](snapshot::SnapshotManifest),
 //!   the strict manifest reader, and the capture's public time and eligibility information.
 //! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session for it,
 //!   for any application protocol, over a platform transport. The private `session` (feature
