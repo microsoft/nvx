@@ -84,7 +84,7 @@ pub const MAX_IDENTITY_LEN: usize = 128;
 const SHA256_HEX_LEN: usize = 64;
 
 /// Opaque text of 1 to [`MAX_IDENTITY_LEN`] printable ASCII characters and no space: the form of
-/// an [`ArtifactIdentity`] and of a control contract revision, which the store only compares.
+/// an [`ArtifactIdentity`] and of a control contract revision, which the library only compares.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Token(String);
 
@@ -116,7 +116,7 @@ impl Token {
 /// a release's `SHA256SUMS` lists for the file.
 ///
 /// It is an opaque token of 1 to [`MAX_IDENTITY_LEN`] printable ASCII characters without spaces,
-/// which the store only compares. Nothing here reads or hashes an artifact: a digest computed at
+/// which the library only compares. Nothing here reads or hashes an artifact: a digest computed at
 /// launch would cost time in proportion to the artifact's size on every start.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use crate::error::{Error, Result};
 
-/// Hypervisor that runs the sandbox VMs.
+/// Hypervisor that runs the VMs.
 ///
 /// With the `serde` feature, it serializes as its OpenVMM spelling: `kvm`, `mshv`, or `whp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
