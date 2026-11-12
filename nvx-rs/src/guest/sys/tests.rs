@@ -23,9 +23,11 @@ pub(crate) use super::rooted::tests::{
 };
 pub(crate) use super::signal::tests::{default_sigpipe, has_child, reap_children_automatically};
 pub(crate) use super::sock_diag::tests::{encode_inet_diag_done, encode_inet_diag_socket};
+#[cfg(feature = "cli")]
 pub(crate) use super::spawn::tests::{
-    CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, holds_capability,
+    CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SETGID, CAP_SETUID,
 };
+pub(crate) use super::spawn::tests::{CAP_SYS_ADMIN, holds_capability};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use super::spawn::tests::{CAP_SYS_NICE, CAP_SYS_RESOURCE};
 

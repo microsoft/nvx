@@ -100,7 +100,7 @@ changes only when the module's purpose does.
 
 | Module | Purpose |
 | --- | --- |
-| [`nvx::protocol`](#nvxprotocol) | The codec of the control console's `NVXS` records, `NVXC` frames, and payloads, which the host, the guest agent, and the fake OpenVMM share |
+| [`nvx::protocol`](#nvxprotocol) | The codec of the control console's `NVXS` records and the payloads that the host, the guest agent, and the fake OpenVMM share |
 | [`nvx::protocol::cmdline`](#nvxprotocolcmdline) | The kernel command line as Linux and the guest's init read it, with the virtio-mmio devices and the guest's DNS server that it names |
 | [`nvx::protocol::export`](#nvxprotocolexport) | The boot tokens of the host export, the virtio-fs device from which a guest maps host paths, and the guest's parser of them |
 | [`nvx::protocol::nvxs`](#nvxprotocolnvxs) | The NVXS session, independent of any application protocol: its records and the state machines of its host and guest roles |
@@ -163,10 +163,12 @@ fields.
 
 ### `nvx::protocol`
 
-The codec of the control console: `NVXS` outer records, `NVXC` application
+The codec of the control console: `NVXS` outer records, the `MAPS` payloads of
+the host mapping table, and the `nvx_maps=` and `nvx_workload_account=create`
+tokens. NVX's own control protocol, `NVXC`, is private to the crate, gated by
+the features of its users, `cli`, `guest` and `testing`: its application
 frames, the `EXEC` payload that the host encodes and the guest agent decodes,
-the `MAPS` payloads of the host mapping table, `GuestFeatures`, and the
-`nvx_maps=` and `nvx_workload_account=create` tokens.
+and the control features that a guest image advertises.
 
 The [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/nvxc-v1.txt`, and OpenVMM's vectors and cases of the `NVXS`

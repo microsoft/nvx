@@ -1,5 +1,5 @@
-//! `MAPS` payloads: the host mapping table that [`APP_MAPS`](super::APP_MAPS) requests hand the
-//! guest agent.
+//! `MAPS` payloads: the host mapping table that the `APP_MAPS` requests of NVX's own control
+//! protocol, `NVXC`, hand the guest agent.
 //!
 //! A payload holds the index of its first entry (`u32`) and its number of entries (`u32`),
 //! followed by the entries. Each entry holds its flags (`u16`), the lengths of its source and

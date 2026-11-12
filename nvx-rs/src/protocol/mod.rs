@@ -1,18 +1,14 @@
 //! Codec of the OpenVMM control-console protocol.
 //!
 //! OpenVMM brokers an authenticated stream of outer records (magic `NVXS`) between one host
-//! client and the Rust guest agent. Data records carry application frames (magic `NVXC`) that
-//! the host and guest share from this module. All integers are little-endian.
+//! client and the guest's agent. Data records carry the bytes of an application protocol. NVX's
+//! own, `NVXC`, with its frames, its `EXEC` payloads and the control features that a guest image
+//! advertises, is private to this crate: only NVX's programs speak it, the CLI, nvx-init, the
+//! managed agent and the fake OpenVMM. All integers are little-endian.
 //!
 //! - Outer records: [`encode_outer`] and [`decode_outer_header`], and the `OUTER_*` record types.
-//! - Application frames: [`encode_app`] and [`decode_app`], the `APP_*` request and response
-//!   kinds, the error categories with which the guest agent refuses a request, and the
-//!   [`ExitCategory`] of a workload.
-//! - `EXEC` payloads: the [`Workload`] that the host encodes with [`encode_exec_payload`], and
-//!   the [`ExecPayload`] that the guest agent decodes with [`decode_exec_payload`].
 //! - `MAPS` payloads: the [`HostMap`] table that the host encodes with [`encode_maps_payloads`],
 //!   and the [`MapsPayload`] that the guest agent decodes with [`decode_maps_payload`].
-//! - [`GuestFeatures`]: the control features that a guest image advertises.
 //! - The kernel command-line tokens through which the host configures the guest agent at boot,
 //!   such as [`MAPS_TOKEN`].
 //! - [`cmdline`]: the kernel command line as Linux reads it, for the readers that need the
@@ -42,8 +38,18 @@ use std::fmt;
 mod app;
 mod boot;
 pub mod cmdline;
-mod exec;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) mod exec;
 pub mod export;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 mod features;
 pub mod maps;
 pub mod nvxs;
@@ -66,6 +72,15 @@ pub(crate) use app::APP_ACTIVATE;
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::APP_CAPTURE;
+#[cfg(any(
+    feature = "cli",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::APP_HEADER_LEN;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use app::AppFrame;
+#[cfg(any(feature = "cli", feature = "testing"))]
+pub(crate) use app::ExitCategory;
 #[cfg(feature = "cli")]
 pub(crate) use app::encode_activate_payload;
 #[cfg(feature = "cli")]
@@ -75,22 +90,42 @@ pub(crate) use app::encode_capture_payload;
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::workload;
-pub use app::{
-    APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAGIC, APP_MAPS,
-    APP_PING, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, APP_VERSION, AppFrame,
-    BUSY, CWD_FAILED, ExitCategory, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED,
-    MAPPINGS_INCOMPLETE, UNSUPPORTED_OPERATION, decode_app, encode_app,
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::{
+    APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_MAPS, APP_PING, APP_READY,
+    APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, MAPPING_FAILED, UNSUPPORTED_OPERATION,
+    decode_app, encode_app,
 };
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use app::{BUSY, CWD_FAILED, INVALID_REQUEST, LAUNCH_FAILED, MAPPINGS_INCOMPLETE};
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::{decode_activate_payload, decode_capture_payload};
 pub use boot::{MAPS_TOKEN, WORKLOAD_ACCOUNT_TOKEN, parse_host_mapping_count};
-pub use exec::{
-    EXEC_CWD_PRESENT, EXEC_ENVIRONMENT_PRESENT, EXEC_EXTENDED, EXEC_INHERIT_DEFAULT_ENV,
-    ExecPayload, GuestExecPayload, MAX_ARGUMENT_BYTES, MAX_ARGUMENTS, MAX_CWD_BYTES,
-    MAX_ENVIRONMENT, MAX_GUEST_CWD_BYTES, MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS, Workload,
-    WorkloadEnvironment, decode_exec_payload, decode_guest_exec_payload, encode_exec_payload,
-};
-pub use features::GuestFeatures;
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use exec::MAX_OUTPUT_BYTES;
+#[cfg(feature = "testing")]
+pub(crate) use exec::decode_exec_payload;
+#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+pub(crate) use exec::{GuestExecPayload, decode_guest_exec_payload};
+#[cfg(feature = "cli")]
+pub(crate) use exec::{Workload, WorkloadEnvironment, encode_exec_payload};
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+pub(crate) use features::GuestFeatures;
 pub use maps::{
     GuestHostMap, GuestMapsPayload, HostMap, MAP_ENTRY_HEADER_LEN, MAP_READ_ONLY, MAPS_HEADER_LEN,
     MAX_HOST_MAPPINGS, MAX_MAP_PATH_BYTES, MapsPayload, decode_guest_maps_payload,
