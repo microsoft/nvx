@@ -38,10 +38,10 @@ use super::{last_error, owned, raw, wide};
 /// Claims a launch's fresh log, which `file` holds open.
 ///
 /// On Windows the claim needs no further step: it is the job object of the log, in which
-/// [`spawn_detached`] starts the VMM, or else the log's handles that the VMM inherits, as
+/// [`spawn_with_stdio`] starts the VMM, or else the log's handles that the VMM inherits, as
 /// [`log_claim_held`] describes.
 ///
-/// [`spawn_detached`]: crate::host::platform::windows::spawn_detached
+/// [`spawn_with_stdio`]: crate::host::platform::windows::spawn_with_stdio
 #[cfg(feature = "cli")]
 pub(crate) fn claim_log(_file: &fs::File) -> io::Result<()> {
     Ok(())
@@ -73,7 +73,7 @@ pub(super) fn log_job_id(log: &fs::File) -> io::Result<Option<(u64, u128)>> {
     }
 }
 
-/// Creates the job object of the log that `log` holds open, in which [`spawn_detached`] starts
+/// Creates the job object of the log that `log` holds open, in which [`spawn_with_stdio`] starts
 /// the VMM that writes the log, so that the processes of the job are the log's claim, as
 /// [`log_claim_held`] describes. The job limits no resource, but it lets no process that the VMM
 /// starts break away from it: one that asks to, with `CREATE_BREAKAWAY_FROM_JOB`, fails with
@@ -91,7 +91,7 @@ pub(super) fn log_job_id(log: &fs::File) -> io::Result<Option<(u64, u128)>> {
 /// of the same file ID, or of the same file before it was truncated, that a process still holds
 /// would: the VMM would share it.
 ///
-/// [`spawn_detached`]: crate::host::platform::windows::spawn_detached
+/// [`spawn_with_stdio`]: crate::host::platform::windows::spawn_with_stdio
 pub(crate) fn create_log_job(log: &fs::File) -> io::Result<Option<OwnedHandle>> {
     let Some(id) = log_job_id(log)? else {
         return Ok(None);
@@ -327,15 +327,15 @@ pub(super) fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
 /// the file `identity`.
 ///
 /// While the job object of the log can be opened by its name, the claim is its processes.
-/// [`spawn_detached`] starts the VMM in the job, every process that the VMM starts joins it, and
-/// no other process does. The job keeps its name while a process holds a handle to it, not merely
-/// while it holds processes, and the spawn closes its own: a process that another thread created
-/// while the VMM's spawn had the log's handles inheritable holds the log, and the job's handle with
-/// it, so the job can be opened by its name for as long as that process holds the log, and the
-/// process, which never joins the job, does not hold the claim. What takes the name but is not the
-/// user's job, as [`log_job_named`] tells it, is not the log's job, and leaves the claim to the
-/// log's handles: another user cannot end a launch whose VMM still runs by creating an empty job
-/// under that name, or a symbolic link under it to an empty job of the user.
+/// [`spawn_with_stdio`] starts the VMM in the job, every process that the VMM starts joins it,
+/// and no other process does. The job keeps its name while a process holds a handle to it, not
+/// merely while it holds processes, and the spawn closes its own: a process that another thread
+/// created while the VMM's spawn had the log's handles inheritable holds the log, and the job's
+/// handle with it, so the job can be opened by its name for as long as that process holds the
+/// log, and the process, which never joins the job, does not hold the claim. What takes the name
+/// but is not the user's job, as [`log_job_named`] tells it, is not the log's job, and leaves the
+/// claim to the log's handles: another user cannot end a launch whose VMM still runs by creating
+/// an empty job under that name, or a symbolic link under it to an empty job of the user.
 ///
 /// Without the user's job, as for a VMM that no such process outlives, that a launch of an earlier
 /// version started outside one, or whose job's name something else took, and for a log that is
@@ -346,7 +346,7 @@ pub(super) fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
 /// inherited the log, holds it. The identity is checked again on the exclusive handle, because a
 /// rename between the opens could have replaced the file.
 ///
-/// [`spawn_detached`]: crate::host::platform::windows::spawn_detached
+/// [`spawn_with_stdio`]: crate::host::platform::windows::spawn_with_stdio
 #[cfg(feature = "cli")]
 pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bool> {
     let replaced = || io::Error::other(format!("{} is not the claimed log", path.display()));
