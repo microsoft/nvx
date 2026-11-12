@@ -1,29 +1,29 @@
 //! The checklist of the security requirements that the host's documentation states, through the
 //! public API alone: the guest paths of an export, the stability of exported objects, the privacy
-//! of a VM's directory and outputs, and the proofs of a VM's liveness, of its endpoint's owner and
-//! of its recovery from saved values, and the strictness of a snapshot's directory. The checks of
-//! a staged image and of a scratch image's claim, which only NVX's CLI makes, are unit tests of
+//! of a VM's directory and outputs, and the strictness of a snapshot's directory. The checks of a
+//! staged image and of a scratch image's claim, which only NVX's CLI makes, are unit tests of
 //! `host::sandbox::distro` and `host::sandbox::scratch`.
 //!
-//! Each check is short and runs no VM: a process of the test's own, an idle copy of the test
-//! binary, stands in for a VM's process where one is needed.
+//! Each check is short and runs no VM. The proofs of a saved VM's liveness, of its endpoint's
+//! owner and of its recovery from saved values need a process of the test's own, named by its
+//! start time, which only the crate's private platform layer reads, so the unit tests of
+//! `nvx::host::vm` check them.
 #![cfg(all(feature = "host", any(target_os = "linux", windows)))]
 
-use std::error::Error as _;
 use std::fs::{self, File};
-use std::io::{self, Read};
+#[cfg(windows)]
+use std::io;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 
 use nvx::activation::{MachineIdMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
 #[cfg(windows)]
 use nvx::host::filesystem::Owner;
 use nvx::host::filesystem::{self, ExportRequest, Mapping, ReservedTargets, Target};
-use nvx::host::process::{BootId, ProcessRef};
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-use nvx::host::{platform, snapshot, transport, vm};
+use nvx::host::{snapshot, vm};
 use nvx::{ErrorKind, Hypervisor};
 
 /// Plans the export of `mappings` into the blockless root.
@@ -313,46 +313,6 @@ fn a_snapshot_opens_only_from_a_snapshot_directory_and_changes_nothing() {
     assert_eq!(fs::read(&caller).unwrap(), b"caller-owned launch state");
 }
 
-/// An idle copy of the test binary, which stands in for a VM's process, and is killed and
-/// reaped when dropped.
-struct IdleChild(Child);
-
-impl IdleChild {
-    fn start() -> Self {
-        Self(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "idle_child", "--ignored", "--test-threads=1"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
-    }
-
-    fn reference(&self) -> ProcessRef {
-        ProcessRef {
-            pid: self.0.id(),
-            start_time: platform::process_start_time(self.0.id()).unwrap().unwrap(),
-            boot: BootId::current().unwrap(),
-        }
-    }
-}
-
-impl Drop for IdleChild {
-    fn drop(&mut self) {
-        if self.0.try_wait().unwrap().is_none() {
-            self.0.kill().unwrap();
-            self.0.wait().unwrap();
-        }
-    }
-}
-
-#[test]
-#[ignore = "the idle stand-in for a VM's process, which only the checklist starts"]
-fn idle_child() {
-    io::stdin().read_to_end(&mut Vec::new()).unwrap();
-}
-
 /// A runtime whose files no check reads.
 fn runtime() -> Runtime {
     Runtime {
@@ -373,160 +333,4 @@ fn runtime() -> Runtime {
         windows_breakaway: false,
         options: LaunchOptions::default(),
     }
-}
-
-/// Returns what a caller saves of a VM whose process is `process`, with an endpoint that no
-/// process serves.
-fn saved(directory: &vm::VmDir, process: ProcessRef) -> vm::SavedVm {
-    #[cfg(target_os = "linux")]
-    let endpoint = directory
-        .path()
-        .join("control.sock")
-        .to_str()
-        .unwrap()
-        .to_owned();
-    #[cfg(windows)]
-    let endpoint = {
-        let mut bytes = [0; 16];
-        getrandom::fill(&mut bytes).unwrap();
-        let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        format!(r"\\.\pipe\openvmm-microvm-{suffix}")
-    };
-    vm::SavedVm {
-        vm_dir: directory.clone(),
-        endpoint,
-        capability: [0xa5; nvx::protocol::CAPABILITY_LEN],
-        process,
-        runtime: runtime().identity,
-    }
-}
-
-#[test]
-fn a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal() {
-    let (_directory, dir) = private_directory();
-    let mut child = IdleChild::start();
-    let saved = saved(&dir, child.reference());
-    let held = vm::verify(&saved, &saved.runtime).unwrap();
-    assert!(held.wait(Instant::now()).unwrap().is_none());
-    let mut other = saved.runtime.clone();
-    other.control_session += 1;
-    assert_eq!(
-        vm::verify(&saved, &other).unwrap_err().kind(),
-        ErrorKind::RuntimeMismatch
-    );
-    assert!(!held.has_exited().unwrap());
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
-    assert!(
-        held.wait(Instant::now() + Duration::from_secs(10))
-            .unwrap()
-            .is_some()
-    );
-    let error = vm::verify(&saved, &saved.runtime).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Exited);
-    assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<io::Error>()
-            .unwrap()
-            .kind(),
-        io::ErrorKind::NotFound
-    );
-}
-
-/// Serves `endpoint` from the test's own process, which is not the VM's.
-#[cfg(target_os = "linux")]
-fn endpoint_server(endpoint: &str) -> std::os::unix::net::UnixListener {
-    std::os::unix::net::UnixListener::bind(endpoint).unwrap()
-}
-
-/// Serves `endpoint` from the test's own process, which is not the VM's.
-#[cfg(windows)]
-fn endpoint_server(endpoint: &str) -> File {
-    use std::os::windows::io::{FromRawHandle, OwnedHandle};
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
-    };
-    use windows_sys::Win32::System::Pipes::{
-        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
-    };
-    let name: Vec<u16> = endpoint.encode_utf16().chain(Some(0)).collect();
-    // SAFETY: the name is a NUL-terminated wide string that outlives the call, and the test owns
-    // the new pipe, which the returned file closes.
-    let handle = unsafe {
-        CreateNamedPipeW(
-            name.as_ptr(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            1,
-            4096,
-            4096,
-            0,
-            std::ptr::null(),
-        )
-    };
-    assert_ne!(
-        handle,
-        INVALID_HANDLE_VALUE,
-        "{}",
-        io::Error::last_os_error()
-    );
-    // SAFETY: the successful call returned a new handle that nothing else owns.
-    File::from(unsafe { OwnedHandle::from_raw_handle(handle) })
-}
-
-#[test]
-fn reattaching_refuses_an_endpoint_that_another_process_serves_and_keeps_the_vm_and_its_values() {
-    let (_directory, dir) = private_directory();
-    let child = IdleChild::start();
-    let saved = saved(&dir, child.reference());
-    let before = saved.clone();
-    let _server = endpoint_server(&saved.endpoint);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let error = vm::reattach(&saved, &runtime(), deadline).err().unwrap();
-    assert_eq!(error.kind(), ErrorKind::Protocol);
-    assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<io::Error>()
-            .unwrap()
-            .kind(),
-        io::ErrorKind::PermissionDenied
-    );
-    assert!(
-        !vm::verify(&saved, &saved.runtime)
-            .unwrap()
-            .has_exited()
-            .unwrap()
-    );
-    assert_eq!(saved.endpoint, before.endpoint);
-    assert_eq!(saved.capability, before.capability);
-    assert_eq!(saved.process, before.process);
-    assert_eq!(saved.runtime, before.runtime);
-    assert_eq!(saved.vm_dir.path(), before.vm_dir.path());
-
-    let mut invalid = saved.clone();
-    invalid.process.pid = 0;
-    let error = transport::connect_verified(&invalid.endpoint, &invalid.process, deadline)
-        .err()
-        .unwrap();
-    assert_eq!(error.kind(), ErrorKind::Io);
-    assert_eq!(
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<io::Error>()
-            .unwrap()
-            .kind(),
-        io::ErrorKind::InvalidInput
-    );
-    assert!(
-        !vm::verify(&saved, &saved.runtime)
-            .unwrap()
-            .has_exited()
-            .unwrap()
-    );
 }

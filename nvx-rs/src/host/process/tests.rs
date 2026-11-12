@@ -4,6 +4,8 @@ use super::*;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "linux", windows))]
+mod orchestrator;
 
 /// The boot of the references in these tests.
 const BOOT: BootId = BootId::from_bytes([0x5a; 16]);

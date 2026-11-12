@@ -14,7 +14,7 @@ use std::path::Path;
 use crate::host::sys::Errno;
 
 /// Returns the device and inode of a file or directory.
-pub fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
+pub(crate) fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     let metadata = fs::metadata(path)?;
     Ok((metadata.dev(), metadata.ino()))
 }

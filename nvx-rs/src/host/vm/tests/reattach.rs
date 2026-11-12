@@ -371,3 +371,135 @@ fn owned_endpoint_child() {
     peer.write_all(&record(RecordType::Data, 1, b"response"))
         .unwrap();
 }
+
+/// An idle copy of the test binary, which stands in for a VM's process, and is killed and
+/// reaped when dropped.
+struct IdleChild(Child);
+
+impl IdleChild {
+    fn start() -> Self {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "host::vm::tests::reattach::idle_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null());
+        Self(crate::host::tests::spawn_locked(&mut command).unwrap())
+    }
+
+    fn reference(&self) -> ProcessRef {
+        ProcessRef {
+            pid: self.0.id(),
+            start_time: platform::process_start_time(self.0.id()).unwrap().unwrap(),
+            boot: BootId::current().unwrap(),
+        }
+    }
+}
+
+impl Drop for IdleChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().unwrap().is_none() {
+            self.0.kill().unwrap();
+            self.0.wait().unwrap();
+        }
+    }
+}
+
+#[test]
+#[ignore = "the idle stand-in for a VM's process, which only the checks of saved values start"]
+fn idle_child() {
+    io::stdin().read_to_end(&mut Vec::new()).unwrap();
+}
+
+#[test]
+fn a_saved_vm_runs_until_its_process_exits_and_another_runtime_is_refused_without_a_signal() {
+    let (_directory, vm) = vm_dir();
+    let mut child = IdleChild::start();
+    let saved = saved(&vm, child.reference());
+    let held = verify(&saved, &saved.runtime).unwrap();
+    assert!(held.wait(Instant::now()).unwrap().is_none());
+    let mut other = saved.runtime.clone();
+    other.control_session += 1;
+    assert_eq!(
+        verify(&saved, &other).unwrap_err().kind(),
+        ErrorKind::RuntimeMismatch
+    );
+    assert!(!held.has_exited().unwrap());
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    assert!(
+        held.wait(Instant::now() + Duration::from_secs(10))
+            .unwrap()
+            .is_some()
+    );
+    let error = verify(&saved, &saved.runtime).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Exited);
+    assert_eq!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn reattaching_refuses_an_endpoint_that_another_process_serves_and_keeps_the_vm_and_its_values() {
+    let (_directory, vm) = vm_dir();
+    let child = IdleChild::start();
+    let saved = saved(&vm, child.reference());
+    let before = saved.clone();
+    let _server = bind(&saved.endpoint);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let error = reattach(&saved, &cold_runtime(), deadline).err().unwrap();
+    assert_eq!(error.kind(), ErrorKind::Protocol);
+    assert_eq!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(
+        !verify(&saved, &saved.runtime)
+            .unwrap()
+            .has_exited()
+            .unwrap()
+    );
+    assert_eq!(saved.endpoint, before.endpoint);
+    assert_eq!(saved.capability, before.capability);
+    assert_eq!(saved.process, before.process);
+    assert_eq!(saved.runtime, before.runtime);
+    assert_eq!(saved.vm_dir.path(), before.vm_dir.path());
+
+    let mut invalid = saved.clone();
+    invalid.process.pid = 0;
+    let error =
+        crate::host::transport::connect_verified(&invalid.endpoint, &invalid.process, deadline)
+            .err()
+            .unwrap();
+    assert_eq!(error.kind(), ErrorKind::Io);
+    assert_eq!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(
+        !verify(&saved, &saved.runtime)
+            .unwrap()
+            .has_exited()
+            .unwrap()
+    );
+}

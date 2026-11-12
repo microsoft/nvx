@@ -22,8 +22,8 @@
 //! - [`transport`] verifies a VM's endpoint and runs the host's role of the NVXS session for it,
 //!   for any application protocol, over a platform transport. The private `session` (feature
 //!   `cli`) speaks NVX's own control protocol, `NVXC`, over it for NVX's programs. [`nvxs`]
-//!   retains compatibility paths. [`platform`] holds the primitives of Linux and Windows hosts.
-//!   Other hosts compile but report NVX as unavailable.
+//!   retains compatibility paths. The private `platform` module holds the primitives of Linux and
+//!   Windows hosts. Other hosts compile but report NVX as unavailable.
 //! - [`process`] names processes by verified references: their ID, start time, and host boot,
 //!   through which a pidfd or a process handle holds them, so that waits sleep until a process
 //!   exits and termination reaches only it, whether or not the caller started it.
@@ -50,7 +50,7 @@
 //! caller allows, and no other descriptor or handle of the caller's.
 //!
 //! The children of `host` depend on one another without cycles: each builds only on children
-//! beneath it, as [`vm`] does on `spawn`, and `spawn` on [`platform`]. An item that
+//! beneath it, as [`vm`] does on `spawn`, and `spawn` on `platform`. An item that
 //! a lower child needs from a higher one moves down, and the higher child re-exports it where it
 //! was. `tests/host_modules.rs` reads the crate's sources and fails on a cycle, which it lists
 //! with a reference for each of its dependencies.
@@ -71,7 +71,7 @@ pub mod filesystem;
 pub mod network;
 pub mod nvxs;
 pub(crate) mod paths;
-pub mod platform;
+pub(crate) mod platform;
 pub mod process;
 pub mod report;
 pub mod restore;

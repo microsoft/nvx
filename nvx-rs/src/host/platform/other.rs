@@ -1,4 +1,6 @@
-use std::fs::{self, File};
+#[cfg(feature = "cli")]
+use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::process::Command;
@@ -10,9 +12,6 @@ use crate::hypervisor::Hypervisor;
 
 #[cfg(all(feature = "cli", unix))]
 pub(crate) use crate::host::sys::{interrupted, watch_interrupts, write_interruptibly};
-
-/// Whether this host can run NVX microVMs.
-pub const SUPPORTED: bool = false;
 
 /// Does nothing: this host has no console interrupts to watch.
 #[cfg(all(feature = "cli", not(unix)))]
@@ -34,7 +33,8 @@ fn unsupported() -> io::Error {
 }
 
 /// Reports every process as gone: this host runs no OpenVMM processes.
-pub fn process_start_time(_pid: u32) -> io::Result<Option<u64>> {
+#[cfg(feature = "cli")]
+pub(crate) fn process_start_time(_pid: u32) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
@@ -94,7 +94,7 @@ pub(crate) fn monotonic_ns() -> io::Result<u64> {
 }
 
 /// Fails: this host cannot export host paths.
-pub fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
+pub(crate) fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
     Err(unsupported())
 }
 
@@ -216,14 +216,6 @@ pub(crate) fn inherit_only(command: &mut Command, inherit: &[Inherited<'_>]) -> 
 
 pub(crate) fn probe_hypervisor(_hypervisor: Hypervisor) -> Result<(), String> {
     Err(unsupported().to_string())
-}
-
-/// Creates `path` if needed.
-pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => Err(error),
-        _ => Ok(()),
-    }
 }
 
 /// The listener of the restore-ready endpoint of a restore, which this host never makes.

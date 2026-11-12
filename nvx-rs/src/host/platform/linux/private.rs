@@ -11,26 +11,10 @@ use std::path::Path;
 use nix::sys::stat::Mode;
 use nix::unistd::Uid;
 
-use super::{GROUP_AND_OTHER_BITS, PRIVATE_DIR_MODE, STORE_DIR_MODE};
+use super::{GROUP_AND_OTHER_BITS, STORE_DIR_MODE};
 #[cfg(feature = "cli")]
 use crate::host::sys;
 use crate::host::sys::Errno;
-
-/// Creates `path` if needed and restricts it to the current user.
-pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    match DirBuilder::new().mode(PRIVATE_DIR_MODE.bits()).create(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    if !fs::symlink_metadata(path)?.is_dir() {
-        return Err(io::Error::other(format!(
-            "{} is not a plain directory",
-            path.display()
-        )));
-    }
-    fs::set_permissions(path, Permissions::from_mode(PRIVATE_DIR_MODE.bits()))
-}
 
 /// Creates the directory `path` of a sandbox store with mode 0700, or checks that an existing one
 /// is private to the current user, as [`check_store_dir`] does, and returns why it is not, if it

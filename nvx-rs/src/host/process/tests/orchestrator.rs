@@ -1,11 +1,13 @@
 //! Verified process references and event-driven exit waits, through the public API of
-//! `nvx::host::process`, as an orchestrator uses them.
+//! `nvx::host::process`, as an orchestrator uses them, with each child named by the start time
+//! that the crate's private platform layer reads.
 //!
 //! The processes are this test executable, run again as one of two fixtures, which inherit
 //! nothing of the test: a process fixture runs until a file named `exit` appears in its working
 //! directory, and a launcher fixture starts a process fixture, prints the process's reference as
-//! an orchestrator would record it, and runs until its standard input closes.
-#![cfg(all(feature = "host", any(target_os = "linux", windows)))]
+//! an orchestrator would record it, and runs until its standard input closes. The test starts
+//! each under a `SpawnLock`, so that on Windows it inherits no handle of a VMM that a concurrent
+//! test spawns.
 
 use std::env;
 use std::ffi::OsString;
@@ -17,8 +19,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nvx::host::platform;
-use nvx::host::process::{BootId, Opened, Process, ProcessRef, WaitMethod};
+use crate::host::platform;
+use crate::host::process::{BootId, Opened, Process, ProcessRef, WaitMethod};
 
 /// File whose presence in its working directory marks a process fixture. Without it, the fixture
 /// returns at once, as it does when `cargo test -- --ignored` runs it.
@@ -81,14 +83,15 @@ fn launcher_fixture() {
     io::copy(&mut input, &mut io::sink()).unwrap();
 }
 
-/// Returns the arguments that run only the fixture `name` of this test executable.
+/// Returns the arguments that run only the fixture `name` of this module of this test executable.
 ///
 /// The fixture runs on libtest's main thread, whatever the host's processors or the inherited
 /// `RUST_TEST_THREADS`, so libtest always prints its name before the fixture's own output.
 fn fixture_arguments(name: &str) -> Vec<OsString> {
+    let path = format!("host::process::tests::orchestrator::{name}");
     [
         "--exact",
-        name,
+        path.as_str(),
         "--ignored",
         "--nocapture",
         "--test-threads=1",
@@ -100,14 +103,14 @@ fn fixture_arguments(name: &str) -> Vec<OsString> {
 /// Starts a process fixture in `directory`, which it marks, without standard streams.
 fn spawn_process(directory: &Path) -> Child {
     File::create(directory.join(PROCESS_MARKER)).unwrap();
-    Command::new(env::current_exe().unwrap())
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
         .args(fixture_arguments("process_fixture"))
         .current_dir(directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::null());
+    crate::host::tests::spawn_locked(&mut command).unwrap()
 }
 
 /// Returns the reference of `child`, which has not been reaped, so that its ID still names it.
@@ -191,13 +194,13 @@ struct Launcher {
 impl Launcher {
     /// Starts a launcher whose process runs in `directory`.
     fn start(directory: &Path) -> Self {
-        let mut child = Command::new(env::current_exe().unwrap())
+        let mut command = Command::new(env::current_exe().unwrap());
+        command
             .args(fixture_arguments("launcher_fixture"))
             .env(LAUNCHER_DIR, directory)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stdout(Stdio::piped());
+        let mut child = crate::host::tests::spawn_locked(&mut command).unwrap();
         let input = child.stdin.take();
         Self { child, input }
     }
@@ -463,13 +466,12 @@ fn a_process_that_this_user_may_not_terminate_is_waited_for_but_never_signaled()
 
 /// Processes whose security descriptor restricts what this user may do with them.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 mod restricted {
     use std::os::windows::io::AsRawHandle;
     use std::process::{Child, Command, Stdio};
     use std::{io, mem, ptr};
 
-    use nvx::host::platform;
-    use nvx::host::process::{BootId, ProcessRef};
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS};
     use windows_sys::Win32::Security::Authorization::{SE_KERNEL_OBJECT, SetSecurityInfo};
     use windows_sys::Win32::Security::{
@@ -478,6 +480,9 @@ mod restricted {
         SECURITY_MAX_SID_SIZE, WinWorldSid,
     };
     use windows_sys::Win32::System::Threading::OpenProcess;
+
+    use crate::host::platform;
+    use crate::host::process::{BootId, ProcessRef};
 
     /// A child process, which is ended when dropped, through the handle with full access that
     /// its creator holds.
@@ -494,13 +499,12 @@ mod restricted {
     /// descriptor then grants everyone, this user included, only `access` to it. Returns it with
     /// its reference.
     pub(crate) fn spawn(access: u32) -> (Running, ProcessRef) {
-        let child = Command::new("ping")
+        let mut command = Command::new("ping");
+        command
             .args(["-n", "60", "127.0.0.1"])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        let child = Running(child);
+            .stdout(Stdio::null());
+        let child = Running(crate::host::tests::spawn_locked(&mut command).unwrap());
         let pid = child.0.id();
         let reference = ProcessRef {
             pid,
