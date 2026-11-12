@@ -424,7 +424,7 @@ their own. The tests that a step runs have rows of their own where they concern 
 | `.github/actions/check-nvx-rs` | Test | kept | Runs `nvx-rs/tests/security_checklist.rs` too |
 | `.github/actions/check-nvx-rs` | Check artifact bundling | retired | The `bundled` feature, which staged a release at build time, leaves NVX with its build script and `artifacts.json` (SL6.6a, #1122) |
 | `.github/actions/check-nvx-rs` | Build documentation | kept |  |
-| `.github/actions/check-nvx-rs` | Check the public API | kept |  |
+| `.github/actions/check-nvx-rs` | Check the public API | kept | Since SL8.1, it also fails unless the API's hidden items are one `main` per binary, the entry point that the binary calls, and the modules that hold it |
 | `.github/actions/check-nvx-rs` | Check the minimum supported Rust version | kept |  |
 | `.github/actions/check-nvx-rs` | Check the macOS build | kept |  |
 | `.github/actions/check-nvx-rs` | Lint and test the guest binaries | kept | Builds `nvx` with `guest` alone, warnings denied, `nvx-rs/examples/guest-workflows.rs` among its targets |

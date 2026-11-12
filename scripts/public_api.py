@@ -12,6 +12,14 @@ API. A pull request that changes the public API updates the snapshots:
 Without `--update`, the script prints how the API differs from each snapshot,
 and fails if it does.
 
+The only hidden items are the entry points of NVX's programs, one per binary:
+the function `main` that the binary's code calls, outside its comments and
+literals, such as `nvx::host::cli::main` for `nvx-rs`, and the modules that
+hold it. The script fails, with or without `--update`, when a binary calls no
+such function or several, when two binaries call one, when the API does not
+list a binary's as hidden on any platform, or lists it without hiding it on
+one, or when it hides anything else.
+
 The script builds the library's rustdoc JSON with every feature, for
 x86_64-unknown-linux-musl, the guests' target, and for x86_64-pc-windows-msvc,
 on the Rust release that rust-toolchain.toml pins. It first adds both targets
@@ -35,7 +43,9 @@ import argparse
 import difflib
 import json
 import os
+import re
 import sys
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -68,6 +78,16 @@ EXCLUDED_FEATURES = frozenset({"default"})
 
 # How rustdoc's JSON gives the attribute `#[doc(hidden)]`.
 HIDDEN = {"other": "#[doc(hidden)]"}
+
+# A binary's call of its program's entry point, such as `nvx::host::cli::main()`.
+ENTRY_POINT_CALL = re.compile(rf"\b({CRATE}(?:::\w+)+)::main\(\)")
+
+# What a Rust source holds besides code where it starts: a line comment, or a raw string, string,
+# or character literal. Block comments, which nest, are scanned apart.
+RUST_NON_CODE = re.compile(
+    r"//[^\n]*|\b[bc]?r(#*)\".*?\"\1|[bc]?\"(?:\\.|[^\"\\])*\"|b?'(?:\\.|[^'\\\n])'",
+    re.DOTALL,
+)
 
 # The kind that a line names for each kind of item in a module, and for each
 # kind of item in a trait or an inherent impl.
@@ -237,8 +257,98 @@ def feature_arguments(features: Mapping[str, object]) -> list[str]:
     ]
 
 
-def platform_lines() -> dict[str, list[str]]:
-    """Builds the rustdoc JSON of each platform, and lists its public API."""
+def rust_code(source: str) -> str:
+    """Returns the Rust `source` with a space in place of each comment, string
+    literal, and character literal, so that only its code remains."""
+    code: list[str] = []
+    index = depth = 0
+    while index < len(source):
+        if source.startswith("/*", index):
+            depth += 1
+            index += 2
+        elif depth and source.startswith("*/", index):
+            depth -= 1
+            index += 2
+            if not depth:
+                code.append(" ")
+        elif depth:
+            index += 1
+        elif literal := RUST_NON_CODE.match(source, index):
+            code.append(" ")
+            index = literal.end()
+        else:
+            code.append(source[index])
+            index += 1
+    return "".join(code)
+
+
+def entry_points(targets: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """Returns the entry point of each binary among `targets`, as `cargo
+    metadata` gives them, by the binary's name: the path of the function
+    `main` that the binary's code, outside its comments and literals, calls."""
+    points: dict[str, str] = {}
+    for target in targets:
+        if "bin" not in target["kind"]:
+            continue
+        source = Path(target["src_path"]).read_text(encoding="utf-8")
+        calls = sorted(set(ENTRY_POINT_CALL.findall(rust_code(source))))
+        if len(calls) != 1:
+            raise ScriptError(
+                f"the binary {target['name']} calls {len(calls)} entry points of "
+                f"{CRATE}, not one: {', '.join(calls) or 'none'}"
+            )
+        points[target["name"]] = f"{calls[0]}::main"
+    return points
+
+
+def entry_point_problems(
+    listings: Mapping[str, list[str]], points: Mapping[str, str]
+) -> list[str]:
+    """Returns how the hidden items of `listings` differ from one entry point
+    per binary of `points`: the binary's own hidden function `main`, and the
+    modules that hold it, as the listings of all platforms show them. A
+    platform that builds a binary as a stub lists no entry point for it, but
+    none may list one without hiding it."""
+    hidden = {
+        line.removesuffix(" (hidden)")
+        for lines in listings.values()
+        for line in lines
+        if line.endswith(" (hidden)")
+    }
+    functions = {f"fn {point}" for point in points.values()}
+    holders = {
+        "mod " + "::".join(parts[:end])
+        for parts in (point.split("::") for point in points.values())
+        for end in range(1, len(parts))
+    }
+    problems = [
+        f"the public API hides {line}, which is no binary's entry point and holds none"
+        for line in sorted(hidden - functions - holders)
+    ]
+    problems.extend(
+        f"the public API does not list {point}, the entry point of {binary}, as "
+        "a hidden function"
+        for binary, point in sorted(points.items())
+        if f"fn {point}" not in hidden
+    )
+    problems.extend(
+        f"the public API on {platform} lists {point}, the entry point of "
+        f"{binary}, without hiding it"
+        for platform, lines in sorted(listings.items())
+        for binary, point in sorted(points.items())
+        if f"fn {point}" in lines
+    )
+    problems.extend(
+        f"{point} is the entry point of {count} binaries, not of one"
+        for point, count in sorted(Counter(points.values()).items())
+        if count > 1
+    )
+    return problems
+
+
+def platform_lines() -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Builds the rustdoc JSON of each platform, and lists its public API.
+    Also returns the entry point of each binary."""
     toolchain = pinned_guest_rust_toolchain()
     run_checked(
         ["rustup", "target", "add", "--toolchain", toolchain, *TARGETS.values()],
@@ -277,7 +387,7 @@ def platform_lines() -> dict[str, list[str]]:
         )
         output = Path(metadata["target_directory"]) / target / "doc" / f"{CRATE}.json"
         listings[platform] = api_lines(json.loads(output.read_text(encoding="utf-8")))
-    return listings
+    return listings, entry_points(package["targets"])
 
 
 def shown(path: Path) -> str:
@@ -336,11 +446,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        listings = platform_lines()
+        listings, points = platform_lines()
     except ScriptError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    return compare(listings, SNAPSHOTS, args.update)
+    problems = entry_point_problems(listings, points)
+    for problem in problems:
+        print(f"error: {problem}", file=sys.stderr)
+    status = compare(listings, SNAPSHOTS, args.update)
+    return 1 if problems else status
 
 
 if __name__ == "__main__":

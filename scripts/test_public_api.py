@@ -364,5 +364,158 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(public_api.compare(listings, directory, False), 0)
 
 
+class EntryPointTests(unittest.TestCase):
+    def test_finds_the_main_function_that_each_binary_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sources = {
+                "cli.rs": "//! See `nvx::host::cli`.\n"
+                "fn main() -> ExitCode {\n    nvx::host::cli::main()\n}\n",
+                # A guest program's stub elsewhere calls nothing.
+                "tool.rs": '#[cfg(target_os = "linux")]\n'
+                "fn main() -> ExitCode {\n    nvx::guest::tool::main()\n}\n"
+                '#[cfg(not(target_os = "linux"))]\n'
+                "fn main() -> ExitCode {\n    ExitCode::FAILURE\n}\n",
+                "none.rs": "fn main() {}\n",
+                "two.rs": "fn main() {\n    nvx::a::main();\n    nvx::b::main();\n}\n",
+            }
+            for name, text in sources.items():
+                (directory / name).write_text(text, encoding="utf-8")
+
+            def target(name: str, kind: str = "bin") -> dict[str, Any]:
+                return {
+                    "name": name,
+                    "kind": [kind],
+                    "src_path": str(directory / f"{name}.rs"),
+                }
+
+            self.assertEqual(
+                public_api.entry_points(
+                    [target("lib", "lib"), target("cli"), target("tool")]
+                ),
+                {"cli": "nvx::host::cli::main", "tool": "nvx::guest::tool::main"},
+            )
+            for name, error in (
+                ("none", "the binary none calls 0 entry points of nvx, not one: none"),
+                (
+                    "two",
+                    "the binary two calls 2 entry points of nvx, not one: nvx::a, "
+                    "nvx::b",
+                ),
+            ):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ScriptError, error):
+                        public_api.entry_points([target(name)])
+
+    def test_finds_no_call_in_a_comment_or_a_literal(self) -> None:
+        # A binary whose delegation is commented out calls no entry point,
+        # even while the library still hides the function.
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "tool.rs"
+            source.write_text(
+                "// nvx::guest::tool::main()\nfn main() {}\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ScriptError, "the binary tool calls 0 entry points of nvx, not one"
+            ):
+                public_api.entry_points(
+                    [{"name": "tool", "kind": ["bin"], "src_path": str(source)}]
+                )
+        for text in (
+            "/// nvx::guest::tool::main()\nfn main() {}\n",
+            "/* nvx::guest::tool::main() */\nfn main() {}\n",
+            "/* /* */ nvx::guest::tool::main() */\nfn main() {}\n",
+            'fn main() {\n    let _ = "nvx::guest::tool::main()";\n}\n',
+            'fn main() {\n    let _ = r#"nvx::guest::tool::main()"#;\n}\n',
+            'fn main() {\n    let _ = b"\\" nvx::guest::tool::main()";\n}\n',
+            'fn main() {\n    let _ = c"nvx::guest::tool::main()";\n}\n',
+            'fn main() {\n    let _ = cr#"" nvx::guest::tool::main() ""#;\n}\n',
+            'fn main() {\n    let _ = br#"" nvx::guest::tool::main() ""#;\n}\n',
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn("nvx::guest", public_api.rust_code(text))
+        # Code stays code after a comment or a literal that holds a quote, and
+        # a lifetime is no literal.
+        code = public_api.rust_code(
+            '// "\nfn main() {\n    let _: &\'static str = "/*";\n'
+            "    let _ = '\"';\n    nvx::host::cli::main()\n}\n"
+        )
+        self.assertIn("&'static str", code)
+        self.assertIn("nvx::host::cli::main()", code)
+
+    def test_hides_only_one_entry_point_per_binary(self) -> None:
+        points = {
+            "nvx-rs": "nvx::host::cli::main",
+            "nvx-tool": "nvx::guest::tool::main",
+            "nvx-time": "nvx::guest::time::main",
+        }
+        # A guest program's entry point is hidden on Linux alone, and its
+        # module may hold the public API of its library too.
+        listings = {
+            "linux": [
+                "mod nvx",
+                "mod nvx::guest",
+                "mod nvx::guest::time",
+                "fn nvx::guest::time::main (hidden)",
+                "fn nvx::guest::time::status",
+                "mod nvx::guest::tool (hidden)",
+                "fn nvx::guest::tool::main (hidden)",
+                "mod nvx::host",
+                "mod nvx::host::cli (hidden)",
+                "fn nvx::host::cli::main (hidden)",
+            ],
+            "windows": [
+                "mod nvx",
+                "mod nvx::host",
+                "mod nvx::host::cli (hidden)",
+                "fn nvx::host::cli::main (hidden)",
+            ],
+        }
+        self.assertEqual(public_api.entry_point_problems(listings, points), [])
+
+        listings["linux"] += [
+            "struct nvx::guest::tool::Options (hidden)",
+            "fn nvx::host::helper (hidden)",
+        ]
+        listings["linux"].remove("fn nvx::guest::time::main (hidden)")
+        listings["linux"].append("fn nvx::guest::time::main")
+        self.assertEqual(
+            public_api.entry_point_problems(
+                listings, {**points, "nvx-copy": "nvx::host::cli::main"}
+            ),
+            [
+                "the public API hides fn nvx::host::helper, which is no binary's "
+                "entry point and holds none",
+                "the public API hides struct nvx::guest::tool::Options, which is "
+                "no binary's entry point and holds none",
+                "the public API does not list nvx::guest::time::main, the entry "
+                "point of nvx-time, as a hidden function",
+                "the public API on linux lists nvx::guest::time::main, the entry "
+                "point of nvx-time, without hiding it",
+                "nvx::host::cli::main is the entry point of 2 binaries, not of one",
+            ],
+        )
+
+    def test_hides_an_entry_point_on_every_platform_that_lists_it(self) -> None:
+        # The entry point that Linux hides does not cover one that Windows
+        # lists without hiding it.
+        listings = {
+            "linux": [
+                "mod nvx::host::cli (hidden)",
+                "fn nvx::host::cli::main (hidden)",
+            ],
+            "windows": ["mod nvx::host::cli", "fn nvx::host::cli::main"],
+        }
+        self.assertEqual(
+            public_api.entry_point_problems(
+                listings, {"nvx-rs": "nvx::host::cli::main"}
+            ),
+            [
+                "the public API on windows lists nvx::host::cli::main, the entry "
+                "point of nvx-rs, without hiding it",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
