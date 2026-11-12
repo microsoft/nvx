@@ -21,7 +21,6 @@ mod socket;
 
 #[cfg(target_os = "linux")]
 pub(crate) use nix::errno::Errno;
-use nix::unistd::{getegid, geteuid};
 
 #[cfg(all(feature = "cli", target_os = "linux"))]
 pub(crate) use fs::rename_no_replace;
@@ -35,11 +34,6 @@ pub(crate) use process::{LAST_STANDARD_STREAM, PidFd, detach, process_exists};
 pub(crate) use socket::{
     connect_nonblocking, peer_pid, send_nonblocking, unread_by_peer, wait_readable, wait_writable,
 };
-
-/// Returns the effective user and group IDs of this process.
-pub(crate) fn effective_ids() -> (u32, u32) {
-    (geteuid().as_raw(), getegid().as_raw())
-}
 
 #[cfg(test)]
 pub(crate) mod tests;

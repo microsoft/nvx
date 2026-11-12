@@ -23,26 +23,22 @@ use crate::activation::ActivationRecord;
 ))]
 use self::workload::WorkloadIdentity;
 
-/// Shared identity data; host-side selection remains in the host module.
+/// Shared identity data.
 #[cfg(any(
-    feature = "host",
+    feature = "cli",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) mod workload {
     /// The identity that workloads run as: a non-root user and group ID.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    #[cfg_attr(
-        not(feature = "host"),
-        expect(unreachable_pub, reason = "public host re-export when host is enabled")
-    )]
-    pub struct WorkloadIdentity {
+    pub(crate) struct WorkloadIdentity {
         /// User ID.
-        pub uid: u32,
+        pub(crate) uid: u32,
         /// Primary group ID.
-        pub gid: u32,
+        pub(crate) gid: u32,
         /// Whether the guest creates an account for the IDs if its image lacks a usable one,
         /// replacing an image account for the UID whose primary group or home does not fit.
-        pub create_account: bool,
+        pub(crate) create_account: bool,
     }
 }
 

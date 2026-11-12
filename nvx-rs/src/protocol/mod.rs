@@ -86,7 +86,7 @@ pub(crate) use app::encode_activate_payload;
 #[cfg(feature = "cli")]
 pub(crate) use app::encode_capture_payload;
 #[cfg(any(
-    feature = "host",
+    feature = "cli",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::workload;
@@ -107,7 +107,7 @@ pub(crate) use app::{
 pub(crate) use app::{BUSY, CWD_FAILED, INVALID_REQUEST, LAUNCH_FAILED, MAPPINGS_INCOMPLETE};
 #[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use app::{decode_activate_payload, decode_capture_payload};
-pub use boot::{MAPS_TOKEN, WORKLOAD_ACCOUNT_TOKEN, parse_host_mapping_count};
+pub use boot::{MAPS_TOKEN, parse_host_mapping_count};
 #[cfg(any(
     feature = "cli",
     feature = "testing",
