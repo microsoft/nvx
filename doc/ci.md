@@ -2339,6 +2339,10 @@ also need the guest artifacts; `--openvmm`, `--kernel`, and `--initrd`
 override their default build paths. `--no-openvmm` qualifies a host without
 OpenVMM: H2 then checks the CPU identity and generation only, and H3 and H6
 cannot run.
+On ARM, the host probe brackets `CNTVCT_EL0` with `ISB` on both sides and
+retains the assembly's compiler memory barrier, matching the guest's maintained
+counter-read ordering. This host diagnostic does not change OpenVMM's counter
+or UTC backend.
 
 The doctor gates on measured properties, alike on every backend: the guest
 warp probe at 1 µs with its idle gaps (H6), the TSC rate stability (H4), and

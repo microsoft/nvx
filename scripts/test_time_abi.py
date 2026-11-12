@@ -4344,6 +4344,30 @@ class DoctorTests(unittest.TestCase):
             )
 
     def test_builds_the_host_probe_once_per_source_version(self):
+        source = doctor.PROBE_SOURCE.read_text(encoding="utf-8")
+        arm = re.search(
+            r'#\[cfg\(target_arch = "aarch64"\)\]\nfn tsc\(\) -> u64 \{(.*?)\n\}',
+            source,
+            re.DOTALL,
+        )
+        assert arm is not None
+        maintained = (
+            doctor.BuildConstants.REPO_ROOT
+            / "nvx-rs"
+            / "src"
+            / "guest"
+            / "sys"
+            / "aarch64.rs"
+        ).read_text(encoding="utf-8")
+        counter = maintained.split("fn virtual_counter()", 1)[1].split("\n}", 1)[0]
+        self.assertEqual(
+            re.findall(r'"([^"]+)"', arm.group(1)),
+            re.findall(r'"([^"]+)"', counter),
+        )
+        self.assertEqual(
+            re.findall(r"options\(([^)]+)\)", arm.group(1)),
+            re.findall(r"options\(([^)]+)\)", counter),
+        )
         target = doctor.probe_path(self.root)
         self.assertRegex(
             target.name, r"^nvx-host-time-probe-x86_64-[0-9a-f]{16}(\.exe)?$"

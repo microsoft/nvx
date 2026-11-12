@@ -255,7 +255,8 @@ jobs:
       # qualifies its runner with the kernel and the Alpine initramfs, the
       # shards of the default suite boot only those, and the debug-kernel jobs
       # run only Alpine scenarios on the debug kernel, so only the guest and
-      # sandbox steps take the Ubuntu and Azure Linux artifacts, and the
+      # sandbox steps or an explicit guest selection take the matching
+      # Ubuntu and Azure Linux artifacts, and the
       # runtime adapter scenarios and an unsharded default run the Ubuntu
       # distro layer of their layered roots and public sandbox scenarios.
       - name: Download guest kernel
@@ -311,7 +312,7 @@ jobs:
           path: ${{ inputs.architecture == 'aarch64' && 'build/aarch64' || 'build' }}
 
       - name: Download Azure Linux initramfs
-        if: ${{ inputs.guests-and-sandboxes && !inputs.debug-kernel }}
+        if: ${{ (inputs.guests-and-sandboxes || inputs.guest == 'azurelinux') && !inputs.debug-kernel }}
         uses: actions/download-artifact@v8
         with:
           name: guest-azurelinux
