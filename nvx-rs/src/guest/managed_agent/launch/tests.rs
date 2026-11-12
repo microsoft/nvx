@@ -1,22 +1,17 @@
 use std::ffi::CString;
 
-use crate::guest::spawn::LaunchStage;
-use crate::guest::sys::PreparedChild;
+use crate::guest::sys;
 use crate::protocol::GuestExecPayload;
 
 use super::*;
 
-fn config(direct: bool) -> AgentConfig {
+fn config() -> AgentConfig {
     AgentConfig {
-        rootfs: CString::new(if direct { "-" } else { "/rootfs" }).unwrap(),
-        hostname: c"sandbox".to_owned(),
         uid: c"1000".to_owned(),
         gid: c"1001".to_owned(),
         user: c"workload".to_owned(),
         home: c"/home/workload".to_owned(),
         restored_proxy: None,
-        direct,
-        entry: None,
     }
 }
 
@@ -30,43 +25,9 @@ fn execution() -> GuestExecPayload {
     }
 }
 
-fn descriptor() -> FileDescriptor {
-    FileDescriptor::from_owned(tempfile::tempfile().unwrap().into())
-}
-
-fn request<'a>(config: &'a AgentConfig, execution: &'a GuestExecPayload) -> LaunchRequest<'a> {
-    LaunchRequest {
-        config,
-        execution,
-        stdout: descriptor(),
-        stderr: descriptor(),
-    }
-}
-
-/// Returns a direct agent's paths with no cgroup hierarchy.
-fn direct_paths(directory: &std::path::Path) -> Paths {
-    Paths {
-        cgroup_root: directory.join("absent-cgroup"),
-        ..Paths::default()
-    }
-}
-
 /// Prepares the direct agent's plain-process child without starting it.
-fn prepare_direct(
-    _paths: &Paths,
-    config: &AgentConfig,
-    execution: &GuestExecPayload,
-) -> ExecRequest {
+fn prepare_direct(config: &AgentConfig, execution: &GuestExecPayload) -> ExecRequest {
     direct_request(config, execution).unwrap()
-}
-
-/// Prepares the child that launches `execution` with the sandbox agent's configuration.
-fn prepare_sandbox(execution: &GuestExecPayload) -> PreparedChild {
-    let config = config(false);
-    let prepared = Prepared::simulated(None);
-    sandbox_command(&Paths::default(), request(&config, execution), prepared)
-        .unwrap()
-        .prepare()
 }
 
 fn strings(strings: &[CString]) -> Vec<&[u8]> {
@@ -75,11 +36,9 @@ fn strings(strings: &[CString]) -> Vec<&[u8]> {
 
 #[test]
 fn direct_launch_uses_the_plain_process_core_without_a_helper_or_cgroup() {
-    let temporary = tempfile::tempdir().unwrap();
-    let paths = direct_paths(temporary.path());
-    let config = config(true);
+    let config = config();
     let execution = execution();
-    let plan = prepare_direct(&paths, &config, &execution);
+    let plan = prepare_direct(&config, &execution);
     assert_eq!(strings(&plan.arguments), [b"/bin/echo".as_slice(), b"ok"]);
     assert_eq!(plan.program.as_bytes(), b"/bin/echo");
     let environment = strings(&plan.environment);
@@ -91,15 +50,13 @@ fn direct_launch_uses_the_plain_process_core_without_a_helper_or_cgroup() {
     ] {
         assert!(environment.contains(&expected), "{expected:?}");
     }
-    assert!(!paths.cgroup_root.exists());
     assert!(!plan.input);
     assert_eq!(plan.account, AccountMode::Numeric);
 }
 
 #[test]
 fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
-    let paths = Paths::default();
-    let mut config = config(true);
+    let mut config = config();
     config.restored_proxy = Some(Some("http://restore.example:3128".to_owned()));
     let exact = GuestExecPayload {
         environment: Some(vec![
@@ -109,7 +66,7 @@ fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
         ]),
         ..execution()
     };
-    let plan = prepare_direct(&paths, &config, &exact);
+    let plan = prepare_direct(&config, &exact);
     assert_eq!(
         strings(&plan.environment),
         [b"EMPTY=".as_slice(), b"VALUE=last"]
@@ -120,11 +77,7 @@ fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
         environment: Some(Vec::new()),
         ..execution()
     };
-    assert!(
-        prepare_direct(&paths, &config, &empty)
-            .environment
-            .is_empty()
-    );
+    assert!(prepare_direct(&config, &empty).environment.is_empty());
     let layered = GuestExecPayload {
         environment: Some(vec![
             b"HOME=/layered".to_vec(),
@@ -134,7 +87,7 @@ fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
         inherit_default_env: true,
         ..execution()
     };
-    let defaults = prepare_direct(&paths, &config, &execution());
+    let defaults = prepare_direct(&config, &execution());
     let mut expected = strings(&defaults.environment);
     let home = expected
         .iter()
@@ -143,7 +96,7 @@ fn direct_launch_applies_exact_empty_and_layered_environments_in_order() {
     expected[home] = b"HOME=/layered";
     expected.push(b"ADDED=2");
     assert_eq!(
-        strings(&prepare_direct(&paths, &config, &layered).environment),
+        strings(&prepare_direct(&config, &layered).environment),
         expected
     );
 }
@@ -168,7 +121,7 @@ fn restored_proxy_defaults_replace_template_values_before_exec_overrides() {
         assert!(child.status().unwrap().success());
         return;
     }
-    let mut config = config(true);
+    let mut config = config();
     config.restored_proxy = Some(Some("http://restore.example:3128".to_owned()));
     let plan = direct_request(&config, &execution()).unwrap();
     for name in names {
@@ -229,7 +182,7 @@ fn privileged_direct_launch_hardens_credentials_and_resets_priority() {
     }
     sys::write_number(sys::kernel::OOM_SCORE_ADJUSTMENT, -1000).unwrap();
     sys::kernel::set_nice(Some(sys::current_process()), -10).unwrap();
-    let config = config(true);
+    let config = config();
     let execution = GuestExecPayload {
         argv: vec![
             b"/bin/sh".to_vec(),
@@ -312,108 +265,6 @@ fn privileged_direct_launch_hardens_credentials_and_resets_priority() {
 }
 
 #[test]
-fn sandbox_launch_runs_the_workload_itself_through_its_entry() {
-    let plan = prepare_sandbox(&execution());
-    assert_eq!(plan.program().as_bytes(), b"/bin/echo");
-    assert_eq!(strings(plan.arguments()), [b"/bin/echo".as_slice(), b"ok"]);
-    let environment = strings(plan.environment());
-    for expected in [
-        b"HOME=/home/workload".as_slice(),
-        b"USER=workload",
-        b"LOGNAME=workload",
-        b"PWD=/work",
-    ] {
-        assert!(environment.contains(&expected), "{expected:?}");
-    }
-    assert!(plan.physical_pwd().is_none());
-    // The agent places the child at its barrier, so the child joins no cgroup itself.
-    assert!(!plan.has_cgroup());
-    assert_eq!(plan.barrier_entry_and_session(), (true, true, true));
-}
-
-#[test]
-fn sandbox_launch_applies_exact_and_layered_environments_in_order() {
-    let exact = GuestExecPayload {
-        environment: Some(vec![b"EMPTY=".to_vec(), b"VALUE=a=b".to_vec()]),
-        ..execution()
-    };
-    let plan = prepare_sandbox(&exact);
-    assert_eq!(
-        strings(plan.environment()),
-        [b"EMPTY=".as_slice(), b"VALUE=a=b"]
-    );
-    assert!(plan.physical_pwd().is_none());
-
-    let layered = GuestExecPayload {
-        environment: Some(vec![
-            b"HOME=/layered".to_vec(),
-            b"ADDED=1".to_vec(),
-            b"ADDED=2".to_vec(),
-        ]),
-        inherit_default_env: true,
-        ..execution()
-    };
-    // The request's entries layer over the defaults, wherever the agent's own environment
-    // put them: a name that the defaults hold keeps its place, and a new one is appended once,
-    // with its last value.
-    let defaults = prepare_sandbox(&execution());
-    let mut expected = strings(defaults.environment());
-    let home = expected
-        .iter()
-        .position(|entry| *entry == b"HOME=/home/workload")
-        .unwrap();
-    expected[home] = b"HOME=/layered".as_slice();
-    expected.push(b"ADDED=2");
-    let plan = prepare_sandbox(&layered);
-    assert_eq!(strings(plan.environment()), expected);
-}
-
-#[test]
-fn sandbox_pwd_is_physical_only_for_noncanonical_names_without_an_entry() {
-    let noncanonical = GuestExecPayload {
-        cwd: Some(b"/a/../b".to_vec()),
-        ..execution()
-    };
-    let plan = prepare_sandbox(&noncanonical);
-    let index = plan.physical_pwd_index().expect("PWD is deferred");
-    assert_eq!(&plan.physical_pwd().unwrap()[..4], b"PWD=");
-    assert!(
-        strings(plan.environment())
-            .iter()
-            .all(|entry| !entry.starts_with(b"PWD="))
-    );
-    assert!(index <= plan.environment().len());
-
-    let named = GuestExecPayload {
-        environment: Some(vec![b"PWD=/named".to_vec()]),
-        inherit_default_env: true,
-        ..noncanonical
-    };
-    let plan = prepare_sandbox(&named);
-    assert!(plan.physical_pwd().is_none());
-    assert!(strings(plan.environment()).contains(&b"PWD=/named".as_slice()));
-}
-
-#[test]
-fn sandbox_launch_reports_a_simulated_stage_without_privileges() {
-    let config = config(false);
-    let execution = execution();
-    let prepared = Prepared::simulated(Some((LaunchStage::Proc, Errno::EPERM)));
-    let mut spawned = sandbox_command(&Paths::default(), request(&config, &execution), prepared)
-        .unwrap()
-        .spawn()
-        .unwrap();
-    let process = spawned.process();
-    spawned.take_barrier().unwrap().release().unwrap();
-    let failure = spawned.into_report().wait().unwrap().unwrap();
-    assert_eq!(
-        (failure.stage(), failure.raw_os_error()),
-        (LaunchStage::Proc, Errno::EPERM as i32)
-    );
-    assert_eq!(sys::wait(process), Some(sys::ChildStatus::Exited(125)));
-}
-
-#[test]
 fn workload_ids_are_nonzero_decimal_and_not_the_unchanged_value() {
     for (text, expected) in [
         (b"1".as_slice(), Some(1)),
@@ -447,15 +298,13 @@ fn safe_working_directory_names_match_the_c_helper() {
 
 #[test]
 fn direct_pwd_is_deferred_only_for_noncanonical_names() {
-    let temporary = tempfile::tempdir().unwrap();
-    let paths = direct_paths(temporary.path());
-    let config = config(true);
+    let config = config();
     for cwd in [b"/a/./b".as_slice(), b"/a/../b", b"/a//b", b"/a/b/"] {
         let execution = GuestExecPayload {
             cwd: Some(cwd.to_vec()),
             ..execution()
         };
-        let plan = prepare_direct(&paths, &config, &execution);
+        let plan = prepare_direct(&config, &execution);
         assert!(plan.physical_pwd, "PWD is deferred");
         assert!(
             strings(&plan.environment)
@@ -468,7 +317,7 @@ fn direct_pwd_is_deferred_only_for_noncanonical_names() {
         cwd: Some(b"/symlinked/component".to_vec()),
         ..execution()
     };
-    let plan = prepare_direct(&paths, &config, &execution);
+    let plan = prepare_direct(&config, &execution);
     assert!(!plan.physical_pwd);
     assert!(strings(&plan.environment).contains(&b"PWD=/symlinked/component".as_slice()));
 }

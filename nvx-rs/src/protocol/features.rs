@@ -49,15 +49,12 @@ impl GuestFeatures {
             | Self::EXEC_CWD.0
             | Self::HOST_MAPPING_TABLE.0,
     );
-    /// Features announced by the managed agent that launches a sandbox container.
-    #[cfg(any(
-        feature = "testing",
-        all(feature = "guest", target_os = "linux", target_arch = "x86_64")
-    ))]
+    /// Features that the fake OpenVMM's guest announces for a layered sandbox, as the managed
+    /// agent's sandbox mode did.
+    #[cfg(feature = "testing")]
     pub(crate) const SANDBOX_AGENT: Self =
         Self(Self::CANCEL.0 | Self::EXEC_ENVIRONMENT.0 | Self::HOST_MAPPING_TABLE.0);
-    /// The features that `nvx-rs sandbox` depends on in the layered sandbox root, whose agent
-    /// announces [`SANDBOX_AGENT`](Self::SANDBOX_AGENT):
+    /// The features that `nvx-rs sandbox` depends on in the layered sandbox root:
     /// [`EXEC_ENVIRONMENT`](Self::EXEC_ENVIRONMENT), because `exec` sends a working directory and
     /// an environment in an extended `EXEC`, and
     /// [`HOST_MAPPING_TABLE`](Self::HOST_MAPPING_TABLE), because `start` sends the mappings of

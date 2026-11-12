@@ -41,8 +41,8 @@ use crate::protocol::{self, GuestHostMap, MAX_HOST_MAPPINGS, ProtocolError};
 /// as a mapper's teardown, which reports each mapping that stays mounted, or a layered root's.
 ///
 /// NVX's managed agent applies its table through one, beneath its own root, `/`, in direct mode,
-/// and beneath the container's assembled root in sandbox mode, with a mapper that it opens at the
-/// first part that the table hands it, so that a table of zero mappings opens nothing.
+/// with a mapper that it opens at the first part that the table hands it, so that a table of zero
+/// mappings opens nothing.
 ///
 /// ```no_run
 /// use nvx::guest::mappings::{Mapping, MappingTable, TableError};

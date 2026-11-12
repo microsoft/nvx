@@ -54,15 +54,11 @@ fn control_session_broker_and_real_agent_loop_back() {
     let agent_thread = thread::spawn(move || {
         let mut system = system;
         let config = AgentConfig {
-            rootfs: c"-".to_owned(),
-            hostname: c"loopback".to_owned(),
             uid: c"1000".to_owned(),
             gid: c"1000".to_owned(),
             user: c"workload".to_owned(),
             home: c"/".to_owned(),
             restored_proxy: None,
-            direct: true,
-            entry: None,
         };
         let mut session = Session::new(agent_descriptor);
         let mut mappings = HostMappings::announced(1);
@@ -198,15 +194,11 @@ fn output_limit_forwards_nothing_after_the_cap() {
     let agent_thread = thread::spawn(move || {
         let mut system = system;
         let config = AgentConfig {
-            rootfs: c"-".to_owned(),
-            hostname: c"loopback".to_owned(),
             uid: c"1000".to_owned(),
             gid: c"1000".to_owned(),
             user: c"workload".to_owned(),
             home: c"/".to_owned(),
             restored_proxy: None,
-            direct: true,
-            entry: None,
         };
         let mut session = Session::new(agent_descriptor);
         let mut mappings = HostMappings::announced(1);

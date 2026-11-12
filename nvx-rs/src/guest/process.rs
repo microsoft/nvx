@@ -135,15 +135,6 @@ impl Child {
         })
     }
 
-    /// Names the crate's own child, for the callers that hold its [`ProcessId`].
-    pub(crate) fn from_process(process: ProcessId) -> Self {
-        Self {
-            process,
-            pidfd: None,
-            status: None,
-        }
-    }
-
     /// Opens a pidfd for the child by its ID, unless the child has one already or has ended: the
     /// ID names the child alone only while its status stays uncollected, which the caller
     /// guarantees until this returns.

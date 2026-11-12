@@ -343,7 +343,6 @@ pub(crate) struct RestoreHandoff {
     pub(crate) workload: protocol::workload::WorkloadIdentity,
     pub(crate) user: CString,
     pub(crate) home: CString,
-    pub(crate) hostname: CString,
     pub(crate) proxy: Option<String>,
     pub(crate) table: MappingTable,
     pub(crate) mapper: Mapper,
@@ -470,9 +469,6 @@ impl Restored {
                     workload,
                     user,
                     home,
-                    hostname: CString::new(applied.hostname())
-                        .map_err(activation_error)
-                        .map_err(classed(status::ACTIVATION_WORKLOAD))?,
                     proxy: applied.proxy().map(str::to_owned),
                     table: u32::try_from(record.configuration().mappings)
                         .ok()

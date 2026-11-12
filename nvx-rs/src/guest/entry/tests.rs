@@ -21,26 +21,6 @@ use crate::guest::sys::tests::Simulation;
 use crate::guest::sys::{ChildStatus, Errno};
 use crate::protocol::cmdline::write_resolver;
 
-impl Prepared {
-    /// Returns an execution for tests without privileges, whose child starts without new
-    /// namespaces and skips the system calls of every entry stage, so that it keeps the test's
-    /// own root and identity, except that the stage of `failure`, if any, fails with its error.
-    pub(crate) fn simulated(failure: Option<(crate::guest::spawn::LaunchStage, Errno)>) -> Self {
-        Self {
-            child: EntryChild {
-                root: c"/".to_owned(),
-                hostname: DEFAULT_HOSTNAME.as_bytes().into(),
-                simulated: Some(match failure {
-                    Some((stage, error)) => sys::tests::Simulation::Fail(stage, error),
-                    None => sys::tests::Simulation::Skip,
-                }),
-                ..EntryChild::default()
-            },
-            account: None,
-        }
-    }
-}
-
 /// Returns an entry of a root at `/run/nvx/rootfs` as `identity`, whose account is numeric, so
 /// that checking it reads nothing.
 fn entry(identity: Identity) -> Entry {

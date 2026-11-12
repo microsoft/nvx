@@ -1,6 +1,5 @@
 //! The managed guest agent. It serves NVX's authenticated control session on the guest's control
-//! TTY and runs one workload at a time, either as the guest's PID 1 or in a sandbox's root
-//! filesystem.
+//! TTY and runs one workload at a time as the guest's PID 1.
 //!
 //! `nvx-managed-agent CONTROL_TTY ROOTFS HOSTNAME UID GID USER HOME` starts the agent.
 //! See `nvx::guest::managed_agent`.

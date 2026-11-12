@@ -24,9 +24,8 @@
 //! the mappings until its teardown.
 //!
 //! NVX's managed agent applies its host mapping table through one, and through a mapper beneath
-//! its own root, `/`, in direct mode, or beneath the container's assembled root in sandbox mode,
-//! from its mount of the host's export, an aggregate, whose root, which lists the aggregate's
-//! children, no table maps: a table refuses an empty source.
+//! its own root, `/`, in direct mode, from its mount of the host's export, an aggregate, whose
+//! root, which lists the aggregate's children, no table maps: a table refuses an empty source.
 
 mod kernel;
 #[doc(hidden)]

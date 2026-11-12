@@ -1,14 +1,10 @@
-use std::ffi::OsStr;
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::guest::mappings::{Mapper, MappingTable, Reserved, SourceRoot, TableError, TargetRoot};
 use crate::guest::sys::{self, Errno, Mode};
 
-use super::AgentConfig;
-use super::diagnostics;
 use super::seam::{System, path_c_string};
 
 /// The direct root's own mounts besides `/`'s, on which the table's mapper may create what a
@@ -36,8 +32,6 @@ enum TableRoot {
     /// The direct agent's own root, `/`.
     #[default]
     Direct,
-    /// The sandbox agent's `ROOTFS`, the container's assembled root.
-    Sandbox(PathBuf),
     /// A layered root's retained mapper and export, never reopened by path.
     Layered,
 }
@@ -67,22 +61,6 @@ impl HostMappings {
             mapper: Some(TableMapper { mapper, export }),
         })
     }
-
-    /// Returns the state of the table of the agent that `config` configures, before
-    /// [`prepare`] reads its announcement: the direct agent maps beneath `/`, and the sandbox
-    /// agent beneath `ROOTFS`.
-    pub(crate) fn new(config: &AgentConfig) -> Self {
-        let root = if config.direct {
-            TableRoot::Direct
-        } else {
-            let rootfs = OsStr::from_bytes(config.rootfs.as_bytes());
-            TableRoot::Sandbox(PathBuf::from(rootfs))
-        };
-        Self {
-            root,
-            ..Self::default()
-        }
-    }
 }
 
 /// Failure returned while validating or applying one MAPS request.
@@ -99,9 +77,8 @@ pub(crate) enum MappingError {
     },
 }
 
-/// Reads the announced mapping count and validates the host export mount, in either mode: the
-/// guest's init mounts the export for the direct agent, and the init agent for the sandbox
-/// agent, at the same place.
+/// Reads the announced mapping count and validates the host export mount, which the guest's init
+/// mounts for the direct agent.
 pub(crate) fn prepare(system: &mut impl System, mappings: &mut HostMappings) -> Result<(), Errno> {
     let mut command_line = [0u8; 4096];
     let count = std::fs::File::open(&system.paths().proc_cmdline)
@@ -135,10 +112,8 @@ pub(crate) fn prepare(system: &mut impl System, mappings: &mut HostMappings) -> 
 /// latches, with the table, at the first entry that fails, as the
 /// [mappings](crate::guest::mappings) module describes. The direct agent's table root is its own,
 /// `/`, on whose mount and the tmpfs at `/tmp`, which a mapping may also cover, the mapper creates
-/// what a target lacks. The sandbox agent's is `ROOTFS`, the container's assembled root, on whose
-/// mount alone it creates what a target lacks, and whose runtime's targets it refuses:
-/// [`Reserved::container_root`]. Either creates nothing inside another mapping. The first part
-/// that the table hands it opens them, so that a table of zero mappings does no work.
+/// what a target lacks, and nothing inside another mapping. The first part that the table hands
+/// it opens them, so that a table of zero mappings does no work.
 pub(crate) fn apply_request(
     system: &mut impl System,
     mappings: &mut HostMappings,
@@ -187,10 +162,6 @@ fn open_table(system: &mut impl System, root: &TableRoot) -> Result<TableMapper,
             }
             (root, Reserved::default())
         }
-        TableRoot::Sandbox(rootfs) => (
-            TargetRoot::open_with(system.kernel(), rootfs).map_err(errno)?,
-            Reserved::container_root(),
-        ),
         TableRoot::Layered => return Err(Errno::EINVAL),
     };
     let export = SourceRoot::open(&system.paths().hostfs_dir.join("root")).map_err(errno)?;
@@ -198,28 +169,6 @@ fn open_table(system: &mut impl System, root: &TableRoot) -> Result<TableMapper,
         mapper: Mapper::new(root, reserved),
         export: Some(export),
     })
-}
-
-/// Unmounts the table's mappings in reverse order, as the sandbox agent does before it returns
-/// to the init agent, which then unmounts the root that holds them. It attempts each, whatever
-/// failed before, reports each failure with its zero-based entry, and returns the error of the
-/// first failure, after which those mappings stay mounted.
-pub(crate) fn teardown(system: &mut impl System, mappings: &mut HostMappings) -> Result<(), Errno> {
-    let Some(mut opened) = mappings.mapper.take() else {
-        return Ok(());
-    };
-    let failures = opened.mapper.unmount_with(system.kernel());
-    let mut first = None;
-    for (entry, failure) in failures {
-        let status = failure.error().raw_os_error();
-        // The table holds at most `MAX_HOST_MAPPINGS` entries, whose indices fit in a `u32`.
-        diagnostics::unmapping_error(system, status, entry as u32);
-        first.get_or_insert(status);
-    }
-    match first {
-        Some(status) => Err(Errno::from_raw(status)),
-        None => Ok(()),
-    }
 }
 #[cfg(test)]
 mod tests;

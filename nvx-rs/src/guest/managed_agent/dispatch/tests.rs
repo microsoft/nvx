@@ -42,35 +42,21 @@ struct Harness {
 }
 
 impl Harness {
-    fn new(direct: bool) -> Self {
-        Self::with_system(direct, TestSystem::new(Paths::default()), 0)
+    fn new() -> Self {
+        Self::with_system(TestSystem::new(Paths::default()), 0)
     }
 
-    fn with_system(direct: bool, system: TestSystem, expected_mappings: u32) -> Self {
-        let mut harness = Self::spawn(direct, system, expected_mappings);
+    fn with_system(system: TestSystem, expected_mappings: u32) -> Self {
+        let mut harness = Self::spawn(system, expected_mappings);
         harness.reset(1, 7);
         harness
     }
 
-    /// Starts a sandbox agent whose assembled root is `rootfs`, with a table of
-    /// `expected_mappings` announced mappings, and resets its session.
-    fn in_sandbox(rootfs: &Path, system: TestSystem, expected_mappings: u32) -> Self {
-        let mut harness = Self::spawn_at(Some(rootfs), system, expected_mappings);
-        harness.reset(1, 7);
-        harness
-    }
-
-    /// Starts the agent, which attaches and waits for the broker's first RESET.
-    fn spawn(direct: bool, system: TestSystem, expected_mappings: u32) -> Self {
-        let rootfs = (!direct).then_some(Path::new("/rootfs"));
-        Self::spawn_at(rootfs, system, expected_mappings)
-    }
-
-    /// Starts a direct agent, or a sandbox agent whose assembled root is `rootfs`, which
-    /// attaches and waits for the broker's first RESET.
-    fn spawn_at(rootfs: Option<&Path>, system: TestSystem, expected_mappings: u32) -> Self {
-        let config = AgentConfig::for_test(rootfs);
-        let mappings = HostMappings::announced_for(&config, expected_mappings);
+    /// Starts the agent, with a table of `expected_mappings` announced mappings, which attaches
+    /// and waits for the broker's first RESET.
+    fn spawn(system: TestSystem, expected_mappings: u32) -> Self {
+        let config = AgentConfig::for_test();
+        let mappings = HostMappings::announced(expected_mappings);
         Self::spawn_with(system, config, mappings)
     }
 
@@ -306,30 +292,23 @@ fn assert_environment_failure(mut harness: Harness, diagnostic_prefix: &[u8]) {
 
 #[test]
 fn agent_advertises_the_control_features_of_its_mode_and_stops() {
-    for (direct, expected) in [
-        (true, GuestFeatures::DIRECT_AGENT),
-        (false, GuestFeatures::SANDBOX_AGENT),
-    ] {
-        let mut harness = Harness::new(direct);
-        let response = harness.request(APP_FEATURES, &[]);
-        assert_eq!(
-            (response.kind, response.request_id, response.status),
-            (APP_READY, 42, 0)
-        );
-        let features = GuestFeatures::decode(&response.payload).unwrap();
-        assert_eq!(features, expected);
-        if direct {
-            assert!(!features.contains(GuestFeatures::EXEC_CGROUP));
-        }
-        let system = harness.stop();
-        assert_eq!(system.tty_drained, 1);
-    }
+    let mut harness = Harness::new();
+    let response = harness.request(APP_FEATURES, &[]);
+    assert_eq!(
+        (response.kind, response.request_id, response.status),
+        (APP_READY, 42, 0)
+    );
+    let features = GuestFeatures::decode(&response.payload).unwrap();
+    assert_eq!(features, GuestFeatures::DIRECT_AGENT);
+    assert!(!features.contains(GuestFeatures::EXEC_CGROUP));
+    let system = harness.stop();
+    assert_eq!(system.tty_drained, 1);
 }
 
 #[test]
 fn fresh_session_refuses_root_requests_and_routes_capture_before_stopping() {
-    let config = AgentConfig::for_test(None);
-    let mappings = HostMappings::announced_for(&config, 0);
+    let config = AgentConfig::for_test();
+    let mappings = HostMappings::announced(0);
     let mut harness = Harness::spawn_with_capture(
         TestSystem::new(Paths::default()),
         config,
@@ -370,7 +349,7 @@ fn fresh_session_refuses_root_requests_and_routes_capture_before_stopping() {
 
 #[test]
 fn agent_refuses_feature_payloads_and_unannounced_mapping_tables() {
-    let mut harness = Harness::new(true);
+    let mut harness = Harness::new();
     for (kind, payload) in [
         (APP_FEATURES, b"abc".as_slice()),
         (APP_MAPS, b"\0\0\0\0\x01\0\0\0\0\0\x01\0\x02\0".as_slice()),
@@ -406,7 +385,7 @@ fn mappings_mount_in_order_and_unblock_workloads_through_dispatch() {
         None,
     );
     let second = maps_payload(2, &[(b"1", out.as_os_str().as_bytes(), 0)], None);
-    let mut harness = Harness::with_system(true, system, 3);
+    let mut harness = Harness::with_system(system, 3);
     let mut replies = Vec::new();
     replies.extend(harness.request_all(1, APP_EXEC, &[]));
     replies.extend(harness.request_all(2, APP_MAPS, &first));
@@ -443,8 +422,8 @@ fn mappings_mount_in_order_and_unblock_workloads_through_dispatch() {
 #[test]
 fn init_refuses_activation_without_a_restore_and_keeps_serving() {
     for fresh in [true, false] {
-        let config = AgentConfig::for_test(None);
-        let mut mappings = HostMappings::announced_for(&config, 0);
+        let config = AgentConfig::for_test();
+        let mut mappings = HostMappings::announced(0);
         let mut system = TestSystem::new(Paths::default());
         let (host, guest) = UnixStream::pair().unwrap();
         let thread = thread::spawn(move || {
@@ -509,8 +488,8 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
         &[(b"1", target.join("out").as_os_str().as_bytes(), 0)],
         None,
     );
-    let config = AgentConfig::for_test(None);
-    let mut mappings = HostMappings::announced_for(&config, 2);
+    let config = AgentConfig::for_test();
+    let mut mappings = HostMappings::announced(2);
     let (mut capture, payload) = Capture::activation_fixture();
     let activation = capture.restored.as_mut().unwrap();
     assert!(matches!(
@@ -580,8 +559,8 @@ fn restored_ready_maps_and_first_exec_share_the_existing_start_transition() -> T
 /// request, what Ready reports, and the workload's process.
 fn running_restored_workload(system: TestSystem) -> (Harness, Vec<u8>, Vec<u8>, sys::ProcessId) {
     use crate::guest::activation::ActivationAction;
-    let config = AgentConfig::for_test(None);
-    let mappings = HostMappings::announced_for(&config, 0);
+    let config = AgentConfig::for_test();
+    let mappings = HostMappings::announced(0);
     let (mut capture, payload) = Capture::activation_fixture();
     let restored = capture.restored.as_mut().unwrap();
     let now = std::time::Instant::now();
@@ -676,7 +655,7 @@ fn mapping_sequence_errors_are_reported_through_dispatch() {
     let moved = target.display().to_string();
     let target = target.as_os_str().as_bytes();
     let entry = [(b"0/src".as_slice(), target, 0)];
-    let mut harness = Harness::with_system(true, system, 1);
+    let mut harness = Harness::with_system(system, 1);
     let mut replies = Vec::new();
     replies.extend(harness.request_all(1, APP_MAPS, &maps_payload(1, &entry, None)));
     replies.extend(harness.request_all(
@@ -710,7 +689,7 @@ fn a_failed_mapping_keeps_refusing_workloads_through_dispatch() {
         .join("guest/missing");
     let missing = maps_payload(0, &[(b"0/missing", target.as_os_str().as_bytes(), 0)], None);
     let valid = maps_payload(0, &[(b"0/src", target.as_os_str().as_bytes(), 0)], None);
-    let mut harness = Harness::with_system(true, system, 2);
+    let mut harness = Harness::with_system(system, 2);
     let mut replies = Vec::new();
     replies.extend(harness.request_all(1, APP_MAPS, &missing));
     replies.extend(harness.request_all(2, APP_EXEC, &[]));
@@ -733,7 +712,7 @@ fn unannounced_mapping_tables_are_refused_through_dispatch() {
     let (temporary, system) = TestSystem::with_host_export();
     let target = temporary.path().canonicalize().unwrap().join("guest/src");
     let mapping = maps_payload(0, &[(b"0/src", target.as_os_str().as_bytes(), 0)], None);
-    let mut harness = Harness::with_system(true, system, 0);
+    let mut harness = Harness::with_system(system, 0);
     assert_eq!(
         harness.request_all(1, APP_MAPS, &mapping),
         vec![response(
@@ -852,7 +831,6 @@ fn prepared_layered_mappings_and_cli_identity_use_the_existing_dispatcher() -> T
     .collect();
     assert_eq!(system.kernel.calls(), expected);
     assert_eq!(system.spawn_calls, 1);
-    assert_eq!(system.entries_prepared, 0);
     Ok(())
 }
 
@@ -886,313 +864,6 @@ fn a_layered_root_without_an_export_refuses_maps_but_keeps_its_complete_table() 
 }
 
 #[test]
-fn sandbox_mappings_mount_in_order_beneath_its_root_and_unblock_workloads() {
-    let (_temporary, system, rootfs) = sandbox_root();
-    let export = system.paths.hostfs_dir.join("root").canonicalize().unwrap();
-    // The targets are the container's paths, below its assembled root, even below the
-    // runtime's exact paths, such as `/etc`.
-    let first = maps_payload(
-        0,
-        &[
-            (b"0/src", b"/workspace", protocol::MAP_READ_ONLY),
-            (b"0/notes.txt", b"/etc/app/notes.txt", 0),
-        ],
-        None,
-    );
-    let second = maps_payload(2, &[(b"1", b"/out", 0)], None);
-    let mut harness = Harness::in_sandbox(&rootfs, system, 3);
-    let mut replies = Vec::new();
-    replies.extend(harness.request_all(1, APP_EXEC, &[]));
-    replies.extend(harness.request_all(2, APP_MAPS, &first));
-    replies.extend(harness.request_all(3, APP_EXEC, &[]));
-    replies.extend(harness.request_all(4, APP_MAPS, &second));
-    replies.extend(harness.request_all(5, APP_EXEC, &[]));
-    assert_eq!(
-        replies,
-        vec![
-            response(APP_ERROR, 1, Errno::EAGAIN as i32, b"mappings-incomplete"),
-            response(APP_READY, 2, 0, b""),
-            response(APP_ERROR, 3, Errno::EAGAIN as i32, b"mappings-incomplete"),
-            response(APP_READY, 4, 0, b""),
-            // With the table complete, the request reaches its decoder.
-            response(APP_ERROR, 5, Errno::EINVAL as i32, b"invalid-request"),
-        ]
-    );
-
-    let system = harness.stop();
-    let [workspace, notes, out] =
-        ["workspace", "etc/app/notes.txt", "out"].map(|target| rootfs.join(target));
-    let expected: Vec<_> = [
-        (export.join("0/src"), &workspace, Access::ReadOnly),
-        (export.join("0/notes.txt"), &notes, Access::ReadWrite),
-        (export.join("1"), &out, Access::ReadWrite),
-    ]
-    .into_iter()
-    .flat_map(|(from, to, access)| attach_calls(&from, to, access))
-    .collect();
-    assert_eq!(system.kernel.calls(), expected);
-    assert!(workspace.is_dir() && notes.is_file() && out.is_dir());
-    assert_eq!(system.spawn_calls, 0);
-}
-
-#[test]
-fn sandbox_mappings_refuse_the_targets_of_the_container_runtime() {
-    // The runtime's trees, their ancestors, and its exact paths.
-    for target in [
-        &b"/proc"[..],
-        b"/dev/shm",
-        b"/.nvx-agent",
-        b"/etc/machine-id",
-        b"/etc/resolv.conf",
-        b"/run/nvx/time/state",
-        b"/run/nvx",
-        b"/run",
-        b"/etc",
-    ] {
-        let (_temporary, system, rootfs) = sandbox_root();
-        let mapping = maps_payload(0, &[(b"0/src", target, 0)], None);
-        let mut harness = Harness::in_sandbox(&rootfs, system, 1);
-        let mut replies = Vec::new();
-        replies.extend(harness.request_all(1, APP_MAPS, &mapping));
-        replies.extend(harness.request_all(2, APP_EXEC, &[]));
-        assert_eq!(
-            replies,
-            vec![
-                response(APP_ERROR, 1, Errno::EPERM as i32, b"mapping-failed"),
-                response(APP_ERROR, 2, Errno::EAGAIN as i32, b"mappings-incomplete"),
-            ],
-            "{}",
-            String::from_utf8_lossy(target)
-        );
-        let system = harness.stop();
-        assert!(system.kernel.calls().is_empty());
-        assert_eq!(std::fs::read_dir(&rootfs).unwrap().count(), 0);
-    }
-}
-
-#[test]
-fn a_failed_sandbox_mapping_keeps_refusing_workloads() {
-    let (_temporary, system, rootfs) = sandbox_root();
-    let missing = maps_payload(0, &[(b"0/missing", b"/workspace", 0)], None);
-    let valid = maps_payload(0, &[(b"0/src", b"/workspace", 0)], None);
-    let mut harness = Harness::in_sandbox(&rootfs, system, 2);
-    let mut replies = Vec::new();
-    replies.extend(harness.request_all(1, APP_MAPS, &missing));
-    replies.extend(harness.request_all(2, APP_EXEC, &[]));
-    replies.extend(harness.request_all(3, APP_MAPS, &valid));
-    replies.extend(harness.request_all(4, APP_EXEC, &[]));
-    assert_eq!(
-        replies,
-        vec![
-            response(APP_ERROR, 1, Errno::ENOENT as i32, b"mapping-failed"),
-            response(APP_ERROR, 2, Errno::EAGAIN as i32, b"mappings-incomplete"),
-            response(APP_ERROR, 3, Errno::EINVAL as i32, b"invalid-request"),
-            response(APP_ERROR, 4, Errno::EAGAIN as i32, b"mappings-incomplete"),
-        ]
-    );
-    let system = harness.stop();
-    assert!(system.kernel.calls().is_empty());
-    assert_eq!(system.spawn_calls, 0);
-}
-
-#[test]
-fn a_sandbox_without_mappings_maps_nothing_and_admits_workloads() {
-    let (_temporary, system, rootfs) = sandbox_root();
-    let mapping = maps_payload(0, &[(b"0/src", b"/workspace", 0)], None);
-    let mut harness = Harness::in_sandbox(&rootfs, system, 0);
-    let mut replies = Vec::new();
-    replies.extend(harness.request_all(1, APP_MAPS, &mapping));
-    replies.extend(harness.request_all(2, APP_EXEC, &[]));
-    assert_eq!(
-        replies,
-        vec![
-            response(APP_ERROR, 1, Errno::EINVAL as i32, b"invalid-request"),
-            // No table holds the request back, so it reaches its decoder.
-            response(APP_ERROR, 2, Errno::EINVAL as i32, b"invalid-request"),
-        ]
-    );
-    let system = harness.stop();
-    assert!(system.kernel.calls().is_empty());
-    assert_eq!(std::fs::read_dir(&rootfs).unwrap().count(), 0);
-}
-
-#[test]
-fn sandbox_does_not_launch_when_an_environment_export_fails() {
-    let mut system = TestSystem::new(Paths::default());
-    system.fail_environment = Some(b"HOME".to_vec());
-    assert_environment_failure(
-        Harness::with_system(false, system, 0),
-        b"nvx-managed-agent: cannot configure workload environment: ",
-    );
-}
-
-/// Spawns a sandbox launch command, whose entry stages the test system simulates, without
-/// privileges.
-fn spawn_sandbox(
-    command: crate::guest::spawn::Command,
-) -> Result<crate::guest::spawn::Spawned, Errno> {
-    command
-        .spawn()
-        .map_err(|error| crate::guest::sys::errno_of(&error))
-}
-
-/// Returns a sandbox agent's test system that spawns its workloads, with their entry stages
-/// simulated, and the path of its `container` cgroup's membership file.
-fn sandbox_system() -> (tempfile::TempDir, TestSystem, std::path::PathBuf) {
-    let (temporary, mut system) = TestSystem::with_container_cgroup();
-    system.spawner = Some(spawn_sandbox);
-    let procs = system.paths.cgroup_root.join("container/cgroup.procs");
-    (temporary, system, procs)
-}
-
-#[test]
-fn sandbox_launch_places_its_workload_before_releasing_it() -> TestResult {
-    if super::super::tests::isolate_process_test(
-        "NVX_DISPATCH_SANDBOX_PLACEMENT_TEST_CHILD",
-        "guest::managed_agent::dispatch::tests::sandbox_launch_places_its_workload_before_releasing_it",
-    ) {
-        return Ok(());
-    }
-    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
-    let (_temporary, system, procs) = sandbox_system();
-    // The workload sees its own process ID in the cgroup's membership file as soon as it
-    // runs, leads its own session, and gets the workload's environment.
-    let script = "[ \"$(cat \"$0\")\" = \"$$\" ] || exit 3; \
-                      set -- $(cat /proc/$$/stat); [ \"$6\" = \"$$\" ] || exit 4; \
-                      printf '%s %s %s %s' \"$HOME\" \"$USER\" \"$LOGNAME\" \"$PWD\"";
-    let mut harness = Harness::with_system(false, system, 0);
-    assert_eq!(
-        harness.request_all(
-            42,
-            APP_EXEC,
-            &workload_payload(&["/bin/sh", "-c", script, utf8(&procs)?], Some("/tmp"))?,
-        ),
-        vec![
-            response(APP_STDOUT, 42, 0, b"/home/workload workload workload /tmp"),
-            response(APP_EXIT, 42, 0, b"exit"),
-        ]
-    );
-    let system = harness.stop();
-    assert_eq!((system.entries_prepared, system.spawn_calls), (1, 1));
-    assert!(system.diagnostics.is_empty());
-    Ok(())
-}
-
-#[test]
-fn sandbox_launch_reports_unusable_directories_and_programs_as_its_helper_did() -> TestResult {
-    if super::super::tests::isolate_process_test(
-        "NVX_DISPATCH_SANDBOX_REFUSAL_TEST_CHILD",
-        "guest::managed_agent::dispatch::tests::sandbox_launch_reports_unusable_directories_and_programs_as_its_helper_did",
-    ) {
-        return Ok(());
-    }
-    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
-    let (temporary, system, _) = sandbox_system();
-    let missing = temporary.path().join("missing");
-    let missing = utf8(&missing)?;
-    let mut harness = Harness::with_system(false, system, 0);
-    let diagnostic = super::super::diagnostics::with_description(
-        format!("nvx-managed-agent: cannot use working directory {missing}: ").as_bytes(),
-        Errno::ENOENT,
-    );
-    assert_eq!(
-        harness.request_all(
-            42,
-            APP_EXEC,
-            &workload_payload(&["/bin/true"], Some(missing))?
-        ),
-        vec![
-            response(APP_STDERR, 42, 0, &diagnostic),
-            response(APP_EXIT, 42, 125, b"exit"),
-        ]
-    );
-    let diagnostic = super::super::diagnostics::with_description(
-        b"nvx-managed-agent: cannot execute workload: ",
-        Errno::ENOENT,
-    );
-    assert_eq!(
-        harness.request_all(43, APP_EXEC, &workload_payload(&[missing], None)?),
-        vec![
-            response(APP_STDERR, 43, 0, &diagnostic),
-            response(APP_EXIT, 43, 125, b"exit"),
-        ]
-    );
-    let system = harness.stop();
-    assert!(system.diagnostics.is_empty());
-    Ok(())
-}
-
-#[test]
-fn sandbox_launch_fails_on_its_entry_and_its_placement_without_running() -> TestResult {
-    if super::super::tests::isolate_process_test(
-        "NVX_DISPATCH_SANDBOX_ENTRY_TEST_CHILD",
-        "guest::managed_agent::dispatch::tests::sandbox_launch_fails_on_its_entry_and_its_placement_without_running",
-    ) {
-        return Ok(());
-    }
-    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
-    let launch_failed = |request_id| {
-        response(
-            APP_ERROR,
-            request_id,
-            125,
-            protocol::LAUNCH_FAILED.as_bytes(),
-        )
-    };
-    let (temporary, mut system, _) = sandbox_system();
-    let marker = temporary.path().join("ran");
-    let payload = workload_payload(&["/bin/touch", utf8(&marker)?], None)?;
-
-    // A refused preparation names its reason and starts nothing.
-    system.refuse_entry = true;
-    let mut harness = Harness::with_system(false, system, 0);
-    let diagnostic = b"nvx-managed-agent: cannot prepare the workload's execution: the \
-                           account is unavailable: no passwd entry has the user ID\n";
-    assert_eq!(
-        harness.request_all(42, APP_EXEC, &payload),
-        vec![response(APP_STDERR, 42, 0, diagnostic), launch_failed(42)]
-    );
-    let system = harness.stop();
-    assert_eq!((system.entries_prepared, system.spawn_calls), (1, 0));
-
-    // A failed entry stage, which names itself, and a failed placement, which never releases
-    // the workload, end the launch before the workload runs.
-    for (request_id, error) in [(43, Errno::EPERM), (44, Errno::ENOENT)] {
-        let (_cgroup, mut system, procs) = sandbox_system();
-        let mut expected = Vec::new();
-        if error == Errno::EPERM {
-            system.entry_failure = Some((crate::guest::spawn::LaunchStage::MoveRoot, error));
-            expected.push(response(
-                APP_STDERR,
-                request_id,
-                0,
-                b"nvx-managed-agent: cannot enter the workload's execution: the root move \
-                      launch stage failed: Operation not permitted (os error 1)\n",
-            ));
-        } else {
-            std::fs::remove_file(&procs)?;
-        }
-        expected.push(launch_failed(request_id));
-        let mut harness = Harness::with_system(false, system, 0);
-        assert_eq!(
-            harness.request_all(request_id, APP_EXEC, &payload),
-            expected
-        );
-        let system = harness.stop();
-        assert_eq!(
-            system.diagnostics,
-            format!(
-                "NVX-MANAGED-ERROR: stage=exec-launch status={}\n",
-                error as i32
-            )
-            .as_bytes()
-        );
-    }
-    assert!(!marker.exists());
-    Ok(())
-}
-
-#[test]
 fn direct_does_not_launch_when_identity_export_fails() {
     if super::super::tests::isolate_process_test(
         "NVX_DISPATCH_HOME_EXPORT_TEST_CHILD",
@@ -1204,7 +875,7 @@ fn direct_does_not_launch_when_identity_export_fails() {
     let (_temporary, mut system) = TestSystem::with_direct();
     system.fail_environment = Some(b"HOME".to_vec());
     assert_environment_failure(
-        Harness::with_system(true, system, 0),
+        Harness::with_system(system, 0),
         b"nvx-managed-agent: cannot configure workload environment: ",
     );
 }
@@ -1220,7 +891,7 @@ fn pwd_export_failures_refuse_launch_without_spawning() {
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock().unwrap();
     let (temporary, mut system) = TestSystem::with_direct();
     system.fail_environment = Some(b"PWD".to_vec());
-    let mut harness = Harness::with_system(true, system, 0);
+    let mut harness = Harness::with_system(system, 0);
     for (request_id, cwd) in [(42, None), (43, Some(temporary.path().to_str().unwrap()))] {
         assert_eq!(
             harness.request_all(request_id, APP_EXEC, &exec_payload(cwd)),
@@ -1238,7 +909,7 @@ fn pwd_export_failures_refuse_launch_without_spawning() {
 
 #[test]
 fn agent_refuses_malformed_working_directories() {
-    let mut harness = Harness::new(true);
+    let mut harness = Harness::new();
     let argument = [9u32.to_le_bytes().as_slice(), b"/bin/true"].concat();
     let mut payload = Vec::new();
     payload.extend_from_slice(&0u32.to_le_bytes());
@@ -1261,7 +932,7 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
     );
     let frame = encode_app(APP_PING, 42, 0, &[]);
     let diagnostics =
-        Harness::new(true).fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 9, &frame).unwrap());
+        Harness::new().fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 9, &frame).unwrap());
     assert_eq!(
         diagnostics,
         [
@@ -1272,7 +943,7 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
     );
 
     let diagnostics =
-        Harness::new(true).fail(&encode_outer(OUTER_DATA, &INSTANCE, 2, 8, &frame).unwrap());
+        Harness::new().fail(&encode_outer(OUTER_DATA, &INSTANCE, 2, 8, &frame).unwrap());
     assert_eq!(
         diagnostics,
         [
@@ -1283,7 +954,7 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
     );
 
     let diagnostics =
-        Harness::new(true).fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, b"x").unwrap());
+        Harness::new().fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, b"x").unwrap());
     assert_eq!(
         diagnostics,
         [
@@ -1298,7 +969,7 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
 fn a_request_that_fails_after_validation_reports_the_data_stage() {
     let frame = encode_app(APP_STOP, 42, 0, b"x");
     let diagnostics =
-        Harness::new(true).fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap());
+        Harness::new().fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap());
     assert_eq!(
         diagnostics,
         format!(
@@ -1396,7 +1067,7 @@ fn direct_start_collects_pending_statuses_before_forking() -> TestResult {
     sys::reset_child_signal();
     let (_temporary, mut system) = TestSystem::with_direct();
     system.direct_starter = Some(start_after_pending_statuses_are_collected);
-    let mut harness = Harness::with_system(true, system, 0);
+    let mut harness = Harness::with_system(system, 0);
     let mut pending = std::process::Command::new("/bin/true").spawn()?;
     let process = sys::ProcessId::from_child(&pending);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -1469,7 +1140,7 @@ fn failed_direct_starts_keep_their_child_until_collected_or_explicitly_lost() ->
         let (temporary, mut system) = TestSystem::with_direct();
         system.direct_starter = Some(start_with_failed_pidfd_and_cleanup);
         let marker = temporary.path().join("failed-child");
-        let mut harness = Harness::with_system(true, system, 0);
+        let mut harness = Harness::with_system(system, 0);
         harness
             .host
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
@@ -1555,7 +1226,7 @@ fn direct_launch_refuses_working_directories_that_the_workload_cannot_enter() ->
     let unsearchable = Unsearchable::new(root.join("unsearchable"))?;
     let marker = root.join("ran");
     let marker = utf8(&marker)?;
-    let mut harness = Harness::with_system(true, system, 0);
+    let mut harness = Harness::with_system(system, 0);
     for (request_id, directory, error) in [
         (42, root.join("missing"), Errno::ENOENT),
         (43, file, Errno::ENOTDIR),
@@ -1599,7 +1270,7 @@ fn direct_launch_refuses_a_failed_identity_change_and_runs_nothing() -> TestResu
     system.direct_starter = Some(super::super::seam::tests::start_with_failing_credentials);
     let marker = temporary.path().join("ran");
     let payload = workload_payload(&["/bin/touch", utf8(&marker)?], None)?;
-    let mut harness = Harness::with_system(true, system, 0);
+    let mut harness = Harness::with_system(system, 0);
     assert_eq!(
         harness.request_all(42, APP_EXEC, &payload),
         vec![response(
@@ -2017,7 +1688,7 @@ fn lost_status_harness() -> Result<(tempfile::TempDir, Harness), Box<dyn std::er
     let (temporary, mut system) = TestSystem::with_direct();
     system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
     crate::guest::sys::ignore_signals(&[crate::guest::sys::Signal::SIGCHLD]);
-    let harness = Harness::with_system(true, system, 0);
+    let harness = Harness::with_system(system, 0);
     // An agent that waited for a lost status would never answer.
     harness
         .host
@@ -2096,7 +1767,7 @@ fn direct_launch_starts_the_workload_in_the_directory_that_it_checked() -> TestR
     std::os::unix::fs::symlink(&first, &link)?;
     let script = "if [ -d \"$1\" ]; then mv \"$1\" \"$2\"; fi; ln -sfn \"$4\" \"$3\"; pwd -P";
     system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
-    let mut harness = Harness::with_system(true, system, 0);
+    let mut harness = Harness::with_system(system, 0);
     let renamed = harness.request_all(
         42,
         APP_EXEC,
@@ -2166,7 +1837,7 @@ fn direct_launch_starts_the_workload_in_the_directory_that_it_checked() -> TestR
 fn direct_harness() -> (tempfile::TempDir, Harness) {
     let (temporary, mut system) = TestSystem::with_direct();
     system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
-    (temporary, Harness::with_system(true, system, 0))
+    (temporary, Harness::with_system(system, 0))
 }
 
 #[test]
@@ -2224,7 +1895,6 @@ fn direct_core_applies_inherited_exact_and_layered_environments() -> TestResult 
         b"/layered|/tmp|last|1",
     );
     let system = harness.stop();
-    assert!(!system.paths.cgroup_root.exists());
     assert!(system.diagnostics.is_empty());
     Ok(())
 }
@@ -2416,8 +2086,8 @@ fn rooted_capture_refuses_both_kill_flags_and_leaves_the_exec_group_running() ->
     let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
     let (_temporary, mut system) = TestSystem::with_direct();
     system.direct_starter = Some(super::super::seam::tests::start_as_privileged);
-    let config = AgentConfig::for_test(None);
-    let mappings = HostMappings::announced_for(&config, 0);
+    let config = AgentConfig::for_test();
+    let mappings = HostMappings::announced(0);
     let mut harness =
         Harness::spawn_with_capture(system, config, mappings, Some(Capture::fixture(false)));
     harness.reset(1, 7);
@@ -2549,7 +2219,7 @@ fn refused_records_report_the_stage_at_which_the_c_agent_reported_them() {
         ),
     ];
     for (record, expected) in cases {
-        let diagnostics = Harness::new(true).fail(&record);
+        let diagnostics = Harness::new().fail(&record);
         let header = &record[..OUTER_HEADER_LEN];
         assert_eq!(
             String::from_utf8(diagnostics).unwrap(),
@@ -2561,7 +2231,7 @@ fn refused_records_report_the_stage_at_which_the_c_agent_reported_them() {
 
 #[test]
 fn data_before_the_first_reset_is_a_type_that_the_agent_does_not_take_yet() {
-    let harness = Harness::spawn(true, TestSystem::new(Paths::default()), 0);
+    let harness = Harness::spawn(TestSystem::new(Paths::default()), 0);
     let frame = encode_app(APP_PING, 42, 0, &[]);
     let diagnostics = harness.fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 0, &frame).unwrap());
     assert_eq!(
@@ -2574,7 +2244,7 @@ fn data_before_the_first_reset_is_a_type_that_the_agent_does_not_take_yet() {
 fn data_at_the_last_sequence_number_is_out_of_sequence() {
     // After a RESET at the second-to-last sequence number, DATA at the last one leaves none
     // for the broker's next record.
-    let mut harness = Harness::spawn(true, TestSystem::new(Paths::default()), 0);
+    let mut harness = Harness::spawn(TestSystem::new(Paths::default()), 0);
     harness.reset(1, u64::MAX - 1);
     let frame = encode_app(APP_PING, 42, 0, &[]);
     let record = encode_outer(OUTER_DATA, &INSTANCE, 1, u64::MAX, &frame).unwrap();
@@ -2597,14 +2267,14 @@ fn a_stream_that_ends_reports_a_read_failure_inside_a_record_or_not() {
     let frame = encode_app(APP_PING, 42, 0, &[]);
     let record = encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap();
     for length in [0, 20, OUTER_HEADER_LEN + 1] {
-        let diagnostics = Harness::new(true).close(&record[..length]);
+        let diagnostics = Harness::new().close(&record[..length]);
         assert_eq!(diagnostics, expected.as_bytes(), "after {length} bytes");
     }
 }
 
 #[test]
 fn a_reset_between_requests_starts_a_new_epoch() {
-    let mut harness = Harness::new(true);
+    let mut harness = Harness::new();
     assert_eq!(
         harness.request(APP_PING, &[]),
         response(APP_READY, 42, 0, b"")

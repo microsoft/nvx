@@ -14,23 +14,10 @@ pub(crate) struct TestSystem {
     pub(crate) fail_environment: Option<Vec<u8>>,
     pub(crate) execs: Vec<RecordedExec>,
     pub(crate) spawn_calls: usize,
-    /// Spawns each workload's launch command when set; `spawn` otherwise fails with `ENOSYS`.
-    pub(crate) spawner: Option<fn(Command) -> Result<Spawned, Errno>>,
     pub(crate) direct_starter:
         Option<fn(init::ExecRequest) -> Result<init::Exec, init::StartFailure>>,
     pub(crate) tty_configured: usize,
     pub(crate) tty_drained: usize,
-    /// The sandbox executions that `prepare_entry` prepared, each simulated, without
-    /// privileges: see [`Prepared::simulated`].
-    pub(crate) entries_prepared: usize,
-    /// The entry stage that fails, with its error, in each simulated sandbox execution.
-    pub(crate) entry_failure: Option<(crate::guest::spawn::LaunchStage, Errno)>,
-    /// Makes `prepare_entry` refuse each sandbox execution, as when its account is missing.
-    pub(crate) refuse_entry: bool,
-    /// The calls of `bind_runtime`, which binds nothing.
-    pub(crate) runtime_binds: usize,
-    /// The error with which `bind_runtime` fails, if any.
-    pub(crate) fail_runtime_bind: Option<Errno>,
 }
 
 impl TestSystem {
@@ -42,46 +29,16 @@ impl TestSystem {
             fail_environment: None,
             execs: Vec::new(),
             spawn_calls: 0,
-            spawner: None,
             direct_starter: None,
             tty_configured: 0,
             tty_drained: 0,
-            entries_prepared: 0,
-            entry_failure: None,
-            refuse_entry: false,
-            runtime_binds: 0,
-            fail_runtime_bind: None,
         }
     }
 
-    /// Returns a direct agent with no cgroup hierarchy in its temporary directory.
+    /// Returns a direct agent's system, and a new temporary directory that the caller keeps.
     #[cfg(feature = "cli")]
     pub(crate) fn with_direct() -> (tempfile::TempDir, Self) {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("cgroup");
-        let paths = Paths {
-            cgroup_root: root,
-            ..Paths::default()
-        };
-        (temporary, Self::new(paths))
-    }
-
-    /// Returns a system for the sandbox agent, in a new temporary directory that the caller
-    /// keeps: its cgroup root holds the agent's `agent` cgroup and its workloads' `container`
-    /// cgroup, with an empty membership file, and its machine ID's path is free.
-    pub(crate) fn with_container_cgroup() -> (tempfile::TempDir, Self) {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("cgroup");
-        std::fs::create_dir_all(root.join("agent")).unwrap();
-        std::fs::create_dir_all(root.join("container")).unwrap();
-        std::fs::write(root.join("container/cgroup.procs"), b"").unwrap();
-        let paths = Paths {
-            cgroup_root: root,
-            machine_id: temporary.path().join("workload-machine-id"),
-            time_status: temporary.path().join("time"),
-            ..Paths::default()
-        };
-        (temporary, Self::new(paths))
+        (tempfile::tempdir().unwrap(), Self::new(Paths::default()))
     }
 
     /// Returns a system whose host-filesystem export, in a new temporary directory that the
@@ -165,14 +122,6 @@ impl System for TestSystem {
         Ok(())
     }
 
-    fn spawn(&mut self, command: Command) -> Result<Spawned, Errno> {
-        self.spawn_calls += 1;
-        match self.spawner {
-            Some(spawner) => spawner(command),
-            None => Err(Errno::ENOSYS),
-        }
-    }
-
     fn start_direct(
         &mut self,
         request: init::ExecRequest,
@@ -182,19 +131,6 @@ impl System for TestSystem {
             Some(start) => start(request),
             None => Err(Errno::ENOSYS.into()),
         }
-    }
-
-    fn prepare_entry(&mut self, _entry: &Entry) -> Result<Prepared, entry::Error> {
-        self.entries_prepared += 1;
-        if self.refuse_entry {
-            return Err(entry::Error::Account(entry::AccountError::Missing));
-        }
-        Ok(Prepared::simulated(self.entry_failure))
-    }
-
-    fn bind_runtime(&mut self, _entry: &Entry) -> Result<(), Errno> {
-        self.runtime_binds += 1;
-        self.fail_runtime_bind.map_or(Ok(()), Err)
     }
 }
 

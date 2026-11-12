@@ -20,11 +20,9 @@ pub(crate) fn seed_inheritable_and_ambient() -> Result<(), Errno> {
 }
 
 /// How a test without privileges simulates the stages of an entry: the child starts without
-/// new namespaces and skips the system calls of every entry stage.
+/// new namespaces and skips the system calls of every entry stage but the one that fails.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Simulation {
-    /// Every entry stage succeeds.
-    Skip,
     /// The stage fails with the error.
     Fail(LaunchStage, Errno),
 }

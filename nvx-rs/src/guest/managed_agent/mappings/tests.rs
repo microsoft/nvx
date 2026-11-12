@@ -1,6 +1,7 @@
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 use super::super::seam::tests::{TestSystem, attach_calls};
 use super::*;
@@ -15,15 +16,6 @@ impl HostMappings {
         Self {
             table: announced_table(expected),
             ..Self::default()
-        }
-    }
-
-    /// Returns the state of the table of `expected` announced mappings of the agent that
-    /// `config` configures, none applied yet.
-    pub(crate) fn announced_for(config: &AgentConfig, expected: u32) -> Self {
-        Self {
-            table: announced_table(expected),
-            ..Self::new(config)
         }
     }
 }
@@ -53,89 +45,12 @@ fn exported(system: &TestSystem, relative: &str) -> PathBuf {
         .join(relative)
 }
 
-/// Returns a system with a host export, the state of a sandbox agent's table of `expected`
-/// mappings, and the canonical path of the agent's assembled root, which is the root of a
-/// mount.
-fn sandbox(expected: u32) -> (tempfile::TempDir, TestSystem, HostMappings, PathBuf) {
-    let (temporary, system) = TestSystem::with_host_export();
+#[test]
+fn a_layered_table_that_announces_mappings_needs_its_retained_export() {
+    let (temporary, mut system) = TestSystem::with_host_export();
     let rootfs = temporary.path().canonicalize().unwrap().join("rootfs");
     fs::create_dir(&rootfs).unwrap();
     system.kernel.add_mount(&rootfs);
-    let config = AgentConfig::for_test(Some(&rootfs));
-    let mappings = HostMappings::announced_for(&config, expected);
-    (temporary, system, mappings, rootfs)
-}
-
-/// Applies three mappings of a sandbox's table: a read-only directory at `/workspace`, a file
-/// at `/data/notes.txt`, and a directory at `/out`, whose paths below `rootfs` it returns.
-fn map_three(system: &mut TestSystem, mappings: &mut HostMappings, rootfs: &Path) -> [PathBuf; 3] {
-    let request = payload(
-        0,
-        &[
-            (b"0/src", b"/workspace", protocol::MAP_READ_ONLY),
-            (b"0/notes.txt", b"/data/notes.txt", 0),
-            (b"1", b"/out", 0),
-        ],
-        None,
-    );
-    apply_request(system, mappings, &request).unwrap();
-    ["workspace", "data/notes.txt", "out"].map(|target| rootfs.join(target))
-}
-
-#[test]
-fn a_sandbox_table_unmounts_in_reverse_order() {
-    let (_temporary, mut system, mut mappings, rootfs) = sandbox(3);
-    let [workspace, notes, out] = map_three(&mut system, &mut mappings, &rootfs);
-    assert_eq!(mappings.table.applied(), 3);
-    teardown(&mut system, &mut mappings).unwrap();
-    let shown = |path: &PathBuf| path.display().to_string();
-    assert_eq!(
-        system.kernel.unmounts(),
-        [&out, &notes, &workspace].map(shown)
-    );
-    for target in [&workspace, &notes, &out] {
-        assert_eq!(system.kernel.mount_at(target), None);
-    }
-    // The teardown forgot the table, so another has nothing to do.
-    teardown(&mut system, &mut mappings).unwrap();
-    assert_eq!(system.kernel.unmounts().len(), 3);
-    assert!(system.diagnostics.is_empty());
-}
-
-#[test]
-fn a_sandbox_table_reports_each_mapping_that_stays_mounted() {
-    let (_temporary, mut system, mut mappings, rootfs) = sandbox(3);
-    let [workspace, notes, out] = map_three(&mut system, &mut mappings, &rootfs);
-    system.kernel.fail(Operation::Unmount, &notes, Errno::EBUSY);
-    assert_eq!(teardown(&mut system, &mut mappings), Err(Errno::EBUSY));
-    // Every mapping is attempted, in reverse order, and only the busy one stays mounted.
-    let shown = |path: &PathBuf| path.display().to_string();
-    assert_eq!(
-        system.kernel.unmounts(),
-        [&out, &notes, &workspace].map(shown)
-    );
-    assert!(system.kernel.mount_at(&notes).is_some());
-    assert_eq!(system.kernel.mount_at(&workspace), None);
-    assert_eq!(system.kernel.mount_at(&out), None);
-    assert_eq!(
-        String::from_utf8_lossy(&system.diagnostics),
-        format!(
-            "NVX-MANAGED-ERROR: stage=host-unmapping status={}\n",
-            Errno::EBUSY as i32
-        )
-    );
-}
-
-#[test]
-fn a_table_without_mappings_has_nothing_to_tear_down() {
-    let (_temporary, mut system, mut mappings, _rootfs) = sandbox(0);
-    teardown(&mut system, &mut mappings).unwrap();
-    assert!(system.kernel.calls().is_empty());
-}
-
-#[test]
-fn a_layered_table_that_announces_mappings_needs_its_retained_export() {
-    let (_temporary, mut system, _mappings, rootfs) = sandbox(1);
     let mapper = Mapper::new(
         TargetRoot::open_with(&mut system.kernel, &rootfs).unwrap(),
         Reserved::container_root(),
@@ -383,15 +298,6 @@ fn the_root_of_the_export_is_refused_though_it_decodes() {
         (0, false)
     );
     assert!(!first.exists() && !root.exists());
-    // So does a sandbox agent, whose export is an aggregate too.
-    let (_temporary, mut system, mut mappings, rootfs) = sandbox(1);
-    let request = payload(0, &[(b"", b"/workspace", 0)], None);
-    assert!(matches!(
-        apply_request(&mut system, &mut mappings, &request),
-        Err(MappingError::Invalid)
-    ));
-    assert!(system.kernel.calls().is_empty());
-    assert!(!rootfs.join("workspace").exists());
 }
 
 #[test]
