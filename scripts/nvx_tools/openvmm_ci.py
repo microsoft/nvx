@@ -10,7 +10,8 @@ on KVM, MSHV, and Windows, to have passed for the pinned revision in either
 workflow, and waits while they run. The gates' other jobs, such as the VMM tests
 on TDX and SEV-SNP hosts, test OpenHCL and confidential VMs, which NVX does not
 use. ARM selection adds the existing native Windows ARM unit and VMM jobs,
-without removing x86 coverage or changing workflow/repository trust.
+without removing x86 coverage. A temporary, explicitly approved trial admits
+one fork-headed run only after checking its pinned PR and workflow blob.
 See doc/ci.md, "OpenVMM CI".
 """
 
@@ -50,6 +51,14 @@ OPENVMM_CI_ARM64_REQUIRED_JOBS = (
     "unit tests [aarch64-windows]",
     "run vmm-tests [aarch64-windows]",
 )
+# TEMPORARY: revert this isolated trial after the coordinator records its outcome.
+_TRIAL_REVISION = "38016f6637f0c61fb55c9ee31033ceec428e346c"
+_TRIAL_RUN = 43109699910
+_TRIAL_PR = 5045
+_TRIAL_HEAD_REPOSITORY = "ahuja-gautam/openvmm"
+_TRIAL_HEAD_REF = "openvmm-arm64-microvm-dev-20261111"
+_TRIAL_WORKFLOW = ".github/workflows/openvmm-pr.yaml"
+_TRIAL_WORKFLOW_BLOB = "2cabb910cd6d8c974b809a30870502f69ac68e83"
 # How long the check waits between two looks at runs that have not finished.
 # OpenVMM's gates take one and a half to two hours, so a look every five
 # minutes adds little to a wait, and keeps a wait's requests, three a look,
@@ -64,6 +73,8 @@ _REVISION = re.compile(r"[0-9a-f]{40}")
 
 class OpenVMMCiApi(Protocol):
     """The GitHub REST operation that the check uses."""
+
+    def get(self, path: str, params: Mapping[str, str] | None = None) -> object: ...
 
     def get_all(
         self,
@@ -121,6 +132,76 @@ def _text(document: Mapping[str, object], field: str) -> str:
     return value
 
 
+def _trial_mapping(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ScriptError("GitHub returned invalid temporary OpenVMM CI trial proof")
+    return cast(Mapping[str, object], value)
+
+
+def _temporary_fork_run(
+    api: OpenVMMCiApi, run: Mapping[str, object], revision: str
+) -> bool:
+    """Admit only the authorized run, with live PR and immutable workflow proof."""
+    if revision != _TRIAL_REVISION or run.get("id") != _TRIAL_RUN:
+        return False
+    for evidence in (
+        run,
+        _trial_mapping(
+            api.get(f"/repos/{OPENVMM_REPOSITORY}/actions/runs/{_TRIAL_RUN}")
+        ),
+    ):
+        if (
+            type(evidence.get("id")) is not int
+            or evidence.get("id") != _TRIAL_RUN
+            or evidence.get("head_sha") != _TRIAL_REVISION
+            or evidence.get("head_branch") != _TRIAL_HEAD_REF
+            or evidence.get("event") != "pull_request"
+            or evidence.get("path") != _TRIAL_WORKFLOW
+            or _trial_mapping(evidence.get("repository")).get("full_name")
+            != OPENVMM_REPOSITORY
+            or _trial_mapping(evidence.get("head_repository")).get("full_name")
+            != _TRIAL_HEAD_REPOSITORY
+        ):
+            raise ScriptError("Temporary OpenVMM CI trial run proof does not match")
+    pull = _trial_mapping(api.get(f"/repos/{OPENVMM_REPOSITORY}/pulls/{_TRIAL_PR}"))
+    head = _trial_mapping(pull.get("head"))
+    base = _trial_mapping(pull.get("base"))
+    if (
+        type(pull.get("number")) is not int
+        or pull.get("number") != _TRIAL_PR
+        or pull.get("state") != "open"
+        or pull.get("merged") is not False
+        or head.get("sha") != _TRIAL_REVISION
+        or head.get("ref") != _TRIAL_HEAD_REF
+        or _trial_mapping(head.get("repo")).get("full_name") != _TRIAL_HEAD_REPOSITORY
+        or base.get("ref") != "feature/microvm/dev"
+        or _trial_mapping(base.get("repo")).get("full_name") != OPENVMM_REPOSITORY
+    ):
+        raise ScriptError("Temporary OpenVMM CI trial PR proof does not match")
+    workflow = _trial_mapping(
+        api.get(
+            f"/repos/{OPENVMM_REPOSITORY}/contents/{_TRIAL_WORKFLOW}",
+            {"ref": _TRIAL_REVISION},
+        )
+    )
+    if (
+        workflow.get("type") != "file"
+        or workflow.get("path") != _TRIAL_WORKFLOW
+        or workflow.get("sha") != _TRIAL_WORKFLOW_BLOB
+        or type(workflow.get("size")) is not int
+        or workflow.get("size") != 421776
+    ):
+        raise ScriptError("Temporary OpenVMM CI trial workflow proof does not match")
+    print(
+        "::warning::TEMPORARY OpenVMM CI evidence trial: admitting only "
+        f"{OPENVMM_REPOSITORY} run {_TRIAL_RUN}, PR {_TRIAL_PR}, "
+        f"head {_TRIAL_REVISION}, workflow blob {_TRIAL_WORKFLOW_BLOB}; "
+        "all selected latest-attempt jobs must still pass",
+        flush=True,
+    )
+    return True
+
+
 def openvmm_ci_runs(api: OpenVMMCiApi, revision: str) -> list[OpenVMMRun]:
     """Return the runs of OpenVMM's checkin gates whose head is `revision`
     in OpenVMM's repository, with the latest attempt of each of their jobs."""
@@ -142,7 +223,8 @@ def openvmm_ci_runs(api: OpenVMMCiApi, revision: str) -> list[OpenVMMRun]:
             or cast(Mapping[str, object], head_repository).get("full_name")
             != OPENVMM_REPOSITORY
         ):
-            continue
+            if not _temporary_fork_run(api, run, revision):
+                continue
         identifier = run.get("id")
         if not isinstance(identifier, int) or isinstance(identifier, bool):
             raise ScriptError("GitHub returned a workflow run without an id")
