@@ -353,7 +353,11 @@ impl Options {
     /// Projects an old cold-run fixture onto the checked public VM contract, independently of
     /// the CLI's parser, planner, and private token renderer. Restore and sandbox fixtures stay
     /// old.
-    pub(crate) fn cold_run_expected(&self, root: &Root, mode: &str) -> nvx::Result<Self> {
+    pub(crate) fn cold_run_expected(
+        &self,
+        root: &Root,
+        mode: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         use nvx::activation::{MachineIdMode, View};
         use nvx::host::config::{Boot, ConsoleAttachment, NetworkConfig, RootConfig, VmConfig};
         use nvx::host::filesystem::Owner;
@@ -433,9 +437,10 @@ impl Options {
             for value in old.values(option) {
                 let path = PathBuf::from(value);
                 if shares.is_empty() || (aggregate && !path.is_absolute()) {
-                    return Err(nvx::Error::unsupported(
-                        "boot share policies need a mapped path and absolute aggregate paths",
-                    ));
+                    return Err(
+                        "boot share policies need a mapped path and absolute aggregate paths"
+                            .into(),
+                    );
                 }
                 policies[index].push(if path.is_absolute() {
                     path
@@ -482,9 +487,7 @@ impl Options {
             .into_iter()
             .any(|option| !old.values(option).is_empty())
         {
-            return Err(nvx::Error::unsupported(
-                "network policy options require --net",
-            ));
+            return Err("network policy options require --net".into());
         }
         let network = if let Some(net) = old.values("--net").first() {
             let access = |option, default| match old.values(option).first().map(String::as_str) {
