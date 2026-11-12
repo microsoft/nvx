@@ -11,10 +11,7 @@
 //! It needs neither NVX's control protocol nor an async runtime, and it keeps no policy: the
 //! caller decides which programs run and how many at once, where their output goes, how much of
 //! it to take, and what each outcome means. NVX's managed agent is one caller, which runs one
-//! execution at a time and forwards its output and outcome as NVXC frames. A caller whose peer
-//! runs the [execution engine](crate::exec)'s other side drives the execution through a
-//! [`Binding`](binding::Binding) instead, which turns the engine's credit, input, endings, and
-//! settlement into the execution's calls, and its events into the engine's inputs.
+//! execution at a time and forwards its output and outcome as NVXC frames.
 //!
 //! # Driving
 //!
@@ -124,8 +121,6 @@ use super::cgroup::{ExecutionCgroup, Scope};
 use super::process::Child;
 use super::spawn::{LaunchFailure, LaunchReport, Spawned};
 use super::sys::{self, Errno, FileDescriptor, ProcessId};
-
-pub mod binding;
 
 /// One of a program's output streams.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -703,15 +698,6 @@ impl Execution {
         self.outputs.iter().any(Output::is_open)
     }
 
-    /// Returns whether every writer of `stream` closed it, without reading it: the stream ends
-    /// once the execution reads what its pipe still holds. A stream that closed hung up too.
-    pub(crate) fn output_hung_up(&self, stream: Stream) -> bool {
-        match &self.outputs[stream.index()].reader {
-            Some(reader) => sys::hung_up(reader.borrowed()).unwrap_or(false),
-            None => true,
-        }
-    }
-
     /// Lets the execution read `bytes` more of `stream`: its flow-control seam. It reads a
     /// stream only while the stream has an allowance, and each output event uses up as much of
     /// it. An allowance that reaches `usize::MAX` never runs out.
@@ -1043,13 +1029,6 @@ impl Execution {
                 Err(error)
             }
         }
-    }
-
-    /// Gives the options' cgroup back to the caller, whose check found it empty after the
-    /// program ended: the execution kills its processes no more, not even when it drops, so
-    /// that the caller may reuse the cgroup at once.
-    pub(crate) fn release_cgroup(&mut self) {
-        self.cgroup = None;
     }
 
     /// Ends the program for `cause`, unless the execution has ended, and returns whether `cause`

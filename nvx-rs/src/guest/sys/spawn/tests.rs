@@ -90,18 +90,6 @@ impl PreparedChild {
         self.cgroup.is_some()
     }
 
-    /// Returns a close-on-exec copy of the launch report's writer, which holds the report back
-    /// while it is open, as a process that another thread forks before the child does, for
-    /// focused tests.
-    pub(crate) fn report_writer_copy(&self) -> Result<FileDescriptor, Errno> {
-        let copy = nix::fcntl::fcntl(
-            self.report_writer.borrowed(),
-            FcntlArg::F_DUPFD_CLOEXEC(FIRST_NONSTANDARD),
-        )?;
-        // SAFETY: `F_DUPFD_CLOEXEC` returned a new descriptor, which nothing else owns.
-        Ok(unsafe { FileDescriptor::from_raw(copy) })
-    }
-
     /// Returns whether the child waits at a barrier, enters an execution, and leads a new
     /// session, for focused launch tests.
     pub(crate) fn barrier_entry_and_session(&self) -> (bool, bool, bool) {

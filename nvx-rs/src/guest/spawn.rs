@@ -80,8 +80,7 @@ use super::sys::{
 /// step, which [`Command::reset_signals`] asks for otherwise.
 ///
 /// Each stage has a number, its [`code`](Self::code), with which the child's launch report names
-/// the stage that failed, and which a [`Binding`](super::exec::binding::Binding) reports to its
-/// runner as the stage of a [`LaunchFailure`](crate::exec::LaunchFailure).
+/// the stage that failed.
 /// [`from_code`](Self::from_code) turns a number back into its stage. The numbers are part of the
 /// API: a stage keeps its number, and a new stage takes a number of its own, wherever it comes in
 /// the order.
@@ -194,28 +193,7 @@ impl LaunchStage {
         }
     }
 
-    /// Returns the stage that `code` numbers, or `None` if no stage has that number, such as 0,
-    /// which a [`Binding`](super::exec::binding::Binding) reports for a launch whose report it
-    /// could not read.
-    ///
-    /// ```
-    /// use nvx::exec::{LaunchFailure, Outcome};
-    /// use nvx::guest::spawn::LaunchStage;
-    ///
-    /// /// Returns whether the program of `outcome` did not start because its working directory
-    /// /// was missing or out of its reach.
-    /// fn lacks_working_directory(outcome: &Outcome) -> bool {
-    ///     outcome.launch_failure().is_some_and(|failure| {
-    ///         LaunchStage::from_code(failure.stage()) == Some(LaunchStage::WorkingDirectory)
-    ///     })
-    /// }
-    ///
-    /// let failure = LaunchFailure::new(LaunchStage::WorkingDirectory.code(), 2);
-    /// assert!(lacks_working_directory(
-    ///     &Outcome::new(None).with_launch_failure(failure)
-    /// ));
-    /// assert_eq!(LaunchStage::from_code(0), None);
-    /// ```
+    /// Returns the stage that `code` numbers, or `None` if no stage has that number, such as 0.
     pub fn from_code(code: u32) -> Option<Self> {
         Self::ALL.into_iter().find(|stage| stage.code() == code)
     }
