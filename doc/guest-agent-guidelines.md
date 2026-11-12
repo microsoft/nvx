@@ -430,7 +430,10 @@ gives the restore its network.
   console, then syncs and powers off with the status.
 - A failed activation, wholly or partly applied, never reports Ready: the init
   reports the failure and ends the VM. nvx-init writes it to the console,
-  after `NVX-INIT-ACTIVATION:`, and powers off with status 125.
+  after `NVX-INIT-ACTIVATION:`, and powers off with the status of the
+  failure's class, which `nvx::protocol::status` defines, such as 54,
+  `ACTIVATION_ROOT`, for a root that does not assemble over its upper, from
+  which the host attributes the failure.
 
 ## Replay
 

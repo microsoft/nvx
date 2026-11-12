@@ -365,7 +365,7 @@ fn run() -> Result<(), AnyError> {
             "ORIGINAL_ACK_DEADLINE_ELAPSED_MS={}",
             native_ready.elapsed().as_millis()
         );
-        expected_status = 125;
+        expected_status = i64::from(crate::protocol::status::ACTIVATION_DEADLINE);
     } else {
         let published = case != "unpublished";
         let transaction = TransactionId::from_bytes([0x77; 16]);
@@ -422,7 +422,7 @@ fn run() -> Result<(), AnyError> {
                     .is_some(),
                 "changed identity replay did not end VM",
             )?;
-            expected_status = 125;
+            expected_status = i64::from(crate::protocol::status::ACTIVATION_PROTOCOL);
             println!("CHANGED_IDENTITY_REPLAY_FATAL");
         } else {
             connection.send(
