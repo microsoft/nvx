@@ -84,7 +84,7 @@ the command. The usage errors that `nvx.py` itself reports, as `argparse` does,
 carry no code, and neither does an interruption by SIGINT or, outside
 Windows, SIGTERM, which prints `Interrupted` and exits with status 130. The
 [`nvx-rs` README](../nvx-rs/README.md#error-codes) gives the `ErrorKind` of
-each code for callers of the `nvx` library.
+each code, which callers of the `nvx` library see in its place.
 
 | Code | Status | Meaning |
 | --- | --- | --- |

@@ -42,7 +42,7 @@ nvx-rs/
 │   ├── uuid.rs      UUIDs in their canonical text and in GPT's layout; no dependencies, shared
 │   │                by the host and the guest
 │   ├── hypervisor.rs
-│   ├── error.rs     nvx::Error, its ErrorKind, and its stable ErrorCode
+│   ├── error.rs     nvx::Error, its ErrorKind, and the stable codes that the CLI prints
 │   ├── host/        feature `host` (default): the runtime that every launch shares, VM
 │   │                directories and configurations, artifacts, network and egress policy files,
 │   │                filesystem, NVXS connection, session, process, platform, templates'
@@ -2342,9 +2342,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Errors
 
-Every fallible operation returns `nvx::Error`: a message that callers can show
-as is, an `ErrorCode`, which determines the error's `ErrorKind`, and an
-optional cause.
+Every fallible operation returns `nvx::Error`, which only `nvx` makes: a
+message that callers can show as is, an `ErrorKind`, and an optional cause.
+Callers tell errors apart by their kinds, and by stable fragments of their
+messages, such as the names of options, fields, files, and processes, since the
+wording of a message may change.
 
 | `ErrorKind` | Meaning |
 | --- | --- |
@@ -2361,20 +2363,20 @@ optional cause.
 
 ### Error codes
 
-An `ErrorCode` is finer than an `ErrorKind`: callers tell errors apart by their
-codes, and by stable fragments of their messages, such as the names of options,
-fields, files, and processes, since the wording of a message may change. The
-[CLI](#the-nvx-rs-cli) prints the code of each error that it reports.
+The [CLI](#the-nvx-rs-cli) prints a stable code with each error that it
+reports, finer than the error's `ErrorKind`, by which callers of the CLI tell
+errors apart. The codes are private to `nvx`: callers of the library see the
+kind of each code, which the table gives.
 
-`ErrorCode::as_str` spells a code in lowercase ASCII words joined by hyphens. A
-failure that a caller can act on has a code of its own, which names the subject
-of the failure and then its condition, such as `sandbox-not-running`. Any other
-failure has the code of its kind, which is spelled as the kind, such as `io`,
-and which an `ErrorKind` converts into. A code keeps its spelling, its kind, and
-its meaning, and is never reused for another failure: a failure that callers
-come to act on gets a new code, so a caller treats a code that it does not know
-as a failure of the operation. The `argument-*` codes are those of the CLI's
-usage errors, which no library error has.
+A code is spelled in lowercase ASCII words joined by hyphens. A failure that a
+caller can act on has a code of its own, which names the subject of the failure
+and then its condition, such as `sandbox-not-running`. Any other failure has
+the code of its kind, which is spelled as the kind, such as `io`. A code keeps
+its spelling, its kind, and its meaning, and is never reused for another
+failure: a failure that callers come to act on gets a new code, so a caller
+treats a code that it does not know as a failure of the operation. The
+`argument-*` codes are those of the CLI's usage errors, which no library error
+has.
 
 | Code | `ErrorKind` | Meaning |
 | --- | --- | --- |
