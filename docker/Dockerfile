@@ -65,7 +65,7 @@ COPY scripts/ /repo/scripts/
 COPY LICENSE README.md SOURCE-MANIFEST.json THIRD_PARTY_NOTICES.md /repo/
 
 FROM base AS kernel
-RUN --mount=type=cache,target=/repo/.cache/downloads \
+RUN --mount=type=cache,target=/repo/.cache/downloads,sharing=locked \
     python3 scripts/nvx.py build-kernel --architecture "$NVX_ARCHITECTURE"
 
 FROM base AS kernel-debug
@@ -74,7 +74,7 @@ RUN python3 scripts/nvx.py build-kernel --debug
 # The kernel configuration and its derived record, generated from the feature
 # inventory with the toolchain that builds the kernel (doc/build.md).
 FROM base AS kernel-config
-RUN --mount=type=cache,target=/repo/.cache/downloads \
+RUN --mount=type=cache,target=/repo/.cache/downloads,sharing=locked \
     python3 scripts/nvx.py kernel-config --native --architecture "$NVX_ARCHITECTURE"
 
 # Only the guest images install the Rust guest binaries and record their sources,

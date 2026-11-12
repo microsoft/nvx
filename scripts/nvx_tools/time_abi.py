@@ -580,7 +580,9 @@ def is_cold_boot_command(command: Sequence[str]) -> bool:
     cli_run = (
         bool(command) and Path(command[0]).stem == "nvx-rs" and "run" in command[1:]
     )
-    return ("--kernel" in command or cli_run) and "--restore-snapshot" not in command
+    return ("--kernel" in command or cli_run) and _command_option(
+        command, "--restore-snapshot"
+    ) is None
 
 
 def _counter_architecture(command: Sequence[str]) -> str:
@@ -706,7 +708,7 @@ class TimeAbiMonitor:
         self.backend = _command_option(command, "--hypervisor")
         self.architecture = _counter_architecture(command)
         self.cold_boot = is_cold_boot_command(command)
-        self.restored = "--restore-snapshot" in command
+        self.restored = _command_option(command, "--restore-snapshot") is not None
         self.boot: dict[str, str] | None = None
         self.restores: list[dict[str, str]] = []
         self.runtime: dict[str, str] | None = None

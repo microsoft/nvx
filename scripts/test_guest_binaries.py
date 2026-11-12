@@ -1290,6 +1290,24 @@ class GuestBinaryArchitectureTests(unittest.TestCase):
         self.assertIn('--architecture "$NVX_ARCHITECTURE"', source)
         self.assertNotIn("--config", source)
 
+    def test_kernel_producers_lock_the_shared_docker_download_cache(self):
+        dockerfile = (BuildConstants.REPO_ROOT / "docker" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        for stage in ("kernel", "kernel-config"):
+            with self.subTest(stage=stage):
+                body = dockerfile.split(f"FROM base AS {stage}\n", 1)[1].split(
+                    "\nFROM ", 1
+                )[0]
+                mount = re.search(r"^RUN --mount=(\S+)", body, flags=re.MULTILINE)
+                assert mount is not None
+                options = dict(
+                    option.split("=", 1) for option in mount.group(1).split(",")
+                )
+                self.assertEqual(options.get("type"), "cache")
+                self.assertEqual(options.get("target"), "/repo/.cache/downloads")
+                self.assertEqual(options.get("sharing"), "locked")
+
     def test_explicit_target_resolution_and_legacy_manifest(self):
         for architecture, target in GuestRustBuildConstants.TARGETS.items():
             with self.subTest(architecture=architecture):

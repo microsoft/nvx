@@ -780,6 +780,52 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(restore.backend, "mshv")
         self.assertFalse(restore.cold_boot)
 
+    def test_restore_option_spellings_require_valid_latest_restore_status(self):
+        boot = BOOT_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
+        restored = RESTORE_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
+        for executable in (["openvmm"], ["nvx-rs.exe", "run"]):
+            for option in (
+                ["--restore-snapshot", "snapshot"],
+                ["--restore-snapshot=snapshot"],
+            ):
+                command = [
+                    *executable,
+                    "--architecture=x86_64",
+                    "--hypervisor=mshv",
+                    *option,
+                ]
+                with self.subTest(command=command, status="valid"):
+                    monitor = TimeAbiMonitor(command)
+                    monitor.feed((boot + restored + STATUS_OK).encode())
+                    self.assertFalse(monitor.cold_boot)
+                    self.assertTrue(monitor.restored)
+                    self.assertEqual(
+                        monitor.require_restore(
+                            "restored guest", online_cpus=4, generation=2
+                        )["generation"],
+                        "2",
+                    )
+                for invalid, message in (
+                    ("", "did not report an NVX-TIME-ABI restore marker"),
+                    (
+                        restored.replace("generation=2", "generation=0"),
+                        "not 1 or later after a restore",
+                    ),
+                    (
+                        restored.replace("lapic_hz=200000000", "lapic_hz=1000000000"),
+                        "is not the mshv rate",
+                    ),
+                    (
+                        restored.replace("tsc_hz=2194804000", "tsc_hz=400000000"),
+                        "outside 500 MHz",
+                    ),
+                ):
+                    with self.subTest(command=command, status=message):
+                        monitor = TimeAbiMonitor(command)
+                        monitor.feed((boot + invalid).encode())
+                        with self.assertRaisesRegex(TimeAbiFailure, message):
+                            monitor.feed(STATUS_OK.encode())
+
     def test_records_markers_across_chunk_boundaries(self):
         monitor = TimeAbiMonitor(KVM_BOOT)
         data = (
