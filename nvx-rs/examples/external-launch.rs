@@ -42,7 +42,7 @@ use nvx::host::network::{Access, NetworkPolicy};
 use nvx::host::process::{BootId, Opened, Process, ProcessRef};
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::transport::{self, Transport};
-use nvx::host::{artifacts, report, snapshot, vm};
+use nvx::host::{report, snapshot, vm};
 use nvx::protocol::root::RootImage;
 
 /// One byte past OpenVMM's 25-byte restore-ready event, so that a longer event fails to parse.
@@ -75,9 +75,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_err(Box::<dyn Error>::from)
     };
     let runtime = Runtime {
-        openvmm: artifacts::absolute(Path::new(&args[2]))?,
-        kernel: artifacts::absolute(Path::new(&args[3]))?,
-        initramfs: artifacts::absolute(Path::new(&args[4]))?,
+        openvmm: std::path::absolute(Path::new(&args[2]))?,
+        kernel: std::path::absolute(Path::new(&args[3]))?,
+        initramfs: std::path::absolute(Path::new(&args[4]))?,
         identity: RuntimeIdentity::new(identity(6)?, identity(7)?, identity(8)?),
         hypervisor,
         cpu_profile: Some("auto".to_owned()),
@@ -121,7 +121,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         config.memory_mib = key.memory() / (1 << 20);
         config.root = RootConfig::Layered(LayeredRoot {
-            image: artifacts::absolute(Path::new(&args[10]))?,
+            image: std::path::absolute(Path::new(&args[10]))?,
             format: RootImage::erofs(None),
             gpt_first_partition_bound: None,
             upper: UpperConfig::Ram {
