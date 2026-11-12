@@ -26,10 +26,11 @@ use crate::host::platform;
 use crate::protocol::{HostMap, MAPS_TOKEN, MAX_HOST_MAPPINGS};
 
 impl ExportPlan {
-    /// Checks that a plan read from a record is one that the CLI's planner could make for a root
-    /// that reserves `reserved`: at least one and at most [`MAX_CHILDREN`] children, none inside
-    /// another, each an absolute host path below a volume's root, with its host paths in the form
-    /// in which `plan` resolves them, whose policy paths lie inside it within OpenVMM's limits and
+    /// Checks that a plan, such as one read from a record, is one that a planner could make for a
+    /// root that reserves `reserved`: at least one and at most [`MAX_CHILDREN`] children, none
+    /// inside another, each an absolute host path below a volume's root, with its host paths
+    /// resolved, without a NUL character or a `..` component, and, on Windows, on a local drive,
+    /// without the verbatim prefix, whose policy paths lie inside it within OpenVMM's limits and
     /// keep its rules, and writable exactly when a bind maps a path of it read-write; and at least
     /// one and at most [`MAX_HOST_MAPPINGS`] binds, each of a known child, from a relative source
     /// that holds the host's names joined with `/`, that a guest path can hold, and that the child

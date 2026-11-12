@@ -26,9 +26,9 @@
 //!   [`HostExport::parse`](super::export::HostExport::parse),
 //!   [`RootLayout::parse`](super::root::RootLayout::parse), and
 //!   [`parse_host_mapping_count`](super::parse_host_mapping_count) read their tokens with it, and
-//!   so do the time ABI's check of report-only mode, in `nvx::guest::time`, and the CLI's check of
-//!   the user's kernel parameters of a sandbox, which splits them both as the kernel and as the
-//!   init does, and compares their names as the kernel does.
+//!   so do the time ABI's check of report-only mode, in `nvx::guest::time`, and the check of a
+//!   boot's own kernel parameters, in `nvx::host::config::VmConfig::check`, which splits them
+//!   both as the kernel and as the init does, and compares their names as the kernel does.
 //!
 //! The kernel leaves OpenVMM's `virtnet_dns=` and `virtnet_gw=` tokens to the guest, which reads
 //! them from the whole command line, as OpenVMM checks them:

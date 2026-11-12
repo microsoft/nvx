@@ -114,37 +114,13 @@
 //!
 //! [guest-agent guidelines]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md
 //!
-//! Each adapter applies the record in its own space. nvx-init applies it with its own, NVX's
-//! internal reference code, private to the crate, which activates the clone as at a cold boot. It
-//! assembles the root as a cold boot does, with the record's image, an EROFS image
-//! whose UUID it checks if the record expects one, or a GPT disk whose GUID it checks if the
-//! record expects one, its upper, a tmpfs or the scratch, with the record's journal policy, and
-//! its overlay mode, and with the inputs that the guest takes from its own configuration, which
-//! its template captured: the runtime directory, the block devices, the host filesystem device's
-//! virtio-fs tag, the gateway of the template's NIC, if it has one, and how long the assembly waits
-//! for each block device, but never past the activation's deadline, so
-//! that the application ends by then. For a GPT disk, it first asks the kernel to reread the disk's
-//! partition table, once the distro device appeared, by the same deadline: the kernel created the
-//! block devices of partitions from the template's placeholder, when it found it, and creates those
-//! of the clone's disk then, from the same read-only bytes that the assembly reads and checks, as
-//! at a cold boot. The upper must be fresh: the assembly refuses one whose `upper` or `work`
-//! directory exists and is not empty, since a clone's root starts as its image alone, while a cold
-//! sandbox's scratch keeps its upper across boots; the check reads at most one entry of each, and
-//! no file. The record holds no execution identity: the adapter gives each execution the identity
-//! that the execution names, as for a sandbox without a workload identity at a cold boot. If the
-//! record has an export, it mounts the host export through the template's filesystem device,
-//! read-write, at `hostfs/root` in the runtime directory, outside the root, where only the guest's
-//! root user reaches it: the record names no mode, and OpenVMM limits each of the export's
-//! children to its own access. It applies the record's VM-wide view, with the record's DNS server,
-//! if any. The root owns the machine-ID and resolver binds, including any made before a later
-//! failure. The view sets the VM's hostname and generates an ID only when the record requests
-//! one, after the repair's reseed. The application starts no process. nvx-init keeps the root and
-//! the workload that it activated, with the export's root, from which it maps the host's mapping
-//! table once the clone is ready, the network's proxy endpoint, which it tells its workloads as at
-//! a cold boot, and the publication and gateway with which it starts and supervises ingress. Their
-//! teardown closes the export's root, then tears the root down with its view binds. An
-//! application that fails leaves nothing that it mounted or bound mounted, unless its error holds
-//! the unmounts that failed.
+//! Each adapter applies the record in its own space, and the library applies none of it.
+//! nvx-init applies it with NVX's own space, internal reference code private to the crate, as a
+//! cold boot assembles its root, by the activation's deadline, and starts no process. The
+//! guidelines give the interface of that space and the rules that it keeps, which another init's
+//! space may adapt, under [Build the space].
+//!
+//! [Build the space]: https://github.com/microsoft/nvx/blob/dev/doc/guest-agent-guidelines.md#build-the-space
 //!
 //! # Example
 //!
@@ -200,14 +176,8 @@
 //! report-only finish without a running time daemon, which runs the deferred time work itself,
 //! in a child that it waits for. They never power the VM off, so a caller that is not PID 1 keeps
 //! its own reaping, transport, and shutdown. The activation needs no privilege, and
-//! makes no system call and changes no admission fence. nvx-init's
-//! application of the record needs the guest's root user, in the guest's initial mount
-//! namespace, as its assembly of a root does: for a GPT disk, it asks the kernel to reread the
-//! disk's partition table, which needs `CAP_SYS_ADMIN`; it mounts the root, applies its VM-wide
-//! view, and, if it fails, tears it down. It starts no process and generates at most one ID, a
-//! machine ID that the record asks for. It mounts the host export of a record that has one, and
-//! writes the machine ID's and the resolver's files in the runtime directory, whose binds over
-//! the root's `/etc/machine-id` and `/etc/resolv.conf` need Linux 6.8 or later.
+//! makes no system call and changes no admission fence: a record's application needs the
+//! privileges of the adapter's own space.
 
 pub(crate) mod state;
 #[cfg(test)]
