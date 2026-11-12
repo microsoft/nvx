@@ -1,25 +1,37 @@
 //! The claim of a launch's log: the job object, named after the log, in which its VMM starts, and
 //! the checks of whether a process of the launch still holds the log.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(feature = "cli")]
+use std::fs::OpenOptions;
 use std::io;
+#[cfg(feature = "cli")]
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::OwnedHandle;
+#[cfg(feature = "cli")]
 use std::path::Path;
 use std::{mem, ptr};
 
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
-    ERROR_SHARING_VIOLATION, ERROR_SUCCESS, HANDLE, SetLastError,
+    ERROR_SUCCESS, HANDLE, SetLastError,
 };
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL};
+#[cfg(feature = "cli")]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+use windows_sys::Win32::System::JobObjects::{CreateJobObjectW, OpenJobObjectW};
+#[cfg(feature = "cli")]
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
-    OpenJobObjectW, QueryInformationJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+    QueryInformationJobObject,
 };
 use windows_sys::Win32::System::Threading::CreateEventW;
 
-use super::identity::{opened_file_id, opened_file_identity, status_error};
+#[cfg(feature = "cli")]
+use super::identity::opened_file_identity;
+use super::identity::{opened_file_id, status_error};
 use super::private::{CurrentUser, Required, privacy_problem, with_owner_only_attributes};
 use super::{last_error, owned, raw, wide};
 
@@ -30,6 +42,7 @@ use super::{last_error, owned, raw, wide};
 /// [`log_claim_held`] describes.
 ///
 /// [`spawn_detached`]: crate::host::platform::windows::spawn_detached
+#[cfg(feature = "cli")]
 pub(crate) fn claim_log(_file: &fs::File) -> io::Result<()> {
     Ok(())
 }
@@ -138,7 +151,16 @@ enum LogJobName {
     /// of the user, as [`holds_name`] tells it.
     Foreign,
     /// The user's job, open to query its processes.
-    Users(OwnedHandle),
+    Users(
+        #[cfg_attr(
+            not(feature = "cli"),
+            expect(
+                dead_code,
+                reason = "only the CLI's claim checks query the job's processes"
+            )
+        )]
+        OwnedHandle,
+    ),
 }
 
 /// The class of the information of `NtQueryObject` that names an object, which `ntifs.h`
@@ -277,6 +299,7 @@ fn log_job_named(name: &[u16]) -> io::Result<LogJobName> {
 
 /// Returns how many processes the job object of the log `id` holds, or `None` if no job of the
 /// user takes its name, as [`log_job_named`] judges it.
+#[cfg(feature = "cli")]
 pub(super) fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
     let LogJobName::Users(job) = log_job_named(&log_job_name(id))? else {
         return Ok(None);
@@ -324,6 +347,7 @@ pub(super) fn log_job_processes(id: (u64, u128)) -> io::Result<Option<u32>> {
 /// rename between the opens could have replaced the file.
 ///
 /// [`spawn_detached`]: crate::host::platform::windows::spawn_detached
+#[cfg(feature = "cli")]
 pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bool> {
     let replaced = || io::Error::other(format!("{} is not the claimed log", path.display()));
     let log = OpenOptions::new()
@@ -355,11 +379,12 @@ pub(crate) fn log_claim_held(path: &Path, identity: (u64, u64)) -> io::Result<bo
 /// Returns whether the live process `pid` that started at `start_time`, which serves the control
 /// endpoint of a launch whose log is the file `log`, is that launch's VMM.
 ///
-/// On Windows it is: the endpoint is a named pipe whose name [`control_endpoint`] draws at random
-/// for each launch, so only the VMM that the launch passed it to serves it. The objects of the
-/// process are not examined, as a query of another process's synchronous pipe could wait forever.
+/// On Windows it is: the endpoint is a named pipe whose name [`vm::create`] draws at random for
+/// each launch, so only the VMM that the launch passed it to serves it. The objects of the process
+/// are not examined, as a query of another process's synchronous pipe could wait forever.
 ///
-/// [`control_endpoint`]: crate::host::platform::windows::control_endpoint
+/// [`vm::create`]: crate::host::vm::create
+#[cfg(feature = "cli")]
 pub(crate) fn serves_launch(_pid: u32, _start_time: u64, _log: (u64, u64)) -> io::Result<bool> {
     Ok(true)
 }

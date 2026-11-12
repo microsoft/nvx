@@ -22,27 +22,27 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 
 use crate::hypervisor::Hypervisor;
 
-pub(crate) use self::endpoint::{
-    ReadyListener, connect_endpoint, control_endpoint, endpoint_server_pid,
-};
+pub(crate) use self::endpoint::{ReadyListener, connect_endpoint};
 #[cfg(feature = "cli")]
 pub(crate) use self::endpoint::{
     endpoint_server_pid_until, interrupt_transfers, transport_from_handle,
 };
 pub use self::identity::file_identity;
+#[cfg(feature = "cli")]
 pub(crate) use self::identity::{
     Directory, file_id, is_deleted, opened_file_id, opened_file_identity,
 };
 #[cfg(feature = "cli")]
 pub(crate) use self::interrupt::{interrupted, watch_interrupts};
-pub(crate) use self::log_claim::{claim_log, create_log_job, log_claim_held, serves_launch};
-pub use self::private::create_private_dir;
+pub(crate) use self::log_claim::create_log_job;
 #[cfg(feature = "cli")]
-pub(crate) use self::private::rename_no_replace;
+pub(crate) use self::log_claim::{claim_log, log_claim_held, serves_launch};
+pub use self::private::create_private_dir;
 pub(crate) use self::private::{
-    check_snapshot_dir, check_store_dir, check_vm_dir, create_store_dir, create_vm_dir,
-    make_sparse, private_file_problem,
+    check_snapshot_dir, check_vm_dir, create_vm_dir, make_sparse, private_file_problem,
 };
+#[cfg(feature = "cli")]
+pub(crate) use self::private::{check_store_dir, create_store_dir, rename_no_replace};
 pub use self::process::process_start_time;
 pub(crate) use self::process::{
     ProcessHandle, boot_id, host_id, monotonic_ns, open_process, own_bytes_read,

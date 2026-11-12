@@ -17,18 +17,10 @@
 //! - [`network`] lowers egress rules, and the egress policy files that `nvx-rs run` and
 //!   `nvx-rs sandbox` accept, into OpenVMM's rules, and [`filesystem`] plans the export of host
 //!   paths through OpenVMM's aggregate virtio-fs device.
-//! - [`instance`] drives one VM instance in a directory of its own, the [`store`] of its VM,
-//!   through the [`supervisor`] and the [`session`]: it starts OpenVMM and waits until the guest
-//!   is ready, reattaches to the VM after a restart, runs workloads, and stops the VM.
-//!   [`report`] reads OpenVMM's outcome report.
-//! - [`store`] keeps the runtime records of a sandbox in a private directory with one lock: the
-//!   runtime record of its VM, with the VM's runtime identity, and the journal of its launch,
-//!   through which an interrupted launch is recovered without signaling an unverified process.
-//! - [`supervisor`] launches a sandbox's VMM through the store's journal, passing it only the
-//!   descriptors or handles that the caller allows, stops it through the caller's graceful step,
-//!   with a bounded forced step on request, and reattaches to it after the orchestrator restarts
-//!   within the same host boot. The private `spawn` module, whose items `supervisor` re-exports,
-//!   starts the VMM detached, with no other descriptor or handle of the caller's.
+//! - [`report`] reads OpenVMM's outcome report.
+//! - [`supervisor`] is the transitional public path, until SL6.3 (#1122), of the low-level spawn
+//!   of the private `spawn` module, which starts a VMM detached, passing it only the descriptors
+//!   or handles that the caller allows, and no other descriptor or handle of the caller's.
 //! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
 //!   from a [`CaptureClass`](snapshot::CaptureClass) and [`SnapshotManifest`](snapshot::SnapshotManifest),
 //!   the strict manifest reader, and the capture's public time and eligibility information.
@@ -62,7 +54,7 @@
 //! `std::path` and `std::fs`, for the sandbox launch profile and the CLI.
 //!
 //! The children of `host` depend on one another without cycles: each builds only on children
-//! beneath it, as the [`supervisor`] does on the [`store`], and the store on `spawn`. An item that
+//! beneath it, as [`vm`] does on `spawn`, and `spawn` on [`platform`]. An item that
 //! a lower child needs from a higher one moves down, and the higher child re-exports it where it
 //! was. `tests/host_modules.rs` reads the crate's sources and fails on a cycle, which it lists
 //! with a reference for each of its dependencies.
@@ -80,7 +72,6 @@ pub mod artifacts;
 pub mod cli;
 pub mod config;
 pub mod filesystem;
-pub mod instance;
 pub mod launch;
 pub mod network;
 pub mod nvxs;
@@ -97,7 +88,6 @@ pub mod seal;
 pub mod session;
 pub mod snapshot;
 mod spawn;
-pub mod store;
 pub mod supervisor;
 #[cfg(unix)]
 #[allow(unsafe_code)]

@@ -47,11 +47,10 @@ nvx-rs/
 │   │                sides, without I/O, threads, or features, for any framing and host
 │   ├── host/        feature `host` (default): the runtime that every launch shares, VM
 │   │                directories and configurations, artifacts, launch, network and egress policy
-│   │                files, filesystem, NVXS connection, session, process, platform, VM instances,
-│   │                sandbox stores, templates' manifests and compatibility keys,
-│   │                outcome reports, file seals, and the sandbox launch profile of `nvx-rs sandbox`,
-│   │                its distro and scratch bindings, and its prepared launches; with feature
-│   │                `cli`, the `nvx-rs` CLI
+│   │                files, filesystem, NVXS connection, session, process, platform, templates'
+│   │                manifests and compatibility keys, outcome reports, file seals, and the
+│   │                sandbox launch profile of `nvx-rs sandbox`, its distro and scratch bindings,
+│   │                and its prepared launches; with feature `cli`, the `nvx-rs` CLI
 │   ├── testing/     feature `testing`: the fake OpenVMM
 │   ├── guest/       feature `guest`: the programs that run in Linux guests, the guest's NVXS
 │   │                connection, the libraries through which a guest init or agent opens the
@@ -63,9 +62,9 @@ nvx-rs/
 │   │                prepares a template's guest for a capture before its root's assembly, and
 │   │                the typed calls through which it runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
-├── tests/           fake-OpenVMM, CLI, NVXS session, process-supervision, checked-handoff, store,
-│                    host-module layering, and guest-binary tests, the CLI's
-│                    scenario tests and their harness, in cli/, the store's record fixtures, the
+├── tests/           fake-OpenVMM, CLI, NVXS session, process and spawn, checked-handoff,
+│                    host-module layering, and guest-binary tests, the CLI's scenario tests and
+│                    their harness, in cli/, the
 │                    hand-written sandbox configurations of every format, the cases of the export
 │                    and root boot tokens, and the template manifests that OpenVMM wrote, in
 │                    fixtures/, and the conformance vectors of the wire formats and of a template's
@@ -81,9 +80,7 @@ on Linux and Windows.
 
 The [filesystem module](src/host/filesystem/mod.rs) keeps its request types and
 planner together, with private siblings for guest and host paths, access policies,
-OpenVMM limits, and recorded-plan checks and rendering. The
-[instance module](src/host/instance/mod.rs) separates private-file helpers,
-lock-held lifecycle transitions, and workload execution. The CLI's
+OpenVMM limits, and recorded-plan checks and rendering. The CLI's
 [managed sandbox lifecycle](src/host/cli/sandbox/lifecycle/mod.rs) separates state
 directories, outcome reports, start and exec, and stop and deprovision. The
 CLI's own [store](src/host/cli/store/mod.rs) keeps the layout of a sandbox's
@@ -92,11 +89,7 @@ its files and its lock. The
 [Linux](src/host/platform/linux/mod.rs) and
 [Windows](src/host/platform/windows/mod.rs) platform modules each separate
 processes, spawns, private directories and files, file identities, the claim of a
-launch's log, and OpenVMM's endpoints, and on Windows, the CLI's Ctrl-C. The
-[store](src/host/store/mod.rs) keeps `SandboxStore` and its documentation, with
-private siblings for the names of its files, `LockedStore`, and launches. The
-[supervisor](src/host/supervisor/mod.rs) keeps its documentation, with private
-siblings for launches, the VMs that it holds and their stops, and reattaches.
+launch's log, and OpenVMM's endpoints, and on Windows, the CLI's Ctrl-C.
 Their `mod.rs` files retain the existing entry points through re-exports; their
 `tests.rs` files keep the unit tests at the same module paths.
 
@@ -133,12 +126,10 @@ changes only when the module's purpose does.
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
 | [`nvx::host::network::policy`](#nvxhostnetworkpolicy) | Egress policy files and their compilation into OpenVMM's native rules |
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
-| [`nvx::host::store`](#nvxhoststore) | `SandboxStore`: the runtime records of one sandbox, which every host that supervises it shares under one lock |
-| [`nvx::host::instance`](#nvxhostinstance) | `Instance`: a VM in a sandbox store of its own, which the store, the supervisor, and the control session drive |
 | [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
-| [`nvx::host::supervisor`](#nvxhostsupervisor) | The supervisor of a sandbox's VMM, beneath the CLI, `Instance`, and external orchestrators |
+| [`nvx::host::supervisor`](#nvxhostsupervisor) | The transitional public path of the low-level spawn of a VMM, which code that stays uses until SL6.3 (#1122) |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::session`, `platform`, `report`](#nvxhostsession-platform-report) | The authenticated control session, Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
@@ -442,7 +433,8 @@ attaches its own.
 their install or staging metadata gives, such as `sha256:` and a digest, which
 NVX compares and never computes, and adds the versions of the contracts that the
 crate speaks; `differences` names the `IdentityPart`s in which two identities
-differ. The sandbox store records it with each VM, and re-exports its types.
+differ. A caller saves it with each VM, in a `SavedVm`, which `vm::verify`
+checks against the current one.
 
 `probe_hypervisor` checks that the host has the hypervisor: its device on Linux,
 and the Windows Hypervisor Platform on Windows.
@@ -606,7 +598,7 @@ Read the resolved NIC or capture context, or build an activation record,
 before consuming `Prepared` into the command.
 
 The compiled [external-launch example](examples/external-launch.rs) consumes
-this command, uses `supervisor::spawn_vm` without a sandbox store, checks the
+this command, launches it with the transitional `supervisor::spawn_vm`, checks the
 cold guest's boot marker and shell response, then asks it to exit cleanly.
 It requires the VMM's actual exit status 0 and a successful
 outcome with complete teardown. Build with
@@ -680,9 +672,8 @@ it, which each clone's restore replaces with the clone's own, so that a template
 with a NIC serves the clones of every network policy at its guest's address.
 
 A key and a class each have one canonical, versioned encoding, whose
-domain-separated SHA-256 digest is its identity, a `KeyIdentity`, which converts
-to and from the `nvx::activation::Identity` by which a clone's lease and durable records
-name its template's key, or a `ClassIdentity`; the
+domain-separated SHA-256 digest is its identity, a `KeyIdentity`, or a
+`ClassIdentity`; the
 [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/snapshot-key-v1.txt`, pin both encodings and identities. The
 key's encoding, version 1, leaves the network policy out, since templates
@@ -991,8 +982,8 @@ with its arguments, in UTF-16 code units, as Windows quotes them, and
 every host, with the reserve that its caller keeps. The helpers live in
 `nvx::host::config` and remain re-exported here for existing callers.
 `LaunchSpec::check_process_command_line`, which a caller runs before it
-provisions an instance, keeps 1024 code units for what may change before the
-instance starts, whose own check keeps none.
+provisions a VM, keeps 1024 code units for what may change before the VM
+starts.
 
 `VmmLaunch::RESERVE`, 2048 code units, is what the planning of an adapter's
 launch keeps for the rest of the launch: the executable and the arguments that
@@ -1046,80 +1037,6 @@ host paths through OpenVMM's aggregate virtio-fs device, for a root's
 its ordered binds, which give the host-mapping table, and the identities that
 each start checks again; and `guest_path` and `resolve_guest_path` (also at
 `nvx::`).
-
-### `nvx::host::store`
-
-`SandboxStore`: the runtime records of one sandbox in a private directory with
-one lock, which every host that supervises the sandbox shares.
-
-The `RuntimeRecord` names the running VM: the `ProcessRef` of its VMM, its
-control endpoint, and the `RuntimeIdentity` that it was launched with, the
-identities of its OpenVMM, kernel, and initramfs from install or staging
-metadata and its boot and control contract versions, which decide whether
-another build of the host may reattach to it.
-
-The `LaunchJournal` of a launch holds a marker written before the spawn, the
-VMM's `ProcessRef` right after it, and an inherited claim on the VMM's log,
-which proves that a launch that never published its endpoint has exited, so that
-recovery ends an interrupted launch and signals only a VMM that it holds through
-a verified `Process`.
-
-Records are JSON in one versioned format, and records in any other format fail
-rather than being migrated.
-
-The caller declares the files that it keeps in the directory, its configuration
-record, whose presence means that the sandbox is provisioned, and any others, as
-`CallerFiles`, and takes the lifecycle locks with them:
-`SandboxStore::lock_for_provision` creates the directory, again if a removal
-deletes it meanwhile, `SandboxStore::lock_existing` fails with
-`ErrorKind::NotFound` once it is gone, and a holder that leaves the directory
-without the configuration record removes its lock file as it releases the lock.
-
-`LockedStore::remove` removes a sandbox that no VMM can run in, for a caller
-that declares its configuration record: the store's files, the caller's, and the
-directory, unless it holds entries that are neither, which it refuses and keeps,
-and `Lingering` waits for open files, such as the lock files of other
-transitions, that keep the emptied directory; both remove the directory only
-while the path still names it.
-
-The store also owns the file in which the VMM stages its outcome report, which a
-VMM that is killed while it writes the report leaves, and removes it once no
-process of its launch runs.
-
-On Windows, directory creation and no-replace renames use extended-length paths
-when needed, so storage paths may exceed the legacy 248-character directory and
-260-character file limits without enabling a machine-wide long-path setting.
-The filesystem's component limits and Windows' extended-length path limit
-(about 32,767 UTF-16 code units, including the resolved root and internal file
-names) still apply. VM launches have a separate
-[working-directory limit](#windows-working-directory-limit).
-
-### `nvx::host::instance`
-
-`Instance`: a VM in a sandbox store of its own, which `nvx::host::store`,
-`nvx::host::supervisor`, and `nvx::host::session` drive, and in which the caller
-keeps the files that it declares as `CallerFiles`.
-
-Under the store's lifecycle lock of an existing sandbox, `LockedInstance::find`
-reattaches to the VM, ends a start that was interrupted, and reports a VM of
-another runtime identity as `Mismatched` rather than driving it;
-`LockedInstance::start` launches OpenVMM through the supervisor with a fresh
-capability, under the caller's `RuntimeIdentity`, waits until the guest is ready
-and has mounted the mapped paths, and commits the launch; `LockedInstance::stop`
-stops the VM with a forced fallback; `LockedInstance::terminate` stops a
-`Mismatched` VM by identity-verified forced termination, without a control
-session or its outcome report; and `LockedInstance::remove` removes a stopped
-instance, with the caller's files and its directory, through the store.
-
-`Instance::exec` runs workloads without the lock and pumps their output.
-
-`write_json` and `read_json` keep the configuration records that callers store
-beside an instance.
-
-An instance's directory is also its VMM's working directory. `check_launch` and
-`LockedInstance::start` apply the
-[Windows working-directory limit](#windows-working-directory-limit) before
-instance creation or launch records, respectively.
 
 ### `nvx::host::nvxs`
 
@@ -1197,16 +1114,15 @@ alone.
 
 ### `nvx::host::supervisor`
 
-The supervisor of a sandbox's VMM, beneath the CLI, `Instance`, and external
-orchestrators, which keep the configuration, the authorization, and the
-application protocol.
-
-`launch` runs the store's launch steps under the sandbox's lock, as a launch
-whose `LaunchId` the caller reserved beforehand, a fresh one for each launch: it
-writes the journal's marker, which names the launch, spawns OpenVMM with the
-claimed log, records its `ProcessRef` right after, and returns a `Starting`
-launch that the caller commits once the VMM serves its control endpoint, or
-abandons. A launch that fails never leaves an unrecorded VMM running.
+The transitional public path of the low-level spawn of a VMM, which code that
+stays uses until SL6.3 (#1122): `spawn` and `spawn_vm`, the `VmmCommand` that
+they start and the `Launched` VMM that they return, `Inherited`, and
+`spawn_command`. The module re-exports them and has no code of its own: it
+supervises nothing. [`nvx::host::vm`](#nvxhostvm) creates, spawns, reattaches
+to, and stops a VM in a private directory that its caller owns. SL6.3 deletes
+`spawn_command` and the checked-file handoff of `PreparedLaunch`, and settles
+the launcher of the `external-launch` example: the last users of this path,
+besides the tests of the spawn in `tests/supervisor.rs`.
 
 `spawn_vm` starts a caller-owned command without a store, with the same strict
 Windows log-job requirement as `vm::spawn`: an untrusted job name or a log that
@@ -1241,35 +1157,18 @@ and holds them until it exits: the read end of the VMM's capability pipe, its
 log, and the handles that it allows. The VMM runs in a job object of its own,
 named after its log, whose processes are the launch's claim while such a
 process holds the log, so a recovery still ends the launch once the VMM exits.
-Each spawn of a VMM holds a `SpawnLock` throughout that window, so a caller that
-launches VMMs spawns its other processes with `spawn_command`, which spawns a
-`std::process::Command` under one, or under one that `lock_spawns` returns. On
-other hosts, the lock holds nothing.
-
-`Vmm::stop` runs one graceful step of the caller's and waits for the VMM's exit
-event until a deadline, and takes a bounded forced step through the VMM's
-verified identity only on request.
-
-`Vmm::stop_unless_exited` stops the VM the same way only if its VMM still runs
-as the stop begins, and otherwise stops nothing and keeps the runtime record of
-its launch, so that `reattach` finds that the VM exited without its holder.
-
-`Vmm::terminate` takes that forced step alone, within the caller's bound, for a
-VM whose guest the caller must not ask anything, such as one of another runtime
-identity.
-
-`reattach` recovers an interrupted launch, and holds the recorded VMM again
-after the orchestrator restarts within the same host boot: `Live`, `Mismatched`
-with another runtime identity, `Exited`, or `Indeterminate`.
+Each spawn of a VMM holds the crate's spawn lock throughout that window, so a
+caller that launches VMMs spawns its other processes with `spawn_command`,
+which spawns a `std::process::Command` under it. On other hosts, the lock holds
+nothing.
 
 #### Windows working-directory limit
 
 Windows' process-creation API limits `VmmCommand::working_dir` to 258 UTF-16
 code units in its absolute path, including any verbatim prefix and trailing
-separator. It may name a shorter directory than the store. A raw `spawn`
-refuses an overlong working directory with `InvalidInput`; high-level instance
-and capture preflight return `Unsupported` with the limit in the top-level
-message. Neither silently changes the requested directory.
+separator. It may name a shorter directory than those of the VMM's other files.
+A raw `spawn` refuses an overlong working directory with `InvalidInput`, and
+never changes the requested directory.
 
 ### `nvx::host::seal`
 
@@ -2554,9 +2453,9 @@ before them.
   [runtime identity](#runtime-identity). `deprovision` removes the state
   directory.
 
-The state directory is the directory of the sandbox's
-[store](src/host/store/mod.rs), the runtime records that every host of a
-sandbox shares, and `config.json` is the CLI's own record beside them. It also
+The state directory is the CLI's own [store](src/host/cli/store/mod.rs) of the
+sandbox, which keeps the runtime records of its VM, and `config.json` is the
+CLI's record of the sandbox beside them. It also
 records the [distro binding](#distro-bindings) and the
 [scratch binding](#checked-handoff) of the sandbox, and its network as the
 network options from which each `start` builds the policy again, as `provision`
@@ -2585,21 +2484,22 @@ whole transition, and `exec` only while it finds the running VM, so that a long
 workload cannot delay a `stop`. An `exec` that finds another holding
 `exec.lock` releases the store's lock and tries again until `--wait` seconds,
 60 by default, have passed, and then fails with `sandbox-busy`; `stop` takes no
-exec lock. The CLI takes the store's
-[lifecycle locks](src/host/store/mod.rs) with `config.json` as its
+exec lock. The CLI takes the lifecycle locks of its own
+[store](src/host/cli/store/mod.rs) with `config.json` as its
 configuration record: a transition that leaves the state directory without it,
 such as one of a sandbox that was never provisioned, removes the lock file as
 it releases the lock, and `deprovision` removes the sandbox through the store,
 which removes the store's files and `config.json`, refuses files that are not
 NVX's, and removes the lock file, while it still holds the lock, before the
-directory. Every transition but `provision` finds the
-sandbox's VM with `nvx::host::supervisor::reattach`, as an orchestrator does
-after it restarts within the same boot of the host: it ends a start that was
-interrupted, holds an OpenVMM that still runs through its verified process
-identity, and clears the runtime record of one that exited without a `stop`.
+directory. Taking the lock ends a start that was interrupted. Every transition
+but `provision` then finds the sandbox's VM in the store's runtime record, as an
+orchestrator does after it restarts within the same boot of the host: it holds
+an OpenVMM that still runs through its verified process identity, and clears
+the runtime record of one that exited without a `stop`.
 The first `exec` or `stop` to find such a record fails because the runtime
 state is stale, while `start` launches OpenVMM again and `deprovision` removes
-the sandbox. `start` launches OpenVMM with `nvx::host::supervisor::launch`, and
+the sandbox. `start` launches OpenVMM with `nvx::host::vm::create` and
+`nvx::host::vm::spawn`, through the store's launch journal, and
 `stop` asks the guest to shut down through the control session, waits up to
 `--timeout` seconds for OpenVMM to exit, and reports one that does not, which
 keeps running: it never ends OpenVMM otherwise, except one of another
@@ -2738,7 +2638,7 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   code page unless `PYTHONIOENCODING` or UTF-8 mode says otherwise.
 - `start` refuses a control endpoint that another process serves, which it
   treats as one that has not appeared yet, and, on Windows, starts OpenVMM
-  without a console window, as `nvx::host::supervisor` starts it.
+  without a console window, as `nvx::host::vm::spawn` starts it.
 - `start` stops waiting for the control endpoint once the OpenVMM that it
   launched exits, as `nvx::host::session::connect` does, and fails at once
   with `exited`, where `nvx.py` waited until `--timeout` passed before it
@@ -2893,52 +2793,72 @@ nothing but `serde` when `serde` is enabled and `nix` and `getrandom` when
 
 ## Example
 
-```rust,no_run
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+A cold boot through `nvx::host::vm`, in a private directory that the caller
+owns, and the VM's stop.
+[`examples/host-workflows.rs`](examples/host-workflows.rs) also captures a VM,
+restores one, and finds one again after its caller restarts.
 
-use nvx::host::instance::{Found, Instance};
-use nvx::host::launch::LaunchSpec;
-use nvx::host::store::CallerFiles;
-use nvx::protocol::{Workload, WorkloadEnvironment};
+```rust,no_run
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use nvx::activation::{MachineIdMode, View};
+use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
+use nvx::host::runtime::{LaunchOptions, Runtime};
+use nvx::host::vm::{self, VmDir};
 use nvx::{Artifacts, Hypervisor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Locates OpenVMM, the guest kernel, and the Alpine initramfs, with the identity that the
+    // install metadata of their release or checkout gives them.
     let artifacts = Artifacts::discover()?;
-    let runtime = artifacts.runtime_identity()?;
-    let spec = LaunchSpec::new(artifacts, Hypervisor::from_env_or_default()?);
-    // The example keeps no files of its own beside the instance's store.
-    let directory = std::env::temp_dir().join("nvx-example");
-    let instance = Instance::create(directory, "example", CallerFiles::none())?;
-    // Lifecycle transitions hold the instance's lock; executions need none.
-    let mut locked = instance.lock(None)?;
-    let Found::Stopped = locked.find(|| Ok(runtime.clone()))? else {
-        return Err("the example's VM runs already".into());
+    let runtime = Runtime {
+        identity: artifacts.runtime_identity()?,
+        openvmm: artifacts.openvmm,
+        kernel: artifacts.kernel,
+        initramfs: artifacts.initrd,
+        hypervisor: Hypervisor::from_env_or_default()?,
+        cpu_profile: None,
+        windows_breakaway: false,
+        options: LaunchOptions::default(),
     };
-    locked.start(&spec, &runtime, Duration::from_secs(60))?;
-    let Found::Running(running) = locked.find(|| Ok(runtime.clone()))? else {
-        return Err("the example's VM stopped".into());
-    };
-
-    let workload = Workload {
-        argv: vec!["/bin/echo".to_owned(), "hello".to_owned()],
-        timeout_ms: 0,
-        cwd: None,
-        environment: WorkloadEnvironment::Default,
-    };
-    let timeout = Duration::from_secs(60);
-    let execution = instance.exec(&running, &workload, timeout, timeout)?;
-    let mut stdout = Vec::new();
-    let outcome = execution.pump(
-        &mut |chunk: &[u8]| {
-            stdout.extend_from_slice(chunk);
-            Ok(())
+    let config = VmConfig {
+        processors: 1,
+        memory_mib: 256,
+        root: RootConfig::Blockless,
+        view: View {
+            hostname: b"example".to_vec(),
+            machine_id: MachineIdMode::Image,
         },
-        &mut |_: &[u8]| Ok(()),
-        &AtomicBool::new(false),
+        network: None,
+        filesystem: None,
+        console: ConsoleAttachment::Disconnected,
+        boot: Some(Boot {
+            command_line: "quiet".to_owned(),
+            memory_capacity_mib: None,
+            capture: None,
+        }),
+    };
+    // The caller creates and owns the VM's private directory.
+    let directory = Path::new("example-vm");
+    vm::create_private_dir(directory)?;
+    let dir = VmDir::open(directory)?;
+    // Creation checks the whole launch and creates its log, but starts nothing; the spawn starts
+    // OpenVMM detached, and returns its verified process.
+    let launched = vm::spawn(vm::create(&runtime, &config, None, &dir)?)?;
+    // The caller speaks its own protocol with its guest at `launched.outputs.endpoint`, with the
+    // secret `launched.capability`. To stop the VM, the callback would ask the guest in that
+    // protocol to end it, and return whether it sent the request; this one sends none, so the
+    // stop ends OpenVMM's verified process once the grace period has passed, unless it exited.
+    let grace = Instant::now() + Duration::from_secs(10);
+    let stopped = vm::stop(
+        &launched.process,
+        &launched.outputs,
+        |_| false,
+        grace,
+        grace + Duration::from_secs(10),
     )?;
-    println!("{outcome:?}: {}", String::from_utf8_lossy(&stdout));
-    locked.stop(running, Duration::from_secs(30))?;
+    println!("forced: {}, report: {:?}", stopped.forced, stopped.report?);
     Ok(())
 }
 ```
@@ -2961,9 +2881,6 @@ optional cause.
 | `TimedOut` | A deadline that passed |
 | `RuntimeMismatch` | A VM that runs under another runtime identity than the artifacts', which NVX does not drive: only a stop, which terminates it, applies |
 | `Other` | Any other failure |
-
-Messages call an instance `sandbox NAME`, after the name that `Instance::create`
-or `Instance::open` gives it.
 
 ### Error codes
 
@@ -3149,8 +3066,8 @@ tests, only the test hooks that
 [`test-layout-allowlist.json`](../scripts/test-layout-allowlist.json) allows, as
 [Test layout](../doc/contribute.md#test-layout) describes.
 
-The tests need no hypervisor. The fake-OpenVMM test drives `Instance` end to end
-against `nvx-fake-openvmm`. The CLI test runs the
+The tests need no hypervisor. The fake-OpenVMM test runs `nvx-fake-openvmm`
+directly, as `nvx-rs run` runs OpenVMM on the terminal. The CLI test runs the
 [scenario tests](#scenario-tests) of `nvx-rs`, and checks the guest-feature
 requirement and, on Linux, Ctrl-C. The
 [conformance vectors](tests/vectors/README.md) of the wire formats cover both
@@ -3169,10 +3086,8 @@ egress policy compiler compare it with a reference model of the format
 ([Egress policy files](#egress-policy-files)). The NVXS test drives the
 host's and the guest's roles of the session and their connections through a
 broker that relays records as OpenVMM's does, with messages of an application
-framing of its own that span records. The store test crashes orchestrator
-processes at each step of a launch, recovers the VMM stand-ins that they leave
-behind, and loads records that another build wrote, in `tests/fixtures/store/`.
-The host-module test reads the crate's sources and fails if the direct children
+framing of its own that span records. The host-module test reads the crate's
+sources and fails if the direct children
 of `nvx::host` depend on one another in a cycle through the paths of their
 production code, outside comments and test-only code. It lists the shortest
 cycle through each dependency on one, with a reference for each of its
@@ -3180,11 +3095,12 @@ dependencies: break a cycle by moving the item that a lower child takes from a
 higher one down, and re-exporting it at its old path. So the children stack in
 layers, each above those that it depends on, which the test prints with
 `--nocapture`.
-The process-supervision test crashes orchestrator processes at each step of a
-launch through the supervisor, reattaches to the VMM stand-ins that they leave
-behind and stops them, and checks that a VMM inherits only its standard streams
-and the descriptors or handles that it is allowed while another thread spawns
-processes. The tests of `nvx::exec` drive a runner and a peer through a
+The process and spawn test spawns VMM stand-ins through the low-level spawn,
+waits for them through their verified references, finds one again after the
+process that spawned it crashed, and checks that a VMM inherits only its
+standard streams and the descriptors or handles that it is allowed while
+another thread spawns processes. The tests of `nvx::exec` drive a runner and a
+peer through a
 simulated workload, transport, and sink on a clock of their own, and, on Linux,
 the tests of `nvx::guest::exec::binding` drive real programs through them, two
 at once in one loop, one of them with a stalled sink; run as root, one of them

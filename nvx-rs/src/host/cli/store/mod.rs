@@ -15,9 +15,7 @@
 //!   outcome.json          OpenVMM's outcome report of the latest start
 //! ```
 //!
-//! The files have the names under which state directories have always kept them, and the lock
-//! is the lock of the same file that `nvx`'s sandbox store locks, so that a transition that takes
-//! one excludes a transition that takes the other.
+//! The files have the names under which state directories have always kept them.
 //!
 //! The directory is private to the current user, since its records decide which process a later
 //! command signals. On Linux, it belongs to the user with mode 0700, which OpenVMM also requires

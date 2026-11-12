@@ -163,6 +163,7 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 /// anything else, which includes a symbolic link or a missing file, unchanged.
 ///
 /// The file is opened only to locate it, which needs no permission on the file itself.
+#[cfg(feature = "cli")]
 pub(crate) fn restore_private_file_mode(path: &Path, mode: Mode) -> io::Result<()> {
     use nix::fcntl::OFlag;
 

@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::host::cli::deadline::Deadline;
-use crate::host::store::{JOURNAL_NAME, RUNTIME_NAME, SandboxStore};
 
 mod launch;
 mod liveness;
@@ -369,34 +368,4 @@ fn lock_files_that_others_may_access_are_refused() {
     let expected = format!("the sandbox lock {} allows other users", path.display());
     let exit = state.lock(Deadline::after(10.0)).unwrap_err();
     assert_eq!(error(exit), (ErrorCode::Io, expected));
-}
-
-#[test]
-fn the_lock_and_the_files_are_those_of_the_sandbox_store_of_nvx() {
-    let (_directory, state) = state();
-    let store = SandboxStore::open(state.dir()).unwrap();
-    // Each lock excludes the other, so that the commands may move from one to the other.
-    let held = store.lock(None).unwrap();
-    assert_eq!(error(state.lock(Deadline::after(0.1)).unwrap_err()), busy());
-    drop(held);
-    let mut held = None;
-    assert!(released(|| {
-        held = state.lock(Deadline::after(0.0)).ok();
-        held.is_some()
-    }));
-    let deadline = Some(Instant::now() + Duration::from_millis(100));
-    let refused = store.lock(deadline).unwrap_err();
-    assert_eq!(refused.kind(), crate::ErrorKind::TimedOut, "{refused}");
-    drop(held);
-    // The commands find the store's other files where the store keeps them.
-    for (file, path) in [
-        (StateFile::Journal, state.dir().join(JOURNAL_NAME)),
-        (StateFile::Runtime, state.dir().join(RUNTIME_NAME)),
-        (StateFile::Capability, store.capability_path()),
-        (StateFile::Socket, store.socket_path()),
-        (StateFile::Log, store.log_path()),
-        (StateFile::Outcome, store.outcome_path()),
-    ] {
-        assert_eq!(state.path(file), path, "{file:?}");
-    }
 }

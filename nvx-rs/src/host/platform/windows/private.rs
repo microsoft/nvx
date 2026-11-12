@@ -194,6 +194,7 @@ pub(super) fn with_owner_only_attributes<T>(
 /// to SYSTEM or the Administrators group, and its access control list must allow no one else, as
 /// that of a directory under the user's profile does. Its list must also pass entries on to the
 /// files created in it, which would otherwise take their creator's default list.
+#[cfg(feature = "cli")]
 pub(crate) fn check_store_dir(path: &Path) -> io::Result<Option<String>> {
     store_dir_problem(path, &CurrentUser::get()?)
 }
