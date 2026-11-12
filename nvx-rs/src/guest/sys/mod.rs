@@ -111,7 +111,7 @@ pub(crate) use ioctl::{
 pub(crate) use mapping::MemoryMapping;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use msr::{MsrAccess, MsrFile};
-pub(crate) use poll::{Pollable, hung_up, poll, readable_or_hung_up};
+pub(crate) use poll::{Pollable, hung_up, poll, readable_or_hung_up, ready};
 pub(crate) use port::{PORT_DEVICE, Port};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use port::{PortAccess, PortError, check_released, power_off, probe_port};

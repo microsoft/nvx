@@ -237,7 +237,7 @@ fn prelaunch_termination(helper_ends: bool) {
     let Ok(Event::Data(payload)) = session.next_event() else {
         panic!("the complete EXEC record was not received");
     };
-    let Ok(request) = session.accept_request(&payload) else {
+    let Ok(Request::App(request)) = session.accept_request(&payload) else {
         panic!("the complete EXEC request was not accepted");
     };
     assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
@@ -258,6 +258,7 @@ fn prelaunch_termination(helper_ends: bool) {
         &config,
         request.request_id,
         &execution,
+        &mut None,
     )
     .err();
     drop(session);

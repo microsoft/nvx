@@ -1,18 +1,19 @@
+use std::os::fd::BorrowedFd;
 use std::os::unix::process::ExitStatusExt;
 use std::time::{Duration, Instant};
 
 use crate::guest::init::{self, Stream};
-use crate::guest::sys::{self, Errno, FileDescriptor, c_string};
+use crate::guest::sys::{self, Errno, c_string};
 use crate::protocol::{
-    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, BUSY,
-    CWD_FAILED, GuestExecPayload, LAUNCH_FAILED, OUTER_DATA,
+    self, APP_ACTIVATE, APP_CANCEL, APP_CAPTURE, APP_EXIT, APP_STDERR, APP_STDOUT, APP_STOP, BUSY,
+    CWD_FAILED, GuestExecPayload, LAUNCH_FAILED, OUTER_DATA, v2::STDIN_WINDOW,
 };
 
 use super::AgentConfig;
 use super::diagnostics::with_description;
 use super::launch;
 use super::seam::System;
-use super::session::{DataFailureKind, Event as SessionEvent, ReceiveFailure, Session};
+use super::session::{DataFailureKind, Event as SessionEvent, ReceiveFailure, Request, Session};
 
 /// Maximum bytes read from one output descriptor at a time.
 const OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
@@ -28,12 +29,21 @@ const ENVIRONMENT_DIAGNOSTIC: &[u8] = b"nvx-managed-agent: cannot configure work
 /// collects the statuses of the agent's children, and checks the workload's timeout. The agent
 /// keeps the C agent's policy: the output cap, checked for each read of up to 32 KiB, and the
 /// precedence of a cancellation, a timeout, and the cap over the workload's own status.
+///
+/// An execution of NVXC version 2 has no output cap. Its workload reads a pipe, into which each
+/// turn writes what the host sent in `STDIN` frames, under [`STDIN_WINDOW`], and acknowledges
+/// what it wrote, and which it closes after `STDIN_END`. The session streams while it runs: its
+/// records go through the send queue, which never waits for the console, and the agent reads no
+/// more output while the queue is full, so the workload waits on its pipes while the agent serves
+/// control requests. `STOP` cancels it, and once its `EXIT` reports that, `stop` holds the
+/// `STOP`'s request ID.
 pub(crate) fn run(
     system: &mut impl System,
     session: &mut Session,
     config: &AgentConfig,
     request_id: u64,
     execution: &GuestExecPayload,
+    stop: &mut Option<u64>,
 ) -> Result<(), Errno> {
     if let Err(failure) = validate_launch_environment(system, config, execution) {
         match failure {
@@ -58,12 +68,17 @@ pub(crate) fn run(
         Err(LaunchError::Other) => return session.send_error(request_id, 125, LAUNCH_FAILED),
     };
     let started = Instant::now();
-    let mut state = RunState::default();
+    let mut state = RunState {
+        v2: session.v2(),
+        ..RunState::default()
+    };
     let mut buffer = [0u8; OUTPUT_CHUNK_BYTES];
+    session.stream(state.v2);
     while state.running(&workload) || (workload.has_open_output() && !state.ending()) {
         let session_ready = match poll(
             &workload,
-            (!state.session_lost).then_some(session.descriptor()),
+            (!state.session_lost).then_some(&*session),
+            !state.input.pending.is_empty(),
         ) {
             Ok(ready) => ready,
             Err(Errno::EINTR) => false,
@@ -73,7 +88,8 @@ pub(crate) fn run(
             }
         };
         if session_ready {
-            match handle_control(system, session, request_id) {
+            let stop = state.v2.then_some(&mut *stop);
+            match handle_control(system, session, request_id, &mut state.input, stop) {
                 Ok(ExecControl::None) => {}
                 Ok(ExecControl::Cancel) if state.running(&workload) && !state.cancelled => {
                     state.cancelled = true;
@@ -104,6 +120,13 @@ pub(crate) fn run(
                     return Err(error);
                 }
             }
+            session.answer_in(state.v2);
+        }
+        if !state.session_lost {
+            // The space that the console freed takes the input's acknowledgement before more
+            // output, so that output cannot starve it.
+            session.send_queued()?;
+            state.input.write(&mut workload, session, request_id)?;
         }
         let output = if state.session_lost || state.output_limited {
             &mut [][..]
@@ -130,10 +153,15 @@ pub(crate) fn run(
     } else {
         state.finish(system, session, request_id, &mut workload, &mut buffer)?
     };
+    session.stream(false);
 
     let launch_report = state.launch.take().unwrap_or(Ok(None));
     if state.session_lost {
         return Ok(());
+    }
+    // Input that the pipe took while the send queue was full is acknowledged before the end.
+    if state.input.written != 0 {
+        session.send_ack(request_id, state.input.written)?;
     }
     match launch_report {
         Ok(Some(failure)) => match failure.kind() {
@@ -251,6 +279,27 @@ impl Workload {
         }
     }
 
+    /// Lends the writer of the workload's standard input while it is open.
+    fn input(&self) -> Option<BorrowedFd<'_>> {
+        match self {
+            Self::Direct(workload) => workload.input(),
+        }
+    }
+
+    /// Writes as much of `bytes` as the workload's standard input takes now.
+    fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Direct(workload) => workload.write_input(bytes),
+        }
+    }
+
+    /// Closes the workload's standard input.
+    fn close_input(&mut self) {
+        match self {
+            Self::Direct(workload) => workload.close_input(),
+        }
+    }
+
     fn next_event<'a>(&mut self, buffer: &'a mut [u8]) -> std::io::Result<Option<Event<'a>>> {
         match self {
             Self::Direct(workload) => workload.next_event(buffer).map(|event| {
@@ -313,7 +362,7 @@ impl Workload {
             if let Some(Event::DirectKillFailed(error)) = self.next_event(&mut [])? {
                 return Err(error);
             }
-            match poll(self, None) {
+            match poll(self, None, false) {
                 Ok(_) | Err(Errno::EINTR) => {}
                 Err(error) => return Err(error.into()),
             }
@@ -376,10 +425,81 @@ fn settle_start(
     Ok(())
 }
 
+/// The standard input of an execution of NVXC version 2: what the host sent and the agent has
+/// yet to write into the workload's pipe, and what it wrote and has yet to acknowledge.
+#[derive(Default)]
+struct Input {
+    /// Bytes that the host sent and the agent has not written.
+    pending: Vec<u8>,
+    /// Bytes written into the pipe and not acknowledged yet.
+    written: u32,
+    /// Bytes that the host sent and the agent has not acknowledged, at most [`STDIN_WINDOW`]:
+    /// those that a closed pipe never took stay unacknowledged.
+    outstanding: u32,
+    /// Whether the host ended the input with `STDIN_END`.
+    ended: bool,
+}
+
+impl Input {
+    /// Takes a `STDIN` frame's bytes, or, for `None`, its `STDIN_END`, refusing bytes beyond the
+    /// window and anything after the end as `EPROTO`.
+    fn receive(&mut self, bytes: Option<&[u8]>) -> Result<(), Errno> {
+        if self.ended {
+            return Err(Errno::EPROTO);
+        }
+        let Some(bytes) = bytes else {
+            self.ended = true;
+            return Ok(());
+        };
+        self.outstanding = u32::try_from(bytes.len())
+            .ok()
+            .and_then(|length| self.outstanding.checked_add(length))
+            .filter(|&outstanding| outstanding <= STDIN_WINDOW)
+            .ok_or(Errno::EPROTO)?;
+        self.pending.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Writes as much as the workload's pipe takes, closes the pipe once the input ended and the
+    /// agent wrote every byte, and, unless the send queue is full, acknowledges what it wrote.
+    fn write(
+        &mut self,
+        workload: &mut Workload,
+        session: &mut Session,
+        request_id: u64,
+    ) -> Result<(), Errno> {
+        if !self.pending.is_empty() {
+            match workload.write_input(&self.pending) {
+                Ok(written) => {
+                    self.pending.drain(..written);
+                    self.written += written as u32;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                // A closed pipe takes nothing more, and the workload reads no more of it.
+                Err(_) => self.pending.clear(),
+            }
+        }
+        if self.ended && self.pending.is_empty() {
+            workload.close_input();
+        }
+        if self.written != 0 && !session.queue_full() {
+            session.send_ack(request_id, self.written)?;
+            self.outstanding -= self.written;
+            self.written = 0;
+        }
+        Ok(())
+    }
+}
+
 /// What the agent learned of one workload while it ran: the C agent's flags, which decide the
 /// outcome that it reports, and the workload's launch report and outcome.
 #[derive(Default)]
 struct RunState {
+    /// Whether the execution is of NVXC version 2, which streams the workload's input, and caps
+    /// no output.
+    v2: bool,
+    /// The workload's standard input, in version 2.
+    input: Input,
     /// Bytes of output forwarded so far, which the 1 MiB cap bounds.
     output_bytes: usize,
     /// Whether the host cancelled the workload while it ran.
@@ -425,11 +545,19 @@ impl RunState {
         workload: &mut Workload,
         buffer: &mut [u8],
     ) -> Result<(), Errno> {
+        // An execution of version 2, whose output has no cap, reads one chunk of it a turn, so
+        // that its output cannot keep the agent from serving control requests or its timeout.
+        let mut read = false;
         loop {
             if let Some((id, status)) = session.take_status() {
                 workload.observe(id, status);
             }
-            let event = match workload.next_event(buffer) {
+            let chunk = if session.queue_full() || (self.v2 && read) {
+                &mut [][..]
+            } else {
+                &mut *buffer
+            };
+            let event = match workload.next_event(chunk) {
                 Ok(Some(event)) => event,
                 Ok(None) => return Ok(()),
                 Err(error) => {
@@ -439,7 +567,7 @@ impl RunState {
             };
             match event {
                 Event::Output(stream, bytes) => {
-                    if self.output_bytes > protocol::MAX_OUTPUT_BYTES - bytes.len() {
+                    if !self.v2 && self.output_bytes > protocol::MAX_OUTPUT_BYTES - bytes.len() {
                         self.output_limited = true;
                         // The cap ends forwarding: read and drop the rest of both streams,
                         // as a lost session does, so the client receives a prefix of what the
@@ -451,6 +579,7 @@ impl RunState {
                         return Ok(());
                     }
                     self.output_bytes += bytes.len();
+                    read = true;
                     let kind = match stream {
                         Stream::Stdout => APP_STDOUT,
                         Stream::Stderr => APP_STDERR,
@@ -499,7 +628,7 @@ impl RunState {
             if self.outcome.is_some() || self.status_lost {
                 return Ok(self.outcome);
             }
-            match poll(workload, None) {
+            match poll(workload, None, false) {
                 Ok(_) | Err(Errno::EINTR) => {}
                 Err(error) => return Err(error),
             }
@@ -507,15 +636,23 @@ impl RunState {
     }
 }
 
-/// Waits at most one poll interval until one of the workload's descriptors or the session's,
-/// if given, polls ready, and returns whether the session's did.
-fn poll(workload: &Workload, session: Option<&FileDescriptor>) -> Result<bool, Errno> {
-    let mut descriptors = workload.descriptors();
+/// Waits at most one poll interval until one of the workload's descriptors polls ready, but its
+/// output while the session's send queue is full, its input, if `input`, writable, or the
+/// session's descriptor, if given, readable, or writable while it has queued bytes, and returns
+/// whether the session's descriptor polled readable.
+fn poll(workload: &Workload, session: Option<&Session>, input: bool) -> Result<bool, Errno> {
+    let mut descriptors = Vec::new();
     if let Some(session) = session {
-        descriptors.push(session.borrowed());
+        let descriptor = session.descriptor().borrowed();
+        descriptors.push((descriptor, false));
+        descriptors.extend(session.queued().then_some((descriptor, true)));
     }
-    let ready = sys::readable_or_hung_up(&descriptors, POLL_INTERVAL_MS)?;
-    Ok(session.is_some() && ready.last().copied().unwrap_or(false))
+    if !session.is_some_and(Session::queue_full) {
+        descriptors.extend(workload.descriptors().into_iter().map(|fd| (fd, false)));
+    }
+    descriptors.extend(workload.input().filter(|_| input).map(|fd| (fd, true)));
+    let ready = sys::ready(&descriptors, POLL_INTERVAL_MS)?;
+    Ok(session.is_some() && ready[0])
 }
 
 /// Reports the kill failures that the workload's execution has yet to report.
@@ -553,9 +690,9 @@ fn launch(
     config: &AgentConfig,
     execution: &GuestExecPayload,
 ) -> Result<Workload, LaunchError> {
-    let workload = system
-        .start_direct(launch::direct_request(config, execution)?)
-        .map_err(LaunchError::Start)?;
+    let mut request = launch::direct_request(config, execution)?;
+    request.input = session.v2();
+    let workload = system.start_direct(request).map_err(LaunchError::Start)?;
     session.watch(workload.id());
     Ok(Workload::Direct(workload))
 }
@@ -640,15 +777,26 @@ enum ExecControl {
     Capture,
 }
 
-/// Processes one control-console record while a workload runs.
+/// Processes one control-console record while a workload runs: in version 2, the workload's
+/// standard input, of which bytes beyond the window or after its end end the session, and, for an
+/// execution of version 2, whose `stop` is given, a `STOP`, which cancels the workload and sets
+/// `stop`.
 fn handle_control(
     system: &mut impl System,
     session: &mut Session,
     exec_id: u64,
+    input: &mut Input,
+    stop: Option<&mut Option<u64>>,
 ) -> Result<ExecControl, Errno> {
     let payload = match session.next_event() {
         Ok(SessionEvent::Reset) => {
+            // The new epoch's acknowledgement follows what the earlier one queued, and the
+            // earlier epoch's `STOP` is abandoned with its work.
+            session.stream(false);
             session.acknowledge()?;
+            if let Some(stop) = stop {
+                *stop = None;
+            }
             return Ok(ExecControl::SessionLost);
         }
         Ok(SessionEvent::Data(payload)) => payload,
@@ -656,7 +804,14 @@ fn handle_control(
         Err(failure) => return Err(report_control_failure(system, failure)),
     };
     let request = match session.accept_request(&payload) {
-        Ok(request) => request,
+        Ok(Request::App(request)) => request,
+        // The input of an execution that ended takes no more bytes.
+        Ok(Request::Stdin(id, bytes)) => {
+            if id == exec_id {
+                input.receive(bytes)?;
+            }
+            return Ok(ExecControl::None);
+        }
         Err(failure) => {
             if failure.kind != DataFailureKind::Credit {
                 super::diagnostics::error(system, "exec-record", i32::from(OUTER_DATA));
@@ -664,6 +819,13 @@ fn handle_control(
             return Err(failure.into_error());
         }
     };
+    if request.kind == APP_STOP
+        && session.v2()
+        && let Some(stop) = stop
+    {
+        *stop = Some(request.request_id);
+        return Ok(ExecControl::Cancel);
+    }
     if request.kind == APP_CANCEL {
         return Ok(
             if request.payload.is_empty() && request.request_id == exec_id {
