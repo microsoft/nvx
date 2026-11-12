@@ -7,18 +7,17 @@
 //! [`finish_capture`] validates an exited capture and writes its key and informational
 //! description without publishing or removing any VM-directory entry.
 //!
-//! [`SnapshotKey`] derives a compatibility key from a capture's class and manifest.
+//! [`SnapshotKey`] derives a compatibility key from a capture's context and manifest.
 //! [`SnapshotManifest::read`] reads the manifest that OpenVMM wrote, and
 //! [`TimeContract::eligibility`] checks its restore window at a [`HostTime`].
 //! [`Snapshot::accepts`] checks a requested VM against that verified metadata.
 //!
 //! # Canonical encoding
 //!
-//! A key and a class each have one canonical encoding, which [`SnapshotKey::to_bytes`] and
-//! [`CaptureClass::to_bytes`] write. A key's [`KeyIdentity`] digests its compatibility prefix,
-//! excluding the appended capture-time anchors and identities; a [`ClassIdentity`] digests the
-//! complete class encoding. Both use SHA-256 after a domain of their own. Each encoding starts
-//! with its version, and each value in it has exactly one encoding:
+//! A key has one canonical encoding, which [`SnapshotKey::to_bytes`] writes. Its [`KeyIdentity`]
+//! digests its compatibility prefix, excluding the appended capture-time anchors and identities,
+//! with SHA-256 after a domain of its own. The encoding starts with its version, and each value in
+//! it has exactly one encoding:
 //!
 //! - An integer is its fixed number of little-endian bytes: one for a `u8`, two for a `u16`, four
 //!   for a `u32`, and eight for a `u64`.
@@ -30,7 +29,7 @@
 //! - A list is its count, a `u32`, then its items in order.
 //!
 //! [`SnapshotKey::from_bytes`] refuses any other encoding, and bytes left after it. The vectors
-//! in `tests/vectors/snapshot-key-v1.txt` fix version 1 of a key's encoding and of a class's.
+//! in `tests/vectors/snapshot-key-v1.txt` fix version 1 of a key's encoding.
 
 mod canonical;
 mod capture;
@@ -61,7 +60,7 @@ use crate::{Error, Hypervisor, Result};
 pub(super) use self::capture::check_snapshot;
 pub use self::capture::{CapturedSnapshot, finish_capture};
 pub use self::eligibility::{Downtime, DowntimeSource, Eligibility, HostTime, MAX_DOWNTIME_NS};
-pub use self::key::{CaptureClass, ClassIdentity, Invariants, KeyIdentity, SnapshotKey};
+pub use self::key::{Invariants, KeyIdentity, SnapshotKey};
 pub use self::manifest::{
     BlockGeometry, HostClock, MANIFEST_NAME, MAX_MANIFEST_LEN, SnapshotManifest, TimeContract,
 };

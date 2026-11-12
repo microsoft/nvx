@@ -1,5 +1,4 @@
-//! The compatibility key of a snapshot, [`SnapshotKey`], and the [`CaptureClass`] of the capture
-//! that makes one.
+//! The compatibility key of a snapshot, [`SnapshotKey`].
 
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -12,8 +11,8 @@ use super::manifest::{
     AddressSpace, BlockGeometry, CPUID_ENTRY_LEN, CpuProfile, Device, DeviceRange,
     FILESYSTEM_SLOT_VERSION, HostClock, Interrupts, Ipv6Identity, MAX_COMMAND_LINE_LEN,
     MAX_CPUID_ENTRIES, MAX_DEVICE_RANGES, MAX_DEVICE_WORDS, MAX_DEVICES, MAX_MEMORY_RANGES,
-    MAX_PROCESSORS, MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic, PROCESSOR_COUNTS,
-    PolicyIdentity, Rates, SnapshotManifest, TimeContract, Topology, parse_profile_id,
+    MAX_PROCESSORS, MAX_TEXT_LEN, Machine, Memory, MemoryRange, Nic, PolicyIdentity, Rates,
+    SnapshotManifest, TimeContract, Topology, parse_profile_id,
 };
 use crate::activation;
 use crate::contract;
@@ -22,7 +21,6 @@ use crate::host::config::{DiskCapture, check_setting};
 use crate::host::platform::parse_hex32;
 use crate::host::process::BootId;
 use crate::host::runtime::{ArtifactIdentity, MAX_IDENTITY_LEN, RuntimeIdentity};
-use crate::host::sandbox::SandboxNetwork;
 use crate::host::sandbox::mount::MOUNT_TAG;
 use crate::hypervisor::Hypervisor;
 
@@ -30,10 +28,6 @@ pub use crate::host::config::Invariants;
 
 /// The domain of a key's identity: the bytes that precede its canonical encoding in the digest.
 const KEY_DOMAIN: &[u8] = b"nvx snapshot key\0";
-
-/// The domain of a capture class's identity: the bytes that precede its canonical encoding in the
-/// digest.
-const CLASS_DOMAIN: &[u8] = b"nvx capture class\0";
 
 /// The generation of a CPU profile that a host derives, rather than a built-in one.
 const HOST_GENERATION: &str = "host";
@@ -215,16 +209,6 @@ identity!(
     "a template key's identity"
 );
 
-identity!(
-    /// The identity of a [`CaptureClass`]: the SHA-256 digest of its canonical encoding, after the
-    /// domain `nvx capture class` and a NUL.
-    ///
-    /// Its text form, which `Display` writes and `FromStr` parses, is 64 lowercase hexadecimal
-    /// digits; parsing also accepts uppercase ones.
-    ClassIdentity,
-    "a capture class's identity"
-);
-
 /// The canonical encoding of a template's invariant settings, which its key holds.
 impl Invariants {
     /// Writes the settings: a list of names and values.
@@ -277,160 +261,10 @@ pub(super) fn cpu_profile_matches(profile: &CpuProfile, requested: &str) -> bool
     }
 }
 
-/// Returns the guest's network on `nic`, its IPv4 address and prefix length, in the canonical form
-/// of a [`SandboxNetwork`].
+/// Returns the guest's network on `nic`, its IPv4 address and prefix length, in its canonical
+/// form.
 fn guest_network_of(nic: &Nic) -> String {
     format!("{}/{}", nic.ipv4, nic.prefix_length)
-}
-
-/// The invariant inputs of a template's capture, known before it: what a template's adapter
-/// requests, and the class of the templates that the capture makes.
-///
-/// A capture whose manifest matches its class makes a template whose [`SnapshotKey`] combines
-/// them: [`SnapshotKey::new`] checks that the machine of the manifest is the class's, and takes
-/// the rest of the key from it. Captures of one class have one compatibility identity unless
-/// something that the class does not fix changes, such as the host's CPU, which its effective
-/// CPUID and its rates follow. Each key also retains its own capture's time contract.
-///
-/// Its [`identity`](Self::identity) names the class: the SHA-256 digest of its canonical encoding,
-/// which holds every field, and the versions of the contracts that the key holds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CaptureClass {
-    /// The runtime: the identities of OpenVMM, the guest kernel, and the guest initramfs, and the
-    /// versions of the boot and control contracts.
-    pub runtime: RuntimeIdentity,
-    /// The build of the guest's agent, which the adapter supplies.
-    pub guest_build: ArtifactIdentity,
-    /// The backend.
-    pub hypervisor: Hypervisor,
-    /// The CPU profile that the capture requests, as OpenVMM's `--cpu-profile` takes it: `auto`,
-    /// for the built-in profile of the host's CPU, `host`, for a profile that the host derives, or
-    /// a profile ID, `VENDOR.GENERATION.vREVISION`.
-    pub cpu_profile: String,
-    /// The processor capacity: 1, 2, 4, or 8.
-    pub processors: u32,
-    /// The processors online at boot: 1, 2, 4, or 8, at most [`processors`](Self::processors).
-    pub boot_processors: u32,
-    /// The RAM at boot, in bytes.
-    pub memory: u64,
-    /// The RAM capacity, in bytes, to which a restore may expand the RAM: at least
-    /// [`memory`](Self::memory).
-    pub memory_capacity: u64,
-    /// The placeholder `distro` that the capture attaches: its length is the capacity of every
-    /// clone's image.
-    pub distro: BlockGeometry,
-    /// The dormant scratch device.
-    pub scratch: BlockGeometry,
-    /// The network: `None` or a network that OpenVMM attaches no device for, as
-    /// [`SandboxNetwork::openvmm_arguments`] lowers it, for a template without a NIC, and
-    /// otherwise a network at the address of the template's fixed NIC. Of the network, the class
-    /// takes only what the template captures: its NIC, at the guest's address, under the
-    /// complete deny-all policy, as [`SandboxNetwork::template_arguments`] lowers it, whatever
-    /// the network's own policy, which each clone's restore replaces with its own. So the classes
-    /// of two networks at one address, whose policies both attach a NIC, are one.
-    pub network: Option<SandboxNetwork>,
-    /// The invariant settings beyond the machine.
-    pub invariants: Invariants,
-}
-
-impl CaptureClass {
-    /// Version of the canonical encoding of a class, its first two bytes.
-    pub const VERSION: u16 = 1;
-
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) unless every field
-    /// has the form that its documentation gives, the runtime identity passes
-    /// [`RuntimeIdentity::check`], and the network lowers to OpenVMM's arguments.
-    pub fn check(&self) -> Result<()> {
-        self.runtime.check()?;
-        if let Some(problem) = cpu_profile_problem(&self.cpu_profile) {
-            return Err(Error::unsupported(problem));
-        }
-        if !PROCESSOR_COUNTS.contains(&self.processors)
-            || !PROCESSOR_COUNTS.contains(&self.boot_processors)
-            || self.boot_processors > self.processors
-        {
-            return Err(Error::unsupported(format!(
-                "a capture of {} processors with {} online at boot needs 1, 2, 4, or 8 of each, \
-                 and no more online than in all",
-                self.processors, self.boot_processors
-            )));
-        }
-        if self.memory == 0 || self.memory_capacity < self.memory {
-            return Err(Error::unsupported(format!(
-                "a capture of {} bytes of RAM needs a nonzero RAM and a capacity of at least it, \
-                 not {}",
-                self.memory, self.memory_capacity
-            )));
-        }
-        for (role, geometry) in [("distro", &self.distro), ("scratch", &self.scratch)] {
-            if let Some(problem) = geometry.problem() {
-                return Err(Error::unsupported(format!(
-                    "the {role} device of a capture is invalid: its {problem}"
-                )));
-            }
-        }
-        self.network_arguments()?;
-        Ok(())
-    }
-
-    /// Returns OpenVMM's arguments of the template's NIC, as
-    /// [`SandboxNetwork::template_arguments`] lowers the network, none without a NIC.
-    fn network_arguments(&self) -> Result<Vec<String>> {
-        match &self.network {
-            None => Ok(Vec::new()),
-            Some(network) => network.template_arguments(),
-        }
-    }
-
-    /// Returns the canonical encoding of the class, which its [`identity`](Self::identity)
-    /// digests.
-    ///
-    /// Version 1 holds, in order: [`VERSION`](Self::VERSION) as a `u16`; the runtime identity's
-    /// OpenVMM, kernel, and initramfs identities as texts, its boot contract version as a `u64`,
-    /// its control contract revision as a text, and its control session version as a `u64`; the
-    /// guest build as a text; the snapshot format, device-state schema, time ABI, restore packet,
-    /// and activation contract versions as `u64`s; the backend, as OpenVMM spells it, and the
-    /// CPU profile, as texts; the processors and those online at boot as `u32`s; the RAM and its
-    /// capacity as `u64`s; the `distro` and scratch geometries, each a `u64` length and two
-    /// `u32` block sizes; the network, as the list of the texts of OpenVMM's arguments of the
-    /// template's NIC, which [`SandboxNetwork::template_arguments`] lowers it to, empty without a
-    /// NIC; and the invariant settings, as a list of names and values, each a text, in the order
-    /// of their names. The [module](super) describes the encoding of each kind of value.
-    ///
-    /// Fails as [`check`](Self::check) does.
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.encode(&Contracts::CURRENT)
-    }
-
-    /// Returns the canonical encoding of the class, with the contract versions `contracts`.
-    fn encode(&self, contracts: &Contracts) -> Result<Vec<u8>> {
-        self.check()?;
-        let mut writer = Writer::default();
-        writer.u16(Self::VERSION);
-        write_runtime(&mut writer, &self.runtime);
-        writer.text(self.guest_build.as_str());
-        contracts.write(&mut writer);
-        writer.text(self.hypervisor.as_str());
-        writer.text(&self.cpu_profile);
-        writer.u32(self.processors);
-        writer.u32(self.boot_processors);
-        writer.u64(self.memory);
-        writer.u64(self.memory_capacity);
-        write_geometry(&mut writer, &self.distro);
-        write_geometry(&mut writer, &self.scratch);
-        writer.list(&self.network_arguments()?, |writer, argument| {
-            writer.text(argument)
-        });
-        self.invariants.write(&mut writer);
-        Ok(writer.finish())
-    }
-
-    /// Returns the identity of the class.
-    ///
-    /// Fails as [`check`](Self::check) does.
-    pub fn identity(&self) -> Result<ClassIdentity> {
-        Ok(ClassIdentity(digest(CLASS_DOMAIN, &self.to_bytes()?)))
-    }
 }
 
 /// The compatibility key of a template: a canonical, versioned projection of the small metadata
@@ -467,7 +301,7 @@ impl CaptureClass {
 /// clones of every network policy at its guest's address.
 ///
 /// The key comes from metadata alone: the artifacts' identities that their install metadata
-/// records, the class's inputs, and the capture's manifest. It never reads or digests a binary,
+/// records, the capture's inputs, and its manifest. It never reads or digests a binary,
 /// an image, the RAM, or the saved state. A bundle that changes any of its artifacts therefore
 /// makes templates of a new key: the templates of the old one are not recertified.
 ///
@@ -490,7 +324,7 @@ pub struct SnapshotKey {
     time: TimeContract,
 }
 
-/// The checked inputs shared by a legacy capture class and a caller-owned capture context.
+/// The checked inputs of a capture, which its context holds.
 struct CaptureInputs<'a> {
     /// The runtime's artifact and contract identities.
     runtime: &'a RuntimeIdentity,
@@ -529,54 +363,6 @@ impl SnapshotKey {
     /// Most bytes of a key's canonical encoding: what the largest key that a manifest of at most
     /// [`MAX_MANIFEST_LEN`](super::MAX_MANIFEST_LEN) bytes can describe takes, with room to spare.
     pub const MAX_LEN: usize = 256 * 1024;
-
-    /// Returns the key of the template that a capture of `class` made, whose manifest is
-    /// `manifest`.
-    ///
-    /// The manifest's machine must be the class's: the backend, the processors and those online
-    /// at boot, the RAM and its capacity, the `distro` and scratch geometries, the presence of a
-    /// NIC, and the NIC's address and prefix, and a CPU profile that the class's request selects.
-    /// A manifest whose machine has no processors online at boot activates all of them at boot,
-    /// which a class whose processors are all online at boot requests. The key takes the class's
-    /// runtime and invariant settings, and this crate's versions of the other
-    /// contracts.
-    ///
-    /// The key also takes the identity of the network policy that OpenVMM enforced on the NIC,
-    /// which this check leaves to OpenVMM: OpenVMM derives it from the arguments of the
-    /// template's NIC, under the complete deny-all policy, as
-    /// [`SandboxNetwork::template_arguments`] lowers the class's network, by an encoding of its
-    /// own, which this crate does not reproduce. A capture that enforced another policy makes a
-    /// key of its own, which no restore serves, since OpenVMM lets a restore replace the complete
-    /// deny-all policy alone.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) as
-    /// [`CaptureClass::check`] does, and with [`ErrorKind::Io`](crate::ErrorKind::Io) for a
-    /// manifest whose machine is not the class's, as a capture that did not do what its class
-    /// requested.
-    pub fn new(class: &CaptureClass, manifest: &SnapshotManifest) -> Result<Self> {
-        class.check()?;
-        let attached = !class.network_arguments()?.is_empty();
-        Self::from_inputs(
-            CaptureInputs {
-                runtime: &class.runtime,
-                hypervisor: class.hypervisor,
-                cpu_profile: &class.cpu_profile,
-                processors: u64::from(class.processors),
-                boot_processors: u64::from(class.boot_processors),
-                memory: class.memory,
-                memory_capacity: class.memory_capacity,
-                distro: &class.distro,
-                scratch: &class.scratch,
-                guest_network: class
-                    .network
-                    .as_ref()
-                    .filter(|_| attached)
-                    .map(|network| network.guest_network().to_owned()),
-                invariants: &class.invariants,
-            },
-            manifest,
-        )
-    }
 
     /// Derives the key from the checked creation context and OpenVMM's validated manifest.
     pub(super) fn from_capture(
@@ -797,8 +583,8 @@ impl SnapshotKey {
     }
 
     /// Returns the guest's network on the template's NIC, its IPv4 address and prefix length, in
-    /// the canonical form of a [`SandboxNetwork`], such as `10.0.0.2/24`, which OpenVMM restores
-    /// from the snapshot with the NIC, or `None` for a template without a NIC. The template serves
+    /// its canonical form, such as `10.0.0.2/24`, which OpenVMM restores from the snapshot with the
+    /// NIC, or `None` for a template without a NIC. The template serves
     /// the clones of every network policy at that address.
     pub fn guest_network(&self) -> Option<String> {
         self.machine.nic.as_ref().map(guest_network_of)

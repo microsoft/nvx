@@ -653,34 +653,26 @@ mistyped, or repeated field, truncated bytes, and a capture that is not a
 template's: a platform-tier capture for clones, with a read-only `distro` whose
 identity is unbound, a fresh scratch, and the dormant filesystem slot.
 
-`CaptureClass` holds the invariant inputs of a capture, known before it: the
-runtime, the guest's build, the backend, the requested CPU profile, the
-processors, those online at boot, and RAM, the geometries of the disks, the
-network, of which it takes what the template captures alone, its NIC at the
-guest's address under the complete deny-all policy, and the adapter's other
-`Invariants`.
+`SnapshotKey` checks that a capture made the machine that its context, the
+`CaptureContext` with which `vm::create` prepared it, requested, and derives
+the template's compatibility key from metadata alone: the runtime and contract
+versions through which its clones are restored, the backend, CPU profile and
+effective CPUID, topology, rates, resources, kernel command line, disks, and
+devices of its machine, with the NIC's addresses and the identity of the
+complete deny-all policy under which the capture attached it, which each
+clone's restore replaces with the clone's own, so that a template with a NIC
+serves the clones of every network policy at its guest's address.
 
-`SnapshotKey::new` checks that the capture made the machine that its class
-requested, and derives the template's compatibility key, from metadata alone:
-the runtime and contract versions through which its clones are restored, the
-backend, CPU profile and effective CPUID, topology, rates, resources, kernel
-command line, disks, and devices of its machine, with the NIC's addresses and
-the identity of the complete deny-all policy under which the capture attached
-it, which each clone's restore replaces with the clone's own, so that a template
-with a NIC serves the clones of every network policy at its guest's address.
-
-A key and a class each have one canonical, versioned encoding, whose
-domain-separated SHA-256 digest is its identity, a `KeyIdentity`, or a
-`ClassIdentity`; the
+A key has one canonical, versioned encoding, whose domain-separated SHA-256
+digest is its identity, a `KeyIdentity`; the
 [conformance vectors](tests/vectors/README.md) of version 1,
-`tests/vectors/snapshot-key-v1.txt`, pin both encodings and identities. The
-key's encoding, version 1, leaves the network policy out, since templates
-capture their NIC under the complete deny-all policy.
+`tests/vectors/snapshot-key-v1.txt`, pin its encoding and identity. The key's
+encoding, version 1, leaves the network policy out, since templates capture
+their NIC under the complete deny-all policy.
 
 The key's canonical encoding and identity use the snapshot names and omit
 `guest_build`. Version 1 changes in place: no snapshot outlives a deployment,
-and no reader or migration of the prior encoding is supported. `CaptureClass`
-still records the legacy capture inputs, including its guest build.
+and no reader or migration of the prior encoding is supported.
 
 The persisted key includes the complete per-snapshot time contract and must
 agree with the manifest's time. Its compatibility identity excludes capture
