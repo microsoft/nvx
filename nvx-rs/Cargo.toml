@@ -1,9 +1,9 @@
 [package]
 name = "nvx"
-version = "0.1.0-alpha.3"
+version = "0.2.0-alpha.1"
 edition = "2024"
 rust-version = "1.89"
-description = "NVX mechanics: the OpenVMM control protocol and the launch, policy lowering, and supervision of NVX microVMs"
+description = "NVX's library of mechanisms and value types for OpenVMM microVMs: launch, snapshots and restores, verified connections, and the guest's side of capture and activation"
 license = "MIT"
 repository = "https://github.com/microsoft/nvx"
 readme = "README.md"
