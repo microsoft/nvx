@@ -31,7 +31,7 @@
 //! is `0`.
 //!
 //! Errors print `error[CODE]: MESSAGE` to standard error and exit with status 1, as `nvx.py`
-//! reports a `ScriptError`, with the stable [`ErrorCode`] of the failure. Usage errors print the
+//! reports a `ScriptError`, with the stable `ErrorCode` of the failure. Usage errors print the
 //! one-line usage of the parser and `PROG: error[CODE]: MESSAGE`, where `PROG` is the parser's
 //! name, such as `nvx-rs run`, with one of the `argument-*` codes, and exit with status 2, as
 //! `argparse` does. Help prints the usage and every option of the parser, and exits with status 0.

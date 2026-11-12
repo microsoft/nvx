@@ -674,12 +674,10 @@ impl SnapshotManifest {
 
     /// Parses and checks the bytes of a template's manifest.
     ///
-    /// Fails with [`ErrorCode::FormatUnsupported`] for a
-    /// manifest of another version of the snapshot format, saved-state schema, machine ABI, boot
-    /// layout, or time ABI than this build reads, and with
-    /// [`ErrorKind::Io`](crate::ErrorKind::Io) for more than [`MAX_MANIFEST_LEN`] bytes, bytes
-    /// that are not such a manifest, and a manifest that is not a template's, as
-    /// [`SnapshotManifest`] describes.
+    /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) for a manifest of another version of the
+    /// snapshot format, saved-state schema, machine ABI, boot layout, or time ABI than this build
+    /// reads, for more than [`MAX_MANIFEST_LEN`] bytes, bytes that are not such a manifest, and a
+    /// manifest that is not a template's, as [`SnapshotManifest`] describes.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_described(bytes, "the snapshot manifest")
     }
