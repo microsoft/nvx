@@ -6,11 +6,12 @@ and guest features, as each of the crate's platforms, Linux and Windows, builds
 it: the module that contains each module, and the modules that each uses. It
 mistakes modules under some cfg conditions, such as cfg(not(windows)), for test
 modules, so this script also reads its analysis with cfg(test), and restores
-them. It merges the exports of the platforms, draws with Graphviz the crate's
-top-level modules, the dependencies between them, and the modules that each
-contains, and writes the page that shows the diagrams. CI draws them after every
-merge to dev that changes their inputs, and commits them when they change
-(doc/ci.md, "Module diagrams").
+them. It keeps the modules of each platform's public API, without the hidden
+modules of NVX's own programs, merges the platforms' exports, draws with
+Graphviz the crate's top-level modules, the dependencies between them, and the
+modules that each contains, and writes the page that shows the diagrams. CI
+draws them every night, and commits them to dev when they change (doc/ci.md,
+"Module diagrams").
 """
 
 from __future__ import annotations
@@ -62,23 +63,35 @@ COLORS = {
     "core": ("#e0f2fe", "#0284c7"),
     "host": ("#ede9fe", "#8b5cf6"),
     "guest": ("#ccfbf1", "#0d9488"),
-    "testing": ("#fef3c7", "#d97706"),
 }
-# What each top-level module holds, in the overview.
+# What each top-level module of the public API holds, in the overview.
 DESCRIPTIONS = {
     "activation": "Layered root activation",
-    "contract": "Control compatibility",
-    "error": "Error types",
-    "exec": "Execution stdio and credit",
+    "contract": "Contract versions",
     "gpt": "GPT partition reader",
-    "guest": "Linux guest programs",
-    "host": "Launch and supervision",
-    "hypervisor": "Backend selection",
+    "guest": "Guest side",
+    "host": "VMs, snapshots, restores",
     "net": "IP networks",
-    "protocol": "NVXS / NVXC codecs",
-    "testing": "Fake OpenVMM",
+    "protocol": "NVXS and boot tokens",
     "uuid": "UUID encoding",
 }
+# The modules of NVX's own programs, which the crate makes public only for the
+# hidden entry points of its binaries: the CLI, the fake OpenVMM, and the guest
+# programs. The diagrams leave them out, with the modules that they contain.
+PROGRAMS = frozenset(
+    {
+        "nvx::guest::console_pending",
+        "nvx::guest::device_io",
+        "nvx::guest::exit",
+        "nvx::guest::ingress",
+        "nvx::guest::init",
+        "nvx::guest::managed_agent",
+        "nvx::guest::mmio_write",
+        "nvx::guest::time_probe",
+        "nvx::host::cli",
+        "nvx::testing",
+    }
+)
 # Graphviz measures the labels with the first of these fonts that is installed,
 # and SVG viewers show them with the first that they have. CI installs
 # Liberation Sans, so that its layouts do not depend on the other fonts of its
@@ -439,6 +452,34 @@ def restore(
     )
 
 
+def public(export: Export) -> Export:
+    """The public API of one platform's export: each module that is public, as are
+    the modules that contain it, but NVX's programs and the modules that they
+    contain, and the uses between the modules that it keeps. It filters each
+    platform's export before the merge, so that a module that is public on one
+    platform alone is drawn as that platform's."""
+
+    def shown(path: str) -> bool:
+        parts = path.split("::")
+        return all(
+            export.visibility[module] == "pub" and module not in PROGRAMS
+            for module in (
+                "::".join(parts[:depth]) for depth in range(2, len(parts) + 1)
+            )
+        )
+
+    kept = {path for path in export.visibility if shown(path)}
+    return Export(
+        {
+            path: visibility
+            for path, visibility in export.visibility.items()
+            if path in kept
+        },
+        {path: owner for path, owner in export.owner.items() if path in kept},
+        frozenset(pair for pair in export.uses if kept.issuperset(pair)),
+    )
+
+
 def merge(exports: Mapping[str, Export]) -> Crate:
     """Merges the exports of the platforms, in their order. A module whose
     visibility differs between them names the visibility of each."""
@@ -623,7 +664,8 @@ def diagrams(crate: Crate) -> list[Diagram]:
             " included, or whose items the definitions of its own items name,"
             " which counts the implementations of a type's traits toward the"
             " type's module, wherever they are. The crate's own arrows are its"
-            " re-exports. The uses within a top-level module are left out.",
+            " re-exports. The uses within a top-level module, and those of the"
+            " modules that the diagrams leave out, are left out.",
             dependencies(crate),
         ),
     ]
@@ -684,22 +726,23 @@ def page(crate: Crate, drawn: Sequence[Diagram], output: Path, tools: str) -> st
         "# Module diagrams",
         "",
         *paragraph(
-            f"The modules of the {link('`nvx` crate', MANIFEST.parent / 'README.md')},"
-            " the modules that each contains, and the dependencies between them, as"
-            f" {tools}. They cover the crate's library with its {features}, and"
-            f" `{FEATURES[-1]}` features, on {targets}. CI draws them again after"
-            " every merge to `dev` that changes the crate, and commits them when"
-            f" they change; see {ci}."
+            "The public modules of the"
+            f" {link('`nvx` crate', MANIFEST.parent / 'README.md')}, the modules"
+            " that each contains, and the dependencies between them, as"
+            f" {tools}. They cover the crate's public API, as its library builds"
+            f" with its {features}, and `{FEATURES[-1]}` features, on {targets}:"
+            " each module that is public, as are the modules that contain it, but"
+            " the modules of NVX's own programs, which the crate hides. CI draws"
+            " them again every night, and commits them to `dev` when they change;"
+            f" see {ci}."
         ),
         *paragraph(
-            "Each box is a module, colored by the part of the crate that holds it:"
-            " blue for the modules that the host and the guest share, purple for"
-            " the host, teal for the guest, and amber for the test doubles. A solid"
-            " box is a public module, and a dashed box a private one, unless it"
-            " names another visibility, such as `pub(crate)`. A box that names"
+            "Each box is a public module, colored by the part of the crate that"
+            " holds it: blue for the modules that the host and the guest share,"
+            " purple for the host, and teal for the guest. A box that names"
             " platforms, as in *Linux only*, is a module that only they build, as"
             " are the modules that it contains. The diagrams leave out the crate's"
-            " tests and binaries, and other crates."
+            " private modules, its tests and binaries, and other crates."
         ),
     ]
     hierarchies = False
@@ -829,7 +872,7 @@ def draw(output: Path, dot: str, execute: Runner = run) -> list[str]:
             warn(execute(export_command(target, cfg_test=True), None)), target
         )
         found = conditions(warn(execute(structure_command(target), None)), target)
-        exports[platform] = restore(plain, tested, found, target)
+        exports[platform] = public(restore(plain, tested, found, target))
     crate = merge(exports)
     drawn = diagrams(crate)
     files: dict[str, str] = {}
