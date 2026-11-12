@@ -16,9 +16,29 @@ pub(crate) fn readable_or_hung_up(
     descriptors: &[BorrowedFd<'_>],
     timeout_milliseconds: u16,
 ) -> Result<Vec<bool>, Errno> {
+    let descriptors: Vec<_> = descriptors
+        .iter()
+        .map(|&descriptor| (descriptor, false))
+        .collect();
+    ready(&descriptors, timeout_milliseconds)
+}
+
+/// Polls each descriptor for readable data or hangup, as [`readable_or_hung_up`] does, or, where
+/// its flag is set, for space to write, and returns whether each one woke, in the caller's order.
+pub(crate) fn ready(
+    descriptors: &[(BorrowedFd<'_>, bool)],
+    timeout_milliseconds: u16,
+) -> Result<Vec<bool>, Errno> {
     let mut polls = descriptors
         .iter()
-        .map(|descriptor| PollFd::new(*descriptor, PollFlags::POLLIN | PollFlags::POLLHUP))
+        .map(|&(descriptor, write)| {
+            let interest = if write {
+                PollFlags::POLLOUT
+            } else {
+                PollFlags::POLLIN | PollFlags::POLLHUP
+            };
+            PollFd::new(descriptor, interest)
+        })
         .collect::<Vec<_>>();
     nix::poll::poll(&mut polls, timeout_milliseconds)?;
     Ok(polls
