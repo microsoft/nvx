@@ -1141,6 +1141,29 @@ class MonitorTests(unittest.TestCase):
             "aarch64",
         )
 
+    def test_arm_debug_product_and_selected_counter_architecture(self):
+        arm_line = BOOT_LINE.replace("tsc_hz=2194804000", "tsc_hz=19200000").replace(
+            "lapic_hz=1000000000", "lapic_hz=0"
+        )
+        command = ["openvmm", "--hypervisor", "kvm", "--kernel", "Image-debug"]
+        for architecture in (None, "aarch64"):
+            monitor = TimeAbiMonitor(command, architecture=architecture)
+            monitor.feed(arm_line.encode() + STATUS_OK.encode())
+            self.assertEqual(monitor.require_boot("ARM debug")["lapic_hz"], "0")
+            refused = TimeAbiMonitor(command, architecture=architecture)
+            with self.assertRaises(TimeAbiFailure):
+                refused.feed(
+                    arm_line.replace("lapic_hz=0", "lapic_hz=1").encode()
+                    + STATUS_OK.encode()
+                )
+        explicit_x86 = TimeAbiMonitor(command, architecture="x86_64")
+        explicit_x86.feed(BOOT_LINE.encode() + STATUS_OK.encode())
+        self.assertEqual(
+            explicit_x86.require_boot("explicit x86")["lapic_hz"], "1000000000"
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported counter architecture"):
+            TimeAbiMonitor(command, architecture="unknown")
+
     def test_validates_restore_marker_fields_against_the_backend(self):
         restore = time_abi.parse_marker(RESTORE_LINE)
         assert restore is not None

@@ -2554,6 +2554,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
             time_abi_status=True,
             on_stderr=None,
             expected_exit_status=42,
+            architecture=None,
         )
         self.assertEqual(result["output"], "NVX-OUT none\r\nNVX-DONE\r\n")
         self.assertEqual(result["text"], transcript)
@@ -16398,6 +16399,142 @@ class MicrovmTests(unittest.TestCase):
 
         guest_boot.assert_not_called()
         lifecycle.assert_not_called()
+
+    def test_arm_missing_sandbox_inputs_recommend_matching_producer_outputs(self):
+        paths = microvm_tests.workload_artifact_paths(architecture="aarch64")
+        for missing, _ in paths:
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                args = nvx.parse_args(
+                    [
+                        "test-microvm",
+                        "--backend",
+                        "whp",
+                        "--architecture",
+                        "aarch64",
+                        "--scenario",
+                        "sandbox-lifecycle",
+                        "--output-dir",
+                        temporary,
+                    ]
+                )
+
+                def require(
+                    path: Path, description: str, missing: Path = missing
+                ) -> Path:
+                    if path == missing:
+                        raise common.ScriptError(f"{description} not found: {path}")
+                    return path
+
+                with (
+                    patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                    patch.object(microvm_tests, "require_file", side_effect=require),
+                    patch.object(microvm_tests, "_run_scenarios") as run,
+                    self.assertRaises(common.ScriptError) as raised,
+                ):
+                    microvm_tests.run(args)
+                run.assert_not_called()
+                message = str(raised.exception)
+                self.assertNotIn("nvx-rs download", message)
+                self.assertNotIn("build-guest --guest all", message)
+                commands = re.findall(r"`([^`]+)`", message)
+                self.assertEqual(
+                    commands,
+                    [
+                        "build-distro-layer --guest ubuntu --architecture aarch64",
+                        "build-scratch-template --output "
+                        "build/aarch64/ubuntu-smoke-scratch.ext4",
+                    ],
+                )
+                with (
+                    patch.object(nvx, "build_distro_layer") as distro,
+                    patch.object(nvx, "build_scratch_template") as scratch,
+                ):
+                    for command in commands:
+                        selected = nvx.parse_args(shlex.split(command))
+                        selected.handler(selected)
+                self.assertEqual(distro.call_args.args[0].architecture, "aarch64")
+                self.assertEqual(distro.call_args.args[0].output, paths[0][0])
+                self.assertEqual(
+                    BuildConstants.REPO_ROOT / scratch.call_args.args[0].output,
+                    paths[-1][0],
+                )
+                self.assertFalse(
+                    (Path(temporary) / microvm_durations.REPORT_NAME).exists()
+                )
+
+    def test_arm_debug_boot_passes_selected_architecture_to_the_shared_monitor(self):
+        marker = (
+            "NVX-TIME-ABI: v=1 phase=boot status=ok cpus=1 "
+            "tsc_hz=19200000 lapic_hz=0 generation=0 elapsed_us=1\n"
+            "NVX-TIME-STATUS-EXIT status=0\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            args = nvx.parse_args(
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "aarch64",
+                    "--debug-kernel",
+                    "--scenario",
+                    "guest-boot",
+                    "--output-dir",
+                    temporary,
+                ]
+            )
+
+            def require(path: Path, _description: str) -> Path:
+                return path
+
+            def guest(
+                command: Sequence[str], _script: str, completion: bytes, **options: Any
+            ) -> benchmark.GuestCommandResult:
+                self.assertEqual(
+                    Path(command[command.index("--kernel") + 1]).name, "Image-debug"
+                )
+                self.assertEqual(options["architecture"], "aarch64")
+                monitor = time_abi.TimeAbiMonitor(
+                    command, architecture=options["architecture"]
+                )
+                monitor.feed(marker.encode())
+                monitor.require_boot("ARM debug guest")
+                return benchmark.GuestCommandResult(
+                    text=marker
+                    + "NVX-GUEST-SCRIPT-START\n"
+                    + completion.decode()
+                    + "\n",
+                    wall_ms=0.0,
+                    peak_rss_bytes=0,
+                )
+
+            with (
+                patch.object(microvm_tests, "validate_openvmm_test_backend"),
+                patch.object(microvm_tests, "require_file", side_effect=require),
+                patch.object(
+                    microvm_tests, "_run_guest_script", side_effect=guest
+                ) as run,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(microvm_tests.run(args), 0)
+            run.assert_called_once()
+
+    def test_invalid_script_counter_architecture_fails_before_process_start(self):
+        with (
+            patch.object(benchmark, "InteractiveProcess") as process,
+            self.assertRaisesRegex(ValueError, "unsupported counter architecture"),
+        ):
+            benchmark.run_guest_script(
+                ["openvmm"],
+                "nvx-exit 0\n",
+                b"done",
+                timeout=1,
+                architecture="unknown",
+            )
+        process.assert_not_called()
 
     def test_managed_executions_enter_through_the_agent_not_the_container_helpers(self):
         root = Path(__file__).resolve().parent.parent
