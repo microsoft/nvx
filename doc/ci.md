@@ -1072,6 +1072,8 @@ been measured; ARM cold reports cannot rebalance the existing full x86 shards.
 The shared argument binder runs directly with the native Python custom shell
 (`python` on Windows, `python3` on Linux), so self-hosted Windows runners need
 no Bash to validate the same inputs and emit the same JSON and step outputs.
+OS-guarded steps share one anchored script and environment, with literal shell
+commands rather than expressions in the workflow's shell field.
 
 ARM producer, CLI, VMM, cold and adapter results feed `Required status check`;
 the repetition result is required for full runs and explicitly skipped for
