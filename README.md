@@ -36,7 +36,8 @@ prerequisites and runtime options. To run without Rust, extract the package of a
 build NVX from source instead, first [initialize](doc/setup.md#initialize) the `openvmm`
 submodule, which the clone below omits.
 
-> ℹ️ For direct OpenVMM integration without `nvx-rs`, see
+> ℹ️ To run microVMs from a program of your own through the `nvx` library, see the
+[library guide](doc/library.md); for direct OpenVMM integration without `nvx-rs`, see
 [Run OpenVMM directly](doc/run.md#run-openvmm-directly).
 
 ### Linux / KVM
@@ -82,8 +83,12 @@ nvx-rs\target\release\nvx-rs.exe run
 - [Benchmark](doc/benchmarks.md) - Instructions for benchmarking NVX.
 - [Command-line reference](doc/usage.md) - Complete `nvx-rs` and `scripts/nvx.py` command and option
   reference.
-- [NVX Rust crate](nvx-rs/README.md) - The `nvx` crate that holds the NVX mechanics: the OpenVMM
-  control protocol and the launch, policy lowering, and supervision of NVX microVMs.
+- [NVX Rust crate](nvx-rs/README.md) - The `nvx` crate: the library of mechanisms and value types
+  with which programs run NVX microVMs, and NVX's own programs, private to it.
+- [Library guide](doc/library.md) - A cold boot, a restore, and a reattach through the `nvx`
+  library, and what its caller owns.
+- [Guest-agent guidelines](doc/guest-agent-guidelines.md) - What an init agent owns in an NVX
+  guest: its space, its executions, and its part in a capture and a restore.
 
 ### Development
 
