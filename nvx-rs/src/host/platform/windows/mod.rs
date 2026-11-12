@@ -27,7 +27,7 @@ pub(crate) use self::endpoint::{ReadyListener, connect_endpoint};
 pub(crate) use self::endpoint::{
     endpoint_server_pid_until, interrupt_transfers, transport_from_handle,
 };
-pub use self::identity::file_identity;
+pub(crate) use self::identity::file_identity;
 #[cfg(feature = "cli")]
 pub(crate) use self::identity::{
     Directory, file_id, is_deleted, opened_file_id, opened_file_identity,
@@ -37,20 +37,19 @@ pub(crate) use self::interrupt::{interrupted, watch_interrupts};
 pub(crate) use self::log_claim::create_log_job;
 #[cfg(feature = "cli")]
 pub(crate) use self::log_claim::{claim_log, log_claim_held, serves_launch};
-pub use self::private::create_private_dir;
 pub(crate) use self::private::{
     check_snapshot_dir, check_vm_dir, create_vm_dir, make_sparse, private_file_problem,
 };
 #[cfg(feature = "cli")]
 pub(crate) use self::private::{check_store_dir, create_store_dir, rename_no_replace};
-pub use self::process::process_start_time;
+// Only the CLI, which checks the processes that its records name, and the tests, which name the
+// processes that they start, read a process's start time on Windows.
+#[cfg(any(test, feature = "cli"))]
+pub(crate) use self::process::process_start_time;
 pub(crate) use self::process::{
     ProcessHandle, boot_id, host_id, monotonic_ns, open_process, own_bytes_read,
 };
 pub(crate) use self::spawn::{LaunchedProcess, SpawnMode, spawn_with_stdio};
-
-/// Whether this host can run NVX microVMs.
-pub const SUPPORTED: bool = true;
 
 /// Encodes `value` as a NUL-terminated UTF-16 string for Win32.
 fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {

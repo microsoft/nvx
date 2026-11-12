@@ -122,7 +122,7 @@ changes only when the module's purpose does.
 | [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
-| [`nvx::host::platform`, `report`](#nvxhostplatform-report) | Linux and Windows primitives, and OpenVMM's outcome report |
+| [`nvx::host::report`](#nvxhostreport) | OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its live shares and option checks; its layer and bindings are private to the CLI |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
@@ -985,11 +985,29 @@ and another transport failure `Io`. Original I/O and protocol causes are
 retained directly; attachment refusal, reset and ended-connection details
 remain available as sources.
 
-`Transport` and `TransportHandle` re-export the existing platform types, with
-one definition beneath the OS adapters. Timed reads and writes, native-handle
-duplication and `unread` are unchanged: Linux reports Unix `SIOCOUTQ` charges,
-and Windows reports `None`. The old `session::connect`, private to the crate
-like the session, remains a compatibility wrapper for the CLI.
+`Transport` and `TransportHandle` re-export the types of the crate's private
+platform layer, with one definition beneath the OS adapters. Timed reads and
+writes, native-handle duplication and `unread` are unchanged: Linux reports
+Unix `SIOCOUTQ` charges, and Windows reports `None`. The old
+`session::connect`, private to the crate like the session, remains a
+compatibility wrapper for the CLI.
+
+A `Transport` to an OpenVMM control endpoint reads and writes with deadlines,
+and tells, through `Transport::unread`, what the endpoint has not read yet of
+what it wrote, where the platform tells: on Linux, what `SIOCOUTQ` reports of
+its Unix socket, the kernel's charge for the buffers of each write until
+OpenVMM read each whole, which a read of part of a buffer leaves as it was, and
+which is zero once OpenVMM read everything. A named pipe tells its writer
+nothing of the kind, so on Windows, and for a transport that does not tell, it
+is `None`.
+
+On Linux and Windows, `Transport::try_clone_handle` optionally returns an
+owned native handle to the same peer-verified connection, not a reconnect:
+an `OwnedFd` for the Unix socket or an `OwnedHandle` for the overlapped pipe.
+An adapter must drop the blocking transport before using or registering the
+duplicate with an I/O runtime, or changing the shared blocking mode. The
+default is `Ok(None)`, so transports without native handles need not implement
+it, and NVX does not depend on an asynchronous I/O runtime.
 
 ### `nvx::host::process`
 
@@ -1031,34 +1049,18 @@ holds what the process's children read once it reaped them, as the kernel
 accounts them to their parent, while Windows counts the process's own reads
 alone.
 
-### `nvx::host::platform`, `report`
+### `nvx::host::report`
 
-Linux and Windows primitives, and OpenVMM's outcome report. The authenticated
-control session, which carries NVX's own control protocol, `NVXC`, one frame
-per DATA record of a `HostConnection`, is private to the crate: the CLI and its
-restore driver use it, with the `cli` feature.
+OpenVMM's outcome report. The Linux and Windows primitives are private to the
+crate, in `host::platform`, and so is the authenticated control session, which
+carries NVX's own control protocol, `NVXC`, one frame per DATA record of a
+`HostConnection`: the CLI and its restore driver use it, with the `cli`
+feature.
 
 `report::read` returns `Ok(None)` for a missing report, and an `Io` error for an
 unreadable or malformed report, retaining the underlying error. It keeps today's
 summary of the outcome category, status code and teardown steps, not free-form
 fields.
-
-A `Transport` to an OpenVMM control endpoint reads and writes with deadlines,
-and tells, through `Transport::unread`, what the endpoint has not read yet of
-what it wrote, where the platform tells: on Linux, what `SIOCOUTQ` reports of
-its Unix socket, the kernel's charge for the buffers of each write until
-OpenVMM read each whole, which a read of part of a buffer leaves as it was, and
-which is zero once OpenVMM read everything. A named pipe tells its writer
-nothing of the kind, so on Windows, and for a transport that does not tell, it
-is `None`.
-
-On Linux and Windows, `Transport::try_clone_handle` optionally returns an
-owned native handle to the same peer-verified connection, not a reconnect:
-an `OwnedFd` for the Unix socket or an `OwnedHandle` for the overlapped pipe.
-An adapter must drop the blocking transport before using or registering the
-duplicate with an I/O runtime, or changing the shared blocking mode. The
-default is `Ok(None)`, so transports without native handles need not implement
-it, and NVX does not depend on an asynchronous I/O runtime.
 
 ### `nvx::host::sandbox`
 
@@ -1808,8 +1810,8 @@ components alone, as `Path::components` reads them, with backslashes on
 Windows, and resolved by `std::fs::canonicalize`, with the components that do
 not exist yet appended. Paths that are not valid Unicode are refused. The
 filesystem queries are those of `std::fs`, and the identities of files those
-of `nvx::host::platform`: the device and inode on Unix, and the volume serial
-number and the 64-bit file index on Windows.
+of the crate's private platform layer: the device and inode on Unix, and the
+volume serial number and the 64-bit file index on Windows.
 
 Every host path becomes absolute through one function, which joins a relative
 path to the current directory without consulting the filesystem, so it
@@ -2781,11 +2783,13 @@ dependencies: break a cycle by moving the item that a lower child takes from a
 higher one down, and re-exporting it at its old path. So the children stack in
 layers, each above those that it depends on, which the test prints with
 `--nocapture`.
-The process and spawn test spawns VMM stand-ins through the low-level spawn,
-waits for them through their verified references, finds one again after the
-process that spawned it crashed, and checks that a VMM inherits only its
-standard streams and the descriptors or handles that it is allowed while
-another thread spawns processes.
+The process tests, unit tests of `nvx::host::process`, start processes of
+their own as an orchestrator does, name them by the start time that the
+crate's private platform layer reads, wait for them through their verified
+references, and find one again after the process that started it exited; the
+spawn's unit tests check that a VMM inherits only its standard streams and the
+descriptors or handles that it is allowed while another thread spawns
+processes.
 On Linux, with the `cli` feature, a loopback test drives
 the host's private `ControlSession` through a broker shim into the real managed
 agent's session, dispatch, and execution engine, and `nvx.py` also lints and
@@ -2802,10 +2806,12 @@ The [security checklist](tests/security_checklist.rs) checks, through the
 public API alone and without a VM, each security requirement that the host's
 documentation states: the guest targets of an export and a read-only path
 inside a writable one, the exported objects that each start checks again, a
-VM's private directory and its new private log, the exit proof of a saved VM,
-the owner of its endpoint, and its recovery from the saved values, and a
-snapshot's strict directory. An idle copy of the test binary stands in for a
-VM's process. The checks that NVX makes of a restore need a captured snapshot,
+VM's private directory and its new private log, and a snapshot's strict
+directory. The exit proof of a saved VM, the owner of its endpoint, and its
+recovery from the saved values need a process that the test names by its start
+time, which only the crate's private platform layer reads, so the unit tests of
+`nvx::host::vm` check them, with an idle copy of their test binary as the VM's
+process. The checks that NVX makes of a restore need a captured snapshot,
 so the unit tests of `nvx::host::vm`, `nvx::host::snapshot`, and
 `nvx::host::restore` check them. The checks of a staged image and the claim of
 a scratch image, which the CLI keeps in directories that only its own account

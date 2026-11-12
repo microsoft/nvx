@@ -136,17 +136,16 @@ impl<'de> Deserialize<'de> for BootId {
 /// A reference to one process: its ID, its start time, and the boot of the host during which it
 /// started, which together never name another process.
 ///
-/// The start time is that of [`platform::process_start_time`]: on Linux, the `starttime` field
-/// of `/proc/<pid>/stat`, in clock ticks since boot, and on Windows, the creation time of the
-/// process as a 64-bit `FILETIME`. A reference is a claim, which a caller may record and read
-/// back after it restarts: [`Process::open`] checks it before anything waits for the process or
-/// signals it.
+/// The start time is, on Linux, the `starttime` field of `/proc/<pid>/stat`, in clock ticks since
+/// boot, and on Windows, the creation time of the process as a 64-bit `FILETIME`. A reference is a
+/// claim, which a caller may record and read back after it restarts: [`Process::open`] checks it
+/// before anything waits for the process or signals it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessRef {
     /// Process ID.
     pub pid: u32,
-    /// Start time, in the units of [`platform::process_start_time`].
+    /// Start time: clock ticks since boot on Linux, and a creation `FILETIME` on Windows.
     pub start_time: u64,
     /// The boot of the host during which the process started.
     pub boot: BootId,
