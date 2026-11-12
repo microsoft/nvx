@@ -51,13 +51,6 @@ to a module that it contains.
 
 ![The modules that nvx::activation contains](nvx-activation.svg)
 
-### `nvx::exec`
-
-`nvx::exec`, in [`nvx-rs/src/exec/mod.rs`](../../nvx-rs/src/exec/mod.rs),
-contains 6 modules.
-
-![The modules that nvx::exec contains](nvx-exec.svg)
-
 ### `nvx::gpt`
 
 `nvx::gpt`, in [`nvx-rs/src/gpt/mod.rs`](../../nvx-rs/src/gpt/mod.rs), contains
