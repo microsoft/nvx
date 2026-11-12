@@ -3754,12 +3754,25 @@ class _FakeSnapshotCli:
                     os.link(directory / "openvmm" / "memory.bin", leftover)
             if zeroed:
                 # The guest cannot mount the zeroed scratch as its upper, so its
-                # VM exits before the workload runs, and frees the lock.
+                # VM exits before the workload runs, and frees the lock, with
+                # nvx-init's status of a root that does not assemble, which the
+                # CLI reports with the restore's attribution.
                 self.terminate(self._spawn())
                 if "failure-keeps-the-lock" in self.faults:
                     locked = False
+                if "unclassified-guest-failure" in self.faults:
+                    return self._error(
+                        "exited", "OpenVMM exited during startup: guest-exit status 125"
+                    )
+                attribution = (
+                    "Io, attributed to the host"
+                    if "misattributed-guest-failure" in self.faults
+                    else "UnusableRoot, attributed to the request"
+                )
                 return self._error(
-                    "exited", "OpenVMM exited during startup: guest-exit status 125"
+                    "exited",
+                    "OpenVMM exited during startup: guest-exit status 54; restore "
+                    f"failed during Activate: {attribution}",
                 )
             guest = self._guest(values)
             self.guests[state] = guest
@@ -4224,6 +4237,18 @@ class PublicSnapshotTests(unittest.TestCase):
             "mounts-zeroed-scratch": (
                 "zeroed-scratch: nvx-rs run --restore-snapshot returned 0, expected 1 "
                 "with error[exited]"
+            ),
+            # A guest that ends its VM with the generic status, or a CLI that
+            # attributes the failure to another cause.
+            "unclassified-guest-failure": (
+                "zeroed-scratch: nvx-rs run --restore-snapshot returned 1, expected 1 "
+                "with error[exited]; stdout=''; stderr='error[exited]: OpenVMM exited "
+                "during startup: guest-exit status 125"
+            ),
+            "misattributed-guest-failure": (
+                "the zeroed-scratch restore does not attribute its unusable root to the "
+                "request: 'OpenVMM exited during startup: guest-exit status 54; restore "
+                "failed during Activate: Io, attributed to the host'"
             ),
             "unserialized-restores": (
                 "busy: nvx-rs run --restore-snapshot returned 0, expected 1 "
