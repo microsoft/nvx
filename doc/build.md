@@ -206,8 +206,10 @@ Ubuntu, and Azure Linux; the kernel targets do not depend on that build. The
 Ubuntu determinism target instead rebuilds them from fresh targets in both
 attempts. Native image builds also rebuild them fresh.
 
-The Alpine initramfs additionally includes the sandbox PID-1 bootstrap and
-its container namespace scripts. `nvx-time-probe` measures TSC and
+The Alpine initramfs is the one that `nvx-rs sandbox` boots: with
+`nvx_sandbox=1` on the kernel command line, the common `/init` hands PID 1 to
+`nvx-init`, which initializes the sandbox's layered root and serves its managed
+control session. `nvx-time-probe` measures TSC and
 clock read latency, reports the guest's clock, clocksource, TSC flags, and
 hypervisor identity, and runs the cross-vCPU warp test that the
 [time ABI](design/3.2-clock-and-time.md#327-cross-processor-consistency) uses to enforce its 1 µs
@@ -231,8 +233,9 @@ predate the ABI. All ten executables link the musl supplied by the pinned
 Rust target. Every package manifest records the shared Rust source digest and
 each installed binary digest. The
 [kernel configuration checks](#kernel-configuration-checks) cover the kernel
-features that the sandbox bootstrap needs. The APK manifest records the
-`blkid` and `util-linux` tools used by the bootstrap along with every
+features that sandboxes need. The APK manifest records every package of the
+Alpine image, among them `blkid`, `busybox-extras`, `e2fsprogs`, `util-linux`,
+and `util-linux-misc`, which the build adds to the minirootfs, along with every
 guest-binary digest.
 
 The Ubuntu initramfs uses Ubuntu userland with the NVX kernel. It is not an

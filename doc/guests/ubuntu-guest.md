@@ -16,7 +16,7 @@ describes how the pieces fit together and why.
 | Artifact | Used by | Boot supervisor |
 | --- | --- | --- |
 | `initramfs-ubuntu.cpio.gz` | `nvx-rs run --guest ubuntu` | The common NVX `/init` inside the Ubuntu initramfs |
-| `ubuntu-distro.erofs` | `nvx-rs sandbox --layer distro,...` | The Alpine control initramfs and its init agent |
+| `ubuntu-distro.erofs` | `nvx-rs sandbox --layer distro,...` | `nvx-init`, which the common `/init` of the Alpine initramfs starts |
 
 Alpine remains the default guest of `run` and the only control environment of
 `sandbox`. The sandbox launcher always boots the Alpine initramfs, and the
@@ -38,8 +38,8 @@ what Ubuntu userland needs on this machine:
 - devtmpfs, procfs, sysfs, and tmpfs;
 - virtio-mmio block, network, console, and filesystem devices;
 - ext4, EROFS, and overlayfs; and
-- the memory and process-count cgroups and the PID, mount, and UTS namespaces
-  that the sandbox uses, and network namespaces for guest services.
+- the memory and process-count cgroups, and the PID, mount, UTS, and network
+  namespaces, which programs in the guest may use.
 
 Its [patches](../../kernel/patches) add the xe9 early and interactive consoles
 and the shared virtio-mmio interrupt status, and keep the HVC console from
