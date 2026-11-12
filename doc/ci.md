@@ -2735,22 +2735,24 @@ NVX_RS="$PWD/nvx-rs/target/release/nvx-rs" python3 scripts/scripts_coverage.py
 
 ## Module diagrams
 
-[`doc/modules`](modules/README.md) publishes diagrams of the modules of the
-[`nvx` crate](../nvx-rs/README.md): its top-level modules, the dependencies
+[`doc/modules`](modules/README.md) publishes diagrams of the public modules of
+the [`nvx` crate](../nvx-rs/README.md): its top-level modules, the dependencies
 between them, and the modules that each contains, on Linux and Windows.
 [`module_diagrams.py`](../scripts/module_diagrams.py) draws them. It exports
 the modules of the crate's library, with its `cli`, `testing`, and `guest`
 features, for each platform's target with
-[cargo-modules](https://github.com/regexident/cargo-modules), merges the
-platforms' modules, lays out the diagrams with Graphviz, and writes them with
-the page that shows them. Unless it analyzes with `cfg(test)`, cargo-modules
-drops as a test module every module whose cfg holds when `test` holds and every
-other condition fails, such as one under `cfg(not(windows))`, so the script
-also reads its analysis with `cfg(test)` and restores those modules, with their
-own uses in place of those that the plain analysis moves to the modules that
-contain them, and stops at a cfg that depends on `test` in another way, but for
-`any(test, feature = "cli")` and its like, whose feature the script enables.
-Nobody edits the diagrams by hand:
+[cargo-modules](https://github.com/regexident/cargo-modules), keeps those of
+each platform's public API, without the modules of NVX's own programs, which
+the crate hides and the script lists, merges the platforms' modules, lays out
+the diagrams with Graphviz, and writes them with the page that shows them.
+Unless it analyzes with `cfg(test)`, cargo-modules drops as a test module every
+module whose cfg holds when `test` holds and every other condition fails, such
+as one under `cfg(not(windows))`, so the script also reads its analysis with
+`cfg(test)` and restores those modules, with their own uses in place of those
+that the plain analysis moves to the modules that contain them, and stops at a
+cfg that depends on `test` in another way, but for `any(test, feature = "cli")`
+and its like, whose feature the script enables. Nobody edits the diagrams by
+hand:
 [`module-diagrams.yml`](../.github/workflows/module-diagrams.yml) draws them
 again every night, with the nightly full run of CI, and commits them to `dev`
 when they changed, so that `dev` takes at most one push of them a night outside
