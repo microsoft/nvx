@@ -21,6 +21,7 @@ from nvx_tools import (  # noqa: E402
     build,
     build_config,
     collect_ubuntu_sources,
+    create_linux_source_archive,
     elf,
     guest_binaries,
     ubuntu,
@@ -28,6 +29,7 @@ from nvx_tools import (  # noqa: E402
 from nvx_tools.build_constants import (  # noqa: E402
     BuildConstants,
     GuestRustBuildConstants,
+    KernelBuildConstants,
 )
 
 
@@ -1050,6 +1052,68 @@ class GuestBinaryCliTests(unittest.TestCase):
 
 
 class GuestBinaryArchitectureTests(unittest.TestCase):
+    def test_linux_source_archive_uses_the_selected_architecture_and_config(self):
+        for architecture in ("x86_64", "aarch64"):
+            for explicit_config in (False, True):
+                with (
+                    self.subTest(
+                        architecture=architecture, explicit_config=explicit_config
+                    ),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = Path(temporary).resolve()
+                    kernel = build_config.KernelBuildConfig(
+                        architecture=architecture, work=root / architecture / "linux"
+                    )
+                    config = (
+                        root / "custom.config"
+                        if explicit_config
+                        else kernel.work / KernelBuildConstants.BUILD_CONFIG_NAME
+                    )
+                    config.parent.mkdir(parents=True, exist_ok=True)
+                    config.write_text("CONFIG_64BIT=y\n", encoding="utf-8")
+                    output = root / "out" / "linux.tar.gz"
+                    argv = ["create-linux-source-archive", "--output", str(output)]
+                    if architecture == "aarch64":
+                        argv.extend(["--architecture", architecture])
+                    if explicit_config:
+                        argv.extend(["--config", str(config)])
+                    args = nvx.parse_args(argv)
+                    with (
+                        patch.object(
+                            create_linux_source_archive.KernelBuildConfig,
+                            "for_architecture",
+                            return_value=kernel,
+                        ) as select,
+                        patch.object(
+                            create_linux_source_archive,
+                            "prepare_kernel_source",
+                            return_value=(root / "source", "fingerprint"),
+                        ) as prepare,
+                        patch.object(
+                            create_linux_source_archive, "create_reproducible_tar_gz"
+                        ) as archive,
+                        contextlib.redirect_stdout(io.StringIO()),
+                    ):
+                        args.handler(args)
+                    select.assert_called_once_with(architecture)
+                    prepare.assert_called_once_with(kernel)
+                    self.assertEqual(archive.call_args.args[0], output)
+                    archive_root = KernelBuildConstants.SOURCE_ARCHIVE_ROOT
+                    self.assertEqual(
+                        archive.call_args.args[1][:2],
+                        (
+                            (
+                                root / "source",
+                                f"{archive_root}/{KernelBuildConstants.SOURCE_NAME}",
+                            ),
+                            (
+                                config,
+                                f"{archive_root}/{KernelBuildConstants.CONFIG_NAME}",
+                            ),
+                        ),
+                    )
+
     def test_common_guest_build_cli_selects_one_architecture_for_every_producer(self):
         args = nvx.parse_args(
             [
@@ -1220,6 +1284,11 @@ class GuestBinaryArchitectureTests(unittest.TestCase):
             "COPY --from=guest-binaries /out/guest-binaries/ /",
             dockerfile,
         )
+        source = dockerfile.split("FROM kernel AS linux-source-archive", 1)[1].split(
+            "\nFROM ", 1
+        )[0]
+        self.assertIn('--architecture "$NVX_ARCHITECTURE"', source)
+        self.assertNotIn("--config", source)
 
     def test_explicit_target_resolution_and_legacy_manifest(self):
         for architecture, target in GuestRustBuildConstants.TARGETS.items():

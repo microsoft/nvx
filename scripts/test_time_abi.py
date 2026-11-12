@@ -1050,6 +1050,51 @@ class MonitorTests(unittest.TestCase):
             )
         )
 
+    def test_explicit_counter_architecture_accepts_both_option_spellings(self):
+        arm_line = BOOT_LINE.replace("tsc_hz=2194804000", "tsc_hz=19200000").replace(
+            "lapic_hz=1000000000", "lapic_hz=0"
+        )
+        for native, architecture, line in (
+            ("x86_64", "aarch64", arm_line),
+            ("ARM64", "x86_64", BOOT_LINE),
+        ):
+            for options in (
+                ["--hypervisor", "kvm", "--architecture", architecture],
+                ["--hypervisor=kvm", f"--architecture={architecture}"],
+            ):
+                with (
+                    self.subTest(native=native, options=options),
+                    patch.object(time_abi.platform, "machine", return_value=native),
+                ):
+                    monitor = TimeAbiMonitor(["nvx-rs", "run", *options])
+                    self.assertEqual(monitor.architecture, architecture)
+                    self.assertEqual(monitor.backend, "kvm")
+                    monitor.feed(line.encode() + STATUS_OK.encode())
+                    self.assertEqual(
+                        monitor.require_boot("explicit ISA", online_cpus=4)["tsc_hz"],
+                        "19200000" if architecture == "aarch64" else "2194804000",
+                    )
+                    rejected = TimeAbiMonitor(["nvx-rs", "run", *options])
+                    with self.assertRaises(TimeAbiFailure):
+                        rejected.feed(
+                            line.replace("lapic_hz=", "lapic_hz=1").encode()
+                            + STATUS_OK.encode()
+                        )
+
+    def test_option_reader_matches_exact_names_and_keeps_native_defaults(self):
+        for options in ([], ["--architecture-extra=aarch64"], ["--architecture"]):
+            with (
+                self.subTest(options=options),
+                patch.object(time_abi.platform, "machine", return_value="x86_64"),
+            ):
+                self.assertEqual(
+                    TimeAbiMonitor(["nvx-rs", "run", *options]).architecture, "x86_64"
+                )
+        self.assertEqual(
+            TimeAbiMonitor(["openvmm", "--kernel=build/aarch64/Image"]).architecture,
+            "aarch64",
+        )
+
     def test_validates_restore_marker_fields_against_the_backend(self):
         restore = time_abi.parse_marker(RESTORE_LINE)
         assert restore is not None

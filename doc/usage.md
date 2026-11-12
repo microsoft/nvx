@@ -1892,14 +1892,17 @@ authenticates live or historical Ubuntu source indexes through signed
 
 ```text
 python3 scripts/nvx.py create-linux-source-archive
-    --config PATH
+    [--architecture {x86_64,aarch64}]
+    [--config PATH]
     --output PATH
 ```
 
 Creates the deterministic Linux corresponding-source archive from the pinned
-kernel inputs and the generated kernel configuration. `--config` must name an
-existing generated kernel configuration, and `--output` names the archive to
-create.
+kernel inputs and the generated kernel configuration. `--architecture` defaults
+to `x86_64` and selects the matching kernel patch set and build directory.
+`--config` overrides the generated configuration path, which defaults to
+`build/linux/.config` for x86 and `build/aarch64/linux/.config` for ARM64; the
+selected file must already exist. `--output` names the archive to create.
 
 ### `package`
 
