@@ -3,7 +3,8 @@
 //!
 //! A frame is a 24-byte header (the magic, the version, the frame kind, two zero flags bytes, the
 //! request ID, a status, and the payload length) followed by the payload. Responses repeat the ID
-//! of their request.
+//! of their request. This module holds version 1, and `v2` version 2, which carries every control
+//! path and streams an execution's standard input, output and error.
 
 #[cfg(any(
     feature = "cli",
@@ -41,6 +42,20 @@ pub(crate) mod workload {
         pub(crate) create_account: bool,
     }
 }
+
+#[cfg(any(
+    feature = "cli",
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "SL4.4b's guest loop and fake OpenVMM serve NVXC v2, and SL4.4c's host speaks it"
+    )
+)]
+pub(crate) mod v2;
 
 /// Magic of every application frame.
 #[cfg(any(
