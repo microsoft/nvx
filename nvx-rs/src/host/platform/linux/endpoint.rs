@@ -1,10 +1,10 @@
 //! The Unix sockets of OpenVMM's endpoints: its control endpoint and the transport over it, and
 //! the listener of a clone's restore-ready event.
 
-use std::fs::{self, OpenOptions, Permissions};
+use std::fs::{self, File, Permissions};
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
@@ -227,11 +227,16 @@ fn set_ready_socket_mode(socket_path: &Path) -> io::Result<()> {
     use std::os::unix::fs::FileTypeExt;
 
     use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
 
-    let socket = OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_PATH | OFlag::O_NOFOLLOW).bits())
-        .open(socket_path)?;
+    // `nix` passes the flags on as they are, where `OpenOptionsExt::custom_flags` masks out the
+    // bits of `O_ACCMODE`, which on musl include `O_PATH`: a musl build would open the socket
+    // itself, which the kernel refuses with `ENXIO`.
+    let socket = File::from(nix::fcntl::open(
+        socket_path,
+        OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?);
     if !socket.metadata()?.file_type().is_socket() {
         return Err(io::Error::other(format!(
             "{} is not the restore-ready socket that the launch bound",
