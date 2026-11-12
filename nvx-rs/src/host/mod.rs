@@ -14,7 +14,8 @@
 //!   whose identity names the capture's snapshots.
 //! - [`network`] lowers egress rules into OpenVMM's rules, as its private `policy` (feature `cli`)
 //!   lowers the egress policy files that `nvx-rs run` and `nvx-rs sandbox` accept, and
-//!   [`filesystem`] plans the export of host paths through OpenVMM's aggregate virtio-fs device.
+//!   [`filesystem`] checks and lowers the export of host paths through OpenVMM's aggregate
+//!   virtio-fs device, which its private planner (feature `cli`) plans for the CLI.
 //! - [`report`] reads OpenVMM's outcome report.
 //! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
 //!   from a capture's context and [`SnapshotManifest`](snapshot::SnapshotManifest),
