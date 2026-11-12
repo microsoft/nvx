@@ -141,6 +141,7 @@ fn is_root() -> bool {
 /// Returns the `errno` with which this process fails to open the device at `path`, as an
 /// unprivileged guest binary does, or `None` when the tests run as root or the device opens: the
 /// binaries would then reach the host's real devices.
+#[cfg(target_arch = "x86_64")]
 fn device_error(path: &str, read: bool, write: bool) -> Option<Errno> {
     if is_root() {
         return None;
@@ -164,6 +165,41 @@ fn console_pending_usage() {
                 b"usage: nvx-console-pending DEVICE\n".to_vec()
             )
         );
+    }
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_coldboot_time_has_a_real_cli_entrypoint() {
+    let usage = b"usage: nvx-time [--report-only] boot|status|sample|generation-id\n";
+    for arguments in [
+        &[][..],
+        &["unknown"],
+        &["sample", "extra"],
+        &["boot", "extra"],
+    ] {
+        assert_eq!(
+            run("nvx-time", arguments),
+            (Some(2), Vec::new(), usage.to_vec()),
+            "{arguments:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_arch = "aarch64")]
+fn arm_coldboot_time_does_not_expose_snapshot_or_restore_commands() {
+    for command in [
+        "capture",
+        "restore-finish",
+        "pre-capture",
+        "cancel-capture",
+        "check",
+    ] {
+        let (status, stdout, stderr) = run("nvx-time", [command]);
+        assert_eq!(status, Some(2), "{command}");
+        assert!(stdout.is_empty());
+        assert!(stderr.starts_with(b"usage: nvx-time "));
     }
 }
 

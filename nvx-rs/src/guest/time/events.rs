@@ -1,16 +1,22 @@
-//! Time-ABI violation events, their codes, and their byte-exact escaping.
+//! Shared time-ABI violation events, their codes, watcher rules and byte-exact escaping.
 
 use std::fmt::{self, Display, Write as _};
 
-use super::Phase;
+use super::sample::Phase;
+use crate::guest::kernel_text;
 
 /// Maximum event record length before its terminating newline.
 pub(crate) const EVENT_MAX: usize = 512;
-/// Maximum unescaped detail bytes considered for one event.
+/// Maximum detail buffer for x86 exhaustive-check diagnostics.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const DETAIL_MAX: usize = 384;
 
 /// The conformance checks, whose failures the time ABI reports as `G_CONFORMANCE_Cn`.
+///
+/// Keep the complete wire-v1 namespace on every ISA, even when its cold-boot checks emit only
+/// a subset of the IDs. The shared formatter and its tests retain the other IDs too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(all(not(target_arch = "x86_64"), not(test)), allow(dead_code))]
 pub(crate) enum CheckId {
     /// The Hyper-V identity leaves, on every CPU that the checks run on.
     C1,
@@ -81,14 +87,20 @@ pub(crate) enum ViolationCode {
     /// A CPU's APIC ID differs from the firmware's.
     ApicIdMismatch,
     /// Restore repair could not correct the wall clock.
+    /// Kept as wire-v1 event vocabulary on cold-boot-only guests, not as restore support.
+    #[cfg_attr(all(not(target_arch = "x86_64"), not(test)), allow(dead_code))]
     RepairClock,
     /// Restore repair found the wrong VM generation.
+    #[cfg_attr(all(not(target_arch = "x86_64"), not(test)), allow(dead_code))]
     RepairGeneration,
     /// Restore repair read a malformed restore packet.
+    #[cfg_attr(all(not(target_arch = "x86_64"), not(test)), allow(dead_code))]
     RepairPacket,
     /// Restore repair could not take a narrow enough time sample.
+    #[cfg_attr(all(not(target_arch = "x86_64"), not(test)), allow(dead_code))]
     RepairSample,
     /// Restore repair could not restore the stall detectors.
+    #[cfg_attr(all(not(target_arch = "x86_64"), not(test)), allow(dead_code))]
     RepairSuppression,
 }
 
@@ -130,6 +142,8 @@ pub(crate) enum EventSource {
     /// The kernel-log and discipline watcher.
     Watcher,
     /// Restore repair.
+    /// Kept as wire-v1 event vocabulary on cold-boot-only guests, not as restore support.
+    #[cfg_attr(all(not(target_arch = "x86_64"), not(test)), allow(dead_code))]
     Repair,
 }
 
@@ -194,6 +208,113 @@ pub(crate) fn format_event(
     line.push_str(&escape_text(detail, available));
     line.push_str("\"\n");
     line
+}
+
+/// Kernel-message signature associated with one existing violation code.
+struct WatchRule {
+    /// Stable ABI violation code.
+    code: ViolationCode,
+    /// Substrings that must all occur.
+    all: &'static [&'static str],
+    /// Alternatives of which at least one must occur.
+    any: &'static [&'static str],
+}
+
+/// Existing ordered watcher rules, shared rather than duplicated for the ARM daemon.
+const WATCH_RULES: &[WatchRule] = &[
+    WatchRule {
+        code: ViolationCode::TscUnstable,
+        all: &["Marking TSC unstable due to "],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::ClocksourceUnstable,
+        all: &[
+            "timekeeping watchdog on CPU",
+            "as unstable because the skew is too large",
+        ],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::ClocksourceSwitch,
+        all: &["clocksource: Switched to clocksource "],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::ClocksourceSkew,
+        all: &["clocksource: "],
+        any: &[" ahead of CPU ", " behind CPU "],
+    },
+    WatchRule {
+        code: ViolationCode::TscWarp,
+        all: &[],
+        any: &[
+            "TSC synchronization [CPU#",
+            "cycles TSC warp between CPUs",
+            "TSC warped randomly between CPUs",
+        ],
+    },
+    WatchRule {
+        code: ViolationCode::TscAdjust,
+        all: &["TSC ADJUST"],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::RcuStall,
+        all: &["rcu: INFO: "],
+        any: &[
+            " detected stalls on CPUs/tasks",
+            " self-detected stall on CPU",
+            " detected expedited stalls",
+        ],
+    },
+    WatchRule {
+        code: ViolationCode::RcuStarved,
+        all: &["rcu: "],
+        any: &[
+            " kthread starved for ",
+            " kthread timer wakeup didn't happen for ",
+        ],
+    },
+    WatchRule {
+        code: ViolationCode::SoftLockup,
+        all: &["watchdog: BUG: soft lockup - CPU#"],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::HardLockup,
+        all: &["Watchdog detected hard LOCKUP"],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::HungTask,
+        all: &["INFO: task ", " blocked for more than "],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::UncheckedMsr,
+        all: &["unchecked MSR access error"],
+        any: &[],
+    },
+    WatchRule {
+        code: ViolationCode::ApicIdMismatch,
+        all: &["APIC ID mismatch"],
+        any: &[],
+    },
+];
+
+/// Returns the existing first matching violation, excluding the time tools' own records.
+pub(crate) fn match_watch_rule(message: &[u8]) -> Option<ViolationCode> {
+    if message.starts_with(b"NVX-TIME-") {
+        return None;
+    }
+    let contains = |part: &&str| kernel_text::contains(message, part.as_bytes());
+    WATCH_RULES
+        .iter()
+        .find(|rule| {
+            rule.all.iter().all(contains) && (rule.any.is_empty() || rule.any.iter().any(contains))
+        })
+        .map(|rule| rule.code)
 }
 
 #[cfg(test)]

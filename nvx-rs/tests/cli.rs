@@ -100,6 +100,60 @@ fn run(root: &Root, arguments: &[String]) -> Output {
     nvx_rs(root, arguments, &BTreeMap::new())
 }
 
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn native_arm_auto_and_host_runs_find_arm_artifacts_without_an_isa_option() {
+    let root = Root::new();
+    let build = root.path.join("build").join("aarch64");
+    fs::create_dir_all(&build).unwrap();
+    let mut image = [0_u8; 64];
+    image[16..24].copy_from_slice(&4096_u64.to_le_bytes());
+    image[24..32].copy_from_slice(&10_u64.to_le_bytes());
+    image[56..60].copy_from_slice(b"ARM\x64");
+    fs::write(build.join("Image"), image).unwrap();
+    for (guest, architecture) in [("alpine", "aarch64"), ("ubuntu", "arm64")] {
+        let name = if guest == "alpine" {
+            "initramfs"
+        } else {
+            "initramfs-ubuntu"
+        };
+        fs::write(build.join(format!("{name}.cpio.gz")), b"dry-run fixture").unwrap();
+        fs::write(
+            build.join(format!("{name}.cpio.gz.packages.json")),
+            format!(r#"{{"architecture":"{architecture}"}}"#),
+        )
+        .unwrap();
+        for profile in ["auto", "host"] {
+            // Deliberately bypass the x86-fixture helper: this checks the real native default.
+            let output = Command::new(NVX_RS)
+                .arg("--root")
+                .arg(&root.path)
+                .args([
+                    "run",
+                    "--dry-run",
+                    "--guest",
+                    guest,
+                    "--cpu-profile",
+                    profile,
+                ])
+                .env_remove("NVX_OPENVMM")
+                .env("NVX_AUTO_DOWNLOAD", "0")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", text(&output.stderr));
+            let printed = text(&output.stdout);
+            assert!(
+                printed.contains(build.join("Image").to_str().unwrap()),
+                "{printed}"
+            );
+            assert!(
+                printed.contains(&format!("--cpu-profile {profile}")),
+                "{printed}"
+            );
+        }
+    }
+}
+
 fn lifecycle(operation: &str, root: &Root, state: &str) -> Vec<String> {
     vec![
         "sandbox".into(),
@@ -2458,8 +2512,11 @@ fn usage_errors_print_the_one_line_usage_of_their_parser() {
 /// The host CPU as the host OS reports it, independently of the CPUID that `nvx-rs` reads: its
 /// vendor and display family, model, and stepping, from the first processor of `/proc/cpuinfo` on
 /// Linux, and from `PROCESSOR_IDENTIFIER`, such as `Intel64 Family 6 Model 85 Stepping 4,
-/// GenuineIntel`, on Windows.
-fn reported_cpu() -> (String, u32, u32, u32) {
+/// GenuineIntel`, on Windows. Non-x86 hosts have no CPUID tuple.
+fn reported_cpu() -> Option<(String, u32, u32, u32)> {
+    if !cfg!(target_arch = "x86_64") {
+        return None;
+    }
     if cfg!(windows) {
         let identifier = std::env::var("PROCESSOR_IDENTIFIER").unwrap();
         let (description, vendor) = identifier.split_once(", ").unwrap();
@@ -2468,12 +2525,12 @@ fn reported_cpu() -> (String, u32, u32, u32) {
             let position = words.iter().position(|word| *word == name).unwrap();
             words[position + 1].parse().unwrap()
         };
-        return (
+        return Some((
             vendor.trim().to_owned(),
             number("Family"),
             number("Model"),
             number("Stepping"),
-        );
+        ));
     }
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap();
     let field = |name: &str| -> String {
@@ -2485,12 +2542,12 @@ fn reported_cpu() -> (String, u32, u32, u32) {
             })
             .unwrap()
     };
-    (
+    Some((
         field("vendor_id"),
         field("cpu family").parse().unwrap(),
         field("model").parse().unwrap(),
         field("stepping").parse().unwrap(),
-    )
+    ))
 }
 
 /// Returns whether a built-in CPU profile serves the CPU of `vendor` with the display `family`,
@@ -2519,9 +2576,15 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
     // nvx-rs run identifies the host's CPU with CPUID, as OpenVMM does and as the host OS reports
     // it, and guides a failed cold boot only where no built-in profile serves the CPU: what
     // follows OpenVMM's output depends on the host that runs the test.
-    let (vendor, family, model, stepping) = reported_cpu();
-    let unserved = !served(&vendor, family, model, stepping);
-    let host_profiles = ["GenuineIntel", "AuthenticAMD"].contains(&vendor.as_str());
+    let cpu = reported_cpu();
+    let unserved = cpu
+        .as_ref()
+        .is_some_and(|(vendor, family, model, stepping)| {
+            !served(vendor, *family, *model, *stepping)
+        });
+    let host_profiles = cpu
+        .as_ref()
+        .is_some_and(|(vendor, ..)| ["GenuineIntel", "AuthenticAMD"].contains(&vendor.as_str()));
     let root = Root::new();
     let arguments = |arguments: &[&str]| -> Vec<String> {
         std::iter::once("run")
@@ -2606,6 +2669,7 @@ fn run_guides_failed_cold_boots_on_cpus_that_no_built_in_profile_serves() {
             assert_eq!(guidance, "", "{options:?}");
             continue;
         }
+        let (vendor, family, model, stepping) = cpu.as_ref().unwrap();
         assert!(
             guidance.starts_with(&format!(
                 "nvx: no built-in CPU profile serves this host's CPU, {vendor} \

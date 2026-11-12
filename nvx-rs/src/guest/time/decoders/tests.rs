@@ -1,6 +1,8 @@
 use proptest::prelude::*;
 
 use super::*;
+use crate::guest::sys::{ClockAdjustment, FrequencyHold};
+use crate::guest::time::sample::{bound_to_ppb, frequency_hold, split_offset};
 use crate::protocol::cmdline::tests::model;
 
 /// A valid packet header without memory ranges, of generation 1.

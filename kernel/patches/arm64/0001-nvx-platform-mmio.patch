@@ -1,0 +1,291 @@
+From: NVX maintainers
+Subject: [PATCH] hvc: add the restricted NVX ARM64 development platform binding
+
+--- a/drivers/tty/hvc/Kconfig
++++ b/drivers/tty/hvc/Kconfig
+@@ -67,6 +67,19 @@
+ 	default y
+ 	help
+ 	  Xen driver for secondary virtual consoles
++
++config HVC_NVX_MMIO
++	bool "NVX ARM64 MMIO platform console and restricted control device"
++	depends on ARM64 && OF
++	select HVC_DRIVER
++	select SERIAL_CORE
++	select SERIAL_CORE_CONSOLE
++	select SERIAL_EARLYCON
++	help
++	  Use the fixed NVX development platform page for early output and
++	  hvc0, and expose its exact registers through /dev/nvx-platform.
++	  The page is root-only and mappings require CAP_SYS_RAWIO.
++	  This is not a generic UART, physical-memory interface or snapshot API.
+ 
+ config HVC_XE9
+ 	bool "microVM portb (0xE9/0xEA) hypervisor console"
+--- a/drivers/tty/hvc/Makefile
++++ b/drivers/tty/hvc/Makefile
+@@ -8,6 +8,7 @@
+ obj-$(CONFIG_HVC_IRQ)		+= hvc_irq.o
+ obj-$(CONFIG_HVC_XEN)		+= hvc_xen.o
+ obj-$(CONFIG_HVC_XE9)		+= hvc_xe9.o
++obj-$(CONFIG_HVC_NVX_MMIO)		+= hvc_nvx_mmio.o
+ obj-$(CONFIG_HVC_IUCV)		+= hvc_iucv.o
+ obj-$(CONFIG_HVC_UDBG)		+= hvc_udbg.o
+ obj-$(CONFIG_HVC_RISCV_SBI)	+= hvc_riscv_sbi.o
+--- a/drivers/tty/hvc/hvc_nvx_mmio.c
++++ b/drivers/tty/hvc/hvc_nvx_mmio.c
+@@ -0,0 +1,253 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/capability.h>
++#include <linux/console.h>
++#include <linux/err.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/miscdevice.h>
++#include <linux/mm.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++#include <linux/serial_core.h>
++#include <linux/uaccess.h>
++
++#include "hvc_console.h"
++
++#define NVX_BASE		0xd1000000
++#define NVX_SIZE		0x1000
++#define NVX_DATA		0x00
++#define NVX_STATUS	0x04
++#define NVX_TIME		0x08
++#define NVX_SHUTDOWN	0x0c
++#define NVX_SNAPSHOT	0x10
++
++/* This built-in fixed device cannot unbind or outlive the guest machine. */
++static void __iomem *nvx_base;
++
++static ssize_t nvx_put(u32 vtermno, const u8 *buffer, size_t count)
++{
++	size_t i;
++
++	if (!nvx_base)
++		return -ENODEV;
++	for (i = 0; i < count; i++)
++		writeb(buffer[i], nvx_base + NVX_DATA);
++	return count;
++}
++
++static ssize_t nvx_get(u32 vtermno, u8 *buffer, size_t count)
++{
++	size_t i;
++
++	if (!nvx_base)
++		return -ENODEV;
++	for (i = 0; i < count; i++) {
++		if (!(readb(nvx_base + NVX_STATUS) & 1))
++			break;
++		buffer[i] = readb(nvx_base + NVX_DATA);
++	}
++	return i;
++}
++
++static const struct hv_ops nvx_ops = {
++	.get_chars = nvx_get,
++	.put_chars = nvx_put,
++};
++
++static void nvx_early_write(struct console *console, const char *text,
++			    unsigned int count)
++{
++	struct earlycon_device *device = console->data;
++	unsigned int i;
++
++	for (i = 0; i < count; i++)
++		writeb(text[i], device->port.membase + NVX_DATA);
++}
++
++static int __init nvx_early_setup(struct earlycon_device *device,
++				 const char *options)
++{
++	if (device->port.mapbase != NVX_BASE || !device->port.membase)
++		return -EINVAL;
++	device->con->write = nvx_early_write;
++	return 0;
++}
++
++/* EARLYCON_DECLARE stringifies a C identifier, which cannot contain this hyphen. */
++static const struct earlycon_id nvx_earlycon
++	EARLYCON_USED_OR_UNUSED __section("__earlycon_table")
++	__aligned(__alignof__(struct earlycon_id)) = {
++	.name = "nvx-mmio",
++	.compatible = "microsoft,nvx-platform-control-v1",
++	.setup = nvx_early_setup,
++};
++
++static int __init nvx_console_init(void)
++{
++	struct device_node *node;
++	struct resource resource;
++	int error;
++
++	node = of_find_compatible_node(NULL, NULL,
++				      "microsoft,nvx-platform-control-v1");
++	if (!node)
++		return -ENODEV;
++	if (!of_device_is_available(node)) {
++		of_node_put(node);
++		return -ENODEV;
++	}
++	error = of_address_to_resource(node, 0, &resource);
++	of_node_put(node);
++	if (error)
++		return error;
++	if (resource.start != NVX_BASE || resource_size(&resource) != NVX_SIZE)
++		return -EINVAL;
++	nvx_base = ioremap(NVX_BASE, NVX_SIZE);
++	if (!nvx_base)
++		return -ENOMEM;
++	error = hvc_instantiate(0, 0, &nvx_ops);
++	if (error) {
++		iounmap(nvx_base);
++		nvx_base = NULL;
++		return error;
++	}
++	if (!console_set_on_cmdline)
++		add_preferred_console("hvc", 0, NULL);
++	return 0;
++}
++console_initcall(nvx_console_init);
++
++static int nvx_open(struct inode *inode, struct file *file)
++{
++	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
++}
++
++static int nvx_access(loff_t offset, size_t count, bool writing)
++{
++	if (count != 1 && count != 2 && count != 4)
++		return -EINVAL;
++	switch (offset) {
++	case NVX_DATA:
++	case NVX_SHUTDOWN:
++		return !writing || count == 1 ? 0 : -EINVAL;
++	case NVX_STATUS:
++		return count == 1 ? 0 : -EINVAL;
++	case NVX_TIME:
++		return writing ? -EINVAL : 0;
++	case NVX_SNAPSHOT:
++		return writing ? -EOPNOTSUPP : 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static ssize_t nvx_read(struct file *file, char __user *buffer, size_t count,
++			loff_t *position)
++{
++	u32 value;
++	int error = nvx_access(*position, count, false);
++
++	if (error)
++		return error;
++	switch (count) {
++	case 1: value = readb(nvx_base + *position); break;
++	case 2: value = readw(nvx_base + *position); break;
++	default: value = readl(nvx_base + *position); break;
++	}
++	value = cpu_to_le32(value);
++	if (copy_to_user(buffer, &value, count))
++		return -EFAULT;
++	*position += count;
++	return count;
++}
++
++static ssize_t nvx_write(struct file *file, const char __user *buffer,
++			 size_t count, loff_t *position)
++{
++	u8 value;
++	int error = nvx_access(*position, count, true);
++
++	if (error)
++		return error;
++	if (copy_from_user(&value, buffer, 1))
++		return -EFAULT;
++	writeb(value, nvx_base + *position);
++	mb();
++	*position += count;
++	return count;
++}
++
++static int nvx_mmap(struct file *file, struct vm_area_struct *vma)
++{
++	unsigned long flags = VM_SHARED | VM_READ | VM_WRITE;
++
++	if (!capable(CAP_SYS_RAWIO))
++		return -EPERM;
++	if (PAGE_SIZE != NVX_SIZE || vma->vm_pgoff ||
++	    vma->vm_end - vma->vm_start != NVX_SIZE ||
++	    (vma->vm_flags & flags) != flags || (vma->vm_flags & VM_EXEC))
++		return -EINVAL;
++	vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP | VM_DONTCOPY);
++	vm_flags_clear(vma, VM_MAYEXEC);
++	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
++	return remap_pfn_range(vma, vma->vm_start, NVX_BASE >> PAGE_SHIFT,
++			      NVX_SIZE, vma->vm_page_prot);
++}
++
++static const struct file_operations nvx_fops = {
++	.open = nvx_open,
++	.read = nvx_read,
++	.write = nvx_write,
++	.mmap = nvx_mmap,
++	.llseek = default_llseek,
++};
++
++static struct miscdevice nvx_device = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "nvx-platform",
++	.fops = &nvx_fops,
++	.mode = 0600,
++};
++
++static int __init nvx_probe(struct platform_device *pdev)
++{
++	struct resource *resource;
++	struct hvc_struct *console;
++	int error;
++
++	resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!nvx_base || !resource || resource->start != NVX_BASE ||
++	    resource_size(resource) != NVX_SIZE)
++		return -EINVAL;
++	if (!devm_request_mem_region(&pdev->dev, NVX_BASE, NVX_SIZE,
++				     "nvx-platform"))
++		return -EBUSY;
++	console = hvc_alloc(0, 0, &nvx_ops, 128);
++	if (IS_ERR(console))
++		return PTR_ERR(console);
++	nvx_device.parent = &pdev->dev;
++	error = misc_register(&nvx_device);
++	if (error)
++		hvc_remove(console);
++	return error;
++}
++
++static const struct of_device_id nvx_match[] = {
++	{ .compatible = "microsoft,nvx-platform-control-v1" },
++	{ }
++};
++
++static struct platform_driver nvx_driver = {
++	.driver = {
++		.name = "nvx-platform",
++		.of_match_table = nvx_match,
++		.suppress_bind_attrs = true,
++	},
++};
++
++static int __init nvx_init(void)
++{
++	return platform_driver_probe(&nvx_driver, nvx_probe);
++}
++device_initcall(nvx_init);

@@ -1,5 +1,22 @@
 use super::*;
 
+#[test]
+fn daemon_file_ownership_does_not_reserve_the_root_runtime_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = crate::guest::sys::path_c_string(directory.path()).unwrap();
+    let _root = try_lock_directory(&path).unwrap();
+    let path =
+        crate::guest::sys::path_c_string(&directory.path().join("time-daemon.lock")).unwrap();
+    let mode = Mode::S_IRUSR | Mode::S_IWUSR;
+    let daemon = try_lock_file(&path, mode).unwrap();
+    assert!(matches!(
+        try_lock_file(&path, mode),
+        Err(Errno::EWOULDBLOCK)
+    ));
+    drop(daemon);
+    assert!(try_lock_file(&path, mode).is_ok());
+}
+
 /// Sets the soft limit of the process's open descriptors to `limit`, and returns the limit that
 /// it replaced, for a test that runs out of descriptors in a process of its own.
 ///

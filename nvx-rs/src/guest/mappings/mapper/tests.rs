@@ -23,6 +23,7 @@ impl Mapped {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl TeardownError {
     /// Returns the error of a teardown that failed to unmount the mapping at `target`, an
     /// absolute path in the root, with `error`, for the tests of other modules.

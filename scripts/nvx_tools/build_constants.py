@@ -51,6 +51,11 @@ class KernelBuildConstants:
     BUILD_STAMP_NAME: Final = ".nvx-build.json"
     BUILD_CONFIG_NAME: Final = ".config"
     INPUT_CONFIG: Final = Path("kernel") / "config-microvm"
+    ARM_INPUT_CONFIG: Final = Path("kernel") / "config-microvm-arm64"
+    ARM_DERIVED_CONFIG: Final = Path("kernel") / "config-microvm-arm64.derived"
+    ARM_PATCH_DIRECTORY: Final = Path("kernel") / "patches" / "arm64"
+    ARM_BINARY_NAME: Final = "Image"
+    ARM_BINARY_PATH: Final = Path("arch") / "arm64" / "boot" / ARM_BINARY_NAME
     # The record of every symbol that INPUT_CONFIG sets beyond the feature
     # inventory, with the Kconfig rule that sets it.
     DERIVED_CONFIG: Final = Path("kernel") / "config-microvm.derived"
@@ -148,6 +153,11 @@ class GuestRustBuildConstants:
     TOOLCHAIN_FILE: Final = BuildConstants.REPO_ROOT / "rust-toolchain.toml"
     TOOLCHAIN: Final = OpenVMMBuildConstants.RUST_TOOLCHAIN
     TARGET: Final = OpenVMMBuildConstants.MUSL_RUST_TARGET
+    ARCHITECTURES: Final = ("x86_64", "aarch64")
+    TARGETS: Final[dict[str, str]] = {
+        "x86_64": TARGET,
+        "aarch64": "aarch64-unknown-linux-musl",
+    }
     PROFILE: Final = "guest"
     FEATURE: Final = "guest"
     BINARIES_VARIABLE: Final = "NVX_GUEST_BINARIES"
@@ -218,6 +228,14 @@ class AlpineBuildConstants:
     MINIROOTFS_SHA256: Final = (
         "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081"
     )
+    ARM_MINIROOTFS_NAME: Final = f"alpine-minirootfs-{VERSION}-aarch64.tar.gz"
+    ARM_MINIROOTFS_URL: Final = (
+        f"https://dl-cdn.alpinelinux.org/alpine/{BRANCH}/releases/"
+        f"aarch64/{ARM_MINIROOTFS_NAME}"
+    )
+    ARM_MINIROOTFS_SHA256: Final = (
+        "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259"
+    )
     INITRAMFS_NAME: Final = "initramfs.cpio.gz"
     PACKAGE_MANIFEST_NAME: Final = (
         f"{INITRAMFS_NAME}{BuildConstants.PACKAGE_MANIFEST_SUFFIX}"
@@ -262,6 +280,17 @@ class UbuntuBuildConstants:
     BASE_ARCHIVE_NAME: Final = f"ubuntu-base-{VERSION}-base-{ARCHITECTURE}.tar.gz"
     PACKAGE_LOCK_RELATIVE_PATH: Final = Path("ubuntu") / "packages.lock.json"
     PACKAGE_LOCK: Final = BuildConstants.REPO_ROOT / PACKAGE_LOCK_RELATIVE_PATH
+    ARM_BASE_ARCHIVE_NAME: Final = f"ubuntu-base-{VERSION}-base-arm64.tar.gz"
+    ARM_BASE_URL: Final = (
+        "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/"
+        f"{ARM_BASE_ARCHIVE_NAME}"
+    )
+    ARM_BASE_SHA256: Final = (
+        "5a1906794ced63a71a8119c3f211ef5f0bbe0a243001b4bbd41fdf80c5b219fd"
+    )
+    ARM_PACKAGE_LOCK: Final = (
+        BuildConstants.REPO_ROOT / "ubuntu" / "packages-arm64.lock.json"
+    )
     PACKAGE_LOCK_FORMAT: Final = 1
     INITRAMFS_NAME: Final = "initramfs-ubuntu.cpio.gz"
     PACKAGE_MANIFEST_NAME: Final = (

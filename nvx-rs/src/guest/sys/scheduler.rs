@@ -21,8 +21,10 @@ const PROMOTION_PASSES: usize = 2;
 
 /// A CPU affinity mask.
 #[derive(Clone, Debug)]
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) struct CpuAffinity(CpuSet);
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl CpuAffinity {
     /// Returns whether the mask contains `cpu`.
     pub(crate) fn contains(&self, cpu: usize) -> bool {
@@ -38,6 +40,7 @@ impl CpuAffinity {
 }
 
 /// Returns the calling thread's CPU affinity mask.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn current_affinity() -> Result<CpuAffinity, Errno> {
     sched_getaffinity(CALLING_THREAD).map(CpuAffinity)
 }
@@ -126,6 +129,7 @@ pub(crate) fn set_scheduling_policy(thread: Option<ProcessId>, policy: Schedulin
 ///
 /// It makes the system call through libc's `syscall` for the reason that
 /// [`set_scheduling_policy`] gives.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn scheduling_policy(thread: Option<ProcessId>) -> Result<i32, Errno> {
     let thread = thread.map_or(CALLING_THREAD.as_raw(), ProcessId::raw);
     // SAFETY: the system call reads only its integer argument.

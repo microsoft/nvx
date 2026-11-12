@@ -18,7 +18,7 @@ feature makes, on which it relies, and which the checks require too.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,3 +713,166 @@ KERNEL_CONFIG_CHECKS: dict[str, tuple[str, ...]] = {
     "time-abi": ("time-abi",),
     "hardening": ("hardening",),
 }
+
+
+def features_for_architecture(architecture: str) -> tuple[KernelFeature, ...]:
+    """Keep the x86 inventory unchanged and bind its common capabilities to ARM."""
+    if architecture == "x86_64":
+        return KERNEL_FEATURES
+    if architecture != "aarch64":
+        raise ValueError(f"unsupported kernel architecture: {architecture}")
+    replacements: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+        "kernel-build": (
+            (
+                "CONFIG_WERROR=y",
+                "CONFIG_EXPERT=y",
+                "# CONFIG_GCC_PLUGINS is not set",
+                "CONFIG_SECTION_MISMATCH_WARN_ONLY=y",
+                "CONFIG_ARM64_4K_PAGES=y",
+                "CONFIG_ARM64_VA_BITS_48=y",
+                "# CONFIG_CPU_BIG_ENDIAN is not set",
+            ),
+            ("CONFIG_ARM64=y", "CONFIG_64BIT=y"),
+        ),
+        "direct-boot": (
+            (
+                "# CONFIG_ACPI is not set",
+                "# CONFIG_EFI is not set",
+                "# CONFIG_PCI is not set",
+                "CONFIG_VIRTIO_MENU=y",
+                "CONFIG_VIRTIO_MMIO=y",
+                "# CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES is not set",
+                "CONFIG_ARM_GIC_V3=y",
+                "CONFIG_OF_RESERVED_MEM=y",
+            ),
+            ("CONFIG_OF=y", "CONFIG_ARM_PSCI_FW=y", "CONFIG_VIRTIO=y"),
+        ),
+        "processors": (
+            ("CONFIG_SMP=y", "CONFIG_NR_CPUS=8", "# CONFIG_HOTPLUG_CPU is not set"),
+            (),
+        ),
+        "scheduling": (
+            (
+                "CONFIG_PREEMPT_VOLUNTARY=y",
+                "CONFIG_PREEMPT_DYNAMIC=y",
+                "CONFIG_SCHED_MC=y",
+                "CONFIG_SCHED_CLUSTER=y",
+                "CONFIG_JUMP_LABEL=y",
+            ),
+            ("CONFIG_PREEMPT_RCU=y",),
+        ),
+        "time-abi": (
+            (
+                "# CONFIG_CPU_FREQ is not set",
+                "CONFIG_HZ_100=y",
+                "CONFIG_NO_HZ_IDLE=y",
+                "CONFIG_HIGH_RES_TIMERS=y",
+                "CONFIG_RCU_CPU_STALL_TIMEOUT=21",
+                "CONFIG_RCU_EXP_CPU_STALL_TIMEOUT=0",
+                "CONFIG_LOG_BUF_SHIFT=18",
+                "CONFIG_PRINTK=y",
+                "CONFIG_PRINTK_TIME=y",
+            ),
+            ("CONFIG_ARM_ARCH_TIMER=y",),
+        ),
+        "byte-channel-console": (
+            (
+                "CONFIG_TTY=y",
+                "CONFIG_HVC_NVX_MMIO=y",
+                "# CONFIG_SERIAL_AMBA_PL011 is not set",
+                "# CONFIG_SERIAL_AMBA_PL011_CONSOLE is not set",
+            ),
+            ("CONFIG_HVC_DRIVER=y", "CONFIG_SERIAL_EARLYCON=y"),
+        ),
+        "platform-control": (
+            ("# CONFIG_DEVMEM is not set", "# CONFIG_DEVPORT is not set"),
+            ("CONFIG_HVC_NVX_MMIO=y",),
+        ),
+        "virtio-console": (
+            ("CONFIG_VIRTIO_CONSOLE=y",),
+            ("CONFIG_HVC_DRIVER=y", "CONFIG_VIRTIO=y", "CONFIG_VIRTIO_MMIO=y"),
+        ),
+        "memory-hotplug": (
+            ("# CONFIG_MEMORY_HOTPLUG is not set",),
+            (),
+        ),
+        "memory-management": (
+            (
+                "CONFIG_COMPACTION=y",
+                "# CONFIG_PT_RECLAIM is not set",
+                "CONFIG_SLAB_MERGE_DEFAULT=y",
+                "CONFIG_SLUB_CPU_PARTIAL=y",
+            ),
+            (),
+        ),
+        "cpu-mitigations": (
+            (
+                "CONFIG_UNMAP_KERNEL_AT_EL0=y",
+                "CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y",
+            ),
+            (),
+        ),
+        "hardening": (
+            (
+                "CONFIG_MODULES=y",
+                'CONFIG_MODPROBE_PATH=""',
+                "CONFIG_TRIM_UNUSED_KSYMS=y",
+                "CONFIG_DEBUG_WX=y",
+                "CONFIG_STACKPROTECTOR=y",
+                "CONFIG_STACKPROTECTOR_STRONG=y",
+                "CONFIG_ARM64_PTR_AUTH=y",
+                "# CONFIG_ARM64_PTR_AUTH_KERNEL is not set",
+                "CONFIG_VMAP_STACK=y",
+                "CONFIG_RANDOMIZE_KSTACK_OFFSET=y",
+                "# CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT is not set",
+                "CONFIG_INIT_STACK_ALL_ZERO=y",
+            ),
+            ("CONFIG_STRICT_KERNEL_RWX=y", "CONFIG_STRICT_MODULE_RWX=y"),
+        ),
+        "linux-abi": (
+            tuple(
+                setting
+                for feature in KERNEL_FEATURES
+                if feature.name == "linux-abi"
+                for setting in feature.settings
+                if not any(
+                    name in setting
+                    for name in (
+                        "IA32_EMULATION",
+                        "COMPAT_32BIT_TIME",
+                        "X86_",
+                        "MODIFY_LDT_SYSCALL",
+                    )
+                )
+            )
+            + ("# CONFIG_COMPAT is not set",),
+            (),
+        ),
+    }
+    return tuple(
+        replace(
+            feature,
+            summary=f"ARM64 binding of {feature.name}",
+            rationale=(
+                "Linux 6.18.38 ARM64 does not select ARCH_SUPPORTS_PT_RECLAIM, "
+                "so empty user PTE reclaim cannot be enabled. Preserve compaction "
+                "and the slab defaults without adding a new memory-management "
+                "implementation to the fixed cold-boot scope."
+                if feature.name == "memory-management"
+                else "Use Linux's ordinary userspace PAC capability, exec key "
+                "initialization and task-switch handling when the CPU profile "
+                "exposes PAC. Keep stack protection and leave kernel return "
+                "signing and guest-helper instrumentation unchanged."
+                if feature.name == "hardening"
+                else "Preserve the shared NVX kernel capabilities with the approved "
+                "ARM64 direct-boot, OF, GICv3, counter and restricted platform "
+                "development binding; no x86 ports, firmware, PL011, 32-bit "
+                "workloads or memory activation are part of this cold-boot kernel."
+            ),
+            settings=replacements[feature.name][0],
+            expects=replacements[feature.name][1],
+        )
+        if feature.name in replacements
+        else feature
+        for feature in KERNEL_FEATURES
+    )

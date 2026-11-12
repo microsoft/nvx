@@ -13,6 +13,7 @@ use super::{Errno, FileDescriptor};
 ///
 /// Connecting fixes the destination of every `write` and the only source from which `read`
 /// receives, as the `socket` and `connect` calls of `nvx-device-io`'s C program did.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn connect_datagram(peer: SocketAddrV4) -> Result<FileDescriptor, Errno> {
     let UdpSocket(socket) = UdpSocket::ipv4()?;
     nix::sys::socket::connect(socket.as_raw_fd(), &SockaddrIn::from(peer))?;

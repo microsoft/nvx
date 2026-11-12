@@ -1,138 +1,109 @@
-//! `nvx-time`, the guest side of NVX time ABI v2, and the typed calls through which any guest
-//! init or agent runs the ABI's steps in its own process.
+//! The shared `nvx-time` program and typed time-ABI calls for x86-64 and ARM64 Linux guests.
 //!
-//! [`TimeAbi`] runs the cold-boot time step and, separately, starts the time daemon, a process
-//! that the caller supervises; it reads the VM generation ID, requests a capture and repairs a
-//! restore, and finishes a restore, with typed inputs, results, and errors. Each call holds the
-//! permission for OpenVMM's ports only for its port transactions, on the calling thread, and no
-//! call waits for a child that it did not start. `nvx-time` runs those steps through the same
-//! calls, and the rest of the ABI itself.
+//! [`TimeAbi::cold_boot`] synchronizes UTC before guest work. [`TimeAbi::start_daemon`] starts
+//! one supervised child for deferred architectural checks, kernel-log watching and continuous
+//! clock discipline. The command-line program uses these same calls on either ISA.
+//! [`TimeAbi::generation_id`] reads the unchanged a6 process identity.
 //!
-//! A restore hands over its fresh entropy in the [`CaptureRequest`]'s mode: the file mode, which
-//! `nvx-time capture` keeps, writes it to a file, and the in-memory mode returns it as the
-//! [`Restore`]'s owned [`Seed`](crate::guest::reseed::Seed), and writes no file:
+//! Transport and counter conversion remain architectural: x86 uses PIO, the TSC and Linux's
+//! kHz conversion; ARM uses the restricted platform device, CNTVCT and the a8 binding's full-Hz
+//! frequency, checked against CNTFRQ. CPU-profile admission belongs to the VMM, not this program.
+//! ARM currently supports cold boot only; capture, restore and x86 diagnostic test hooks remain
+//! x86-only. The sample wire format, event codes and persisted state format are unchanged.
 //!
-//! ```no_run
-//! use nvx::guest::reseed;
-//! use nvx::guest::time::{CaptureOutcome, CaptureRequest, RestoreFinish, ScratchPolicy, TimeAbi};
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let abi = TimeAbi::new();
-//! // At boot, before the process starts any thread.
-//! let daemon = abi.start_daemon(abi.cold_boot()?)?;
-//! // The caller supervises the process `daemon`.
-//!
-//! // A snapshot's capture, after `nvx-time pre-capture`.
-//! let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, abi.generation_id()?);
-//! if let CaptureOutcome::Restored(mut restore) = abi.capture(request)? {
-//!     // A clone of the snapshot continues here, with its wall clock repaired. The seed zeroes
-//!     // its bytes when it is dropped, after the reseed.
-//!     if let Some(seed) = restore.take_seed() {
-//!         reseed::reseed(&seed)?;
-//!     }
-//!     let mut finish = RestoreFinish::new();
-//!     if restore.acknowledgement_required() {
-//!         finish = finish.acknowledge();
-//!     }
-//!     abi.restore_finish(finish)?;
-//! }
-//! # let _ = daemon;
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! A violation of the ABI stops the VM in enforcing mode, the mode of the command tools, with a
-//! status that `nvx::protocol::status` publishes: 193 for a conformance check, 194 for the time
-//! daemon's watcher, and 195 for the repair of a restore. A caller that owns the VM's exit
-//! status and its shutdown takes the ABI in strict mode, with [`TimeAbi::strict`], in which a
-//! call fails with the violation instead, whose [`status`](Violation::status) the caller ends the
-//! VM with.
-//!
-//! `nvx-time` runs the conformance checks, the violation watcher and the wall-clock discipline
-//! in one daemon, a separate process, and the snapshot agent's time steps: the guest preparation
-//! steps of the architecture guide's section 5.3.2 and the guest repair steps of its section
-//! 5.5.7, which the comments cite by number. Section 3.2.10 is the contract that it enforces. It
-//! prints nothing on success: checks record their results in the state file, and only violation
-//! events reach the console. It keeps the check IDs, the guest codes, and the formats of the
-//! output lines and the state file of the C program that it replaced.
-//!
-//! `nvx-time test NAME ARGUMENTS...` runs one of the C program's test hooks, which exercise its
-//! decoders, formats, and process structure without the hypervisor.
+//! Enforcing violations stop the VM with the status in [`crate::protocol::status`]. A caller
+//! that owns shutdown uses [`TimeAbi::strict`] and receives a [`Violation`] instead. The child
+//! daemon enforces independently. Each hardware transaction relinquishes its authority before
+//! another process can be started, and no call waits for a child it did not start.
+#![cfg_attr(
+    target_arch = "x86_64",
+    doc = r#"
+On x86, capture and restore use the same API. An in-memory capture hands fresh entropy over
+as an owned `Seed`, rather than writing an entropy file:
+
+```no_run
+use nvx::guest::reseed;
+use nvx::guest::time::{CaptureOutcome, CaptureRequest, RestoreFinish, ScratchPolicy, TimeAbi};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let abi = TimeAbi::new();
+let daemon = abi.start_daemon(abi.cold_boot()?)?;
+let request = CaptureRequest::in_memory(ScratchPolicy::Fresh, abi.generation_id()?);
+if let CaptureOutcome::Restored(mut restore) = abi.capture(request)? {
+    if let Some(seed) = restore.take_seed() {
+        reseed::reseed(&seed)?;
+    }
+    let mut finish = RestoreFinish::new();
+    if restore.acknowledgement_required() {
+        finish = finish.acknowledge();
+    }
+    abi.restore_finish(finish)?;
+}
+# let _ = daemon;
+# Ok(())
+# }
+```
+"#
+)]
 
 mod api;
+#[cfg(target_arch = "x86_64")]
 mod checks;
+#[cfg(target_arch = "aarch64")]
+mod checks_arm64;
+#[cfg(target_arch = "aarch64")]
+use checks_arm64 as checks;
 mod commands;
+#[cfg(target_arch = "x86_64")]
 mod cpu_mask;
 mod daemon;
+#[cfg(target_arch = "x86_64")]
 mod decoders;
+mod deferred;
 mod events;
+mod sample;
 mod state;
 mod system;
+#[cfg(target_arch = "x86_64")]
 mod test_mode;
 
 use std::ffi::CString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) use api::PreCaptureError;
+#[cfg(target_arch = "x86_64")]
 pub use api::{
-    CaptureOutcome, CaptureRequest, ColdBoot, CpuSet, MemoryRange, Restore, RestoreFinish,
-    RestoreNetwork, ScratchPolicy, TimeAbi, TimeError, Violation,
+    CaptureOutcome, CaptureRequest, CpuSet, MemoryRange, Restore, RestoreFinish, RestoreNetwork,
+    ScratchPolicy,
 };
+pub use api::{ColdBoot, TimeAbi, TimeError, Violation};
 
 use super::status::{CommandError, run_main};
 use super::sys;
+pub(crate) use deferred::DEFERRED_START_NS;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use deferred::IDLE_BOUND_NS;
+pub(crate) use sample::Phase;
 
 /// Nanoseconds in one second.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const NSEC_PER_SEC: i64 = 1_000_000_000;
 /// Nanoseconds in one millisecond.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const NSEC_PER_MSEC: i64 = 1_000_000;
 /// Nanoseconds in one microsecond.
 pub(crate) const NSEC_PER_USEC: i64 = 1_000;
 /// Maximum processor count represented by the time ABI's fixed CPU masks.
+#[cfg(target_arch = "x86_64")]
 pub(crate) const MAX_CPUS: usize = 64;
-/// Delay between restore readiness and deferred check work.
-pub(crate) const DEFERRED_START_NS: i64 = 150 * NSEC_PER_MSEC;
-/// Deadline after which idle-priority work is promoted.
-pub(crate) const IDLE_BOUND_NS: i64 = 100 * NSEC_PER_MSEC;
 /// Most arguments that a command line may hold besides `--report-only`, as many as the C
 /// program's fixed argument array.
 const MAX_ARGUMENTS: usize = 32;
 
-/// The phase in which a check or event occurs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Phase {
-    /// Initial guest boot.
-    Boot,
-    /// Snapshot capture preparation.
-    Capture,
-    /// Post-snapshot restore repair.
-    Restore,
-    /// Continuous daemon operation.
-    Runtime,
-}
-
-impl Phase {
-    /// Persisted check phases in state-file order.
-    pub(crate) const CHECKS: [Self; 3] = [Self::Boot, Self::Capture, Self::Restore];
-
-    /// Returns the stable lowercase phase token used in output records.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Boot => "boot",
-            Self::Capture => "capture",
-            Self::Restore => "restore",
-            Self::Runtime => "runtime",
-        }
-    }
-
-    /// Returns this phase's position in the three persisted check records.
-    pub(crate) fn check_index(self) -> Option<usize> {
-        Self::CHECKS.iter().position(|&phase| phase == self)
-    }
-}
-
 /// Byte-exact command help printed for malformed invocations.
+#[cfg(target_arch = "x86_64")]
 const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
   boot
   check --phase capture|restore [--new-cpus LIST]
@@ -146,6 +117,9 @@ const USAGE: &[u8] = br#"usage: nvx-time [--report-only] COMMAND
   exhaustive
   test NAME ARGUMENTS...
 "#;
+/// Cold-boot commands supported by the ARM machine contract.
+#[cfg(target_arch = "aarch64")]
+const USAGE: &[u8] = b"usage: nvx-time [--report-only] boot|status|sample|generation-id\n";
 
 /// Runs `nvx-time` with the process's arguments. It exits with 0 on success, 1 when a command
 /// or a check fails, or 2 for an invalid command line.
@@ -168,13 +142,16 @@ fn run(args: &[CString], out: &mut dyn Write, err: &mut dyn Write) -> Result<(),
             return Err(CommandError::Usage);
         }
     }
-    let Some((&command, rest)) = arguments.split_first() else {
+    let Some((command, rest)) = arguments.split_first() else {
         sys::report(err, &[USAGE]);
         return Err(CommandError::Usage);
     };
-    if command == b"test" {
+    #[cfg(target_arch = "x86_64")]
+    if *command == b"test" {
         return test_mode::run(rest, out);
     }
+    #[cfg(target_arch = "aarch64")]
+    let _ = (command, rest);
     commands::run(&arguments, report_only, out, err)
 }
 

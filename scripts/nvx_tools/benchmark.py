@@ -2834,8 +2834,12 @@ def run_guest_script(
     time_abi_status: bool = False,
     host_state_on_timeout: Callable[[subprocess.Popen[bytes]], str] | None = None,
     on_stderr: Callable[[bytes], None] | None = None,
+    expected_exit_status: int = 0,
 ) -> GuestCommandResult:
     """Run ``script`` once the guest boots and wait for ``completion_marker``.
+
+    Guest teardown must return ``expected_exit_status`` (zero by default);
+    reserved time-violation statuses still fail even when requested.
 
     With ``time_abi_status``, a cold boot first asks the guest for its time
     ABI status and sends ``script`` only after the query exits, so the
@@ -2925,7 +2929,7 @@ def run_guest_script(
         monitor.finish()
         returncode = process.wait()
         monitor.check_exit(returncode)
-        if teardown_mode == "guest-exit" and returncode != 0:
+        if teardown_mode == "guest-exit" and returncode != expected_exit_status:
             raise monitor.exit_error(returncode)
         if not input_sent:
             if status_sent:

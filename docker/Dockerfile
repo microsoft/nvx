@@ -5,8 +5,10 @@ ARG RUST_BUILDER_IMAGE=rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490
 ARG EROFS_UTILS_VERSION=1.5-1
 ARG AZURELINUX_VERSION=3.0
 ARG AZURELINUX_IMAGE=mcr.microsoft.com/azurelinux/base/core@sha256:c877612270d1ee2d6ab2bc1f64bfe38ab697ac50be325154ee5129fce89c17e4
+ARG NVX_ARCHITECTURE=x86_64
 
 FROM ${RUST_BUILDER_IMAGE} AS guest-binaries
+ARG NVX_ARCHITECTURE
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         python3 \
@@ -18,10 +20,20 @@ COPY scripts/ /repo/scripts/
 RUN set -eux; \
     toolchain="$(sed -n 's/^channel = "\([^"]*\)".*/\1/p' rust-toolchain.toml)"; \
     test -n "$toolchain"; \
-    rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl; \
-    python3 scripts/nvx.py build-guest-binaries --output /out/guest-binaries
+    set --; \
+    if [ "$NVX_ARCHITECTURE" = x86_64 ]; then \
+        rustup target add --toolchain "$toolchain" x86_64-unknown-linux-musl; \
+    else \
+        target="$(PYTHONPATH=/repo/scripts python3 -c \
+            'import sys; from nvx_tools.guest_binaries import guest_rust_target; print(guest_rust_target(sys.argv[1]))' \
+            "$NVX_ARCHITECTURE")"; \
+        rustup target add --toolchain "$toolchain" "$target"; \
+        set -- --architecture "$NVX_ARCHITECTURE"; \
+    fi; \
+    python3 scripts/nvx.py build-guest-binaries --output /out/guest-binaries "$@"
 
 FROM ${DEBIAN_IMAGE} AS base
+ARG NVX_ARCHITECTURE
 ARG EROFS_UTILS_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bc \
@@ -53,7 +65,8 @@ COPY scripts/ /repo/scripts/
 COPY LICENSE README.md SOURCE-MANIFEST.json THIRD_PARTY_NOTICES.md /repo/
 
 FROM base AS kernel
-RUN python3 scripts/nvx.py build-kernel
+RUN --mount=type=cache,target=/repo/.cache/downloads,sharing=locked \
+    python3 scripts/nvx.py build-kernel --architecture "$NVX_ARCHITECTURE"
 
 FROM base AS kernel-debug
 RUN python3 scripts/nvx.py build-kernel --debug
@@ -61,7 +74,8 @@ RUN python3 scripts/nvx.py build-kernel --debug
 # The kernel configuration and its derived record, generated from the feature
 # inventory with the toolchain that builds the kernel (doc/build.md).
 FROM base AS kernel-config
-RUN python3 scripts/nvx.py kernel-config --native
+RUN --mount=type=cache,target=/repo/.cache/downloads,sharing=locked \
+    python3 scripts/nvx.py kernel-config --native --architecture "$NVX_ARCHITECTURE"
 
 # Only the guest images install the Rust guest binaries and record their sources,
 # so the kernel and Linux source targets never build them.
@@ -72,10 +86,10 @@ COPY --from=guest-binaries /out/guest-binaries/ /repo/build/guest-binaries/
 ENV NVX_GUEST_BINARIES=/repo/build/guest-binaries
 
 FROM guest-base AS initramfs
-RUN python3 scripts/nvx.py build-initramfs --guest alpine
+RUN python3 scripts/nvx.py build-initramfs --guest alpine --architecture "$NVX_ARCHITECTURE"
 
 FROM guest-base AS ubuntu-initramfs
-RUN python3 scripts/nvx.py build-initramfs --guest ubuntu
+RUN python3 scripts/nvx.py build-initramfs --guest ubuntu --architecture "$NVX_ARCHITECTURE"
 
 FROM ubuntu-initramfs AS ubuntu-distro-layer
 RUN python3 scripts/nvx.py build-distro-layer \
@@ -255,6 +269,33 @@ COPY --from=kernel /repo/build/vmlinux /vmlinux
 COPY --from=kernel /repo/build/vmlinux.config /vmlinux.config
 COPY --from=kernel /repo/build/vmlinux.provenance.json /vmlinux.provenance.json
 
+FROM scratch AS guest-binary-artifacts
+COPY --from=guest-binaries /out/guest-binaries/ /
+
+FROM scratch AS arm64-kernel-artifacts
+COPY --from=kernel /repo/build/aarch64/Image /Image
+COPY --from=kernel /repo/build/aarch64/Image.config /Image.config
+COPY --from=kernel /repo/build/aarch64/Image.provenance.json /Image.provenance.json
+
+FROM scratch AS arm64-kernel-config-artifacts
+COPY --from=kernel-config /repo/kernel/config-microvm-arm64 /config-microvm-arm64
+COPY --from=kernel-config /repo/kernel/config-microvm-arm64.derived /config-microvm-arm64.derived
+
+FROM scratch AS arm64-artifacts
+COPY --from=kernel /repo/build/aarch64/Image /Image
+COPY --from=kernel /repo/build/aarch64/Image.config /Image.config
+COPY --from=kernel /repo/build/aarch64/Image.provenance.json /Image.provenance.json
+COPY --from=initramfs /repo/build/aarch64/initramfs.cpio.gz /initramfs.cpio.gz
+COPY --from=initramfs /repo/build/aarch64/initramfs.cpio.gz.packages.json /initramfs.cpio.gz.packages.json
+COPY --from=initramfs /repo/build/aarch64/initramfs.provenance.json /initramfs.provenance.json
+
+FROM scratch AS arm64-ubuntu-artifacts
+COPY --from=kernel /repo/build/aarch64/Image /Image
+COPY --from=kernel /repo/build/aarch64/Image.config /Image.config
+COPY --from=kernel /repo/build/aarch64/Image.provenance.json /Image.provenance.json
+COPY --from=ubuntu-initramfs /repo/build/aarch64/initramfs-ubuntu.cpio.gz /initramfs-ubuntu.cpio.gz
+COPY --from=ubuntu-initramfs /repo/build/aarch64/initramfs-ubuntu.cpio.gz.packages.json /initramfs-ubuntu.cpio.gz.packages.json
+
 FROM scratch AS kernel-debug-artifacts
 COPY --from=kernel-debug /repo/build/vmlinux-debug /vmlinux-debug
 COPY --from=kernel-debug /repo/build/vmlinux-debug.config /vmlinux-debug.config
@@ -292,7 +333,7 @@ COPY --from=azurelinux-initramfs /tmp/initramfs-azurelinux.cpio.gz.packages.json
 FROM kernel AS linux-source-archive
 RUN mkdir -p /out \
     && python3 scripts/nvx.py create-linux-source-archive \
-        --config /repo/build/linux/.config \
+        --architecture "$NVX_ARCHITECTURE" \
         --output /out/nvx-linux-source-6.18.38.tar.gz
 
 FROM scratch AS artifacts

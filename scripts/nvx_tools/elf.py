@@ -31,6 +31,33 @@ _DT_NEEDED = 1
 _HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 _PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
 _DYNAMIC_ENTRY = struct.Struct("<qQ")
+_MACHINES = {"x86_64": 62, "aarch64": 183}
+_ARM_IMAGE_HEADER = struct.Struct("<IIQQQQQQII")
+_ARM_IMAGE_MAGIC = 0x644D5241
+
+
+def read_arm64_image(path: Path) -> dict[str, int]:
+    """Validate the uncompressed little-endian, 4-KiB-page direct-boot Image."""
+    with path.open("rb") as image:
+        header = image.read(_ARM_IMAGE_HEADER.size)
+    if len(header) != _ARM_IMAGE_HEADER.size:
+        raise ScriptError(f"{path}: truncated ARM64 Image header")
+    _, _, offset, size, flags, _, _, _, magic, _ = _ARM_IMAGE_HEADER.unpack(header)
+    file_size = path.stat().st_size
+    if magic != _ARM_IMAGE_MAGIC:
+        raise ScriptError(f"{path}: not an ARM64 Linux Image")
+    if flags & 1 or (flags >> 1) & 3 != 1 or flags & ~0xF:
+        raise ScriptError(f"{path}: Image is not little-endian with 4-KiB pages")
+    if not flags & 8:
+        raise ScriptError(f"{path}: Image does not support reservation-safe placement")
+    if size < file_size or offset % 4096 or offset + size > 0xFFFF_FFFF_FFFF_FFFF:
+        raise ScriptError(f"{path}: invalid ARM64 Image footprint or text offset")
+    return {
+        "text_offset": offset,
+        "image_size": size,
+        "flags": flags,
+        "file_size": file_size,
+    }
 
 
 @dataclass(frozen=True)
@@ -44,6 +71,7 @@ class ElfExecutable:
     needed: int
     dynamic: bool
     executable_stack: bool
+    machine: int
 
     @property
     def static(self) -> bool:
@@ -123,13 +151,28 @@ def _parse(path: Path, data: bytes) -> ElfExecutable:
         needed=needed,
         dynamic=dynamic,
         executable_stack=executable_stack,
+        machine=header[2],
     )
 
 
-def check_static_executables(paths: Sequence[Path]) -> list[ElfExecutable]:
+def check_static_executables(
+    paths: Sequence[Path], *, architecture: str | None = None
+) -> list[ElfExecutable]:
     """Describe each executable, and fail unless every one is static with a
     non-executable stack."""
+    if architecture is not None and architecture not in _MACHINES:
+        raise ScriptError(f"unsupported ELF architecture: {architecture}")
     executables = [read_elf_executable(path) for path in paths]
+    if architecture is not None:
+        wrong_machine = [
+            f"{executable.path} (e_machine={executable.machine})"
+            for executable in executables
+            if executable.machine != _MACHINES[architecture]
+        ]
+        if wrong_machine:
+            raise ScriptError(
+                f"executables are not {architecture}: " + ", ".join(wrong_machine)
+            )
     for executable in executables:
         print(executable.describe())
     dynamic = [

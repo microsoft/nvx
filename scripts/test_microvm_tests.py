@@ -2397,6 +2397,19 @@ class _EchoingGuestConsole:
     def read_output(self, chunks: queue.Queue[bytes | None]) -> None:
         chunks.put(b"NVX-GUEST-BOOT-OK: alpine\r\n")
         typed = self._input.get(timeout=5).decode()
+        if typed == time_abi.status_script():
+            arm = time_abi.TimeAbiMonitor(["nvx-rs", "run"]).architecture == "aarch64"
+            chunks.put(
+                b"NVX-TIME-ABI: v=1 phase=boot status=ok cpus=1 "
+                + (
+                    b"tsc_hz=19200000 lapic_hz=0"
+                    if arm
+                    else b"tsc_hz=2194804000 lapic_hz=1000000000"
+                )
+                + b" generation=0 elapsed_us=1\n"
+                b"NVX-TIME-STATUS-EXIT status=0\n"
+            )
+            typed = self._input.get(timeout=5).decode()
         files: dict[str, list[str]] = {}
         arrived = 0
         consumed = 0
@@ -2523,6 +2536,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
                 timeout=30,
                 log_path=Path("guest.log"),
                 contain_process_tree=True,
+                expected_exit_status=42,
             )
         run.assert_called_once_with(
             ["openvmm"],
@@ -2539,6 +2553,7 @@ class GuestConsoleEchoTests(unittest.TestCase):
             contain_process_tree=True,
             time_abi_status=True,
             on_stderr=None,
+            expected_exit_status=42,
         )
         self.assertEqual(result["output"], "NVX-OUT none\r\nNVX-DONE\r\n")
         self.assertEqual(result["text"], transcript)

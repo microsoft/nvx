@@ -184,7 +184,7 @@ fn repositories_are_owner_and_name() {
 }
 
 #[test]
-fn platforms_are_those_of_the_host() {
+fn platforms_are_selected_by_os_and_backend_not_downloader_isa() {
     if cfg!(windows) {
         assert_eq!(platform("auto").unwrap(), "windows-whp");
         assert_eq!(platform("whp").unwrap(), "windows-whp");
@@ -541,6 +541,29 @@ fn present_artifacts_need_no_download_and_no_variable() {
     // A restore with another OpenVMM runs nothing of the root.
     let (_directory, dir) = checkout(true);
     assert_eq!(action(&dir, &[], unasked).unwrap(), Action::Proceed);
+}
+
+#[test]
+fn local_arm_artifacts_proceed_but_missing_ones_never_download_x86() {
+    let (_directory, dir) = checkout(true);
+    let dir = dir.with_architecture(Architecture::Aarch64).unwrap();
+    let exit = action(&dir, &needed(&dir), || Ok(true)).unwrap_err();
+    assert_eq!(exit.code(), Some(ErrorCode::Unsupported));
+    assert!(exit.message().unwrap().contains("ARM64 release downloads"));
+    assert_eq!(
+        action(&dir, &needed(&dir), || Ok(false)).unwrap(),
+        Action::Proceed
+    );
+    for path in needed(&dir) {
+        write(&path);
+    }
+    assert_eq!(
+        action(&dir, &needed(&dir), || panic!(
+            "local artifacts need no download setting"
+        ))
+        .unwrap(),
+        Action::Proceed
+    );
 }
 
 #[test]

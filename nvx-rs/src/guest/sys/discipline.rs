@@ -30,6 +30,7 @@ pub(crate) enum ClockAdjustment {
     Frequency(FrequencyHold),
     /// Clears the phase offset through the phase-locked loop in nanosecond mode, without changing
     /// its status or held frequency correction.
+    #[cfg(any(target_arch = "x86_64", test))]
     ClearPhase,
     /// Slews the wall clock by `offset_ns` through the phase-locked loop in nanosecond mode, with
     /// its frequency held, and sets its time constant, the frequency correction, and the error
@@ -66,6 +67,7 @@ impl ClockAdjustment {
             Self::Query => 0,
             Self::Step { .. } => libc::ADJ_SETOFFSET | libc::ADJ_NANO,
             Self::Frequency(_) => HOLD,
+            #[cfg(any(target_arch = "x86_64", test))]
             Self::ClearPhase => libc::ADJ_OFFSET | libc::ADJ_NANO,
             Self::Slew { .. } => HOLD | libc::ADJ_OFFSET | libc::ADJ_TIMECONST | libc::ADJ_NANO,
         }
@@ -74,7 +76,9 @@ impl ClockAdjustment {
     /// Returns the discipline status that the adjustment sets, or zero for one that sets none.
     pub(crate) fn status(self) -> i32 {
         match self {
-            Self::Query | Self::Step { .. } | Self::ClearPhase => 0,
+            Self::Query | Self::Step { .. } => 0,
+            #[cfg(any(target_arch = "x86_64", test))]
+            Self::ClearPhase => 0,
             Self::Frequency(_) | Self::Slew { .. } => PLL_NANOSECONDS,
         }
     }
@@ -116,6 +120,7 @@ pub(crate) fn adjust_clock(adjustment: ClockAdjustment) -> Result<ClockDisciplin
             };
         }
         ClockAdjustment::Frequency(hold) => hold.apply(&mut value),
+        #[cfg(any(target_arch = "x86_64", test))]
         ClockAdjustment::ClearPhase => {}
         ClockAdjustment::Slew {
             offset_ns,

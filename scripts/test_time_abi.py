@@ -780,6 +780,52 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(restore.backend, "mshv")
         self.assertFalse(restore.cold_boot)
 
+    def test_restore_option_spellings_require_valid_latest_restore_status(self):
+        boot = BOOT_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
+        restored = RESTORE_LINE.replace("lapic_hz=1000000000", "lapic_hz=200000000")
+        for executable in (["openvmm"], ["nvx-rs.exe", "run"]):
+            for option in (
+                ["--restore-snapshot", "snapshot"],
+                ["--restore-snapshot=snapshot"],
+            ):
+                command = [
+                    *executable,
+                    "--architecture=x86_64",
+                    "--hypervisor=mshv",
+                    *option,
+                ]
+                with self.subTest(command=command, status="valid"):
+                    monitor = TimeAbiMonitor(command)
+                    monitor.feed((boot + restored + STATUS_OK).encode())
+                    self.assertFalse(monitor.cold_boot)
+                    self.assertTrue(monitor.restored)
+                    self.assertEqual(
+                        monitor.require_restore(
+                            "restored guest", online_cpus=4, generation=2
+                        )["generation"],
+                        "2",
+                    )
+                for invalid, message in (
+                    ("", "did not report an NVX-TIME-ABI restore marker"),
+                    (
+                        restored.replace("generation=2", "generation=0"),
+                        "not 1 or later after a restore",
+                    ),
+                    (
+                        restored.replace("lapic_hz=200000000", "lapic_hz=1000000000"),
+                        "is not the mshv rate",
+                    ),
+                    (
+                        restored.replace("tsc_hz=2194804000", "tsc_hz=400000000"),
+                        "outside 500 MHz",
+                    ),
+                ):
+                    with self.subTest(command=command, status=message):
+                        monitor = TimeAbiMonitor(command)
+                        monitor.feed((boot + invalid).encode())
+                        with self.assertRaisesRegex(TimeAbiFailure, message):
+                            monitor.feed(STATUS_OK.encode())
+
     def test_records_markers_across_chunk_boundaries(self):
         monitor = TimeAbiMonitor(KVM_BOOT)
         data = (
@@ -978,6 +1024,122 @@ class MonitorTests(unittest.TestCase):
         )
         assert mshv is not None
         time_abi.validate_boot_marker(mshv, backend="mshv")
+
+    def test_normal_arm_cli_uses_architected_counter_not_x86_frequency_or_lapic(self):
+        arm_line = BOOT_LINE.replace("tsc_hz=2194804000", "tsc_hz=19200000").replace(
+            "lapic_hz=1000000000", "lapic_hz=0"
+        )
+        for profile in ("auto", "host"):
+            command = [
+                "nvx-rs.exe",
+                "--root",
+                "repository",
+                "run",
+                "--architecture",
+                "aarch64",
+                "--hypervisor",
+                "whp",
+                "--cpu-profile",
+                profile,
+            ]
+            monitor = TimeAbiMonitor(command)
+            self.assertTrue(monitor.cold_boot)
+            monitor.feed(arm_line.encode() + STATUS_OK.encode())
+            self.assertEqual(
+                monitor.require_boot("qualification", online_cpus=4)["tsc_hz"],
+                "19200000",
+            )
+        fields = time_abi.parse_marker(arm_line)
+        assert fields is not None
+        with patch.object(time_abi.platform, "machine", return_value="ARM64"):
+            for profile in ("auto", "host"):
+                native = TimeAbiMonitor(["nvx-rs.exe", "run", "--cpu-profile", profile])
+                native.feed(arm_line.encode() + STATUS_OK.encode())
+                self.assertEqual(
+                    native.require_boot("native omitted ISA")["tsc_hz"], "19200000"
+                )
+            report_only = TimeAbiMonitor(["nvx-rs.exe", "run"])
+            with self.assertRaisesRegex(TimeAbiFailure, "report-only"):
+                report_only.feed(
+                    arm_line.replace("NVX-TIME-ABI:", "NVX-TIME-REPORT:").encode()
+                    + STATUS_OK.encode()
+                )
+            mixed = TimeAbiMonitor(["nvx-rs.exe", "run"])
+            mixed.feed(arm_line.encode())
+            with self.assertRaisesRegex(TimeAbiFailure, "report-only"):
+                mixed.feed(
+                    arm_line.replace("NVX-TIME-ABI:", "NVX-TIME-REPORT:").encode()
+                    + STATUS_OK.encode()
+                )
+        for frequency in ("1", "24000000", "4294967295"):
+            time_abi.validate_boot_marker(
+                {**fields, "tsc_hz": frequency}, backend="kvm", architecture="aarch64"
+            )
+        for frequency in ("0", "-1", "4294967296", "fast"):
+            with self.assertRaises(TimeAbiFailure):
+                time_abi.validate_boot_marker(
+                    {**fields, "tsc_hz": frequency},
+                    backend="whp",
+                    architecture="aarch64",
+                )
+        with self.assertRaises(TimeAbiFailure):
+            time_abi.validate_boot_marker(
+                {**fields, "lapic_hz": "200000000"},
+                backend="whp",
+                architecture="aarch64",
+            )
+        with self.assertRaises(TimeAbiFailure):
+            time_abi.validate_boot_marker(fields, backend="whp")
+        self.assertFalse(
+            time_abi.is_cold_boot_command(
+                ["nvx-rs", "run", "--restore-snapshot", "snapshot"]
+            )
+        )
+
+    def test_explicit_counter_architecture_accepts_both_option_spellings(self):
+        arm_line = BOOT_LINE.replace("tsc_hz=2194804000", "tsc_hz=19200000").replace(
+            "lapic_hz=1000000000", "lapic_hz=0"
+        )
+        for native, architecture, line in (
+            ("x86_64", "aarch64", arm_line),
+            ("ARM64", "x86_64", BOOT_LINE),
+        ):
+            for options in (
+                ["--hypervisor", "kvm", "--architecture", architecture],
+                ["--hypervisor=kvm", f"--architecture={architecture}"],
+            ):
+                with (
+                    self.subTest(native=native, options=options),
+                    patch.object(time_abi.platform, "machine", return_value=native),
+                ):
+                    monitor = TimeAbiMonitor(["nvx-rs", "run", *options])
+                    self.assertEqual(monitor.architecture, architecture)
+                    self.assertEqual(monitor.backend, "kvm")
+                    monitor.feed(line.encode() + STATUS_OK.encode())
+                    self.assertEqual(
+                        monitor.require_boot("explicit ISA", online_cpus=4)["tsc_hz"],
+                        "19200000" if architecture == "aarch64" else "2194804000",
+                    )
+                    rejected = TimeAbiMonitor(["nvx-rs", "run", *options])
+                    with self.assertRaises(TimeAbiFailure):
+                        rejected.feed(
+                            line.replace("lapic_hz=", "lapic_hz=1").encode()
+                            + STATUS_OK.encode()
+                        )
+
+    def test_option_reader_matches_exact_names_and_keeps_native_defaults(self):
+        for options in ([], ["--architecture-extra=aarch64"], ["--architecture"]):
+            with (
+                self.subTest(options=options),
+                patch.object(time_abi.platform, "machine", return_value="x86_64"),
+            ):
+                self.assertEqual(
+                    TimeAbiMonitor(["nvx-rs", "run", *options]).architecture, "x86_64"
+                )
+        self.assertEqual(
+            TimeAbiMonitor(["openvmm", "--kernel=build/aarch64/Image"]).architecture,
+            "aarch64",
+        )
 
     def test_validates_restore_marker_fields_against_the_backend(self):
         restore = time_abi.parse_marker(RESTORE_LINE)
@@ -2554,18 +2716,22 @@ class DoctorTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        scaled_ppm = decoders["SCALED_PPM"]
+        shared = rust_integer_constants(
+            (root / "nvx-rs" / "src" / "guest" / "time" / "sample.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        scaled_ppm = shared["SCALED_PPM"]
         self.assertEqual(scaled_ppm, 1 << 16)
         self.assertEqual(
-            decoders["FREQUENCY_LIMIT"], doctor.GUEST_FREQUENCY_LIMIT_PPM * scaled_ppm
+            shared["FREQUENCY_LIMIT"], doctor.GUEST_FREQUENCY_LIMIT_PPM * scaled_ppm
         )
         self.assertEqual(
             decoders["RATE_DEVIATION_LIMIT"], doctor.RESTORE_TOLERANCE_PPM * scaled_ppm
         )
         self.assertEqual(
             doctor.RATE_TOLERANCE_PPM,
-            (decoders["FREQUENCY_LIMIT"] - decoders["RATE_DEVIATION_LIMIT"])
-            / scaled_ppm,
+            (shared["FREQUENCY_LIMIT"] - decoders["RATE_DEVIATION_LIMIT"]) / scaled_ppm,
         )
         rate = rust_integer_constants(
             pinned_openvmm_file(self, "vmm_core/virt/src/time_abi/rate.rs")
