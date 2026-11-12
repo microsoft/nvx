@@ -632,9 +632,7 @@ def _correctness_arguments(inputs: Mapping[str, Any], system: str) -> dict[str, 
         "PYTHONPATH": str(BuildConstants.REPO_ROOT / "scripts"),
         "PATH": "",
     }
-    shell = shlex.split(
-        _interpolate_expressions(step["shell"], {"runner": {"os": system}}, {})
-    )
+    shell = shlex.split(_interpolate_expressions(step["shell"], {"inputs": inputs}, {}))
     expected = "python" if system == "Windows" else "python3"
     if shell != [expected, "{0}"]:
         raise AssertionError(f"binder needs the native Python custom shell: {shell}")
@@ -11136,7 +11134,10 @@ python3() {
                 self.subTest(system=system, inputs=inputs),
                 self.assertRaisesRegex(AssertionError, message),
             ):
-                _correctness_arguments({"backend": "whp"} | dict(inputs), system)
+                _correctness_arguments(
+                    {"backend": "whp" if system == "Windows" else "kvm"} | dict(inputs),
+                    system,
+                )
 
     def test_ci_runs_each_default_microvm_suite_in_its_shards(self):
         # #696: each backend runs its default suite in the shards that

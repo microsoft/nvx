@@ -157,7 +157,7 @@ jobs:
 
       - name: Bind shared correctness arguments
         id: correctness
-        shell: ${{ runner.os == 'Windows' && 'python {0}' || 'python3 {0}' }}
+        shell: ${{ inputs.backend == 'whp' && 'python {0}' || 'python3 {0}' }}
         env:
           ARCHITECTURE: ${{ inputs.architecture }}
           BACKEND: ${{ inputs.backend }}
