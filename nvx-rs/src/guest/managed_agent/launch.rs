@@ -10,9 +10,10 @@ use super::environment;
 
 /// Describes one workload for the init-owned plain-process core.
 ///
-/// The workload's standard input is the null device, its standard output and error are the
-/// core's pipes. The plain-process core resets the child's priority and credentials, enters
-/// its working directory, and executes the workload in its own process group.
+/// The request reads the null device as standard input, which the agent's launch replaces with a
+/// pipe, since every execution streams its input; its standard output and error are the core's
+/// pipes. The plain-process core resets the child's priority and credentials, enters its working
+/// directory, and executes the workload in its own process group.
 pub(crate) fn direct_request(
     config: &AgentConfig,
     execution: &GuestExecPayload,
