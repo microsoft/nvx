@@ -2,7 +2,7 @@
 //! mount, the runtime's mounts in their order and with their options, the time status's
 //! read-only bind or none, the mount points that it creates or refuses, the undo of a call that
 //! fails at any of its steps, the teardown's order, the refusal of a call after a share or a
-//! mapping, and the shares and mappings beneath `/run` after the runtime.
+//! child of an aggregate, and the shares and children beneath `/run` after the runtime.
 
 use super::*;
 
@@ -62,15 +62,6 @@ fn occupied(path: &Path) -> Result<(), String> {
         "a file system is mounted at {} already",
         path.display()
     ))
-}
-
-/// Returns the root of the mappings' sources beside the runtime directory, `hostfs/root`, a mount
-/// of its own, with the directory `0/src`.
-fn source(guest: &Guest) -> SourceRoot {
-    let export = guest.path("hostfs/root");
-    fs::create_dir_all(export.join("0/src")).unwrap();
-    guest.kernel.add_mount(&export);
-    SourceRoot::open(&export).unwrap()
 }
 
 /// Returns a recorded new mount of `kind` with `parameters` and `attributes`.
@@ -416,10 +407,9 @@ fn a_runtime_mount_whose_detach_fails_is_owned_until_teardown() {
             if persistent {
                 let error = torn.unwrap_err();
                 assert!(
-                    error.failures().iter().any(|failure| {
-                        failure.mount() == &Mount::Runtime(runtime)
-                            && failure.path() == original
-                            && failure.error().raw_os_error() == Some(Errno::EBUSY as i32)
+                    error.failures.iter().any(|failure| {
+                        failure.mount == Mount::Runtime(runtime)
+                            && failure.error.raw_os_error() == Some(Errno::EBUSY as i32)
                     }),
                     "{runtime:?}: {error:?}"
                 );
@@ -498,10 +488,9 @@ fn a_time_status_bind_whose_lookup_and_detach_fail_reports_its_teardown_failure(
     root.mount_runtime(Some(&guest.path("time"))).unwrap_err();
     let error = root.teardown().unwrap_err();
     assert!(
-        error.failures().iter().any(|failure| {
-            failure.mount() == &Mount::Runtime(RuntimeMounts::TimeStatus)
-                && failure.path() == time
-                && failure.error().raw_os_error() == Some(Errno::EBUSY as i32)
+        error.failures.iter().any(|failure| {
+            failure.mount == Mount::Runtime(RuntimeMounts::TimeStatus)
+                && failure.error.raw_os_error() == Some(Errno::EBUSY as i32)
         }),
         "{error:?}"
     );
@@ -509,29 +498,21 @@ fn a_time_status_bind_whose_lookup_and_detach_fail_reports_its_teardown_failure(
 }
 
 #[test]
-fn a_call_after_a_share_a_child_or_a_mapping_is_refused_before_it_changes_anything() {
+fn a_call_after_a_share_or_a_child_is_refused_before_it_changes_anything() {
     let rw = Access::ReadWrite;
     // The `/run` tmpfs would hide one beneath `/run` from the teardown, and the runtime comes
     // first whatever the target.
-    for (kind, target) in [
-        ("share", "/run/app"),
-        ("child", "/run/app"),
-        ("mapping", "/srv"),
-    ] {
+    for (kind, target) in [("share", "/run/app"), ("child", "/run/app")] {
         let (guest, mut root) = assembled();
         let path = guest.path("run/nvx/rootfs").join(&target[1..]);
         let mut unmounts = vec![path.display().to_string()];
         match kind {
             "share" => root.mount_share("app", Path::new(target), rw).unwrap(),
-            "child" => {
+            _ => {
                 export(&guest, &[("app", ShareKind::Directory)]);
                 let children = [child("app", target, rw, ShareKind::Directory)];
                 root.mount_aggregate("all", rw, &children).unwrap();
                 unmounts.push(guest.text("run/nvx/shares"));
-            }
-            _ => {
-                let mapping = Mapping::new("0/src", target, rw).unwrap();
-                root.map(&source(&guest), &[mapping]).unwrap();
             }
         }
         let calls = guest.kernel.calls().len();
@@ -563,30 +544,38 @@ fn a_call_after_a_share_a_child_or_a_mapping_is_refused_before_it_changes_anythi
 }
 
 #[test]
-fn shares_and_mappings_beneath_run_after_the_runtime_are_on_its_tmpfs_and_unmounted_first() {
+fn shares_and_children_beneath_run_after_the_runtime_are_on_its_tmpfs_and_unmounted_first() {
     let (guest, mut root) = assembled();
     root.mount_runtime(Some(&guest.path("time"))).unwrap();
     let unmounted = guest.kernel.unmounts().len();
     // The mapper creates what the targets lack on the `/run` tmpfs, one of its own mounts.
     let shared = root.mount_share("app", Path::new("/run/app"), Access::ReadWrite);
-    let mapping = Mapping::new("0/src", "/run/nvx/state", Access::ReadOnly).unwrap();
-    let mapped = root.map(&source(&guest), &[mapping]);
+    export(&guest, &[("state", ShareKind::Directory)]);
+    let children = [child(
+        "state",
+        "/run/nvx/state",
+        Access::ReadOnly,
+        ShareKind::Directory,
+    )];
+    let bound = root.mount_aggregate("all", Access::ReadOnly, &children);
     let tracked = targets(&root);
     // A second call is still refused for the runtime's own mounts first.
     let again = root.mount_runtime(None);
     let torn = root.teardown().map_err(|error| error.to_string());
     let observed = (
         shared.map_err(|error| error.to_string()),
-        mapped.map_err(|error| error.to_string()),
+        bound.map_err(|error| error.to_string()),
         tracked,
         again.map_err(|error| error.to_string()),
         torn,
         guest.kernel.unmounts()[unmounted..].to_vec(),
     );
-    // The teardown unmounts the mapper's mounts, the later first, before the runtime's.
+    // The teardown unmounts the mapper's mounts, the later first, then the aggregate, before the
+    // runtime's.
     let mut unmounts = vec![
         guest.text("run/nvx/rootfs/run/nvx/state"),
         guest.text("run/nvx/rootfs/run/app"),
+        guest.text("run/nvx/shares"),
     ];
     unmounts.extend(reversed(&guest, &RUNTIME));
     let expected = (
