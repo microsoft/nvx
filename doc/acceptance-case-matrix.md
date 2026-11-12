@@ -499,7 +499,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/guest/spawn.rs - guest::spawn (line 41)` | kept | Its module leaves with the exec engine (#1087), whose PR retires it |
 | `nvx-rs/src/guest/spawn.rs - guest::spawn::LaunchStage::from_code (line 201)` | rewritten | `nvx-rs/src/guest/spawn/tests.rs::launch_stages_keep_their_numbers`. The exec engine's launch failure and outcome, which the example read, leave with the engine (SL6.11a) |
 | `nvx-rs/src/guest/terminal.rs - guest::terminal (line 10)` | kept |  |
-| `nvx-rs/src/guest/time/mod.rs - guest::time (line 15)` | kept |  |
+| `nvx-rs/src/guest/time/mod.rs - guest::time (line 9)` | kept | SL6.11c removed its capture and restore finish, which became crate-private: `guest::snapshot::capture` runs them |
 | `nvx-rs/src/host/sandbox/prepared.rs - host::sandbox::prepared::PreparedLaunch (line 92)` | kept | Its launch type leaves with the old launch paths (#1087), whose PR retires it |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 72)` | retired | The sandbox store leaves (SL6.1, #1121) |
 | `nvx-rs/src/host/supervisor/mod.rs - host::supervisor (line 32)` | retired | The store-coupled supervisor leaves with the sandbox store (SL6.1, #1121); `host::supervisor` stays only as the transitional public path of the low-level spawn, until SL6.3 (#1122), with no doc test |
