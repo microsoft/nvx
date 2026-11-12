@@ -38,6 +38,12 @@ const PATIENCE: Duration = Duration::from_secs(20);
 /// the execution, and the allowance that they grant each stream at a time.
 const MAX_EVENT_BYTES: usize = 4096;
 
+/// More bytes than a program's output pipe can hold, even after the program grows the pipe, as
+/// uutils' `head -c` (Ubuntu 26.04's `head`) does to fit what it copies. Without privileges, a
+/// program can grow a pipe to `/proc/sys/fs/pipe-max-size` at most, 1 MiB by default, and uutils
+/// grows it to 1 MiB at most.
+const MORE_THAN_A_PIPE_HOLDS: usize = 4 * 1024 * 1024;
+
 /// Spawns `command` with new pipes, its standard input piped if `input`, in a process group of
 /// its own, and starts its execution with `options`.
 fn start(command: Command, input: bool, options: Options) -> Execution {
@@ -288,7 +294,7 @@ fn concurrent_executions_progress_independently() {
 
 #[test]
 fn a_stalled_sink_stalls_only_its_own_execution_and_loses_nothing() {
-    const LENGTH: usize = 256 * 1024;
+    const LENGTH: usize = MORE_THAN_A_PIPE_HOLDS;
     let mut stalled = start(
         shell(&format!("head -c {LENGTH} /dev/zero")),
         false,
@@ -337,7 +343,10 @@ fn a_stalled_sink_stalls_only_its_own_execution_and_loses_nothing() {
 fn cancellation_ends_a_stalled_program_and_the_caller_discards_the_rest() {
     // The program fills its pipe with the first page, which any pipe holds, before it says so.
     let mut execution = start(
-        shell("head -c 4096 /dev/zero; printf ready >&2; exec head -c 262144 /dev/zero"),
+        shell(&format!(
+            "head -c 4096 /dev/zero; printf ready >&2; \
+             exec head -c {MORE_THAN_A_PIPE_HOLDS} /dev/zero"
+        )),
         true,
         Options::new(),
     );
