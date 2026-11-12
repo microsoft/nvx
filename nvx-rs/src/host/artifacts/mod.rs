@@ -20,26 +20,35 @@
 //! `scripts/nvx_tools/common.py`, so that `nvx-rs` and the `nvx.py` commands that build,
 //! install, benchmark, and test the guests agree on where each artifact is.
 
+#[cfg(feature = "cli")]
 mod dir;
+#[cfg(feature = "cli")]
 mod guest;
+#[cfg(feature = "cli")]
 mod identity;
 mod require;
 
+#[cfg(feature = "cli")]
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "cli")]
 use crate::error::{Error, Result};
 
-pub use self::dir::{ArtifactDir, ArtifactPaths, GuestPaths, Layout};
-pub use self::guest::Guest;
+#[cfg(feature = "cli")]
+pub(crate) use self::dir::{ArtifactDir, ArtifactPaths, Layout};
+#[cfg(feature = "cli")]
+pub(crate) use self::guest::Guest;
 #[cfg(feature = "cli")]
 pub(crate) use self::require::require_artifact;
 pub(crate) use self::require::require_existing;
 
 /// Name of the release manifest at the root of a release archive or repository checkout.
-pub const MANIFEST_NAME: &str = "SOURCE-MANIFEST.json";
+#[cfg(feature = "cli")]
+pub(crate) const MANIFEST_NAME: &str = "SOURCE-MANIFEST.json";
 
 /// Returns whether `directory` is in the release layout: whether it contains `bin/openvmm[.exe]`,
 /// `guest/vmlinux`, or `guest/initramfs.cpio.gz`.
+#[cfg(feature = "cli")]
 fn is_release_dir(directory: &Path) -> bool {
     let guest = directory.join(RELEASE_GUEST_DIR);
     [
@@ -52,7 +61,8 @@ fn is_release_dir(directory: &Path) -> bool {
 }
 
 /// Returns the file name of the OpenVMM executable on this host.
-pub fn openvmm_executable() -> &'static str {
+#[cfg(feature = "cli")]
+pub(crate) fn openvmm_executable() -> &'static str {
     if cfg!(windows) {
         "openvmm.exe"
     } else {
@@ -62,40 +72,54 @@ pub fn openvmm_executable() -> &'static str {
 
 /// Resolves a relative path against the current directory, failing with
 /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable).
-pub fn absolute(path: &Path) -> Result<PathBuf> {
+#[cfg(feature = "cli")]
+pub(crate) fn absolute(path: &Path) -> Result<PathBuf> {
     std::path::absolute(path).map_err(|error| {
         Error::unavailable(format!("cannot resolve {}", path.display())).with_source(error)
     })
 }
 
 /// File name of the guest kernel in both layouts.
-pub const KERNEL_NAME: &str = "vmlinux";
+#[cfg(feature = "cli")]
+pub(crate) const KERNEL_NAME: &str = "vmlinux";
 /// Suffix of the package manifest that lists the packages of an initramfs.
-pub const PACKAGE_MANIFEST_SUFFIX: &str = ".packages.json";
+#[cfg(feature = "cli")]
+pub(crate) const PACKAGE_MANIFEST_SUFFIX: &str = ".packages.json";
 /// Suffix of the manifest of a distro layer, which binds the layer's digest and packages.
-pub const DISTRO_MANIFEST_SUFFIX: &str = ".manifest.json";
+#[cfg(feature = "cli")]
+pub(crate) const DISTRO_MANIFEST_SUFFIX: &str = ".manifest.json";
 /// Repository-layout directory of guest artifacts.
+#[cfg(feature = "cli")]
 pub(crate) const REPO_BUILD_DIR: &str = "build";
 /// Repository-layout path of the OpenVMM build output directory.
+#[cfg(feature = "cli")]
 const REPO_OPENVMM_DIR: [&str; 3] = ["openvmm", "target", "release"];
 /// Release-layout directory of the OpenVMM executable.
+#[cfg(feature = "cli")]
 const RELEASE_BIN_DIR: &str = "bin";
 /// Release-layout directory of the guest artifacts.
+#[cfg(feature = "cli")]
 const RELEASE_GUEST_DIR: &str = "guest";
 /// Name of the list of the SHA-256 digests of the files of a release, at its root.
-pub const CHECKSUMS_NAME: &str = "SHA256SUMS";
+#[cfg(feature = "cli")]
+pub(crate) const CHECKSUMS_NAME: &str = "SHA256SUMS";
 /// Name of the build provenance of the OpenVMM executable, beside the guest artifacts of a
 /// repository checkout.
-pub const OPENVMM_PROVENANCE_NAME: &str = "openvmm.provenance.json";
+#[cfg(feature = "cli")]
+pub(crate) const OPENVMM_PROVENANCE_NAME: &str = "openvmm.provenance.json";
 /// Name of the build provenance of the guest kernel, beside it.
-pub const KERNEL_PROVENANCE_NAME: &str = "vmlinux.provenance.json";
+#[cfg(feature = "cli")]
+pub(crate) const KERNEL_PROVENANCE_NAME: &str = "vmlinux.provenance.json";
 /// Name of the build provenance of the Alpine initramfs, beside it.
-pub const INITRAMFS_PROVENANCE_NAME: &str = "initramfs.provenance.json";
+#[cfg(feature = "cli")]
+pub(crate) const INITRAMFS_PROVENANCE_NAME: &str = "initramfs.provenance.json";
 /// Format of the build provenance that this crate reads.
+#[cfg(feature = "cli")]
 const PROVENANCE_FORMAT: u64 = 1;
 /// Longest file of install metadata that this crate reads, in bytes. A release's checksum list
 /// holds one line for each of its files, and a build provenance a few fields.
+#[cfg(feature = "cli")]
 const MAX_METADATA_LEN: u64 = 1 << 20;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cli"))]
 mod tests;

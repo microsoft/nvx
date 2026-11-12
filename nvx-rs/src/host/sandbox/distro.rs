@@ -55,10 +55,10 @@ use crate::host::seal::{self, FileKind, FileSeal};
 /// A change of the policy moves the revision, and [`DistroBinding::check`] refuses a binding of
 /// another revision than the one that its caller accepts, so a layer is verified again under the
 /// new policy before it launches.
-pub const DISTRO_POLICY_REVISION: u32 = 1;
+pub(crate) const DISTRO_POLICY_REVISION: u32 = 1;
 
 /// The version of the serde form of [`DistroBinding`] that this build writes and checks.
-pub const BINDING_VERSION: u32 = 1;
+pub(crate) const BINDING_VERSION: u32 = 1;
 
 /// How the operations of a binding reach files: the opens of [`seal`] and [`FileSeal::of`], or,
 /// in tests, opens that forbid reading the content, and seals that change a file as it is read.
@@ -87,7 +87,7 @@ impl Access<'static> {
 /// The format of a staged distro layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum DistroFormat {
+pub(crate) enum DistroFormat {
     /// An EROFS filesystem image, whose filesystem UUID the guest checks before it mounts it.
     Erofs,
     /// A GPT disk image, whose disk GUID the guest checks before it uses the disk.
@@ -96,7 +96,7 @@ pub enum DistroFormat {
 
 impl DistroFormat {
     /// Returns the name of the format: `erofs` or `gpt`.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Erofs => "erofs",
             Self::Gpt => "gpt",
@@ -113,7 +113,7 @@ impl fmt::Display for DistroFormat {
 /// The result of a distro policy for a layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PolicyResult {
+pub(crate) enum PolicyResult {
     /// The policy accepts the layer.
     Accepted,
     /// The policy refuses the layer, which no check passes.
@@ -123,17 +123,17 @@ pub enum PolicyResult {
 /// The verdict of a distro policy for a layer: the policy's revision and its result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PolicyVerdict {
+pub(crate) struct PolicyVerdict {
     /// The revision of the policy that judged the layer, such as [`DISTRO_POLICY_REVISION`].
-    pub revision: u32,
+    pub(crate) revision: u32,
     /// What the policy found.
-    pub result: PolicyResult,
+    pub(crate) result: PolicyResult,
 }
 
 impl PolicyVerdict {
     /// The verdict of explicit verification for a layer that it accepts: NVX's distro policy, at
     /// [`DISTRO_POLICY_REVISION`], accepts the layer.
-    pub const ACCEPTED: Self = Self {
+    pub(crate) const ACCEPTED: Self = Self {
         revision: DISTRO_POLICY_REVISION,
         result: PolicyResult::Accepted,
     };
@@ -153,7 +153,7 @@ impl PolicyVerdict {
 /// where `format` is `erofs` or `gpt`, and each `SEAL` is the serde form of a [`FileSeal`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DistroBinding {
+pub(crate) struct DistroBinding {
     /// [`BINDING_VERSION`].
     version: u32,
     /// The layer's format.
@@ -178,7 +178,7 @@ pub struct DistroBinding {
 /// that nothing modifies, renames, or replaces the layer while it is held; OpenVMM's read-only
 /// open of the layer shares it. Dropping it closes the file.
 #[derive(Debug)]
-pub struct CheckedDistro {
+pub(crate) struct CheckedDistro {
     /// The checked layer, which stays open until the caller drops it.
     _file: File,
 }
@@ -202,7 +202,7 @@ impl DistroBinding {
     /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) for a layer that is not a regular
     /// file; and with [`ErrorKind::Io`](crate::ErrorKind::Io) if the layer cannot be read or sealed,
     /// or changed while it was read.
-    pub fn verify(layer: &SandboxLayer) -> Result<Self> {
+    pub(crate) fn verify(layer: &SandboxLayer) -> Result<Self> {
         verify_with(layer, Access::READ)
     }
 
@@ -224,7 +224,11 @@ impl DistroBinding {
     /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a verdict that rejects the
     /// layer and a path without a name; and with [`ErrorKind::Io`](crate::ErrorKind::Io) if a file
     /// cannot be opened or sealed.
-    pub fn check(&self, layer: &SandboxLayer, policy_revision: u32) -> Result<CheckedDistro> {
+    pub(crate) fn check(
+        &self,
+        layer: &SandboxLayer,
+        policy_revision: u32,
+    ) -> Result<CheckedDistro> {
         self.check_with(layer, policy_revision, Access::GUARDED)
     }
 

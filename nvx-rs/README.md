@@ -116,16 +116,14 @@ changes only when the module's purpose does.
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshots, post-exit capture finishing, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
-| [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
 | [`nvx::host::network::policy`](#nvxhostnetworkpolicy) | Egress policy files and their compilation into OpenVMM's native rules |
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
 | [`nvx::host::nvxs`](#nvxhostnvxs) | Compatibility paths for the host NVXS connection and its retained cause details |
 | [`nvx::host::transport`](#nvxhosttransport) | A verified VM endpoint connection and the blocking host NVXS driver, with the existing timed transport |
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
-| [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::platform`, `report`](#nvxhostplatform-report) | Linux and Windows primitives, and OpenVMM's outcome report |
-| [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its layer, live shares, option checks, and bindings |
+| [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its live shares and option checks; its layer and bindings are private to the CLI |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
@@ -928,19 +926,6 @@ namespaces, it uses passwordless `sudo` only for that isolated helper, not the
 test suite or build. If neither route works, the test fails; it never changes
 host namespace policy or skips the identity assertions.
 
-### `nvx::host::artifacts`
-
-`ArtifactDir` and `Guest`: every artifact of the guests that `nvx.py` runs, the
-OpenVMM executable, the kernel, the Alpine, Ubuntu, and Azure Linux initramfs
-images and their package manifests, and the Ubuntu distro layer and its
-manifest, in a checkout's `build/` and `openvmm/target/release/` or a release's
-`guest/` and `bin/`, checked with the messages of `nvx.py`. `ArtifactPaths`
-lists them all and serializes as JSON.
-
-`ArtifactDir::runtime_identity` reads the `RuntimeIdentity` of the OpenVMM
-executable, kernel, and Alpine initramfs from the install metadata, a release's
-`SHA256SUMS` or a checkout's build provenance, without hashing an artifact.
-
 ### `nvx::host::network`
 
 `NetworkPolicy` and `openvmm_arguments`, the one lowering of a network posture
@@ -1053,14 +1038,6 @@ holds what the process's children read once it reaped them, as the kernel
 accounts them to their parent, while Windows counts the process's own reads
 alone.
 
-### `nvx::host::seal`
-
-`FileSeal`: what the host reports about an open file from its metadata alone,
-without reading it: the platform scheme, the device or volume serial number, the
-file ID, the kind, the length, the modification time, and on Linux the change
-time, with a versioned serde form. A seal detects accidental change, not
-tampering; see [Distro bindings](#distro-bindings).
-
 ### `nvx::host::platform`, `report`
 
 Linux and Windows primitives, and OpenVMM's outcome report. The authenticated
@@ -1093,8 +1070,16 @@ it, and NVX does not depend on an asynchronous I/O runtime.
 ### `nvx::host::sandbox`
 
 The launch profile of `nvx-rs sandbox`, with native input validation: the
-distro `SandboxLayer`, an EROFS layer or a GPT disk, the one layer that a
-sandbox takes, and the workload identity that `--workload-user` names.
+workload identity that `--workload-user` names, the live shares, and the checks
+of the options. The image staging of the profile is private to the crate, for
+the CLI (feature `cli`): `layer`'s `SandboxLayer`, the distro layer of a
+sandbox, an EROFS layer or a GPT disk, the one layer that a sandbox takes;
+`distro`'s `DistroBinding` of the layer, which explicit verification makes, and
+its check from metadata alone; `scratch`'s `ScratchBinding` of a scratch image,
+its identity, kind, and length, and its check from metadata alone, which claims
+the image for one sandbox at a time; and the seals of `nvx::host`'s private
+`seal`, which they record. See [Distro bindings](#distro-bindings) and
+[Images by path](#images-by-path).
 
 `mount`: `SandboxMount` requests of live shares of host directories and files,
 their guest targets and the reserved ones, their access policies and owner, and
@@ -1106,14 +1091,6 @@ options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write`
 to shares, the systemd entrypoint check and the explicit verification of the
 distro layer, the targets of `nvx-rs run` shares, and the managed exec
 environment; see [Sandbox input contract](#sandbox-input-contract).
-
-`distro`: the `DistroBinding` of a distro layer, an EROFS layer or a GPT disk,
-which explicit verification makes, and its check from metadata alone, which
-returns the layer open; see [Distro bindings](#distro-bindings).
-
-`scratch`: the `ScratchBinding` of a scratch image, its identity, kind, and
-length, and its check from metadata alone, which claims the image for one
-sandbox at a time and returns it open.
 
 ### `nvx::guest`
 
@@ -1669,7 +1646,8 @@ file, that each refusal names, a fragment of its reason, and its error code.
 ## Distro bindings
 
 Three separate checks guard the distro layer of a sandbox, and only explicit
-verification reads it:
+verification reads it. The bindings and the seals that they record are private
+to the crate, for the CLI:
 
 - `options::validate_sandbox_entrypoint` refuses the entrypoints of systemd,
   which the sandbox security profile does not run. Every launch applies it,
@@ -1738,9 +1716,9 @@ scratch image at the paths that the VM's configuration holds. Their checks,
 unchanged from its metadata alone and return it open, but what takes an image's
 path after its check is what OpenVMM opens. Callers therefore stage their
 images in a directory that only their own account can write, as
-[Distro bindings](#distro-bindings) and the docs of `nvx::host::sandbox::distro`,
-`nvx::host::sandbox::scratch`, and `nvx::host::seal` require, so that no other
-account can replace a checked image. On Windows, a checked distro layer also
+[Distro bindings](#distro-bindings) and the docs of the crate's private
+`host::sandbox::distro`, `host::sandbox::scratch`, and `host::seal` require, so
+that no other account can replace a checked image. On Windows, a checked distro layer also
 denies other opens for writing or deleting the layer while it is held, and the
 scratch image's guard denies deleting and renaming the image. `nvx-rs sandbox
 start` and `run` check the images just before they create the VM, and hold the
@@ -2831,14 +2809,16 @@ python3 ../scripts/nvx.py test-guest-binaries \
 The [security checklist](tests/security_checklist.rs) checks, through the
 public API alone and without a VM, each security requirement that the host's
 documentation states: the guest targets of an export and a read-only path
-inside a writable one, the checks of a staged image and the claim of a scratch
-image, which callers keep in directories that only their own account can write,
-the exported objects that each start checks again, a VM's private directory and
-its new private log, the exit proof of a saved VM, the owner of its endpoint,
-and its recovery from the saved values, and a snapshot's strict directory. An
-idle copy of the test binary stands in for a VM's process. The checks that NVX
-makes of a restore need a captured snapshot, so the unit tests of
-`nvx::host::vm`, `nvx::host::snapshot`, and `nvx::host::restore` check them.
+inside a writable one, the exported objects that each start checks again, a
+VM's private directory and its new private log, the exit proof of a saved VM,
+the owner of its endpoint, and its recovery from the saved values, and a
+snapshot's strict directory. An idle copy of the test binary stands in for a
+VM's process. The checks that NVX makes of a restore need a captured snapshot,
+so the unit tests of `nvx::host::vm`, `nvx::host::snapshot`, and
+`nvx::host::restore` check them. The checks of a staged image and the claim of
+a scratch image, which the CLI keeps in directories that only its own account
+can write, are private to the crate, so the unit tests of its distro and
+scratch bindings check them.
 
 Two examples compile the documented workflows through the public API alone,
 and nothing runs them: [`host-workflows`](examples/host-workflows.rs), a cold
