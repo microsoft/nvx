@@ -94,7 +94,6 @@ each code for callers of the `nvx` library.
 | `unsupported` | 1 | NVX refuses the request: options that it cannot combine, a value that it does not accept, or a policy that it cannot represent or enforce. The message names the option or field. |
 | `unavailable` | 1 | A dependency is missing or unusable, other than as a finer code says: install metadata, the hypervisor, a release, a distro layer or scratch image that the request names, or a host that NVX does not support. |
 | `artifact-missing` | 1 | An artifact that the command runs, such as OpenVMM, the guest kernel, or an initramfs, does not exist, or no artifact root holds them. |
-| `guest-features-missing` | 1 | The guest image lacks control features that the sandbox needs, which the message names. |
 | `sandbox-not-provisioned` | 1 | No sandbox is provisioned at `--state-dir`, which does not exist, is not a plain directory, or holds no configuration. |
 | `sandbox-provisioned` | 1 | `provision` found the sandbox provisioned already, or it was provisioned again while `deprovision` removed it. |
 | `sandbox-not-running` | 1 | `exec` or `stop` found the VM of a provisioned sandbox not running. |

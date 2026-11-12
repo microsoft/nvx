@@ -25,7 +25,6 @@ variant nvx::ErrorCode::ExecRefused
 variant nvx::ErrorCode::Exited
 variant nvx::ErrorCode::ForeignFiles
 variant nvx::ErrorCode::FormatUnsupported
-variant nvx::ErrorCode::GuestFeaturesMissing
 variant nvx::ErrorCode::Io
 variant nvx::ErrorCode::NotFound
 variant nvx::ErrorCode::Other

@@ -10,8 +10,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[non_exhaustive]
 pub enum ErrorKind {
     /// A runtime dependency is missing or unusable: an artifact, the hypervisor, a release or
-    /// guest image without the control contract or features that this crate needs, or a host
-    /// that NVX does not support.
+    /// guest image without the control contract that this crate needs, or a host that NVX does
+    /// not support.
     Unavailable,
     /// NVX refuses the request: a value that it does not accept, such as a malformed or
     /// out-of-range one, options that it cannot combine, or a request that it cannot represent or
@@ -117,8 +117,6 @@ pub enum ErrorCode {
     /// `artifact-missing`: an artifact that the operation runs, such as OpenVMM, the guest kernel,
     /// or an initramfs, does not exist, or no artifact root holds them.
     ArtifactMissing,
-    /// `guest-features-missing`: the guest image lacks control features that the operation needs.
-    GuestFeaturesMissing,
     /// `sandbox-not-provisioned`: no sandbox is provisioned at its state directory, which does not
     /// exist, is not a plain directory, or holds no configuration.
     SandboxNotProvisioned,
@@ -185,7 +183,6 @@ impl ErrorCode {
         Self::ArgumentMissing,
         Self::ArgumentInvalid,
         Self::ArtifactMissing,
-        Self::GuestFeaturesMissing,
         Self::SandboxNotProvisioned,
         Self::SandboxProvisioned,
         Self::SandboxNotRunning,
@@ -221,7 +218,6 @@ impl ErrorCode {
             Self::ArgumentMissing => "argument-missing",
             Self::ArgumentInvalid => "argument-invalid",
             Self::ArtifactMissing => "artifact-missing",
-            Self::GuestFeaturesMissing => "guest-features-missing",
             Self::SandboxNotProvisioned => "sandbox-not-provisioned",
             Self::SandboxProvisioned => "sandbox-provisioned",
             Self::SandboxNotRunning => "sandbox-not-running",
@@ -247,7 +243,6 @@ impl ErrorCode {
         match self {
             Self::Unavailable
             | Self::ArtifactMissing
-            | Self::GuestFeaturesMissing
             | Self::TemplateIneligible
             | Self::TemplateTombstoned => ErrorKind::Unavailable,
             Self::Unsupported
