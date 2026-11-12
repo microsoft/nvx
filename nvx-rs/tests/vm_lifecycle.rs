@@ -29,12 +29,20 @@ use nvx::host::runtime::{
 use nvx::host::transport::HostConnection;
 use nvx::host::vm::{self, SavedVm, VmDir, VmOutputs};
 use nvx::protocol::root::RootImage;
-use nvx::protocol::{self, APP_PING, APP_READY, APP_STOP, APP_STOPPED};
 use nvx::uuid::Uuid;
 
 /// The caller's kernel command-line tokens, which `nvx-rs sandbox start` gives nvx-init too: it
 /// manages the VM, and runs workloads as the fixed identity `65534:65534`.
 const COMMAND_LINE: &str = "nvx_sandbox=1 nvx_mode=managed nvx_identity=65534:65534";
+
+/// The request of NVXC, nvx-init's protocol, that asks the guest whether it is ready.
+const PING: u8 = 1;
+/// The request of NVXC that asks the guest to end the VM.
+const STOP: u8 = 3;
+/// NVXC's acknowledgement of [`PING`].
+const READY: u8 = 0x81;
+/// NVXC's acknowledgement of [`STOP`].
+const STOPPED: u8 = 0x85;
 
 /// The inputs of the test, which the scenario gives it as a JSON object in `NVX_VM_LIFECYCLE`.
 #[derive(serde::Deserialize)]
@@ -92,8 +100,28 @@ impl Drop for Started {
     }
 }
 
-/// Sends the request `kind` of the caller's own protocol with its guest, which for nvx-init is
-/// NVXC, and checks that the guest acknowledges it with `reply` by `deadline`.
+/// The NVXC frame of `kind` for the request `request`, with status 0 and no payload: the magic,
+/// the version, 1, the kind, two zero flag bytes, the request's ID, the status, and the payload's
+/// length, each integer little-endian, as `tests/vectors/nvxc-v1.txt` pins them.
+fn frame(kind: u8, request: u64) -> Vec<u8> {
+    [
+        &b"NVXC"[..],
+        &[1, kind, 0, 0],
+        &request.to_le_bytes(),
+        &0i32.to_le_bytes(),
+        &0u32.to_le_bytes(),
+    ]
+    .concat()
+}
+
+/// Sends the request `kind` of the caller's own protocol with its guest, and checks that the guest
+/// acknowledges it with `reply` by `deadline`.
+///
+/// `nvx` carries the bytes of whatever protocol a caller speaks with its guest over the
+/// `HostConnection` that `vm::reattach` returns, and leaves the protocol to the caller. This
+/// caller's guest is nvx-init, which speaks NVX's own protocol, NVXC; NVXC is private to `nvx`,
+/// so the caller encodes the few frames that it sends and expects itself, as any caller of a
+/// guest of its own would.
 fn acknowledged(
     connection: &mut HostConnection,
     kind: u8,
@@ -102,15 +130,14 @@ fn acknowledged(
     deadline: Instant,
 ) {
     connection
-        .send(&protocol::encode_app(kind, request, 0, &[]), Some(deadline))
+        .send(&frame(kind, request), Some(deadline))
         .expect("the guest takes the request");
     let response = connection
         .receive(Some(deadline))
         .expect("the guest answers the request");
-    let frame = protocol::decode_app(&response).expect("the answer is an NVXC frame");
     assert_eq!(
-        (frame.kind, frame.request_id, frame.status, frame.payload),
-        (reply, request, 0, &[][..]),
+        response,
+        frame(reply, request),
         "the guest acknowledges request {kind}"
     );
 }
@@ -203,9 +230,9 @@ fn a_cold_vm_is_reattached_from_saved_values_and_stopped() {
     assert_eq!(reattached.process.reference(), &saved.process);
     acknowledged(
         &mut reattached.connection,
-        APP_PING,
+        PING,
         1,
-        APP_READY,
+        READY,
         Instant::now() + timeout,
     );
     drop(reattached);
@@ -213,9 +240,9 @@ fn a_cold_vm_is_reattached_from_saved_values_and_stopped() {
         .expect("the saved values reattach the VM again, with a new connection");
     acknowledged(
         &mut reattached.connection,
-        APP_PING,
+        PING,
         2,
-        APP_READY,
+        READY,
         Instant::now() + timeout,
     );
     let grace = Instant::now() + timeout;
@@ -223,13 +250,7 @@ fn a_cold_vm_is_reattached_from_saved_values_and_stopped() {
         &reattached.process,
         &started.outputs,
         |deadline| {
-            acknowledged(
-                &mut reattached.connection,
-                APP_STOP,
-                3,
-                APP_STOPPED,
-                deadline,
-            );
+            acknowledged(&mut reattached.connection, STOP, 3, STOPPED, deadline);
             true
         },
         grace,
