@@ -150,16 +150,6 @@ impl FileSeal {
         self.length
     }
 
-    /// Returns the modification time.
-    pub fn modified(&self) -> SealTime {
-        self.modified
-    }
-
-    /// Returns the change time on Linux, and `None` on Windows.
-    pub fn changed(&self) -> Option<SealTime> {
-        self.changed
-    }
-
     /// Returns what differs first between this seal and `other`, in the order version, scheme,
     /// identity, kind, length, modification time, and change time, or `None` if they are equal.
     pub(crate) fn difference(&self, other: &Self) -> Option<&'static str> {
