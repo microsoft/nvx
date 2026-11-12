@@ -3,7 +3,6 @@
 use std::fmt;
 
 use super::{DISTRO_MANIFEST_SUFFIX, PACKAGE_MANIFEST_SUFFIX};
-use crate::error::{Error, Result};
 
 /// A Linux guest that `nvx.py` builds and runs, as `scripts/nvx_tools/guests.py` describes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -27,24 +26,6 @@ impl Guest {
             Self::Ubuntu => "ubuntu",
             Self::AzureLinux => "azurelinux",
         }
-    }
-
-    /// Returns the guest named `name`.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) and the message
-    /// `unsupported guest "NAME"; choose alpine, ubuntu, azurelinux`, which quotes the name with
-    /// Rust's debug formatting.
-    pub fn from_name(name: &str) -> Result<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|guest| guest.name() == name)
-            .ok_or_else(|| {
-                let names: Vec<&str> = Self::ALL.iter().map(|guest| guest.name()).collect();
-                Error::unsupported(format!(
-                    "unsupported guest {name:?}; choose {}",
-                    names.join(", ")
-                ))
-            })
     }
 
     /// Returns the name of the guest's distribution, as messages show it: `Alpine Linux`,
