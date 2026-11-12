@@ -1,16 +1,15 @@
-//! Translation of a network posture into OpenVMM options, and, in the private `policy` (feature
-//! `cli`), the egress policy files of the CLI.
+//! Translation of a network posture into OpenVMM options.
 //!
 //! OpenVMM's portable profile enforces an egress default plus IPv4 and IPv6 allow and deny rules
 //! that match a network of one family and, optionally, one protocol (TCP, UDP, or ICMP) and, for
 //! TCP or UDP, one port or an inclusive range of ports; deny rules take precedence.
-//! [`EgressRule`]s are lowered into that form exactly, by the lowering that also compiles the CLI's
-//! egress policy files: exceptions are subtracted from their networks, a rule without
-//! destinations matches `0.0.0.0/0` and `::/0`, `any` protocol with a port or a port range becomes
-//! a TCP and a UDP rule, destinations merge into the fewest networks that cover them, rules for
-//! every port of a protocol subsume narrower rules, and overlapping and adjacent port ranges
-//! merge. Each action emits at most [`MAX_RULES`] OpenVMM rules, sorted by family, address, prefix
-//! length, protocol, and ports, which [`NetworkPolicy::native_egress_rules`] returns.
+//! [`EgressRule`]s are lowered into that form exactly: exceptions are subtracted from their
+//! networks, a rule without destinations matches `0.0.0.0/0` and `::/0`, `any` protocol with a
+//! port or a port range becomes a TCP and a UDP rule, destinations merge into the fewest networks
+//! that cover them, rules for every port of a protocol subsume narrower rules, and overlapping
+//! and adjacent port ranges merge. Each action emits at most [`MAX_RULES`] OpenVMM rules, sorted
+//! by family, address, prefix length, protocol, and ports, which
+//! [`NetworkPolicy::native_egress_rules`] returns.
 //!
 //! Host-loopback access is bidirectional: with it allowed, the guest reaches host loopback
 //! services through its gateway, and OpenVMM publishes the guest's listeners on host loopback.

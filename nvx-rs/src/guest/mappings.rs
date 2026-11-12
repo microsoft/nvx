@@ -7,9 +7,9 @@
 //! [last section](#host-mapping-table) describes, and hands their mappings to the root of its
 //! caller's choice.
 //!
-//! NVX mounts mappings through its mapper, which binds each beneath the descriptor of its root.
-//! The mapper, like the rest of the guest's space, is nvx-init's internal reference code, private
-//! to this crate.
+//! The caller mounts the mappings through a mapper of its own. NVX's mapper, which binds each
+//! beneath the descriptor of its root, is part of the guest's space, nvx-init's internal
+//! reference code, private to this crate.
 //!
 //! # Host mapping table
 //!
@@ -23,9 +23,8 @@
 //! table, so that the agent starts no workload on a partial table. The caller keeps the mappings
 //! until its teardown.
 //!
-//! NVX's managed agent applies its host mapping table through one, and through a mapper beneath
-//! its own root, `/`, in direct mode, from its mount of the host's export, an aggregate, whose
-//! root, which lists the aggregate's children, no table maps: a table refuses an empty source.
+//! A table takes its entries from an aggregate export, whose root, which lists the aggregate's
+//! children, no table maps: it refuses an empty source.
 
 mod kernel;
 pub(crate) mod mapper;
