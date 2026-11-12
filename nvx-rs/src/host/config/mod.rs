@@ -38,7 +38,8 @@ pub const COMMAND_LINE_BUDGET: usize = 1024;
 /// OpenVMM's command line is held to it on every host, so a policy behaves alike on all of them.
 pub const PROCESS_COMMAND_LINE_LIMIT: usize = 32_767;
 
-/// Room for the runtime's files and the VM's output paths, as legacy adapter planning reserves.
+/// Room for the runtime's files and the VM's output paths, which
+/// [`VmConfig::check_command_line`] keeps.
 pub(crate) const OPENVMM_COMMAND_LINE_RESERVE: usize = 2048;
 
 /// The guest address of a VM's NIC at a cold boot whose configuration names none, in the form
@@ -674,8 +675,8 @@ impl VmConfig {
     /// host, without reading or changing the host, with 2048 UTF-16 code units reserved for the
     /// runtime's files, launch options, and the VM's output paths.
     ///
-    /// Like legacy adapter planning, the reserve foresees runtime-file and output names of up to
-    /// 260 code units each, Windows' `MAX_PATH`. It does not certify arbitrary runtime paths or
+    /// The reserve foresees runtime-file and output names of up to 260 code units each, Windows'
+    /// `MAX_PATH`. It does not certify arbitrary runtime paths or
     /// CPU-profile names: [`crate::host::vm::create`] checks the complete command line with the
     /// actual runtime and output names, without a reserve.
     /// A listener's backend prefix is counted here; its endpoint name stays in the reserve.
@@ -1168,7 +1169,7 @@ pub(crate) fn reject_container_path(path: &Path, shown: &str) -> Result<()> {
     reject_container_backend(path, shown, true, false)
 }
 
-/// Common cold-boot inputs, shared with the legacy VmmLaunch without narrowing its public types.
+/// The OpenVMM arguments of the inputs that every cold boot names.
 pub(crate) fn boot_arguments(
     hypervisor: Hypervisor,
     memory_mib: u64,
