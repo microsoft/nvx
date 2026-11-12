@@ -138,7 +138,72 @@ fn a_transferred_listener_cannot_authenticate_its_exited_creator() {
         println!("{verified} pid={pid}");
         return;
     }
+    run_with_transferred_listener(
+        "host::platform::linux::tests::a_transferred_listener_cannot_authenticate_its_exited_creator",
+        true,
+        verified,
+    );
+}
 
+#[cfg(feature = "cli")]
+#[test]
+fn a_child_endpoint_accepts_its_exited_child_until_the_child_is_reaped() {
+    use std::io::Write;
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixListener;
+
+    use nix::sys::wait::{Id, WaitPidFlag, waitid, waitpid};
+    use nix::unistd::Pid;
+
+    let verified = "NVX_UNREAPED_CHILD_PEER_ACCEPTED";
+    if let Some(pid) = std::env::var_os("NVX_TEST_TRANSFERRED_CONTROL_LISTENER") {
+        let pid: u32 = pid.to_str().unwrap().parse().unwrap();
+        let endpoint = std::env::var("NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT").unwrap();
+        let listener = UnixListener::from(std::io::stdin().as_fd().try_clone_to_owned().unwrap());
+        // The listener's creator is this process's child: it exits, and only this process reaps it.
+        let creator = Pid::from_raw(i32::try_from(pid).unwrap());
+        waitid(
+            Id::Pid(creator),
+            WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT,
+        )
+        .unwrap();
+        let error = connect_endpoint(&endpoint, pid, Duration::from_secs(2))
+            .err()
+            .expect("other connections must still refuse an exited peer");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("original socket peer exited"));
+        drop(listener.accept().unwrap());
+        let mut transport = connect_child_endpoint(&endpoint, pid).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.write_all(b"output").unwrap();
+        let mut output = [0; 6];
+        let count = transport
+            .read(&mut output, Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(&output[..count], b"output");
+        waitpid(creator, None).unwrap();
+        let error = connect_child_endpoint(&endpoint, pid)
+            .err()
+            .expect("a reaped peer must not authenticate");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("original socket peer exited"));
+        println!("{verified} pid={pid}");
+        return;
+    }
+    run_with_transferred_listener(
+        "host::platform::linux::tests::a_child_endpoint_accepts_its_exited_child_until_the_child_is_reaped",
+        false,
+        verified,
+    );
+}
+
+/// Runs this binary's test `test` in a Python process that a child of its own, the creator, gave
+/// a listener at a new socket before it exited, and checks that the test passed and printed
+/// `verified`. The test finds the listener on its standard input, the creator's PID in
+/// `NVX_TEST_TRANSFERRED_CONTROL_LISTENER`, and the socket's path in
+/// `NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT`. The process reaps the creator first if `reap`, and
+/// leaves it to the test otherwise.
+fn run_with_transferred_listener(test: &str, reap: bool, verified: &str) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("control.sock");
     let mut command = Command::new("python3");
@@ -163,7 +228,8 @@ assert messages[0][:2] == (socket.SOL_SOCKET, socket.SCM_RIGHTS)
 descriptors = array.array("i")
 descriptors.frombytes(messages[0][2])
 assert len(descriptors) == 1
-assert os.waitpid(creator, 0) == (creator, 0)
+if sys.argv[4] == "reap":
+    assert os.waitpid(creator, 0) == (creator, 0)
 os.dup2(descriptors[0], 0)
 if descriptors[0] != 0:
     os.close(descriptors[0])
@@ -174,10 +240,9 @@ os.execv(sys.argv[2], [sys.argv[2], "--exact", sys.argv[3], "--nocapture", "--te
         ])
         .arg(&path)
         .arg(std::env::current_exe().unwrap())
-        .arg(
-            "host::platform::linux::tests::a_transferred_listener_cannot_authenticate_its_exited_creator",
-        )
-        .env(endpoint, &path)
+        .arg(test)
+        .arg(if reap { "reap" } else { "keep" })
+        .env("NVX_TEST_TRANSFERRED_CONTROL_ENDPOINT", &path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

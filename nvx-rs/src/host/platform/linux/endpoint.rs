@@ -139,7 +139,7 @@ impl ReadyListener {
                 ));
             }
             if verify_original_peer {
-                check_original_peer(&connection)?;
+                check_original_peer(&connection, false)?;
             }
             connection.set_nonblocking(true)?;
             self.connection = Some(connection);
@@ -178,7 +178,10 @@ impl ReadyListener {
 }
 
 /// The kernel returns a descriptor of the socket's original peer, not a new lookup of its PID.
-fn check_original_peer(connection: &UnixStream) -> io::Result<()> {
+///
+/// A peer that has exited is refused, unless `accept_unreaped` accepts one that has not been
+/// reaped, which still holds its ID, as `connect_child_endpoint` requires.
+fn check_original_peer(connection: &UnixStream, accept_unreaped: bool) -> io::Result<()> {
     let peer = match getsockopt(connection, PeerPidfd) {
         Err(
             sys::Errno::ENOPROTOOPT
@@ -207,6 +210,9 @@ fn check_original_peer(connection: &UnixStream) -> io::Result<()> {
     }
     let events = descriptors[0].revents().unwrap_or(PollFlags::empty());
     if events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP) {
+        if accept_unreaped && sys::PidFd::from(peer).holds_its_id()? {
+            return Ok(());
+        }
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "the original socket peer exited",
@@ -262,6 +268,29 @@ pub(crate) fn connect_endpoint(
     expected_pid: u32,
     _timeout: Duration,
 ) -> io::Result<Box<dyn Transport>> {
+    connect_peer(endpoint, expected_pid, false)
+}
+
+/// Connects to the endpoint that the process `child` serves, as [`connect_endpoint`] does, for a
+/// caller that launched `child` and has not reaped it: a cold run, whose OpenVMM may write its
+/// boot console's output and exit before the run checks the console's peer.
+///
+/// It accepts an original socket peer that has exited but has not been reaped, and still refuses
+/// a reaped one. That is safe because the caller's own unreaped child keeps its PID, which no
+/// other process can reuse until the caller reaps it, so a peer that holds the child's PID is the
+/// child. Every other connection, as [`connect_endpoint`]'s, still refuses an exited peer.
+#[cfg(feature = "cli")]
+pub(crate) fn connect_child_endpoint(endpoint: &str, child: u32) -> io::Result<Box<dyn Transport>> {
+    connect_peer(endpoint, child, true)
+}
+
+/// Connects to the endpoint that the process `expected_pid` serves as the socket's original peer,
+/// which [`check_original_peer`] checks, with `accept_unreaped`.
+fn connect_peer(
+    endpoint: &str,
+    expected_pid: u32,
+    accept_unreaped: bool,
+) -> io::Result<Box<dyn Transport>> {
     let stream = sys::connect_nonblocking(endpoint)?;
     let peer = sys::peer_pid(&stream)?;
     if peer != expected_pid {
@@ -272,7 +301,7 @@ pub(crate) fn connect_endpoint(
             ),
         ));
     }
-    check_original_peer(&stream)?;
+    check_original_peer(&stream, accept_unreaped)?;
     transport_from_handle(stream.into())
 }
 
