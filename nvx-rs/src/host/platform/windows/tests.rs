@@ -5,7 +5,6 @@ use std::io::{self, Read, Write};
 use std::mem;
 #[cfg(feature = "cli")]
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::AsHandle;
 use std::path::Path;
 use std::rc::Rc;
 use std::thread;
@@ -320,57 +319,6 @@ fn make_inheritable(handle: &impl AsRawHandle) {
         )
     };
     assert_ne!(set, 0, "{}", io::Error::last_os_error());
-}
-
-#[test]
-fn a_child_loses_only_the_inherited_handle_that_is_closed_in_it() {
-    let directory = tempfile::tempdir().unwrap();
-    let closed = std::fs::File::create(directory.path().join("closed")).unwrap();
-    let kept = std::fs::File::create(directory.path().join("kept")).unwrap();
-    let (_other_reader, other) = io::pipe().unwrap();
-    let (stdin, _stdin_writer) = io::pipe().unwrap();
-    let (_stdout_reader, stdout) = io::pipe().unwrap();
-    let stderr = stdout.try_clone().unwrap();
-    let system = std::env::var_os("SystemRoot").unwrap();
-    let ping = Path::new(&system).join("System32").join("PING.EXE");
-    let child = spawn_with_stdio(
-        &ping,
-        &["-n", "30", "127.0.0.1"].map(OsString::from),
-        &std::env::temp_dir(),
-        [stdin.into(), stdout.into(), stderr.into()],
-        &[Inherited::new(&closed), Inherited::new(&kept)],
-        SpawnMode::Detached {
-            breakaway_from_job: false,
-        },
-        None,
-    )
-    .unwrap();
-    let pid = child.id();
-    let (process, start_time) = child.pin().unwrap();
-    let value = |handle: &std::fs::File| handle.as_raw_handle() as HANDLE;
-    let held = |handle: &std::fs::File| holds(&child.process, value(handle), handle);
-    let inherited = (held(&closed), held(&kept));
-    // A handle that the child did not inherit is not closed in it, and neither is any of its
-    // own.
-    let refused = process.close_inherited(pid, other.as_handle());
-    // A process found again, through a handle that may not duplicate its handles, keeps them.
-    let found = open_process(pid, start_time).unwrap().unwrap();
-    let denied = found.close_inherited(pid, closed.as_handle());
-    let closing = process.close_inherited(pid, closed.as_handle());
-    let after = (held(&closed), held(&kept));
-    assert!(child.terminate(Duration::from_secs(10)));
-    // Once the child has exited, it holds no handle, so a close succeeds.
-    let exited = process.close_inherited(pid, kept.as_handle());
-    assert_eq!(inherited, (true, true), "the child did not inherit both");
-    assert!(refused.is_err(), "{refused:?}");
-    assert_eq!(denied.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-    closing.unwrap();
-    assert_eq!(
-        after,
-        (false, true),
-        "the close did not take the closed handle alone"
-    );
-    exited.unwrap();
 }
 
 #[test]

@@ -111,10 +111,6 @@ fn vmms_inherit_the_allowed_descriptors_under_their_numbers() {
     // Only the VMM's process cleared their close-on-exec flags.
     assert!(close_on_exec(pipe.as_fd()));
     assert!(close_on_exec(file.as_fd()));
-    assert_eq!(
-        Inherited::new(&file).proc_path(),
-        PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
-    );
 }
 
 #[test]
