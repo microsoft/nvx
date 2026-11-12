@@ -1,10 +1,7 @@
-//! The children of an aggregate of shares, the values of OpenVMM's options that attach shares,
-//! and the planning of the export of a sandbox's shares.
+//! The planning of the export of a sandbox's shares.
 
 use std::io;
 use std::path::PathBuf;
-
-use sha2::{Digest, Sha256};
 
 use super::{
     MountAccess, MountKind, MountOwner, PolicyKind, SandboxMount, validate_mount_host_paths,
@@ -16,40 +13,6 @@ use crate::host::filesystem::{
 };
 use crate::host::paths;
 use crate::host::sandbox::refused;
-
-/// Returns the name of the aggregate child at `index` that the guest binds at `target`: the
-/// index, a hyphen, and the first 32 hexadecimal digits of the SHA-256 digest of the target.
-///
-/// A snapshot records every child's name, so it pins each target, and OpenVMM refuses a restore
-/// that requests other targets before the guest runs, rather than keep the snapshot's binds.
-pub fn aggregate_child_name(index: usize, target: &str) -> String {
-    let digest = Sha256::digest(target.as_bytes());
-    let hex: String = digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("{index}-{hex}")
-}
-
-/// Returns the `--mount-child` value that attaches `host_path` as the child `name`. It always
-/// gives the mode, which OpenVMM reads after the last comma or before the `file` flag, so the
-/// host path may contain commas. A file child carries OpenVMM's `file` flag, so OpenVMM refuses
-/// a directory that replaced the file instead of exporting all of it.
-pub fn aggregate_child_argument(
-    name: &str,
-    host_path: &str,
-    access: MountAccess,
-    kind: MountKind,
-) -> String {
-    let file = if kind == MountKind::File { ",file" } else { "" };
-    format!("{name},{host_path},{access}{file}")
-}
-
-/// Returns the `--mount` value that attaches `host_path` at `target`. It always gives the mode,
-/// which OpenVMM reads after the last comma, so the host path may contain commas.
-pub fn mount_argument(target: &str, host_path: &str, access: MountAccess) -> String {
-    format!("{target},{host_path},{access}")
-}
 
 /// Plans the export of `mounts`, the live shares of one sandbox, through the planner of every
 /// NVX caller, [`filesystem::plan`], after it checks them with [`validate_mounts`], each share

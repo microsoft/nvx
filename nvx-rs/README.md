@@ -128,7 +128,7 @@ changes only when the module's purpose does.
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
 | [`nvx::host::platform`, `report`](#nvxhostplatform-report) | Linux and Windows primitives, and OpenVMM's outcome report |
-| [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, and bindings |
+| [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its layer, live shares, option checks, and bindings |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
 | [`nvx::guest::nvxs`](#nvxguestnvxs) | `GuestConnection`: the guest's role of the NVXS session over a byte stream, such as the control console |
@@ -1142,48 +1142,14 @@ it, and NVX does not depend on an asynchronous I/O runtime.
 
 ### `nvx::host::sandbox`
 
-The launch profile of `nvx-rs sandbox`, with native input validation:
-`SandboxLaunch`, with the distro `SandboxLayer`, an EROFS layer or a GPT disk,
-the one layer that a sandbox takes, its `SandboxUpper`, the ext4 scratch disk
-or RAM, the entrypoint, arguments, hostname, workload identity, and
-`SandboxSettings` resource limits (`Option<u64>` for memory and `Option<u32>`
-for processes), and the `SandboxPlan` that it makes of them.
-
-`plan`: `SandboxPlan`, the typed plan of a cold layered launch, which is
-persistable in a versioned serde form: one read-only `distro` block device, an
-EROFS filesystem or a GPT disk with the identity that the guest expects of it,
-if any, an upper, the ext4 scratch disk or RAM, the launch settings, the
-`ExportPlan` of its live shares, and optionally a `SandboxNetwork`, the guest
-network and its typed `NetworkPolicy`, whose proxy's URL as the guest sees it
-the plan reports. The plan of an adapter that boots its own guest,
-`SandboxPlan::adapter`, holds no launch settings and no export plan.
-
-A plan knows only the `distro` and `scratch` `BlockRole`s, and gives, for every
-combination, its `--microvm-sandbox-block` arguments, with
-`--microvm-workload-identity` when it has launch settings, with no scratch block
-device for a RAM upper, and those of its network, which `nvx::host::network`
-lowers, and its kernel command line, with the boot tokens of
-`nvx::protocol::root`, within the 1024-byte budget that OpenVMM leaves it,
-refusing one whose root tokens the guest's parser refuses. Both deliver the live
-shares as the managed lifecycle does: the arguments export them at
-`nvx::host::filesystem::GUEST_EXPORT`, the command line announces the number of
-their mappings with `nvx_maps=`, and `mapping_table` gives the ordered table
-that `start` and `sandbox run` send once the guest agent is ready.
-
-An adapter's plan renders the caller's tokens before those of its root, and
-refuses tokens that its root or OpenVMM's shares own.
-`SandboxPlan::check_adapter_launch` checks, as an adapter plans its launch, that
-the plan's arguments, those that export the adapter's shares, and the kernel
-command line leave `nvx::host::launch::VmmLaunch::RESERVE` of the limit of a
-Windows command line to the rest of the launch, so that planning refuses a plan
-whose network rules or mapped, hidden, or allowed paths leave it too little.
+The launch profile of `nvx-rs sandbox`, with native input validation: the
+distro `SandboxLayer`, an EROFS layer or a GPT disk, the one layer that a
+sandbox takes, and the workload identity that `--workload-user` names.
 
 `mount`: `SandboxMount` requests of live shares of host directories and files,
 their guest targets and the reserved ones, their access policies and owner, and
-the checks of their host paths; `plan_mounts`, which plans them through
-`nvx::host::filesystem` for the container root, and `boot_shares`, which renders
-a plan as the OpenVMM arguments and boot tokens of one share or of the aggregate
-of several, as the one-shot lifecycle delivers them.
+the checks of their host paths; and `plan_mounts`, which plans them through
+`nvx::host::filesystem` for the container root.
 
 `options`: the checks that `nvx-rs sandbox` and `nvx-rs run` apply to their
 options: the attribution of `--mount-deny`, `--mount-allow`, and `--mount-write`
@@ -1844,9 +1810,9 @@ scratch image's guard denies deleting and renaming the image. `nvx-rs sandbox
 start` and `run` check the images just before they create the VM, and hold the
 checked files until the guest is ready, or, for `run`, until its VM has exited.
 
-`SandboxPlan::validated` rejects disk image paths containing commas, semicolons,
-or improperly nested square brackets with `ErrorKind::Unsupported`, including
-the resolved paths that `provision` records. Balanced brackets, as in
+`nvx-rs sandbox` rejects disk image paths containing commas, semicolons, or
+improperly nested square brackets with `ErrorKind::Unsupported`, including the
+resolved paths that `provision` records. Balanced brackets, as in
 `layer[1].erofs` or `layer[[1][2]].erofs`, are supported; an unclosed `[`, an
 unmatched `]`, or reversed `][` is not. `run` and `provision` apply these checks
 before launching OpenVMM or recording a sandbox, and `start` checks recorded
@@ -1897,18 +1863,14 @@ and its binding, and neither `start` nor `run` binds or claims one.
 ## Sandbox input contract
 
 The sandbox launch profile specifies its own inputs rather than emulating Python.
-UID/GID and workload resource limits contain only ASCII decimal digits, without
-signs, whitespace, underscores, or Unicode digits. Each UID/GID is in
-`1..4294967294`, memory in `1..18446744073709551615` bytes, and the process
-limit in `1..4194303`. A layer UUID is canonical lowercase hyphenated text;
-braces, a prefix, uppercase, and unhyphenated forms are refused.
+A UID or GID contains only ASCII decimal digits, without signs, whitespace,
+underscores, or Unicode digits, and is in `1..4294967294`. A layer UUID is
+canonical lowercase hyphenated text; braces, a prefix, uppercase, and
+unhyphenated forms are refused.
 
-API change: `nvx::host::sandbox::{Int, IntError}` are no longer exported.
-`SandboxSettings::memory_max` is `Option<u64>` and `pids_max` is `Option<u32>`;
-`None` leaves the respective limit unset, and zero is refused. Persisted plans
-still encode these limits as canonical positive decimal strings. The CLI's
-sandbox configuration records hold no limits: the VM is the limit of a
-sandbox's workload. See [Specification tests](#specification-tests).
+API change: `nvx::host::sandbox::{Int, IntError}` are no longer exported. The
+CLI's sandbox configuration records hold no resource limits: the VM is the
+limit of a sandbox's workload. See [Specification tests](#specification-tests).
 
 Managed exec environment files and distro manifests are strict UTF-8 JSON,
 read with `serde_json`; non-finite numbers, numbers beyond the range of a
@@ -1926,14 +1888,14 @@ formatting and retain native JSON/I/O error details rather than Python's
 
 Entrypoints, workload arguments, and guest mount targets must each remain one
 unquoted kernel token: no whitespace, control characters, double quotes, or
-UTF-8 byte that Linux treats as whitespace (including `0xa0`). Caller-supplied
-sandbox command lines use Linux's parameter splitting, including quoted values
-and hyphen/underscore name equivalence. The exact trimmed text is validated
-before rendering, and the guest bootstrap's whitespace-only token view is
-checked too. Reserved `nvx_*` and `virtfs_*` names cannot be hidden inside
-quoted values or behind leading Unicode whitespace; a `--` or unclosed quote
-that hides the appended root tokens is refused. Adapter plans reserve only
-their root and OpenVMM share parameters, as before.
+UTF-8 byte that Linux treats as whitespace (including `0xa0`). `nvx-rs sandbox
+start` and `run` check the kernel command line that they launch: the caller's
+`--cmdline` uses Linux's parameter splitting, including quoted values and
+hyphen/underscore name equivalence, and is checked as the launched line holds
+it, untrimmed, and through the guest bootstrap's whitespace-only token view
+too. Reserved `nvx_*` and `virtfs_*` names cannot be hidden inside quoted
+values or behind leading Unicode whitespace; a `--` or unclosed quote that
+hides the tokens that OpenVMM appends is refused.
 
 Host paths are the host's own, which `std::path` holds: spelled with their
 components alone, as `Path::components` reads them, with backslashes on
@@ -3109,10 +3071,8 @@ own facilities replaced it:
   and of the export planner that paths that are not valid Unicode are refused.
 
 The sandbox specification tests, those of `nvx::host::sandbox`, specify the
-documented option grammar and the contracts with OpenVMM and the guest.
-Properties cover the restore-stable aggregate child names, reserved targets
-and tokens, every generated launch token and its exact 1024-byte budget,
-policy option sequences, and paths on the host's own filesystem. They check
+documented option grammar. Properties cover canonical layer UUIDs, reserved
+targets, policy option sequences, and paths on the host's own filesystem. They check
 that a launch refuses both systemd entrypoints whatever the distro layer's
 manifest lists, and that verification refuses a manifest that lists `systemd`
 whatever the entrypoint, as [Distro bindings](#distro-bindings) describes. The
@@ -3133,6 +3093,5 @@ properties check that the kernel reads no reserved parameter in the extra
 parameters that a `LaunchSpec` accepts, whatever separates it, and reads the
 `hostname=` parameter after them; that the time ABI's check of the guest's
 command line fails exactly when the kernel applies a clock parameter that the
-ABI forbids; and that the kernel reads every token of the command lines of a
-sandbox whose entrypoint, arguments, and share targets a launch accepts as one
-parameter, whole.
+ABI forbids; and that the share targets that a sandbox accepts hold nothing at
+which the kernel would end a parameter.

@@ -5,9 +5,7 @@
 //!   environment, from `--environment` or `--environment-file`.
 //! - [`sandbox_mounts`]: the shares of the `--mount` options, with each `--mount-deny`,
 //!   `--mount-allow`, and `--mount-write` attributed to its share, and each share's kind.
-//! - [`validate_sandbox_entrypoint`]: the refusal of systemd entrypoints, and
-//!   [`validate_sandbox_systemd_policy`]: the preflight of `run` and `provision`, which also
-//!   verifies the distro layer and returns its [`DistroBinding`].
+//! - [`validate_sandbox_entrypoint`]: the refusal of systemd entrypoints.
 //! - [`validate_run_share_targets`]: the guest targets of several `nvx-rs run` shares, or of a
 //!   shared file.
 //! - [`validate_exec_environment`] and [`exec_environment_from_file`]: the environment of a
@@ -18,12 +16,11 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use super::distro::DistroBinding;
 use super::mount::{
     AGGREGATE_MOUNT_TARGET, MountKind, MountOwner, MountPolicy, POLICY_KINDS, PolicyKind,
     SandboxMount, has_forbidden_character, has_irregular_component, mount_kind, targets_overlap,
 };
-use super::{SandboxLaunch, refused};
+use super::refused;
 use crate::error::Result;
 use crate::protocol::root::RootUpper;
 
@@ -372,18 +369,6 @@ pub fn validate_sandbox_entrypoint(entrypoint: &str) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-/// Refuses a launch that would run systemd, and returns the binding of its distro layer: the
-/// preflight of `nvx-rs sandbox run` and `provision`.
-///
-/// It refuses a systemd entrypoint with [`validate_sandbox_entrypoint`], and then verifies the
-/// distro layer explicitly with [`DistroBinding::verify`], which refuses a layer whose manifest,
-/// `LAYER.manifest.json` next to it, lists the `systemd` package, and hashes the layer only when
-/// that manifest exists. Fails as they do.
-pub fn validate_sandbox_systemd_policy(launch: &SandboxLaunch) -> Result<DistroBinding> {
-    validate_sandbox_entrypoint(&launch.settings().entrypoint)?;
-    DistroBinding::verify(launch.distro())
 }
 
 /// Checks a managed exec environment, as `encode_exec_environment` does: at most
