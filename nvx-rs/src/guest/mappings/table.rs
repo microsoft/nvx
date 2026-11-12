@@ -21,8 +21,8 @@ use crate::protocol::{self, GuestHostMap, MAX_HOST_MAPPINGS, ProtocolError};
 /// parts, each a `MAPS` payload of consecutive entries, in order, which
 /// [`protocol::decode_guest_maps_payload`] reads. [`apply`](Self::apply) checks each part against
 /// the table, and hands its entries, as [`Mapping`]s, to the caller, which maps them beneath the
-/// root of its choice, from the host export: through a mapper beneath a guest's own `/` or a
-/// container's root, for example, or through a layered root.
+/// root of its choice, from the host export: through a mapper beneath a guest's own `/`, a
+/// container's root, or a layered root, for example.
 ///
 /// - The table refuses a part as a whole, and changes nothing, which [`TableError::Refused`]
 ///   reports with the entry that the table expects next and the [`Refusal`]: once a mapping
@@ -37,8 +37,8 @@ use crate::protocol::{self, GuestHostMap, MAX_HOST_MAPPINGS, ProtocolError};
 ///   announced, and none failed: only then may the agent start workloads. A table of zero
 ///   mappings is complete at once, and its agent maps nothing.
 ///
-/// The root keeps the mappings, and its own teardown tears the table down, in reverse order, such
-/// as a mapper's teardown, which reports each mapping that stays mounted, or a layered root's.
+/// The table unmounts nothing: the caller keeps the mappings that it applied, and unmounts them
+/// itself, in reverse order, if it ever does.
 ///
 /// NVX's managed agent applies its table through one, beneath its own root, `/`, in direct mode,
 /// with a mapper that it opens at the first part that the table hands it, so that a table of zero

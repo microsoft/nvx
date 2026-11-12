@@ -130,7 +130,7 @@ changes only when the module's purpose does.
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation of each clone that its capture repaired |
 | [`nvx::guest::reseed`](#nvxguestreseed) | A restore's fresh entropy, and the reseed of the kernel's random number generator with it |
-| [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its assembly, shares, export, mappings, and teardown |
+| [`nvx::guest::root`](#nvxguestroot) | The operations of a layered root: its assembly, shares, export, and teardown |
 | [`nvx::guest::view`](#nvxguestview) | The VM-wide hostname, machine ID, and single-server resolver, whose binds the layered root owns |
 | [`nvx::guest::gpt`](#nvxguestgpt) | `read_disk`: the partition table of a GPT disk, read and checked through its block device |
 
@@ -1129,11 +1129,12 @@ restricted `nosuid`, `nodev`, and read-only when asked, `mount_setattr`, before
 do no work; the first that fails is reported with its index as an `ApplyError`,
 and latches the mapper.
 
-`Mapper::teardown` detaches a mapping that a rename moved and that the attach
-failed to detach, then unmounts the mappings in reverse order, and reports each
-failure.
+A layered root's teardown, which unmounts its mapper's mappings, first detaches
+a mapping that a rename moved and that the attach failed to detach, then
+unmounts the mappings in reverse order, and reports each failure.
 
-`bind` applies one runtime bind through the same walk and attach.
+A runtime bind, such as the view's machine ID, goes through the same walk and
+attach.
 
 `MappingTable` keeps a guest agent's account of a host mapping table: the
 mappings that the host hands the agent in `MAPS` parts once it is ready, after
@@ -1145,16 +1146,16 @@ decode, holds no entry, does not continue the table, ends past the
 announcement, or maps the export's root, which an empty source names, as a
 `TableError::Refused` at the entry that it expects next, which changes nothing.
 It hands the part's mappings to the caller, which applies them beneath the root
-of its choice, such as through a `Mapper` or a layered `Root`; the first that
+of its choice, such as through a `Mapper`; the first that
 fails latches the table, which reports it as a `TableError::Failed` with its
 entry, and refuses every later part. The table is complete once every announced
-mapping is applied, and none failed, and the root's teardown tears it down.
+mapping is applied, and none failed, and the caller's teardown tears it down.
 
 Linux 6.8 or later. NVX's managed agent applies its host mapping table through
 a `MappingTable` and a mapper, beneath `/` in direct mode; the table refuses an
 empty source, since the export is an aggregate, whose root lists its children,
 and NVX's hosts, whose exports are all aggregates, send none. A layered `Root`
-applies its live shares and mappings through a mapper.
+mounts its live shares through a mapper.
 
 ### `nvx::guest::nvxs`
 
@@ -1313,8 +1314,7 @@ export's `SourceRoot`, to map the host's mapping table from once the clone is
 ready, `proxy` the network's proxy endpoint, which the adapter tells its
 workloads as at a cold boot, and `publication` and `gateway`, from which its
 caller starts and supervises ingress. Its `teardown` closes the export's root,
-then tears the root down with its view binds; `into_parts` returns
-`(Root, MachineId)`, retaining every bind in the root. A switched root unmounts
+then tears the root down with its view binds. A switched root unmounts
 nothing. A failure returns an
 `ApplyError`, `Export` or `Network` among them, after which nothing that it
 mounted or bound stays mounted unless the error reports the unmounts that
@@ -1388,9 +1388,6 @@ shows read-only or without the mode's options in effect, since the kernel mounts
 one so, rather than fail, when its upper can't hold its work directory or its
 extended attributes.
 
-The `Root` reports the first partition's bytes, its `Lower` layers, its
-`UpperKind`, and its `OverlayMode`.
-
 `Root::mount_share` and `Root::mount_aggregate`: virtio-fs live shares at
 targets in the root that it checks, against the targets that `protocol::share`
 reserves among others, with one aggregate per root, which it attaches through
@@ -1402,13 +1399,11 @@ and a copy of each child's entry of the aggregate.
 `protocol::export`, one per root, mounted `nosuid,nodev` with the access of its
 `ExportMode` at `hostfs/root` in the runtime directory, out of the root, below a
 directory that only root may enter, whose root it returns as the `SourceRoot` of
-the caller's mappings.
-
-`Root::map`: a caller's host mappings, through the same mapper. A share, a
-child, the export, or a mapping that fails latches the root.
+the caller's mappings, which the caller's own mapper applies. A share, a child,
+or the export that fails latches the root.
 
 `Root::mount_runtime`: the runtime's file systems, which an init mounts once
-for its VM, before the root's first live share or mapping, after it makes every
+for its VM, before the root's first live share, after it makes every
 mount of the root's tree `nosuid,nodev`: procfs at `/proc`, sysfs at `/sys`,
 read-only, a tmpfs at `/dev` with an execution's device nodes and links, devpts
 at `/dev/pts`, and tmpfs at `/dev/shm` and `/run`, with an execution's options,
@@ -1416,9 +1411,9 @@ then the time status's directory, when the caller names one, bound read-only at
 `/run/nvx/time`. It refuses a mount point that leads through a symbolic link or
 where something is mounted already, and, before it changes anything, a call
 while the root holds the runtime's mounts, whose `/dev` and `/dev/pts` a second
-restriction would make `nodev`, or a live share or mapping, since the `/run`
+restriction would make `nodev`, or a live share, since the `/run`
 tmpfs would hide one beneath `/run` from the teardown. A call that fails
-unmounts what it mounted. A later share or mapping beneath `/run` is on that
+unmounts what it mounted. A later share beneath `/run` is on that
 tmpfs, which the root's mapper owns, as a guest's mapper owns its `/tmp`.
 Each attachment is checked at its named target before it is recorded. A runtime
 mount whose attachment fails and which cannot be detached keeps its mount
@@ -1433,7 +1428,7 @@ refused, and dropping the root unmounts nothing, while descriptors opened before
 the switch, such as a `TargetRoot` and a `SourceRoot`, still map. A move that
 fails leaves the root where it was.
 
-`Root::teardown`: the view's binds, then the shares and mappings in reverse order, a runtime mount whose
+`Root::teardown`: the view's binds, then the shares in reverse order, a runtime mount whose
 attachment failed and which could not be detached, then the mounts of an
 aggregate, of the export, and of the runtime, the later first, the overlay,
 the layers from the top down, and the upper, with every failed sync or unmount
@@ -1454,9 +1449,8 @@ Hidden, unstable internal reference code of the guest's space, like `root`.
 hostname from the view's bytes. Image mode leaves `/etc/machine-id` untouched;
 generated mode writes a new UUID at `MACHINE_ID_FILE` in the runtime directory
 and binds it read-only over the image's ID. Optional DNS writes one server in
-`RESOLVER_FILE` and binds it read-only over `/etc/resolv.conf`. The existing
-`entry::MachineId` and hostname constants, and activation's file constants,
-remain available through re-exports.
+`RESOLVER_FILE` and binds it read-only over `/etc/resolv.conf`.
+`nvx::guest::activation` re-exports both file constants.
 
 The root owns every bind, including an attachment left by a failed call.
 Teardown before the switch removes them; after the switch teardown refuses
@@ -2564,7 +2558,7 @@ account of a host's mapping table. NVX's own guest space is internal reference
 code, hidden, unstable, and crate-private once nothing outside NVX uses it:
 the mapper of `mappings` mounts host mappings beneath the descriptors of the
 roots that its caller names, and `root` assembles a layered root, mounts live
-shares and mappings in it through the mapper, and tears it down.
+shares in it through the mapper, and tears it down.
 `nvx-managed-agent` opens its control terminal and runs direct workloads through
 nvx-init's plain-process core: each child resets its priority, drops its
 credentials and capabilities, and enters its working directory before exec.
