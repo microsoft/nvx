@@ -54,7 +54,8 @@ use super::download::{self, Hold};
 use super::network::{NativeRules, NetworkOptions};
 use super::sandbox::{
     self, HYPERVISORS, MAX_MEMORY_MIB, MOUNT_OWNERS, copy_openvmm_outcome, error_with_cause,
-    hypervisor, path_string, path_text, sandbox_network, validate_outcome_destination,
+    export_tokens, hypervisor, path_string, path_text, sandbox_network,
+    validate_outcome_destination,
 };
 use super::session::{AttachmentCancellation, Session};
 use super::shell::format_command;
@@ -63,16 +64,17 @@ use super::{Exit, Result, check_interrupt, output};
 use crate::ErrorCode;
 use crate::activation::{MachineIdMode, View};
 use crate::host::artifacts::{ArtifactDir, Guest, require_artifact};
-use crate::host::config::{Boot, ConsoleAttachment, NicConfig, RootConfig, VmConfig};
+use crate::host::config::{
+    Boot, COMMAND_LINE_BUDGET, ConsoleAttachment, NicConfig, RootConfig, VmConfig,
+};
 use crate::host::filesystem::{
     self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
 };
 use crate::host::platform::{self, Transport};
 use crate::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
-use crate::host::sandbox::SANDBOX_COMMAND_LINE_MAX_SIZE;
 use crate::host::sandbox::mount::{
-    MountAccess, MountKind, MountOwner, POLICY_KINDS, PolicyKind, export_command_line_fragment,
-    mount_kind, parse_mount_value, require_mount_owner_supported,
+    MountAccess, MountKind, MountOwner, POLICY_KINDS, PolicyKind, mount_kind, parse_mount_value,
+    require_mount_owner_supported,
 };
 use crate::host::sandbox::options::{SandboxOperation, validate_run_share_targets};
 use crate::host::vm::{self, VmDir};
@@ -665,9 +667,7 @@ fn cold_vm_config(
     };
     if let Some(export) = &config.filesystem {
         let line = config.kernel_command_line().map_err(error_with_cause)?;
-        if line.len() + export_command_line_fragment(export).len() + 1
-            > SANDBOX_COMMAND_LINE_MAX_SIZE
-        {
+        if line.len() + export_tokens(export).len() + 1 > COMMAND_LINE_BUDGET {
             return Err(Exit::error(
                 ErrorCode::Unsupported,
                 "the --mount shares and --cmdline exceed the 1024-byte budget of the kernel command \
