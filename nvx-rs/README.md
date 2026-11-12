@@ -67,9 +67,7 @@ nvx-rs/
 │                    and root boot tokens, and the template manifests that OpenVMM wrote, in
 │                    fixtures/, and the conformance vectors of the wire formats and of a template's
 │                    key, in vectors/
-├── public-api/      the crate's public API on Linux and on Windows, which CI checks
-├── build.rs         bundled-release staging
-└── artifacts.json   the NVX release that the `bundled` feature stages
+└── public-api/      the crate's public API on Linux and on Windows, which CI checks
 ```
 
 The [module diagrams](../doc/modules/README.md) show the crate's modules, the
@@ -936,11 +934,10 @@ host namespace policy or skips the identity assertions.
 ### `nvx::host::artifacts`
 
 `Artifacts` (also `nvx::Artifacts`): the OpenVMM executable, guest kernel, and
-Alpine initramfs, from a release, a repository checkout, the environment, a
-directory next to the executable, or the bundle. Artifacts located in a release
-or checkout keep its `ArtifactDir`, and `Artifacts::runtime_identity` reads
-their `RuntimeIdentity` from its install metadata; artifacts named by path have
-none.
+Alpine initramfs, from a release, a repository checkout, the environment, or a
+directory next to the executable. Artifacts located in a release or checkout
+keep its `ArtifactDir`, and `Artifacts::runtime_identity` reads their
+`RuntimeIdentity` from its install metadata; artifacts named by path have none.
 
 `ArtifactDir` and `Guest`: every artifact of the guests that `nvx.py` runs, the
 OpenVMM executable, the kernel, the Alpine, Ubuntu, and Azure Linux initramfs
@@ -2061,19 +2058,18 @@ installs all of them or, if a step fails, none, and never installs `nvx-rs`,
 which the checkout builds. A directory where the release has a file fails the
 installation, which deletes no directory. An extracted release root is refused.
 
-It runs host tools, as the [bundled artifacts](#bundled-artifacts) build script
-does: `git` reads the history, from the root alone; `curl` queries the GitHub
-REST API and downloads the package, speaking HTTPS alone and following no
-redirect itself, so that the token of `GH_TOKEN` or `GITHUB_TOKEN`, which it
-reads on its standard input, reaches only the API; and `tar` lists the
-package's members, whose names must be relative and canonical below one root,
-and extracts it into a private directory below `build/`. Every extracted file
-must be a regular file that `SHA256SUMS` lists with its digest. On Windows,
-`curl` and `tar` are those of `%SystemRoot%\System32`, whose `tar` reads the
-ZIP package of `windows-whp`. `download` reads the status and the redirect of
-each response from the headers that `curl` dumps, rather than from its
-`--write-out`, with which the `curl` 8.8.0 of some Windows releases fails every
-HTTPS request.
+It runs host tools: `git` reads the history, from the root alone; `curl`
+queries the GitHub REST API and downloads the package, speaking HTTPS alone
+and following no redirect itself, so that the token of `GH_TOKEN` or
+`GITHUB_TOKEN`, which it reads on its standard input, reaches only the API; and
+`tar` lists the package's members, whose names must be relative and canonical
+below one root, and extracts it into a private directory below `build/`. Every
+extracted file must be a regular file that `SHA256SUMS` lists with its digest.
+On Windows, `curl` and `tar` are those of `%SystemRoot%\System32`, whose `tar`
+reads the ZIP package of `windows-whp`. `download` reads the status and the
+redirect of each response from the headers that `curl` dumps, rather than from
+its `--write-out`, with which the `curl` 8.8.0 of some Windows releases fails
+every HTTPS request.
 
 `run`, `sandbox run`, and `sandbox start` download the release themselves,
 before they launch, when an artifact that they run is missing from a root that
@@ -2542,7 +2538,6 @@ caller owner.
 | Feature | Contents |
 | --- | --- |
 | `host` (default) | The `host` module. It enables `serde`, and `sha2`, which names the children of a sandbox's aggregate share and hashes distro layers in their explicit verification |
-| `bundled` | Stages a release at build time; see [Bundled artifacts](#bundled-artifacts) |
 | `testing` | NVX's own `nvx-fake-openvmm` binary, a fake OpenVMM for tests; see [Test hooks](#test-hooks). It adds no API |
 | `cli` | NVX's own `nvx-rs` binary; it adds no API, and enables `host`. See [The nvx-rs CLI](#the-nvx-rs-cli) |
 | `serde` | The serde forms of `Hypervisor` and `net::Ipv4Cidr` |
@@ -2695,31 +2690,6 @@ usage errors, which no library error has.
 | `template-tombstoned` | `Unavailable` | A tombstone quarantines the template's generation, which takes no new clones, while the clones that lease it keep their leases |
 | `sandbox-leased` | `Other` | The sandbox holds a lease of a template's generation, which allows no other lease, and one launch of its clone, until a release ends it once its VM has exited |
 
-## Bundled artifacts
-
-With the `bundled` feature, the build script stages the OpenVMM executable,
-guest kernel, and Alpine initramfs of a release, with its
-`SOURCE-MANIFEST.json` and `SHA256SUMS`, in its output directory, and
-`Artifacts::bundled` returns them. `Artifacts::discover` uses the bundle when no
-other source is present.
-
-| Build variable | Effect |
-| --- | --- |
-| `NVX_BUNDLE_DIR` | Stages the extracted release in this directory, for offline builds or local artifacts |
-| `NVX_BUNDLE_HYPERVISOR` | `kvm` (default) or `mshv`: the Linux package to download |
-| `NVX_BUNDLE=skip` | Stages nothing, as when the feature is disabled; CI sets it for `--all-features` builds |
-
-Without `NVX_BUNDLE_DIR`, the build script downloads the release package that
-[`artifacts.json`](artifacts.json) pins with `curl` and extracts it with `tar`;
-Windows packages are ZIP archives, which need bsdtar (Windows' own `tar`) or
-`unzip`. Every staged file must match the source's `SHA256SUMS`, a download
-must match its pinned digest, and the release must declare the microVM, time,
-restore-packet, control-session, and control contracts of `nvx::contract`. The
-build script extracts and verifies only the files that the bundle holds, and
-leaves out the rest of the release, such as `bin/nvx-rs[.exe]`. The build
-scripts of dependents receive the staged directory as `DEP_NVX_ARTIFACTS_DIR`
-and can ship it next to their executables as `nvx/`.
-
 ## Guest binaries
 
 The `guest` feature adds the programs that run in NVX's Linux guests: the
@@ -2800,7 +2770,7 @@ routine. Docker builds the set once and installs identical bytes in all three
 guest images; Ubuntu determinism checks rebuild from fresh targets.
 
 Of this crate, the guest images depend only on the files that this build reads:
-`Cargo.toml`, `Cargo.lock`, `build.rs`, any Cargo configuration in `.cargo/`,
+`Cargo.toml`, `Cargo.lock`, any Cargo configuration in `.cargo/`,
 and every file under `src/` but the host side and the test modules. The host
 side is `src/host/`, `src/testing/`, and the `nvx-rs` and `nvx-fake-openvmm`
 binaries; the test modules are the `tests.rs` files and the `tests`
@@ -2818,7 +2788,7 @@ select.
 
 ```bash
 cd nvx-rs
-NVX_BUNDLE=skip cargo test --all-features   # unit, conformance-vector, property, and fake-OpenVMM tests
+cargo test --all-features   # unit, conformance-vector, property, and fake-OpenVMM tests
 ```
 
 A module's unit tests belong in its `tests` module, out of line, in the
@@ -2907,7 +2877,7 @@ The
 rustfmt, Clippy with warnings denied for all features, for the library
 with and without default features, and for the `serde`, `cli` and `testing`
 features alone, the tests, a build and the tests of the library
-without default features, a synthetic-release `bundled` test, rustdoc with
+without default features, rustdoc with
 warnings denied, the minimum supported Rust version (1.89), and a macOS check.
 On Linux, it also lints, builds, and tests the guest binaries through `nvx.py`,
 and checks the crate's public API against its snapshots,
@@ -2937,7 +2907,7 @@ namespace. It mounts a temporary tmpfs and needs root, but no hypervisor;
 run it as root with:
 
 ```bash
-NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
+cargo test --locked --all-features --lib -- \
   --ignored --exact guest::root::tests::a_thread_with_private_tables_finds_its_mount_points_and_options
 ```
 
@@ -2950,7 +2920,7 @@ its own, and check the mounts that stay and a mapping through descriptors opened
 before the switch. They need root and Linux 6.8 or later; run them as root with:
 
 ```bash
-NVX_BUNDLE=skip cargo test --locked --all-features --lib -- \
+cargo test --locked --all-features --lib -- \
   --ignored guest::root::tests::privileged
 ```
 

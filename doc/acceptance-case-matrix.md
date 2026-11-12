@@ -33,7 +33,7 @@ its own in turn.
 | [The adapter's scenarios](#the-adapters-scenarios) | 157 | 0 | 113 | 44 |
 | [The adapter's other tests](#the-adapters-other-tests) | 169 | 0 | 9 | 160 |
 | [MicroVM scenarios](#microvm-scenarios) | 54 | 50 | 3 | 1 |
-| [CI](#ci) | 69 | 43 | 3 | 23 |
+| [CI](#ci) | 69 | 42 | 3 | 24 |
 | [Docs](#docs) | 36 | 25 | 3 | 8 |
 
 ## The adapter's scenarios
@@ -424,7 +424,7 @@ their own. The tests that a step runs have rows of their own where they concern 
 | `.github/actions/check-nvx-rs` | Check formatting | kept |  |
 | `.github/actions/check-nvx-rs` | Lint | kept | Builds `nvx` with each feature set, warnings denied: all features, `host` (the default), no default features, and `serde`, `cli` and `testing` alone, which checks `serde` alone since this matrix |
 | `.github/actions/check-nvx-rs` | Test | kept | Runs `nvx-rs/tests/security_checklist.rs` too |
-| `.github/actions/check-nvx-rs` | Check artifact bundling | kept |  |
+| `.github/actions/check-nvx-rs` | Check artifact bundling | retired | The `bundled` feature, which staged a release at build time, leaves NVX with its build script and `artifacts.json` (SL6.6a, #1122) |
 | `.github/actions/check-nvx-rs` | Build documentation | kept |  |
 | `.github/actions/check-nvx-rs` | Check the public API | kept |  |
 | `.github/actions/check-nvx-rs` | Check the minimum supported Rust version | kept |  |
@@ -443,8 +443,8 @@ their own. The tests that a step runs have rows of their own where they concern 
 | `.github/workflows/ci.yml` | openvmm-ci: Check OpenVMM's CI of the pinned revision | kept |  |
 | `.github/workflows/ci.yml` | performance-gate: Gate on performance regressions | kept |  |
 | `.github/workflows/ci.yml` | required-status-check: Verify required jobs | kept | SL5.2 removes the adapter's job from what it requires |
-| `.github/workflows/ci.yml` | crate-package: Package, check, and build the nvx crate | kept |  |
-| `.github/workflows/ci.yml` | crate-release: Check the nvx package | kept |  |
+| `.github/workflows/ci.yml` | crate-package: Package, check, and build the nvx crate | kept | Since SL6.6a, the package holds no build script or `artifacts.json`, and builds once, with every feature |
+| `.github/workflows/ci.yml` | crate-release: Check the nvx package | kept | Since SL6.6a, the package holds no build script or `artifacts.json` |
 | `.github/workflows/ci.yml` | nvx-microvm-adapter-whp: the runtime adapter's job on WHP | retired | The adapter's scenarios, whose fates are above |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run NVX microVM tests on Linux and on Windows | kept | The default suite's scenarios, by shard and on the debug kernel |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run public managed sandbox acceptance on Linux and on Windows | kept | Runs `sandbox-gpt-layer` and `vm-lifecycle` too, since SL5.1b: see [Cold boots](#cold-boots); and `snapshot-core` and `snapshot-tiers`, since SL5.1c: see [Snapshots](#snapshots) |

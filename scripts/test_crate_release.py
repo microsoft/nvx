@@ -72,8 +72,6 @@ CRATE_FILES = {
     "Cargo.lock": LOCKFILE,
     "LICENSE": "MIT\n",
     "README.md": "# demo\n",
-    "build.rs": "fn main() {}\n",
-    "artifacts.json": "{}\n",
     "src/lib.rs": "//! Demo.\n",
     "src/main.rs": "fn main() {}\n",
 }
@@ -914,19 +912,15 @@ class ReleaseTests(unittest.TestCase):
             "GITHUB_OUTPUT": str(self.output),
             "GITHUB_STEP_SUMMARY": str(self.summary),
             "PATH": os.environ.get("PATH", ""),
-            "NVX_BUNDLE": "skip",
-            "NVX_BUNDLE_DIR": str(root / "bundle"),
-            "NVX_BUNDLE_HYPERVISOR": "mshv",
         }
 
-    def package(self, platform: str = "linux") -> crate_release.Plan:
+    def package(self) -> crate_release.Plan:
         with patch.object(crate_release, "run_checked", self.cargo):
             return crate_release.package_release(
                 self.checkout.crate_dir,
                 self.work_dir,
                 registry=self.crates_io.registry(),
                 environment=self.environment,
-                platform=platform,
             )
 
     def package_job(self) -> tuple[str, str]:
@@ -990,24 +984,14 @@ class ReleaseTests(unittest.TestCase):
         )
         self.assertEqual(self.checkout.status(), "")
         self.assertFalse((self.work_dir / crate_release.STATE_FILE).exists())
-        self.assertEqual(self.cargo.subcommands(), ["package", "build", "build"])
+        self.assertEqual(self.cargo.subcommands(), ["package", "build"])
         self.assertNotIn("--allow-dirty", self.cargo.commands[0])
         self.assertIn("--no-verify", self.cargo.commands[0])
         self.assertIn("--locked", self.cargo.commands[0])
         built = self.work_dir / "build" / f"demo-{DECLARED}"
-        for command, environment, hypervisor in zip(
-            self.cargo.commands[1:],
-            self.cargo.environments[1:],
-            ("kvm", "mshv"),
-            strict=True,
-        ):
-            with self.subTest(hypervisor=hypervisor):
-                self.assertIn("--all-features", command)
-                self.assertIn("--locked", command)
-                self.assertIn(str(built / "Cargo.toml"), command)
-                self.assertEqual(environment["NVX_BUNDLE_HYPERVISOR"], hypervisor)
-                self.assertNotIn("NVX_BUNDLE", environment)
-                self.assertNotIn("NVX_BUNDLE_DIR", environment)
+        self.assertIn("--all-features", self.cargo.commands[1])
+        self.assertIn("--locked", self.cargo.commands[1])
+        self.assertIn(str(built / "Cargo.toml"), self.cargo.commands[1])
         self.assertEqual(
             (built / "src" / "lib.rs").read_bytes(),
             CRATE_FILES["src/lib.rs"].encode(),
@@ -1018,11 +1002,6 @@ class ReleaseTests(unittest.TestCase):
             "crates.io has no version of demo.",
             self.summary.read_text(encoding="utf-8"),
         )
-
-    def test_windows_builds_its_one_bundle(self):
-        self.package(platform="win32")
-        self.assertEqual(self.cargo.subcommands(), ["package", "build"])
-        self.assertNotIn("NVX_BUNDLE_HYPERVISOR", self.cargo.environments[1])
 
     def test_a_changed_crate_publishes_the_next_number(self):
         self.crates_io.release(self.checkout)

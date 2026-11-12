@@ -6,7 +6,6 @@ const nvx::Artifacts::ENV_INITRD
 const nvx::Artifacts::ENV_KERNEL
 const nvx::Artifacts::ENV_OPENVMM
 method nvx::Artifacts::artifact_dir
-method nvx::Artifacts::bundled
 method nvx::Artifacts::discover
 method nvx::Artifacts::from_dir
 method nvx::Artifacts::from_release_dir
@@ -371,7 +370,6 @@ const nvx::host::artifacts::Artifacts::ENV_INITRD
 const nvx::host::artifacts::Artifacts::ENV_KERNEL
 const nvx::host::artifacts::Artifacts::ENV_OPENVMM
 method nvx::host::artifacts::Artifacts::artifact_dir
-method nvx::host::artifacts::Artifacts::bundled
 method nvx::host::artifacts::Artifacts::discover
 method nvx::host::artifacts::Artifacts::from_dir
 method nvx::host::artifacts::Artifacts::from_release_dir

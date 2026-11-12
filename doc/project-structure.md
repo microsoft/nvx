@@ -112,9 +112,7 @@ nvx/
 |   |   `-- bin/                 nvx-rs CLI, nvx-fake-openvmm test double, and the guest binaries
 |   |-- examples/                The external-launch example, and the documented host and guest workflows, which only compile
 |   |-- tests/                   Fake-OpenVMM behavior, process and VM spawn, CLI scenario, NVXS session, guest-binary, and hypervisor public-API VM lifecycle tests, the security checklist, sandbox configurations of every format, the cases of the export and root boot tokens, and the conformance vectors of the wire formats
-|   |-- public-api/              The crate's public API on Linux and on Windows, which CI checks
-|   |-- build.rs                 Stages the bundled artifacts (feature `bundled`)
-|   `-- artifacts.json           Release package pinned for the bundled artifacts
+|   `-- public-api/              The crate's public API on Linux and on Windows, which CI checks
 |-- openvmm/                     OpenVMM Git submodule
 |-- scripts/                     Build, run, benchmark, and release tooling
 |   |-- nvx_tools/               Python implementation behind the NVX CLI
@@ -319,8 +317,8 @@ for other kernel-specific details.
 ### `nvx-rs/`
 
 The Rust crate `nvx` holds the NVX mechanics: the
-authenticated control protocol of the guest agent, artifact discovery and
-bundled-release staging, OpenVMM's command line, the lowering of network and
+authenticated control protocol of the guest agent, artifact discovery,
+OpenVMM's command line, the lowering of network and
 filesystem policies, the compiler of the egress policy files that `nvx-rs run`
 and `nvx-rs sandbox` accept, process and platform primitives for Linux and
 Windows hosts, the creation, spawn, and stop of VMs, the sandbox launch profile

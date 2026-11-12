@@ -26,9 +26,9 @@
 //! ([`ensure_under`]), so that it never reads half of an installation, and no download replaces
 //! the artifacts while it reads them and launches OpenVMM on them ([`Hold`]).
 //!
-//! The download runs host tools, as the `bundled` build script does: `git`, which [`git`] runs;
-//! `curl`, which [`github`] runs; and `tar`, which [`archive`] runs. On Windows, `curl` and `tar`
-//! are those of `%SystemRoot%\System32`, whose `tar` reads the ZIP package of `windows-whp`.
+//! The download runs host tools: `git`, which [`git`] runs; `curl`, which [`github`] runs; and
+//! `tar`, which [`archive`] runs. On Windows, `curl` and `tar` are those of
+//! `%SystemRoot%\System32`, whose `tar` reads the ZIP package of `windows-whp`.
 
 mod archive;
 mod git;
