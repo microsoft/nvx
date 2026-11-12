@@ -17,10 +17,9 @@
 //!   layer and its manifest, and which a launch checks from metadata alone.
 //! - [`scratch`]: the binding of the scratch image, its identity, kind, and length, which a
 //!   launch checks from metadata alone, and the claim of the image by one sandbox at a time.
-//! - The block geometry that OpenVMM presents for each checked file, its length and its logical
-//!   and physical block sizes, which [`CheckedDistro::geometry`](distro::CheckedDistro::geometry)
-//!   and [`CheckedScratch::geometry`](scratch::CheckedScratch::geometry) read through the file,
-//!   as OpenVMM reads it.
+//! - The block geometry that OpenVMM presents for a block device, its length and its logical and
+//!   physical block sizes, which the crate reads through an open file of the device's image, as
+//!   OpenVMM reads it.
 //!
 //! Workload IDs are ASCII decimal integers in their documented ranges. Layer UUIDs use their
 //! canonical lowercase hyphenated text. Host paths use the host's native flavor.
@@ -131,8 +130,11 @@ const WINDOWS_PHYSICAL_BLOCK_SIZE: u32 = 4096;
 
 /// Returns the block geometry that OpenVMM presents for a sandbox block device whose file `file`
 /// holds open, which messages call `description` at `path`, read through `file` as OpenVMM reads
-/// it through its own open of the file, as
-/// [`CheckedDistro::geometry`](distro::CheckedDistro::geometry) describes.
+/// it through its own open of the file: the file's length, which must be a nonzero multiple of
+/// 512 bytes; logical blocks of 512 bytes; and physical blocks of the I/O block size of the file's
+/// filesystem, its `st_blksize`, on Linux, of 4096 bytes on Windows, and of the logical block size
+/// on other hosts, which must be a power of two of at least 512 bytes. It reads the file's
+/// metadata alone.
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a physical
 /// block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io) if the file's

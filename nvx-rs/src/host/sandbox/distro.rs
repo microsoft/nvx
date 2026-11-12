@@ -20,13 +20,11 @@
 //!   never reads, maps, or hashes either file. A missing or stale binding fails: no launch
 //!   registers, verifies, or hashes a layer on its own.
 //!
-//! A [`DistroBinding`] comes from explicit verification, or from a staging caller that verified
-//! the layer itself and imports the binding with [`DistroBinding::import`], which does not hash
-//! the layer again. It ties the [`FileSeal`] of the layer to the seal of its manifest, or to the
-//! manifest's absence, to the revision and result of the distro policy, and to the layer's format
-//! and the identity that the guest expects of it. Callers record bindings, as
-//! `nvx-rs sandbox provision` records one in the sandbox's configuration, so their serde form is
-//! part of the callers' state.
+//! A [`DistroBinding`] comes from explicit verification. It ties the [`FileSeal`] of the layer to
+//! the seal of its manifest, or to the manifest's absence, to the revision and result of the
+//! distro policy, and to the layer's format and the identity that the guest expects of it.
+//! Callers record bindings, as `nvx-rs sandbox provision` records one in the sandbox's
+//! configuration, so their serde form is part of the callers' state.
 //!
 //! A seal detects accidental change, not deliberate tampering by the account that can write the
 //! sealed files, as [`seal`] explains. A caller therefore stages layers and their manifests
@@ -42,10 +40,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::geometry::BlockGeometry;
 use super::layer::SandboxLayer;
 use super::mount::os_error;
-use super::{block_geometry, refused};
+use super::refused;
 use crate::error::{Error, Result};
 use crate::host::artifacts::DISTRO_MANIFEST_SUFFIX;
 use crate::host::network::policy::MAX_JSON_DEPTH;
@@ -80,8 +77,7 @@ impl Access<'static> {
         seal: &FileSeal::of,
     };
 
-    /// The access of the staged check and of imports: [`seal::open_guarded`] and
-    /// [`FileSeal::of`].
+    /// The access of the staged check: [`seal::open_guarded`] and [`FileSeal::of`].
     pub(crate) const GUARDED: Self = Self {
         open: &seal::open_guarded,
         seal: &FileSeal::of,
@@ -146,9 +142,8 @@ impl PolicyVerdict {
 /// The binding of a distro layer: the seals of the layer and of its manifest, or the manifest's
 /// absence, the policy verdict, and the layer's format and expected identity.
 ///
-/// [`verify`](Self::verify) and [`import`](Self::import) make a binding, and
-/// [`check`](Self::check) checks the layer against it before a launch. Its serde form, which
-/// callers record, holds every field, each required:
+/// [`verify`](Self::verify) makes a binding, and [`check`](Self::check) checks the layer against
+/// it before a launch. Its serde form, which callers record, holds every field, each required:
 ///
 /// ```json
 /// {"version": 1, "format": "erofs", "identity": "11111111-1111-1111-1111-111111111111",
@@ -184,53 +179,8 @@ pub struct DistroBinding {
 /// open of the layer shares it. Dropping it closes the file.
 #[derive(Debug)]
 pub struct CheckedDistro {
-    /// The checked layer.
-    file: File,
-    /// The path at which the check opened the layer.
-    path: PathBuf,
-    /// The layer's format, as the binding names it.
-    format: DistroFormat,
-}
-
-impl CheckedDistro {
-    /// Returns the checked layer.
-    pub fn file(&self) -> &File {
-        &self.file
-    }
-
-    /// Returns the path at which the check opened the layer.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the block geometry that OpenVMM presents for the layer as the read-only `distro`
-    /// block device, read through the checked file, as OpenVMM reads it through its own open of
-    /// the layer: the layer's length, which must be a nonzero multiple of 512 bytes; logical
-    /// blocks of 512 bytes; and physical blocks of the I/O block size of the layer's filesystem,
-    /// its `st_blksize`, on Linux, of 4096 bytes on Windows, and of the logical block size on
-    /// other hosts, which must be a power of two of at least 512 bytes.
-    ///
-    /// It reads the file's metadata alone. A restore of a template presents its `distro` at the
-    /// geometry that the template recorded, the capacity of every clone's image, over an image
-    /// that may be shorter, so the image of a clone must be no longer than the template's
-    /// `distro`, with the same logical and physical block sizes.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a
-    /// physical block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io)
-    /// if the metadata cannot be read.
-    pub fn geometry(&self) -> Result<BlockGeometry> {
-        let description = match self.format {
-            DistroFormat::Erofs => "distro EROFS layer",
-            DistroFormat::Gpt => "distro GPT image",
-        };
-        block_geometry(&self.file, &self.path, description)
-    }
-
-    /// Returns the checked layer, which the caller then holds: an owned descriptor on Linux, and
-    /// an owned handle on Windows, which it converts into an `OwnedFd` or an `OwnedHandle`.
-    pub fn into_file(self) -> File {
-        self.file
-    }
+    /// The checked layer, which stays open until the caller drops it.
+    _file: File,
 }
 
 impl DistroBinding {
@@ -256,22 +206,6 @@ impl DistroBinding {
         verify_with(layer, Access::READ)
     }
 
-    /// Returns the binding of the distro layer `layer`, staged and judged by its caller, which
-    /// verified the layer itself, without reading the layer or its manifest.
-    ///
-    /// The binding holds the seals of the layer and of its manifest, if one sits beside it, and
-    /// `verdict`. A caller that imports a binding vouches for the layer and its manifest as
-    /// [`verify`](Self::verify) would; it must therefore be authorized to stage layers, which
-    /// NVX leaves to it. Fails with
-    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a path without a name, with
-    /// [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) if the layer or its manifest is
-    /// not a regular file, and with [`ErrorKind::Io`](crate::ErrorKind::Io) if either cannot be
-    /// opened or sealed, as for a manifest path whose lookup fails for another reason than a
-    /// missing file, which the import does not take for an absent manifest.
-    pub fn import(layer: &SandboxLayer, verdict: PolicyVerdict) -> Result<Self> {
-        import_with(layer, verdict, Access::GUARDED)
-    }
-
     /// Checks the distro layer `layer` against this binding from metadata alone, and returns the
     /// layer, open, as the check found it.
     ///
@@ -292,32 +226,6 @@ impl DistroBinding {
     /// cannot be opened or sealed.
     pub fn check(&self, layer: &SandboxLayer, policy_revision: u32) -> Result<CheckedDistro> {
         self.check_with(layer, policy_revision, Access::GUARDED)
-    }
-
-    /// Returns the layer's format.
-    pub fn format(&self) -> DistroFormat {
-        self.format
-    }
-
-    /// Returns the identity that the guest expects of the layer: the UUID of its EROFS
-    /// filesystem, or the GUID of its GPT disk.
-    pub fn identity(&self) -> &str {
-        &self.identity
-    }
-
-    /// Returns the seal of the layer.
-    pub fn image(&self) -> &FileSeal {
-        &self.image
-    }
-
-    /// Returns the seal of the layer's manifest, or `None` for a layer without one.
-    pub fn manifest(&self) -> Option<&FileSeal> {
-        self.manifest.as_ref()
-    }
-
-    /// Returns the policy verdict.
-    pub fn policy(&self) -> PolicyVerdict {
-        self.policy
     }
 
     /// Returns the binding of `layer`, with the seals of its image and manifest and `policy`.
@@ -424,11 +332,7 @@ impl DistroBinding {
                 }
             },
         }
-        Ok(CheckedDistro {
-            file,
-            path: path.to_path_buf(),
-            format: self.format,
-        })
+        Ok(CheckedDistro { _file: file })
     }
 }
 
@@ -507,19 +411,6 @@ pub(crate) fn verify_with(layer: &SandboxLayer, access: Access<'_>) -> Result<Di
         Some(manifest_seal),
         PolicyVerdict::ACCEPTED,
     ))
-}
-
-/// Implements [`DistroBinding::import`], reaching files through `access`.
-pub(crate) fn import_with(
-    layer: &SandboxLayer,
-    verdict: PolicyVerdict,
-    access: Access<'_>,
-) -> Result<DistroBinding> {
-    let path = layer.path();
-    let manifest = manifest_path(path)?;
-    let image = seal_regular(path, access, &layer_description(layer))?;
-    let manifest = seal_if_present(&manifest, access, "sandbox distro manifest")?;
-    Ok(DistroBinding::new(layer, image, manifest, verdict))
 }
 
 /// Returns how messages name the image of `layer`: `distro EROFS layer` or `distro GPT image`.

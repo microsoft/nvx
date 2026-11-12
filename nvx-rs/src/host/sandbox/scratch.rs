@@ -54,9 +54,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::geometry::BlockGeometry;
 use super::mount::os_error;
-use super::{block_geometry, refused};
+use super::refused;
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::paths;
 use crate::host::seal::{FileId, FileKind, FileSeal, SealScheme};
@@ -145,43 +144,19 @@ pub struct CheckedScratch {
         )
     )]
     claim: File,
-    /// The path at which the check opened the image.
-    path: PathBuf,
 }
 
 impl CheckedScratch {
-    /// Returns the checked image: on Linux, the image open for reading and writing, and on Windows
-    /// its guard.
+    /// Returns the checked image, open for reading and writing, whose open file description holds
+    /// the claim on Linux, which a VMM that inherits a copy of it keeps.
+    #[cfg(not(windows))]
     pub fn file(&self) -> &File {
         &self.file
     }
 
-    /// Returns the path at which the check opened the image.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the block geometry that OpenVMM presents for the image as the `scratch` block
-    /// device, read through the checked file, as
-    /// [`CheckedDistro::geometry`](super::distro::CheckedDistro::geometry) reads that of a distro
-    /// layer: the image's length, logical blocks of 512 bytes, and physical blocks of the I/O
-    /// block size of the image's filesystem on Linux, of 4096 bytes on Windows, and of the logical
-    /// block size on other hosts. On Windows, the checked file is the image's guard, which may
-    /// read the image's metadata.
-    ///
-    /// It reads the file's metadata alone, never the image's content. The scratch image of a
-    /// clone must present the geometry of its template's scratch, its length included.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) for a length or a
-    /// physical block size that OpenVMM refuses, and with [`ErrorKind::Io`](crate::ErrorKind::Io)
-    /// if the metadata cannot be read.
-    pub fn geometry(&self) -> Result<BlockGeometry> {
-        block_geometry(&self.file, &self.path, DESCRIPTION)
-    }
-
-    /// Returns the checked image, which the caller then holds with its claim: an owned descriptor
-    /// on Linux, and on Windows an owned handle, the image's guard, which then holds the claim
+    /// Returns the image's guard, an owned handle, which the caller then holds with the claim
     /// alone, since this closes the claim's handle.
+    #[cfg(windows)]
     pub fn into_file(self) -> File {
         self.file
     }
@@ -226,31 +201,6 @@ impl ScratchBinding {
     /// sealed, or claimed.
     pub fn check(&self, path: &Path, deadline: Instant) -> Result<CheckedScratch> {
         self.check_with(&normalized(path)?, deadline, Access::WRITABLE)
-    }
-
-    /// Returns the host that took the binding.
-    pub fn scheme(&self) -> SealScheme {
-        self.scheme
-    }
-
-    /// Returns the device, or on Windows the volume serial number.
-    pub fn device(&self) -> u64 {
-        self.device
-    }
-
-    /// Returns the inode, or on Windows the file ID.
-    pub fn file_id(&self) -> u128 {
-        self.file_id.0
-    }
-
-    /// Returns the kind of file.
-    pub fn kind(&self) -> FileKind {
-        self.kind
-    }
-
-    /// Returns the length in bytes.
-    pub fn length(&self) -> u64 {
-        self.length
     }
 
     /// Returns the binding of the image that `seal` seals.
@@ -303,7 +253,6 @@ impl ScratchBinding {
             file,
             #[cfg(windows)]
             claim,
-            path: path.to_path_buf(),
         })
     }
 
