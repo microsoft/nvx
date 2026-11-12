@@ -19,14 +19,6 @@ pub(crate) fn seed_inheritable_and_ambient() -> Result<(), Errno> {
     )
 }
 
-/// How a test without privileges simulates the stages of an entry: the child starts without
-/// new namespaces and skips the system calls of every entry stage but the one that fails.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Simulation {
-    /// The stage fails with the error.
-    Fail(LaunchStage, Errno),
-}
-
 #[test]
 fn capability_sets_split_into_two_data_words() {
     assert_eq!(
@@ -55,8 +47,6 @@ fn capability_sets_split_into_two_data_words() {
 
 #[test]
 fn the_kernel_structures_have_their_uapi_sizes() {
-    assert_eq!(std::mem::size_of::<CloneArgs>(), 64);
-    assert_eq!(std::mem::size_of::<OpenHow>(), 24);
     assert_eq!(std::mem::size_of::<MountAttr>(), 32);
     assert_eq!(std::mem::size_of::<CapabilityHeader>(), 8);
     assert_eq!(std::mem::size_of::<CapabilityData>(), 12);

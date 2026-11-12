@@ -512,24 +512,6 @@ field nvx::guest::activation::RootTemplate::runtime (hidden)
 field nvx::guest::activation::RootTemplate::scratch (hidden)
 field nvx::guest::activation::RootTemplate::timeout (hidden)
 fn nvx::guest::activation::apply (hidden)
-mod nvx::guest::cgroup
-struct nvx::guest::cgroup::ExecutionCgroup
-method nvx::guest::cgroup::ExecutionCgroup::is_occupied
-method nvx::guest::cgroup::ExecutionCgroup::kill
-method nvx::guest::cgroup::ExecutionCgroup::open
-method nvx::guest::cgroup::ExecutionCgroup::path
-method nvx::guest::cgroup::ExecutionCgroup::place
-method nvx::guest::cgroup::ExecutionCgroup::placement
-method nvx::guest::cgroup::ExecutionCgroup::prepare
-method nvx::guest::cgroup::ExecutionCgroup::remove
-method nvx::guest::cgroup::ExecutionCgroup::settle
-struct nvx::guest::cgroup::Layout
-method nvx::guest::cgroup::Layout::agent
-method nvx::guest::cgroup::Layout::new
-method nvx::guest::cgroup::Layout::workload
-enum nvx::guest::cgroup::Scope
-variant nvx::guest::cgroup::Scope::Execution
-variant nvx::guest::cgroup::Scope::Workload
 mod nvx::guest::clone
 struct nvx::guest::clone::Activation
 method nvx::guest::clone::Activation::complete
@@ -724,199 +706,6 @@ mod nvx::guest::console_pending (hidden)
 fn nvx::guest::console_pending::main (hidden)
 mod nvx::guest::device_io (hidden)
 fn nvx::guest::device_io::main (hidden)
-mod nvx::guest::entry
-struct nvx::guest::entry::Account
-method nvx::guest::entry::Account::home
-method nvx::guest::entry::Account::name
-enum nvx::guest::entry::AccountError
-variant nvx::guest::entry::AccountError::Duplicate
-variant nvx::guest::entry::AccountError::Group
-variant nvx::guest::entry::AccountError::Home
-variant nvx::guest::entry::AccountError::Malformed
-variant nvx::guest::entry::AccountError::Missing
-variant nvx::guest::entry::AccountError::NotFile
-field nvx::guest::entry::AccountError::NotFile::0
-variant nvx::guest::entry::AccountError::PrimaryGroup
-field nvx::guest::entry::AccountError::PrimaryGroup::0
-variant nvx::guest::entry::AccountError::Read
-field nvx::guest::entry::AccountError::Read::0
-field nvx::guest::entry::AccountError::Read::1
-variant nvx::guest::entry::AccountError::TooLarge
-field nvx::guest::entry::AccountError::TooLarge::0
-enum nvx::guest::entry::AccountMode
-variant nvx::guest::entry::AccountMode::Existing
-variant nvx::guest::entry::AccountMode::Numeric
-struct nvx::guest::entry::Capabilities
-const nvx::guest::entry::Capabilities::ALLOWED
-const nvx::guest::entry::Capabilities::EMPTY
-const nvx::guest::entry::Capabilities::PUBLISHED_REFUSED
-method nvx::guest::entry::Capabilities::bits
-method nvx::guest::entry::Capabilities::contains
-method nvx::guest::entry::Capabilities::is_empty
-method nvx::guest::entry::Capabilities::iter
-method nvx::guest::entry::Capabilities::with
-method nvx::guest::entry::Capabilities::without
-struct nvx::guest::entry::Capability
-const nvx::guest::entry::Capability::AUDIT_WRITE
-const nvx::guest::entry::Capability::CHOWN
-const nvx::guest::entry::Capability::DAC_OVERRIDE
-const nvx::guest::entry::Capability::FOWNER
-const nvx::guest::entry::Capability::FSETID
-const nvx::guest::entry::Capability::KILL
-const nvx::guest::entry::Capability::NET_BIND_SERVICE
-const nvx::guest::entry::Capability::NET_RAW
-const nvx::guest::entry::Capability::SETFCAP
-const nvx::guest::entry::Capability::SETGID
-const nvx::guest::entry::Capability::SETPCAP
-const nvx::guest::entry::Capability::SETUID
-const nvx::guest::entry::Capability::SYS_CHROOT
-method nvx::guest::entry::Capability::is_allowed
-method nvx::guest::entry::Capability::new
-method nvx::guest::entry::Capability::number
-const nvx::guest::entry::DEFAULT_HOSTNAME
-enum nvx::guest::entry::Database
-variant nvx::guest::entry::Database::Group
-variant nvx::guest::entry::Database::Passwd
-enum nvx::guest::entry::DeviceNode
-const nvx::guest::entry::DeviceNode::ALL
-variant nvx::guest::entry::DeviceNode::Full
-variant nvx::guest::entry::DeviceNode::Null
-variant nvx::guest::entry::DeviceNode::Random
-variant nvx::guest::entry::DeviceNode::Tty
-variant nvx::guest::entry::DeviceNode::Urandom
-variant nvx::guest::entry::DeviceNode::Zero
-struct nvx::guest::entry::Entry
-method nvx::guest::entry::Entry::bind_runtime
-method nvx::guest::entry::Entry::check
-method nvx::guest::entry::Entry::devices
-method nvx::guest::entry::Entry::hostname
-method nvx::guest::entry::Entry::identity
-method nvx::guest::entry::Entry::machine_id
-method nvx::guest::entry::Entry::new
-method nvx::guest::entry::Entry::prepare
-method nvx::guest::entry::Entry::publication
-method nvx::guest::entry::Entry::resolver
-method nvx::guest::entry::Entry::time_status
-enum nvx::guest::entry::Error
-variant nvx::guest::entry::Error::Account
-field nvx::guest::entry::Error::Account::0
-variant nvx::guest::entry::Error::Capability
-field nvx::guest::entry::Error::Capability::0
-variant nvx::guest::entry::Error::Groups
-variant nvx::guest::entry::Error::Hostname
-variant nvx::guest::entry::Error::InvalidId
-variant nvx::guest::entry::Error::MachineId
-field nvx::guest::entry::Error::MachineId::0
-variant nvx::guest::entry::Error::NonRootCapabilities
-variant nvx::guest::entry::Error::Published
-field nvx::guest::entry::Error::Published::0
-variant nvx::guest::entry::Error::Resolver
-field nvx::guest::entry::Error::Resolver::0
-variant nvx::guest::entry::Error::Rollback
-field nvx::guest::entry::Error::Rollback::error
-field nvx::guest::entry::Error::Rollback::teardown
-variant nvx::guest::entry::Error::Root
-field nvx::guest::entry::Error::Root::0
-variant nvx::guest::entry::Error::RootPath
-variant nvx::guest::entry::Error::TimeStatus
-field nvx::guest::entry::Error::TimeStatus::0
-struct nvx::guest::entry::Identity
-method nvx::guest::entry::Identity::account
-method nvx::guest::entry::Identity::account_mode
-method nvx::guest::entry::Identity::capabilities
-method nvx::guest::entry::Identity::capability_set
-method nvx::guest::entry::Identity::gid
-method nvx::guest::entry::Identity::groups
-method nvx::guest::entry::Identity::new
-method nvx::guest::entry::Identity::supplementary_groups
-method nvx::guest::entry::Identity::uid
-const nvx::guest::entry::MAX_ACCOUNT_DATABASE_BYTES
-const nvx::guest::entry::MAX_GROUPS
-const nvx::guest::entry::MAX_HOSTNAME_BYTES
-enum nvx::guest::entry::MachineId
-variant nvx::guest::entry::MachineId::Generated
-field nvx::guest::entry::MachineId::Generated::0
-variant nvx::guest::entry::MachineId::Image
-method nvx::guest::entry::MachineId::generate
-struct nvx::guest::entry::Prepared
-method nvx::guest::entry::Prepared::account
-enum nvx::guest::entry::Publication
-variant nvx::guest::entry::Publication::Published
-variant nvx::guest::entry::Publication::Unpublished
-struct nvx::guest::entry::RuntimeBinds
-method nvx::guest::entry::RuntimeBinds::remove
-mod nvx::guest::exec
-enum nvx::guest::exec::Cause
-variant nvx::guest::exec::Cause::Cancelled
-variant nvx::guest::exec::Cause::Disconnected
-variant nvx::guest::exec::Cause::Terminated
-variant nvx::guest::exec::Cause::TimedOut
-enum nvx::guest::exec::Event
-variant nvx::guest::exec::Event::Closed
-field nvx::guest::exec::Event::Closed::0
-variant nvx::guest::exec::Event::Discarded
-field nvx::guest::exec::Event::Discarded::0
-field nvx::guest::exec::Event::Discarded::1
-variant nvx::guest::exec::Event::Ended
-field nvx::guest::exec::Event::Ended::0
-variant nvx::guest::exec::Event::KillFailed
-field nvx::guest::exec::Event::KillFailed::0
-field nvx::guest::exec::Event::KillFailed::1
-variant nvx::guest::exec::Event::Launch
-field nvx::guest::exec::Event::Launch::0
-variant nvx::guest::exec::Event::Output
-field nvx::guest::exec::Event::Output::0
-field nvx::guest::exec::Event::Output::1
-variant nvx::guest::exec::Event::ReadFailed
-field nvx::guest::exec::Event::ReadFailed::0
-field nvx::guest::exec::Event::ReadFailed::1
-struct nvx::guest::exec::Execution
-method nvx::guest::exec::Execution::adopt
-method nvx::guest::exec::Execution::cancel
-method nvx::guest::exec::Execution::close_input
-method nvx::guest::exec::Execution::deadline
-method nvx::guest::exec::Execution::descriptors
-method nvx::guest::exec::Execution::discard
-method nvx::guest::exec::Execution::disconnect
-method nvx::guest::exec::Execution::grant
-method nvx::guest::exec::Execution::id
-method nvx::guest::exec::Execution::input
-method nvx::guest::exec::Execution::new
-method nvx::guest::exec::Execution::next_event
-method nvx::guest::exec::Execution::observe
-method nvx::guest::exec::Execution::signal
-method nvx::guest::exec::Execution::status
-method nvx::guest::exec::Execution::terminate
-method nvx::guest::exec::Execution::write_input
-enum nvx::guest::exec::KillTarget
-variant nvx::guest::exec::KillTarget::Cgroup
-variant nvx::guest::exec::KillTarget::ProcessGroup
-variant nvx::guest::exec::KillTarget::Program
-struct nvx::guest::exec::Options
-method nvx::guest::exec::Options::caller_reaps
-method nvx::guest::exec::Options::cgroup
-method nvx::guest::exec::Options::new
-method nvx::guest::exec::Options::process_group
-method nvx::guest::exec::Options::timeout
-struct nvx::guest::exec::Outcome
-method nvx::guest::exec::Outcome::cause
-method nvx::guest::exec::Outcome::discarded
-method nvx::guest::exec::Outcome::status
-struct nvx::guest::exec::Pipes
-method nvx::guest::exec::Pipes::from_ends
-method nvx::guest::exec::Pipes::new
-struct nvx::guest::exec::ProgramEnds
-field nvx::guest::exec::ProgramEnds::stderr
-field nvx::guest::exec::ProgramEnds::stdin
-field nvx::guest::exec::ProgramEnds::stdout
-enum nvx::guest::exec::Source
-variant nvx::guest::exec::Source::Exit
-variant nvx::guest::exec::Source::Launch
-variant nvx::guest::exec::Source::Output
-field nvx::guest::exec::Source::Output::0
-enum nvx::guest::exec::Stream
-variant nvx::guest::exec::Stream::Stderr
-variant nvx::guest::exec::Stream::Stdout
 mod nvx::guest::exit (hidden)
 fn nvx::guest::exit::main (hidden)
 mod nvx::guest::gpt (hidden)
@@ -1114,17 +903,6 @@ variant nvx::guest::nvxs::GuestConnectionError::Io
 field nvx::guest::nvxs::GuestConnectionError::Io::0
 variant nvx::guest::nvxs::GuestConnectionError::Protocol
 field nvx::guest::nvxs::GuestConnectionError::Protocol::0
-mod nvx::guest::process
-struct nvx::guest::process::Child
-method nvx::guest::process::Child::from_pidfd
-method nvx::guest::process::Child::id
-method nvx::guest::process::Child::new
-method nvx::guest::process::Child::observe
-method nvx::guest::process::Child::pidfd
-method nvx::guest::process::Child::status
-method nvx::guest::process::Child::try_wait
-method nvx::guest::process::Child::wait
-method nvx::guest::process::Child::with_pidfd
 mod nvx::guest::reseed
 enum nvx::guest::reseed::ReseedError
 variant nvx::guest::reseed::ReseedError::OpenRandom
@@ -1156,18 +934,6 @@ struct nvx::guest::root::AssemblyError (hidden)
 method nvx::guest::root::AssemblyError::cleanup (hidden)
 method nvx::guest::root::AssemblyError::error (hidden)
 method nvx::guest::root::AssemblyError::into_parts (hidden)
-struct nvx::guest::root::Bootstrap (hidden)
-method nvx::guest::root::Bootstrap::layout (hidden)
-method nvx::guest::root::Bootstrap::moved (hidden)
-method nvx::guest::root::Bootstrap::workload (hidden)
-enum nvx::guest::root::BootstrapStep (hidden)
-variant nvx::guest::root::BootstrapStep::AgentCgroup (hidden)
-variant nvx::guest::root::BootstrapStep::AgentMemoryLow (hidden)
-variant nvx::guest::root::BootstrapStep::Hierarchy (hidden)
-variant nvx::guest::root::BootstrapStep::Layout (hidden)
-variant nvx::guest::root::BootstrapStep::Placement (hidden)
-variant nvx::guest::root::BootstrapStep::UserNamespaces (hidden)
-variant nvx::guest::root::BootstrapStep::WorkloadCgroup (hidden)
 struct nvx::guest::root::Device (hidden)
 field nvx::guest::root::Device::mmio (hidden)
 field nvx::guest::root::Device::sectors (hidden)
@@ -1184,9 +950,6 @@ variant nvx::guest::root::Error::Access (hidden)
 field nvx::guest::root::Error::Access::device (hidden)
 field nvx::guest::root::Error::Access::read_only (hidden)
 field nvx::guest::root::Error::Access::role (hidden)
-variant nvx::guest::root::Error::Bootstrap (hidden)
-field nvx::guest::root::Error::Bootstrap::error (hidden)
-field nvx::guest::root::Error::Bootstrap::step (hidden)
 variant nvx::guest::root::Error::Device (hidden)
 field nvx::guest::root::Error::Device::device (hidden)
 field nvx::guest::root::Error::Device::error (hidden)
@@ -1299,10 +1062,6 @@ enum nvx::guest::root::OverlayMode (hidden)
 variant nvx::guest::root::OverlayMode::TrustedLowers (hidden)
 variant nvx::guest::root::OverlayMode::UntrustedLowers (hidden)
 method nvx::guest::root::OverlayMode::options (hidden)
-struct nvx::guest::root::Resources (hidden)
-field nvx::guest::root::Resources::agent_memory_low (hidden)
-field nvx::guest::root::Resources::workload_memory_max (hidden)
-field nvx::guest::root::Resources::workload_pids_max (hidden)
 enum nvx::guest::root::Role (hidden)
 variant nvx::guest::root::Role::Distro (hidden)
 variant nvx::guest::root::Role::Scratch (hidden)
@@ -1373,7 +1132,6 @@ enum nvx::guest::root::UpperKind (hidden)
 variant nvx::guest::root::UpperKind::Scratch (hidden)
 variant nvx::guest::root::UpperKind::Tmpfs (hidden)
 fn nvx::guest::root::assemble (hidden)
-fn nvx::guest::root::bootstrap (hidden)
 mod nvx::guest::snapshot
 enum nvx::guest::snapshot::CaptureCause
 variant nvx::guest::snapshot::CaptureCause::Io
@@ -1480,63 +1238,6 @@ method nvx::guest::snapshot::Repaired::cpus
 method nvx::guest::snapshot::Repaired::generation_id
 method nvx::guest::snapshot::Repaired::memory
 fn nvx::guest::snapshot::capture
-mod nvx::guest::spawn
-struct nvx::guest::spawn::Barrier
-method nvx::guest::spawn::Barrier::release
-struct nvx::guest::spawn::Cgroup
-method nvx::guest::spawn::Cgroup::open
-struct nvx::guest::spawn::Command
-method nvx::guest::spawn::Command::barrier
-method nvx::guest::spawn::Command::cgroup
-method nvx::guest::spawn::Command::check_working_directory_as
-method nvx::guest::spawn::Command::enter
-method nvx::guest::spawn::Command::environment
-method nvx::guest::spawn::Command::export_physical_working_directory
-method nvx::guest::spawn::Command::inherit
-method nvx::guest::spawn::Command::new
-method nvx::guest::spawn::Command::new_process_group
-method nvx::guest::spawn::Command::new_session
-method nvx::guest::spawn::Command::reset_signals
-method nvx::guest::spawn::Command::root
-method nvx::guest::spawn::Command::search_path
-method nvx::guest::spawn::Command::spawn
-method nvx::guest::spawn::Command::stderr
-method nvx::guest::spawn::Command::stdin
-method nvx::guest::spawn::Command::stdout
-method nvx::guest::spawn::Command::working_directory
-struct nvx::guest::spawn::LaunchFailure
-method nvx::guest::spawn::LaunchFailure::raw_os_error
-method nvx::guest::spawn::LaunchFailure::stage
-struct nvx::guest::spawn::LaunchReport
-method nvx::guest::spawn::LaunchReport::wait
-enum nvx::guest::spawn::LaunchStage
-variant nvx::guest::spawn::LaunchStage::Barrier
-variant nvx::guest::spawn::LaunchStage::Bounding
-variant nvx::guest::spawn::LaunchStage::Capabilities
-variant nvx::guest::spawn::LaunchStage::Cgroup
-variant nvx::guest::spawn::LaunchStage::Credentials
-variant nvx::guest::spawn::LaunchStage::Descriptors
-variant nvx::guest::spawn::LaunchStage::Devices
-variant nvx::guest::spawn::LaunchStage::Exec
-variant nvx::guest::spawn::LaunchStage::Hostname
-variant nvx::guest::spawn::LaunchStage::Identity
-variant nvx::guest::spawn::LaunchStage::MoveRoot
-variant nvx::guest::spawn::LaunchStage::NoNewPrivileges
-variant nvx::guest::spawn::LaunchStage::PhysicalWorkingDirectory
-variant nvx::guest::spawn::LaunchStage::Proc
-variant nvx::guest::spawn::LaunchStage::ProcessGroup
-variant nvx::guest::spawn::LaunchStage::Propagation
-variant nvx::guest::spawn::LaunchStage::Root
-variant nvx::guest::spawn::LaunchStage::Session
-variant nvx::guest::spawn::LaunchStage::Signals
-variant nvx::guest::spawn::LaunchStage::Sys
-variant nvx::guest::spawn::LaunchStage::WorkingDirectory
-method nvx::guest::spawn::LaunchStage::code
-method nvx::guest::spawn::LaunchStage::from_code
-struct nvx::guest::spawn::Spawned
-method nvx::guest::spawn::Spawned::id
-method nvx::guest::spawn::Spawned::into_report
-method nvx::guest::spawn::Spawned::take_barrier
 mod nvx::guest::terminal
 struct nvx::guest::terminal::Terminal
 method nvx::guest::terminal::Terminal::configure_raw

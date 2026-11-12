@@ -5,10 +5,9 @@
 //! What a test cannot do in a temporary directory, such as a mount, an unmount, a flush of a
 //! block device's buffers, a sync of a mounted file system, a reread of a disk's partition table,
 //! or a read of a GPT disk's partition table at the geometry that its block device reports, and
-//! the writes to the kernel's control files, the check for a mount point, and the options of a
-//! mount, whose effects and answers a test simulates, go through a [`Kernel`], which also performs
-//! the mapper's operations for the root's live shares and mappings, the runtime's mounts, and the
-//! switch into the root.
+//! the check for a mount point and the options of a mount, whose effects and answers a test
+//! simulates, go through a [`Kernel`], which also performs the mapper's operations for the root's
+//! live shares and mappings, the runtime's mounts, and the switch into the root.
 
 use std::ffi::CStr;
 use std::fs::{self, File};
@@ -29,16 +28,16 @@ const MOUNT_TABLE: &str = "/proc/thread-self/mountinfo";
 
 /// The kernel's operations that the root operations perform, other than reads: mounts and
 /// unmounts, flushes of a block device's buffers, syncs of a mounted file system, rereads of a
-/// disk's partition table, writes of a control file, and the sleeps between two polls for a block
-/// device; the check for a mount point and the options of a mount, which depend on them; since
-/// only a block device reports its geometry, the read of a GPT disk's partition table; the
-/// mapper's operations, through which the root mounts its live shares and mappings; the new
-/// mounts, the restriction of the root's tree, and the device nodes of the runtime's file systems;
-/// and the change of root directory into a switched root.
+/// disk's partition table, and the sleeps between two polls for a block device; the check for a
+/// mount point and the options of a mount, which depend on them; since only a block device
+/// reports its geometry, the read of a GPT disk's partition table; the mapper's operations,
+/// through which the root mounts its live shares and mappings; the new mounts, the restriction of
+/// the root's tree, and the device nodes of the runtime's file systems; and the change of root
+/// directory into a switched root.
 ///
 /// [`SystemKernel`] performs them. The tests' fake records the operations, simulates the effect
-/// of a cgroup's membership file and its own mounts, reads a GPT disk's table from a regular
-/// file, and fails the operations that a test chooses.
+/// of its own mounts, reads a GPT disk's table from a regular file, and fails the operations that
+/// a test chooses.
 pub(super) trait Kernel: MappingKernel + Send + Sync {
     /// Mounts `source` at `target`, as `mount(2)` does, with the file system's own options
     /// `data`.
@@ -74,10 +73,6 @@ pub(super) trait Kernel: MappingKernel + Send + Sync {
         file: &File,
         expected: &Expected,
     ) -> Result<Disk, DeviceError>;
-
-    /// Writes `value` whole to the existing control file `path`, such as a cgroup's or a
-    /// sysctl's, and reports a failure to close it.
-    fn write(&mut self, path: &CStr, value: &[u8]) -> Result<(), Errno>;
 
     /// Returns whether the directory `path` is a mount point: whether it is on another mount
     /// than its parent directory, as it is where a file system is mounted, or where a directory
@@ -162,16 +157,6 @@ impl Kernel for SystemKernel {
         expected: &Expected,
     ) -> Result<Disk, DeviceError> {
         gpt::read_disk(file, expected)
-    }
-
-    fn write(&mut self, path: &CStr, value: &[u8]) -> Result<(), Errno> {
-        let descriptor = sys::open(
-            path,
-            OpenFlags::O_WRONLY | OpenFlags::O_CLOEXEC,
-            Mode::empty(),
-        )?;
-        descriptor.write_all(value)?;
-        descriptor.close()
     }
 
     fn is_mount_point(&mut self, path: &Path) -> io::Result<bool> {
