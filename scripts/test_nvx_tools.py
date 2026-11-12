@@ -6611,6 +6611,51 @@ class CiConfigurationTests(unittest.TestCase):
                 )
                 self.assertIn("guest-ubuntu-distro", downloaded)
 
+            for guest in ("alpine", "ubuntu", "azurelinux"):
+                selected = context | {
+                    "inputs.guest": guest,
+                    "inputs.scenarios": '["guest-boot"]',
+                }
+                with self.subTest(system=system, selected_guest=guest):
+                    result = consume(microvm_steps, selected)
+                    assert result is not None
+                    downloaded, _ = result
+                    self.assertEqual(
+                        downloaded,
+                        {"guest-kernel", "guest-alpine", f"guest-{guest}"},
+                    )
+            azure = next(
+                step
+                for step in microvm_steps
+                if step["name"] == "Download Azure Linux initramfs"
+            )
+            for selected_guest, all_guests, debug, expected in (
+                ("azurelinux", False, False, True),
+                ("alpine", False, False, False),
+                ("ubuntu", False, False, False),
+                ("alpine", True, False, True),
+                ("azurelinux", False, True, False),
+                ("alpine", True, True, False),
+            ):
+                with self.subTest(
+                    system=system,
+                    guest=selected_guest,
+                    all_guests=all_guests,
+                    debug=debug,
+                ):
+                    self.assertEqual(
+                        holds(
+                            azure["if"],
+                            context
+                            | {
+                                "inputs.guest": selected_guest,
+                                "inputs.guests-and-sandboxes": all_guests,
+                                "inputs.debug-kernel": debug,
+                            },
+                        ),
+                        expected,
+                    )
+
         # test-openvmm boots the kernel and the Alpine initramfs.
         requested: list[str] = []
 

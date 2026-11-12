@@ -35,13 +35,14 @@ fn tsc() -> u64 {
 #[cfg(target_arch = "aarch64")]
 fn tsc() -> u64 {
     let counter: u64;
-    // SAFETY: qualification reads the unprivileged architected counter, ordered by ISB.
+    // SAFETY: ISB brackets the unprivileged counter read and orders compiler accesses.
     unsafe {
         core::arch::asm!(
             "isb",
             "mrs {counter}, cntvct_el0",
+            "isb",
             counter = out(reg) counter,
-            options(nomem, nostack, preserves_flags),
+            options(nostack, preserves_flags),
         );
     }
     counter
