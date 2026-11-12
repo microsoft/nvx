@@ -18,52 +18,39 @@ use crate::host::platform;
 use crate::host::platform::inherit::Inherited;
 #[cfg(not(windows))]
 use crate::host::process::POLL_INTERVAL;
-use crate::host::process::{BootId, KILL_TIMEOUT, Process, ProcessRef};
+use crate::host::process::{BootId, Process, ProcessRef};
 use crate::protocol::CAPABILITY_LEN;
 
-/// How [`spawn`] or [`spawn_vm`] starts a VMM: its executable, arguments, and working directory,
+/// How [`spawn_vm_with_mode`] starts a VMM: its executable, arguments, and working directory,
 /// whether it leaves the caller's job object on Windows, and the descriptors or handles of the
 /// caller that it inherits besides its standard streams.
 #[derive(Debug, Clone)]
-pub struct VmmCommand<'a> {
+pub(crate) struct VmmCommand<'a> {
     /// The VMM's executable.
-    pub program: PathBuf,
+    pub(crate) program: PathBuf,
     /// The VMM's arguments, after the name of its executable.
-    pub arguments: Vec<OsString>,
+    pub(crate) arguments: Vec<OsString>,
     /// The VMM's working directory.
     ///
     /// Windows permits at most 258 UTF-16 code units in its absolute path, including any verbatim
     /// prefix and trailing separator. It may differ from the directories of the files that the
     /// VMM uses, whose paths can be longer.
-    pub working_dir: PathBuf,
+    pub(crate) working_dir: PathBuf,
     /// Whether the VMM starts outside the caller's job object on Windows, which must permit
     /// breakaway, so that the VMM survives the job. Other hosts ignore it.
-    pub breakaway_from_job: bool,
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "only Windows has job objects to break away from")
+    )]
+    pub(crate) breakaway_from_job: bool,
     /// The descriptors or handles of the caller that the VMM inherits under their numbers in the
     /// caller, besides its standard streams. One that the list names twice is inherited once.
-    pub inherit: Vec<Inherited<'a>>,
+    pub(crate) inherit: Vec<Inherited<'a>>,
 }
 
-impl VmmCommand<'_> {
-    /// Returns the command that starts `program` with `arguments` in `working_dir`, inside the
-    /// caller's job object, and with nothing of the caller's besides its standard streams.
-    pub fn new(
-        program: impl Into<PathBuf>,
-        arguments: Vec<OsString>,
-        working_dir: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
-            program: program.into(),
-            arguments,
-            working_dir: working_dir.into(),
-            breakaway_from_job: false,
-            inherit: Vec::new(),
-        }
-    }
-}
-
-/// Starts the VMM that `command` describes, detached from the caller, with `capability` on its
-/// standard input and `log` as its standard output and error.
+/// Starts the VMM that `command` describes, as [`vm::spawn`](crate::host::vm::spawn) starts
+/// OpenVMM: detached from the caller unless `foreground`, with `capability` on its standard input
+/// and `log` as its standard output and error.
 ///
 /// OpenVMM reads its capability from standard input as soon as it starts, so the capability is
 /// written into a pipe whose write end is closed before the spawn: it never appears in arguments,
@@ -76,59 +63,32 @@ impl VmmCommand<'_> {
 /// gives them whatever the caller's umask, outside directories with a default ACL, which Linux
 /// applies instead of the umask; on Windows, without a console window, and outside the caller's
 /// job object when `command` asks for it, in a job object of its own that is named after `log`,
-/// which limits no resource but lets no process that the VMM starts break away from it, unless
-/// `log` is not a file of a disk volume, such as `NUL` or a pipe, or what takes that name is not
-/// the user's job. A process that the caller spawns while the VMM is created, which can inherit
-/// the log as [`Inherited`] describes, never joins the VMM's job, so it holds the log's claim only
-/// if the VMM has none.
+/// which limits no resource but lets no process that the VMM starts break away from it. A process
+/// that the caller spawns while the VMM is created, which can inherit the log as [`Inherited`]
+/// describes, never joins the VMM's job. A `foreground` VMM, which the CLI's one-shot runs start,
+/// stays in the caller's session and console instead.
 ///
 /// Record the VMM's identity right after the spawn, through [`Launched::process`], if the caller
-/// recovers its launches. Fails with [`io::ErrorKind::InvalidInput`] on
-/// Linux for a descriptor of a standard stream, 0 to 2, or one that is not close-on-exec, and on
-/// Windows for a working directory whose absolute path exceeds 258 UTF-16 code units, including
-/// any verbatim prefix and trailing separator, or for a batch file, which Windows would run
-/// through `cmd.exe` with arguments that it reads as shell syntax, and with
-/// [`io::ErrorKind::AlreadyExists`] on Windows
-/// if a job of the user takes
-/// the name of the job of `log` already, as described below; and with
-/// [`io::ErrorKind::Unsupported`] for any descriptor or handle on hosts other than Linux and
-/// Windows.
+/// recovers its launches. Fails, before it creates any child, with
+/// [`io::ErrorKind::InvalidInput`] on Linux for a descriptor of a standard stream, 0 to 2, or one
+/// that is not close-on-exec, and on Windows for a working directory whose absolute path exceeds
+/// 258 UTF-16 code units, including any verbatim prefix and trailing separator, or for a batch
+/// file, which Windows would run through `cmd.exe` with arguments that it reads as shell syntax;
+/// on Windows with [`io::ErrorKind::PermissionDenied`] for a log that is not a file of a disk
+/// volume, such as `NUL` or a pipe, or for an untrusted object or object-manager link under the
+/// name of its job, and with [`io::ErrorKind::AlreadyExists`] if a job of the user takes that name
+/// already, as described below; and with [`io::ErrorKind::Unsupported`] for any descriptor or
+/// handle on hosts other than Linux and Windows.
 ///
 /// On Windows, give each VMM a log file of its own, created anew, as
-/// [`vm::create`](crate::host::vm::create) does. The
-/// job of `log` is named after the file's identity, which the file keeps when it is truncated, as
+/// [`vm::create`](crate::host::vm::create) does. The job of `log` is named after the file's
+/// identity, which the file keeps when it is truncated, as
 /// [`File::create`](std::fs::File::create) truncates an existing file, and its name stays taken
 /// while another spawn with the file holds the job, or while a process that inherited the job's
 /// handle in the window of such a spawn still runs, as one spawned while an earlier VMM of the
-/// file started may: a spawn with the file fails until then.
-pub fn spawn(
-    command: &VmmCommand<'_>,
-    capability: &[u8; CAPABILITY_LEN],
-    log: File,
-) -> io::Result<Launched> {
-    spawn_inner(command, capability, log, false, false)
-}
-
-/// Starts a VMM with the strict launch contract of [`crate::host::vm::VmmCommand`].
-///
-/// Uses [`spawn`]'s standard streams, inheritance allowlist, detachment, and process lifetime.
-/// Unlike [`spawn`], on Windows this requires a trusted log-named job: a log that is not a file
-/// of a disk volume, or an untrusted object or object-manager link under its job name, fails with
-/// [`io::ErrorKind::PermissionDenied`] before any child is created. A job of the user already
-/// holding that name fails with [`io::ErrorKind::AlreadyExists`], as in [`spawn`].
-///
-/// On other hosts this has the same behavior and errors as [`spawn`]. The caller retains its
-/// owned inherited resources until the spawn returns, and keeps or ends the returned child as
+/// file started may: a spawn with the file fails until then. The caller retains its owned
+/// inherited resources until the spawn returns, and keeps or ends the returned child as
 /// [`Launched`] describes.
-pub fn spawn_vm(
-    command: &VmmCommand<'_>,
-    capability: &[u8; CAPABILITY_LEN],
-    log: File,
-) -> io::Result<Launched> {
-    spawn_vm_with_mode(command, capability, log, false)
-}
-
-/// Shares the strict VM spawn with the CLI's private foreground mode.
 pub(crate) fn spawn_vm_with_mode(
     command: &VmmCommand<'_>,
     capability: &[u8; CAPABILITY_LEN],
@@ -209,15 +169,15 @@ fn spawn_inner(
     }
 }
 
-/// A VMM that [`spawn`] or [`spawn_vm`] started, which the caller has not released yet: on Unix,
+/// A VMM that [`spawn_vm_with_mode`] started, which the caller has not released yet: on Unix,
 /// its child process; on Windows, its process handle. On Unix the child's ID names no other
 /// process until [`wait_timeout`](Self::wait_timeout) reaps it; hold it with
 /// [`process`](Self::process) before waiting to keep a verified handle after it exits.
 ///
 /// Hold it with [`process`](Self::process). Then release it with [`detach`](Self::detach), or end it
 /// with [`kill_and_confirm_exit`](Self::kill_and_confirm_exit); the [`Process`] stays valid
-/// either way. [`kill_and_wait`](Self::kill_and_wait) provides legacy, time-bounded cleanup.
-pub struct Launched {
+/// either way.
+pub(crate) struct Launched {
     #[cfg(not(windows))]
     /// Child process retained until it is detached or terminated.
     child: Child,
@@ -240,7 +200,7 @@ impl fmt::Debug for Launched {
 
 impl Launched {
     /// Returns the process ID.
-    pub fn id(&self) -> u32 {
+    pub(crate) fn id(&self) -> u32 {
         #[cfg(not(windows))]
         return self.child.id();
         #[cfg(windows)]
@@ -252,13 +212,13 @@ impl Launched {
     /// The caller has not reaped the process, so its ID and start time still identify it, and
     /// the reference of the `Process` is the one to record: a successor of the caller can find
     /// the process again with [`Process::open`]. The `Process` stays valid after
-    /// [`detach`](Self::detach), [`kill_and_confirm_exit`](Self::kill_and_confirm_exit), or
-    /// [`kill_and_wait`](Self::kill_and_wait) releases this `Launched`. A process that exited
-    /// already keeps its identity, and the `Process` reports that it exited.
+    /// [`detach`](Self::detach) or [`kill_and_confirm_exit`](Self::kill_and_confirm_exit)
+    /// releases this `Launched`. A process that exited already keeps its identity, and the
+    /// `Process` reports that it exited.
     ///
     /// Fails if the identity of the process or of the current boot cannot be read, and with
     /// [`io::ErrorKind::Unsupported`] on hosts other than Linux and Windows.
-    pub fn process(&self) -> io::Result<Process> {
+    pub(crate) fn process(&self) -> io::Result<Process> {
         #[cfg(windows)]
         let (handle, start_time) = self.process.pin()?;
         #[cfg(not(windows))]
@@ -284,7 +244,7 @@ impl Launched {
     /// zombie while this process lives. If that thread cannot start, the child becomes a zombie
     /// after it exits; liveness checks treat zombies without threads as exited, so only the
     /// process table entry leaks.
-    pub fn detach(self) {
+    pub(crate) fn detach(self) {
         #[cfg(not(windows))]
         {
             let mut child = self.child;
@@ -298,44 +258,15 @@ impl Launched {
         drop(self);
     }
 
-    /// Ends the process through its handle, which cannot race with the reuse of its ID, and
-    /// returns whether it exited within ten seconds. A process that did not is released as
-    /// [`detach`](Self::detach) releases it.
-    pub fn kill_and_wait(self) -> bool {
-        #[cfg(windows)]
-        return self.process.terminate(KILL_TIMEOUT);
-        #[cfg(not(windows))]
-        {
-            let mut child = self.child;
-            if child.kill().is_ok() {
-                let deadline = Instant::now() + KILL_TIMEOUT;
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => return true,
-                        Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
-                        _ => break,
-                    }
-                }
-            }
-            Self {
-                child,
-                reaped: self.reaped,
-            }
-            .detach();
-            false
-        }
-    }
-
     /// Terminates this owned child and waits without a deadline for proof of its exit.
     ///
-    /// Unlike [`kill_and_wait`](Self::kill_and_wait), this has no timeout and never hands off a
-    /// child to a background reaper. On Unix a successful call reaps the child. Even if
-    /// termination fails, it waits for the child's exit; a child that exited already succeeds.
-    /// Use this when setup fails after [`spawn_vm`] created a child, including when
-    /// [`process`](Self::process) cannot verify its identity.
+    /// It has no timeout and never hands off a child to a background reaper. On Unix a successful
+    /// call reaps the child. Even if termination fails, it waits for the child's exit; a child
+    /// that exited already succeeds. Use this when setup fails after [`spawn_vm_with_mode`]
+    /// created a child, including when [`process`](Self::process) cannot verify its identity.
     ///
     /// Fails if waiting cannot confirm exit, retaining both failures if termination also failed.
-    pub fn kill_and_confirm_exit(self) -> io::Result<()> {
+    pub(crate) fn kill_and_confirm_exit(self) -> io::Result<()> {
         #[cfg(windows)]
         return self.process.terminate_and_wait();
         #[cfg(not(windows))]
@@ -358,7 +289,14 @@ impl Launched {
     ///
     /// On Unix a successful wait reaps the child; call [`process`](Self::process) before it to
     /// retain a verified process handle. Later waits return the same status.
-    pub fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<i64>> {
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(
+            dead_code,
+            reason = "only the CLI's one-shot runs wait for the status of the VMMs that they start"
+        )
+    )]
+    pub(crate) fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<i64>> {
         #[cfg(windows)]
         return Ok(self.process.wait_timeout(timeout)?.map(i64::from));
         #[cfg(not(windows))]
@@ -380,6 +318,13 @@ impl Launched {
 
     /// Reaps the child if it has exited, and returns its status if it has.
     #[cfg(not(windows))]
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(
+            dead_code,
+            reason = "only the CLI's one-shot runs wait for the status of the VMMs that they start"
+        )
+    )]
     fn try_reap(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
         let status = self.child.try_wait()?;
         self.reaped |= status.is_some();
@@ -389,6 +334,13 @@ impl Launched {
 
 /// Returns `Popen.returncode` for `status`: the exit code, or the negated signal number.
 #[cfg(not(windows))]
+#[cfg_attr(
+    not(feature = "cli"),
+    allow(
+        dead_code,
+        reason = "only the CLI's one-shot runs wait for the status of the VMMs that they start"
+    )
+)]
 fn status_value(status: std::process::ExitStatus) -> i64 {
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
@@ -405,5 +357,5 @@ fn status_value(status: std::process::ExitStatus) -> i64 {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests;

@@ -511,7 +511,7 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
     let mut capability = [0; CAPABILITY_LEN];
     getrandom::fill(&mut capability).unwrap();
     // OpenVMM reads its capability as soon as it starts, so its input already holds the
-    // capability and its end, as `nvx::host::supervisor::spawn` prepares it.
+    // capability and its end, as `nvx::host::vm::spawn` prepares it.
     let (input, mut writer) = io::pipe().unwrap();
     writer.write_all(&capability).unwrap();
     drop(writer);
