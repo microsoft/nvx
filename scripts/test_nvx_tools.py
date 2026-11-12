@@ -630,12 +630,22 @@ def _correctness_arguments(inputs: Mapping[str, Any], system: str) -> dict[str, 
         **{name: _resolve_inputs(value, inputs) for name, value in step["env"].items()},
         "RUNNER_OS": system,
         "PYTHONPATH": str(BuildConstants.REPO_ROOT / "scripts"),
+        "PATH": "",
     }
-    script = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    shell = shlex.split(
+        _interpolate_expressions(step["shell"], {"runner": {"os": system}}, {})
+    )
+    expected = "python" if system == "Windows" else "python3"
+    if shell != [expected, "{0}"]:
+        raise AssertionError(f"binder needs the native Python custom shell: {shell}")
     with tempfile.TemporaryDirectory() as directory:
-        environment["GITHUB_OUTPUT"] = str(Path(directory) / "outputs")
+        output = Path(directory) / "outputs"
+        environment["GITHUB_OUTPUT"] = str(output)
+        script = Path(directory) / "correctness arguments.py"
+        script.write_text(step["run"], encoding="utf-8")
+        # Use this interpreter for the runner's Python alias, with no shell tools.
         result = subprocess.run(
-            [sys.executable, "-c", script],
+            [sys.executable, str(script)],
             cwd=directory,
             env=environment,
             capture_output=True,
@@ -645,11 +655,17 @@ def _correctness_arguments(inputs: Mapping[str, Any], system: str) -> dict[str, 
         )
         if result.returncode:
             raise AssertionError(result.stderr)
-        return json.loads(
+        selected = json.loads(
             (Path(directory) / "build" / "nvx-correctness-arguments.json").read_text(
                 encoding="utf-8"
             )
         )
+        expected_output = (
+            f"workload-artifacts={str(selected['workload_artifacts']).lower()}\n"
+        )
+        if output.read_text(encoding="utf-8") != expected_output:
+            raise AssertionError("binder's workload-artifacts output does not match")
+        return selected
 
 
 def _runner_system(runner: str | list[str]) -> str:
@@ -11007,6 +11023,120 @@ python3() {
                 ),
             ],
         )
+
+    def test_correctness_binder_executes_without_shell_tools_on_each_platform(self):
+        cases = (
+            (
+                "Linux",
+                {"backend": "kvm", "shard": 1, "shard-count": 2},
+                [
+                    "test-microvm",
+                    "--backend",
+                    "kvm",
+                    "--architecture",
+                    "x86_64",
+                    "--guest",
+                    "alpine",
+                    "--shard",
+                    "1/2",
+                ],
+                1,
+                "build/test-results/microvm-kvm",
+                False,
+            ),
+            (
+                "Windows",
+                {"backend": "whp", "guests-and-sandboxes": True},
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "x86_64",
+                    "--guest",
+                    "alpine",
+                ],
+                1,
+                "build/test-results/microvm-whp",
+                True,
+            ),
+            (
+                "Windows",
+                {
+                    "backend": "whp",
+                    "architecture": "aarch64",
+                    "cold-only": True,
+                    "scenarios": '["sandbox-lifecycle"]',
+                    "processors": "[1]",
+                    "start-stop-cycles": 10,
+                    "memory-mib": 1024,
+                    "cycles": 2,
+                    "managed-root": "scratch",
+                    "output-dir": "build/test-results/trial-arm",
+                    "result-id": "scratch-10",
+                },
+                [
+                    "test-microvm",
+                    "--backend",
+                    "whp",
+                    "--architecture",
+                    "aarch64",
+                    "--guest",
+                    "alpine",
+                    "--scenario",
+                    "sandbox-lifecycle",
+                    "--processors",
+                    "1",
+                    "--start-stop-cycles",
+                    "10",
+                    "--memory-mib",
+                    "1024",
+                    "--cold-only",
+                    "--managed-root",
+                    "scratch",
+                ],
+                2,
+                "build/test-results/trial-arm",
+                True,
+            ),
+        )
+        for system, inputs, arguments, cycles, directory, artifacts in cases:
+            with self.subTest(system=system, inputs=inputs):
+                self.assertEqual(
+                    _correctness_arguments(inputs, system),
+                    {
+                        "arguments": arguments,
+                        "cycles": cycles,
+                        "output_dir": directory,
+                        "workload_artifacts": artifacts,
+                    },
+                )
+
+    def test_correctness_binder_retains_input_guards_without_shell_tools(self):
+        cases: tuple[tuple[str, Mapping[str, Any], str], ...] = (
+            ("Windows", {"scenarios": "{}"}, "JSON string array"),
+            ("Windows", {"processors": "[true]"}, "JSON integer array"),
+            ("Windows", {"result-id": "../cell"}, "artifact-safe"),
+            ("Windows", {"cycles": 0}, "positive integer"),
+            ("Linux", {"cycles": 2}, "serial cycles require Windows"),
+            ("Windows", {"memory-mib": -1}, "must be nonnegative"),
+            (
+                "Windows",
+                {"architecture": "aarch64"},
+                "explicit Windows/WHP cold scope",
+            ),
+            (
+                "Windows",
+                {"architecture": "aarch64", "cold-only": True},
+                "explicit existing scenarios",
+            ),
+        )
+        for system, inputs, message in cases:
+            with (
+                self.subTest(system=system, inputs=inputs),
+                self.assertRaisesRegex(AssertionError, message),
+            ):
+                _correctness_arguments({"backend": "whp"} | dict(inputs), system)
 
     def test_ci_runs_each_default_microvm_suite_in_its_shards(self):
         # #696: each backend runs its default suite in the shards that

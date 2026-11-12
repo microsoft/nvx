@@ -157,7 +157,7 @@ jobs:
 
       - name: Bind shared correctness arguments
         id: correctness
-        shell: bash
+        shell: ${{ runner.os == 'Windows' && 'python {0}' || 'python3 {0}' }}
         env:
           ARCHITECTURE: ${{ inputs.architecture }}
           BACKEND: ${{ inputs.backend }}
@@ -177,7 +177,6 @@ jobs:
           SHARD_COUNT: ${{ inputs.shard-count }}
           RESULT_ID: ${{ inputs.result-id }}
         run: |
-          ${{ runner.os == 'Windows' && 'python' || 'python3' }} - <<'PY'
           import json
           import os
           import re
@@ -243,7 +242,6 @@ jobs:
                           "workload_artifacts": workload_artifacts}),
               encoding="utf-8",
           )
-          PY
 
       # The guest artifacts that the steps below boot or read. Every job
       # qualifies its runner with the kernel and the Alpine initramfs, the
