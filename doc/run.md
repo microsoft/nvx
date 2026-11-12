@@ -1812,11 +1812,10 @@ template, so it has the same artifact requirements. It checks that:
   is on scratch;
 - `/sbin/nvx-sandbox-smoke` passes its security profile checks in a sandbox
   provisioned with `--hostname`, after earlier requests;
-- a request that writes more than the 1 MiB output bound exits with status
-  125 and an `output-limit` outcome report after the host has received more
-  than 1 MiB less one 32 KiB read chunk and at most 1 MiB, and a request whose
-  `--outcome-report` path exists fails before its workload runs and leaves the
-  file intact;
+- a request that writes 2 MiB, more than the 1 MiB that version 1 of NVXC
+  forwarded, streams all of it and exits with status 0 and an `exit` outcome
+  report, and a request whose `--outcome-report` path exists fails before its
+  workload runs and leaves the file intact;
 - `stop` ends OpenVMM and its control socket or pipe, leaves only
   `config.json`, `sandbox.lock`, `exec.lock`, `openvmm.log`, and a successful
   `outcome.json`, and leaves a cleanly unmounted scratch file system, after
