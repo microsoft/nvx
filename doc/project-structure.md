@@ -57,8 +57,7 @@ nvx/
 |   `-- copilot-instructions.md  Repository-wide Copilot instructions
 |-- .vscode/settings.json        Shared VS Code settings
 |-- guest/                       Guest-owned scripts
-|   |-- common/                  Shared init, agent, snapshot, and probe scripts
-|   |-- alpine/                  Alpine-control container entry scripts
+|   |-- common/                  Shared init, snapshot, and probe scripts
 |   `-- ubuntu/                  Ubuntu interactive-shell startup policy
 |-- ubuntu/
 |   `-- packages.lock.json       Exact supplemental Ubuntu binary package closure
@@ -234,10 +233,7 @@ starts an initramfs program named by `nvx_exec=`, `nvx-init` for a layered root,
 workload named by `nvx_entrypoint=`, a virtio restore probe for benchmark
 profiling, or the interactive shell. On an interactive boot, `init` prints a
 stable distribution boot marker for Alpine and Azure Linux, and
-`guest/ubuntu/nvx-bashrc` prints Ubuntu's. `guest/alpine` contains
-the container launch and entry scripts that only the Alpine initramfs installs;
-the entry script stages Alpine's musl loader and `setpriv` inside the
-workload's root.
+`guest/ubuntu/nvx-bashrc` prints Ubuntu's.
 
 The remaining common helpers handle shutdown, virtio-fs mounting, snapshot
 preparation, and the guest side of the time ABI. The Rust guest binaries

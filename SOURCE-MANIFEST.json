@@ -38,7 +38,6 @@
     "minirootfs_sha256": "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
     "guest_sources": [
       "guest/common",
-      "guest/alpine",
       "nvx-rs",
       "rust-toolchain.toml"
     ],
