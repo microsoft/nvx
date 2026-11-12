@@ -14,15 +14,14 @@ use crate::harness::{HYPERVISOR, OPENVMM, Root, is_hex};
 /// Caller bytes left by the two-directory fixture, its native bootstrap, and a terminating NUL.
 pub(crate) fn two_share_command_line_room() -> usize {
     use nvx::host::filesystem::GUEST_EXPORT;
-    use nvx::host::sandbox::mount::{
-        AGGREGATE_MOUNT_TARGET, MountAccess, aggregate_command_line_fragment,
-    };
+    use nvx::host::sandbox::mount::MOUNT_TAG;
 
     let kernel = "nvx_hostname=6e7678 nvx_machine_id=image nvx_maps=2 nvx_mode=one-shot \
                   nvx_share=0,/a,ro nvx_share=1,/b,rw";
-    let fragment =
-        aggregate_command_line_fragment(&[MountAccess::ReadOnly, MountAccess::ReadWrite])
-            .replace(AGGREGATE_MOUNT_TARGET, GUEST_EXPORT);
+    // OpenVMM appends the tokens of the aggregate, read-write since one share is.
+    let fragment = format!(
+        " virtfs_dir={GUEST_EXPORT} virtfs_tag={MOUNT_TAG} virtfs_mode=rw virtfs_aggregate=1"
+    );
     nvx::host::config::COMMAND_LINE_BUDGET - kernel.len() - fragment.len() - 2
 }
 

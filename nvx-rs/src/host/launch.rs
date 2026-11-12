@@ -28,7 +28,6 @@ use crate::net::{is_valid_guest_network, is_valid_hostname};
 use crate::protocol::WORKLOAD_ACCOUNT_TOKEN;
 use crate::protocol::cmdline::{self, Parameter};
 
-pub(crate) use super::config::fit_arguments;
 pub use super::config::{
     COMMAND_LINE_BUDGET, DEFAULT_GUEST_NETWORK, PROCESS_COMMAND_LINE_LIMIT,
     fit_process_command_line, process_command_line_units,
@@ -318,9 +317,7 @@ pub struct VmmLaunch<'a> {
 
 impl VmmLaunch<'_> {
     /// The part of [`PROCESS_COMMAND_LINE_LIMIT`] that the planning of an adapter's launch keeps
-    /// for the rest of the launch, in UTF-16 code units, as
-    /// [`SandboxPlan::check_adapter_launch`](super::sandbox::SandboxPlan::check_adapter_launch)
-    /// leaves it: what the plan does not render.
+    /// for the rest of the launch, in UTF-16 code units: what the plan does not render.
     ///
     /// It holds the rest of a launch whose OpenVMM executable, kernel, initramfs, endpoint, and
     /// outcome report take up to 260 code units each, Windows' `MAX_PATH`: the executable and the
