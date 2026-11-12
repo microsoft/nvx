@@ -204,9 +204,10 @@ fn distro_manifest_binds_the_layer() {
     });
     layer.manifest(&valid.to_string());
     let binding = layer.preflight("/bin/sh").unwrap();
-    assert_eq!(binding.identity(), "11111111-1111-1111-1111-111111111111");
-    assert_eq!(binding.format(), DistroFormat::Erofs);
-    assert!(binding.manifest().is_some());
+    let recorded = serde_json::to_value(&binding).unwrap();
+    assert_eq!(recorded["identity"], "11111111-1111-1111-1111-111111111111");
+    assert_eq!(recorded["format"], DistroFormat::Erofs.as_str());
+    assert!(recorded["manifest"].is_object());
     binding
         .check(&layer.layer(), DISTRO_POLICY_REVISION)
         .unwrap();
@@ -378,7 +379,7 @@ fn the_entrypoint_check_needs_no_manifest_and_precedes_the_distro_verification()
     // A layer without a manifest passes the distro verification unread, and its binding records
     // the manifest's absence, but the entrypoint check still refuses systemd.
     let binding = layer.preflight("/sbin/init").unwrap();
-    assert_eq!(binding.manifest(), None);
+    assert!(serde_json::to_value(&binding).unwrap()["manifest"].is_null());
     assert_eq!(
         message(layer.preflight("/usr/lib/systemd/systemd")),
         "systemd entrypoints are unsupported by the sandbox security profile"
@@ -417,7 +418,10 @@ fn sandbox_rejects_systemd_from_bound_distro_metadata() {
         &fs::File::open(layer.path("distro.erofs.manifest.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(binding.manifest(), Some(&sealed));
+    assert_eq!(
+        serde_json::to_value(&binding).unwrap()["manifest"],
+        serde_json::to_value(&sealed).unwrap()
+    );
     for (format, artifact, sha256) in [
         ("\"1\"", "\"distro.erofs\"", sha256.as_str()),
         ("1.0", "\"distro.erofs\"", &sha256),

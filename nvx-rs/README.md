@@ -1110,19 +1110,12 @@ distro layer, the targets of `nvx-rs run` shares, and the managed exec
 environment; see [Sandbox input contract](#sandbox-input-contract).
 
 `distro`: the `DistroBinding` of a distro layer, an EROFS layer or a GPT disk,
-which explicit verification makes or a staging caller imports, and its check
-from metadata alone, which returns the layer open; see
-[Distro bindings](#distro-bindings).
+which explicit verification makes, and its check from metadata alone, which
+returns the layer open; see [Distro bindings](#distro-bindings).
 
 `scratch`: the `ScratchBinding` of a scratch image, its identity, kind, and
 length, and its check from metadata alone, which claims the image for one
 sandbox at a time and returns it open.
-
-`CheckedDistro::geometry` and `CheckedScratch::geometry` read, through the
-checked files, the `BlockGeometry` that OpenVMM presents for them: their length,
-a nonzero multiple of 512 bytes, logical blocks of 512 bytes, and physical
-blocks of the I/O block size of their filesystem on Linux, and of 4096 bytes on
-Windows.
 
 ### `nvx::guest`
 
@@ -1699,17 +1692,15 @@ manifest, or to the manifest's absence, to the revision and result of the
 distro policy, `DISTRO_POLICY_REVISION`, and to the layer's format and the
 identity that the guest expects of it: the UUID of an EROFS layer, or the disk
 GUID of a GPT disk, which `SandboxLayer::gpt` names. It comes from explicit
-verification, or from `DistroBinding::import`, which a staging caller that
-verified the layer itself calls to bind it without hashing it again. `check`
-fails for a binding of another version, layer, format, or policy revision, a verdict
-that rejects the layer, a layer whose identity, kind, length, or times changed,
-and a manifest that appeared, disappeared, or changed. A binding of a layer
-without a manifest holds only while nothing is at the manifest's path: unlike
-verification, which finds a manifest as `Path.exists` does, `check` and
-`import` refuse a path whose lookup fails for another reason than a missing
-file. A missing or stale binding fails: no runtime operation registers,
-verifies, or hashes a layer on its own. Hashing belongs where layers are built,
-installed, or staged, and to diagnostics.
+verification. `check` fails for a binding of another version, layer, format,
+or policy revision, a verdict that rejects the layer, a layer whose identity,
+kind, length, or times changed, and a manifest that appeared, disappeared, or
+changed. A binding of a layer without a manifest holds only while nothing is at
+the manifest's path: unlike verification, which finds a manifest as
+`Path.exists` does, `check` refuses a path whose lookup fails for another
+reason than a missing file. A missing or stale binding fails: no runtime
+operation registers, verifies, or hashes a layer on its own. Hashing belongs
+where layers are built, installed, or staged, and to diagnostics.
 
 On Linux, a seal holds `st_dev`, `st_ino`, the file type, `st_size`, and
 `st_mtime` and `st_ctime` with their nanoseconds; on Windows, the volume serial
