@@ -111,7 +111,9 @@ python3 scripts/public_api.py --update
 ```
 
 The script builds rustdoc's JSON with the Rust release that
-`rust-toolchain.toml` pins, and adds the musl and MSVC targets to it; see
+`rust-toolchain.toml` pins, and adds the musl and MSVC targets to it. It also
+fails unless the API's hidden items are one `main` per binary, the entry point
+that the binary's source calls, and the modules that hold it; see
 [Rust crates](ci.md#rust-crates).
 
 ## Test ownership
