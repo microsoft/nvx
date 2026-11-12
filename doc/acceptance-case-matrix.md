@@ -114,7 +114,7 @@ The adapter's README said what each proved.
 | Scenario | Fate | Coverage, or why it retires |
 | --- | --- | --- |
 | `a_launch_takes_the_bindings_that_the_store_stages_for_its_images` | rewritten | `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_scratch_binding`. The adapter's staging store retires |
-| `staging_verifies_the_image_and_binds_the_scratch` | rewritten | `nvx-rs/src/host/sandbox/distro/tests.rs::verification_binds_the_layer_its_manifest_and_the_policy`; `nvx-rs/src/host/sandbox/scratch/tests.rs::binds_refuse_what_is_not_a_scratch_image`; `nvx-rs/tests/security_checklist.rs::a_staged_image_that_was_replaced_fails_its_check` |
+| `staging_verifies_the_image_and_binds_the_scratch` | rewritten | `nvx-rs/src/host/sandbox/distro/tests.rs::verification_binds_the_layer_its_manifest_and_the_policy`; `nvx-rs/src/host/sandbox/scratch/tests.rs::binds_refuse_what_is_not_a_scratch_image`; `nvx-rs/src/host/sandbox/distro/tests.rs::a_staged_image_that_was_replaced_fails_its_check` |
 | `the_host_program_stages_images_in_the_store` | retired | The adapter's `stage` command and its record |
 | `the_store_records_the_staged_images` | retired | The adapter's record of its staged images |
 
@@ -122,10 +122,10 @@ The adapter's README said what each proved.
 
 | Scenario | Fate | Coverage, or why it retires |
 | --- | --- | --- |
-| `a_launch_claims_its_scratch_image_until_it_releases_its_checked_files` | rewritten | `nvx-rs/tests/security_checklist.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`; `nvx-rs/src/host/sandbox/scratch/tests.rs::a_claim_lasts_while_the_vmm_holds_the_image` |
+| `a_launch_claims_its_scratch_image_until_it_releases_its_checked_files` | rewritten | `nvx-rs/src/host/sandbox/scratch/tests.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`; `nvx-rs/src/host/sandbox/scratch/tests.rs::a_claim_lasts_while_the_vmm_holds_the_image` |
 | `a_launch_reads_only_the_networks_that_the_plan_takes` | rewritten | `nvx-rs/tests/cli.rs::network_policies_that_the_planner_refuses_fail_before_launch`; `nvx-rs/src/host/network/tests.rs::invalid_rules_are_rejected_with_the_policy_compilers_messages` |
 | `a_launch_records_what_it_launched` | retired | The adapter's launch records. Callers keep `SavedVm`: `nvx-rs/src/host/vm/tests/reattach.rs::verifying_saved_values_checks_runtime_and_process_without_opening_an_endpoint` |
-| `a_launch_refuses_images_that_are_not_staged_or_changed_since` | rewritten | `nvx-rs/tests/security_checklist.rs::a_staged_image_that_was_replaced_fails_its_check`; `nvx-rs/src/host/sandbox/scratch/tests.rs::checks_fail_without_reading_when_the_image_changes`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding` |
+| `a_launch_refuses_images_that_are_not_staged_or_changed_since` | rewritten | `nvx-rs/src/host/sandbox/distro/tests.rs::a_staged_image_that_was_replaced_fails_its_check`; `nvx-rs/src/host/sandbox/scratch/tests.rs::checks_fail_without_reading_when_the_image_changes`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding` |
 | `a_launch_refuses_shares_that_it_cannot_export` | rewritten | `nvx-rs/src/host/filesystem/tests.rs::policy_paths_hide_show_and_narrow_writes`; `nvx-rs/tests/security_checklist.rs::an_export_refuses_a_read_only_path_inside_a_writable_directory` |
 | `a_launch_renders_each_element_of_its_network_through_the_plan` | rewritten | `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path`; `nvx-rs/src/host/network/tests.rs::proxy_urls_name_the_gateway_as_the_guest_sees_it` |
 | `a_launch_shares_host_paths_inside_the_authorized_directories` | rewritten | `nvx-rs/src/host/filesystem/tests.rs::policy_paths_hide_show_and_narrow_writes`; `nvx-rs/src/host/config/tests.rs::cold_boot_arguments_lower_layered_roots_networks_and_exports_by_path` |
@@ -151,7 +151,7 @@ The adapter's README said what each proved.
 
 | Scenario | Fate | Coverage, or why it retires |
 | --- | --- | --- |
-| `a_launch_that_the_hook_ends_after_its_checks_leaves_no_launch` | rewritten | A launch that fails after its checks leaves nothing of its own: `nvx-rs/src/host/vm/tests.rs::creation_rolls_back_its_log_and_never_removes_preexisting_outputs_or_inputs`; `nvx-rs/tests/security_checklist.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`. The step hook retires |
+| `a_launch_that_the_hook_ends_after_its_checks_leaves_no_launch` | rewritten | A launch that fails after its checks leaves nothing of its own: `nvx-rs/src/host/vm/tests.rs::creation_rolls_back_its_log_and_never_removes_preexisting_outputs_or_inputs`; `nvx-rs/src/host/sandbox/scratch/tests.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`. The step hook retires |
 | `images_replaced_after_the_checks_never_reach_the_vm` | retired | The checked-file handoff leaves (SL6.3, #1122): a launch names its images by path, so what takes an image's path after its check is what OpenVMM opens. Callers stage their images in a directory that only their own account can write, as the docs of `host::sandbox::distro`, `host::sandbox::scratch` and `host::seal` require, so that no other account can replace a checked image |
 | `the_hook_pauses_a_launch_at_each_of_its_steps` | retired | The adapter's step hook |
 
@@ -159,13 +159,13 @@ The adapter's README said what each proved.
 
 | Scenario | Fate | Coverage, or why it retires |
 | --- | --- | --- |
-| `a_changed_image_is_refused_before_spawn` | rewritten | `nvx-rs/tests/security_checklist.rs::a_staged_image_that_was_replaced_fails_its_check`; `nvx-rs/src/host/sandbox/distro/tests.rs::the_staged_check_fails_without_reading_when_the_layer_changes`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding` |
+| `a_changed_image_is_refused_before_spawn` | rewritten | `nvx-rs/src/host/sandbox/distro/tests.rs::a_staged_image_that_was_replaced_fails_its_check`; `nvx-rs/src/host/sandbox/distro/tests.rs::the_staged_check_fails_without_reading_when_the_layer_changes`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding` |
 | `a_denied_network_lets_no_probe_through` | rewritten | A deny-all network now keeps its NIC, which lets nothing through: `nvx-rs/src/host/config/tests.rs::an_explicit_deny_all_network_keeps_its_nic`; `test-microvm --scenario directional-network-policy` |
 | `a_failed_mapping_tears_the_vm_down` | rewritten | The guest's refusal, which keeps the mappings before it, latches the table and refuses the start: `nvx-rs/src/guest/mappings/table/tests.rs::a_failed_mapping_keeps_those_before_it_and_latches_the_table`; `nvx-rs/src/guest/managed_agent/dispatch/tests.rs::a_failed_mapping_keeps_refusing_workloads_through_dispatch`. The stop that the guest confirms, with a successful outcome and no record of the VM: `nvx-rs/tests/cli.rs::a_mapping_that_the_guest_refuses_leaves_no_usable_start`. The teardown of the root and its mappings: `nvx-rs/src/guest/root/tests.rs::a_teardown_unmounts_the_layers_top_first_and_reports_every_failure`; `nvx-rs/src/guest/mappings/mapper/tests/privileged.rs::a_teardown_unmounts_each_mapping_and_reports_a_busy_one` |
 | `a_forward_reaches_its_guest_port` | rewritten | `test-microvm --scenario host-loopback-policy` |
 | `a_proxy_only_network_lets_only_its_proxy_through` | rewritten | `test-microvm --scenario sandbox-proxy-only` |
 | `a_read_only_share_inside_a_writable_one_is_refused_before_launch` | rewritten | `nvx-rs/tests/security_checklist.rs::an_export_refuses_a_read_only_path_inside_a_writable_directory` |
-| `a_replaced_scratch_is_refused_before_spawn` | rewritten | `nvx-rs/tests/security_checklist.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_scratch_binding` |
+| `a_replaced_scratch_is_refused_before_spawn` | rewritten | `nvx-rs/src/host/sandbox/scratch/tests.rs::a_scratch_image_is_claimed_by_one_launch_and_checked_again_after_a_release`; `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_scratch_binding` |
 | `a_share_inside_a_reserved_tree_is_refused_before_launch` | rewritten | `nvx-rs/tests/security_checklist.rs::an_export_refuses_guest_targets_that_are_not_canonical_or_that_a_root_reserves`; `nvx-rs/src/host/filesystem/tests.rs::reserved_targets_depend_on_the_root` |
 | `a_share_over_a_reserved_tree_is_refused_before_launch` | rewritten | `nvx-rs/tests/security_checklist.rs::an_export_refuses_guest_targets_that_are_not_canonical_or_that_a_root_reserves`; `nvx-rs/src/host/filesystem/tests.rs::reserved_targets_depend_on_the_root` |
 | `accountless_workload_identity_fails_its_stage` | rewritten | `test-microvm --scenario workload-identity`; `nvx-rs/src/guest/init/boot/tests.rs::account_creation_replaces_only_the_requested_unusable_identity_once` |
@@ -201,7 +201,7 @@ The adapter's README said what each proved.
 | `published_listeners_refuse_binding_and_raw_sockets` | retired | The capability allowlist of the old guest entry leaves with the exec engine (#1087): nvx-init runs each execution as a plain process |
 | `recovery_required_layer_fails_the_assembly` | rewritten | `nvx-rs/src/guest/root/tests.rs::a_layer_that_is_not_ext4_or_whose_journal_needs_a_recovery_is_refused_before_any_mount` |
 | `root_profiles_enter_the_root` | retired | Per-execution namespaces, root profiles and capability sets leave with the exec engine (#1087) |
-| `unstaged_images_are_refused_before_spawn` | rewritten | `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding`; `nvx-rs/tests/security_checklist.rs::a_staged_image_that_was_replaced_fails_its_check` |
+| `unstaged_images_are_refused_before_spawn` | rewritten | `nvx-rs/tests/cli.rs::start_refuses_a_configuration_without_a_valid_distro_binding`; `nvx-rs/src/host/sandbox/distro/tests.rs::a_staged_image_that_was_replaced_fails_its_check` |
 
 ### `vm_template` (8)
 
