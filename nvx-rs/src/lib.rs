@@ -35,7 +35,7 @@
 //!   network and filesystem policies, the host's NVXS connection, control sessions, process and
 //!   platform primitives, the supervision of VM instances: starting, reattaching, executing
 //!   workloads, and stopping, the store of a sandbox's runtime records and launch journal, and the
-//!   manifests, compatibility keys, store, and leases of templates.
+//!   manifests and compatibility keys of templates.
 //! - `guest` (feature `guest`, Linux): the programs that run in NVX guests, such as
 //!   `nvx-console-pending`, the guest's NVXS connection, the libraries through which any guest
 //!   init or agent opens the terminal on which it serves its session (`guest::terminal`), starts

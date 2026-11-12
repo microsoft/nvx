@@ -15,8 +15,8 @@ use crate::activation::{
 use crate::host::instance::generate_capability;
 use crate::host::nvxs::HostConnection;
 use crate::host::session;
+use crate::host::snapshot::SnapshotManifest;
 use crate::host::supervisor::{Launched, VmmCommand, spawn};
-use crate::host::template::TemplateManifest;
 use crate::protocol::{
     APP_ERROR, APP_EXEC, APP_EXIT, APP_MAPS, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP,
     APP_STOPPED, HostMap, Workload, WorkloadEnvironment, decode_app, encode_app,
@@ -196,7 +196,7 @@ fn run() -> Result<(), AnyError> {
     for path in [&vmm, &snapshot, &distro, &original_console, &root, &result] {
         require(path.is_absolute(), "all fixture paths must be absolute")?;
     }
-    let manifest = TemplateManifest::read(&snapshot)?;
+    let manifest = SnapshotManifest::read(&snapshot)?;
     require(
         manifest.hypervisor() == backend() && manifest.memory_len() == 128 << 20,
         "wrong backend/memory snapshot",
