@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
-use crate::guest::activation::{ActivationAction, ActivationState};
+use crate::guest::activation::{ActivationAction, ActivationInput, ActivationState};
 use crate::guest::init::{self, Capture, CaptureStep, RestoreHandoff, Restored, Runtime};
 use crate::guest::nvxs::{GuestConnection, GuestConnectionError};
 use crate::guest::snapshot::{Captured, Disposition};
@@ -280,6 +280,16 @@ impl<'r> Session<'r> {
         self.capture.as_ref().and_then(Capture::shutdown_status)
     }
 
+    /// The status of the failed restored activation's class, which the PID-1 caller uses once
+    /// the session has failed, or `None` without a restored activation that failed.
+    pub(crate) fn activation_status(&mut self) -> Option<u8> {
+        self.capture
+            .as_mut()?
+            .restored
+            .as_mut()?
+            .failure_status(Instant::now())
+    }
+
     /// Refuses rooted callers before validating the flag or reserving workload cleanup.
     pub(crate) fn queue_capture(
         &mut self,
@@ -457,15 +467,21 @@ impl<'r> Session<'r> {
                                 let retry = self
                                     .accept_request(&bytes)
                                     .map_err(DataFailure::into_error)?;
-                                if retry.kind != protocol::APP_ACTIVATE
-                                    || !matches!(
+                                if retry.kind != protocol::APP_ACTIVATE {
+                                    return Err(activation_failure(
                                         restored
-                                            .accept(retry.payload, Instant::now())
-                                            .map_err(activation_failure)?
-                                            .0,
-                                        ActivationAction::Join
-                                    )
-                                {
+                                            .activation
+                                            .input(Instant::now(), ActivationInput::Request)
+                                            .expect_err("an activation takes no request yet"),
+                                    ));
+                                }
+                                if !matches!(
+                                    restored
+                                        .accept(retry.payload, Instant::now())
+                                        .map_err(activation_failure)?
+                                        .0,
+                                    ActivationAction::Join
+                                ) {
                                     return Err(Errno::EPROTO);
                                 }
                                 replies.push(retry.request_id);

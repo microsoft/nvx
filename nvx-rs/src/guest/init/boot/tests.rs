@@ -274,6 +274,222 @@ fn an_expired_activation_cannot_begin_or_advance_to_another_space_step() {
     assert!(error.to_string().contains("deadline"));
 }
 
+#[test]
+fn a_failed_activation_ends_the_vm_with_the_status_of_its_class() {
+    use crate::activation::{ActivationRecord, Configuration, RestoreSection, TransactionId};
+    use crate::guest::activation::NetworkError;
+    use crate::protocol::status::*;
+
+    let now = Instant::now();
+    let (_, payload) = super::super::Capture::activation_fixture();
+    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
+    let encode = |restore, change: fn(&mut Configuration)| {
+        let mut configuration = record.configuration().clone();
+        change(&mut configuration);
+        ActivationRecord::new(restore, configuration)
+            .unwrap()
+            .encode()
+    };
+    let cold = encode(None, |_| {});
+    let larger = encode(record.restore().copied(), |configuration| {
+        configuration.resources.cpus += 1
+    });
+    let other = encode(
+        Some(RestoreSection {
+            transaction: TransactionId::from_bytes([0x33; TransactionId::LEN]),
+        }),
+        |_| {},
+    );
+    let restricted = || {
+        super::super::Capture::activation_fixture()
+            .0
+            .restored
+            .unwrap()
+    };
+    let refused = |input: ActivationInput<'_>| {
+        let mut restored = restricted();
+        restored.activation.input(now, input).unwrap_err();
+        restored
+    };
+    let activating = || {
+        let mut restored = restricted();
+        assert!(matches!(
+            restored.accept(&payload, now).unwrap().0,
+            ActivationAction::Apply(_)
+        ));
+        restored
+    };
+    // The record's application fails with `error`, as `Restored::apply` returns it.
+    let failed = |error: Error| {
+        let mut restored = activating();
+        restored
+            .activation
+            .complete(now, Err(error.into()))
+            .unwrap_err();
+        restored
+    };
+    let applying = |error: ApplyError| failed(activation_error(error));
+    let missing = || root::Error::Missing {
+        role: root::Role::Distro,
+        mmio: DISTRO_MMIO_BASE,
+    };
+    let relative = RootTemplate {
+        runtime: "run/nvx".into(),
+        distro: Device {
+            mmio: DISTRO_MMIO_BASE,
+            sectors: None,
+        },
+        scratch: Device {
+            mmio: SCRATCH_MMIO_BASE,
+            sectors: None,
+        },
+        timeout: Duration::ZERO,
+        filesystem_tag: "microvm".into(),
+        gateway: None,
+    };
+    let Err(assembly) = guest_activation::apply(&record, &relative, None) else {
+        panic!("a relative runtime directory was assembled");
+    };
+    let mut ordered = restricted();
+    ordered.activation.start().unwrap_err();
+    let mut completed = restricted();
+    completed.activation.complete(now, Ok(())).unwrap_err();
+    let mut changed = activating();
+    changed
+        .activation
+        .input(now, ActivationInput::Activate(&other))
+        .unwrap_err();
+    // Requests that `Restored` refuses before its activation takes them.
+    let mut identity = payload.clone();
+    identity[0] ^= 1;
+    let mut undecodable = restricted();
+    undecodable.accept(&payload[..5], now).unwrap_err();
+    let mut rewritten = activating();
+    rewritten.accept(&identity, now).unwrap_err();
+    let mut replayed = activating();
+    replayed.activation.complete(now, Ok(())).unwrap();
+    replayed.accept(&identity, now).unwrap_err();
+    let cases = [
+        ("an expired deadline", restricted(), ACTIVATION_DEADLINE),
+        (
+            "a second reset",
+            refused(ActivationInput::Reset),
+            ACTIVATION_PROTOCOL,
+        ),
+        (
+            "a request before the Activate",
+            refused(ActivationInput::Request),
+            ACTIVATION_PROTOCOL,
+        ),
+        ("another transaction", changed, ACTIVATION_PROTOCOL),
+        ("a changed request", rewritten, ACTIVATION_PROTOCOL),
+        (
+            "a changed request once ready",
+            replayed,
+            ACTIVATION_PROTOCOL,
+        ),
+        ("an undecodable request", undecodable, ACTIVATION_RECORD),
+        (
+            "an undecodable record",
+            refused(ActivationInput::Activate(&[0])),
+            ACTIVATION_RECORD,
+        ),
+        (
+            "a cold boot's record",
+            refused(ActivationInput::Activate(&cold)),
+            ACTIVATION_RECORD,
+        ),
+        (
+            "other resources",
+            refused(ActivationInput::Activate(&larger)),
+            ACTIVATION_RESOURCES,
+        ),
+        (
+            "a root that does not assemble",
+            applying(assembly),
+            ACTIVATION_ROOT,
+        ),
+        (
+            "a GPT disk",
+            applying(ApplyError::Gpt(missing())),
+            ACTIVATION_ROOT,
+        ),
+        (
+            "a machine ID",
+            applying(ApplyError::MachineId {
+                error: std::io::Error::other("no machine ID"),
+                teardown: None,
+            }),
+            ACTIVATION_WORKLOAD,
+        ),
+        (
+            "a view",
+            applying(ApplyError::View {
+                error: Error::io("no hostname"),
+                teardown: None,
+            }),
+            ACTIVATION_WORKLOAD,
+        ),
+        (
+            "an export",
+            applying(ApplyError::Export {
+                error: missing(),
+                teardown: None,
+            }),
+            ACTIVATION_EXPORT,
+        ),
+        (
+            "network settings",
+            applying(ApplyError::Network {
+                error: NetworkError::Gateway,
+                teardown: None,
+            }),
+            ACTIVATION_NETWORK,
+        ),
+        (
+            "an account",
+            failed(classed(ACTIVATION_WORKLOAD)(Error::unsupported(
+                "the account is missing",
+            ))),
+            ACTIVATION_WORKLOAD,
+        ),
+        // A teardown's failure keeps the step's class among the causes.
+        (
+            "an announcer",
+            failed(
+                Error::io("the announcer failed; cleanup failed").with_source(classed(
+                    ACTIVATION_NETWORK,
+                )(
+                    Error::io("the announcer failed"),
+                )),
+            ),
+            ACTIVATION_NETWORK,
+        ),
+        (
+            "a switch",
+            failed(Error::io("failed to switch")),
+            ACTIVATION_ROOT,
+        ),
+        ("an early completion", completed, ACTIVATION_ORDER),
+        ("an early start", ordered, ACTIVATION_ORDER),
+    ];
+    for (case, mut restored, expected) in cases {
+        let later = now + Duration::from_secs(3600);
+        assert_eq!(
+            restored.failure_status(later),
+            Some(expected),
+            "{case}: {:?}",
+            restored.activation
+        );
+        assert_eq!(restored.failure_status(later), Some(expected), "{case}");
+    }
+    // An activation fails only once its deadline has passed, and never once it is ready.
+    assert_eq!(restricted().failure_status(now), None);
+    let mut ready = activating();
+    ready.activation.complete(now, Ok(())).unwrap();
+    assert_eq!(ready.failure_status(now + Duration::from_secs(3600)), None);
+}
+
 fn tokens(extra: &str) -> Tokens {
     Tokens::parse(format!("{ROOT} {VIEW} {CLI} {extra}").as_bytes()).unwrap()
 }
