@@ -2,8 +2,8 @@
 //! which a caller's mappings come, and tear it down, for a guest init or agent, whether or not it
 //! is PID 1.
 //!
-//! This module is NVX's internal reference code of the guest's space, hidden from the
-//! documentation and unstable: it becomes crate-private once nothing outside NVX uses it.
+//! This module is part of the guest's space, nvx-init's internal reference code, private to the
+//! crate.
 //!
 //! - [`assemble`] finds the block devices of an [`Assembly`] by their MMIO windows, checks and
 //!   flushes them, and mounts the root: an overlay, mounted `nosuid,nodev` with the option set of
@@ -149,7 +149,7 @@ use crate::uuid::Uuid;
 
 pub(crate) use self::block::window_directories;
 pub(crate) use self::kernel::Paths;
-pub use self::share::{ShareChild, ShareKind, ShareRefusal};
+pub(crate) use self::share::{ShareChild, ShareKind, ShareRefusal};
 
 /// Where the runtime binds its time status read-only in the root.
 pub(crate) const TIME_STATUS_TARGET: &str = "/run/nvx/time";
@@ -218,12 +218,12 @@ const RUNTIME_DIRECTORY_MODE: u32 = 0o755;
 /// The most bytes of options that `mount(2)` passes a file system whole: one 4 KiB page, the
 /// smallest into which Linux copies them, less the NUL that ends them. Linux cuts longer options
 /// short, so [`assemble`] refuses an overlay whose options are longer.
-pub const MOUNT_OPTIONS_LIMIT: usize = 4095;
+pub(crate) const MOUNT_OPTIONS_LIMIT: usize = 4095;
 
 /// The role of a block device in a layered root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum Role {
+pub(crate) enum Role {
     /// The read-only image: an EROFS file system, the overlay's lower layer, or a GPT disk, whose
     /// partitions after the first hold the overlay's lower layers.
     Distro,
@@ -252,17 +252,17 @@ impl fmt::Display for Role {
 /// A block device that the VMM attaches for a role, which the base address of its MMIO window
 /// names, as the VMM declares it on the kernel command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Device {
+pub(crate) struct Device {
     /// The base address of the device's MMIO window.
-    pub mmio: u64,
+    pub(crate) mmio: u64,
     /// The size that the device must have, in 512-byte sectors, if the caller expects one.
-    pub sectors: Option<u64>,
+    pub(crate) sectors: Option<u64>,
 }
 
 /// A step on a found block device, which an [`Error::Device`] names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum DeviceStep {
+pub(crate) enum DeviceStep {
     /// Reading its size.
     Size,
     /// Flushing its buffers.
@@ -297,29 +297,29 @@ impl fmt::Display for DeviceStep {
 
 /// What [`assemble`] mounts, and where.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Assembly {
+pub(crate) struct Assembly {
     /// The runtime directory: an absolute path in canonical form, not `/`, without an empty, `.`,
     /// or `..` component, or a trailing `/`, of at most
     /// [`MAX_PATH_BYTES`](super::mappings::MAX_PATH_BYTES) bytes, that no symbolic link leads
     /// through, and without `,`, `:`, `\`, `=`, or NUL, which the overlay's options reserve.
-    pub runtime: PathBuf,
+    pub(crate) runtime: PathBuf,
     /// The distro device, which holds the image.
-    pub distro: Device,
+    pub(crate) distro: Device,
     /// The image's format, and what the caller expects of it.
-    pub image: Image,
+    pub(crate) image: Image,
     /// The upper, which holds the overlay's upper and work directories.
-    pub upper: Upper,
+    pub(crate) upper: Upper,
     /// The overlay's mode, which selects its option set.
-    pub overlay: OverlayMode,
+    pub(crate) overlay: OverlayMode,
     /// How long to wait for each device to appear.
-    pub timeout: Duration,
+    pub(crate) timeout: Duration,
 }
 
 /// The image on the distro device, in the format that the caller names: an assembly never probes
 /// the device for another.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Image {
+pub(crate) enum Image {
     /// An EROFS file system: the overlay's one lower layer, which an assembly mounts read-only at
     /// `layers/distro`.
     Erofs {
@@ -356,7 +356,7 @@ pub enum Image {
 /// directories on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum Upper {
+pub(crate) enum Upper {
     /// A whole-device ext4 file system on the scratch device, which an assembly mounts
     /// `rw,nosuid,nodev` at `scratch`, and whose directories persist across boots.
     Scratch {
@@ -376,7 +376,7 @@ pub enum Upper {
 
 impl Upper {
     /// Returns the upper's kind.
-    pub const fn kind(self) -> UpperKind {
+    pub(crate) const fn kind(self) -> UpperKind {
         match self {
             Self::Scratch { .. } => UpperKind::Scratch,
             Self::Tmpfs { .. } => UpperKind::Tmpfs,
@@ -387,7 +387,7 @@ impl Upper {
 /// The kind of a root's upper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum UpperKind {
+pub(crate) enum UpperKind {
     /// An ext4 scratch, on the scratch device.
     Scratch,
     /// A tmpfs.
@@ -397,7 +397,7 @@ pub enum UpperKind {
 /// Whether an ext4 scratch may have a journal, which [`assemble`] checks in the feature flags of
 /// its superblock before it mounts it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Journal {
+pub(crate) enum Journal {
     /// The scratch may have a journal or none, so the assembly reads nothing to check it.
     Allowed,
     /// The scratch may not have a journal: the assembly refuses a scratch whose ext4 superblock
@@ -410,7 +410,7 @@ pub enum Journal {
 /// mounts without the set in effect.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum OverlayMode {
+pub(crate) enum OverlayMode {
     /// `metacopy=on,xino=on`, the default, for lowers whose overlay xattrs the caller trusts: a
     /// change of a lower file's metadata copies up its metadata alone, renaming a lower directory
     /// records a redirect, and inode numbers stay unique across the layers.
@@ -424,7 +424,7 @@ pub enum OverlayMode {
 
 impl OverlayMode {
     /// Returns the mode's option set, which follows the overlay's directories in its options.
-    pub const fn options(self) -> &'static str {
+    pub(crate) const fn options(self) -> &'static str {
         match self {
             Self::TrustedLowers => "metacopy=on,xino=on",
             Self::UntrustedLowers => "metacopy=off,redirect_dir=nofollow",
@@ -475,7 +475,7 @@ impl OverlayMode {
 ///     redirects when the upper can't hold the overlay's extended attributes.
 ///
 /// A failure unmounts what the assembly mounted, as [`Root::teardown`] does, and reports both.
-pub fn assemble(assembly: &Assembly) -> Result<Root, AssemblyError> {
+pub(crate) fn assemble(assembly: &Assembly) -> Result<Root, AssemblyError> {
     assemble_until(assembly, None)
 }
 
@@ -616,7 +616,7 @@ fn assemble_with(
 
 /// A read-only layer of an assembled root, one of the overlay's lower directories.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lower {
+pub(crate) struct Lower {
     /// The layer's mount.
     mount: Mount,
     /// The node of the layer's block device.
@@ -634,7 +634,7 @@ pub struct Lower {
 /// unmounts them the same way, and ignores failures, unless `Root::switch` has switched into the
 /// root: it then unmounts nothing. Until then, the root holds the lock of its runtime directory,
 /// where no other root assembles.
-pub struct Root {
+pub(crate) struct Root {
     /// The kernel that mounts and unmounts.
     kernel: Box<dyn Kernel>,
     /// The runtime directory.
@@ -684,12 +684,12 @@ pub struct Root {
 impl Root {
     /// Returns the root's original overlay mount point, `rootfs` in the runtime directory.
     /// This path is unchanged by `Root::switch`; paths then resolve inside the switched root.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     /// Returns the runtime directory.
-    pub fn runtime(&self) -> &Path {
+    pub(crate) fn runtime(&self) -> &Path {
         &self.runtime
     }
 
@@ -764,7 +764,7 @@ impl Root {
     ///
     /// Once `Root::switch` has switched into the root, the teardown refuses: it unmounts nothing,
     /// and its error's `TeardownError::is_switched` is true.
-    pub fn teardown(mut self) -> Result<(), TeardownError> {
+    pub(crate) fn teardown(mut self) -> Result<(), TeardownError> {
         self.unmount()
     }
 
@@ -1798,7 +1798,7 @@ fn holds_entry<T>(mut entries: impl Iterator<Item = io::Result<T>>) -> io::Resul
 /// A mount of a layered root.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum Mount {
+pub(crate) enum Mount {
     /// The EROFS image, at `layers/distro` in the runtime directory.
     Distro,
     /// The layer in a partition of a GPT disk, at `layers/pN` in the runtime directory, for its
@@ -1876,7 +1876,7 @@ impl fmt::Display for Mount {
 /// order of these variants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum RuntimeMounts {
+pub(crate) enum RuntimeMounts {
     /// procfs, at `/proc`.
     Proc,
     /// sysfs, at `/sys`.
@@ -1911,7 +1911,7 @@ impl RuntimeMounts {
 /// Why a root operation failed. Its text names what failed, and the system's error, if any.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum Error {
+pub(crate) enum Error {
     /// The runtime directory's path is not absolute and canonical, holds a reserved character,
     /// or leads through a symbolic link.
     Runtime {
@@ -2263,7 +2263,7 @@ impl std::error::Error for Error {}
 
 /// Why [`assemble`] failed, and how unmounting what it had mounted failed, if it did.
 #[derive(Debug)]
-pub struct AssemblyError {
+pub(crate) struct AssemblyError {
     /// The assembly's failure.
     error: Error,
     /// The failures to unmount what the assembly had mounted.
@@ -2320,7 +2320,7 @@ impl std::error::Error for SwitchError {}
 /// The syncs and unmounts of a teardown that failed, in the order in which they were attempted,
 /// or the refusal of a root that has switched.
 #[derive(Debug)]
-pub struct TeardownError {
+pub(crate) struct TeardownError {
     /// The failures, which is empty only for the refusal of a root that has switched.
     failures: Vec<Unmount>,
 }
@@ -2354,7 +2354,7 @@ impl std::error::Error for TeardownError {}
 /// An unmount that failed, which left its mount in place, or the sync of an ext4 scratch's file
 /// system that failed before its unmount, which the teardown then skips.
 #[derive(Debug)]
-pub struct Unmount {
+pub(crate) struct Unmount {
     /// The mount.
     mount: Mount,
     /// The step that failed.

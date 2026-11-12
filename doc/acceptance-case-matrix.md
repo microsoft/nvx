@@ -478,16 +478,16 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/activation/mod.rs - activation (line 130)` | kept |  |
 | `nvx-rs/src/exec/mod.rs - exec (line 113)` | retired | The exec engine leaves (SL6.11a) |
 | `nvx-rs/src/gpt/mod.rs - gpt (line 43)` | kept |  |
-| `nvx-rs/src/guest/activation.rs - guest::activation (line 157)` | kept | SL6.11c rewrote it on `guest::snapshot::capture`, when its capture preparation and admission fence left (#1087) |
-| `nvx-rs/src/guest/activation/state.rs - guest::activation::state::Activation (line 56)` | kept |  |
+| `nvx-rs/src/guest/activation.rs - guest::activation (line 151)` | kept | SL6.11c rewrote it on `guest::snapshot::capture`, when its capture preparation and admission fence left (#1087) |
+| `nvx-rs/src/guest/activation/state.rs - guest::activation::state::Activation (line 54)` | kept | SL6.13b (#1127) rewrote it without the guest's space, which became private: its agent applies the record in its own space |
 | `nvx-rs/src/guest/cgroup.rs - guest::cgroup (line 36)` | retired | `guest::cgroup` leaves (SL6.11b) |
 | `nvx-rs/src/guest/entry.rs - guest::entry (line 90)` | retired | `guest::entry` leaves (SL6.11b) |
 | `nvx-rs/src/guest/exec.rs - guest::exec (line 79)` | retired | `guest::exec` leaves (SL6.11b) |
 | `nvx-rs/src/guest/exec.rs - guest::exec::Execution::adopt (line 619)` | retired | `guest::exec` leaves (SL6.11b) |
-| `nvx-rs/src/guest/gpt.rs - guest::gpt (line 18)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
+| `nvx-rs/src/guest/gpt.rs - guest::gpt (line 18)` | kept | SL6.13b (#1127) moved it to the module's unit tests, `nvx-rs/src/guest/gpt/tests.rs::a_disk_s_steps_compile`, since the guest's space became private |
 | `nvx-rs/src/guest/mappings/mapper.rs - guest::mappings::mapper (line 107)` | kept | SL6.11d (#1123) moved it to the mapper's unit tests, `nvx-rs/src/guest/mappings/mapper/tests.rs::a_mapper_s_steps_compile`, which map and unmount through the seams that NVX's programs use, since the mapper's `apply` and `teardown`, which only tests used, left |
 | `nvx-rs/src/guest/mappings/table.rs - guest::mappings::table::MappingTable (line 47)` | kept |  |
-| `nvx-rs/src/guest/mod.rs - guest (line 34)` | kept | The guest-agent guidelines quote it |
+| `nvx-rs/src/guest/mod.rs - guest (line 33)` | kept | The guest-agent guidelines quote it |
 | `nvx-rs/src/guest/nvxs.rs - guest::nvxs (line 22)` | kept |  |
 | `nvx-rs/src/guest/process.rs - guest::process (line 12)` | retired | `guest::process` leaves (SL6.11b) |
 | `nvx-rs/src/guest/process.rs - guest::process (line 39)` | retired | `guest::process` leaves (SL6.11b) |

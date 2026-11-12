@@ -8,8 +8,8 @@
 //! caller's choice.
 //!
 //! NVX mounts mappings through its mapper, which binds each beneath the descriptor of its root.
-//! The mapper, like the rest of the guest's space, is NVX's internal reference code: hidden from
-//! this documentation, unstable, and crate-private once nothing outside NVX uses it.
+//! The mapper, like the rest of the guest's space, is nvx-init's internal reference code, private
+//! to this crate.
 //!
 //! # Host mapping table
 //!
@@ -28,8 +28,7 @@
 //! root, which lists the aggregate's children, no table maps: a table refuses an empty source.
 
 mod kernel;
-#[doc(hidden)]
-pub mod mapper;
+pub(crate) mod mapper;
 mod table;
 
 use std::ffi::OsStr;
@@ -40,12 +39,9 @@ use std::path::{Path, PathBuf};
 use super::sys::{self, FileKind, MountAttributes, MountFlags};
 
 pub(crate) use self::kernel::{Kernel, SystemKernel};
-#[doc(hidden)]
-pub use self::mapper::{
-    ApplyError, Mapper, MappingError, Reserved, SourceRoot, Step, TargetRoot, TeardownError,
-    UnmountFailure,
+pub(crate) use self::mapper::{
+    Mapped, Mapper, MappingError, Reserved, SourceRoot, Step, TargetRoot, unbind_with,
 };
-pub(crate) use self::mapper::{Mapped, unbind_with};
 pub use self::table::{MappingTable, Refusal, TableError};
 
 /// The longest source or target of a [`Mapping`], in bytes: Linux's `PATH_MAX` without its
