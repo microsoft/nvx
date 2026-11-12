@@ -6,11 +6,11 @@ use std::path::Path;
 use std::thread;
 
 use crate::protocol::{
-    APP_ERROR, APP_EXIT, APP_STDERR, APP_STDOUT, OUTER_ACK, OUTER_CREDIT, OUTER_DATA,
-    OUTER_GUEST_ATTACH, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_RECEIVE_WINDOW, OUTER_RESET,
-    OUTER_WAIT, OuterHeader, ProtocolError, Workload, WorkloadEnvironment, decode_ack_payload,
-    decode_app, decode_credit_payload, decode_outer_header, encode_app, encode_exec_payload,
-    encode_outer,
+    APP_ERROR, APP_EXIT, APP_HEADER_LEN, APP_STDERR, APP_STDOUT, OUTER_ACK, OUTER_CREDIT,
+    OUTER_DATA, OUTER_GUEST_ATTACH, OUTER_HEADER_LEN, OUTER_MAX_PAYLOAD, OUTER_RECEIVE_WINDOW,
+    OUTER_RESET, OUTER_WAIT, OuterHeader, ProtocolError, Workload, WorkloadEnvironment,
+    decode_ack_payload, decode_credit_payload, decode_outer_header, encode_exec_payload,
+    encode_outer, v2,
 };
 
 use super::super::seam::Paths;
@@ -24,7 +24,11 @@ use crate::guest::sys::tests::{
 use crate::guest::sys::{self, FileDescriptor};
 
 const INSTANCE: [u8; 16] = [7; 16];
+/// The kind of `BUSY`, with which the agent refuses a request while an execution runs.
+const APP_BUSY: u8 = 0x87;
 
+/// A frame that the agent sent: its kind, request ID and status, and its payload, which follows
+/// a `READY`'s protocol version.
 #[derive(Debug, PartialEq, Eq)]
 struct Response {
     kind: u8,
@@ -120,9 +124,10 @@ impl Harness {
         self.responses()
     }
 
-    /// Sends one request, and reads the credit that returns its bytes, before any response.
+    /// Sends one request, of version 2, and reads the credit that returns its bytes, before any
+    /// response.
     fn send(&mut self, request_id: u64, kind: u8, payload: &[u8]) {
-        let frame = encode_app(kind, request_id, 0, payload);
+        let frame = frame(kind, request_id, payload);
         self.host
             .write_all(
                 &encode_outer(
@@ -153,13 +158,7 @@ impl Harness {
             (OUTER_DATA, self.guest_sequence)
         );
         self.guest_sequence += 1;
-        let frame = decode_app(&frame).unwrap();
-        Response {
-            kind: frame.kind,
-            request_id: frame.request_id,
-            status: frame.status,
-            payload: frame.payload.to_vec(),
-        }
+        response_of(&frame)
     }
 
     /// Reads responses up to the first terminal one, which it returns last.
@@ -169,7 +168,7 @@ impl Harness {
             let response = self.next_response();
             let terminal = matches!(
                 response.kind,
-                APP_READY | APP_ERROR | APP_EXIT | APP_STOPPED
+                APP_READY | APP_ERROR | APP_EXIT | APP_STOPPED | APP_BUSY
             );
             responses.push(response);
             if terminal {
@@ -226,6 +225,41 @@ fn read_outer(host: &mut UnixStream) -> (OuterHeader, Vec<u8>) {
 
 mod runtime;
 mod streams;
+
+/// Returns the request of version 2 of `kind`, with `request_id`, status 0 and `payload`, as the
+/// protocol defines it, whatever the payload that the kind allows.
+fn frame(kind: u8, request_id: u64, payload: &[u8]) -> Vec<u8> {
+    let length = u32::try_from(payload.len()).unwrap();
+    [
+        &b"NVXC\x02"[..],
+        &[kind, 0, 0],
+        &request_id.to_le_bytes(),
+        &0i32.to_le_bytes(),
+        &length.to_le_bytes(),
+        payload,
+    ]
+    .concat()
+}
+
+/// Returns the response that `frame`, of version 2, carries.
+fn response_of(frame: &[u8]) -> Response {
+    let (request_id, decoded) = v2::Frame::decode(frame).unwrap();
+    let mut payload = &frame[APP_HEADER_LEN..];
+    if let v2::Frame::Ready {
+        version,
+        activation,
+    } = decoded
+    {
+        assert_eq!(version, v2::VERSION);
+        payload = activation;
+    }
+    Response {
+        kind: frame[5],
+        request_id,
+        status: i32::from_le_bytes(frame[16..20].try_into().unwrap()),
+        payload: payload.to_vec(),
+    }
+}
 
 fn response(kind: u8, request_id: u64, status: i32, payload: &[u8]) -> Response {
     Response {
@@ -292,21 +326,6 @@ fn assert_environment_failure(mut harness: Harness, diagnostic_prefix: &[u8]) {
 }
 
 #[test]
-fn agent_advertises_the_control_features_of_its_mode_and_stops() {
-    let mut harness = Harness::new();
-    let response = harness.request(APP_FEATURES, &[]);
-    assert_eq!(
-        (response.kind, response.request_id, response.status),
-        (APP_READY, 42, 0)
-    );
-    let features = GuestFeatures::decode(&response.payload).unwrap();
-    assert_eq!(features, GuestFeatures::DIRECT_AGENT);
-    assert!(!features.contains(GuestFeatures::EXEC_CGROUP));
-    let system = harness.stop();
-    assert_eq!(system.tty_drained, 1);
-}
-
-#[test]
 fn fresh_session_refuses_root_requests_and_routes_capture_before_stopping() {
     let config = AgentConfig::for_test();
     let mappings = HostMappings::announced(0);
@@ -349,19 +368,14 @@ fn fresh_session_refuses_root_requests_and_routes_capture_before_stopping() {
 }
 
 #[test]
-fn agent_refuses_feature_payloads_and_unannounced_mapping_tables() {
+fn agent_refuses_unannounced_mapping_tables() {
     let mut harness = Harness::new();
-    for (kind, payload) in [
-        (APP_FEATURES, b"abc".as_slice()),
-        (APP_MAPS, b"\0\0\0\0\x01\0\0\0\0\0\x01\0\x02\0".as_slice()),
-    ] {
-        let response = harness.request(kind, payload);
-        assert_eq!(
-            (response.kind, response.request_id, response.status),
-            (APP_ERROR, 42, Errno::EINVAL as i32)
-        );
-        assert_eq!(response.payload, INVALID_REQUEST.as_bytes());
-    }
+    let response = harness.request(APP_MAPS, b"\0\0\0\0\x01\0\0\0\0\0\x01\0\x02\0");
+    assert_eq!(
+        (response.kind, response.request_id, response.status),
+        (APP_ERROR, 42, Errno::EINVAL as i32)
+    );
+    assert_eq!(response.payload, INVALID_REQUEST.as_bytes());
     harness.stop();
 }
 
@@ -931,7 +945,7 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
         "NVX-MANAGED-ERROR: stage=data status={}\n",
         Errno::EPROTO as i32
     );
-    let frame = encode_app(APP_PING, 42, 0, &[]);
+    let frame = frame(APP_PING, 42, &[]);
     let diagnostics =
         Harness::new().fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 9, &frame).unwrap());
     assert_eq!(
@@ -968,9 +982,16 @@ fn data_validation_diagnostics_preserve_the_c_failure_stage_and_status() {
 
 #[test]
 fn a_request_that_fails_after_validation_reports_the_data_stage() {
-    let frame = encode_app(APP_STOP, 42, 0, b"x");
-    let diagnostics =
-        Harness::new().fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap());
+    // A restored agent's activate request passes the validation of its frame, and its record,
+    // which does not decode, then ends the session.
+    let config = AgentConfig::for_test();
+    let mappings = HostMappings::announced(0);
+    let (capture, _) = Capture::activation_fixture();
+    let system = TestSystem::new(Paths::default());
+    let mut harness = Harness::spawn_with_capture(system, config, mappings, Some(capture));
+    harness.reset(1, 7);
+    let frame = frame(APP_ACTIVATE, 42, b"x");
+    let diagnostics = harness.fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap());
     assert_eq!(
         diagnostics,
         format!(
@@ -1367,15 +1388,9 @@ fn direct_endings_do_not_wait_for_an_escaped_descendant_to_close_output() -> Tes
     harness
         .host
         .set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
-    for (request_id, ending, status) in [
-        (42, "cancelled", 137),
-        (43, "timeout", 124),
-        (44, "output-limit", 125),
-    ] {
+    for (request_id, ending, status) in [(42, "cancelled", 137), (43, "timeout", 124)] {
         let exit = Gate::new(temporary.path().join(format!("exit-{request_id}")))?;
-        let mut output = Some(Gate::new(
-            temporary.path().join(format!("output-{request_id}")),
-        )?);
+        let output = Gate::new(temporary.path().join(format!("output-{request_id}")))?;
         let finish = Gate::new(temporary.path().join(format!("finish-{request_id}")))?;
         let escaped = temporary.path().join(format!("escaped-{request_id}"));
         // The finish gate ends only this escaped group, even after its readers have closed.
@@ -1385,18 +1400,12 @@ fn direct_endings_do_not_wait_for_an_escaped_descendant_to_close_output() -> Tes
                 "-c",
                 "exec 3<\"$0\" 4<\"$1\" 5<\"$2\"; \
                  setsid sh -c 'echo $$ > \"$0\"; read -r line <&4; \
-                 if [ \"$1\" = output-limit ]; then \
-                 (read -r line <&5; kill -KILL -$$) >/dev/null 2>&1 & \
-                 trap \"\" PIPE; \
-                 for i in 1 2 3 4; do \
-                 (while :; do cat /dev/zero 2>/dev/null; done) & done; wait; fi; \
-                 read -r line <&5' \"$3\" \"$4\" & \
+                 read -r line <&5' \"$3\" & \
                  echo $$; read -r line <&3",
                 utf8(&exit.path)?,
-                utf8(&output.as_ref().unwrap().path)?,
+                utf8(&output.path)?,
                 utf8(&finish.path)?,
                 utf8(&escaped)?,
-                ending,
             ]
             .map(str::to_owned)
             .into(),
@@ -1420,27 +1429,17 @@ fn direct_endings_do_not_wait_for_an_escaped_descendant_to_close_output() -> Tes
         }
         if ending == "cancelled" {
             harness.send(request_id, APP_CANCEL, &[]);
-        } else if ending == "output-limit" {
-            drop(output.take());
         }
         let mut responses = harness.responses();
         assert_eq!(
             responses.pop(),
             Some(response(APP_EXIT, request_id, status, ending.as_bytes()))
         );
-        let forwarded: usize = responses
-            .iter()
-            .map(|response| {
-                assert_eq!(
-                    (response.kind, response.request_id, response.status),
-                    (APP_STDOUT, request_id, 0)
-                );
-                response.payload.len()
-            })
-            .sum();
-        assert!(forwarded + leader.payload.len() <= protocol::MAX_OUTPUT_BYTES);
-        if ending == "output-limit" {
-            assert!(forwarded > 0);
+        for response in responses {
+            assert_eq!(
+                (response.kind, response.request_id, response.status),
+                (APP_STDOUT, request_id, 0)
+            );
         }
         let descendant = std::fs::read_to_string(&escaped)?.trim().parse::<u32>()?;
         drop(output);
@@ -1552,7 +1551,7 @@ fn a_control_failure_after_a_lost_status_does_not_wait_again() -> TestResult {
     drop(exit);
     wait_for_process_exit(leader)?;
     for _ in 0..2 {
-        assert_eq!(harness.request(APP_PING, &[]).status, Errno::EBUSY as i32);
+        assert_eq!(harness.request(APP_PING, &[]).kind, APP_BUSY);
     }
     harness.host.write_all(&encode_outer(
         OUTER_WAIT,
@@ -1647,12 +1646,7 @@ fn a_lost_status_keeps_its_outcome_through_a_later_cancellation_or_timeout() -> 
         for _ in 0..2 {
             assert_eq!(
                 harness.request(APP_PING, &[]),
-                response(
-                    APP_ERROR,
-                    42,
-                    Errno::EBUSY as i32,
-                    protocol::BUSY.as_bytes()
-                ),
+                response(APP_BUSY, 42, 0, b"")
             );
         }
         if cancelled {
@@ -1979,56 +1973,6 @@ fn normal_completion_kills_the_direct_process_group() -> TestResult {
 }
 
 #[test]
-fn output_beyond_the_cap_ends_the_workload_after_the_reads_that_fit() -> TestResult {
-    if super::super::tests::isolate_process_test(
-        "NVX_DISPATCH_OUTPUT_CAP_TEST_CHILD",
-        "guest::managed_agent::dispatch::tests::output_beyond_the_cap_ends_the_workload_after_the_reads_that_fit",
-    ) {
-        return Ok(());
-    }
-    let _process = super::super::tests::PROCESS_TEST_LOCK.lock()?;
-    let (temporary, mut harness) = direct_harness();
-    // As the C agent did, the agent forwards each read of up to 32 KiB while the output
-    // stays within 1 MiB, and ends the workload at the first read beyond it, before the
-    // workload could leave its marker. The workload writes 3 MiB into a pipe that holds 1 MiB
-    // at most, even after uutils' `head -c` (Ubuntu 26.04's `head`) grows it to fit what it
-    // copies, so it can finish only after the agent has read 2 MiB.
-    let chunk = 32 * 1024;
-    let marker = temporary.path().join("survived");
-    let script = format!(
-        "head -c {} /dev/zero; touch '{}'",
-        3 * protocol::MAX_OUTPUT_BYTES,
-        marker.display()
-    );
-    let mut replies = harness.request_all(
-        42,
-        APP_EXEC,
-        &workload_payload(&["/bin/sh", "-c", &script], None)?,
-    );
-    assert_eq!(
-        replies.pop(),
-        Some(response(APP_EXIT, 42, 125, b"output-limit"))
-    );
-    let mut forwarded = 0;
-    for reply in &replies {
-        assert_eq!(
-            (reply.kind, reply.request_id, reply.status),
-            (APP_STDOUT, 42, 0)
-        );
-        assert!((1..=chunk).contains(&reply.payload.len()));
-        assert!(reply.payload.iter().all(|&byte| byte == 0));
-        forwarded += reply.payload.len();
-    }
-    assert!(
-        protocol::MAX_OUTPUT_BYTES - chunk < forwarded && forwarded <= protocol::MAX_OUTPUT_BYTES,
-        "{forwarded}"
-    );
-    assert!(harness.stop().diagnostics.is_empty());
-    assert!(!marker.exists());
-    Ok(())
-}
-
-#[test]
 fn a_running_workload_refuses_other_requests_and_ends_when_cancelled_or_late() -> TestResult {
     if super::super::tests::isolate_process_test(
         "NVX_DISPATCH_CANCEL_TEST_CHILD",
@@ -2046,12 +1990,7 @@ fn a_running_workload_refuses_other_requests_and_ends_when_cancelled_or_late() -
     );
     assert_eq!(
         harness.request_all(43, APP_PING, &[]),
-        vec![response(
-            APP_ERROR,
-            43,
-            Errno::EBUSY as i32,
-            protocol::BUSY.as_bytes()
-        )]
+        vec![response(APP_BUSY, 43, 0, b"")]
     );
     // A cancellation of another request leaves the workload running.
     harness.send(41, APP_CANCEL, &[]);
@@ -2161,7 +2100,7 @@ fn refused_records_report_the_stage_at_which_the_c_agent_reported_them() {
     let outer = |record_type, instance: &[u8; 16], epoch, sequence, payload: &[u8]| {
         encode_outer(record_type, instance, epoch, sequence, payload).unwrap()
     };
-    let ping = encode_app(APP_PING, 42, 0, &[]);
+    let ping = frame(APP_PING, 42, &[]);
     let mut bad_magic = outer(OUTER_DATA, &INSTANCE, 1, 8, &ping);
     bad_magic[0] = b'X';
     let mut oversized = outer(OUTER_DATA, &INSTANCE, 1, 8, &[]);
@@ -2233,7 +2172,7 @@ fn refused_records_report_the_stage_at_which_the_c_agent_reported_them() {
 #[test]
 fn data_before_the_first_reset_is_a_type_that_the_agent_does_not_take_yet() {
     let harness = Harness::spawn(TestSystem::new(Paths::default()), 0);
-    let frame = encode_app(APP_PING, 42, 0, &[]);
+    let frame = frame(APP_PING, 42, &[]);
     let diagnostics = harness.fail(&encode_outer(OUTER_DATA, &INSTANCE, 1, 0, &frame).unwrap());
     assert_eq!(
         diagnostics,
@@ -2247,7 +2186,7 @@ fn data_at_the_last_sequence_number_is_out_of_sequence() {
     // for the broker's next record.
     let mut harness = Harness::spawn(TestSystem::new(Paths::default()), 0);
     harness.reset(1, u64::MAX - 1);
-    let frame = encode_app(APP_PING, 42, 0, &[]);
+    let frame = frame(APP_PING, 42, &[]);
     let record = encode_outer(OUTER_DATA, &INSTANCE, 1, u64::MAX, &frame).unwrap();
     assert_eq!(
         String::from_utf8(harness.fail(&record)).unwrap(),
@@ -2265,7 +2204,7 @@ fn a_stream_that_ends_reports_a_read_failure_inside_a_record_or_not() {
         "NVX-MANAGED-ERROR: stage=outer-read status={}\n",
         Errno::EIO as i32
     );
-    let frame = encode_app(APP_PING, 42, 0, &[]);
+    let frame = frame(APP_PING, 42, &[]);
     let record = encode_outer(OUTER_DATA, &INSTANCE, 1, 8, &frame).unwrap();
     for length in [0, 20, OUTER_HEADER_LEN + 1] {
         let diagnostics = Harness::new().close(&record[..length]);

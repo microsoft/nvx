@@ -121,35 +121,6 @@ fn text(data: &[u8]) -> String {
 }
 
 #[test]
-fn starts_ask_the_guest_for_no_features() {
-    // NVXC version 2 has no FEATURES: a guest that refuses that request of version 1, or that
-    // advertises none of the features, starts, runs workloads and stops all the same.
-    let root = Root::new();
-    for (state, command_line) in [
-        ("legacy", "fake_legacy_guest=1"),
-        ("featureless", "fake_guest_features=0"),
-    ] {
-        let output = run(&root, &provision(&root, state, command_line));
-        assert!(output.status.success(), "{}", text(&output.stderr));
-        let output = run(&root, &lifecycle("start", &root, state));
-        assert!(output.status.success(), "{state}: {}", text(&output.stderr));
-        let mut exec = lifecycle("exec", &root, state);
-        exec.extend(["--entrypoint", "/bin/echo", "--arg", "ran"].map(str::to_owned));
-        let output = run(&root, &exec);
-        assert!(output.status.success(), "{state}: {}", text(&output.stderr));
-        assert_eq!(text(&output.stdout), "ran\n");
-        for operation in ["stop", "deprovision"] {
-            let output = run(&root, &lifecycle(operation, &root, state));
-            assert!(
-                output.status.success(),
-                "{state} {operation}: {}",
-                text(&output.stderr)
-            );
-        }
-    }
-}
-
-#[test]
 fn a_mapping_that_the_guest_refuses_leaves_no_usable_start() {
     // The guest agent mounts each share as the mapping table that start sends once it is ready
     // orders, and refuses workloads until then: a mapping that it cannot mount ends the start.

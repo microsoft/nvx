@@ -27,9 +27,9 @@ the nested `openvmm/` workspace.
 ```text
 nvx-rs/
 ├── src/
-│   ├── protocol/    NVXS session, NVXC frames, EXEC and MAPS payloads, guest features, kernel
-│   │                command-line tokens, and the guest targets that live shares may not take;
-│   │                no dependencies, shared by the host and the guest
+│   ├── protocol/    NVXS session, NVXC frames, EXEC and MAPS payloads, kernel command-line
+│   │                tokens, and the guest targets that live shares may not take; no
+│   │                dependencies, shared by the host and the guest
 │   ├── activation/  the activation record of a layered root, its canonical encoding, and what
 │   │                Ready reports about it; no dependencies, shared by the host, the guest, and
 │   │                every adapter's framing
@@ -147,19 +147,20 @@ The codec of the control console: `NVXS` outer records, the `MAPS` payloads of
 the host mapping table, and the `nvx_maps=` and `nvx_workload_account=create`
 tokens. NVX's own control protocol, `NVXC`, is private to the crate, gated by
 the features of its users, `cli`, `guest` and `testing`: its application
-frames, the `EXEC` payload that the host encodes and the guest agent decodes,
-and the control features that a guest image advertises. Beside version 1's
-frames, `protocol::app::v2` holds the codec of version 2's, which carry every
-control path, with version 1's payloads, and stream an execution's standard
-input, output and error. NVX's host speaks version 2 alone, and the guest loop
-that nvx-init and the managed agent share, and the fake OpenVMM, serve both
-versions, so `v2` follows the features `cli`, `guest` and `testing`, and
-version 1's frames those of their servers, `guest` and `testing`.
+frames, and the `EXEC` payload that the host encodes and the guest agent
+decodes. `protocol::app::v2` holds the codec of version 2's frames, NVXC's only
+version, which carry every control path, with version 1's payloads, and stream
+an execution's standard input, output and error. NVX's host, the guest loop
+that nvx-init and the managed agent share, and the fake OpenVMM speak version 2
+alone, and refuse a frame of another version, such as version 1, whose frames
+and `FEATURES` request are gone.
 
 The [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/nvxc-v1.txt`, and OpenVMM's vectors and cases of the `NVXS`
-session pin every record, frame, and payload independently of the codec, which
-the host, the guest agent, and the fake OpenVMM share.
+session pin the records and the `EXEC` and `MAPS` payloads independently of the
+codec, which the host, the guest agent, and the fake OpenVMM share; version 2
+refuses the frames of version 1 that they hold, their features payloads have
+no codec any longer, and version 2's tests pin its own frames.
 
 ### `nvx::protocol::cmdline`
 
@@ -2039,7 +2040,7 @@ to it, whose `READY` names the version that the guest agent speaks, and require
 that version: a guest image whose agent answers in another version, as one
 that predates version 2 does, is stopped as a failed start is, and the start
 fails. They ask for no control features, which only version 1's `FEATURES`
-request reports, and which `start` required before: per-execution environments
+request reported, and which `start` required before: per-execution environments
 and host path mapping tables, which every guest agent of version 2 provides.
 `exec` and `sandbox run` send a working directory and an environment, and the
 start then sends the mapping table of the sandbox's shares, which the guest
@@ -2197,9 +2198,8 @@ with it for any other. Like OpenVMM, it refuses with status 2 a restore with
 with `--network-profile` alone or with `--restore-network-policy`, and a
 restore with `--network-ingress allow` or explicit `--host-loopback allow`
 without `--restore-network-policy`. Kernel
-command-line tokens make it fail: `fake_exit_on_start=STATUS`,
-`fake_exit_status=STATUS`, `fake_guest_features=MASK`, and
-`fake_legacy_guest=1`, among others; see `src/testing/fake_openvmm.rs`. Like
+command-line tokens make it fail: `fake_exit_on_start=STATUS` and
+`fake_exit_status=STATUS`, among others; see `src/testing/fake_openvmm.rs`. Like
 OpenVMM, it opens the sandbox's block devices at the paths that its options
 name and holds them until it exits, after `fake_block_delay_ms=MS` if asked,
 and records what each held in `fake-openvmm-TOKEN-blocks.json` next to the
@@ -2658,13 +2658,13 @@ tests, only the test hooks that
 
 The tests need no hypervisor. The fake-OpenVMM test runs `nvx-fake-openvmm`
 directly, as `nvx-rs run` runs OpenVMM on the terminal. The CLI test runs the
-[scenario tests](#scenario-tests) of `nvx-rs`, and checks that a start asks
-the guest for no features, that `exec` and `sandbox run` stream, and, on
-Linux, Ctrl-C, which also cancels an `exec`. The
+[scenario tests](#scenario-tests) of `nvx-rs`, and checks that `exec` and
+`sandbox run` stream, and, on Linux, Ctrl-C, which also cancels an `exec`. The
 [conformance vectors](tests/vectors/README.md) of the wire formats cover both
-sides of every record, frame, and payload: the codec decodes each vector of
-`tests/vectors/nvxc-v1.txt` to its values and encodes them to its bytes, it
-accepts or refuses OpenVMM's vectors and cases of the `NVXS` session as they
+sides of every record and payload: the codecs decode each record and each
+`EXEC` and `MAPS` payload of `tests/vectors/nvxc-v1.txt` to its values and
+encode them to its bytes, version 2's codec refuses its frames, the codecs
+accept or refuse OpenVMM's vectors and cases of the `NVXS` session as they
 say, and, on Linux, the guest's listener announcements match
 `tests/vectors/nvxl-v1.txt`. The activation codecs decode each record and
 Ready activation of `tests/vectors/activation-v2.txt` to its values, encode
