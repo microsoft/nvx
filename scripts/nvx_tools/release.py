@@ -1643,10 +1643,6 @@ def verify_source_tree() -> None:
         / "0002-microvm-hvc-xe9.patch": "xe9 HVC patch",
         BuildConstants.REPO_ROOT / "kernel" / "COPYING-LINUX": "Linux copyright notice",
         BuildConstants.REPO_ROOT / "guest" / "common" / "init": "common guest init",
-        BuildConstants.REPO_ROOT
-        / "guest"
-        / "alpine"
-        / "nvx-container-enter": "Alpine sandbox container helper",
         UbuntuBuildConstants.PACKAGE_LOCK: "Ubuntu supplemental package lock",
         OpenVMMBuildConstants.DIRECTORY / "Cargo.toml": "initialized OpenVMM submodule",
     }
