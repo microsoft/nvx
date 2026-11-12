@@ -333,10 +333,13 @@ launches or is recorded; see [Sandbox networking](run.md#sandbox-networking).
 given. It exits with status 1 for an error, 2 for a usage error, and 130 after
 Ctrl-C, and otherwise with the status that the workload or OpenVMM returns. Its
 errors and usage errors carry their [error codes](#error-codes), as
-`error[CODE]: MESSAGE` and `nvx-rs sandbox: error[CODE]: MESSAGE`; an `exec`
-prints its workload's standard output and error before any error of its own,
-which starts a new line. Options take their values as those of [`run`](#run)
-do, and their names cannot be abbreviated either.
+`error[CODE]: MESSAGE` and `nvx-rs sandbox: error[CODE]: MESSAGE`. An `exec`,
+and the workload of a `run`, stream the command's standard input to the
+workload until it ends, and the workload's standard output and error back as
+they arrive, without a limit; a command whose input is the null device gives
+the workload none. An error of the command's own follows the workload's output
+on a new line, and Ctrl-C cancels the workload. Options take their values as
+those of [`run`](#run) do, and their names cannot be abbreviated either.
 
 | Option | Default | Description |
 | --- | --- | --- |

@@ -1,4 +1,17 @@
-//! The control features that a guest image advertises in response to `APP_FEATURES`.
+//! The control features that a guest image advertises in response to `APP_FEATURES`, which only
+//! version 1 of NVXC has.
+//!
+//! NVX's host asked for them before it spoke version 2, whose Ready names the protocol version
+//! instead. The guest agents and the fake OpenVMM still advertise them to version 1's `FEATURES`
+//! until SL4.4d deletes them, and with them the host's side, which no host path uses any longer:
+//! only some builds of the tests use it, so no expectation of dead code holds in every build.
+#![cfg_attr(
+    feature = "cli",
+    allow(
+        dead_code,
+        reason = "NVX's host sends no FEATURES since SL4.4c, and SL4.4d deletes them"
+    )
+)]
 
 use std::ops::BitOr;
 
@@ -8,8 +21,8 @@ use super::{ProtocolError, array, violation};
 /// Control features of a guest image, advertised in the response to `APP_FEATURES`.
 ///
 /// The Rust guest agent uses these shared definitions and also speaks for the features of its
-/// image's init script. A host drives a sandbox only when its guest provides every feature that
-/// the host depends on, such as [`LAYERED_SANDBOX`](Self::LAYERED_SANDBOX) for `nvx-rs sandbox`;
+/// image's init script. A host drove a sandbox only when its guest provided every feature that
+/// the host depended on, such as [`LAYERED_SANDBOX`](Self::LAYERED_SANDBOX) for `nvx-rs sandbox`;
 /// an older image would silently ignore the policy or the request that depends on the missing
 /// feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,15 +67,15 @@ impl GuestFeatures {
     #[cfg(feature = "testing")]
     pub(crate) const SANDBOX_AGENT: Self =
         Self(Self::CANCEL.0 | Self::EXEC_ENVIRONMENT.0 | Self::HOST_MAPPING_TABLE.0);
-    /// The features that `nvx-rs sandbox` depends on in the layered sandbox root:
+    /// The features that `nvx-rs sandbox` depended on in the layered sandbox root while it spoke
+    /// version 1:
     /// [`EXEC_ENVIRONMENT`](Self::EXEC_ENVIRONMENT), because `exec` sends a working directory and
     /// an environment in an extended `EXEC`, and
     /// [`HOST_MAPPING_TABLE`](Self::HOST_MAPPING_TABLE), because `start` sends the mappings of
     /// the sandbox's shares as `MAPS` requests.
     ///
-    /// It holds no [`CANCEL`](Self::CANCEL), because the CLI sends no `APP_CANCEL`: as `nvx.py`
-    /// did, Ctrl-C ends an `exec` by closing the session, and the guest agent ends the workload
-    /// when OpenVMM resets the session that it ran for. It holds no
+    /// It holds no [`CANCEL`](Self::CANCEL), because the CLI sent no `APP_CANCEL` before it spoke
+    /// version 2: as `nvx.py` did, Ctrl-C ended an `exec` by closing the session. It holds no
     /// [`WORKLOAD_ACCOUNT`](Self::WORKLOAD_ACCOUNT), because no sandbox launch requests account
     /// creation, which the layered root neither performs nor announces (microsoft/nvx#566).
     #[cfg(feature = "cli")]
