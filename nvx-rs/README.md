@@ -44,8 +44,8 @@ nvx-rs/
 │   ├── hypervisor.rs
 │   ├── error.rs     nvx::Error, its ErrorKind, and its stable ErrorCode
 │   ├── host/        feature `host` (default): the runtime that every launch shares, VM
-│   │                directories and configurations, artifacts, launch, network and egress policy
-│   │                files, filesystem, NVXS connection, session, process, platform, templates'
+│   │                directories and configurations, artifacts, network and egress policy files,
+│   │                filesystem, NVXS connection, session, process, platform, templates'
 │   │                manifests and compatibility keys, outcome reports, file seals, and the
 │   │                sandbox launch profile of `nvx-rs sandbox` and its distro and scratch
 │   │                bindings; with feature `cli`, the `nvx-rs` CLI
@@ -119,7 +119,6 @@ changes only when the module's purpose does.
 | [`nvx::host::config`](#nvxhostconfig) | `VmConfig` and `CaptureConfig`: pure configuration, cold-boot kernel/OpenVMM arguments, portable length checks, and capture identity |
 | [`nvx::host::restore`](#nvxhostrestore) | A caller-driven restore to Ready without I/O or a clock, and its peer-verified restore-ready listener |
 | [`nvx::host::artifacts`](#nvxhostartifacts) | Locating the OpenVMM executable and the guest artifacts that a VM runs, and their runtime identity |
-| [`nvx::host::launch`](#nvxhostlaunch) | `LaunchSpec` and `VmmLaunch`: the OpenVMM command line of a managed microVM, its checks, and the inputs that it shares with an adapter's launch |
 | [`nvx::host::network`](#nvxhostnetwork) | The one lowering of a network posture into OpenVMM options, for the CLI and external orchestrators |
 | [`nvx::host::network::policy`](#nvxhostnetworkpolicy) | Egress policy files and their compilation into OpenVMM's native rules |
 | [`nvx::host::filesystem`](#nvxhostfilesystem) | The planner of the host paths that every NVX caller exports to the guest through OpenVMM's virtio-fs device |
@@ -764,8 +763,8 @@ percent of the VM's memory, 50 when the caller has no other
 
 A `NetworkConfig` holds the `NetworkPolicy` that OpenVMM enforces and the NIC's
 address, an `nvx::net::Ipv4Cidr`, if the caller names one: without one, a cold
-boot takes `DEFAULT_GUEST_NETWORK`, `10.0.0.2/24`, which `nvx::host::launch`
-also exports, and a restore the snapshot's. A `NicConfig` is the NIC that a VM
+boot takes `DEFAULT_GUEST_NETWORK`, `10.0.0.2/24`, and a restore the
+snapshot's. A `NicConfig` is the NIC that a VM
 settled on, with its address. A `Boot` holds the caller's own kernel
 command-line tokens, to which NVX adds those of what it lowers: a VM that boots
 needs one, and a VM that a snapshot restores takes none.
@@ -804,8 +803,8 @@ entries. The table's `HostMap` and its wire codecs are accessible through
 `nvx::protocol::maps`, and remain re-exported from `nvx::protocol`.
 
 `COMMAND_LINE_BUDGET`, in `nvx::host::config`, is the 1,024-byte x86 kernel
-command-line budget, including the terminating NUL. The legacy launch checks
-continue to use it.
+command-line budget, including the terminating NUL. The CLI checks the command
+lines that it launches against it.
 
 The internal whole-config renderer used by `vm::create` renders a cold boot's
 OpenVMM arguments from `Runtime` and `VmConfig`. Its borrowed control endpoint,
@@ -837,10 +836,12 @@ every host, before any host change, with 2048 UTF-16 code units reserved for the
 runtime's files, launch options, and VM output names. The reserve foresees file
 and endpoint names of up to 260 code units, not arbitrary runtime paths or
 CPU-profile strings. The whole renderer checks the complete actual command
-line without a reserve too. `PROCESS_COMMAND_LINE_LIMIT`,
-`process_command_line_units` and `fit_process_command_line` now belong to
-`nvx::host::config`; their existing `nvx::host::launch` paths remain usable,
-with the same Windows quoting and terminating-NUL count.
+line without a reserve too. `process_command_line_units`, in
+`nvx::host::config`, counts the Windows command line that runs a program with
+its arguments, in UTF-16 code units, as Windows quotes them, with the
+terminating NUL, and `fit_process_command_line` checks it against
+`PROCESS_COMMAND_LINE_LIMIT`, on every host, with the reserve that its caller
+keeps.
 
 A `Boot` may also hold a `CaptureConfig`, what a capture of the VM adds to the
 VM's configuration, which keeps the rest, such as the NIC, the console, and the
@@ -951,47 +952,6 @@ manifest, in a checkout's `build/` and `openvmm/target/release/` or a release's
 `ArtifactDir::runtime_identity` reads the `RuntimeIdentity` of the OpenVMM
 executable, kernel, and Alpine initramfs from the install metadata, a release's
 `SHA256SUMS` or a checkout's build provenance, without hashing an artifact.
-
-### `nvx::host::launch`
-
-`LaunchSpec` and OpenVMM's command line: the managed lifecycle, the
-`WorkloadIdentity`, the 1024-byte kernel command line, its reserved parameters,
-the 32,767-character limit of a Windows command line, and `LaunchSpec::check`,
-which every command line applies to the memory size, the non-root identity, the
-hostname, the guest network, and the kernel parameters.
-
-`VmmLaunch` holds the inputs that a cold launch's command line names besides the
-VM's devices and its kernel command line: the OpenVMM executable, the
-hypervisor, the memory, the kernel, the initramfs, the endpoint of the control
-console, and the outcome report. `VmmLaunch::arguments` renders them for a
-`LaunchSpec`'s launch, after its managed lifecycle, and for an adapter's
-launch, after its devices, and `LaunchSpec::vmm_launch` gives a
-specification's.
-
-`process_command_line_units` counts the Windows command line that runs a program
-with its arguments, in UTF-16 code units, as Windows quotes them, and
-`fit_process_command_line` checks it against `PROCESS_COMMAND_LINE_LIMIT`, on
-every host, with the reserve that its caller keeps. The helpers live in
-`nvx::host::config` and remain re-exported here for existing callers.
-`LaunchSpec::check_process_command_line`, which a caller runs before it
-provisions a VM, keeps 1024 code units for what may change before the VM
-starts.
-
-`VmmLaunch::RESERVE`, 2048 code units, is what the planning of an adapter's
-launch keeps for the rest of the launch: the executable and the arguments that
-`VmmLaunch::arguments` renders besides the kernel command line, with paths of up
-to 260 code units, Windows' `MAX_PATH`, and the longer final paths of the plan's
-block devices.
-
-`kernel_parameters_problem` checks the extra kernel parameters as the guest's
-kernel reads them, with `nvx::protocol::cmdline`: trimmed, split at every byte
-that the kernel takes for whitespace, including the 0xa0 that ends the UTF-8
-encoding of characters such as `à`, with names that match whether they spell a
-dash or an underscore. It refuses NUL characters, quotes, and the `--`
-delimiter, after which the kernel would leave the `hostname=` parameter that
-follows the extra parameters to init, and the reserved parameters: those named
-`tsc` or `hostname`, with or without a value, and those whose names start with
-`nvx_` or `nvx-`.
 
 ### `nvx::host::network`
 
@@ -3091,9 +3051,7 @@ and `parameq`, `parameqn`, and `repair_env_string`, with which the kernel
 matches parameters with their handlers. `nvx::protocol::cmdline::parameters`
 must read as the model does every command line of up to six bytes among a
 letter and those that `next_arg` treats apart, and random ones. With the model,
-properties check that the kernel reads no reserved parameter in the extra
-parameters that a `LaunchSpec` accepts, whatever separates it, and reads the
-`hostname=` parameter after them; that the time ABI's check of the guest's
-command line fails exactly when the kernel applies a clock parameter that the
-ABI forbids; and that the share targets that a sandbox accepts hold nothing at
-which the kernel would end a parameter.
+properties check that the time ABI's check of the guest's command line fails
+exactly when the kernel applies a clock parameter that the ABI forbids, and
+that the share targets that a sandbox accepts hold nothing at which the kernel
+would end a parameter.
