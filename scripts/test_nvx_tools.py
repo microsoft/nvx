@@ -2356,7 +2356,7 @@ class NvxRsTests(unittest.TestCase):
                 self.assertIsNone(nvx_rs.reported_error(stderr))
 
     def test_usage_documents_every_error_code_of_nvx_rs(self):
-        # nvx-rs/README.md lists every code of nvx::ErrorCode, which a test of
+        # nvx-rs/README.md lists every code that nvx-rs prints, which a test of
         # nvx-rs checks, and doc/usage.md lists the same codes with the status
         # with which nvx-rs exits: 2 for usage errors and 1 for any other.
         def table(path: Path) -> list[tuple[str, str]]:
