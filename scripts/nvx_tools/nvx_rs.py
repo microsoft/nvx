@@ -108,14 +108,13 @@ def release_target() -> str:
 def source_files(root: Path | None = None) -> tuple[Path, ...]:
     """Return the files that determine the nvx-rs executable of the checkout at
     `root`, this one by default, in path order: the crate's manifest, lock
-    file, build script, and sources, and rust-toolchain.toml, which pins the
-    Rust release that builds it."""
+    file, and sources, and rust-toolchain.toml, which pins the Rust release
+    that builds it."""
     root = DIRECTORY.parent if root is None else root
     crate = root / DIRECTORY.name
     files = [
         crate / "Cargo.toml",
         crate / "Cargo.lock",
-        crate / "build.rs",
         root / "rust-toolchain.toml",
     ]
     sources = crate / "src"

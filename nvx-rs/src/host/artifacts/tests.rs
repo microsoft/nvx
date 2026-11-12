@@ -33,10 +33,6 @@ fn checkout(root: &Path) {
     fs::write(root.join(MANIFEST_NAME), COMPATIBLE_MANIFEST).unwrap();
 }
 
-fn no_bundle() -> Result<Option<Artifacts>> {
-    Ok(None)
-}
-
 fn variables(pairs: &[(&str, &Path)]) -> impl Fn(&str) -> Option<OsString> {
     let map: HashMap<String, OsString> = pairs
         .iter()
@@ -99,12 +95,8 @@ fn repository_layout_is_detected_beside_the_guest_sources() {
 fn the_directory_variable_accepts_a_repository_checkout() {
     let directory = tempfile::tempdir().unwrap();
     checkout(directory.path());
-    let artifacts = discover_with(
-        variables(&[(Artifacts::ENV_DIR, directory.path())]),
-        None,
-        no_bundle,
-    )
-    .unwrap();
+    let artifacts =
+        discover_with(variables(&[(Artifacts::ENV_DIR, directory.path())]), None).unwrap();
     let build = std::path::absolute(directory.path()).unwrap().join("build");
     assert_eq!(artifacts.kernel, build.join("vmlinux"));
 }
@@ -135,17 +127,11 @@ fn explicit_variables_win_and_must_be_complete() {
             (Artifacts::ENV_DIR, directory.path()),
         ]),
         None,
-        no_bundle,
     )
     .unwrap();
     assert_eq!(artifacts, Artifacts::new(openvmm, kernel, initrd));
 
-    let error = discover_with(
-        variables(&[(Artifacts::ENV_OPENVMM, openvmm)]),
-        None,
-        no_bundle,
-    )
-    .unwrap_err();
+    let error = discover_with(variables(&[(Artifacts::ENV_OPENVMM, openvmm)]), None).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
 }
 
@@ -159,7 +145,6 @@ fn the_directory_variable_precedes_the_executable_directory() {
     let artifacts = discover_with(
         variables(&[(Artifacts::ENV_DIR, variable_dir.path())]),
         Some(exe_dir.path()),
-        no_bundle,
     )
     .unwrap();
     assert!(
@@ -168,7 +153,7 @@ fn the_directory_variable_precedes_the_executable_directory() {
             .starts_with(std::path::absolute(variable_dir.path()).unwrap())
     );
 
-    let artifacts = discover_with(variables(&[]), Some(exe_dir.path()), no_bundle).unwrap();
+    let artifacts = discover_with(variables(&[]), Some(exe_dir.path())).unwrap();
     assert!(
         artifacts.kernel.starts_with(
             std::path::absolute(exe_dir.path().join(Artifacts::BESIDE_EXE_DIR)).unwrap()
@@ -177,22 +162,13 @@ fn the_directory_variable_precedes_the_executable_directory() {
 }
 
 #[test]
-fn the_bundle_is_the_last_resort() {
+fn discovery_fails_when_no_source_is_present() {
     let exe_dir = tempfile::tempdir().unwrap();
-    let bundle = Artifacts::new("bundled-openvmm", "bundled-kernel", "bundled-initrd");
-    let expected = bundle.clone();
-    let artifacts =
-        discover_with(variables(&[]), Some(exe_dir.path()), || Ok(Some(bundle))).unwrap();
-    assert_eq!(artifacts, expected);
-
-    let error = discover_with(variables(&[]), Some(exe_dir.path()), no_bundle).unwrap_err();
+    let error = discover_with(variables(&[]), Some(exe_dir.path())).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Unavailable);
     assert!(error.message().contains(Artifacts::ENV_DIR));
-    assert!(
-        error
-            .message()
-            .contains("build the nvx crate with the bundled feature")
-    );
+    // No build-time bundle remains to suggest.
+    assert!(!error.message().contains("bundled"));
 }
 
 #[test]
@@ -752,21 +728,4 @@ fn located_artifacts_have_the_identity_of_their_directory() {
             located.artifact_dir().unwrap().root().display()
         )
     );
-}
-
-#[cfg(feature = "bundled")]
-#[test]
-fn the_bundle_is_a_compatible_release() {
-    let bundled = Artifacts::bundled().unwrap();
-    // A build that was asked to stage a release must have staged it.
-    let requested = env::var_os("NVX_BUNDLE_DIR").is_some()
-        && env::var_os("NVX_BUNDLE").is_none_or(|value| value != "skip");
-    if requested && (cfg!(target_os = "linux") || cfg!(windows)) {
-        assert!(bundled.is_some(), "NVX_BUNDLE_DIR was not staged");
-    }
-    if let Some(artifacts) = bundled {
-        for path in [&artifacts.openvmm, &artifacts.kernel, &artifacts.initrd] {
-            assert!(path.is_file(), "{} is missing", path.display());
-        }
-    }
 }

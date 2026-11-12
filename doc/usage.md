@@ -60,7 +60,7 @@ their `nvx-rs` tests.
 
 The provenance of a checkout's `nvx-rs`, `build/nvx-rs.provenance.json`, binds
 the SHA-256 of its executable to a digest of the `nvx-rs` sources that built
-it, the crate's manifest, lock file, build script, and `src/` tree and
+it, the crate's manifest, lock file, and `src/` tree and
 `rust-toolchain.toml`, and to the Rust release, target, and Cargo features of
 the build. `nvx.py` records it when it builds `nvx-rs` for the scenarios, and
 [`record-nvx-rs-provenance`](#record-nvx-rs-provenance) records it for a build
@@ -681,7 +681,7 @@ python3 scripts/nvx.py guest-binary-source-identity [--root PATH]
 
 Prints the source digest that guest package manifests record for the Rust guest
 binaries: a digest of the relative path and content of every file that their
-build reads. Those are the crate's manifest, lockfile, and build script, its
+build reads. Those are the crate's manifest and lockfile, its
 Cargo configuration under `nvx-rs/.cargo/`, every file under `nvx-rs/src/`
 except the host side and the test modules, `rust-toolchain.toml`, and the
 `build_constants.py` and `guest_binaries.py` build modules. The host side is
