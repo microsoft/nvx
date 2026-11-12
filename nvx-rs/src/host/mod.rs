@@ -36,9 +36,7 @@
 //!   layers and a private ext4 scratch disk, with live shares, and the checks of its options.
 //!   [`sandbox::distro`] binds a distro layer to what explicit verification found, so that a
 //!   launch checks the layer through [`seal`], which seals open files from their metadata alone,
-//!   and [`sandbox::scratch`] binds and claims a scratch image. A
-//!   [`PreparedLaunch`](sandbox::PreparedLaunch) hands the VMM the files that those checks
-//!   opened, which it inherits through the [`supervisor`]'s allowlist.
+//!   and [`sandbox::scratch`] binds and claims a scratch image.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
 //!   its files and endpoints, and a checked cold, capture or restore [`Prepared`](vm::Prepared)
 //!   launch with its opened log and control credential, which the library never writes. A

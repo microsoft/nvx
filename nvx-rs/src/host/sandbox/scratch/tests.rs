@@ -259,8 +259,8 @@ fn checks_claim_the_image_without_reading_it() {
     assert!(!inheritable(checked.file()));
     #[cfg(windows)]
     {
-        assert!(checked.claim().read(&mut byte).is_err());
-        assert!(!inheritable(checked.claim()));
+        assert!((&checked.claim).read(&mut byte).is_err());
+        assert!(!inheritable(&checked.claim));
     }
 
     // A second check finds the image claimed until its deadline...
