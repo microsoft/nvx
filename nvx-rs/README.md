@@ -158,7 +158,10 @@ the host mapping table, and the `nvx_maps=` and `nvx_workload_account=create`
 tokens. NVX's own control protocol, `NVXC`, is private to the crate, gated by
 the features of its users, `cli`, `guest` and `testing`: its application
 frames, the `EXEC` payload that the host encodes and the guest agent decodes,
-and the control features that a guest image advertises.
+and the control features that a guest image advertises. Beside version 1's
+frames, `protocol::app::v2` holds the codec of version 2's, which carry every
+control path, with version 1's payloads, and stream an execution's standard
+input, output and error.
 
 The [conformance vectors](tests/vectors/README.md) of version 1,
 `tests/vectors/nvxc-v1.txt`, and OpenVMM's vectors and cases of the `NVXS`
