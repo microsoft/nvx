@@ -946,16 +946,26 @@ action that needs more than 256 rules.
 
 The `ExportPlan` of host paths through OpenVMM's aggregate virtio-fs device, for
 a root's `ReservedTargets`, the blockless root's or the container root's: its
-children, its ordered binds, which give the host-mapping table, and the
-identities that each start checks again; `ExportPlan::check`, which checks a
-recorded plan without reading the host, and the plan's OpenVMM options, boot
-token, and mapping table; and `guest_path` (also at `nvx::`), the guest path at
-which the host-path convention places a resolved host path.
+children and its ordered binds, which give the host-mapping table, paths only;
+`ExportPlan::check`, which checks a recorded plan without reading the host, and
+the plan's mapping table, `ExportPlan::guest_table`; and `guest_path` (also at
+`nvx::`), the guest path at which the host-path convention places a resolved
+host path. A `VmConfig` lowers the plan into OpenVMM's options and its
+`nvx_maps` boot token internally.
+
+OpenVMM resolves the plan's paths only when it starts, so the caller keeps them
+naming the objects that it means, as the module documents: across the launch
+race, from its own checks of the host until OpenVMM opens the paths; through a
+writable-part recheck before each later launch, since a workload that may write
+a part of a child can move a mapped or denied object there and put a decoy at
+its path; and for each durable denial, which holds only while its path names
+the object that it hides.
 
 The planner, which turns the mapped host paths at their guest targets, their
-denied, allowed, and write paths, and the owner into a plan, and the checks of a
+denied, allowed, and write paths, and the owner into a plan, with the pins of
+the objects that a workload could move, and the checks of those pins and of the
 plan's host objects before each start are the CLI's path rules, private to the
-crate (feature `cli`).
+crate (feature `cli`). The CLI records the pins beside the plan.
 
 ### `nvx::host::nvxs`
 
@@ -1941,7 +1951,7 @@ provision it again:
 
 | File | Contents |
 | --- | --- |
-| `config.json` | The provisioned sandbox, in format 10 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export is typed, `null` when absent. `network`, `null` without `--net`, holds `--net`, `--network-egress`, `--network-ingress`, `--host-loopback`, `--network-proxy`, each `null` when not given, and the `--host-loopback-forward` options, as given, with the egress rules in OpenVMM's form, from a policy file's compile if one was given. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
+| `config.json` | The provisioned sandbox, in format 10 only: `image` holds its format, path and identity; `upper` is tagged as scratch with its path or RAM with `max_memory_percent`. `distro_binding` binds the image, and `scratch_binding` binds scratch or is `null` for RAM. The export is typed, `null` when absent, and holds paths only; `export_pins`, `null` without an export, holds the identities of the export's denied and mapped objects that a workload could move, which each start checks before it launches the export, and a configuration without it is refused with the advice to deprovision the sandbox and provision it again. `network`, `null` without `--net`, holds `--net`, `--network-egress`, `--network-ingress`, `--host-loopback`, `--network-proxy`, each `null` when not given, and the `--host-loopback-forward` options, as given, with the egress rules in OpenVMM's form, from a policy file's compile if one was given. A sandbox that `snapshot restore` provisioned also records its snapshot's name under `source_snapshot`, the absolute path of the snapshot's store under `source_store`, and the program and arguments of the workload that each restore runs under `workload`; one that boots cold records none of them. An atomic pretty-JSON write uses mode 0600, and start reads the same strict typed fields without a legacy reader. |
 | `sandbox.lock` | The store's lock, which serializes the lifecycle transitions |
 | `exec.lock` | The exec lock, which an `exec` holds from before it finds the running VM until its workload ends, so that one `exec` at a time runs in the sandbox; it stays from the first `exec` until `deprovision` |
 | `launch.json` | The store's journal of a start in progress, or of one that was interrupted |

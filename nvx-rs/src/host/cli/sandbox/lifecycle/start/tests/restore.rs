@@ -268,7 +268,6 @@ fn restored_config(fixture: &Fixture, gpt: bool, ram: bool) -> VmConfig {
             file: false,
             writable: false,
             denied: Vec::new(),
-            denied_identities: Vec::new(),
             allowed: Vec::new(),
             write: Vec::new(),
         }],
@@ -277,7 +276,6 @@ fn restored_config(fixture: &Fixture, gpt: bool, ram: bool) -> VmConfig {
             source: String::new(),
             target: "/work".to_owned(),
             read_only: true,
-            identity: None,
         }],
         owner: Owner::Vmm,
     });

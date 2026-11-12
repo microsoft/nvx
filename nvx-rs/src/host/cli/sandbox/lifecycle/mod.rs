@@ -1,9 +1,10 @@
 //! Persistent sandboxes on the CLI's store and caller-owned [`crate::host::vm`] interface.
 //!
-//! Provision records the typed image and upper, image bindings, network and export. Start journals the
-//! prepared capability and outputs before spawn, records the verified process, and commits the
-//! matching saved VM only after authenticated readiness and mappings. Every lifecycle command
-//! takes the CLI store's recoverable lock; indeterminate launches retain their evidence.
+//! Provision records the typed image and upper, image bindings, network, and export with its pins.
+//! Start journals the prepared capability and outputs before spawn, records the verified process,
+//! and commits the matching saved VM only after authenticated readiness and mappings. Every
+//! lifecycle command takes the CLI store's recoverable lock; indeterminate launches retain their
+//! evidence.
 //!
 //! A restored sandbox, whose configuration names a named snapshot, restores it at each start in
 //! place of a cold boot, under the snapshot's lock, through the blocking restore driver, which
@@ -38,7 +39,7 @@ use crate::host::cli::sandbox::{Artifacts, error_with_cause};
 use crate::host::cli::session::Session;
 use crate::host::cli::store::StateFile;
 use crate::host::cli::{Exit, Result};
-use crate::host::filesystem::ExportPlan;
+use crate::host::filesystem::PlannedExport;
 use crate::host::process::{Opened, Process};
 use crate::host::runtime::{IdentityPart, LaunchOptions, Runtime, RuntimeIdentity};
 use crate::host::sandbox::layer::SandboxLayer;
@@ -74,8 +75,8 @@ pub(crate) struct ProvisionConfig<'a> {
     pub(crate) hostname: &'a str,
     /// `--workload-user`.
     pub(crate) workload_identity: (u32, u32),
-    /// The export plan of the shares, if any.
-    pub(crate) export: Option<&'a ExportPlan>,
+    /// The export plan of the shares, with its pins, if any.
+    pub(crate) export: Option<&'a PlannedExport>,
     /// The network options, or `None` without `--net`.
     pub(crate) network: Option<&'a NetworkRecord>,
 }

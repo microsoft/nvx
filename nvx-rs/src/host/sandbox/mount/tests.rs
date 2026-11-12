@@ -546,7 +546,8 @@ fn shares_are_planned_through_the_export_planner() {
         ]
     };
     assert_eq!(plan_mounts(&[]).unwrap(), None);
-    let plan = plan_mounts(&mounts(MountOwner::Vmm)).unwrap().unwrap();
+    let planned = plan_mounts(&mounts(MountOwner::Vmm)).unwrap().unwrap();
+    let plan = &planned.description;
     let work = resolved(&base.join("work"));
     // The children follow their resolved host paths, and each share maps its root at its target,
     // parents first, with its policy paths resolved.
@@ -568,7 +569,7 @@ fn shares_are_planned_through_the_export_planner() {
     assert_eq!(workspace.allowed, [work.join("secrets").join("public")]);
     assert_eq!(workspace.write, [work.join("out")]);
     // Writes are narrowed to `out`, so nothing that the plan names can move.
-    assert_eq!(workspace.denied_identities, [None]);
+    assert_eq!(planned.pins.denied[2], [None]);
     let binds: Vec<(usize, &str, &str, bool)> = plan
         .binds
         .iter()
@@ -590,8 +591,8 @@ fn shares_are_planned_through_the_export_planner() {
         ]
     );
     assert_eq!(plan.owner, Owner::Vmm);
-    plan.verify().unwrap();
-    plan.check(ReservedTargets::CONTAINER_ROOT).unwrap();
+    planned.verify().unwrap();
+    planned.check(ReservedTargets::CONTAINER_ROOT).unwrap();
 
     // The planner refuses what OpenVMM would: here, a writable path that a denied path hides.
     let error = plan_mounts(&[share(
@@ -612,7 +613,7 @@ fn shares_are_planned_through_the_export_planner() {
         let owned = std::fs::metadata(directory.path()).unwrap();
         if owned.uid() != 0 && owned.gid() != 0 {
             let plan = plan_mounts(&mounts(MountOwner::Caller)).unwrap().unwrap();
-            assert_eq!(plan.owner, Owner::Caller);
+            assert_eq!(plan.description.owner, Owner::Caller);
         }
     }
 }

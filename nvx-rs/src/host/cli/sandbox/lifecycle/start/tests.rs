@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::*;
-use crate::host::filesystem::ExportPlan;
+use crate::host::filesystem::PlannedExport;
 use crate::host::paths::resolve;
 use crate::host::sandbox::distro::DistroBinding;
 use crate::host::sandbox::layer::{LayerRole, SandboxLayer};
@@ -111,11 +111,12 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
     let export = |shares: &[String]| plan_mounts(&sandbox_mounts(shares, &[], None).unwrap());
     let read_only = export(std::slice::from_ref(&settings)).unwrap();
     let writable = export(&[settings, output]).unwrap();
+    let tokens = |export: &PlannedExport| export_tokens(&export.description);
     assert_eq!(
-        export_tokens(read_only.as_ref().unwrap()),
+        tokens(read_only.as_ref().unwrap()),
         " virtfs_dir=/run/nvx/hostfs/root virtfs_tag=microvm virtfs_mode=ro virtfs_aggregate=1"
     );
-    let configure = |cmdline: &str, scratch: Option<&Path>, export: Option<&ExportPlan>| {
+    let configure = |cmdline: &str, scratch: Option<&Path>, export: Option<&PlannedExport>| {
         let config = ProvisionConfig {
             hypervisor: "kvm",
             memory_mib: 256,
@@ -130,7 +131,7 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
         let vm = config.vm_config().unwrap();
         (config, vm)
     };
-    let refusal = |cmdline: &str, scratch: Option<&Path>, export: Option<&ExportPlan>| {
+    let refusal = |cmdline: &str, scratch: Option<&Path>, export: Option<&PlannedExport>| {
         let (config, vm) = configure(cmdline, scratch, export);
         let error = check_command_line(&config, &vm).unwrap_err();
         assert_eq!(error.code(), Some(ErrorCode::Unsupported), "{error:?}");
@@ -139,7 +140,7 @@ fn starts_check_the_kernel_command_line_that_they_launch() {
     for upper in [None, Some(scratch.as_path())] {
         for export in [None, read_only.as_ref(), writable.as_ref()] {
             let (_, vm) = configure("", upper, export);
-            let fragment = export.map(export_tokens).unwrap_or_default();
+            let fragment = export.map(tokens).unwrap_or_default();
             let room =
                 COMMAND_LINE_BUDGET - vm.kernel_command_line().unwrap().len() - fragment.len() - 2;
             let (config, vm) = configure(&"x".repeat(room), upper, export);
