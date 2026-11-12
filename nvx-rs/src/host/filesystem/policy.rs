@@ -444,6 +444,7 @@ pub(super) fn nearest_rule<'p>(
 }
 
 /// Whether a child is writable, and the paths to which OpenVMM limits its writes.
+#[cfg(feature = "cli")]
 pub(super) struct Writable {
     /// Whether the guest may modify the child.
     pub(super) writable: bool,
@@ -452,6 +453,7 @@ pub(super) struct Writable {
     pub(super) write: Vec<PathBuf>,
 }
 
+#[cfg(feature = "cli")]
 impl Writable {
     /// Returns whether a workload could move `path`, which lies in the child at `root`: whether it
     /// lies strictly inside a writable part, in a directory that the workload may change.

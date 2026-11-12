@@ -992,7 +992,9 @@ impl Shares {
         .check()?;
         let mounts = sandbox_mounts(&mounts, &policy_paths, owner)?;
         validate_mounts(&mounts)?;
-        let export = plan_mounts(&mounts)?.expect("shares have an export plan");
+        let export = plan_mounts(&mounts)?
+            .expect("shares have an export plan")
+            .description;
         Ok((export.openvmm_arguments(), export.kernel_token()))
     }
 }

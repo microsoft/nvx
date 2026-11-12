@@ -9,7 +9,7 @@ use super::{
 };
 use crate::error::Result;
 use crate::host::filesystem::{
-    self, ExportPlan, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
+    self, ExportRequest, Mapping, Owner, PathList, PlannedExport, ReservedTargets, Target,
 };
 use crate::host::paths;
 use crate::host::sandbox::refused;
@@ -24,12 +24,13 @@ use crate::host::sandbox::refused;
 /// requires to be one, becomes the export's, and the container root reserves the trees of its
 /// runtime. Each share keeps the kind with which it was requested: a host path that the planner
 /// finds to be of the other kind is refused, as [`SandboxMount::validated`] refuses it. Returns
-/// `None` without shares.
+/// the export with the pins of the objects in it that a workload could move, or `None` without
+/// shares.
 ///
 /// Fails as those checks and [`filesystem::plan`] do, and with
 /// [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an unreadable current
 /// directory, or Windows cannot qualify a drive-relative path.
-pub(crate) fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<ExportPlan>> {
+pub(crate) fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<PlannedExport>> {
     validate_mounts(mounts)?;
     for mount in mounts {
         mount.validated()?;
@@ -43,7 +44,7 @@ pub(crate) fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<ExportPlan>>
 pub(crate) fn plan_mounts_with(
     mounts: &[SandboxMount],
     cwd: &dyn Fn() -> io::Result<PathBuf>,
-) -> Result<Option<ExportPlan>> {
+) -> Result<Option<PlannedExport>> {
     let Some(first) = mounts.first() else {
         return Ok(None);
     };
@@ -89,7 +90,10 @@ pub(crate) fn plan_mounts_with(
     // since the share was requested is refused rather than shared whole, and so is a host path
     // that now leads into another share's directory, where the share would have no root of its
     // own.
-    if let Some(plan) = &plan {
+    if let Some(PlannedExport {
+        description: plan, ..
+    }) = &plan
+    {
         for mount in mounts {
             let Some(bind) = plan
                 .binds
