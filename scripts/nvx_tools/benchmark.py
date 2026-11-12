@@ -2835,6 +2835,7 @@ def run_guest_script(
     host_state_on_timeout: Callable[[subprocess.Popen[bytes]], str] | None = None,
     on_stderr: Callable[[bytes], None] | None = None,
     expected_exit_status: int = 0,
+    architecture: str | None = None,
 ) -> GuestCommandResult:
     """Run ``script`` once the guest boots and wait for ``completion_marker``.
 
@@ -2858,6 +2859,7 @@ def run_guest_script(
     then holds alone, and the log and the error reports interleave the two
     streams by whole lines. ``SeparatedOutput`` keeps the last MiB of each.
     """
+    monitor = TimeAbiMonitor(command, architecture=architecture)
     environment = os.environ.copy()
     environment["OPENVMM_LOG"] = "off"
     started_ns = time.perf_counter_ns()
@@ -2868,7 +2870,6 @@ def run_guest_script(
         separate_stderr=on_stderr is not None,
     )
     process = interaction.process
-    monitor = TimeAbiMonitor(command)
     query_status = time_abi_status and monitor.cold_boot
     if windows_cpus is not None:
         set_windows_affinity(process.pid, windows_cpus)

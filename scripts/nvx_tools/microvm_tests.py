@@ -881,6 +881,7 @@ def run_guest_script(
     boot_marker: bytes = BOOT_MARKER,
     on_stderr: Callable[[bytes], None] | None = None,
     expected_exit_status: int = 0,
+    architecture: str | None = None,
 ) -> GuestScriptResult:
     """Run ``script`` in the shell of the guest that ``command`` boots, and
     require it to print the line ``completion_marker``.
@@ -918,6 +919,7 @@ def run_guest_script(
         time_abi_status=True,
         on_stderr=on_stderr,
         expected_exit_status=expected_exit_status,
+        architecture=architecture,
     )
     output = _guest_script_output(result["text"])
     if not contains_output_line(output.encode("utf-8"), completion_marker):
@@ -1266,6 +1268,7 @@ def run_guest_boot(
     memory_mib: int,
     timeout: float,
     log_path: Path,
+    architecture: str | None = None,
 ) -> None:
     command = workload_boot_command(
         executable,
@@ -1287,6 +1290,7 @@ def run_guest_boot(
         GUEST_BOOT_COMPLETION_MARKER,
         timeout=timeout,
         log_path=log_path,
+        architecture=architecture,
     )
 
 
@@ -11449,13 +11453,20 @@ def run(args: argparse.Namespace) -> int:
             for path, description in workload_artifact_paths(architecture=architecture):
                 require_file(path, description)
         except ScriptError as error:
+            advice = (
+                "build them with `build-distro-layer --guest ubuntu "
+                "--architecture aarch64` and `build-scratch-template "
+                "--output build/aarch64/ubuntu-smoke-scratch.ext4` on Linux"
+                if architecture == "aarch64"
+                else "install them with `nvx-rs download` or build them with "
+                "`build-guest --guest all`, format the template alone with "
+                "`build-scratch-template` on Linux"
+            )
             raise ScriptError(
                 f"{error}; {', '.join(public)} "
                 f"{'reads' if len(public) == 1 else 'read'} the Ubuntu distro "
-                "layer and the sandbox scratch template: install them with "
-                "`nvx-rs download` or build them with `build-guest --guest "
-                "all`, format the template alone with `build-scratch-template` "
-                "on Linux, or name other scenarios with --scenario"
+                f"layer and the sandbox scratch template: {advice}, "
+                "or name other scenarios with --scenario"
             ) from error
 
     with DurationReport(
@@ -11516,6 +11527,7 @@ def _run_scenarios(
             memory_mib=args.memory_mib,
             timeout=args.timeout,
             log_path=output_dir / f"{descriptor.name}-guest-boot.log",
+            architecture=architecture,
         )
     if "guest-identity" in scenarios:
         report.start(
