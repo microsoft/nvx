@@ -923,18 +923,12 @@ host namespace policy or skips the identity assertions.
 
 ### `nvx::host::artifacts`
 
-`Artifacts` (also `nvx::Artifacts`): the OpenVMM executable, guest kernel, and
-Alpine initramfs, from a release, a repository checkout, the environment, or a
-directory next to the executable. Artifacts located in a release or checkout
-keep its `ArtifactDir`, and `Artifacts::runtime_identity` reads their
-`RuntimeIdentity` from its install metadata; artifacts named by path have none.
-
 `ArtifactDir` and `Guest`: every artifact of the guests that `nvx.py` runs, the
 OpenVMM executable, the kernel, the Alpine, Ubuntu, and Azure Linux initramfs
 images and their package manifests, and the Ubuntu distro layer and its
 manifest, in a checkout's `build/` and `openvmm/target/release/` or a release's
-`guest/` and `bin/`, checked in the order and with the messages of `nvx.py`.
-`ArtifactPaths` lists them all and serializes as JSON.
+`guest/` and `bin/`, checked with the messages of `nvx.py`. `ArtifactPaths`
+lists them all and serializes as JSON.
 
 `ArtifactDir::runtime_identity` reads the `RuntimeIdentity` of the OpenVMM
 executable, kernel, and Alpine initramfs from the install metadata, a release's
@@ -2542,21 +2536,28 @@ restores one, and finds one again after its caller restarts.
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use nvx::Hypervisor;
 use nvx::activation::{MachineIdMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-use nvx::host::runtime::{LaunchOptions, Runtime};
+use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::vm::{self, VmDir};
-use nvx::{Artifacts, Hypervisor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Locates OpenVMM, the guest kernel, and the Alpine initramfs, with the identity that the
-    // install metadata of their release or checkout gives them.
-    let artifacts = Artifacts::discover()?;
+    // The caller locates OpenVMM, the guest kernel, and the Alpine initramfs, and identifies each
+    // by the SHA-256 digest that its install metadata records, such as the `SHA256SUMS` of an NVX
+    // release: here, from the command line.
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let [openvmm, kernel, initramfs, openvmm_sha256, kernel_sha256, initramfs_sha256] =
+        <[String; 6]>::try_from(arguments).map_err(|_| "expected three paths and three digests")?;
     let runtime = Runtime {
-        identity: artifacts.runtime_identity()?,
-        openvmm: artifacts.openvmm,
-        kernel: artifacts.kernel,
-        initramfs: artifacts.initrd,
+        identity: RuntimeIdentity::new(
+            ArtifactIdentity::sha256(&openvmm_sha256)?,
+            ArtifactIdentity::sha256(&kernel_sha256)?,
+            ArtifactIdentity::sha256(&initramfs_sha256)?,
+        ),
+        openvmm: openvmm.into(),
+        kernel: kernel.into(),
+        initramfs: initramfs.into(),
         hypervisor: Hypervisor::from_env_or_default()?,
         cpu_profile: None,
         windows_breakaway: false,
