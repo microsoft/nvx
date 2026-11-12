@@ -1,7 +1,6 @@
 //! Tests of the activation record's types and limits.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::num::NonZeroU64;
 
 use super::*;
 
@@ -104,7 +103,6 @@ fn the_limits_keep_their_values() {
     assert_eq!(MAX_MAPPINGS, crate::protocol::MAX_HOST_MAPPINGS);
     assert_eq!(MAX_HOSTNAME_BYTES, 64);
     assert_eq!(MAX_PROXY_ENDPOINT_BYTES, 255);
-    assert_eq!(Identity::LEN, 32);
     assert_eq!(TransactionId::LEN, 16);
 }
 
@@ -348,12 +346,6 @@ fn errors_name_the_limits_that_they_break() {
 
 #[test]
 fn opaque_values_keep_their_bytes_and_display_them_in_hexadecimal() {
-    let bytes: [u8; 32] = std::array::from_fn(|index| index as u8 * 8 + 1);
-    let digits = "0109111921293139414951596169717981899199a1a9b1b9c1c9d1d9e1e9f1f9";
-    let identity = Identity::from_bytes(bytes);
-    assert_eq!(identity.as_bytes(), &bytes);
-    assert_eq!(identity.to_string(), digits);
-    assert_eq!(format!("{identity:?}"), format!("Identity({digits})"));
     let bytes: [u8; 16] = std::array::from_fn(|index| 0xf0 - index as u8);
     let digits = "f0efeeedecebeae9e8e7e6e5e4e3e2e1";
     let transaction = TransactionId::from_bytes(bytes);
@@ -363,21 +355,6 @@ fn opaque_values_keep_their_bytes_and_display_them_in_hexadecimal() {
         format!("{transaction:?}"),
         format!("TransactionId({digits})")
     );
-}
-
-#[test]
-fn a_store_generation_is_a_nonzero_number_in_the_order_of_publication() {
-    let first = StoreGeneration::new(NonZeroU64::MIN);
-    let number = NonZeroU64::new(1_000_000_007).unwrap();
-    let later = StoreGeneration::new(number);
-    assert_eq!(first.get(), NonZeroU64::MIN);
-    assert_eq!(later.get(), number);
-    assert!(first < later);
-    assert_eq!(later.to_string(), "1000000007");
-    assert_eq!(format!("{later:?}"), "StoreGeneration(1000000007)");
-    let last = StoreGeneration::new(NonZeroU64::MAX);
-    assert!(later < last);
-    assert_eq!(last.to_string(), "18446744073709551615");
 }
 
 #[test]

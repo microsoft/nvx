@@ -88,7 +88,7 @@ use std::path::{Path, PathBuf};
 
 /// A file that the test reads.
 struct Source {
-    /// The file's path in the crate, with `/` separators, such as `src/host/store/mod.rs`.
+    /// The file's path in the crate, with `/` separators, such as `src/host/platform/mod.rs`.
     path: String,
     /// The file's text.
     text: String,
@@ -259,7 +259,7 @@ struct Graph {
 /// A reference that makes a dependency.
 #[derive(Debug)]
 struct Example {
-    /// The file and line of the reference, such as `src/host/store/mod.rs:242`.
+    /// The file and line of the reference, such as `src/host/platform/mod.rs:242`.
     location: String,
     /// The path that the reference writes, such as `super::spawn::Launched`.
     path: String,
@@ -2667,8 +2667,8 @@ fn parse(module: &[String], text: &str, context: &Context) -> Facts {
     facts
 }
 
-/// Returns the module of the file at `path` in the crate, such as `["host", "store"]` for
-/// `src/host/store/mod.rs`, or `None` for a path that is not a source file.
+/// Returns the module of the file at `path` in the crate, such as `["host", "platform"]` for
+/// `src/host/platform/mod.rs`, or `None` for a path that is not a source file.
 fn module_of(path: &str) -> Option<Vec<String>> {
     let relative = path.strip_prefix("src/")?.strip_suffix(".rs")?;
     let mut module: Vec<String> = relative.split('/').map(str::to_owned).collect();
@@ -3302,10 +3302,10 @@ fn the_children_of_host_depend_on_one_another_without_cycles() {
 fn the_graph_holds_well_known_dependencies_of_the_sources() {
     let graph = analyze(&read_sources()).unwrap_or_else(|error| panic!("{error}"));
     for (from, to) in [
-        ("instance", "store"),
-        ("supervisor", "store"),
+        ("vm", "spawn"),
+        ("supervisor", "spawn"),
         ("cli", "sandbox"),
-        ("store", "spawn"),
+        ("spawn", "platform"),
     ] {
         assert!(
             graph.edges.contains_key(&(from.to_owned(), to.to_owned())),

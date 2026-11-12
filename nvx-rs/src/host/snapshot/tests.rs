@@ -1021,9 +1021,9 @@ impl SnapshotFixture {
 
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("snapshot");
-        assert_eq!(platform::create_store_dir(&dir).unwrap(), None);
+        crate::host::vm::create_private_dir(&dir).unwrap();
         let openvmm = dir.join(OPENVMM_DIR);
-        assert_eq!(platform::create_store_dir(&openvmm).unwrap(), None);
+        crate::host::vm::create_private_dir(&openvmm).unwrap();
         let spec = ManifestSpec::template();
         let manifest = SnapshotManifest::parse(&spec.encode()).unwrap();
         let key = SnapshotKey::new(&class(), &manifest).unwrap();

@@ -7,6 +7,7 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+#[cfg(feature = "cli")]
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,14 +16,6 @@ use nix::sys::socket::{MsgFlags, getsockopt, recv, sockopt::PeerPidfd};
 
 use crate::host::platform::{Transport, TransportHandle, time_left};
 use crate::host::sys;
-
-/// Returns the control endpoint OpenVMM should listen on for a sandbox.
-pub(crate) fn control_endpoint(socket_path: &Path) -> io::Result<String> {
-    socket_path
-        .to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| io::Error::other("control socket path is not valid UTF-8"))
-}
 
 /// The listener at which a restore awaits the restore-ready event of its VMM: a Unix
 /// socket, which the VMM connects to once, and which queues its connection until the host
@@ -312,12 +305,8 @@ pub(crate) fn interrupt_transfers(handle: &TransportHandle) -> io::Result<()> {
     }
 }
 
-/// Returns the process that listens on a control endpoint, or `None` if nothing listens.
-pub(crate) fn endpoint_server_pid(endpoint: &str) -> io::Result<Option<u32>> {
-    endpoint_server_pid_until(endpoint, Instant::now() + Duration::from_secs(5))
-}
-
 /// Looks up the endpoint owner within the caller's absolute deadline.
+#[cfg(feature = "cli")]
 pub(crate) fn endpoint_server_pid_until(
     endpoint: &str,
     deadline: Instant,
