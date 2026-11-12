@@ -1810,3 +1810,111 @@ fn mapped_paths_resolve_to_utf8_paths() {
         );
     }
 }
+
+/// Plans the export of `mappings` into the blockless root.
+fn plan_blockless(mappings: &[Mapping<'_>]) -> Result<Option<ExportPlan>> {
+    super::plan(&plain_request(mappings, ReservedTargets::BLOCKLESS_ROOT))
+}
+
+#[test]
+fn an_export_refuses_guest_targets_that_are_not_canonical_or_that_a_root_reserves() {
+    let directory = tempfile::tempdir().unwrap();
+    for target in [
+        "",
+        "relative",
+        "/",
+        "/work/",
+        "/work//child",
+        "/work/./child",
+        "/work/../child",
+        "/work\0child",
+        "/etc",
+        "/etc/child",
+    ] {
+        let mappings = [Mapping {
+            name: "filesystem",
+            path: directory.path(),
+            target: Target::Guest(target),
+            read_only: true,
+        }];
+        let error = plan_blockless(&mappings).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{target:?}: {error}");
+    }
+    let mappings = [Mapping {
+        name: "filesystem",
+        path: directory.path(),
+        target: Target::Guest("/work"),
+        read_only: true,
+    }];
+    let plan = plan_blockless(&mappings).unwrap().unwrap();
+    plan.check(ReservedTargets::BLOCKLESS_ROOT).unwrap();
+    plan.verify().unwrap();
+}
+
+#[test]
+fn an_export_refuses_a_read_only_path_inside_a_writable_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("input");
+    fs::write(&file, b"input").unwrap();
+    let mappings = [
+        Mapping {
+            name: "filesystem",
+            path: directory.path(),
+            target: Target::Guest("/work"),
+            read_only: false,
+        },
+        Mapping {
+            name: "filesystem",
+            path: &file,
+            target: Target::Guest("/work/input"),
+            read_only: true,
+        },
+    ];
+    assert_eq!(
+        plan_blockless(&mappings).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_caller_owner_is_refused_on_windows() {
+    let request = ExportRequest {
+        owner: Owner::Caller,
+        ..plain_request(&[], ReservedTargets::BLOCKLESS_ROOT)
+    };
+    assert_eq!(
+        super::plan(&request).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
+}
+
+#[test]
+fn an_exported_object_that_a_workload_could_move_is_checked_again_before_a_start() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("input");
+    fs::write(&file, b"original").unwrap();
+    let mappings = [
+        Mapping {
+            name: "filesystem",
+            path: directory.path(),
+            target: Target::Guest("/work"),
+            read_only: false,
+        },
+        Mapping {
+            name: "filesystem",
+            path: &file,
+            target: Target::Guest("/work/input"),
+            read_only: false,
+        },
+    ];
+    let plan = plan_blockless(&mappings).unwrap().unwrap();
+    plan.verify().unwrap();
+    fs::rename(&file, directory.path().join("kept-original")).unwrap();
+    fs::write(&file, b"replacement").unwrap();
+    assert_eq!(plan.verify().unwrap_err().kind(), ErrorKind::Other);
+    assert_eq!(
+        fs::read(directory.path().join("kept-original")).unwrap(),
+        b"original"
+    );
+}
