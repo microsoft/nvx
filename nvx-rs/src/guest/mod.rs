@@ -52,8 +52,9 @@
 //! Each other module holds one program, and the crate's binary of the same name runs its `main`.
 //! Two of them also offer their steps as typed calls, which any guest init or agent runs in its
 //! own process and their programs run on: on x86-64, `time`'s `TimeAbi` runs the time ABI's
-//! cold-boot step, capture, and restore finish, and [`reseed`] reseeds the kernel's random number
-//! generator with a restore's fresh entropy, which starts with the new [`GenerationId`]. The
+//! cold-boot step and starts its daemon, while [`snapshot`] runs its capture and restore finish,
+//! and [`reseed`] reseeds the kernel's random number generator with a restore's fresh entropy,
+//! which starts with the new [`GenerationId`]. The
 //! program of the hidden `ingress` module, the announcer of the guest's listeners, offers no call:
 //! activation reports the publication and gateway to its caller, which runs the program, or has
 //! `nvx-ingress start` run it from a socket that it binds for it. The
