@@ -86,6 +86,17 @@ impl fmt::Debug for Capability {
     }
 }
 
+/// Returns a fresh launch capability, which is never all zero.
+pub(crate) fn generate_capability() -> Result<[u8; CAPABILITY_LEN]> {
+    let mut capability = [0u8; CAPABILITY_LEN];
+    while capability == [0; CAPABILITY_LEN] {
+        getrandom::fill(&mut capability).map_err(|error| {
+            Error::other("cannot generate a control capability").with_source(error)
+        })?;
+    }
+    Ok(capability)
+}
+
 /// Launch values that the caller saves and reloads to verify or reattach its VM.
 ///
 /// The library never serializes, stores or locates them. The endpoint is the name chosen at
@@ -640,7 +651,7 @@ pub fn create(
                 unused_output(Path::new(console))?;
             }
         }
-        let capability = Capability(crate::host::instance::generate_capability()?);
+        let capability = Capability(generate_capability()?);
         if let Some(snapshot) = from {
             unused_output(&view)?;
             if let Some(endpoint) = &ready_endpoint {

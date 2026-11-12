@@ -36,7 +36,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use nvx::host::instance::generate_capability;
 use nvx::host::platform::process_start_time;
 use nvx::host::session::{self, ControlSession, ExecEvent};
 use nvx::protocol::{
@@ -509,7 +508,8 @@ fn a_managed_guest_runs_request_scoped_workloads_until_it_stops() {
     let output_dir = PathBuf::from(variable("NVX_MANAGED_LIFECYCLE_OUTPUT_DIR"));
     fs::create_dir_all(&output_dir).unwrap();
     let log = File::create(output_dir.join("managed-lifecycle.log")).unwrap();
-    let capability = generate_capability().unwrap();
+    let mut capability = [0; CAPABILITY_LEN];
+    getrandom::fill(&mut capability).unwrap();
     // OpenVMM reads its capability as soon as it starts, so its input already holds the
     // capability and its end, as `nvx::host::supervisor::spawn` prepares it.
     let (input, mut writer) = io::pipe().unwrap();
