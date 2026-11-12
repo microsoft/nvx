@@ -5,7 +5,7 @@ use std::fmt;
 /// Result type of NVX operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Classification of an [`Error`], which its [`ErrorCode`] determines.
+/// Classification of an [`Error`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -63,7 +63,9 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-/// Stable, machine-readable code of an [`Error`], finer than its [`ErrorKind`].
+/// Stable, machine-readable code of an [`Error`], finer than its [`ErrorKind`], which the `nvx-rs`
+/// CLI prints with each error that it reports. Codes are private to the crate: callers of the
+/// library tell errors apart by their kinds.
 ///
 /// Each code belongs to one kind, which [`kind`](Self::kind) returns. A failure that a caller can
 /// act on has a code of its own, such as `sandbox-not-running`; any other failure has its kind's
@@ -73,14 +75,16 @@ impl fmt::Display for ErrorKind {
 /// a kind, or the subject of the failure followed by its condition, such as `artifact-missing`.
 /// Codes are stable: a code keeps its spelling, its kind, and its meaning, and is never reused for
 /// another failure, so a new failure that a caller can act on gets a new code. Messages are not
-/// stable, so callers tell errors apart by their codes, and by stable fragments of their messages,
-/// such as the names of options and fields.
+/// stable, so the CLI's callers tell errors apart by their codes, and by stable fragments of their
+/// messages, such as the names of options and fields.
 ///
-/// The `nvx-rs` CLI prints the code of every error that it reports, including the `argument-*`
-/// codes of its usage errors, which no library error has.
+/// The CLI's usage errors have the `argument-*` codes, which no library error has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ErrorCode {
+#[cfg_attr(
+    not(feature = "cli"),
+    allow(dead_code, reason = "the CLI makes most of the finer codes")
+)]
+pub(crate) enum ErrorCode {
     /// `unavailable`: a runtime dependency is missing or unusable, other than as a finer code
     /// says, such as install metadata, the hypervisor, a release, or a host that NVX does not
     /// support.
@@ -158,39 +162,8 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// Every code of this release.
-    pub const ALL: &'static [ErrorCode] = &[
-        Self::Unavailable,
-        Self::Unsupported,
-        Self::Exited,
-        Self::StillRunning,
-        Self::Io,
-        Self::NotFound,
-        Self::Protocol,
-        Self::TimedOut,
-        Self::Other,
-        Self::ArgumentUnrecognized,
-        Self::ArgumentMissing,
-        Self::ArgumentInvalid,
-        Self::ArtifactMissing,
-        Self::SandboxNotProvisioned,
-        Self::SandboxProvisioned,
-        Self::SandboxNotRunning,
-        Self::SandboxRunning,
-        Self::SandboxExited,
-        Self::SandboxBusy,
-        Self::RuntimeMismatch,
-        Self::VmmIndeterminate,
-        Self::FormatUnsupported,
-        Self::ForeignFiles,
-        Self::OutcomeReportExists,
-        Self::ScratchClaimed,
-        Self::ExecRefused,
-        Self::EndpointClosed,
-    ];
-
     /// Returns the stable spelling of this code.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Unavailable => ErrorKind::Unavailable.as_str(),
             Self::Unsupported => ErrorKind::Unsupported.as_str(),
@@ -223,7 +196,7 @@ impl ErrorCode {
     }
 
     /// Returns the kind of the errors that have this code.
-    pub const fn kind(self) -> ErrorKind {
+    pub(crate) const fn kind(self) -> ErrorKind {
         match self {
             Self::Unavailable | Self::ArtifactMissing => ErrorKind::Unavailable,
             Self::Unsupported
@@ -272,14 +245,13 @@ impl From<ErrorKind> for ErrorCode {
     }
 }
 
-/// Error of an NVX operation: its [`ErrorCode`], which determines its [`ErrorKind`], a
-/// description, and an optional cause.
+/// Error of an NVX operation: its [`ErrorKind`], a description, and an optional cause.
 ///
 /// The description is a complete sentence fragment that callers can show as is, so callers map
-/// errors onto their own classifications by [`kind`](Self::kind) or [`code`](Self::code) alone.
+/// errors onto their own classifications by [`kind`](Self::kind) alone.
 #[derive(Debug)]
 pub struct Error {
-    /// Stable code that callers use when telling the failure apart.
+    /// Stable code, which determines the error's kind, and which the CLI prints.
     code: ErrorCode,
     /// Complete, user-facing description without a trailing period.
     message: String,
@@ -289,7 +261,7 @@ pub struct Error {
 
 impl Error {
     /// Creates an error with the given code, or the code of the given kind, and description.
-    pub fn new(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -298,43 +270,49 @@ impl Error {
     }
 
     /// Creates an [`ErrorKind::Unavailable`] error.
-    pub fn unavailable(message: impl Into<String>) -> Self {
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Unavailable, message)
     }
 
     /// Creates an [`ErrorKind::Unsupported`] error.
-    pub fn unsupported(message: impl Into<String>) -> Self {
+    #[cfg(any(feature = "host", all(feature = "guest", target_os = "linux")))]
+    pub(crate) fn unsupported(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Unsupported, message)
     }
 
     /// Creates an [`ErrorKind::Exited`] error.
-    pub fn exited(message: impl Into<String>) -> Self {
+    #[cfg(feature = "host")]
+    pub(crate) fn exited(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Exited, message)
     }
 
     /// Creates an [`ErrorKind::Io`] error.
-    pub fn io(message: impl Into<String>) -> Self {
+    #[cfg(any(feature = "host", all(feature = "guest", target_os = "linux")))]
+    pub(crate) fn io(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Io, message)
     }
 
     /// Creates an [`ErrorKind::Protocol`] error.
-    pub fn protocol(message: impl Into<String>) -> Self {
+    #[cfg(feature = "host")]
+    pub(crate) fn protocol(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Protocol, message)
     }
 
     /// Creates an [`ErrorKind::TimedOut`] error.
-    pub fn timed_out(message: impl Into<String>) -> Self {
+    #[cfg(feature = "host")]
+    pub(crate) fn timed_out(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::TimedOut, message)
     }
 
     /// Creates an [`ErrorKind::Other`] error.
-    pub fn other(message: impl Into<String>) -> Self {
+    #[cfg(feature = "host")]
+    pub(crate) fn other(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Other, message)
     }
 
     /// Attaches an underlying cause to this error.
     #[must_use]
-    pub fn with_source(
+    pub(crate) fn with_source(
         mut self,
         source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
     ) -> Self {
@@ -342,13 +320,17 @@ impl Error {
         self
     }
 
-    /// Returns the classification of this error, which its code determines.
+    /// Returns the classification of this error.
     pub fn kind(&self) -> ErrorKind {
         self.code.kind()
     }
 
-    /// Returns the stable code of this error.
-    pub fn code(&self) -> ErrorCode {
+    /// Returns the stable code of this error, which the CLI prints.
+    #[cfg_attr(
+        not(feature = "cli"),
+        allow(dead_code, reason = "the CLI prints the codes")
+    )]
+    pub(crate) fn code(&self) -> ErrorCode {
         self.code
     }
 
@@ -358,8 +340,7 @@ impl Error {
     }
 
     /// Splits the error into its kind, description, and cause, so that a caller can rebuild it
-    /// as an error of its own without adding a level to the chain of causes. A caller that keeps
-    /// the code reads it with [`code`](Self::code) first.
+    /// as an error of its own without adding a level to the chain of causes.
     pub fn into_parts(
         self,
     ) -> (
