@@ -441,8 +441,8 @@ their own. The tests that a step runs have rows of their own where they concern 
 | `.github/workflows/ci.yml` | openvmm-ci: Check OpenVMM's CI of the pinned revision | kept |  |
 | `.github/workflows/ci.yml` | performance-gate: Gate on performance regressions | kept |  |
 | `.github/workflows/ci.yml` | required-status-check: Verify required jobs | kept | SL5.2 removes the adapter's job from what it requires |
-| `.github/workflows/ci.yml` | crate-package: Package, check, and build the nvx crate | kept | Since SL6.6a, the package holds no build script or `artifacts.json`, and builds once, with every feature |
-| `.github/workflows/ci.yml` | crate-release: Check the nvx package | kept | Since SL6.6a, the package holds no build script or `artifacts.json` |
+| `.github/workflows/ci.yml` | crate-package: Package, check, and build the nvx crate | kept | Since SL6.6a, the package holds no build script or `artifacts.json`, and builds once, with every feature. Since SL8.1, it holds the public API's snapshots too, and `cargo install` then builds `nvx-ingress` from its files with the `guest` feature and profile, outside the checkout, and runs it |
+| `.github/workflows/ci.yml` | crate-release: Check the nvx package | kept | Since SL6.6a, the package holds no build script or `artifacts.json`. Since SL8.1, it holds the public API's snapshots |
 | `.github/workflows/ci.yml` | nvx-microvm-adapter-whp: the runtime adapter's job on WHP | retired | The adapter's scenarios, whose fates are above |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run NVX microVM tests on Linux and on Windows | kept | The default suite's scenarios, by shard and on the debug kernel |
 | `.github/workflows/run-nvx-microvm-tests.yml` | Run public managed sandbox acceptance on Linux and on Windows | kept | Runs `sandbox-gpt-layer` and `vm-lifecycle` too, since SL5.1b: see [Cold boots](#cold-boots); and `snapshot-core` and `snapshot-tiers`, since SL5.1c: see [Snapshots](#snapshots) |
