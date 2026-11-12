@@ -16,10 +16,6 @@ use crate::activation::{self, MachineIdMode, View};
 use crate::protocol::cmdline::write_resolver;
 use crate::{Error, Result};
 
-/// The hostname used unless a caller names another.
-pub const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
-/// The longest guest hostname, in bytes: Linux's `HOST_NAME_MAX`.
-pub const MAX_HOSTNAME_BYTES: usize = 64;
 /// The generated machine ID's file in the root's runtime directory.
 pub const MACHINE_ID_FILE: &str = "workload-machine-id";
 /// The resolver file in the root's runtime directory.

@@ -1,5 +1,5 @@
-//! Live shares, virtio-fs devices that the VMM exports from the host, and a caller's mappings,
-//! mounted at targets in a layered root through the root's mapper, after the checks that the
+//! Live shares, virtio-fs devices that the VMM exports from the host, mounted at targets in a
+//! layered root through the root's mapper, after the checks that the
 //! [module](super#live-shares-and-mappings) lists, and the host export, the device from which a
 //! caller's mappings come.
 
@@ -250,9 +250,8 @@ impl Root {
     }
 
     /// Mounts the host export, the aggregate virtio-fs device `tag` from which the caller maps host
-    /// paths into the root with [`map`](Self::map), and returns the export's root, the
-    /// [`SourceRoot`] of those mappings. A guest reads the export's tag and [`ExportMode`] from
-    /// its kernel command line with
+    /// paths into the root, and returns the export's root, the [`SourceRoot`] of those mappings. A
+    /// guest reads the export's tag and [`ExportMode`] from its kernel command line with
     /// [`HostExport::parse`](crate::protocol::export::HostExport::parse), and mounts it with the
     /// mode's access.
     ///
@@ -266,9 +265,9 @@ impl Root {
     /// live share's is; nothing is created or mounted for a refused one.
     ///
     /// The mount belongs to the root, which unmounts it when it is torn down, after the live
-    /// shares and mappings, those mapped from the export included. The returned [`SourceRoot`]
-    /// holds a descriptor of the export's root, which keeps the mount busy: drop it before the
-    /// teardown, which otherwise fails to unmount the export, and leaves it mounted.
+    /// shares. The returned [`SourceRoot`] holds a descriptor of the export's root, which keeps the
+    /// mount busy: drop it before the teardown, which otherwise fails to unmount the export, and
+    /// leaves it mounted.
     ///
     /// A root has one export at most, since every export is mounted at the same place: once the
     /// root has mounted one, another is refused. A failure once the tag passed its check latches
@@ -289,24 +288,6 @@ impl Root {
         let mounted = self.mount_export_at(&export, tag, access);
         self.latched |= mounted.is_err();
         mounted
-    }
-
-    /// Applies `mappings` beneath the root, in order, from `source`, such as the guest's mount of
-    /// the host's export, through the root's mapper, as the
-    /// [module](super#live-shares-and-mappings) describes, and owns them: the teardown unmounts
-    /// them first, with the live shares, in reverse order.
-    ///
-    /// Zero mappings do no work. The first mapping that is refused or fails is reported, with
-    /// the target that names it, as [`Error::Mapping`]; the mappings before it stay, and the root
-    /// is latched.
-    pub fn map(&mut self, source: &SourceRoot, mappings: &[Mapping]) -> Result<(), Error> {
-        let Some(first) = mappings.first() else {
-            return Ok(());
-        };
-        self.check_latch(&mapping_mount(first))?;
-        let mapped = self.apply(source, mappings);
-        self.latched |= mapped.is_err();
-        mapped
     }
 
     /// Mounts the device `tag` at `staging` and moves it onto the relative `target`, as
@@ -452,15 +433,6 @@ impl Root {
         })
     }
 
-    /// Applies `mappings` from `source` through the root's mapper, as [`map`](Self::map)
-    /// describes.
-    fn apply(&mut self, source: &SourceRoot, mappings: &[Mapping]) -> Result<(), Error> {
-        for mapping in mappings {
-            self.apply_one(source, &mapping_mount(mapping), mapping)?;
-        }
-        Ok(())
-    }
-
     /// Applies `mapping` from `source` through the root's mapper, and owns it as `mount`.
     fn apply_one(
         &mut self,
@@ -567,13 +539,6 @@ impl Root {
             })),
             None => Ok(()),
         }
-    }
-}
-
-/// Returns the mount of the caller's `mapping`, which its absolute target names.
-fn mapping_mount(mapping: &Mapping) -> Mount {
-    Mount::Mapping {
-        target: Path::new("/").join(mapping.target()),
     }
 }
 

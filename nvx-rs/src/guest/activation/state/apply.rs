@@ -9,14 +9,14 @@ mod tests;
 use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[cfg(doc)]
 use super::Activation;
 use crate::activation::{self, ActivationRecord, Configuration, Publication};
 use crate::gpt::Expected;
-use crate::guest::mappings::{self, Access, SourceRoot};
+use crate::guest::mappings::{Access, SourceRoot};
 use crate::guest::root::{self, Assembly, AssemblyError, Device, Root, TeardownError};
 #[cfg(doc)]
 use crate::guest::snapshot::Devices;
@@ -55,12 +55,6 @@ pub struct Applied {
     export: Option<SourceRoot>,
     /// The root, which also owns the view's binds.
     root: Root,
-    /// The VM-wide hostname taken from the record.
-    hostname: Vec<u8>,
-    /// The machine ID that the view applied.
-    machine_id: MachineId,
-    /// The resolver file, when the record names a DNS server.
-    resolver: Option<PathBuf>,
     /// The proxy endpoint, which the caller tells its workloads.
     proxy: Option<String>,
     /// Whether the record publishes listeners.
@@ -75,24 +69,9 @@ impl Applied {
         &self.root
     }
 
-    /// Returns the assembled root to mount runtime filesystems, shares, and mappings.
+    /// Returns the assembled root to mount runtime filesystems and shares in, and to switch into.
     pub fn root_mut(&mut self) -> &mut Root {
         &mut self.root
-    }
-
-    /// Returns the VM-wide hostname taken from the record.
-    pub fn hostname(&self) -> &[u8] {
-        &self.hostname
-    }
-
-    /// Returns the machine ID that the root's view applied.
-    pub fn machine_id(&self) -> &MachineId {
-        &self.machine_id
-    }
-
-    /// Returns the runtime resolver file, or `None` when the image's resolver remains in use.
-    pub fn resolver(&self) -> Option<&Path> {
-        self.resolver.as_deref()
     }
 
     /// Returns the proxy endpoint for the caller to tell its workloads.
@@ -121,48 +100,21 @@ impl Applied {
     pub fn teardown(self) -> Result<(), AppliedTeardownError> {
         teardown_with(&mut LiveSystem, self.export, self.root)
     }
-
-    /// Returns the root and its machine ID, closing an export descriptor not already taken.
-    ///
-    /// The root retains the view's binds. No separate owner can unmount them after its switch.
-    pub fn into_parts(self) -> (Root, MachineId) {
-        drop(self.export);
-        (self.root, self.machine_id)
-    }
 }
 
-/// Why an applied root's teardown failed.
-///
-/// View-bind failures now belong to the root's teardown. The separate bind-failure accessor
-/// remains for compatibility with callers of the earlier application interface.
+/// Why an applied root's teardown failed: the root's teardown, which includes its view binds.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct AppliedTeardownError {
-    /// A legacy failure of independently owned runtime binds.
-    binds: Option<mappings::TeardownError>,
     /// The root's teardown failure, including its view binds.
     root: Option<TeardownError>,
 }
 
-impl AppliedTeardownError {
-    /// Returns a legacy independently owned bind failure; new teardowns report through `root`.
-    pub fn binds(&self) -> Option<&mappings::TeardownError> {
-        self.binds.as_ref()
-    }
-
-    /// Returns the root's teardown failure, including its view binds.
-    pub fn root(&self) -> Option<&TeardownError> {
-        self.root.as_ref()
-    }
-}
-
 impl fmt::Display for AppliedTeardownError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.binds, &self.root) {
-            (Some(binds), Some(root)) => write!(formatter, "{binds}; {root}"),
-            (Some(binds), None) => binds.fmt(formatter),
-            (None, Some(root)) => root.fmt(formatter),
-            (None, None) => Ok(()),
+        match &self.root {
+            Some(root) => root.fmt(formatter),
+            None => Ok(()),
         }
     }
 }
@@ -189,9 +141,6 @@ pub fn apply(
     Ok(Applied {
         export: activated.export,
         root: activated.root,
-        hostname: activated.hostname,
-        machine_id: activated.machine_id,
-        resolver: activated.resolver,
         proxy: activated.proxy,
         publication: activated.publication,
         gateway: activated.gateway,
@@ -207,13 +156,6 @@ pub enum ApplyError {
     Gpt(root::Error),
     /// Assembly failed, including a refusal of a non-fresh upper.
     Assembly(AssemblyError),
-    /// A legacy separately generated machine ID could not be written.
-    MachineId {
-        /// Why generation failed.
-        error: io::Error,
-        /// Any root teardown failure.
-        teardown: Option<TeardownError>,
-    },
     /// The VM-wide view could not be prepared or its machine ID applied.
     View {
         /// The failure reported by [`view::apply`].
@@ -249,13 +191,6 @@ impl fmt::Display for ApplyError {
             Self::Assembly(error) => {
                 return write!(formatter, "the root's assembly failed: {error}");
             }
-            Self::MachineId { error, teardown } => {
-                write!(
-                    formatter,
-                    "the workload's machine ID cannot be generated: {error}"
-                )?;
-                teardown
-            }
             Self::View { error, teardown } => {
                 write!(formatter, "the workload's view cannot be set: {error}")?;
                 teardown
@@ -282,7 +217,6 @@ impl std::error::Error for ApplyError {
             Self::Gpt(error) | Self::Export { error, .. } => Some(error),
             Self::Assembly(error) => Some(error),
             Self::View { error, .. } => Some(error),
-            Self::MachineId { error, .. } => Some(error),
             Self::Network { error, .. } => Some(error),
         }
     }
@@ -422,12 +356,6 @@ struct Activated<R, E> {
     root: R,
     /// The export descriptor, if any.
     export: Option<E>,
-    /// The record's VM-wide hostname.
-    hostname: Vec<u8>,
-    /// The machine ID applied by the view.
-    machine_id: MachineId,
-    /// The resolver file, if DNS was supplied.
-    resolver: Option<PathBuf>,
     /// The record's proxy endpoint.
     proxy: Option<String>,
     /// The record's publication, or unpublished without a network.
@@ -478,19 +406,13 @@ fn apply_with<S: System>(
         });
     }
     let dns = network.and_then(|network| network.dns);
-    let machine_id = match system.view(&mut root, &configuration.view, dns) {
-        Ok(machine_id) => machine_id,
-        Err(error) => {
-            let teardown = discard(system, export, root);
-            return Err(view_failure(error, teardown));
-        }
-    };
+    if let Err(error) = system.view(&mut root, &configuration.view, dns) {
+        let teardown = discard(system, export, root);
+        return Err(view_failure(error, teardown));
+    }
     Ok(Activated {
         root,
         export,
-        hostname: configuration.view.hostname.clone(),
-        machine_id,
-        resolver: dns.map(|_| template.runtime.join(RESOLVER_FILE)),
         proxy: network.and_then(|network| network.proxy.clone()),
         publication,
         gateway: template.gateway,
@@ -527,10 +449,7 @@ fn teardown_with<S: System>(
 ) -> Result<(), AppliedTeardownError> {
     match discard(system, export, root) {
         None => Ok(()),
-        Some(root) => Err(AppliedTeardownError {
-            binds: None,
-            root: Some(root),
-        }),
+        Some(root) => Err(AppliedTeardownError { root: Some(root) }),
     }
 }
 

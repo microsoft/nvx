@@ -94,7 +94,7 @@ impl Fixture {
         let mut mapper = self.mapper(reserved);
         let error = self.apply(&mut mapper, &[mapping]).unwrap_err();
         assert_eq!(error.entry(), 0);
-        assert!(mapper.is_latched());
+        assert!(mapper.latched);
         error.error().clone()
     }
 }
@@ -162,7 +162,7 @@ fn mappings_are_restricted_copies_attached_in_order() {
     for target in ["root/data/ro", "root/data/rw", "root/conf/app.conf"] {
         assert!(fixture.kernel.mount_at(&fixture.path(target)).is_some());
     }
-    assert!(!mapper.is_latched());
+    assert!(!mapper.latched);
 }
 
 #[test]
@@ -430,7 +430,8 @@ fn targets_that_would_shadow_a_mapping_or_a_mount_are_refused() {
         .apply(&mut mapper, &[mapping("dir", "/data/x", Access::ReadOnly)])
         .unwrap();
     // The checks alone neither open anything nor latch.
-    let check = |target: &str| mapper.check(&mapping("dir", target, Access::ReadOnly));
+    let check =
+        |target: &str| mapper.check_target(mapping("dir", target, Access::ReadOnly).target());
     let overlap = MappingError::Overlap {
         mapped: "/data/x".into(),
     };
@@ -438,13 +439,13 @@ fn targets_that_would_shadow_a_mapping_or_a_mount_are_refused() {
     assert_eq!(check("/data"), Err(overlap.clone()));
     assert_eq!(check("/data/x/y"), Ok(()));
     assert_eq!(check("/data/xy"), Ok(()));
-    assert!(!mapper.is_latched());
+    assert!(!mapper.latched);
     let error = fixture
         .apply(&mut mapper, &[mapping("dir", "/data", Access::ReadOnly)])
         .unwrap_err();
     assert_eq!(error.error(), &overlap);
     assert_eq!(error.error().raw_os_error(), Errno::EBUSY as i32);
-    assert!(mapper.is_latched());
+    assert!(mapper.latched);
 
     // The root of a mount that the root does not own.
     fs::create_dir(fixture.path("root/mounted")).unwrap();
@@ -491,7 +492,7 @@ fn a_mapping_covers_the_root_of_a_mount_that_the_root_owns() {
     );
     assert!(!tmp.join("new").exists());
     // The teardown uncovers it.
-    mapper.teardown_with(&mut fixture.kernel()).unwrap();
+    assert_eq!(mapper.unmount_with(&mut fixture.kernel()), Vec::new());
     assert_eq!(fixture.kernel.mount_at(&tmp), Some(tmpfs));
 }
 
@@ -499,7 +500,8 @@ fn a_mapping_covers_the_root_of_a_mount_that_the_root_owns() {
 fn reserved_targets_and_their_ancestors_are_refused() {
     let fixture = Fixture::new();
     let check = |reserved: Reserved, target: &str| {
-        Mapper::new(fixture.root(), reserved).check(&mapping("dir", target, Access::ReadOnly))
+        Mapper::new(fixture.root(), reserved)
+            .check_target(mapping("dir", target, Access::ReadOnly).target())
     };
     // Every mapper reserves the runtime's time tree, and the ancestors that would shadow it.
     for target in ["/run", "/run/nvx", "/run/nvx/time", "/run/nvx/time/status"] {
@@ -606,7 +608,7 @@ fn the_first_failure_latches_the_mapper() {
     assert!(fixture.kernel.mount_at(&fixture.path("root/one")).is_some());
     assert!(!fixture.path("root/two").exists());
     assert!(!fixture.path("root/three").exists());
-    assert!(mapper.is_latched());
+    assert!(mapper.latched);
     let calls = fixture.kernel.calls();
     let error = fixture
         .apply(
@@ -703,7 +705,7 @@ fn a_mapping_that_a_rename_moved_is_detached_and_refused() {
             .apply(&mut mapper, &[mapping("dir", "/data/x", Access::ReadOnly)])
             .unwrap_err();
         assert_eq!(error.entry(), 0);
-        assert!(mapper.is_latched());
+        assert!(mapper.latched);
         assert_eq!(
             error.error(),
             &MappingError::Moved {
@@ -728,7 +730,7 @@ fn a_mapping_that_a_rename_moved_is_detached_and_refused() {
         // it is.
         assert_eq!(mapper.targets().len(), 0);
         fixture.kernel.restore(Operation::Detach, &moved);
-        mapper.teardown_with(&mut fixture.kernel()).unwrap();
+        assert_eq!(mapper.unmount_with(&mut fixture.kernel()), Vec::new());
         assert_eq!(fixture.kernel.mount_at(&moved), None);
         let detaches = fixture
             .kernel
@@ -871,20 +873,29 @@ fn a_teardown_unmounts_in_reverse_order_and_reports_each_failure() {
         .unwrap();
     fixture.kernel.add_mount(fixture.path("root/covered"));
     fs::rename(fixture.path("root/renamed"), fixture.path("root/elsewhere")).unwrap();
-    let error = mapper.teardown_with(&mut fixture.kernel()).unwrap_err();
+    let failures = mapper.unmount_with(&mut fixture.kernel());
     assert_eq!(
-        error.failures(),
+        failures,
         [
-            UnmountFailure {
-                target: "/renamed".into(),
-                error: failed(Step::Locate, Errno::ENOENT),
-            },
-            UnmountFailure {
-                target: "/covered".into(),
-                error: MappingError::Moved { mounted: true },
-            },
+            (
+                1,
+                UnmountFailure {
+                    target: "/renamed".into(),
+                    error: failed(Step::Locate, Errno::ENOENT),
+                }
+            ),
+            (
+                0,
+                UnmountFailure {
+                    target: "/covered".into(),
+                    error: MappingError::Moved { mounted: true },
+                }
+            ),
         ]
     );
+    let error = TeardownError {
+        failures: failures.into_iter().map(|(_, failure)| failure).collect(),
+    };
     assert_eq!(
         error.to_string(),
         format!(
@@ -907,7 +918,10 @@ fn a_runtime_bind_skips_the_checks_of_a_host_mapping_but_not_the_walk() {
     fs::write(fixture.path("root/etc/machine-id"), b"image\n").unwrap();
     let root = fixture.root();
     let source = fixture.source();
-    let bind = |mapping: Mapping| bind_with(&mut fixture.kernel(), &root, &source, &mapping);
+    let bind = |mapping: Mapping| {
+        bind_retained_with(&mut fixture.kernel(), &root, &source, &mapping)
+            .map_err(|failure| failure.error)
+    };
     // Onto targets that a container root's mapper refuses, creating what they lack.
     bind(mapping("file.txt", "/etc/machine-id", Access::ReadOnly)).unwrap();
     bind(mapping("dir", "/run/nvx/time", Access::ReadOnly)).unwrap();
@@ -953,7 +967,7 @@ fn runtime_binds_unbind_in_reverse_order_and_report_each_failure() {
         ]
         .map(|(source_path, target)| {
             let mapping = mapping(source_path, target, Access::ReadOnly);
-            bind_with(&mut fixture.kernel(), &root, &source, &mapping).unwrap()
+            bind_retained_with(&mut fixture.kernel(), &root, &source, &mapping).unwrap()
         })
     };
     let points = [
@@ -1239,7 +1253,7 @@ fn an_empty_source_maps_the_source_root_itself_from_beneath_it() {
         )
     );
     assert!(fixture.path("root/whole").is_dir());
-    mapper.teardown_with(&mut fixture.kernel()).unwrap();
+    assert_eq!(mapper.unmount_with(&mut fixture.kernel()), Vec::new());
     // It is a directory, which goes only onto a directory, and only where a mapping of a
     // directory may go.
     let calls = fixture.kernel.calls();
@@ -1331,4 +1345,20 @@ fn errors_name_what_failed() {
             io::Error::from_raw_os_error(Errno::EPERM as i32)
         )
     );
+}
+
+/// Compiles a mapper's steps, as the module's example showed them, without mounting anything: a
+/// mapper beneath a guest's new root maps the host export's `0/workspace` at `/workspace`,
+/// read-write, `nosuid`, and `nodev`, then unmounts it.
+#[test]
+fn a_mapper_s_steps_compile() {
+    let _steps = || -> Result<(), Box<dyn std::error::Error>> {
+        let root = TargetRoot::open(Path::new("/newroot"))?;
+        let mut mapper = Mapper::new(root, Reserved::container_root());
+        let export = SourceRoot::open(Path::new("/run/export"))?;
+        let workspace = Mapping::new("0/workspace", "/workspace", Access::ReadWrite)?;
+        mapper.apply_with(&mut SystemKernel, &export, &[workspace])?;
+        assert!(mapper.unmount_with(&mut SystemKernel).is_empty());
+        Ok(())
+    };
 }

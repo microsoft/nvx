@@ -1,6 +1,6 @@
-//! Operations that assemble a layered root, mount live shares and mappings in it, and the host
-//! export from which mappings come, and tear it down, for a guest init or agent, whether or not
-//! it is PID 1.
+//! Operations that assemble a layered root, mount live shares in it, and the host export from
+//! which a caller's mappings come, and tear it down, for a guest init or agent, whether or not it
+//! is PID 1.
 //!
 //! This module is NVX's internal reference code of the guest's space, hidden from the
 //! documentation and unstable: it becomes crate-private once nothing outside NVX uses it.
@@ -10,24 +10,22 @@
 //!   the caller's [`OverlayMode`], which it checks the kernel applied, of the read-only layers of
 //!   the `distro` image over an upper. The caller names the image's format, which the assembly
 //!   never probes: an EROFS file system, the overlay's one lower layer, or a GPT disk, whose first
-//!   partition holds opaque bytes that the root returns, and whose later partitions hold the
-//!   layers, ext4 file systems. The upper is an ext4 scratch or a tmpfs. It returns the [`Root`]
-//!   that owns the mounts, holds the [runtime directory](#runtime-directory), and reports what it
-//!   mounted: the first partition's bytes, the [`Lower`] layers, the [`UpperKind`], and the
-//!   [`OverlayMode`].
+//!   partition holds opaque bytes that the assembly reads within the caller's bound, and whose
+//!   later partitions hold the layers, ext4 file systems. The upper is an ext4 scratch or a tmpfs.
+//!   It returns the [`Root`] that owns the mounts and holds the
+//!   [runtime directory](#runtime-directory).
 //! - [`Root::mount_share`] and [`Root::mount_aggregate`] mount the VMM's live shares at targets in
-//!   the root, [`Root::mount_export`] mounts the host export out of the root, and [`Root::map`]
-//!   applies a caller's host mappings in the root, from the export or another source, through the
-//!   root's [`Mapper`], as [live shares and mappings](#live-shares-and-mappings) describes.
+//!   the root, through the root's [`Mapper`], and [`Root::mount_export`] mounts the host export
+//!   out of the root, as [live shares and mappings](#live-shares-and-mappings) describes.
 //! - `Root::mount_runtime`, which is crate-private, mounts the runtime's file systems in the root,
-//!   as an init does once for its VM, before the root's first live share or mapping: it makes
+//!   as an init does once for its VM, before the root's first live share: it makes
 //!   every mount of the root's tree `nosuid` and `nodev`, then mounts `/proc`, `/sys`, `/dev` with
 //!   `/dev/pts` and `/dev/shm`, and `/run`, and binds the guest's time status at `/run/nvx/time`.
 //! - `Root::switch`, which is crate-private, switches into the root, as an init does once for its
 //!   VM: it moves the root's mount onto `/`, then makes the root the caller's root directory and
 //!   working directory. The root's mounts stay from then on: its teardown refuses, and dropping it
 //!   unmounts nothing.
-//! - [`Root::teardown`] unmounts, in order, the live shares and mappings in reverse order, the
+//! - [`Root::teardown`] unmounts, in order, the live shares in reverse order, the
 //!   mounts of an aggregate live share, of the host export, and of the runtime, the later first,
 //!   the overlay, the layers from the top down, and the upper, whose file system it syncs first
 //!   if the upper is an ext4 scratch. It attempts each, whatever failed before, and reports every
@@ -104,62 +102,22 @@
 //! each mount with its [`Access`], `nosuid`, and `nodev` set already.
 //! The root mounts a share's device at `staging`, with them, then moves it onto its target, and
 //! mounts an aggregate's device at `shares`, then attaches a copy of each child's entry there.
-//! [`Root::map`] applies a caller's host [`Mapping`]s beneath the
-//! overlay the same way, from the caller's [`SourceRoot`].
 //!
 //! The host export is the device of an aggregate whose children the root never binds itself:
 //! they are the sources of the caller's mappings, such as the mapping table of NVX's managed
 //! lifecycle, whose boot tokens [`protocol::export`](crate::protocol::export) reads.
 //! [`Root::mount_export`] mounts it at `hostfs/root`, out of the root, with the access of its
 //! [`ExportMode`](crate::protocol::export::ExportMode), `nosuid`, and `nodev`, and returns its
-//! root, the [`SourceRoot`] from which [`Root::map`] applies the
-//! caller's mappings. A root has one export at most.
+//! root, the [`SourceRoot`] from which the caller's own [`Mapper`] applies its mappings beneath
+//! the root. A root has one export at most.
 //!
 //! The mounts are made in the caller's mount namespace, which must be recursively private, as a
 //! guest's initial namespace is. Mount-point checks and mount-option reads use the calling
 //! thread's descriptor table and mount namespace, even when it shares neither with the process's
-//! first thread. A share, a child, the export, or a mapping that fails once the root has checked
-//! its request latches the root: the root refuses every later share, export, and
-//! mapping, so that its caller starts no workload on a partial set, and the mounts before it stay
-//! until the teardown, which unmounts them first.
-//!
-//! ```no_run
-//! use std::path::Path;
-//! use std::time::Duration;
-//!
-//! use nvx::gpt::Expected;
-//! use nvx::guest::mappings::{Access, Mapping};
-//! use nvx::guest::root::{self, Assembly, Device, Image, OverlayMode, Upper};
-//! use nvx::protocol::export::HostExport;
-//! use nvx::protocol::root::DISTRO_MMIO_BASE;
-//!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut root = root::assemble(&Assembly {
-//!     runtime: "/run/nvx".into(),
-//!     distro: Device { mmio: DISTRO_MMIO_BASE, sectors: None },
-//!     image: Image::Gpt {
-//!         expected: Expected::new().disk_guid("8d2f3a4e-1c5b-4e7a-9f60-2b3c4d5e6f70".parse()?),
-//!         first_partition_bound: 64 * 1024,
-//!     },
-//!     upper: Upper::Tmpfs { max_memory_percent: Some(50) },
-//!     overlay: OverlayMode::UntrustedLowers,
-//!     timeout: Duration::from_secs(30),
-//! })?;
-//! let configuration = root.first_partition().unwrap_or_default();
-//! let layers = root.lowers().len();
-//! println!("the first partition holds {} bytes over {layers} layers", configuration.len());
-//! root.mount_share("workspace", Path::new("/workspace"), Access::ReadWrite)?;
-//! // The host export that the kernel command line names, if any, is the source of host mappings.
-//! if let Some(export) = HostExport::parse(&std::fs::read("/proc/cmdline")?)? {
-//!     let source = root.mount_export(&export.tag, export.mode.into())?;
-//!     root.map(&source, &[Mapping::new("0/src", "/src", Access::ReadOnly)?])?;
-//!     // Dropping the export's root here lets the teardown unmount the export.
-//! }
-//! // Run the workload in the root at `root.path()`; then:
-//! root.teardown()?;
-//! # Ok(())
-//! # }
-//! ```
+//! first thread. A share, a child, or the export that fails once the root has checked its request
+//! latches the root: the root refuses every later share and export, so that its caller starts no
+//! workload on a partial set, and the mounts before it stay until the teardown, which unmounts
+//! them first.
 
 mod block;
 mod kernel;
@@ -372,8 +330,8 @@ pub enum Image {
     /// [`guest::gpt::read_disk`](super::gpt::read_disk), and whose partitions it uses as the
     /// kernel created them when it found the disk, or when it last reread the table, as a clone
     /// asks of it before its assembly: the assembly neither compares them with the table nor asks
-    /// the kernel to reread it. Its first partition holds opaque bytes, which the assembly
-    /// returns through [`Root::first_partition`], and never probes or mounts. Each later
+    /// the kernel to reread it. Its first partition holds opaque bytes, which the assembly reads,
+    /// and never probes or mounts. Each later
     /// partition, from partition 2 on, holds a layer, an ext4 file system that the assembly
     /// mounts at `layers/pN`, for the partition's number N, `ro,nosuid,nodev`, with
     /// `noload,errors=remount-ro`: it never loads or replays the journal, whose scan can hang
@@ -426,7 +384,7 @@ impl Upper {
     }
 }
 
-/// The kind of a root's upper, which [`Root::upper`] reports.
+/// The kind of a root's upper.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum UpperKind {
@@ -669,33 +627,8 @@ pub struct Lower {
     partition: Option<Partition>,
 }
 
-impl Lower {
-    /// Returns the layer's mount: [`Mount::Distro`] for an EROFS image, or [`Mount::Layer`] for a
-    /// layer of a GPT disk.
-    pub fn mount(&self) -> &Mount {
-        &self.mount
-    }
-
-    /// Returns the node of the layer's block device: the distro device that holds an EROFS image,
-    /// or the block device of a GPT disk's partition.
-    pub fn device(&self) -> &Path {
-        &self.device
-    }
-
-    /// Returns the layer's mount point, below the runtime directory.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the GPT partition that holds the layer, with its number, GUIDs, and extent, or
-    /// `None` for an EROFS image.
-    pub fn partition(&self) -> Option<&Partition> {
-        self.partition.as_ref()
-    }
-}
-
 /// The handle of an assembled layered root, which owns its mounts, those of the assembly and
-/// those of its live shares, host export, and mappings, and reports what the assembly mounted.
+/// those of its live shares and host export.
 ///
 /// [`teardown`](Self::teardown) unmounts them and reports each failure. Dropping the root
 /// unmounts them the same way, and ignores failures, unless `Root::switch` has switched into the
@@ -731,14 +664,14 @@ pub struct Root {
     view_binds: Option<(TargetRoot, Vec<Mapped>)>,
     /// A view bind whose attachment failed and which could not be detached.
     view_stray: Option<(PathBuf, FileDescriptor)>,
-    /// The mapper of the live shares and mappings in the root, once the root has mounted one, whose
-    /// own mounts are the overlay and the runtime's `/run` tmpfs, if the root held it then.
+    /// The mapper of the live shares in the root, once the root has mounted one, whose own mounts
+    /// are the overlay and the runtime's `/run` tmpfs, if the root held it then.
     mapper: Option<Mapper>,
     /// What each of the mapper's mappings mounts, in the mapper's order, then what the one that
     /// a rename moved and that the mapper failed to detach mounts, if any.
     mapped: Vec<Mount>,
-    /// Whether a share, the export, a mapping, or a view bind failed, after which the root refuses
-    /// later shares, exports, mappings, and view applications.
+    /// Whether a share, the export, or a view bind failed, after which the root refuses later
+    /// shares, exports, and view applications.
     latched: bool,
     /// Whether the root's mount has moved onto `/`, after which the root refuses another switch
     /// and its teardown, and unmounts nothing.
@@ -810,40 +743,9 @@ impl Root {
         Ok(())
     }
 
-    /// Returns whether a live share, the host export, a mapping, or a view bind failed, after which
-    /// the root refuses later shares, exports, mappings, and views.
-    pub fn is_latched(&self) -> bool {
-        self.latched
-    }
-
-    /// Returns the bytes of a GPT disk's first partition: all of its bytes, less its trailing NUL
-    /// bytes and ASCII whitespace, as opaque bytes that need not be UTF-8 and that the root never
-    /// interprets. Returns `None` for an EROFS image.
-    pub fn first_partition(&self) -> Option<&[u8]> {
-        self.first_partition.as_deref()
-    }
-
-    /// Returns the overlay's layers, the base first: an EROFS image, or the layers of a GPT disk
-    /// in the order of their partitions, from partition 2's, the base, to the last partition's,
-    /// the top.
-    pub fn lowers(&self) -> &[Lower] {
-        &self.lowers
-    }
-
-    /// Returns the kind of the root's upper.
-    pub fn upper(&self) -> UpperKind {
-        self.upper_kind
-    }
-
-    /// Returns the overlay's mode, whose option set, [`OverlayMode::options`], the assembly found
-    /// in effect.
-    pub fn overlay(&self) -> OverlayMode {
-        self.overlay_mode
-    }
-
-    /// Unmounts the root's mounts, in order: the view's binds, a live share or a mapping that a rename moved and
-    /// that its mapper failed to detach, which the mapper detaches, the live shares and mappings
-    /// in reverse order, a runtime mount whose attachment failed and which could not be detached,
+    /// Unmounts the root's mounts, in order: the view's binds, a live share that a rename moved and
+    /// that its mapper failed to detach, which the mapper detaches, the live shares in reverse
+    /// order, a runtime mount whose attachment failed and which could not be detached,
     /// the mounts of an aggregate live share, of the host export, and of the runtime, the later
     /// first, the overlay, the layers from the top down, and the upper.
     ///
@@ -888,10 +790,10 @@ impl Root {
     /// is mounted already is refused as [`Error::Occupied`]. So is a call while the root holds a
     /// runtime mount, before it changes anything, since restricting the tree again would make an
     /// earlier call's `/dev` and `/dev/pts` `nodev`: a second call changes nothing. So is a call
-    /// while the root holds a live share or a mapping, before it changes anything too, since the
-    /// `/run` tmpfs would hide one beneath `/run` from the teardown: the runtime comes first. A
-    /// later share or mapping beneath `/run` is on the `/run` tmpfs, where the root's mapper
-    /// creates what its target lacks, and the teardown unmounts it before the tmpfs.
+    /// while the root holds a live share, before it changes anything too, since the `/run` tmpfs
+    /// would hide one beneath `/run` from the teardown: the runtime comes first. A later share
+    /// beneath `/run` is on the `/run` tmpfs, where the root's mapper creates what its target
+    /// lacks, and the teardown unmounts it before the tmpfs.
     /// The mounts belong to the root, which unmounts them, the later first, when it is torn down.
     /// If one fails, the call unmounts those that it made, the later first, and returns the
     /// failure; one that fails to unmount stays for the teardown. The tree stays `nosuid` and
@@ -935,10 +837,8 @@ impl Root {
         {
             return Err(Error::Occupied { path: path.clone() });
         }
-        // The `/run` tmpfs would hide a share or a mapping beneath `/run` from the teardown.
-        if let Some(
-            Mount::Share { target, .. } | Mount::Child { target, .. } | Mount::Mapping { target },
-        ) = self.mapped.first()
+        // The `/run` tmpfs would hide a share beneath `/run` from the teardown.
+        if let Some(Mount::Share { target, .. } | Mount::Child { target, .. }) = self.mapped.first()
         {
             let path = self.path.join(target.strip_prefix("/").unwrap_or(target));
             return Err(Error::Occupied { path });
@@ -1029,8 +929,7 @@ impl Root {
     ///
     /// Paths resolve in the root from then on, but descriptors opened before the switch stay
     /// usable: a [`Mapper`] still maps from a [`SourceRoot`](super::mappings::SourceRoot) beneath
-    /// a [`TargetRoot`] opened before it, as [`map`](Self::map) does if the root had mounted a
-    /// live share or a mapping before it.
+    /// a [`TargetRoot`] opened before it.
     pub(crate) fn switch(&mut self) -> Result<(), SwitchError> {
         if self.switched {
             return Err(SwitchError::Switched);
@@ -1415,7 +1314,6 @@ impl Root {
                 mount: Mount::Mapping {
                     target: target.clone(),
                 },
-                path: self.path.join(target.strip_prefix("/").unwrap_or(&target)),
                 step: Step::Unmount,
                 error: error.into(),
             });
@@ -1429,7 +1327,6 @@ impl Root {
                     mount: Mount::Mapping {
                         target: target.to_owned(),
                     },
-                    path: self.path.join(target.strip_prefix("/").unwrap_or(target)),
                     step: Step::Unmount,
                     error: share::io_error(failure.error()),
                 });
@@ -1448,7 +1345,6 @@ impl Root {
                     });
                 failures.push(Unmount {
                     mount,
-                    path: self.path.join(target.strip_prefix("/").unwrap_or(target)),
                     step: Step::Unmount,
                     error: share::io_error(failure.error()),
                 });
@@ -1459,7 +1355,6 @@ impl Root {
         {
             failures.push(Unmount {
                 mount: Mount::Runtime(runtime),
-                path: self.path.join(&runtime.target()[1..]),
                 step: Step::Unmount,
                 error: error.into(),
             });
@@ -1489,7 +1384,6 @@ impl Root {
             if let Err(error) = outcome {
                 failures.push(Unmount {
                     mount,
-                    path,
                     step,
                     error: error.into(),
                 });
@@ -1558,9 +1452,9 @@ pub(crate) fn bind_file_retained(
 }
 
 /// Binds the file or directory at `path`, which must be of `kind`, read-only at `target` beneath
-/// `root`, with `kernel`, through the walk and attach of [`mappings::bind`] from a source root at
-/// `path`'s parent directory, and returns the bind, retaining a failed bind that its caller must
-/// detach.
+/// `root`, with `kernel`, through the walk and attach of a runtime bind,
+/// [`bind_retained_with`](mappings::mapper::bind_retained_with), from a source root at `path`'s
+/// parent directory, and returns the bind, retaining a failed bind that its caller must detach.
 pub(crate) fn bind_runtime_file_retained(
     kernel: &mut dyn mappings::Kernel,
     root: &TargetRoot,
@@ -1943,7 +1837,7 @@ pub enum Mount {
         /// The child's target in the root.
         target: PathBuf,
     },
-    /// A caller's host mapping, at its target in the root.
+    /// A bind at its target in the root, such as one of the view's.
     Mapping {
         /// The mapping's target in the root.
         target: PathBuf,
@@ -2202,10 +2096,10 @@ pub enum Error {
         /// The error.
         error: io::Error,
     },
-    /// A live share, a child of an aggregate live share, or a mapping was refused or failed to
-    /// attach at its target in the root, once the root had checked its request; nothing of it
-    /// stays mounted, unless the error is a moved mapping that stays mounted. The root refuses
-    /// every later share, export, and mapping, with [`MappingError::Latched`].
+    /// A live share or a child of an aggregate live share was refused or failed to attach at its
+    /// target in the root, once the root had checked its request; nothing of it stays mounted,
+    /// unless the error is a moved mapping that stays mounted. The root refuses every later share
+    /// and export, with [`MappingError::Latched`].
     Mapping {
         /// The mount that was refused or failed.
         mount: Mount,
@@ -2376,23 +2270,6 @@ pub struct AssemblyError {
     cleanup: Option<TeardownError>,
 }
 
-impl AssemblyError {
-    /// Returns the assembly's failure.
-    pub fn error(&self) -> &Error {
-        &self.error
-    }
-
-    /// Returns the failures to unmount what the assembly had mounted, if any: those mounts stay.
-    pub fn cleanup(&self) -> Option<&TeardownError> {
-        self.cleanup.as_ref()
-    }
-
-    /// Returns the assembly's failure and the cleanup's.
-    pub fn into_parts(self) -> (Error, Option<TeardownError>) {
-        (self.error, self.cleanup)
-    }
-}
-
 impl fmt::Display for AssemblyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.error.fmt(formatter)?;
@@ -2449,12 +2326,6 @@ pub struct TeardownError {
 }
 
 impl TeardownError {
-    /// Returns the failures, each of a mount that stays in place, in the order in which they were
-    /// attempted: none if the root had switched.
-    pub fn failures(&self) -> &[Unmount] {
-        &self.failures
-    }
-
     /// Returns whether the teardown was refused because the root had
     /// [switched](Root::switch), so that it unmounted nothing.
     pub(crate) fn is_switched(&self) -> bool {
@@ -2486,8 +2357,6 @@ impl std::error::Error for TeardownError {}
 pub struct Unmount {
     /// The mount.
     mount: Mount,
-    /// Its mount point.
-    path: PathBuf,
     /// The step that failed.
     step: Step,
     /// The error.
@@ -2501,23 +2370,6 @@ enum Step {
     Sync,
     /// The unmount.
     Unmount,
-}
-
-impl Unmount {
-    /// Returns the mount that stays in place.
-    pub fn mount(&self) -> &Mount {
-        &self.mount
-    }
-
-    /// Returns its mount point.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the error of its sync or of its unmount.
-    pub fn error(&self) -> &io::Error {
-        &self.error
-    }
 }
 
 impl fmt::Display for Unmount {

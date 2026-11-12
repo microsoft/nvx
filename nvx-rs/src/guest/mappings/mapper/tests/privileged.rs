@@ -95,8 +95,10 @@ impl Scene {
     fn refusal(&self, reserved: Reserved, source: &str, target: &str) -> MappingError {
         let mut mapper = self.mapper(reserved);
         let mapping = Mapping::new(source, target, Access::ReadWrite).unwrap();
-        let error = mapper.apply(&self.source(), &[mapping]).unwrap_err();
-        assert!(mapper.is_latched());
+        let error = mapper
+            .apply_with(&mut SystemKernel, &self.source(), &[mapping])
+            .unwrap_err();
+        assert!(mapper.latched);
         error.error().clone()
     }
 }
@@ -297,7 +299,7 @@ fn a_rename_race_never_mounts_outside_the_target() {
     for attempt in 0..2000 {
         let mut mapper = scene.mapper(Reserved::default());
         let mapping = Mapping::new("dir", format!("/a/x{attempt}"), Access::ReadOnly).unwrap();
-        match mapper.apply(&source, &[mapping]) {
+        match mapper.apply_with(&mut SystemKernel, &source, &[mapping]) {
             Ok(()) => attached += 1,
             Err(error) => match error.error() {
                 MappingError::Link { .. } => linked += 1,
@@ -342,13 +344,17 @@ fn kinds_nested_targets_and_reserved_targets_are_checked() {
         Mapping::new("dir", "/m", Access::ReadWrite).unwrap(),
         Mapping::new("file.txt", "/m/marker", Access::ReadOnly).unwrap(),
     ];
-    mapper.apply(&scene.source(), &mappings).unwrap();
+    mapper
+        .apply_with(&mut SystemKernel, &scene.source(), &mappings)
+        .unwrap();
     let (outer, outer_root) = mount_of(&root.join("m"));
     let (inner, inner_root) = mount_of(&root.join("m/marker"));
     assert!(outer_root && inner_root && outer != inner);
     assert_eq!(fs::read(root.join("m/marker")).unwrap(), b"file");
     let nested = Mapping::new("dir/inner", "/m/new", Access::ReadOnly).unwrap();
-    let error = mapper.apply(&scene.source(), &[nested]).unwrap_err();
+    let error = mapper
+        .apply_with(&mut SystemKernel, &scene.source(), &[nested])
+        .unwrap_err();
     assert_eq!(
         error.error(),
         &MappingError::Foreign {
@@ -378,7 +384,7 @@ fn kinds_nested_targets_and_reserved_targets_are_checked() {
         );
     }
     assert!(!root.join("run").exists() && !root.join("etc").exists());
-    mapper.teardown().unwrap();
+    assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
     assert!(mounts_below(&root).is_empty());
 }
 
@@ -403,7 +409,9 @@ fn an_empty_source_maps_a_copy_of_the_source_root_s_own_mount() {
     std::os::unix::fs::symlink("dir", export.join("link")).unwrap();
     let mut mapper = scene.mapper(Reserved::default());
     let whole = Mapping::new("", "/whole", Access::ReadOnly).unwrap();
-    mapper.apply(&scene.source(), &[whole]).unwrap();
+    mapper
+        .apply_with(&mut SystemKernel, &scene.source(), &[whole])
+        .unwrap();
     // The target is the root of a copy of the source root's own mount, read-only, `nosuid`, and
     // `nodev`, which shows the whole export, but not the file system mounted below it.
     let mapped = root.join("whole");
@@ -431,7 +439,7 @@ fn an_empty_source_maps_a_copy_of_the_source_root_s_own_mount() {
         scene.refusal(Reserved::default(), "dir/inner", "/inner"),
         refused(Errno::EXDEV)
     );
-    mapper.teardown().unwrap();
+    assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
     assert!(mounts_below(&root).is_empty());
     assert!(!export.join("new").exists());
 }
@@ -464,13 +472,15 @@ fn a_mapping_covers_the_root_of_a_mount_only_if_the_root_owns_it() {
     target.add_mount(&tmp).unwrap();
     let mut mapper = Mapper::new(target, Reserved::default());
     let mapping = Mapping::new("dir", "/tmp", Access::ReadWrite).unwrap();
-    mapper.apply(&scene.source(), &[mapping]).unwrap();
+    mapper
+        .apply_with(&mut SystemKernel, &scene.source(), &[mapping])
+        .unwrap();
     let (covering, covering_root) = mount_of(&tmp);
     assert!(covering_root && covering != tmpfs);
     assert_eq!(fs::read(tmp.join("marker")).unwrap(), b"host");
     assert!(!tmp.join("own").exists());
     // The teardown uncovers it.
-    mapper.teardown().unwrap();
+    assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
     assert_eq!(mount_of(&tmp), (tmpfs, true));
     assert_eq!(fs::read(tmp.join("own")).unwrap(), b"tmpfs");
     assert_eq!(mounts_below(&root), [tmp]);
@@ -505,7 +515,9 @@ fn a_workload_that_is_not_root_enters_what_a_mapper_created_whatever_the_umask_o
             mappings.push(Mapping::new("dir", share, Access::ReadOnly).unwrap());
             mappings.push(Mapping::new("file.txt", file, Access::ReadOnly).unwrap());
         }
-        mapper.apply(&scene.source(), &mappings).unwrap();
+        mapper
+            .apply_with(&mut SystemKernel, &scene.source(), &mappings)
+            .unwrap();
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
         for directory in ["srv"].iter().chain(parents) {
             assert_eq!(mode(&root.join(directory)), 0o755, "{directory}");
@@ -533,7 +545,7 @@ fn a_workload_that_is_not_root_enters_what_a_mapper_created_whatever_the_umask_o
         for ((path, contents), read) in expected.iter().zip(read) {
             assert_eq!(read.unwrap(), *contents, "{}", path.display());
         }
-        mapper.teardown().unwrap();
+        assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
     })
     .join()
     .unwrap();
@@ -571,11 +583,13 @@ fn a_read_only_mapping_is_never_visible_writable() {
     for _ in 0..300 {
         let mut mapper = scene.mapper(Reserved::default());
         let mapping = Mapping::new("dir", "/ro", Access::ReadOnly).unwrap();
-        mapper.apply(&source, &[mapping]).unwrap();
+        mapper
+            .apply_with(&mut SystemKernel, &source, &[mapping])
+            .unwrap();
         let flags = statvfs(&scene.path("root/ro")).unwrap().flags();
         assert!(flags.contains(FsFlags::ST_RDONLY | FsFlags::ST_NOSUID | FsFlags::ST_NODEV));
         let _teardown = attempts.write().unwrap();
-        mapper.teardown().unwrap();
+        assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
     }
     stop.store(true, Ordering::Relaxed);
     racer.join().unwrap();
@@ -584,13 +598,15 @@ fn a_read_only_mapping_is_never_visible_writable() {
     // A writable mapping is writable, and still `nosuid` and `nodev`.
     let mut mapper = scene.mapper(Reserved::default());
     let mapping = Mapping::new("dir", "/rw", Access::ReadWrite).unwrap();
-    mapper.apply(&source, &[mapping]).unwrap();
+    mapper
+        .apply_with(&mut SystemKernel, &source, &[mapping])
+        .unwrap();
     let flags = statvfs(&scene.path("root/rw")).unwrap().flags();
     assert!(flags.contains(FsFlags::ST_NOSUID | FsFlags::ST_NODEV));
     assert!(!flags.contains(FsFlags::ST_RDONLY));
     fs::write(scene.path("root/rw/marker"), b"guest").unwrap();
     assert_eq!(fs::read(scene.path("export/dir/marker")).unwrap(), b"guest");
-    mapper.teardown().unwrap();
+    assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
 }
 
 #[test]
@@ -606,21 +622,22 @@ fn a_teardown_unmounts_each_mapping_and_reports_a_busy_one() {
         Mapping::new("dir/inner", "/busy/inner", Access::ReadOnly).unwrap(),
         Mapping::new("file.txt", "/deep/file", Access::ReadOnly).unwrap(),
     ];
-    mapper.apply(&scene.source(), &mappings).unwrap();
+    mapper
+        .apply_with(&mut SystemKernel, &scene.source(), &mappings)
+        .unwrap();
     assert_eq!(mounts_below(&root).len(), 3);
     // An open file keeps its mapping busy, which the teardown reports and leaves.
     let held = fs::File::open(root.join("busy/marker")).unwrap();
-    let error = mapper.teardown().unwrap_err();
+    let failures = mapper.unmount_with(&mut SystemKernel);
     assert_eq!(
-        error
-            .failures()
+        failures
             .iter()
-            .map(UnmountFailure::target)
+            .map(|(_, failure)| failure.target())
             .collect::<Vec<_>>(),
         [Path::new("/busy")]
     );
     assert_eq!(
-        error.failures()[0].error(),
+        failures[0].1.error(),
         &MappingError::System {
             step: Step::Unmount,
             error: Errno::EBUSY as i32
@@ -631,8 +648,10 @@ fn a_teardown_unmounts_each_mapping_and_reports_a_busy_one() {
     nix::mount::umount(&root.join("busy")).unwrap();
     // Without one, every mapping goes.
     let mut mapper = scene.mapper(Reserved::default());
-    mapper.apply(&scene.source(), &mappings).unwrap();
-    mapper.teardown().unwrap();
+    mapper
+        .apply_with(&mut SystemKernel, &scene.source(), &mappings)
+        .unwrap();
+    assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
     assert!(mounts_below(&root).is_empty());
     assert!(root.join("deep/file").is_file());
 }
@@ -655,9 +674,11 @@ fn a_thread_with_a_descriptor_table_of_its_own_tears_its_mappings_down() {
             Mapping::new("dir", "/a/b", Access::ReadOnly).unwrap(),
             Mapping::new("file.txt", "/c", Access::ReadOnly).unwrap(),
         ];
-        mapper.apply(&scene.source(), &mappings).unwrap();
+        mapper
+            .apply_with(&mut SystemKernel, &scene.source(), &mappings)
+            .unwrap();
         assert_eq!(mounts_below(&root).len(), 2);
-        mapper.teardown().unwrap();
+        assert_eq!(mapper.unmount_with(&mut SystemKernel), Vec::new());
         assert!(mounts_below(&root).is_empty());
     })
     .join()

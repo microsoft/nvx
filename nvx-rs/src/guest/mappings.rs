@@ -19,9 +19,9 @@
 //! target, and its access. A [`MappingTable`] keeps the agent's account of the table: it checks
 //! each part against what the host announced and against the entries that it applied, hands the
 //! part's mappings to the caller, which applies them beneath the root of its choice, such as
-//! through a mapper or a layered root, and latches at the first that fails, which it reports with
-//! its entry in the table, so that the agent starts no workload on a partial table. The root keeps
-//! the mappings until its teardown.
+//! through a mapper, and latches at the first that fails, which it reports with its entry in the
+//! table, so that the agent starts no workload on a partial table. The caller keeps the mappings
+//! until its teardown.
 //!
 //! NVX's managed agent applies its host mapping table through one, and through a mapper beneath
 //! its own root, `/`, in direct mode, from its mount of the host's export, an aggregate, whose
@@ -43,7 +43,7 @@ pub(crate) use self::kernel::{Kernel, SystemKernel};
 #[doc(hidden)]
 pub use self::mapper::{
     ApplyError, Mapper, MappingError, Reserved, SourceRoot, Step, TargetRoot, TeardownError,
-    UnmountFailure, bind,
+    UnmountFailure,
 };
 pub(crate) use self::mapper::{Mapped, unbind_with};
 pub use self::table::{MappingTable, Refusal, TableError};

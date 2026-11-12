@@ -2,6 +2,7 @@
 //! The seam has no process or admission operation.
 
 use std::error::Error as _;
+use std::path::Path;
 
 use super::*;
 use crate::activation::{
@@ -11,6 +12,7 @@ use crate::activation::{
 use crate::guest::activation::{
     Activation, ActivationAction, ActivationCause, ActivationInput, ActivationState,
 };
+use crate::guest::root::tests::assembly_failure;
 use crate::guest::sys::Errno;
 use crate::protocol::root::{DISTRO_MMIO_BASE, SCRATCH_MMIO_BASE};
 use crate::uuid::Uuid;
@@ -336,14 +338,6 @@ fn a_valid_activate_activates_the_root_and_the_workload_once_before_ready() {
         Effect::View(record.configuration().view.clone(), Some(DNS)),
     ];
     assert_eq!(system.effects, expected);
-    assert_eq!(
-        applied.machine_id,
-        MachineId::Generated(Path::new(RUNTIME).join(MACHINE_ID_FILE))
-    );
-    assert_eq!(
-        applied.resolver,
-        Some(Path::new(RUNTIME).join(RESOLVER_FILE))
-    );
     assert_eq!(applied.proxy.as_deref(), Some(PROXY));
     assert_eq!(applied.publication, Publication::Published);
     assert_eq!(applied.gateway, Some(GATEWAY));
@@ -583,7 +577,7 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
     };
     let error = apply_with(&mut system, &accepted(), &template(), None).unwrap_err();
     assert!(matches!(&error, ApplyError::Assembly(error) if matches!(
-        error.error(), root::Error::Runtime { path } if path == Path::new("run/nvx")
+        assembly_failure(error), root::Error::Runtime { path } if path == Path::new("run/nvx")
     )));
     let failure = activation.complete(now, Err(error.into())).unwrap_err();
     assert!(matches!(failure.cause(), ActivationCause::Failed(_)));
@@ -596,7 +590,7 @@ fn a_failed_assembly_is_final_and_reads_and_tears_down_nothing() {
 }
 
 #[test]
-fn the_record_s_view_is_applied_once_with_its_own_dns_and_returned_machine_id() {
+fn the_record_s_view_is_applied_once_with_its_own_dns() {
     let ipv6 = IpAddr::V6("fd00::53".parse().unwrap());
     for mode in [MachineIdMode::Image, MachineIdMode::Generated] {
         for dns in [None, Some(DNS), Some(ipv6)] {
@@ -616,18 +610,6 @@ fn the_record_s_view_is_applied_once_with_its_own_dns_and_returned_machine_id() 
                     Effect::Assemble(accepted_assembly()),
                     Effect::View(configuration.view, dns),
                 ]
-            );
-            assert_eq!(
-                applied.machine_id,
-                match mode {
-                    MachineIdMode::Image => MachineId::Image,
-                    MachineIdMode::Generated =>
-                        MachineId::Generated(Path::new(RUNTIME).join(MACHINE_ID_FILE)),
-                }
-            );
-            assert_eq!(
-                applied.resolver,
-                dns.map(|_| Path::new(RUNTIME).join(RESOLVER_FILE))
             );
             assert_eq!(applied.proxy.as_deref(), Some(PROXY));
         }
@@ -797,7 +779,10 @@ fn the_application_refuses_without_privileges_what_it_cannot_assemble() {
     let Err(ApplyError::Assembly(error)) = apply(&accepted(), &relative, None) else {
         panic!("a relative runtime directory was assembled")
     };
-    assert!(matches!(error.error(), root::Error::Runtime { path } if path == Path::new("run/nvx")));
+    assert!(matches!(
+        assembly_failure(&error),
+        root::Error::Runtime { path } if path == Path::new("run/nvx")
+    ));
     let disk = clone_record(Configuration {
         image: activation::Image::Gpt {
             disk_guid: None,
@@ -853,21 +838,5 @@ impl ApplyError {
     /// Classifies an actual view failure for the root's retained-bind regression tests.
     pub(crate) fn from_test_view_failure(failure: view::ApplyFailure) -> Self {
         view_failure(failure, None)
-    }
-}
-
-impl Applied {
-    /// Wraps an assembled root to exercise the ownership transfer in the root's unit tests.
-    pub(crate) fn from_test_root(root: Root, machine_id: MachineId) -> Self {
-        Self {
-            export: None,
-            root,
-            hostname: HOSTNAME.to_vec(),
-            machine_id,
-            resolver: None,
-            proxy: None,
-            publication: Publication::Unpublished,
-            gateway: None,
-        }
     }
 }

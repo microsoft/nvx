@@ -222,7 +222,7 @@ The adapter's README said what each proved.
 | --- | --- | --- |
 | `a_clone_binds_the_resolver_of_its_policy_s_dns_server_read_only` | rewritten | `test-microvm --scenario untiered-network-policy`, whose restored guests' resolvers name exactly the DNS server of their policies; `test-microvm --scenario network-snapshot`; `nvx-rs/src/guest/root/tests/view.rs::actual_resolver_failures_keep_the_network_class_and_root_owned_bind` |
 | `a_clone_maps_an_aggregate_of_directories_and_files_beneath_its_root_before_its_sandbox_starts` | rewritten | `test-microvm --scenario platform-aggregate-export`; `nvx-rs/src/guest/mappings/table/tests.rs::mappings_keep_the_paths_and_the_access_of_their_entries` |
-| `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | rewritten | `nvx-rs/src/guest/activation/state/apply/tests.rs::the_record_s_view_is_applied_once_with_its_own_dns_and_returned_machine_id`; `test-microvm --scenario filesystem-snapshot` |
+| `a_clone_of_a_template_with_a_nic_maps_its_export_beside_its_resolver` | rewritten | `nvx-rs/src/guest/activation/state/apply/tests.rs::the_record_s_view_is_applied_once_with_its_own_dns`; `test-microvm --scenario filesystem-snapshot` |
 | `a_clone_reads_no_more_of_its_disks_than_its_root_needs` | rewritten | A restore reads no content of its disks or snapshot: `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_never_reopens_snapshot_paths_or_reads_runtime_artifacts`; `nvx-rs/src/host/sandbox/distro/tests.rs::the_staged_check_reads_no_content`; `nvx-rs/src/host/sandbox/scratch/tests.rs::checks_claim_the_image_without_reading_it`. The adapter's in-guest read statistics retire |
 | `a_clone_refuses_a_scratch_image_whose_upper_an_earlier_clone_used` | rewritten | `nvx-rs/src/guest/root/tests.rs::a_fresh_upper_s_directories_must_be_missing_or_empty` |
 | `a_clone_runs_the_executions_that_name_their_identity_once_it_is_ready` | retired | Executions that name their identities leave with the exec engine (#1087) |
@@ -230,7 +230,7 @@ The adapter's README said what each proved.
 | `a_clone_s_time_settles_after_it_is_ready` | rewritten | `test-microvm --scenario time-host-correction`; `test-microvm --scenario restore-downtime` |
 | `a_clone_whose_activation_fails_ends_before_it_is_ready` | rewritten | `nvx-rs/src/host/restore/tests.rs::restore_failures_attribute_the_existing_policy_free_evidence_classes`; `nvx-rs/src/host/restore/tests.rs::restore_exit_reports_keep_guest_status_classification_and_actual_details`; `nvx-rs/src/guest/init/boot/tests.rs::a_failed_activation_ends_the_vm_with_the_status_of_its_class`; `nvx-rs/src/guest/managed_agent/session/tests.rs::a_failed_restored_activation_gives_init_the_status_of_its_class`; `nvx-rs/src/host/cli/sandbox/lifecycle/start/tests/restore.rs::a_restore_that_fails_before_its_guest_is_ready_reports_its_attribution`; `test-microvm --scenario snapshot-core`, whose restore over a zeroed scratch image ends its VM before its workload runs, with nvx-init's status of an unusable root, 54, which the CLI attributes to the request. Quarantine and leases retire (#1121) |
 | `a_clone_whose_mapping_fails_ends_before_its_sandbox_starts` | rewritten | `nvx-rs/src/guest/mappings/mapper/tests.rs::a_failure_at_any_step_leaves_nothing_mounted`; `nvx-rs/src/guest/mappings/table/tests.rs::a_failed_mapping_keeps_those_before_it_and_latches_the_table` |
-| `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | rewritten | `nvx-rs/src/guest/activation/state/apply/tests.rs::the_record_s_view_is_applied_once_with_its_own_dns_and_returned_machine_id`; `nvx-rs/src/guest/root/tests/view.rs::a_later_bind_failure_stays_owned_and_its_teardown_removes_the_earlier_bind` |
+| `a_clone_whose_view_cannot_be_set_ends_before_it_is_ready` | rewritten | `nvx-rs/src/guest/activation/state/apply/tests.rs::the_record_s_view_is_applied_once_with_its_own_dns`; `nvx-rs/src/guest/root/tests/view.rs::a_later_bind_failure_stays_owned_and_its_teardown_removes_the_earlier_bind` |
 | `a_clone_whose_vm_exits_once_a_stop_found_it_fails_before_its_lease_is_released` | retired | Clone records and leases leave with the old clone path (#1121). A stop that finds an exit: `nvx-rs/src/host/vm/tests.rs::stop_preserves_report_results_after_a_real_self_exit` |
 | `a_forward_whose_port_another_socket_holds_fails_the_clone_as_the_host_s` | rewritten | `test-microvm --scenario platform-network-policy`; `nvx-rs/src/host/restore/tests.rs::restore_failures_attribute_the_existing_policy_free_evidence_classes` |
 | `a_generation_is_eligible_by_the_clock_of_its_capture` | rewritten | `nvx-rs/src/host/snapshot/eligibility/tests.rs::within_one_boot_the_downtime_is_the_host_monotonic_clocks`; `nvx-rs/src/host/snapshot/tests.rs::snapshot_accepts_reports_early_and_expired_time_as_unavailable` |
@@ -478,21 +478,21 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/activation/mod.rs - activation (line 130)` | kept |  |
 | `nvx-rs/src/exec/mod.rs - exec (line 113)` | retired | The exec engine leaves (SL6.11a) |
 | `nvx-rs/src/gpt/mod.rs - gpt (line 43)` | kept |  |
-| `nvx-rs/src/guest/activation.rs - guest::activation (line 158)` | kept | SL6.11c rewrote it on `guest::snapshot::capture`, when its capture preparation and admission fence left (#1087) |
+| `nvx-rs/src/guest/activation.rs - guest::activation (line 157)` | kept | SL6.11c rewrote it on `guest::snapshot::capture`, when its capture preparation and admission fence left (#1087) |
 | `nvx-rs/src/guest/activation/state.rs - guest::activation::state::Activation (line 56)` | kept |  |
 | `nvx-rs/src/guest/cgroup.rs - guest::cgroup (line 36)` | retired | `guest::cgroup` leaves (SL6.11b) |
 | `nvx-rs/src/guest/entry.rs - guest::entry (line 90)` | retired | `guest::entry` leaves (SL6.11b) |
 | `nvx-rs/src/guest/exec.rs - guest::exec (line 79)` | retired | `guest::exec` leaves (SL6.11b) |
 | `nvx-rs/src/guest/exec.rs - guest::exec::Execution::adopt (line 619)` | retired | `guest::exec` leaves (SL6.11b) |
 | `nvx-rs/src/guest/gpt.rs - guest::gpt (line 18)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
-| `nvx-rs/src/guest/mappings/mapper.rs - guest::mappings::mapper (line 107)` | kept | The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
+| `nvx-rs/src/guest/mappings/mapper.rs - guest::mappings::mapper (line 107)` | kept | SL6.11d (#1123) moved it to the mapper's unit tests, `nvx-rs/src/guest/mappings/mapper/tests.rs::a_mapper_s_steps_compile`, which map and unmount through the seams that NVX's programs use, since the mapper's `apply` and `teardown`, which only tests used, left |
 | `nvx-rs/src/guest/mappings/table.rs - guest::mappings::table::MappingTable (line 47)` | kept |  |
 | `nvx-rs/src/guest/mod.rs - guest (line 34)` | kept | The guest-agent guidelines quote it |
 | `nvx-rs/src/guest/nvxs.rs - guest::nvxs (line 22)` | kept |  |
 | `nvx-rs/src/guest/process.rs - guest::process (line 12)` | retired | `guest::process` leaves (SL6.11b) |
 | `nvx-rs/src/guest/process.rs - guest::process (line 39)` | retired | `guest::process` leaves (SL6.11b) |
 | `nvx-rs/src/guest/reseed.rs - guest::reseed (line 17)` | kept |  |
-| `nvx-rs/src/guest/root.rs - guest::root (line 126)` | kept | SL6.11b removed its bootstrap, which left with the cgroups. The guest's space becomes private (#1127), whose PR moves it to the space's unit tests |
+| `nvx-rs/src/guest/root.rs - guest::root (line 126)` | kept | SL6.11b removed its bootstrap, which left with the cgroups. SL6.11d (#1123) moved it to the root's unit tests, `nvx-rs/src/guest/root/tests.rs::a_layered_root_s_steps_compile`, without the first partition's bytes, the layers and `Root::map`, which only tests used, and which left |
 | `nvx-rs/src/guest/snapshot.rs - guest::snapshot (line 25)` | kept | The guest-agent guidelines quote it |
 | `nvx-rs/src/guest/spawn.rs - guest::spawn (line 41)` | retired | `guest::spawn` leaves (SL6.11b) |
 | `nvx-rs/src/guest/spawn.rs - guest::spawn::LaunchStage::from_code (line 201)` | retired | `LaunchStage::from_code` and its test, `launch_stages_keep_their_numbers`, leave with `guest::spawn` (SL6.11b). The stages of nvx-init's executions keep their numbers in the crate's own fork boundary, whose launch report `nvx-rs/src/guest/init/tests/exec.rs::native_workload_cwd_accepts_procfs_links_but_closes_inherited_descriptors` reads from a real launch |

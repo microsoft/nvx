@@ -46,7 +46,7 @@ fn a_root_switches_once_and_its_teardown_then_unmounts_nothing() {
     // The teardown refuses, and neither it nor the drop that follows unmounts anything.
     let error = root.teardown().unwrap_err();
     assert!(error.is_switched(), "{error:?}");
-    assert!(error.failures().is_empty(), "{error:?}");
+    assert!(error.failures.is_empty(), "{error:?}");
     assert_eq!(
         error.to_string(),
         "the root has switched, so its mounts stay"

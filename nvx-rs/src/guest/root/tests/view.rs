@@ -95,38 +95,6 @@ fn the_root_removes_its_view_binds_in_reverse_order_before_the_overlay() {
     );
 }
 
-#[cfg(target_arch = "x86_64")]
-#[test]
-fn an_applied_root_keeps_its_view_binds_when_transferred_into_parts() {
-    for switched in [false, true] {
-        let (guest, mut root, machine_id, resolver) = prepared();
-        root.begin_view().unwrap();
-        root.bind_view(&machine_id, Some(&resolver)).unwrap();
-        if switched {
-            root.switch().unwrap();
-        }
-        let calls = guest.kernel.calls();
-        let applied = crate::guest::activation::Applied::from_test_root(root, machine_id.clone());
-        let (root, returned_id) = applied.into_parts();
-        assert_eq!(returned_id, machine_id);
-        assert_eq!(guest.kernel.calls(), calls);
-        assert_eq!(root.view_binds.as_ref().unwrap().1.len(), 2);
-        if switched {
-            assert!(root.teardown().unwrap_err().is_switched());
-            assert!(guest.kernel.unmounts().is_empty());
-        } else {
-            root.teardown().unwrap();
-            assert_eq!(
-                &guest.kernel.unmounts()[..2],
-                [
-                    guest.text("run/nvx/rootfs/etc/resolv.conf"),
-                    guest.text("run/nvx/rootfs/etc/machine-id"),
-                ]
-            );
-        }
-    }
-}
-
 #[test]
 fn image_mode_without_dns_binds_nothing_and_a_second_view_is_refused() {
     let (guest, mut root, _, _) = prepared();
@@ -175,7 +143,7 @@ fn a_later_bind_failure_stays_owned_and_its_teardown_removes_the_earlier_bind() 
             .kind(),
         ErrorKind::Io
     );
-    assert!(root.is_latched());
+    assert!(root.latched);
     let machine = root.path().join("etc/machine-id");
     assert!(guest.kernel.mount_at(&machine).is_some());
     assert!(guest.kernel.mount_at(&target).is_none());
@@ -227,7 +195,7 @@ fn actual_resolver_failures_keep_the_network_class_and_root_owned_bind() {
                     .downcast_ref::<MappingError>()
                     .unwrap();
                 assert_eq!(cause.raw_os_error(), Errno::EPERM as i32);
-                assert!(root.is_latched());
+                assert!(root.latched);
             }
             error => panic!("a real resolver failure lost its network class: {error}"),
         }
@@ -277,7 +245,7 @@ fn switched_or_failed_roots_refuse_a_view_before_opening_its_root() {
                 Errno::ENODEV,
             );
             root.mount_export("microvm", Access::ReadOnly).unwrap_err();
-            assert!(root.is_latched());
+            assert!(root.latched);
         }
         let calls = guest.kernel.calls();
         assert_eq!(
@@ -300,15 +268,16 @@ fn teardown_reports_each_view_bind_that_stays_mounted() {
             .fail(Operation::Unmount, root.path().join(target), Errno::EBUSY);
     }
     let error = root.teardown().unwrap_err();
-    let paths: Vec<_> = error
-        .failures()
+    let mounts: Vec<Mount> = error
+        .failures
         .iter()
-        .map(|failure| failure.path().to_path_buf())
+        .map(|failure| failure.mount.clone())
         .collect();
     assert_eq!(
-        paths,
-        ["etc/resolv.conf", "etc/machine-id"]
-            .map(|target| guest.path("run/nvx/rootfs").join(target))
+        mounts,
+        [RESOLVER_TARGET, MACHINE_ID_TARGET].map(|target| Mount::Mapping {
+            target: target.into()
+        })
     );
 }
 
@@ -339,10 +308,13 @@ fn a_view_bind_that_moves_and_cannot_detach_stays_owned_until_teardown() {
         let torn = root.teardown();
         if persistent {
             let error = torn.unwrap_err();
+            let mount = Mount::Mapping {
+                target: RESOLVER_TARGET.into(),
+            };
             assert!(
-                error.failures().iter().any(|failure| {
-                    failure.path() == guest.path("run/nvx/rootfs/etc/resolv.conf")
-                        && failure.error().raw_os_error() == Some(Errno::EBUSY as i32)
+                error.failures.iter().any(|failure| {
+                    failure.mount == mount
+                        && failure.error.raw_os_error() == Some(Errno::EBUSY as i32)
                 }),
                 "{error:?}"
             );
