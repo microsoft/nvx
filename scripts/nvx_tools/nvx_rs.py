@@ -389,8 +389,8 @@ def query(arguments: Sequence[str]) -> object:
     """Run `nvx-rs --root ROOT ARGUMENTS`, and return the JSON that it prints.
 
     A failure raises NvxRsError with the code and the message of the error
-    that nvx-rs reported, which nvx.py prints after `error: ` as it printed the
-    message of the Python code that nvx-rs replaced.
+    that nvx-rs reported, which nvx.py prints after `error: `. Callers tell
+    failures apart by the code, since the message may change.
     """
     command = command_line(arguments)
     try:
