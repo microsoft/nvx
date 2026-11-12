@@ -9,7 +9,7 @@ yet breaks those peers. Only bytes that no codec produced catch such a change.
 
 | File | Vectors |
 | --- | --- |
-| [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol: `NVXC` frames, their `EXEC`, `MAPS`, and features payloads, and `NVXS` records of NVX's host and guest |
+| [`nvxc-v1.txt`](nvxc-v1.txt) | Version 1 of the control protocol, which no peer speaks any longer: `NVXC` frames, which version 2 refuses, their `EXEC` and `MAPS` payloads, which version 2 carries unchanged, their features payloads, and `NVXS` records of NVX's host and guest |
 | [`nvxl-v1.txt`](nvxl-v1.txt) | Version 1 of the `NVXL` listener announcement |
 | [`activation-v2.txt`](activation-v2.txt) | Version 2 of the activation record of a layered root, and what Ready reports about an activation |
 | [`snapshot-key-v1.txt`](snapshot-key-v1.txt) | Version 1 of the canonical encoding of a snapshot's compatibility key, with its identity |
@@ -48,6 +48,9 @@ KIND|NAME|BYTES|VALUE|...
 A decoder must decode the bytes of each vector to its values, and an encoder
 must encode the values to exactly its bytes. A kind whose name starts with
 `INVALID_` has no values: every decoder must refuse the bytes of its vectors.
+The frames and the features payload of `nvxc-v1.txt` have no codec any longer:
+version 2's decoder refuses those frames, version 2 carries their `EXEC` and
+`MAPS` payloads unchanged, and its tests pin the bytes of its own frames.
 
 A key holds too many values for one line, so the value of each vector of
 `snapshot-key-v1.txt` is its identity, and the file's header names the

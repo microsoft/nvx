@@ -7,10 +7,12 @@ use super::*;
 use crate::guest::snapshot::{CaptureCause, CaptureFailure, CaptureStage};
 use crate::protocol::{
     APP_CAPTURE, APP_READY, OUTER_ACK, OUTER_CREDIT, OUTER_DATA, OUTER_GUEST_ATTACH,
-    OUTER_HEADER_LEN, OUTER_RESET, OuterHeader, decode_app, decode_outer_header, encode_outer,
+    OUTER_HEADER_LEN, OUTER_RESET, OuterHeader, decode_outer_header, encode_outer,
 };
 
 const INSTANCE: [u8; 16] = [7; 16];
+/// The kind of `BUSY`, with which the agent refuses a request while an execution runs.
+const APP_BUSY: u8 = 0x87;
 
 impl Session<'_> {
     pub(crate) fn activation_state_for_test(&self) -> Option<ActivationState> {
@@ -50,32 +52,27 @@ impl Peer {
         (header, payload)
     }
 
+    /// Reads the agent's next frame, of version 2, and checks its kind, request ID and status, and
+    /// its payload, which follows a `READY`'s protocol version.
     fn app(&mut self, kind: u8, id: u64, status: i32, payload: &[u8]) {
         let (header, bytes) = self.read();
         assert_eq!(header.record_type, OUTER_DATA);
         assert_eq!(header.epoch, self.epoch);
-        let frame = decode_app(&bytes).unwrap();
+        let (request_id, frame) = v2::Frame::decode(&bytes).unwrap();
+        let mut carried = &bytes[protocol::APP_HEADER_LEN..];
+        if let v2::Frame::Ready {
+            version,
+            activation,
+        } = frame
+        {
+            assert_eq!(version, v2::VERSION);
+            carried = activation;
+        }
+        let frame_status = i32::from_le_bytes(bytes[16..20].try_into().unwrap());
         assert_eq!(
-            (frame.kind, frame.request_id, frame.status, frame.payload),
+            (bytes[5], request_id, frame_status, carried),
             (kind, id, status, payload)
         );
-    }
-
-    fn send(&mut self, kind: u8, id: u64, payload: &[u8]) {
-        let bytes = protocol::encode_app(kind, id, 0, payload);
-        self.stream
-            .write_all(
-                &encode_outer(
-                    OUTER_DATA,
-                    &INSTANCE,
-                    self.epoch,
-                    self.host_sequence,
-                    &bytes,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        self.host_sequence += 1;
     }
 
     fn send_v2(&mut self, id: u64, frame: v2::Frame<'_>) {
@@ -138,7 +135,7 @@ fn restored() -> (Session<'static>, Peer, Vec<u8>) {
 }
 
 fn activate_bytes(session: &mut Session<'_>, peer: &mut Peer, id: u64, payload: &[u8]) -> Vec<u8> {
-    peer.send(protocol::APP_ACTIVATE, id, payload);
+    peer.send_v2(id, v2::Frame::Activate(payload));
     let Event::Data(bytes) = session
         .next_event()
         .unwrap_or_else(|_| panic!("activate DATA"))
@@ -169,7 +166,7 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
                 (1000, 1001, true)
             );
             peer.reset(2, 4);
-            peer.send(protocol::APP_ACTIVATE, 62, &payload);
+            peer.send_v2(62, v2::Frame::Activate(&payload));
             Ok("one applied space")
         })
         .unwrap();
@@ -198,37 +195,6 @@ fn a_replacement_session_joins_one_activation_and_caches_ready_without_reapplyin
     assert_eq!(
         session.activation_state_for_test(),
         Some(ActivationState::Started)
-    );
-}
-
-#[test]
-fn joined_activations_get_ready_in_their_own_versions() {
-    let (mut session, mut peer, payload) = restored();
-    let (record, _) = protocol::decode_activate_payload(&payload).unwrap();
-    let ready = crate::activation::ReadyActivation::of(&record).encode();
-    let bytes = activate_bytes(&mut session, &mut peer, 61, &payload);
-    let Ok(Request::App(request)) = session.accept_request(&bytes) else {
-        panic!("valid activate");
-    };
-    peer.credit();
-    let retained = session.activate_with(request, |_, _, _, _| {
-        peer.send_v2(62, v2::Frame::Activate(&payload));
-        Ok("one applied space")
-    });
-    assert_eq!(retained.unwrap(), Some("one applied space"));
-    peer.credit();
-    peer.app(APP_READY, 61, 0, &ready);
-    let (_, frame) = peer.read();
-    let activation = ready.as_slice();
-    assert_eq!(
-        v2::Frame::decode(&frame).unwrap(),
-        (
-            62,
-            v2::Frame::Ready {
-                version: v2::VERSION,
-                activation
-            }
-        )
     );
 }
 
@@ -278,7 +244,7 @@ fn changed_record_or_workload_bytes_during_application_fail_without_ready() {
         };
         peer.credit();
         let result = session.activate_with(request, |_, _, _, _| {
-            peer.send(protocol::APP_ACTIVATE, 65, &changed);
+            peer.send_v2(65, v2::Frame::Activate(&changed));
             Ok(())
         });
         assert_eq!(result.err(), Some(Errno::EPROTO));
@@ -355,7 +321,7 @@ fn a_failed_restored_activation_gives_init_the_status_of_its_class() {
     };
     peer.credit();
     let result = session.activate_with(request, |_, _, _, _| {
-        peer.send(protocol::APP_PING, 70, &[]);
+        peer.send_v2(70, v2::Frame::Ping);
         Ok(())
     });
     assert_eq!(result.err(), Some(Errno::EPROTO));
@@ -429,7 +395,8 @@ fn reconnect_and_partial_input_wait_only_until_the_original_activation_deadline(
 fn an_unread_output_stream_cannot_extend_the_activation_deadline() {
     let (mut session, _peer, _) = restored();
     let deadline = short_deadline(&mut session);
-    let payload = vec![0; OUTER_MAX_PAYLOAD - protocol::APP_HEADER_LEN];
+    // The largest payload that a `READY` carries after its protocol version.
+    let payload = vec![0; v2::MAX_PAYLOAD - 1];
     let error = loop {
         if let Err(error) = session.send_app(APP_READY, 67, 0, &payload) {
             break error;
@@ -446,7 +413,7 @@ fn queue(
     payload: &[u8],
     active: bool,
 ) -> bool {
-    peer.send(APP_CAPTURE, id, payload);
+    peer.send_v2(id, v2::Frame::Capture(payload));
     let Event::Data(bytes) = session
         .next_event()
         .unwrap_or_else(|_| panic!("valid request DATA"))
@@ -463,15 +430,16 @@ fn queue(
 
 #[test]
 fn capture_refuses_active_execution_without_kill_and_validates_the_existing_flag() {
-    for (payload, status, category) in [
-        (b"\0".as_slice(), Errno::EBUSY, protocol::BUSY),
-        (b"\x02".as_slice(), Errno::EINVAL, protocol::INVALID_REQUEST),
-        (b"".as_slice(), Errno::EINVAL, protocol::INVALID_REQUEST),
+    let invalid = protocol::INVALID_REQUEST.as_bytes();
+    for (payload, kind, status, category) in [
+        (b"\0".as_slice(), APP_BUSY, 0, b"".as_slice()),
+        (b"\x02".as_slice(), APP_ERROR, Errno::EINVAL as i32, invalid),
+        (b"".as_slice(), APP_ERROR, Errno::EINVAL as i32, invalid),
     ] {
         let (mut session, mut peer) = connected(true);
         assert!(!queue(&mut session, &mut peer, 31, payload, true));
         assert!(!session.capture_pending());
-        peer.app(APP_ERROR, 31, status as i32, category.as_bytes());
+        peer.app(kind, 31, status, category);
     }
     let (mut session, mut peer) = connected(true);
     assert!(queue(&mut session, &mut peer, 32, &[1], true));
@@ -624,19 +592,15 @@ fn restored_capture_consumes_reset_and_acknowledges_the_existing_connection() {
     assert!(session.rootless());
     assert!(session.capture_status().is_none());
     assert_eq!(session.connection.session().identity().unwrap().epoch, 2);
-    let bytes = protocol::encode_app(APP_CAPTURE, 38, 0, &[0]);
-    assert!(
-        !session
-            .queue_capture(decode_app(&bytes).unwrap(), false)
-            .unwrap()
-    );
+    let request = protocol::AppFrame {
+        kind: APP_CAPTURE,
+        request_id: 38,
+        status: 0,
+        payload: &[0],
+    };
+    assert!(!session.queue_capture(request, false).unwrap());
     assert!(!session.capture_pending());
-    peer.app(
-        APP_ERROR,
-        38,
-        Errno::EBUSY as i32,
-        protocol::BUSY.as_bytes(),
-    );
+    peer.app(APP_BUSY, 38, 0, b"");
     peer.stream.set_nonblocking(true).unwrap();
     assert_eq!(
         peer.stream.read(&mut [0]).unwrap_err().kind(),

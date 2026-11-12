@@ -250,8 +250,9 @@ plain-process core:
   root's user and group databases once, before its switch, and creates when
   the boot, with `nvx_workload_account=create`, or the activate request asks
   for it.
-- **In the child**, which leads a process group of its own, with the null
-  device as its standard input and pipes as its standard output and error,
+- **In the child**, which leads a process group of its own, with a pipe of
+  the input that the host streams as its standard input, which nvx-init
+  closes after the input's end, and pipes as its standard output and error,
   the execution resets its priority, sets its credentials, changes to its
   working directory and execs. It resets its out-of-memory score adjustment
   and its nice value to 0, then drops its capability bounding set and takes
@@ -263,11 +264,14 @@ plain-process core:
   in another directory.
 - **End, cancellation, timeout and reset** each kill the execution's process
   group: nvx-init kills it when the execution's leader ends, normally or not,
-  when the host cancels the execution, when its timeout passes, and when a
-  session reset abandons it, whose output it then discards rather than report
-  it on the new session. PID 1 collects the status of every child, orphans
-  included. A process group is a cleanup scope, not containment: a process
-  that leaves its group escapes it, as the capture's sweep allows for.
+  when the host cancels the execution or shuts the VM down while it runs,
+  when its timeout passes, and when a session reset abandons it. None of an
+  abandoned execution's output reaches the new session: nvx-init reads no
+  more of it, and what it had already queued goes out before the reset's
+  acknowledgement, in the earlier epoch, whose records the broker drops.
+  PID 1 collects the status of every child, orphans included. A process
+  group is a cleanup scope, not containment: a process that leaves its group
+  escapes it, as the capture's sweep allows for.
 
 This is priority, not limits. PID 1 and its helpers run with an out-of-memory
 score adjustment of -1000 and a nice value of -10, ahead of the executions'
@@ -294,7 +298,7 @@ enforces none of it.
 
 nvx-init has no workspace: it refuses a capture while an execution runs, or
 kills the process groups and sweeps when the host asks, as its capture
-request says. Without permission to kill, it refuses the request with `EBUSY`
+request says. Without permission to kill, it refuses the request as `busy`
 while any process but PID 1 and its registered helpers runs; with it, it ends
 a running execution's process group, then sweeps, killing every process but
 PID 1 and its helpers again and again until none remains. The checks, the

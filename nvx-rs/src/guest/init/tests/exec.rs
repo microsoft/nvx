@@ -299,7 +299,7 @@ fn ending_failures_are_reported_and_discarding_preserves_the_first_cause() {
     }
     let mut execution = pipe_execution(b"drop", b"keep");
     execution.status_lost = false;
-    execution.discard(Stream::Stdout);
+    execution.discarding[Stream::Stdout as usize] = true;
     execution.cancel();
     execution.end();
     assert!(matches!(

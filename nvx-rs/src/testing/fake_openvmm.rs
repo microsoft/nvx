@@ -32,17 +32,15 @@
 //! made with `mkdir`), or that is a mapped regular file, with a diagnostic and the `cwd-failed`
 //! category.
 //!
-//! Like the guest agent, the fake serves NVXC versions 1 and 2, and answers each request in its
-//! version. A workload of version 1 reads no standard input, so its `cat` copies nothing, and
-//! ends with `output-limit` once its output would pass 1 MiB. A workload of version 2 runs alone,
-//! and another `EXEC` gets `BUSY`, as other requests do while it runs; its output has no cap; its
+//! Like the guest agent, the fake serves NVXC version 2 alone: a frame of another version, such
+//! as version 1, ends the session, as any malformed record does. A workload runs alone, and another
+//! `EXEC` gets `BUSY`, as other requests do while it runs; its output has no cap; its
 //! standard input is what the host's `STDIN` frames sent, which the fake acknowledges as the
 //! workload reads it, until `STDIN_END`, and of which more than the window unacknowledged, or
 //! more after its end, ends the session; and a `STOP` while it sleeps or reads its input ends it
 //! with the cancelled outcome before the fake acknowledges the `STOP`, unless `fake_ignore_stop=1`
 //! ignores it, as between workloads; with `fake_drop_stop=1`, the fake closes the connection after
-//! that `EXIT`, without acknowledging the `STOP`. Each refusal while a workload runs takes the
-//! version of the request that it refuses.
+//! that `EXIT`, without acknowledging the `STOP`.
 //!
 //! Host paths are mapped as OpenVMM and the guest agent map them: the command line exports
 //! numbered `--mount-child` directories, and files with the `file` flag, through
@@ -71,10 +69,8 @@
 //! `fake_boot_diagnostics=1` emits console output and a binary log before control attachment.
 //! `fake_refuse_attach=1` refuses attachment after the endpoint has accepted its client.
 //! `fake_foreground_gate=console|connect|handshake|keys` synchronizes foreground regressions.
-//! `fake_guest_features=MASK` advertises the decimal feature mask `MASK` instead of the current
-//! guest's, `fake_legacy_guest=1` refuses the features request like a guest agent that
-//! predates it, and `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot
-//! mount a mapped path. The command line is recorded in `fake-openvmm-<token>.json` next to the
+//! `fake_refuse_maps=1` fails every `MAPS` request like a guest that cannot mount a mapped path.
+//! The command line is recorded in `fake-openvmm-<token>.json` next to the
 //! kernel, and each connection to the control endpoint that the fake accepts adds a line to
 //! `fake-openvmm-<token>-sessions.log` there, so that a test can tell whether a host connected.
 //!
@@ -88,8 +84,7 @@
 //! path that its option names, the layer read-only and the scratch disk for reading and writing,
 //! and holds them until it exits; it reads them whole, and records what each held, with its role
 //! and path, in `fake-openvmm-<token>-blocks.json` next to the kernel. The
-//! `fake_block_delay_ms=MS` token delays the opens. Its guest advertises the features of the
-//! sandbox agent, `GuestFeatures::SANDBOX_AGENT`. With `--microvm-lifecycle managed`, it serves
+//! `fake_block_delay_ms=MS` token delays the opens. With `--microvm-lifecycle managed`, it serves
 //! the control console as above, and maps the sandbox's shares as above too: from the children of
 //! the aggregate export at `/run/nvx/hostfs/root`, as many as `nvx_maps=` announces, which `MAPS`
 //! requests deliver; it refuses a `--mount` share and `nvx_share=` tokens. With
@@ -207,13 +202,12 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::nvxs::ErrorCode;
 use crate::protocol::{
-    APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAPS, APP_PING,
-    APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, BUSY, CAPABILITY_LEN, CWD_FAILED,
-    ExitCategory, GuestFeatures, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED,
-    MAPPINGS_INCOMPLETE, MAPS_TOKEN, MAX_HOST_MAPPINGS, MAX_OUTPUT_BYTES, MapsPayload, OUTER_DATA,
-    OUTER_ERROR, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_WAIT, OuterHeader,
-    UNSUPPORTED_OPERATION, decode_app, decode_exec_payload, decode_maps_payload,
-    decode_outer_header, encode_app, encode_outer, v2,
+    APP_CANCEL, APP_ERROR, APP_EXEC, APP_HEADER_LEN, APP_MAPS, APP_PING, APP_READY, APP_STDERR,
+    APP_STDOUT, APP_STOP, APP_STOPPED, BUSY, CAPABILITY_LEN, CWD_FAILED, INVALID_REQUEST,
+    LAUNCH_FAILED, MAPPING_FAILED, MAPPINGS_INCOMPLETE, MAPS_TOKEN, MAX_HOST_MAPPINGS, MapsPayload,
+    OUTER_DATA, OUTER_ERROR, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_WAIT,
+    OuterHeader, UNSUPPORTED_OPERATION, decode_exec_payload, decode_maps_payload,
+    decode_outer_header, encode_outer, v2,
 };
 
 /// Largest workload-output frame emitted by the fake guest.
@@ -228,17 +222,6 @@ const MODE_TOKEN: &str = "nvx_mode=";
 const IDENTITY_TOKEN: &str = "nvx_identity=";
 /// The UID of the workloads of a launch that names no identity: the guest's `nobody`.
 const DEFAULT_WORKLOAD_UID: u32 = 65534;
-
-/// Control features of the current guest: cancellation, workload accounts,
-/// per-execution environments, working directories, and host path mapping tables.
-/// Bit 1 is retired.
-const GUEST_FEATURES: GuestFeatures = GuestFeatures::from_bits(
-    GuestFeatures::CANCEL.bits()
-        | GuestFeatures::WORKLOAD_ACCOUNT.bits()
-        | GuestFeatures::EXEC_ENVIRONMENT.bits()
-        | GuestFeatures::EXEC_CWD.bits()
-        | GuestFeatures::HOST_MAPPING_TABLE.bits(),
-);
 
 /// The guest directory at which the host mounts the aggregate export.
 const GUEST_EXPORT: &str = "/run/nvx/hostfs/root";
@@ -454,14 +437,10 @@ struct Options {
     exit_delay: Duration,
     /// Whether cancellation requests are deliberately ignored.
     ignore_cancel: bool,
-    /// Whether the guest omits feature negotiation like an older image.
-    legacy_guest: bool,
     /// Whether host-mapping requests are deliberately refused.
     refuse_maps: bool,
     /// UID whose account and environment the fake guest models.
     workload_uid: u32,
-    /// Feature mask returned during guest feature negotiation.
-    guest_features: GuestFeatures,
     /// Host directories of the aggregate export, in child order.
     children: Vec<PathBuf>,
     /// Number of host mappings that the kernel command line announces.
@@ -1869,11 +1848,6 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let default_features = if sandbox {
-        GuestFeatures::SANDBOX_AGENT
-    } else {
-        GUEST_FEATURES
-    };
     let restore_console = restore
         .as_ref()
         .and_then(|_| values.get("--virtio-console"))
@@ -1934,12 +1908,8 @@ fn parse(program: &str, arguments: &[String]) -> Result<Options, String> {
         drop_stop: knob("fake_drop_stop") == Some("1"),
         exit_delay: millis("fake_exit_delay_ms").unwrap_or_default(),
         ignore_cancel: knob("fake_ignore_cancel") == Some("1"),
-        legacy_guest: knob("fake_legacy_guest") == Some("1"),
         refuse_maps: knob("fake_refuse_maps") == Some("1"),
         workload_uid,
-        guest_features: knob("fake_guest_features")
-            .and_then(|value| value.parse().ok())
-            .map_or(default_features, GuestFeatures::from_bits),
         children,
         maps,
         share_targets,
@@ -2606,7 +2576,7 @@ enum Flow {
 enum Interrupt {
     /// No control request is waiting.
     None,
-    /// The workload's matching cancellation request, or a `STOP` of version 2, arrived.
+    /// The workload's matching cancellation request, or a `STOP`, arrived.
     Cancel,
     /// The host disconnected and abandoned the workload.
     Disconnected,
@@ -2614,9 +2584,8 @@ enum Interrupt {
 
 /// A host request that a DATA record carries.
 enum Request {
-    /// A request: whether it is of NVXC version 2, its kind, whose code version 2 shares with
-    /// version 1, its ID, and its payload.
-    App(bool, u8, u64, Vec<u8>),
+    /// A request: its kind, whose code version 2 shares with version 1, its ID, and its payload.
+    App(u8, u64, Vec<u8>),
     /// Version 2's standard input of the workload with this ID: a `STDIN` frame's bytes, or
     /// `None` for its `STDIN_END`.
     Stdin(u64, Option<Vec<u8>>),
@@ -2706,9 +2675,6 @@ struct Session<'a, S> {
     ignore_cancel: bool,
     /// Whether stop requests are ignored for fault injection, also while a workload runs.
     ignore_stop: bool,
-    /// Whether the request that the fake serves, or the workload that runs, is of NVXC version
-    /// 2, whose frames its answers take.
-    v2: bool,
     /// What the host sent of the running workload's standard input in version 2 and the workload
     /// has not read, which the fake acknowledges as the workload reads it.
     stdin: Vec<u8>,
@@ -2719,11 +2685,8 @@ struct Session<'a, S> {
 }
 
 impl<S: Read + Write + Pending> Session<'_, S> {
-    /// Encodes and sends one sequenced guest application frame, in the session's version.
+    /// Encodes and sends one sequenced guest application frame, of version 2.
     fn send(&mut self, kind: u8, request_id: u64, status: i32, payload: &[u8]) -> io::Result<()> {
-        if !self.v2 {
-            return self.send_frame(&encode_app(kind, request_id, status, payload));
-        }
         let frame = match kind {
             APP_READY => v2::Frame::Ready {
                 version: v2::VERSION,
@@ -2763,7 +2726,8 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         self.stream.write_all(&record)
     }
 
-    /// Reads the next host request, of either version, returning `None` at end of stream.
+    /// Reads the next host request, of version 2, returning `None` at end of stream. A frame of
+    /// another version is invalid.
     fn request(&mut self) -> io::Result<Option<Request>> {
         let Some((header, frame)) = read_record(self.stream)? else {
             return Ok(None);
@@ -2772,21 +2736,15 @@ impl<S: Read + Write + Pending> Session<'_, S> {
             && header.instance_id == self.instance
             && header.epoch == self.epoch
             && header.sequence == self.host_sequence;
-        let request = if frame.get(4) == Some(&v2::VERSION) {
-            v2::Frame::decode(&frame)
-                .ok()
-                .map(|(request_id, decoded)| match decoded {
-                    v2::Frame::Stdin(bytes) => Request::Stdin(request_id, Some(bytes.to_vec())),
-                    v2::Frame::StdinEnd => Request::Stdin(request_id, None),
-                    // Version 2 keeps version 1's header and the codes of the kinds that both
-                    // have.
-                    _ => Request::App(true, frame[5], request_id, frame[APP_HEADER_LEN..].to_vec()),
-                })
-        } else {
-            decode_app(&frame).ok().map(|frame| {
-                Request::App(false, frame.kind, frame.request_id, frame.payload.to_vec())
-            })
-        };
+        let request = v2::Frame::decode(&frame)
+            .ok()
+            .map(|(request_id, decoded)| match decoded {
+                v2::Frame::Stdin(bytes) => Request::Stdin(request_id, Some(bytes.to_vec())),
+                v2::Frame::StdinEnd => Request::Stdin(request_id, None),
+                // Version 2 keeps version 1's header and the codes of the kinds that both
+                // have.
+                _ => Request::App(frame[5], request_id, frame[APP_HEADER_LEN..].to_vec()),
+            });
         let request = request
             .filter(|_| valid)
             .ok_or_else(|| io::Error::other("invalid data record"))?;
@@ -2801,15 +2759,11 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                 return Ok(Flow::Continue);
             };
             // The standard input of a workload that ended takes no more bytes.
-            let Request::App(v2, kind, request_id, payload) = request else {
+            let Request::App(kind, request_id, payload) = request else {
                 continue;
             };
-            self.v2 = v2;
             match kind {
                 APP_PING => self.send(APP_READY, request_id, 0, &[])?,
-                APP_FEATURES if !options.legacy_guest => {
-                    self.send(APP_READY, request_id, 0, &options.guest_features.encode())?;
-                }
                 APP_EXEC if guest.mapped.len() < options.maps => {
                     self.send(APP_ERROR, request_id, 11, MAPPINGS_INCOMPLETE.as_bytes())?;
                 }
@@ -2862,23 +2816,18 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                     }
                     self.stdin.extend(bytes);
                 }
-                Some(Request::App(true, APP_STOP, _, _)) if self.v2 && self.ignore_stop => {}
-                Some(Request::App(true, APP_STOP, id, _)) if self.v2 => {
+                Some(Request::App(APP_STOP, _, _)) if self.ignore_stop => {}
+                Some(Request::App(APP_STOP, id, _)) => {
                     self.stop = Some(id);
                     return Ok(Interrupt::Cancel);
                 }
-                Some(Request::App(_, APP_CANCEL, id, _))
+                Some(Request::App(APP_CANCEL, id, _))
                     if id == request_id && !self.ignore_cancel =>
                 {
                     return Ok(Interrupt::Cancel);
                 }
-                Some(Request::App(_, APP_CANCEL, _, _)) => {}
-                // The refusal takes the request's version, and the workload's frames their own.
-                Some(Request::App(v2, _, id, _)) => {
-                    let running = std::mem::replace(&mut self.v2, v2);
-                    self.send(APP_ERROR, id, 16, BUSY.as_bytes())?;
-                    self.v2 = running;
-                }
+                Some(Request::App(APP_CANCEL, _, _)) => {}
+                Some(Request::App(_, id, _)) => self.send(APP_ERROR, id, 16, BUSY.as_bytes())?,
             }
         }
         Ok(Interrupt::None)
@@ -2900,9 +2849,8 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         let Ok(exec) = decode_exec_payload(payload) else {
             return self.send_some(APP_ERROR, request_id, 22, INVALID_REQUEST.as_bytes());
         };
-        // A workload of version 1 has no standard input, as one that reads the null device.
         self.stdin.clear();
-        self.stdin_ended = !self.v2;
+        self.stdin_ended = false;
         let mut environment = if exec.inherit_default_env {
             guest.default_environment.clone()
         } else {
@@ -2943,13 +2891,12 @@ impl<S: Read + Write + Pending> Session<'_, S> {
             [program, ..] => {
                 let message = format!("{}: {program}: not found\n", self.program);
                 self.send(APP_STDERR, request_id, 0, message.as_bytes())?;
-                return self.exit(request_id, 127, ExitCategory::Exit);
+                return self.exit(request_id, 127, v2::Outcome::Exit);
             }
             [] => return self.send_some(APP_ERROR, request_id, 22, INVALID_REQUEST.as_bytes()),
         };
         let started = Instant::now();
         let limit = (timeout_ms > 0).then(|| started + Duration::from_millis(timeout_ms.into()));
-        let mut output = 0usize;
         let mut status = 0;
         for command in script
             .split(';')
@@ -2968,15 +2915,9 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                     } else {
                         APP_STDERR
                     };
-                    if !self.forward(kind, request_id, &mut output, line.as_bytes())? {
-                        return self.exit(request_id, 125, ExitCategory::OutputLimit);
-                    }
+                    self.send(kind, request_id, 0, line.as_bytes())?;
                 }
-                "printerr" => {
-                    if !self.forward(APP_STDERR, request_id, &mut output, argument.as_bytes())? {
-                        return self.exit(request_id, 125, ExitCategory::OutputLimit);
-                    }
-                }
+                "printerr" => self.send(APP_STDERR, request_id, 0, argument.as_bytes())?,
                 "touch" => {
                     // A workload that writes a read-write share creates host files.
                     if let Err(error) = OpenOptions::new().create(true).append(true).open(argument)
@@ -2997,37 +2938,35 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                                     .min(Duration::from_millis(5)),
                             ),
                             Interrupt::Cancel => {
-                                return self.exit(request_id, 137, ExitCategory::Cancelled);
+                                return self.exit(request_id, 137, v2::Outcome::Cancelled);
                             }
                             Interrupt::Disconnected => return Ok(None),
                         }
                     }
                     if wake > end {
-                        return self.exit(request_id, 124, ExitCategory::Timeout);
+                        return self.exit(request_id, 124, v2::Outcome::Timeout);
                     }
                 }
                 "exit" => {
                     let status = argument.parse().unwrap_or(1);
-                    return self.exit(request_id, status, ExitCategory::Exit);
+                    return self.exit(request_id, status, v2::Outcome::Exit);
                 }
                 "signal" => {
                     let signal: i32 = argument.parse().unwrap_or(9);
-                    return self.exit(request_id, 128 + signal, ExitCategory::Signal);
+                    return self.exit(request_id, 128 + signal, v2::Outcome::Signal);
                 }
                 "flood" => {
                     let mut remaining: usize = argument.parse().unwrap_or(0);
                     while remaining > 0 {
                         let chunk = remaining.min(OUTPUT_CHUNK_BYTES);
-                        if !self.forward(APP_STDOUT, request_id, &mut output, &vec![b'x'; chunk])? {
-                            return self.exit(request_id, 125, ExitCategory::OutputLimit);
-                        }
+                        self.send(APP_STDOUT, request_id, 0, &vec![b'x'; chunk])?;
                         remaining -= chunk;
                     }
                 }
                 "cat" => loop {
                     let chunk = self.stdin.len().min(OUTPUT_CHUNK_BYTES);
                     if limit.is_some_and(|limit| Instant::now() >= limit) {
-                        return self.exit(request_id, 124, ExitCategory::Timeout);
+                        return self.exit(request_id, 124, v2::Outcome::Timeout);
                     } else if chunk > 0 {
                         // The workload reads these bytes now, so the fake acknowledges them.
                         let bytes: Vec<u8> = self.stdin.drain(..chunk).collect();
@@ -3039,7 +2978,7 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                         match self.interrupt(request_id)? {
                             Interrupt::None => thread::sleep(Duration::from_millis(5)),
                             Interrupt::Cancel => {
-                                return self.exit(request_id, 137, ExitCategory::Cancelled);
+                                return self.exit(request_id, 137, v2::Outcome::Cancelled);
                             }
                             Interrupt::Disconnected => return Ok(None),
                         }
@@ -3060,9 +2999,7 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                 "env" => {
                     for (name, value) in &environment {
                         let line = format!("{name}={value}\n");
-                        if !self.forward(APP_STDOUT, request_id, &mut output, line.as_bytes())? {
-                            return self.exit(request_id, 125, ExitCategory::OutputLimit);
-                        }
+                        self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
                     }
                 }
                 "printenv" => {
@@ -3071,16 +3008,7 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                         .find(|(variable, _)| variable == argument)
                         .map(|(_, value)| format!("{value}\n"));
                     match value {
-                        Some(line) => {
-                            if !self.forward(
-                                APP_STDOUT,
-                                request_id,
-                                &mut output,
-                                line.as_bytes(),
-                            )? {
-                                return self.exit(request_id, 125, ExitCategory::OutputLimit);
-                            }
-                        }
+                        Some(line) => self.send(APP_STDOUT, request_id, 0, line.as_bytes())?,
                         None => status = 1,
                     }
                 }
@@ -3092,18 +3020,18 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                     let line = format!("{timeout_ms}\n");
                     self.send(APP_STDOUT, request_id, 0, line.as_bytes())?;
                 }
-                "fail" => return self.exit(request_id, 125, ExitCategory::Failed),
+                "fail" => return self.exit(request_id, 125, v2::Outcome::Failed),
                 "launchfail" => {
                     return self.send_some(APP_ERROR, request_id, 125, LAUNCH_FAILED.as_bytes());
                 }
                 _ => {
                     let message = format!("{}: unknown command {name}\n", self.program);
                     self.send(APP_STDERR, request_id, 0, message.as_bytes())?;
-                    return self.exit(request_id, 127, ExitCategory::Exit);
+                    return self.exit(request_id, 127, v2::Outcome::Exit);
                 }
             }
         }
-        self.exit(request_id, status, ExitCategory::Exit)
+        self.exit(request_id, status, v2::Outcome::Exit)
     }
 
     /// Sends one frame and adapts success to the optional value expected by script execution.
@@ -3117,44 +3045,15 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         self.send(kind, request_id, status, payload).map(Some)
     }
 
-    /// Ends workload `request_id` with `status` and `category`.
+    /// Ends workload `request_id` with `status` and `outcome`.
     fn exit(
         &mut self,
         request_id: u64,
         status: i32,
-        category: ExitCategory,
+        outcome: v2::Outcome,
     ) -> io::Result<Option<()>> {
-        if self.v2 {
-            let outcome = match category {
-                ExitCategory::Exit => v2::Outcome::Exit,
-                ExitCategory::Signal => v2::Outcome::Signal,
-                ExitCategory::Timeout => v2::Outcome::Timeout,
-                ExitCategory::Cancelled => v2::Outcome::Cancelled,
-                ExitCategory::Failed | ExitCategory::OutputLimit => v2::Outcome::Failed,
-            };
-            return self
-                .send_v2(request_id, v2::Frame::Exit { status, outcome })
-                .map(Some);
-        }
-        self.send_some(APP_EXIT, request_id, status, category.as_str().as_bytes())
-    }
-
-    /// Forwards workload output unless it would exceed the guest agent's output limit of version
-    /// 1, and returns whether it did. A workload whose output was refused ends with
-    /// `output-limit`.
-    fn forward(
-        &mut self,
-        kind: u8,
-        request_id: u64,
-        forwarded: &mut usize,
-        output: &[u8],
-    ) -> io::Result<bool> {
-        if !self.v2 && *forwarded + output.len() > MAX_OUTPUT_BYTES {
-            return Ok(false);
-        }
-        *forwarded += output.len();
-        self.send(kind, request_id, 0, output)?;
-        Ok(true)
+        self.send_v2(request_id, v2::Frame::Exit { status, outcome })
+            .map(Some)
     }
 }
 
@@ -3211,7 +3110,6 @@ fn serve_client<S: Read + Write + Pending>(
         host_sequence: 0,
         ignore_cancel: options.ignore_cancel,
         ignore_stop: options.ignore_stop,
-        v2: false,
         stdin: Vec::new(),
         stdin_ended: true,
         stop: None,

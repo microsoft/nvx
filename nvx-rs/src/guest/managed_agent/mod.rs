@@ -5,17 +5,15 @@
 //! With `ROOTFS` `-`, the direct agent runs as PID 1: it applies the host mapping table beneath
 //! its own root, `/`, launches each workload through nvx-init's plain-process core, reaps orphaned
 //! processes, and powers the VM off after `STOP`. It refuses any other `ROOTFS`. It refuses
-//! workloads until the table is complete, and keeps the C agent's command lines, wire behavior,
-//! status and error categories, 1 MiB output and receive windows, and timeout and cancellation
-//! behavior.
+//! workloads until the table is complete, and keeps the C agent's command lines, status and error
+//! categories, 1 MiB receive window, and timeout and cancellation behavior.
 //!
-//! It also serves NVXC version 2, whose frames carry the same requests, and in which each answer
-//! of a request takes its version. An execution of version 2 runs as one of version 1 does, alone,
-//! and a second `EXEC` gets `BUSY`, but its workload reads a pipe of the standard input that the
-//! host streams, which the agent acknowledges as it writes it, up to its explicit end; its output
-//! has no cap; and `STOP` ends it. While it runs, the agent's records wait in a send queue rather
-//! than for the console, and the agent reads none of the workload's output while the queue is
-//! full.
+//! It serves NVXC version 2, whose frames carry the requests of version 1, which the C agent
+//! spoke, and refuses a frame of any other version. An execution runs alone, and a second `EXEC`
+//! gets `BUSY`; its workload reads a pipe of the standard input that the host streams, which the
+//! agent acknowledges as it writes it, up to its explicit end; its output has no cap; and `STOP`
+//! ends it. While it runs, the agent's records wait in a send queue rather than for the console,
+//! and the agent reads none of the workload's output while the queue is full.
 //!
 //! The agent exits with 0, or with 125 when it fails.
 //!
@@ -36,9 +34,8 @@
 //! or Rust cleanup before `execve` or `_exit`. The execution reads the workload's output,
 //! ends it, and reports its launch and outcome, and the
 //! agent forwards the output as NVXC frames, serves the control session while the workload runs,
-//! and reports the outcome. The agent keeps its own policy: the null device as the workload's
-//! standard input and the output cap of version 1, the identity,
-//! the timeout, the precedence of a cancellation, a timeout, and the cap over the workload's own
+//! and reports the outcome. The agent keeps its own policy: the identity,
+//! the timeout, the precedence of a cancellation and a timeout over the workload's own
 //! status, and the outcome that it reports for a failed launch stage. It builds the workload's
 //! environment in memory, as C's environment functions changed it, and passes it to `execve`, so
 //! that no process changes its
@@ -64,8 +61,7 @@ mod diagnostics;
 mod dispatch;
 /// Environments that the agent builds for `execve`.
 mod environment;
-/// The NVXC adapter, which runs each workload as an execution, and its output cap, cancellation,
-/// and timeout.
+/// The NVXC adapter, which runs each workload as an execution, and its cancellation and timeout.
 mod exec;
 /// Direct launch commands.
 mod launch;

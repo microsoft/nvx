@@ -16,15 +16,13 @@ use crate::host::nvxs::HostConnection;
 use crate::host::session;
 use crate::host::snapshot::SnapshotManifest;
 use crate::host::spawn::{Launched, VmmCommand, spawn_vm_with_mode};
+use crate::protocol::v2::{self, Frame, Outcome};
 use crate::protocol::{
-    APP_ERROR, APP_EXEC, APP_EXIT, APP_MAPS, APP_READY, APP_STDERR, APP_STDOUT, APP_STOP,
-    APP_STOPPED, CAPABILITY_LEN, HostMap, Workload, WorkloadEnvironment, decode_app, encode_app,
-    encode_exec_payload, encode_maps_payloads,
+    CAPABILITY_LEN, HostMap, Workload, WorkloadEnvironment, encode_exec_payload,
+    encode_maps_payloads,
 };
 
 type AnyError = Box<dyn Error>;
-const ACTIVATE: u8 = 8;
-const CAPTURE: u8 = 7;
 
 struct OwnedVm(Option<Launched>);
 impl Drop for OwnedVm {
@@ -92,11 +90,12 @@ fn ready(
     by: Instant,
 ) -> Result<(), AnyError> {
     let bytes = connection.receive(Some(by))?;
-    let frame = decode_app(&bytes)?;
-    require(
-        (frame.kind, frame.request_id, frame.status, frame.payload) == (APP_READY, id, 0, expected),
-        format!("unexpected Ready: {frame:?}"),
-    )
+    let frame = Frame::decode(&bytes)?;
+    let ready = Frame::Ready {
+        version: v2::VERSION,
+        activation: expected,
+    };
+    require(frame == (id, ready), format!("unexpected Ready: {frame:?}"))
 }
 
 fn workload(script: &str, environment: WorkloadEnvironment<'_>) -> Result<Vec<u8>, AnyError> {
@@ -116,23 +115,25 @@ fn execute(
     by: Instant,
 ) -> Result<String, AnyError> {
     connection.send(
-        &encode_app(APP_EXEC, id, 0, &workload(script, environment)?),
+        &Frame::Exec(&workload(script, environment)?).encode(id)?,
         Some(by),
     )?;
+    // The workload reads no standard input.
+    connection.send(&Frame::StdinEnd.encode(id)?, Some(by))?;
     let mut output = Vec::new();
     loop {
         let bytes = connection.receive(Some(by))?;
-        let frame = decode_app(&bytes)?;
+        let (request_id, frame) = Frame::decode(&bytes)?;
         require(
-            frame.request_id == id,
+            request_id == id,
             format!("wrong execution response: {frame:?}"),
         )?;
-        match frame.kind {
-            APP_STDOUT => output.extend_from_slice(frame.payload),
-            APP_STDERR => eprint!("{}", String::from_utf8_lossy(frame.payload)),
-            APP_EXIT => {
+        match frame {
+            Frame::Stdout(chunk) => output.extend_from_slice(chunk),
+            Frame::Stderr(chunk) => eprint!("{}", String::from_utf8_lossy(chunk)),
+            Frame::Exit { status, outcome } => {
                 require(
-                    frame.status == 0 && frame.payload == b"exit",
+                    status == 0 && outcome == Outcome::Exit,
                     format!("execution failed: {frame:?}"),
                 )?;
                 return Ok(String::from_utf8(output)?);
@@ -410,12 +411,12 @@ fn run() -> Result<(), AnyError> {
             transaction: Some(transaction),
         }
         .encode();
-        connection.send(&encode_app(ACTIVATE, 100, 0, &activation), Some(by))?;
+        connection.send(&Frame::Activate(&activation).encode(100)?, Some(by))?;
         ready(&mut connection, 100, &expected_ready, by)?;
         println!("ACTIVATION_READY_PUBLICATION={published} OWN_DNS=10.88.0.53");
         if case == "changed" {
             activation[0] ^= 1;
-            connection.send(&encode_app(ACTIVATE, 101, 0, &activation), Some(by))?;
+            connection.send(&Frame::Activate(&activation).encode(101)?, Some(by))?;
             require(
                 process
                     .wait(Instant::now() + Duration::from_secs(15))?
@@ -426,20 +427,17 @@ fn run() -> Result<(), AnyError> {
             println!("CHANGED_IDENTITY_REPLAY_FATAL");
         } else {
             connection.send(
-                &encode_app(
-                    APP_EXEC,
-                    102,
-                    0,
-                    &workload("true", WorkloadEnvironment::Default)?,
-                ),
+                &Frame::Exec(&workload("true", WorkloadEnvironment::Default)?).encode(102)?,
                 Some(by),
             )?;
             let bytes = connection.receive(Some(by))?;
-            let frame = decode_app(&bytes)?;
+            let frame = Frame::decode(&bytes)?;
+            let refusal = Frame::Error {
+                status: 11,
+                category: b"mappings-incomplete",
+            };
             require(
-                frame.kind == APP_ERROR
-                    && frame.status == 11
-                    && frame.payload == b"mappings-incomplete",
+                frame == (102, refusal),
                 format!("EXEC bypassed MAPS gate: {frame:?}"),
             )?;
             let maps = [HostMap {
@@ -448,7 +446,7 @@ fn run() -> Result<(), AnyError> {
                 read_only: true,
             }];
             for payload in encode_maps_payloads(&maps, 32768)? {
-                connection.send(&encode_app(APP_MAPS, 103, 0, &payload), Some(by))?;
+                connection.send(&Frame::Maps(&payload).encode(103)?, Some(by))?;
                 ready(&mut connection, 103, &[], by)?;
             }
             let script = format!(
@@ -525,20 +523,20 @@ printf 'REAL_READY_MAPS_EXEC_OK\n'
                 .to_owned();
             for kill in [0, 1] {
                 connection.send(
-                    &encode_app(CAPTURE, 106 + u64::from(kill), 0, &[kill]),
+                    &Frame::Capture(&[kill]).encode(106 + u64::from(kill))?,
                     Some(by),
                 )?;
                 let bytes = connection.receive(Some(by))?;
-                let frame = decode_app(&bytes)?;
+                let (_, frame) = Frame::decode(&bytes)?;
                 require(
-                    frame.kind == APP_ERROR && frame.status == 95,
+                    matches!(frame, Frame::Error { status: 95, .. }),
                     "activated restore accepted capture",
                 )?;
             }
             drop(connection);
             let transport = session::connect(&endpoint, pid, process.reference().start_time, by)?;
             connection = HostConnection::attach(transport, &capability, by)?;
-            connection.send(&encode_app(ACTIVATE, 108, 0, &activation), Some(by))?;
+            connection.send(&Frame::Activate(&activation).encode(108)?, Some(by))?;
             ready(&mut connection, 108, &expected_ready, by)?;
             let replay = execute(
                 &mut connection,
@@ -559,13 +557,10 @@ printf 'RECONNECT_REPLAY_PRESERVED_UPPER_AND_MAPS\n'
                 "retry regenerated the machine ID",
             )?;
             print!("{replay}");
-            connection.send(&encode_app(APP_STOP, 110, 0, &[]), Some(by))?;
+            connection.send(&Frame::Stop.encode(110)?, Some(by))?;
             let bytes = connection.receive(Some(by))?;
-            let frame = decode_app(&bytes)?;
-            require(
-                frame.kind == APP_STOPPED && frame.status == 0,
-                "STOP not acknowledged",
-            )?;
+            let frame = Frame::decode(&bytes)?;
+            require(frame == (110, Frame::Stopped), "STOP not acknowledged")?;
             require(
                 process
                     .wait(Instant::now() + Duration::from_secs(30))?

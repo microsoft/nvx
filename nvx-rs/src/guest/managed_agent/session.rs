@@ -21,11 +21,11 @@ const SEND_QUEUE_BYTES: usize = 64 * 1024;
 /// The agent's control session: the guest's role of the shared NVXS session on the control
 /// console, and the NVXC frames that its DATA records carry.
 ///
-/// It serves requests of NVXC versions 1 and 2, which keep the codes of the kinds that both have,
-/// and answers each in the version of the request that it serves. While an execution of version
-/// 2 runs, the session's records go through a send queue, which never waits for the console, so
-/// that the agent keeps serving control requests while the host does not read; the record that
-/// it sends next without streaming waits until the console has taken the queue and itself.
+/// It serves requests of NVXC version 2, which keeps the codes of the kinds that version 1 had,
+/// and refuses a frame of any other version as a malformed request. While an execution runs, the
+/// session's records go through a send queue, which never waits for the console, so that the
+/// agent keeps serving control requests while the host does not read; the record that it sends
+/// next without streaming waits until the console has taken the queue and itself.
 pub(crate) struct Session<'r> {
     /// The guest's NVXS connection on the owned control-console descriptor.
     connection: GuestConnection<Control<'r>>,
@@ -34,9 +34,6 @@ pub(crate) struct Session<'r> {
     /// Error of the connection's latest failure, which a connection that a failure ended reports
     /// again.
     last_error: Option<Errno>,
-    /// Whether the request that the session serves is of version 2, whose frames its answers
-    /// take.
-    v2: bool,
 }
 
 /// Byte transport only: the existing connection still owns all record framing.
@@ -205,10 +202,10 @@ pub(crate) enum Event {
     Data(Vec<u8>),
 }
 
-/// An NVXC request that the session accepted, whose answers take its version.
+/// An NVXC request that the session accepted.
 pub(crate) enum Request<'a> {
-    /// A request of version 1, or one of version 2 of a kind that version 1 has too, with the
-    /// code that both give it.
+    /// A request other than an execution's standard input, with the code that version 2 gives
+    /// its kind, as version 1 did.
     App(protocol::AppFrame<'a>),
     /// Version 2's standard input of the execution of this ID: a `STDIN` frame's bytes, or `None`
     /// for its `STDIN_END`.
@@ -293,7 +290,6 @@ impl<'r> Session<'r> {
             }),
             capture: None,
             last_error: None,
-            v2: false,
         }
     }
 
@@ -501,8 +497,7 @@ impl<'r> Session<'r> {
                             ));
                         }
                     };
-                    // Each joined request gets its Ready in its own version.
-                    let mut replies = vec![(request.request_id, self.v2)];
+                    let mut replies = vec![request.request_id];
                     while sys::readable_or_hung_up(&[self.descriptor().borrowed()], 0)?[0] {
                         match self
                             .next_event()
@@ -539,7 +534,7 @@ impl<'r> Session<'r> {
                                 ) {
                                     return Err(Errno::EPROTO);
                                 }
-                                replies.push((retry.request_id, self.v2));
+                                replies.push(retry.request_id);
                             }
                         }
                     }
@@ -549,13 +544,10 @@ impl<'r> Session<'r> {
                         .map_err(activation_failure)?;
                     (Some(retained), ready, replies)
                 }
-                ActivationAction::Ready(ready) => {
-                    (None, ready, vec![(request.request_id, self.v2)])
-                }
+                ActivationAction::Ready(ready) => (None, ready, vec![request.request_id]),
                 _ => return Err(Errno::EPROTO),
             };
-            for (id, v2) in replies {
-                self.v2 = v2;
+            for id in replies {
                 self.send_app(protocol::APP_READY, id, 0, &ready.encode())?;
             }
             self.connection.get_ref().deadline.set(None);
@@ -674,63 +666,43 @@ impl<'r> Session<'r> {
         acknowledged.map_err(|error| self.error(error))
     }
 
-    /// Decodes the NVXC request that a DATA payload carries, of version 1 or 2, then returns the
+    /// Decodes the NVXC request that a DATA payload carries, of version 2, then returns the
     /// payload's bytes to the receive window before the agent serves the request, as the C agent
-    /// did. The session answers in the request's version until it accepts another.
+    /// did. A frame of another version, such as version 1, is malformed.
     pub(crate) fn accept_request<'a>(
         &mut self,
         payload: &'a [u8],
     ) -> Result<Request<'a>, DataFailure> {
         // A DATA payload has at most `OUTER_MAX_PAYLOAD` bytes, so its length fits either type.
         let status = payload.len() as i32;
-        let streams = payload.get(4) == Some(&v2::VERSION);
-        let request = if streams {
-            v2::Frame::decode(payload)
-                .ok()
-                .map(|(request_id, frame)| match frame {
-                    v2::Frame::Stdin(bytes) => Request::Stdin(request_id, Some(bytes)),
-                    v2::Frame::StdinEnd => Request::Stdin(request_id, None),
-                    // Version 2 keeps version 1's header, and the codes of the kinds that both
-                    // have, which its decoder checked.
-                    _ => Request::App(protocol::AppFrame {
-                        kind: payload[5],
-                        request_id,
-                        status: 0,
-                        payload: &payload[protocol::APP_HEADER_LEN..],
-                    }),
-                })
-        } else {
-            protocol::decode_app(payload)
-                .ok()
-                .filter(|frame| frame.request_id != 0 && frame.status == 0)
-                .map(Request::App)
-        }
-        .ok_or_else(|| data_failure(DataFailureKind::Application, status))?;
+        let request = v2::Frame::decode(payload)
+            .ok()
+            .map(|(request_id, frame)| match frame {
+                v2::Frame::Stdin(bytes) => Request::Stdin(request_id, Some(bytes)),
+                v2::Frame::StdinEnd => Request::Stdin(request_id, None),
+                // Version 2 keeps version 1's header, and the codes of the kinds that both
+                // have, which its decoder checked.
+                _ => Request::App(protocol::AppFrame {
+                    kind: payload[5],
+                    request_id,
+                    status: 0,
+                    payload: &payload[protocol::APP_HEADER_LEN..],
+                }),
+            })
+            .ok_or_else(|| data_failure(DataFailureKind::Application, status))?;
         let credited = self.connection.credit(payload.len() as u32);
         credited.map_err(|error| DataFailure {
             kind: DataFailureKind::Credit,
             status,
             error: self.error(error),
         })?;
-        self.v2 = streams;
         Ok(request)
     }
 
-    /// Whether the session answers in version 2.
-    pub(crate) fn v2(&self) -> bool {
-        self.v2
-    }
-
-    /// Answers in version 2, or in version 1, such as an execution's frames after a control
-    /// request of its own version.
-    pub(crate) fn answer_in(&mut self, v2: bool) {
-        self.v2 = v2;
-    }
-
-    /// Encodes and sends one application frame, in one DATA record, in the session's version.
+    /// Encodes and sends one application frame of version 2, in one DATA record.
     ///
-    /// In version 2, `READY` starts with the protocol version, an `ERROR` of the `busy` category
-    /// is `BUSY`, and an `EXIT` names its outcome as version 1 does.
+    /// `READY` starts with the protocol version, an `ERROR` of the `busy` category is `BUSY`, and
+    /// an `EXIT` names its outcome as version 1 did.
     pub(crate) fn send_app(
         &mut self,
         kind: u8,
@@ -738,36 +710,26 @@ impl<'r> Session<'r> {
         status: i32,
         payload: &[u8],
     ) -> Result<(), Errno> {
-        let frame = if self.v2 {
-            let frame = match kind {
-                APP_READY => v2::Frame::Ready {
-                    version: v2::VERSION,
-                    activation: payload,
-                },
-                APP_STDOUT => v2::Frame::Stdout(payload),
-                APP_STDERR => v2::Frame::Stderr(payload),
-                APP_EXIT => v2::Frame::Exit {
-                    status,
-                    outcome: outcome(payload),
-                },
-                APP_STOPPED => v2::Frame::Stopped,
-                APP_ERROR if payload == protocol::BUSY.as_bytes() => v2::Frame::Busy,
-                APP_ERROR => v2::Frame::Error {
-                    status,
-                    category: payload,
-                },
-                _ => return Err(Errno::EINVAL),
-            };
-            frame.encode(request_id).map_err(|_| Errno::EMSGSIZE)?
-        } else {
-            if protocol::APP_HEADER_LEN
-                .checked_add(payload.len())
-                .is_none_or(|length| length > OUTER_MAX_PAYLOAD)
-            {
-                return Err(Errno::EMSGSIZE);
-            }
-            protocol::encode_app(kind, request_id, status, payload)
+        let frame = match kind {
+            APP_READY => v2::Frame::Ready {
+                version: v2::VERSION,
+                activation: payload,
+            },
+            APP_STDOUT => v2::Frame::Stdout(payload),
+            APP_STDERR => v2::Frame::Stderr(payload),
+            APP_EXIT => v2::Frame::Exit {
+                status,
+                outcome: outcome(payload),
+            },
+            APP_STOPPED => v2::Frame::Stopped,
+            APP_ERROR if payload == protocol::BUSY.as_bytes() => v2::Frame::Busy,
+            APP_ERROR => v2::Frame::Error {
+                status,
+                category: payload,
+            },
+            _ => return Err(Errno::EINVAL),
         };
+        let frame = frame.encode(request_id).map_err(|_| Errno::EMSGSIZE)?;
         let sent = self.connection.send(&frame);
         sent.map_err(|error| self.error(error))
     }

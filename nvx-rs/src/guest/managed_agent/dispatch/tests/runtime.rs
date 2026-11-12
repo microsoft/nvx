@@ -204,8 +204,7 @@ fn privileged_layered_runtime_helper_failure_wins_over_pending_sigterm() {
 fn receive(host: &mut UnixStream) -> Response {
     let (header, payload) = read_outer(host);
     assert_eq!(header.record_type, OUTER_DATA);
-    let frame = decode_app(&payload).unwrap();
-    response(frame.kind, frame.request_id, frame.status, frame.payload)
+    response_of(&payload)
 }
 
 fn prelaunch_termination(helper_ends: bool) {
@@ -224,14 +223,7 @@ fn prelaunch_termination(helper_ends: bool) {
     assert_eq!(read_outer(&mut host).0.record_type, OUTER_ACK);
     let execution = workload_payload(&["/bin/true"], Some("/")).unwrap();
     host.write_all(
-        &encode_outer(
-            OUTER_DATA,
-            &INSTANCE,
-            1,
-            1,
-            &encode_app(APP_EXEC, 9, 0, &execution),
-        )
-        .unwrap(),
+        &encode_outer(OUTER_DATA, &INSTANCE, 1, 1, &frame(APP_EXEC, 9, &execution)).unwrap(),
     )
     .unwrap();
     let Ok(Event::Data(payload)) = session.next_event() else {
@@ -335,21 +327,15 @@ fn privileged_layered_runtime_delivers_a_fragment_collected_status_before_driver
                 host.write_all(&encode_outer(OUTER_RESET, &INSTANCE, 1, 0, &[]).unwrap())
                     .unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_ACK);
-                let execution = encode_app(APP_EXEC, 9, 0, &payload);
+                let execution = frame(APP_EXEC, 9, &payload);
                 host.write_all(&encode_outer(OUTER_DATA, &INSTANCE, 1, 1, &execution).unwrap())
                     .unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
                 until(|| pid_path.exists() && std::fs::metadata(&pid_path).unwrap().len() != 0);
                 let id: i64 = std::fs::read_to_string(&pid_path).unwrap().parse().unwrap();
                 let leader = sys::open_pidfd(ProcessId::from_positive(id).unwrap()).unwrap();
-                let ping = encode_outer(
-                    OUTER_DATA,
-                    &INSTANCE,
-                    1,
-                    2,
-                    &encode_app(APP_PING, 98, 0, &[]),
-                )
-                .unwrap();
+                let ping =
+                    encode_outer(OUTER_DATA, &INSTANCE, 1, 2, &frame(APP_PING, 98, &[])).unwrap();
                 fragment(&mut host, probe, &ping);
                 std::fs::OpenOptions::new()
                     .write(true)
@@ -363,10 +349,7 @@ fn privileged_layered_runtime_delivers_a_fragment_collected_status_before_driver
                 until(|| !Path::new(&format!("/proc/{id}")).exists());
                 host.write_all(&ping[1..]).unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
-                assert_eq!(
-                    receive(&mut host),
-                    response(APP_ERROR, 98, Errno::EBUSY as i32, b"busy")
-                );
+                assert_eq!(receive(&mut host), response(APP_BUSY, 98, 0, b""));
                 let mut output = Vec::new();
                 loop {
                     let frame = receive(&mut host);
@@ -379,14 +362,7 @@ fn privileged_layered_runtime_delivers_a_fragment_collected_status_before_driver
                 }
                 assert_eq!(output, b"observed");
                 host.write_all(
-                    &encode_outer(
-                        OUTER_DATA,
-                        &INSTANCE,
-                        1,
-                        3,
-                        &encode_app(APP_STOP, 99, 0, &[]),
-                    )
-                    .unwrap(),
+                    &encode_outer(OUTER_DATA, &INSTANCE, 1, 3, &frame(APP_STOP, 99, &[])).unwrap(),
                 )
                 .unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
@@ -448,14 +424,8 @@ fn privileged_layered_runtime_keeps_helper_policy_and_first_error_during_failed_
                     .unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_ACK);
                 host.write_all(
-                    &encode_outer(
-                        OUTER_DATA,
-                        &INSTANCE,
-                        1,
-                        1,
-                        &encode_app(APP_EXEC, 9, 0, &payload),
-                    )
-                    .unwrap(),
+                    &encode_outer(OUTER_DATA, &INSTANCE, 1, 1, &frame(APP_EXEC, 9, &payload))
+                        .unwrap(),
                 )
                 .unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
@@ -566,7 +536,7 @@ fn only_stdout_prefix(mut traffic: &[u8]) {
         if traffic.len() < length {
             return;
         }
-        let frame = decode_app(&traffic[OUTER_HEADER_LEN..length]).unwrap();
+        let frame = response_of(&traffic[OUTER_HEADER_LEN..length]);
         assert_eq!((frame.kind, frame.request_id), (APP_STDOUT, 9));
         traffic = &traffic[length..];
     }
@@ -707,14 +677,8 @@ fn privileged_layered_runtime_delivers_a_write_collected_status_before_driver_ev
                 narrow_output(&probe);
                 reset_peer(&mut host);
                 host.write_all(
-                    &encode_outer(
-                        OUTER_DATA,
-                        &INSTANCE,
-                        1,
-                        1,
-                        &encode_app(APP_EXEC, 9, 0, &payload),
-                    )
-                    .unwrap(),
+                    &encode_outer(OUTER_DATA, &INSTANCE, 1, 1, &frame(APP_EXEC, 9, &payload))
+                        .unwrap(),
                 )
                 .unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
@@ -752,14 +716,7 @@ fn privileged_layered_runtime_delivers_a_write_collected_status_before_driver_ev
                 }
                 assert_eq!(output, vec![0; 6000]);
                 host.write_all(
-                    &encode_outer(
-                        OUTER_DATA,
-                        &INSTANCE,
-                        1,
-                        2,
-                        &encode_app(APP_STOP, 99, 0, &[]),
-                    )
-                    .unwrap(),
+                    &encode_outer(OUTER_DATA, &INSTANCE, 1, 2, &frame(APP_STOP, 99, &[])).unwrap(),
                 )
                 .unwrap();
                 assert_eq!(read_outer(&mut host).0.record_type, OUTER_CREDIT);
