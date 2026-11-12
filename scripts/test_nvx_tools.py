@@ -808,7 +808,6 @@ def _write_release_fixture(
             "minirootfs_sha256": AlpineBuildConstants.MINIROOTFS_SHA256,
             "guest_sources": [
                 "guest/common",
-                "guest/alpine",
                 *GuestRustBuildConstants.SOURCE_PATHS,
             ],
             "package_manifests": ["build/initramfs.cpio.gz.packages.json"],
@@ -7511,7 +7510,6 @@ class CiConfigurationTests(unittest.TestCase):
             (("kernel/config-microvm",), microvm_and_benchmarks, None),
             (("kernel/patches/0001-example.patch",), microvm_and_benchmarks, None),
             (("guest/common/init",), microvm_and_benchmarks, None),
-            (("guest/alpine/nvx-container-enter",), microvm_and_benchmarks, None),
             (
                 (".github/actions/build-guest-artifacts/action.yml",),
                 microvm_and_benchmarks,

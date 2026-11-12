@@ -792,23 +792,7 @@ def _install_guest_files(
             root / "sbin" / "nvx-virtio-restore-probe",
         ),
     ]
-    if descriptor.sandbox_control:
-        alpine = BuildConstants.REPO_ROOT / AlpineBuildConstants.GUEST_DIRECTORY
-        scripts.extend(
-            [
-                (
-                    "nvx-container-enter",
-                    alpine / "nvx-container-enter",
-                    root / "sbin" / "nvx-container-enter",
-                ),
-                (
-                    "nvx-container-launch",
-                    alpine / "nvx-container-launch",
-                    root / "sbin" / "nvx-container-launch",
-                ),
-            ]
-        )
-    else:
+    if not descriptor.sandbox_control:
         scripts.append(
             (
                 "nvx-bashrc",
@@ -889,14 +873,7 @@ def _guest_customization_files(descriptor: GuestDescriptor) -> tuple[Path, ...]:
         )
         if path.is_file()
     )
-    alpine = tuple(
-        path
-        for path in sorted(
-            (BuildConstants.REPO_ROOT / AlpineBuildConstants.GUEST_DIRECTORY).iterdir()
-        )
-        if path.is_file()
-    )
-    return (*common, *alpine, *guest_binary_source_files())
+    return (*common, *guest_binary_source_files())
 
 
 def build_initramfs(config: InitramfsBuildConfig) -> None:
