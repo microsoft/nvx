@@ -17,10 +17,12 @@
 //! or `printenv` in any directory, which prints its environment. A script is a `;`-separated
 //! list of commands: `echo TEXT`, `echoerr TEXT`, `printerr TEXT`, which writes `TEXT` to
 //! standard error without a line end, `sleep MS`, `exit CODE`, `signal NUMBER`, `flood BYTES`,
-//! `write KEY VALUE`, `read KEY`, `mkdir DIRECTORY`, `touch PATH`, which creates the host file
-//! `PATH`, as a workload that writes a read-write share does, `env`, `printenv NAME`, `pwd`,
-//! `timeout`, `fail`, and `launchfail`. Like `sh`, a script exits with the status of its
-//! last command; `printenv NAME` prints nothing and fails with status 1 when `NAME` is unset.
+//! `cat`, which copies the workload's standard input to its standard output until the input ends
+//! or the workload times out, `write KEY VALUE`, `read KEY`, `mkdir DIRECTORY`, `touch PATH`, which
+//! creates the host file `PATH`, as a workload that writes a read-write share does, `env`,
+//! `printenv NAME`, `pwd`, `timeout`, `fail`, and `launchfail`. Like `sh`, a script exits with the
+//! status of its last command; `printenv NAME` prints nothing and fails with status 1 when `NAME`
+//! is unset.
 //! Values written with `write` and directories made with `mkdir` live in memory until the VM
 //! stops, like files in the guest's RAM root file system. A `CANCEL` request ends a sleeping
 //! workload with the cancelled outcome, and a client that disconnects during an exec abandons it,
@@ -29,6 +31,18 @@
 //! directory that does not exist (any but `/`, `/tmp`, `/work`, a mapped directory, or a directory
 //! made with `mkdir`), or that is a mapped regular file, with a diagnostic and the `cwd-failed`
 //! category.
+//!
+//! Like the guest agent, the fake serves NVXC versions 1 and 2, and answers each request in its
+//! version. A workload of version 1 reads no standard input, so its `cat` copies nothing, and
+//! ends with `output-limit` once its output would pass 1 MiB. A workload of version 2 runs alone,
+//! and another `EXEC` gets `BUSY`, as other requests do while it runs; its output has no cap; its
+//! standard input is what the host's `STDIN` frames sent, which the fake acknowledges as the
+//! workload reads it, until `STDIN_END`, and of which more than the window unacknowledged, or
+//! more after its end, ends the session; and a `STOP` while it sleeps or reads its input ends it
+//! with the cancelled outcome before the fake acknowledges the `STOP`, unless `fake_ignore_stop=1`
+//! ignores it, as between workloads; with `fake_drop_stop=1`, the fake closes the connection after
+//! that `EXIT`, without acknowledging the `STOP`. Each refusal while a workload runs takes the
+//! version of the request that it refuses.
 //!
 //! Host paths are mapped as OpenVMM and the guest agent map them: the command line exports
 //! numbered `--mount-child` directories, and files with the `file` flag, through
@@ -193,12 +207,13 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::nvxs::ErrorCode;
 use crate::protocol::{
-    APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_MAPS, APP_PING, APP_READY,
-    APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, BUSY, CAPABILITY_LEN, CWD_FAILED, ExitCategory,
-    GuestFeatures, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED, MAPPINGS_INCOMPLETE, MAPS_TOKEN,
-    MAX_HOST_MAPPINGS, MAX_OUTPUT_BYTES, MapsPayload, OUTER_DATA, OUTER_ERROR, OUTER_HEADER_LEN,
-    OUTER_HOST_ATTACH, OUTER_READY, OUTER_WAIT, OuterHeader, UNSUPPORTED_OPERATION, decode_app,
-    decode_exec_payload, decode_maps_payload, decode_outer_header, encode_app, encode_outer,
+    APP_CANCEL, APP_ERROR, APP_EXEC, APP_EXIT, APP_FEATURES, APP_HEADER_LEN, APP_MAPS, APP_PING,
+    APP_READY, APP_STDERR, APP_STDOUT, APP_STOP, APP_STOPPED, BUSY, CAPABILITY_LEN, CWD_FAILED,
+    ExitCategory, GuestFeatures, INVALID_REQUEST, LAUNCH_FAILED, MAPPING_FAILED,
+    MAPPINGS_INCOMPLETE, MAPS_TOKEN, MAX_HOST_MAPPINGS, MAX_OUTPUT_BYTES, MapsPayload, OUTER_DATA,
+    OUTER_ERROR, OUTER_HEADER_LEN, OUTER_HOST_ATTACH, OUTER_READY, OUTER_WAIT, OuterHeader,
+    UNSUPPORTED_OPERATION, decode_app, decode_exec_payload, decode_maps_payload,
+    decode_outer_header, encode_app, encode_outer, v2,
 };
 
 /// Largest workload-output frame emitted by the fake guest.
@@ -2591,10 +2606,20 @@ enum Flow {
 enum Interrupt {
     /// No control request is waiting.
     None,
-    /// The workload's matching cancellation request arrived.
+    /// The workload's matching cancellation request, or a `STOP` of version 2, arrived.
     Cancel,
     /// The host disconnected and abandoned the workload.
     Disconnected,
+}
+
+/// A host request that a DATA record carries.
+enum Request {
+    /// A request: whether it is of NVXC version 2, its kind, whose code version 2 shares with
+    /// version 1, its ID, and its payload.
+    App(bool, u8, u64, Vec<u8>),
+    /// Version 2's standard input of the workload with this ID: a `STDIN` frame's bytes, or
+    /// `None` for its `STDIN_END`.
+    Stdin(u64, Option<Vec<u8>>),
 }
 
 /// A control stream that can report whether input is waiting without consuming it.
@@ -2679,26 +2704,67 @@ struct Session<'a, S> {
     host_sequence: u64,
     /// Whether matching cancellation requests are ignored for fault injection.
     ignore_cancel: bool,
+    /// Whether stop requests are ignored for fault injection, also while a workload runs.
+    ignore_stop: bool,
+    /// Whether the request that the fake serves, or the workload that runs, is of NVXC version
+    /// 2, whose frames its answers take.
+    v2: bool,
+    /// What the host sent of the running workload's standard input in version 2 and the workload
+    /// has not read, which the fake acknowledges as the workload reads it.
+    stdin: Vec<u8>,
+    /// Whether the running workload's standard input ended.
+    stdin_ended: bool,
+    /// The request ID of a `STOP` of version 2 that ended the running workload.
+    stop: Option<u64>,
 }
 
 impl<S: Read + Write + Pending> Session<'_, S> {
-    /// Encodes and sends one sequenced guest application frame.
+    /// Encodes and sends one sequenced guest application frame, in the session's version.
     fn send(&mut self, kind: u8, request_id: u64, status: i32, payload: &[u8]) -> io::Result<()> {
-        let frame = encode_app(kind, request_id, status, payload);
+        if !self.v2 {
+            return self.send_frame(&encode_app(kind, request_id, status, payload));
+        }
+        let frame = match kind {
+            APP_READY => v2::Frame::Ready {
+                version: v2::VERSION,
+                activation: payload,
+            },
+            // Version 2 carries no empty chunk of output.
+            APP_STDOUT | APP_STDERR if payload.is_empty() => return Ok(()),
+            APP_STDOUT => v2::Frame::Stdout(payload),
+            APP_STDERR => v2::Frame::Stderr(payload),
+            APP_STOPPED => v2::Frame::Stopped,
+            APP_ERROR if payload == BUSY.as_bytes() => v2::Frame::Busy,
+            _ => v2::Frame::Error {
+                status,
+                category: payload,
+            },
+        };
+        self.send_v2(request_id, frame)
+    }
+
+    /// Encodes and sends one frame of version 2.
+    fn send_v2(&mut self, request_id: u64, frame: v2::Frame<'_>) -> io::Result<()> {
+        let frame = frame.encode(request_id).map_err(io::Error::other)?;
+        self.send_frame(&frame)
+    }
+
+    /// Sends one sequenced DATA record that carries `frame`.
+    fn send_frame(&mut self, frame: &[u8]) -> io::Result<()> {
         let record = encode_outer(
             OUTER_DATA,
             &self.instance,
             self.epoch,
             self.guest_sequence,
-            &frame,
+            frame,
         )
         .map_err(io::Error::other)?;
         self.guest_sequence += 1;
         self.stream.write_all(&record)
     }
 
-    /// Reads the next host request, returning `None` at end of stream.
-    fn request(&mut self) -> io::Result<Option<(u8, u64, Vec<u8>)>> {
+    /// Reads the next host request, of either version, returning `None` at end of stream.
+    fn request(&mut self) -> io::Result<Option<Request>> {
         let Some((header, frame)) = read_record(self.stream)? else {
             return Ok(None);
         };
@@ -2706,20 +2772,39 @@ impl<S: Read + Write + Pending> Session<'_, S> {
             && header.instance_id == self.instance
             && header.epoch == self.epoch
             && header.sequence == self.host_sequence;
-        let frame = decode_app(&frame)
-            .ok()
+        let request = if frame.get(4) == Some(&v2::VERSION) {
+            v2::Frame::decode(&frame)
+                .ok()
+                .map(|(request_id, decoded)| match decoded {
+                    v2::Frame::Stdin(bytes) => Request::Stdin(request_id, Some(bytes.to_vec())),
+                    v2::Frame::StdinEnd => Request::Stdin(request_id, None),
+                    // Version 2 keeps version 1's header and the codes of the kinds that both
+                    // have.
+                    _ => Request::App(true, frame[5], request_id, frame[APP_HEADER_LEN..].to_vec()),
+                })
+        } else {
+            decode_app(&frame).ok().map(|frame| {
+                Request::App(false, frame.kind, frame.request_id, frame.payload.to_vec())
+            })
+        };
+        let request = request
             .filter(|_| valid)
             .ok_or_else(|| io::Error::other("invalid data record"))?;
         self.host_sequence += 1;
-        Ok(Some((frame.kind, frame.request_id, frame.payload.to_vec())))
+        Ok(Some(request))
     }
 
     /// Serves requests until the host disconnects or asks the VM to stop.
     fn run(&mut self, options: &Options, guest: &mut Guest) -> io::Result<Flow> {
         loop {
-            let Some((kind, request_id, payload)) = self.request()? else {
+            let Some(request) = self.request()? else {
                 return Ok(Flow::Continue);
             };
+            // The standard input of a workload that ended takes no more bytes.
+            let Request::App(v2, kind, request_id, payload) = request else {
+                continue;
+            };
+            self.v2 = v2;
             match kind {
                 APP_PING => self.send(APP_READY, request_id, 0, &[])?,
                 APP_FEATURES if !options.legacy_guest => {
@@ -2731,6 +2816,13 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                 APP_EXEC => {
                     if !self.exec(request_id, &payload, guest)? {
                         return Ok(Flow::Continue);
+                    }
+                    if let Some(stop) = self.stop.take() {
+                        if options.drop_stop {
+                            return Ok(Flow::Drop);
+                        }
+                        let _ = self.send(APP_STOPPED, stop, 0, &[]);
+                        return Ok(Flow::Exit);
                     }
                 }
                 APP_MAPS => match guest.map(options, &payload) {
@@ -2752,16 +2844,41 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         }
     }
 
-    /// Handles control traffic that arrives while workload `request_id` runs.
+    /// Handles control traffic that arrives while workload `request_id` runs. The workload's
+    /// standard input of version 2 queues for it, under the window; bytes beyond it, or after its
+    /// end, fail the session.
     fn interrupt(&mut self, request_id: u64) -> io::Result<Interrupt> {
         while self.stream.pending()? {
             match self.request()? {
                 None => return Ok(Interrupt::Disconnected),
-                Some((APP_CANCEL, id, _)) if id == request_id && !self.ignore_cancel => {
+                Some(Request::Stdin(id, _)) if id != request_id => {}
+                Some(Request::Stdin(_, _)) if self.stdin_ended => {
+                    return Err(io::Error::other("standard input after its end"));
+                }
+                Some(Request::Stdin(_, None)) => self.stdin_ended = true,
+                Some(Request::Stdin(_, Some(bytes))) => {
+                    if self.stdin.len() + bytes.len() > v2::STDIN_WINDOW as usize {
+                        return Err(io::Error::other("standard input beyond the window"));
+                    }
+                    self.stdin.extend(bytes);
+                }
+                Some(Request::App(true, APP_STOP, _, _)) if self.v2 && self.ignore_stop => {}
+                Some(Request::App(true, APP_STOP, id, _)) if self.v2 => {
+                    self.stop = Some(id);
                     return Ok(Interrupt::Cancel);
                 }
-                Some((APP_CANCEL, _, _)) => {}
-                Some((_, id, _)) => self.send(APP_ERROR, id, 16, BUSY.as_bytes())?,
+                Some(Request::App(_, APP_CANCEL, id, _))
+                    if id == request_id && !self.ignore_cancel =>
+                {
+                    return Ok(Interrupt::Cancel);
+                }
+                Some(Request::App(_, APP_CANCEL, _, _)) => {}
+                // The refusal takes the request's version, and the workload's frames their own.
+                Some(Request::App(v2, _, id, _)) => {
+                    let running = std::mem::replace(&mut self.v2, v2);
+                    self.send(APP_ERROR, id, 16, BUSY.as_bytes())?;
+                    self.v2 = running;
+                }
             }
         }
         Ok(Interrupt::None)
@@ -2783,6 +2900,9 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         let Ok(exec) = decode_exec_payload(payload) else {
             return self.send_some(APP_ERROR, request_id, 22, INVALID_REQUEST.as_bytes());
         };
+        // A workload of version 1 has no standard input, as one that reads the null device.
+        self.stdin.clear();
+        self.stdin_ended = !self.v2;
         let mut environment = if exec.inherit_default_env {
             guest.default_environment.clone()
         } else {
@@ -2904,6 +3024,27 @@ impl<S: Read + Write + Pending> Session<'_, S> {
                         remaining -= chunk;
                     }
                 }
+                "cat" => loop {
+                    let chunk = self.stdin.len().min(OUTPUT_CHUNK_BYTES);
+                    if limit.is_some_and(|limit| Instant::now() >= limit) {
+                        return self.exit(request_id, 124, ExitCategory::Timeout);
+                    } else if chunk > 0 {
+                        // The workload reads these bytes now, so the fake acknowledges them.
+                        let bytes: Vec<u8> = self.stdin.drain(..chunk).collect();
+                        self.send_v2(request_id, v2::Frame::StdinAck(chunk as u32))?;
+                        self.send(APP_STDOUT, request_id, 0, &bytes)?;
+                    } else if self.stdin_ended {
+                        break;
+                    } else {
+                        match self.interrupt(request_id)? {
+                            Interrupt::None => thread::sleep(Duration::from_millis(5)),
+                            Interrupt::Cancel => {
+                                return self.exit(request_id, 137, ExitCategory::Cancelled);
+                            }
+                            Interrupt::Disconnected => return Ok(None),
+                        }
+                    }
+                },
                 "write" => {
                     let (key, value) = argument.split_once(' ').unwrap_or((argument, ""));
                     guest.values.insert(key.to_owned(), value.to_owned());
@@ -2983,11 +3124,24 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         status: i32,
         category: ExitCategory,
     ) -> io::Result<Option<()>> {
+        if self.v2 {
+            let outcome = match category {
+                ExitCategory::Exit => v2::Outcome::Exit,
+                ExitCategory::Signal => v2::Outcome::Signal,
+                ExitCategory::Timeout => v2::Outcome::Timeout,
+                ExitCategory::Cancelled => v2::Outcome::Cancelled,
+                ExitCategory::Failed | ExitCategory::OutputLimit => v2::Outcome::Failed,
+            };
+            return self
+                .send_v2(request_id, v2::Frame::Exit { status, outcome })
+                .map(Some);
+        }
         self.send_some(APP_EXIT, request_id, status, category.as_str().as_bytes())
     }
 
-    /// Forwards workload output unless it would exceed the guest agent's output limit, and
-    /// returns whether it did. A workload whose output was refused ends with `output-limit`.
+    /// Forwards workload output unless it would exceed the guest agent's output limit of version
+    /// 1, and returns whether it did. A workload whose output was refused ends with
+    /// `output-limit`.
     fn forward(
         &mut self,
         kind: u8,
@@ -2995,7 +3149,7 @@ impl<S: Read + Write + Pending> Session<'_, S> {
         forwarded: &mut usize,
         output: &[u8],
     ) -> io::Result<bool> {
-        if *forwarded + output.len() > MAX_OUTPUT_BYTES {
+        if !self.v2 && *forwarded + output.len() > MAX_OUTPUT_BYTES {
             return Ok(false);
         }
         *forwarded += output.len();
@@ -3056,6 +3210,11 @@ fn serve_client<S: Read + Write + Pending>(
         guest_sequence: 1,
         host_sequence: 0,
         ignore_cancel: options.ignore_cancel,
+        ignore_stop: options.ignore_stop,
+        v2: false,
+        stdin: Vec::new(),
+        stdin_ended: true,
+        stop: None,
     };
     match session.run(options, guest) {
         Ok(Flow::Exit) => {

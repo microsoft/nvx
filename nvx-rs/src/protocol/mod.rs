@@ -74,6 +74,7 @@ pub(crate) use app::APP_ACTIVATE;
 pub(crate) use app::APP_CAPTURE;
 #[cfg(any(
     feature = "cli",
+    feature = "testing",
     all(feature = "guest", target_os = "linux", target_arch = "x86_64")
 ))]
 pub(crate) use app::APP_HEADER_LEN;
@@ -85,7 +86,10 @@ pub(crate) use app::ExitCategory;
 pub(crate) use app::encode_activate_payload;
 #[cfg(feature = "cli")]
 pub(crate) use app::encode_capture_payload;
-#[cfg(all(feature = "guest", target_os = "linux", target_arch = "x86_64"))]
+#[cfg(any(
+    feature = "testing",
+    all(feature = "guest", target_os = "linux", target_arch = "x86_64")
+))]
 pub(crate) use app::v2;
 #[cfg(any(
     feature = "cli",

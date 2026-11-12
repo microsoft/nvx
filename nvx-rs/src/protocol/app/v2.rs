@@ -46,6 +46,12 @@
 //! has written them into the execution's standard input, and the host never has more than
 //! [`STDIN_WINDOW`] bytes that the guest agent has not acknowledged. `CANCEL` ends the execution,
 //! whose `EXIT` reports it. Version 1's `FEATURES` request, `0x05`, has no place in version 2.
+//!
+//! NVX's guest agents and the fake OpenVMM run one execution at a time. A `STOP` while it runs
+//! ends it, whose `EXIT` comes before `STOPPED`. Bytes that its standard input never took, as
+//! once the workload closed it, stay unacknowledged; `STDIN`, `STDIN_END` and `CANCEL` of an
+//! execution that ended get no answer; and standard input beyond the window, or after its end,
+//! ends the session.
 
 use crate::protocol::{OUTER_MAX_PAYLOAD, ProtocolError, array, violation};
 
