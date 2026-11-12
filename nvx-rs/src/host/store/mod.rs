@@ -8,8 +8,7 @@
 //!   launch.json            the journal of a launch in progress, or of one that was interrupted
 //!   runtime.json           the runtime record of its running VM
 //!   control.capability     the launch capability of its VM
-//!   control.sock           the control endpoint of its VM, on Linux, but for a clone, whose VMM
-//!                          listens beside the snapshot that it restores
+//!   control.sock           the control endpoint of its VM, on Linux
 //!   openvmm.log            the VMM's output, claimed by the launch that created it
 //!   console.log            the guest console of the latest launch, or of every launch, if the
 //!                          caller captures it
@@ -17,7 +16,7 @@
 //!   .tmpXXXXXX             the outcome report while the VMM writes it, which it then publishes
 //!   clone.json             the binding of a clone to the generation of a template that it leases
 //!   clone-scratch.raw      the file of the scratch device that earlier versions created for a
-//!                          clone whose upper is in RAM, which a release removes if one remains
+//!                          clone whose upper is in RAM, which a removal deletes if one remains
 //!   clone-activation.bin   the activation record of a clone, which its launch writes
 //!   clone-progress.log     the progress log of a clone's launch and restore sequence
 //!   clone-failure.json     the record of a clone's failure
@@ -58,9 +57,7 @@
 //! # Launches
 //!
 //! A launch holds the sandbox's lock throughout, under an identity that the caller reserved
-//! before it began, with [`LaunchId::generate`], a fresh one for each launch, or that a clone's
-//! lease reserved, which records it durably before any VMM of the clone exists, for the one
-//! launch of the clone that the lease allows:
+//! before it began, with [`LaunchId::generate`], a fresh one for each launch:
 //!
 //! 1. [`LockedStore::begin_launch`] stores the capability, creates a fresh log and claims it, and
 //!    writes the journal's marker, which names the launch, before anything is spawned.
@@ -172,8 +169,7 @@
 //!   the VMM through the control endpoint that the journal names, holds it, confirms that the
 //!   endpoint still names it once held, and terminates it.
 //!   On Windows the endpoint is a pipe whose name each launch draws at random, which names the
-//!   VMM by itself. On Linux it is the same socket path for every launch of the sandbox, but the
-//!   one launch of a clone, whose VMM listens at a socket that its lease reserves, so the
+//!   VMM by itself. On Linux it is the same socket path for every launch of the sandbox, so the
 //!   VMM must also hold the claimed log as its standard output. Until the VMM serves its
 //!   endpoint, recovery is indeterminate and keeps the journal; once the VMM exits, the released
 //!   claim proves it.
@@ -230,7 +226,7 @@
 //!
 //! [`LockedStore::remove`] removes a sandbox that no VMM can run in: it refuses while the store
 //! records a VM or a launch, which the caller reattaches to, or recovers, first. It removes what a
-//! clone kept of its launch, as a release does, and the sandbox's
+//! clone kept of its launch, and the sandbox's
 //! [clone binding](CLONE_BINDING_NAME) first, and makes their absence durable before anything
 //! else goes. It checks for those records, and removes those files, through one handle of the
 //! directory, once it has checked through that handle that the directory holds its lock, so that
@@ -304,7 +300,6 @@ pub use self::identity::{
 pub use self::launch::{Launch, Recovery};
 pub use self::lifecycle::{Lingering, RemovalError};
 pub use self::locked::LockedStore;
-pub(crate) use self::locked::Reservation;
 use self::names::CLONE_FILE_NAMES;
 pub use self::names::{
     CAPABILITY_NAME, CLONE_ACTIVATION_NAME, CLONE_BINDING_NAME, CLONE_FAILURE_NAME,

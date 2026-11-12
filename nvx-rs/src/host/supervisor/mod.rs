@@ -11,8 +11,7 @@
 //! # Launches
 //!
 //! [`launch`] runs the store's launch steps under the sandbox's lock, as a launch whose identity
-//! the caller reserved beforehand, with [`LaunchId::generate`], or through a clone's lease, as
-//! [Clones](#clones) describes:
+//! the caller reserved beforehand, with [`LaunchId::generate`]:
 //!
 //! 1. [`LockedStore::begin_launch`] writes the journal's marker, which names the launch, and the
 //!    caller's `command` builds the VMM's [`VmmCommand`] with the control endpoint that the
@@ -124,79 +123,6 @@
 //! that it has not released, a [`Process`] that matched its recorded reference, or, during the
 //! recovery of a launch that did not record its VMM, the process that recovery verified to be that
 //! VMM. It never signals a process that reuses a recorded ID.
-//!
-//! # Clones
-//!
-//! A clone restores a generation of a template that it leases from a
-//! [template store](crate::host::template::Store), and its lease reserves its launch:
-//!
-//! 1. [`Store::acquire`](crate::host::template::Store::acquire) leases the generation, and writes
-//!    the lease's record in the store and the clone binding in the sandbox, durably, with the
-//!    identity of the launch that the lease reserves,
-//!    [`Lease::launch`](crate::host::template::Lease::launch), before any VMM of the clone
-//!    exists. It returns the sandbox's lock.
-//! 2. Under that lock, the caller launches the clone with [`launch`], as the reserved launch,
-//!    which [`LockedStore::begin_launch`] requires of a sandbox that holds a lease, and which
-//!    begins once, under that lock alone, whatever its outcome. The supervisor prepares nothing of
-//!    the restore: the caller binds what the restore needs before the launch, such as its
-//!    restore-ready endpoint, and its `command` gives OpenVMM the restore's options, such as
-//!    `--restore-ready-path`. The clone's VMM restores the generation's snapshot in place, and on
-//!    Linux listens beside it, at the control socket that the lease reserves in the generation's
-//!    payload, named after the launch, which [`Starting::endpoint`] and the runtime record name,
-//!    as every launch's endpoint, rather than at the sandbox's own socket.
-//! 3. Still under that lock, the caller checks, through its own transport, that the clone's
-//!    restore completed: that the VMM sent its restore-ready event, and that the clone was
-//!    activated, reported Ready and started, as the caller's protocol requires. Only then does it
-//!    commit the launch with [`Starting::commit`], which writes the runtime record. A failure ends
-//!    the launch with [`Starting::abandon`], through the VMM's verified identity: a launch that
-//!    cannot be ended keeps its journal, and the lease.
-//! 4. Once the clone's VM has exited, as a stop, a termination, or a reattach verifies,
-//!    [`Store::release`](crate::host::template::Store::release) ends the lease, under the
-//!    sandbox's lock, taken through the lease's path,
-//!    [`Lease::sandbox`](crate::host::template::Lease::sandbox), as the acquisition took it. The
-//!    VMM removes its control socket as it exits, the stop or the reattach removes the one that an
-//!    abrupt exit leaves, and the release makes the socket's absence durable before the lease
-//!    ends.
-//!
-//! ## The lock order
-//!
-//! These steps, and every other transition of a template store or a sandbox, take their locks in
-//! one order: the lifecycle lock of a capture class's slot, which serializes the class's captures,
-//! as [`Store::refresh_template`](crate::host::template::Store::refresh_template) describes, then
-//! the template store's lock, then the [lifecycle lock](super::store#lifecycle-locks) of a sandbox,
-//! which guards its clone binding and its launch journal, or of a capture's transaction, the
-//! sandbox store of the capture's VM, then the scratch image's claim. None waits for a lock while
-//! it holds a later one: under its slot's lock, a capture, or its recovery, takes its
-//! transaction's lock and then, once it has released it, the store's lock, to publish, and no
-//! other; an acquisition releases the store's lock before it returns; a release, a launch, a stop,
-//! a reattach, and a removal of the sandbox take no lock of the store; and a retirement takes no
-//! lock of a sandbox. No lock but those of a capture lasts for a VM's lifetime: a capture holds
-//! its slot's lock and its transaction's until its VM has ended, while the caller of a clone's
-//! launch releases the sandbox's lock once the launch commits or ends, and the scratch image's
-//! claim belongs to the VMM, which holds it until it exits.
-//!
-//! ## Crashes
-//!
-//! A crash at any step leaves records from which a later transition, under the same locks, decides
-//! what becomes of the lease, which a release ends only once the sandbox records no VM and no
-//! launch:
-//!
-//! - After the acquisition, the binding reserves a launch that never began, and that no later lock
-//!   begins: a release ends the lease at once, and another acquisition, which checks the
-//!   generation's eligibility again, reserves another launch.
-//! - After the launch's journal, before or after the spawn, before its commit, [`reattach`] ends
-//!   the launch, as [`LockedStore::recover`] does, and the lease lasts until it has: a launch
-//!   that cannot be ended yet is [`Reattached::Indeterminate`], and keeps it.
-//! - After the commit, the runtime record names the VM, which [`reattach`] holds again: the lease
-//!   lasts as long as the VM runs, until a stop or a termination verifies its exit.
-//! - During a release, the binding goes first, durably, and leaves the record of the lease, which
-//!   a retirement removes.
-//!
-//! The evidence of the VM's exit decides each outcome. A record of an earlier boot, or of a process
-//! ID that another process now has, names a VM that has exited: reattach clears it, and the lease
-//! may be released. A VM that cannot be examined is indeterminate, and keeps its records, and so
-//! the lease. A forced teardown that fails, or that does not end the VM, keeps its runtime record,
-//! and the lease.
 //!
 //! [`launch`]: fn@crate::host::supervisor::launch
 //! [`LaunchId::generate`]: crate::host::store::LaunchId::generate

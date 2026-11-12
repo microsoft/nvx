@@ -506,8 +506,6 @@ pub struct SnapshotKey {
     time: TimeContract,
 }
 
-pub(in crate::host) use SnapshotKey as TemplateKey;
-
 /// The checked inputs shared by a legacy capture class and a caller-owned capture context.
 struct CaptureInputs<'a> {
     /// The runtime's artifact and contract identities.
@@ -540,8 +538,8 @@ impl SnapshotKey {
     /// Version 1 omits the guest build, appends the complete capture-time contract, and holds
     /// the snapshot's NIC, if it has one, with the identity of the complete
     /// deny-all policy under which the capture attached it, but no network policy of its clones.
-    /// It has not been released, so a template store that an earlier build created is not
-    /// supported: delete it and create a new one. There is no migration.
+    /// It has not been released, so no key that an earlier build encoded is supported. There is
+    /// no migration.
     pub const VERSION: u16 = 1;
 
     /// Most bytes of a key's canonical encoding: what the largest key that a manifest of at most
