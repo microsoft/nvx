@@ -18184,14 +18184,37 @@ class GuestInitRoutingTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "new-init <4242>\n")
 
-    def test_old_workload_identity_tokens_name_no_identity(self):
-        # Only nvx_identity= names the identity of a one-shot workload.
-        result = self._run(
-            "nvx_workload_uid=4242 nvx_workload_gid=4242 nvx_entrypoint=/bin/true"
+    def test_openvmm_workload_identity_needs_the_same_nvx_identity(self):
+        # OpenVMM's identity tokens no longer name the identity: without the
+        # same nvx_identity=, a boot of any route fails closed before it
+        # starts anything.
+        refused = (
+            "NVX-WORKLOAD-ERROR: nvx_identity must name OpenVMM's workload identity\n"
         )
+        openvmm = "nvx_workload_uid=4242 nvx_workload_gid=4242"
+        for tokens in (
+            f"nvx_exec=/bin/true {openvmm}",
+            "nvx_exec=/bin/true nvx_workload_uid=4242",
+            f"nvx_exec=/bin/true nvx_identity=4243:4242 {openvmm}",
+            f"{openvmm} nvx_identity=4242:4243",
+            f"nvx_entrypoint=/bin/true {openvmm}",
+            f"nvx_mode=managed nvx_control_tty=hvc2 {openvmm}",
+            f"nvx_sandbox=1 nvx_snapshot_tier=platform {openvmm}",
+        ):
+            with self.subTest(tokens=tokens):
+                result = self._run(tokens)
+                self.assertEqual(result.returncode, 125, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(refused, result.stderr)
+        # The same identity boots on, here to the one-shot workload's check
+        # of its entrypoint.
+        result = self._run(f"{openvmm} nvx_identity=4242:4242 nvx_entrypoint=bin/true")
         self.assertEqual(result.returncode, 125, result.stdout)
+        self.assertIn("hostmount\n", result.stdout)
+        self.assertNotIn(refused, result.stderr)
         self.assertIn(
-            "NVX-WORKLOAD-ERROR: workload UID is unavailable\n", result.stderr
+            "NVX-WORKLOAD-ERROR: nvx_entrypoint must be an absolute path\n",
+            result.stderr,
         )
 
     def test_exec_override_cannot_bypass_the_new_sandbox_init(self):
