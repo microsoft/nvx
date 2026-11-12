@@ -1,7 +1,7 @@
 //! The managed lifecycle of a guest whose init hands the boot to the managed agent, on a real
 //! hypervisor: authenticated sessions and reconnects, request-scoped working directories and
 //! environments, the workload identity, timeouts, descendants that outlive their workload,
-//! refused working directories, and stop, driven through `nvx::host::session`.
+//! refused working directories, and stop, driven through the host's control session.
 //!
 //! `scripts/nvx.py test-microvm --scenario managed-lifecycle` runs it for the selected guest and
 //! backend, then checks the outcome report that OpenVMM wrote and the guest console. It sets:
@@ -23,7 +23,6 @@
 //!
 //! These checks were `run_managed_lifecycle` of `scripts/nvx_tools/microvm_tests.py`, which drove
 //! the control session from Python until microsoft/nvx#359 left the protocol to nvx-rs alone.
-#![cfg(all(feature = "host", any(target_os = "linux", windows)))]
 
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -34,9 +33,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use nvx::host::platform::{Transport, process_start_time};
-use nvx::host::session::{self, ControlSession, ExecEvent};
-use nvx::protocol::{
+use crate::host::platform::{Transport, process_start_time};
+use crate::host::session::{self, ControlSession, ExecEvent};
+use crate::protocol::{
     self, APP_ERROR, APP_MAPS, APP_READY, CAPABILITY_LEN, CWD_FAILED, ExitCategory, HostMap,
     Workload, WorkloadEnvironment,
 };

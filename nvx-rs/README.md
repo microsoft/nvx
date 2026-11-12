@@ -131,7 +131,7 @@ changes only when the module's purpose does.
 | [`nvx::host::process`](#nvxhostprocess) | Verified references to OpenVMM processes, through which callers wait for them and end them |
 | [`nvx::host::supervisor`](#nvxhostsupervisor) | The transitional public path of the low-level spawn of a VMM, which code that stays uses until SL6.3 (#1122) |
 | [`nvx::host::seal`](#nvxhostseal) | `FileSeal`: what the host reports about an open file from its metadata alone, without reading it |
-| [`nvx::host::session`, `platform`, `report`](#nvxhostsession-platform-report) | The authenticated control session, Linux and Windows primitives, and OpenVMM's outcome report |
+| [`nvx::host::platform`, `report`](#nvxhostplatform-report) | Linux and Windows primitives, and OpenVMM's outcome report |
 | [`nvx::host::sandbox`](#nvxhostsandbox) | The launch profile of `nvx-rs sandbox`: its plans, live shares, option checks, bindings, and prepared launches |
 | [`nvx::guest`](#nvxguest) | The programs that run in Linux guests; see [Guest binaries](#guest-binaries) |
 | [`nvx::guest::mappings`](#nvxguestmappings) | `Mapping` and `MappingTable`: host mappings, and the account of a host's mapping table, for any guest init or agent |
@@ -1063,7 +1063,8 @@ and refuses unverifiable peers rather than falling back to a numeric PID.
 An indeterminate process check remains an error, never exit proof.
 
 `HostConnection`: the host's role of the NVXS session over a platform transport,
-on which `nvx::host::session` and other host applications run their protocols.
+on which NVX's own control session and other host applications run their
+protocols.
 It attaches with the launch capability, waiting while the broker asks it to,
 sends application bytes in as many DATA records as they take, and returns each
 DATA payload from the guest, with deadlines; a receive that times out keeps a
@@ -1078,8 +1079,8 @@ remain available as sources.
 `Transport` and `TransportHandle` re-export the existing platform types, with
 one definition beneath the OS adapters. Timed reads and writes, native-handle
 duplication and `unread` are unchanged: Linux reports Unix `SIOCOUTQ` charges,
-and Windows reports `None`. The old `host::session::connect` remains a
-compatibility wrapper.
+and Windows reports `None`. The old `session::connect`, private to the crate
+like the session, remains a compatibility wrapper for the CLI.
 
 ### `nvx::host::process`
 
@@ -1187,11 +1188,12 @@ file ID, the kind, the length, the modification time, and on Linux the change
 time, with a versioned serde form. A seal detects accidental change, not
 tampering; see [Distro bindings](#distro-bindings).
 
-### `nvx::host::session`, `platform`, `report`
+### `nvx::host::platform`, `report`
 
-The authenticated control session, which carries NVX's control protocol, `NVXC`,
-one frame per DATA record of a `HostConnection`; Linux and Windows primitives;
-and OpenVMM's outcome report.
+Linux and Windows primitives, and OpenVMM's outcome report. The authenticated
+control session, which carries NVX's own control protocol, `NVXC`, one frame
+per DATA record of a `HostConnection`, is private to the crate: the CLI and its
+restore driver use it, with the `cli` feature.
 
 `report::read` returns `Ok(None)` for a missing report, and an `Io` error for an
 unreadable or malformed report, retaining the underlying error. It keeps today's
@@ -2651,9 +2653,9 @@ guest agents of NVX advertise bits 0, 4, and 6 in sandbox mode.
   treats as one that has not appeared yet, and, on Windows, starts OpenVMM
   without a console window, as `nvx::host::vm::spawn` starts it.
 - `start` stops waiting for the control endpoint once the OpenVMM that it
-  launched exits, as `nvx::host::session::connect` does, and fails at once
-  with `exited`, where `nvx.py` waited until `--timeout` passed before it
-  reported the exit.
+  launched exits, as `nvx::host::transport::connect_verified` does, and fails
+  at once with `exited`, where `nvx.py` waited until `--timeout` passed before
+  it reported the exit.
 - `exec` refuses more than 1 MiB of workload output, which the guest agent
   never forwards.
 - `provision`, and `start` again, refuse a share whose resolved host path
@@ -3116,10 +3118,11 @@ simulated workload, transport, and sink on a clock of their own, and, on Linux,
 the tests of `nvx::guest::exec::binding` drive real programs through them, two
 at once in one loop, one of them with a stalled sink; run as root, one of them
 also settles a real cgroup.
-On Linux, a loopback test drives
-the host `ControlSession` through a broker shim into the real managed agent's
-session, dispatch, and execution engine, and `nvx.py` also lints and tests the
-guest binaries, and runs their integration tests against a build of them:
+On Linux, with the `cli` feature, a loopback test drives
+the host's private `ControlSession` through a broker shim into the real managed
+agent's session, dispatch, and execution engine, and `nvx.py` also lints and
+tests the guest binaries, and runs their integration tests against a build of
+them:
 
 ```bash
 python3 ../scripts/nvx.py check-guest-binaries
@@ -3221,14 +3224,15 @@ promotion; see
 profiles from which [`run`](#run) guides a failed cold boot, with the profiles
 that the submodule pins, and runs where that one does.
 
-`tests/managed_lifecycle.rs` is an ignored test of the managed lifecycle of a
-guest whose init hands the boot to the managed agent, on a real hypervisor:
-authenticated sessions and reconnects, request-scoped working directories and
-environments, the workload identity, timeouts, refused working directories,
-and stop, which `nvx::host::session` drives. `nvx.py test-microvm --scenario
-managed-lifecycle` builds OpenVMM's command line for its guest and backend,
-runs the test with Cargo, and checks the outcome report and the guest console
-that it leaves:
+`src/host/session/tests/managed_lifecycle.rs` is an ignored unit test of the
+host's private control session, which the `cli` feature builds: the managed
+lifecycle of a guest whose init hands the boot to the managed agent, on a real
+hypervisor: authenticated sessions and reconnects, request-scoped working
+directories and environments, the workload identity, timeouts, refused working
+directories, and stop, which the session drives. `nvx.py test-microvm
+--scenario managed-lifecycle` builds OpenVMM's command line for its guest and
+backend, runs the test with Cargo, and checks the outcome report and the guest
+console that it leaves:
 
 ```bash
 python3 ../scripts/nvx.py test-microvm --backend kvm --scenario managed-lifecycle
