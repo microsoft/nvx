@@ -157,8 +157,9 @@ jobs:
 
       - name: Bind shared correctness arguments
         id: correctness
-        shell: ${{ inputs.backend == 'whp' && 'python {0}' || 'python3 {0}' }}
-        env:
+        if: runner.os == 'Windows'
+        shell: python {0}
+        env: &correctness-environment
           ARCHITECTURE: ${{ inputs.architecture }}
           BACKEND: ${{ inputs.backend }}
           SCENARIOS: ${{ inputs.scenarios }}
@@ -176,7 +177,7 @@ jobs:
           SHARD: ${{ inputs.shard }}
           SHARD_COUNT: ${{ inputs.shard-count }}
           RESULT_ID: ${{ inputs.result-id }}
-        run: |
+        run: &correctness-script |
           import json
           import os
           import re
@@ -243,6 +244,13 @@ jobs:
               encoding="utf-8",
           )
 
+      - name: Bind shared correctness arguments on Linux
+        id: correctness-linux
+        if: runner.os != 'Windows'
+        shell: python3 {0}
+        env: *correctness-environment
+        run: *correctness-script
+
       # The guest artifacts that the steps below boot or read. Every job
       # qualifies its runner with the kernel and the Alpine initramfs, the
       # shards of the default suite boot only those, and the debug-kernel jobs
@@ -286,7 +294,7 @@ jobs:
       # The layer, its manifest, and the sandbox scratch template, which the
       # public sandbox scenarios of an unsharded default run read.
       - name: Download Ubuntu distro layer for the whole default run
-        if: ${{ !inputs.guests-and-sandboxes && !inputs.runtime-adapter && !inputs.debug-kernel && !inputs.shard && steps.correctness.outputs.workload-artifacts == 'true' }}
+        if: ${{ !inputs.guests-and-sandboxes && !inputs.runtime-adapter && !inputs.debug-kernel && !inputs.shard && (steps.correctness.outputs.workload-artifacts || steps.correctness-linux.outputs.workload-artifacts) == 'true' }}
         uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.architecture == 'aarch64' && 'guest-aarch64-ubuntu-distro' || 'guest-ubuntu-distro' }}

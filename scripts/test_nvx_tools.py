@@ -615,11 +615,15 @@ def _correctness_arguments(inputs: Mapping[str, Any], system: str) -> dict[str, 
         BuildConstants.REPO_ROOT / ".github" / "workflows" / "run-nvx-microvm-tests.yml"
     )
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    step = next(
+    selected_steps = [
         step
         for step in workflow["jobs"]["test"]["steps"]
-        if step["name"] == "Bind shared correctness arguments"
-    )
+        if step["name"].startswith("Bind shared correctness arguments")
+        and _evaluate_expression(step["if"], {"runner": {"os": system}}, {})
+    ]
+    if len(selected_steps) != 1:
+        raise AssertionError(f"expected exactly one native binder on {system}")
+    step = selected_steps[0]
     defaults = {
         name: definition.get("default")
         for name, definition in workflow[True]["workflow_call"]["inputs"].items()
@@ -632,7 +636,7 @@ def _correctness_arguments(inputs: Mapping[str, Any], system: str) -> dict[str, 
         "PYTHONPATH": str(BuildConstants.REPO_ROOT / "scripts"),
         "PATH": "",
     }
-    shell = shlex.split(_interpolate_expressions(step["shell"], {"inputs": inputs}, {}))
+    shell = shlex.split(step["shell"])
     expected = "python" if system == "Windows" else "python3"
     if shell != [expected, "{0}"]:
         raise AssertionError(f"binder needs the native Python custom shell: {shell}")
@@ -6676,6 +6680,13 @@ class CiConfigurationTests(unittest.TestCase):
                     "steps.correctness.outputs.workload-artifacts": str(
                         selected["workload_artifacts"]
                     ).lower()
+                    if context["runner.os"] == "Windows"
+                    else "",
+                    "steps.correctness-linux.outputs.workload-artifacts": str(
+                        selected["workload_artifacts"]
+                    ).lower()
+                    if context["runner.os"] != "Windows"
+                    else "",
                 }
             for step in steps:
                 arguments = step.get("with", {})
@@ -10858,7 +10869,7 @@ python3() {
                 "inputs.runtime-adapter": adapter,
                 "!inputs.runtime-adapter": single or not adapter,
                 "!inputs.shard": not sharded,
-                "steps.correctness.outputs.workload-artifacts == 'true'": True,
+                "(steps.correctness.outputs.workload-artifacts || steps.correctness-linux.outputs.workload-artifacts) == 'true'": True,
                 "(inputs.guests-and-sandboxes || inputs.guest == 'ubuntu')": guests,
             }
             chosen: list[str] = []
