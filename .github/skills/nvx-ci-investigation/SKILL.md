@@ -40,6 +40,10 @@ cancels an older run when a newer head is synchronized.
   behind earlier pushes instead of being replaced, so its cancellation is never a
   supersession. Under earlier workflows, a newer `dev` push replaced the one waiting
   run.
+- A merge group's run that a `Cancel superseded merge group runs` job cancelled
+  belongs to a group that the merge queue replaced or that its pull request left.
+  Check the pull request's queue outcome before treating it as a failure; see
+  [Superseded merge groups](../../../doc/ci.md#superseded-merge-groups).
 - A run started while a pull request was Ready remains active after conversion to
   Draft because `converted_to_draft` is not a workflow trigger. Do not diagnose this
   as the draft guard being ignored.
@@ -79,9 +83,13 @@ Reproduce the earliest actionable failure with the narrowest equivalent command.
 Match the run's revision, platform, tools, environment, feature flags, matrix inputs,
 and generated artifacts as closely as practical.
 
-- For quality or CLI failures, run the focused command from
-  [check-quality](../../actions/check-quality/action.yml) or
-  [validate-nvx](../../actions/validate-nvx/action.yml).
+- For quality, CLI, or `nvx-rs` failures, run the focused command from
+  [check-quality](../../actions/check-quality/action.yml),
+  [validate-nvx](../../actions/validate-nvx/action.yml), or
+  [check-nvx-rs](../../actions/check-nvx-rs/action.yml). A failed public-API check
+  prints how the public API of `nvx` differs from its snapshots in
+  `nvx-rs/public-api/`; a deliberate change updates them with
+  `python3 scripts/public_api.py --update`.
 - For an NVX boot, microVM, snapshot, guest-console, or benchmark acceptance failure,
   load [nvx-debug](../nvx-debug/SKILL.md). When the matching backend is remote, first
   load [nvx-host-connect](../nvx-host-connect/SKILL.md) and use a configured profile
@@ -97,6 +105,13 @@ and generated artifacts as closely as practical.
   only on request, as
   [Expected benchmark hosts](../../../doc/benchmarks.md#expected-benchmark-hosts)
   describes.
+- A failed `OpenVMM CI of the pinned revision` job (`openvmm-ci`) means that
+  OpenVMM's own CI has not passed a job that NVX requires for the pinned revision,
+  as its annotations say, unless it could not read OpenVMM's runs;
+  `python3 scripts/nvx.py check-openvmm-ci` checks the pin again. Classify it as
+  OpenVMM's CI result, not an NVX defect: rerun a failed OpenVMM job in OpenVMM,
+  then the `openvmm-ci` job once OpenVMM's CI has passed the pin, as
+  [OpenVMM CI](../../../doc/ci.md#openvmm-ci) describes.
 
 Do not alter the current checkout merely to reach the run SHA. Use immutable `git show`
 content for inspection and report when exact-SHA execution is unavailable. Do not
