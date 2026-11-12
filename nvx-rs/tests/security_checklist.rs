@@ -1,8 +1,9 @@
 //! The checklist of the security requirements that the host's documentation states, through the
-//! public API alone: the guest paths of an export, the stability of exported objects, the privacy
-//! of a VM's directory and outputs, and the strictness of a snapshot's directory. The checks of a
-//! staged image and of a scratch image's claim, which only NVX's CLI makes, are unit tests of
-//! `host::sandbox::distro` and `host::sandbox::scratch`.
+//! public API alone: the privacy of a VM's directory and outputs, and the strictness of a
+//! snapshot's directory. The checks of an export's guest targets, read-only paths and owner, and of
+//! the stability of its exported objects, which only NVX's CLI plans and checks again, are unit
+//! tests of `host::filesystem`, and those of a staged image and of a scratch image's claim, which
+//! only NVX's CLI makes, unit tests of `host::sandbox::distro` and `host::sandbox::scratch`.
 //!
 //! Each check is short and runs no VM. The proofs of a saved VM's liveness, of its endpoint's
 //! owner and of its recovery from saved values need a process of the test's own, named by its
@@ -19,132 +20,9 @@ use std::process::{Command, Stdio};
 
 use nvx::activation::{MachineIdMode, View};
 use nvx::host::config::{Boot, ConsoleAttachment, RootConfig, VmConfig};
-use nvx::host::filesystem::{
-    self, ExportRequest, Mapping, Owner, PathList, ReservedTargets, Target,
-};
 use nvx::host::runtime::{ArtifactIdentity, LaunchOptions, Runtime, RuntimeIdentity};
 use nvx::host::{snapshot, vm};
 use nvx::{ErrorKind, Hypervisor};
-
-/// Returns the request that maps `mappings` into the blockless root as `owner`, without denied,
-/// allowed, or write paths.
-fn request<'a>(mappings: &'a [Mapping<'a>], owner: Owner) -> ExportRequest<'a> {
-    let none = PathList {
-        name: "",
-        paths: &[],
-    };
-    ExportRequest {
-        mappings,
-        denied: none,
-        allowed: none,
-        write: none,
-        owner,
-        reserved: ReservedTargets::BLOCKLESS_ROOT,
-    }
-}
-
-/// Plans the export of `mappings` into the blockless root.
-fn plan(mappings: &[Mapping<'_>]) -> nvx::Result<Option<filesystem::ExportPlan>> {
-    filesystem::plan(&request(mappings, Owner::Vmm))
-}
-
-#[test]
-fn an_export_refuses_guest_targets_that_are_not_canonical_or_that_a_root_reserves() {
-    let directory = tempfile::tempdir().unwrap();
-    for target in [
-        "",
-        "relative",
-        "/",
-        "/work/",
-        "/work//child",
-        "/work/./child",
-        "/work/../child",
-        "/work\0child",
-        "/etc",
-        "/etc/child",
-    ] {
-        let mappings = [Mapping {
-            name: "filesystem",
-            path: directory.path(),
-            target: Target::Guest(target),
-            read_only: true,
-        }];
-        let error = plan(&mappings).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Unsupported, "{target:?}: {error}");
-    }
-    let mappings = [Mapping {
-        name: "filesystem",
-        path: directory.path(),
-        target: Target::Guest("/work"),
-        read_only: true,
-    }];
-    let plan = plan(&mappings).unwrap().unwrap();
-    plan.check(ReservedTargets::BLOCKLESS_ROOT).unwrap();
-    plan.verify().unwrap();
-}
-
-#[test]
-fn an_export_refuses_a_read_only_path_inside_a_writable_directory() {
-    let directory = tempfile::tempdir().unwrap();
-    let file = directory.path().join("input");
-    fs::write(&file, b"input").unwrap();
-    let mappings = [
-        Mapping {
-            name: "filesystem",
-            path: directory.path(),
-            target: Target::Guest("/work"),
-            read_only: false,
-        },
-        Mapping {
-            name: "filesystem",
-            path: &file,
-            target: Target::Guest("/work/input"),
-            read_only: true,
-        },
-    ];
-    assert_eq!(plan(&mappings).unwrap_err().kind(), ErrorKind::Unsupported);
-}
-
-#[cfg(windows)]
-#[test]
-fn the_caller_owner_is_refused_on_windows() {
-    assert_eq!(
-        filesystem::plan(&request(&[], Owner::Caller))
-            .unwrap_err()
-            .kind(),
-        ErrorKind::Unsupported
-    );
-}
-
-#[test]
-fn an_exported_object_that_a_workload_could_move_is_checked_again_before_a_start() {
-    let directory = tempfile::tempdir().unwrap();
-    let file = directory.path().join("input");
-    fs::write(&file, b"original").unwrap();
-    let mappings = [
-        Mapping {
-            name: "filesystem",
-            path: directory.path(),
-            target: Target::Guest("/work"),
-            read_only: false,
-        },
-        Mapping {
-            name: "filesystem",
-            path: &file,
-            target: Target::Guest("/work/input"),
-            read_only: false,
-        },
-    ];
-    let plan = plan(&mappings).unwrap().unwrap();
-    plan.verify().unwrap();
-    fs::rename(&file, directory.path().join("kept-original")).unwrap();
-    fs::write(&file, b"replacement").unwrap();
-    assert_eq!(plan.verify().unwrap_err().kind(), ErrorKind::Other);
-    assert_eq!(
-        fs::read(directory.path().join("kept-original")).unwrap(),
-        b"original"
-    );
-}
 
 /// Returns a new private directory below a temporary one, which the caller keeps.
 fn private_directory() -> (tempfile::TempDir, vm::VmDir) {
