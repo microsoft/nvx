@@ -1,19 +1,23 @@
 //! The sandbox launch profile: a microVM that runs one workload in a container over a read-only
 //! distro image and a writable upper, with live virtio-fs shares.
 //!
-//! This is the profile of `nvx-rs sandbox`: its documented limits and option semantics, with
-//! native Rust input validation and diagnostics:
+//! This is the profile of `nvx-rs sandbox`, private to the crate: its documented limits and option
+//! semantics, with native Rust input validation and diagnostics. Only the CLI (feature `cli`)
+//! uses them, but for the block geometry, which [`host::vm`](crate::host::vm) and
+//! [`host::snapshot`](crate::host::snapshot) read too, and the tag of the shares' virtio-fs
+//! device, which a snapshot's key names:
 //!
 //! - The private `layer` (feature `cli`): `SandboxLayer`, the distro layer of a sandbox, the one
 //!   `LayerRole` that a sandbox takes: an EROFS filesystem, as `nvx-rs sandbox` names it with
 //!   `ROLE,PATH,EROFS_UUID`, or a GPT disk.
-//! - [`SandboxMount`]: a requested live share of a host directory or regular file at a guest
-//!   target, with its access mode, owner, and access-policy paths; [`mount`] holds the rules of
-//!   guest targets and the checks of host paths, and plans the shares of a sandbox through the
-//!   planner of every NVX caller, [`host::filesystem`](crate::host::filesystem).
-//! - [`options`]: the checks that `nvx-rs sandbox` and `nvx-rs run` apply to their options: the
-//!   attribution of access-policy paths to shares, the systemd entrypoint check, the targets of
-//!   `nvx-rs run` shares, and the managed exec environment.
+//! - The private `mount`: `SandboxMount` (feature `cli`), a requested live share of a host
+//!   directory or regular file at a guest target, with its access mode, owner, and access-policy
+//!   paths, which `--mount` names; `mount` holds the rules of guest targets and the checks of host
+//!   paths, and plans the shares of a sandbox through the planner of every NVX caller,
+//!   [`host::filesystem`](crate::host::filesystem).
+//! - The private `options` (feature `cli`): the checks that `nvx-rs sandbox` and `nvx-rs run`
+//!   apply to their options: the attribution of access-policy paths to shares, the systemd
+//!   entrypoint check, the targets of `nvx-rs run` shares, and the managed exec environment.
 //! - The private `distro` (feature `cli`): the binding of the distro layer, which explicit
 //!   verification makes from the layer and its manifest, and which a launch checks from metadata
 //!   alone.
@@ -40,8 +44,9 @@ pub(crate) mod distro;
 pub(crate) mod geometry;
 #[cfg(feature = "cli")]
 pub(crate) mod layer;
-pub mod mount;
-pub mod options;
+pub(crate) mod mount;
+#[cfg(feature = "cli")]
+pub(crate) mod options;
 #[cfg(feature = "cli")]
 pub(crate) mod scratch;
 
@@ -50,17 +55,23 @@ use std::path::Path;
 
 use self::geometry::BlockGeometry;
 use self::mount::os_error;
-pub use self::mount::{MountAccess, MountKind, MountOwner, MountPolicy, PolicyKind, SandboxMount};
-use crate::error::{Error, ErrorCode, Result};
+#[cfg(feature = "cli")]
+use crate::error::ErrorCode;
+use crate::error::{Error, Result};
+#[cfg(feature = "cli")]
 use crate::host::artifacts::require_existing;
+#[cfg(feature = "cli")]
 use crate::protocol::cmdline;
 
 /// The workload identity by default, `65534:65534`.
-pub const DEFAULT_WORKLOAD_IDENTITY: (u32, u32) = (65534, 65534);
+#[cfg(feature = "cli")]
+pub(crate) const DEFAULT_WORKLOAD_IDENTITY: (u32, u32) = (65534, 65534);
 /// The entrypoint by default.
-pub const DEFAULT_ENTRYPOINT: &str = "/bin/sh";
+#[cfg(feature = "cli")]
+pub(crate) const DEFAULT_ENTRYPOINT: &str = "/bin/sh";
 /// The hostname by default.
-pub const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
+#[cfg(feature = "cli")]
+pub(crate) const DEFAULT_HOSTNAME: &str = "nvx-sandbox";
 
 /// Returns the error of a request that the profile refuses.
 pub(crate) fn refused(message: impl Into<String>) -> Error {
@@ -74,7 +85,8 @@ pub(crate) fn refused(message: impl Into<String>) -> Error {
 ///
 /// Each ID contains only ASCII decimal digits, without a sign or whitespace. Fails with
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported).
-pub fn parse_workload_identity(value: &str) -> Result<(u32, u32)> {
+#[cfg(feature = "cli")]
+pub(crate) fn parse_workload_identity(value: &str) -> Result<(u32, u32)> {
     let fields: Vec<&str> = value.split(':').collect();
     let [uid, gid] = fields[..] else {
         return Err(refused("--workload-user must be UID:GID"));
@@ -98,6 +110,7 @@ pub fn parse_workload_identity(value: &str) -> Result<(u32, u32)> {
 }
 
 /// Parses nonempty ASCII decimal digits into a native integer, refusing signs and whitespace.
+#[cfg(feature = "cli")]
 pub(crate) fn parse_decimal<T: std::str::FromStr>(value: &str) -> Option<T> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -107,6 +120,7 @@ pub(crate) fn parse_decimal<T: std::str::FromStr>(value: &str) -> Option<T> {
 
 /// Returns whether a value cannot stay one unquoted kernel token: whitespace, a control
 /// character, a quote, or a UTF-8 byte that Linux treats as whitespace.
+#[cfg(feature = "cli")]
 pub(crate) fn has_kernel_separator(value: &str) -> bool {
     value
         .chars()
@@ -121,7 +135,8 @@ pub(crate) fn has_kernel_separator(value: &str) -> bool {
 /// Fails with [`ErrorKind::Unavailable`](crate::ErrorKind::Unavailable) and the message
 /// `{description} not found: {path}`, with `path` spelled with its components alone, as
 /// [`Path::components`] reads them.
-pub fn require_file(path: &Path, description: &str) -> Result<()> {
+#[cfg(feature = "cli")]
+pub(crate) fn require_file(path: &Path, description: &str) -> Result<()> {
     require_existing(path, description, ErrorCode::Unavailable)
 }
 
@@ -186,5 +201,5 @@ pub(crate) fn block_geometry(file: &File, path: &Path, description: &str) -> Res
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cli"))]
 mod tests;
