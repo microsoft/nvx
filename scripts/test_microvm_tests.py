@@ -17131,23 +17131,6 @@ class MicrovmTests(unittest.TestCase):
         guest_boot.assert_not_called()
         lifecycle.assert_not_called()
 
-    def test_managed_executions_enter_through_the_agent_not_the_container_helpers(self):
-        root = Path(__file__).resolve().parent.parent
-        bootstrap = (root / "guest" / "common" / "nvx-init-agent").read_text()
-        launcher = (root / "guest" / "alpine" / "nvx-container-enter").read_text()
-        # The managed agent generates the workload's machine ID itself, so the
-        # init agent generates one only for a one-shot workload.
-        self.assertLess(
-            bootstrap.index("    /sbin/nvx-managed-agent \\"),
-            bootstrap.index('>"$runtime/workload-machine-id"'),
-        )
-        self.assertLess(
-            bootstrap.index('>"$runtime/workload-machine-id"'),
-            bootstrap.index("/sbin/nvx-container-launch"),
-        )
-        self.assertNotIn("NVX_EXEC_CONFIG_FD", launcher)
-        self.assertNotIn("nvx-managed-agent", launcher)
-
     def test_runner_uses_ubuntu_artifact_and_default_memory(self):
         requested: list[Path] = []
 

@@ -16,8 +16,6 @@ The Azure Linux initramfs is a workload guest, not a sandbox control
 environment. Alpine remains the default guest of `run` and the only control
 environment of `sandbox`:
 
-- the initramfs omits the sandbox init agent, so the common `/init` refuses
-  sandbox mode;
 - the microVM test harness rejects the sandbox-control scenarios for Azure
   Linux; and
 - `build-distro-layer` accepts only Ubuntu, so there is no Azure Linux

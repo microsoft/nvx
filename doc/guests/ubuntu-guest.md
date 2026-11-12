@@ -147,16 +147,11 @@ proof.
 The layer runs under the Alpine control initramfs as the sandbox's read-only
 `distro` layer over a writable scratch disk, which is formatted separately
 with `mkfs.ext4`; see the
-[experimental sandbox](../run.md#experimental-single-workload-sandbox). For a
-one-shot workload, the Alpine
-[container entry helper](../../guest/alpine/nvx-container-enter) injects its
-musl loader, `setpriv`, and libraries into `/.nvx-agent`, so glibc Ubuntu
-binaries run while the trusted agent stays musl-based. A managed sandbox's
-init, nvx-init, a static binary, runs each execution itself, as a plain
-process in the VM's root, without them. A one-shot workload gets private
-mount, PID, and UTS namespaces, a managed sandbox's executions share
-nvx-init's, and every workload shares the guest's network namespace. It runs
-as a fixed non-root identity, by default `65534:65534`, the Ubuntu `nobody`
+[experimental sandbox](../run.md#experimental-single-workload-sandbox). The
+sandbox's init, nvx-init, a static binary, runs each execution itself, as a
+plain process in the VM's root. Its executions share nvx-init's mount, PID,
+and UTS namespaces, and the guest's network namespace. A workload runs as a
+fixed non-root identity, by default `65534:65534`, the Ubuntu `nobody`
 account whose home the builder creates, with no supplementary groups, no
 capabilities, and `no_new_privs`.
 
