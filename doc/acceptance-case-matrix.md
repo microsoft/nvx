@@ -497,7 +497,7 @@ this matrix. The README's own code is no doctest.
 | `nvx-rs/src/guest/spawn.rs - guest::spawn (line 41)` | retired | `guest::spawn` leaves (SL6.11b) |
 | `nvx-rs/src/guest/spawn.rs - guest::spawn::LaunchStage::from_code (line 201)` | retired | `LaunchStage::from_code` and its test, `launch_stages_keep_their_numbers`, leave with `guest::spawn` (SL6.11b). The stages of nvx-init's executions keep their numbers in the crate's own fork boundary, whose launch report `nvx-rs/src/guest/init/tests/exec.rs::native_workload_cwd_accepts_procfs_links_but_closes_inherited_descriptors` reads from a real launch |
 | `nvx-rs/src/guest/terminal.rs - guest::terminal (line 10)` | kept |  |
-| `nvx-rs/src/guest/time/mod.rs - guest::time (line 9)` | kept | SL6.11c removed its capture and restore finish, which became crate-private: `guest::snapshot::capture` runs them |
+| `nvx-rs/src/guest/time/mod.rs - guest::time (line 10)` | kept | SL6.11c removed its capture and restore finish, which became crate-private: `guest::snapshot::capture` runs them |
 | `nvx-rs/src/host/sandbox/prepared.rs - host::sandbox::prepared::PreparedLaunch (line 92)` | retired | `PreparedLaunch` leaves with the checked-file handoff (SL6.3, #1122) |
 | `nvx-rs/src/host/store/mod.rs - host::store (line 72)` | retired | The sandbox store leaves (SL6.1, #1121) |
 | `nvx-rs/src/host/supervisor/mod.rs - host::supervisor (line 32)` | retired | The store-coupled supervisor leaves with the sandbox store (SL6.1, #1121), and `host::supervisor`, the transitional public path of the low-level spawn, with SL6.3 (#1122): `host::vm` spawns VMMs, and the tests of the spawn moved to `nvx-rs/src/host/spawn/tests.rs` and `nvx-rs/src/host/process/tests/orchestrator.rs` |
