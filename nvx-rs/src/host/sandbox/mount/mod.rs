@@ -7,7 +7,9 @@
 //! sandbox records the resulting [`ExportPlan`].
 //!
 //! OpenVMM attaches one virtio-fs device, with the tag [`MOUNT_TAG`], which exports the plan at
-//! [`GUEST_EXPORT`], from which the guest maps it as the plan's mapping table orders.
+//! [`GUEST_EXPORT`], from which the guest maps it as the plan's mapping table orders. The tag,
+//! which a snapshot's key names, is the one part of the shares that the crate uses outside the
+//! CLI; the rest is the CLI's (feature `cli`).
 //!
 //! A share's access-policy paths are host paths: `--mount-deny` hides a path, `--mount-allow`
 //! exposes a path inside a denied path again, and `--mount-write` makes a path one of the only
@@ -17,55 +19,59 @@
 //! [`filesystem::plan`]: crate::host::filesystem::plan
 //! [`ExportPlan`]: crate::host::filesystem::ExportPlan
 //! [`GUEST_EXPORT`]: crate::host::filesystem::GUEST_EXPORT
+//! [`RESERVED_MOUNT_TARGETS`]: crate::protocol::share::RESERVED_MOUNT_TARGETS
+//! [`RESERVED_EXACT_MOUNT_TARGETS`]: crate::protocol::share::RESERVED_EXACT_MOUNT_TARGETS
 
+#[cfg(feature = "cli")]
 mod aggregate;
+#[cfg(feature = "cli")]
 mod boot;
+#[cfg(feature = "cli")]
 mod host_paths;
 mod request;
 
+#[cfg(feature = "cli")]
 use std::fmt;
 
-pub use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
-
-pub use self::aggregate::plan_mounts;
-pub use self::host_paths::validate_mount_host_paths;
-#[cfg_attr(
-    not(feature = "cli"),
-    allow(
-        unused_imports,
-        reason = "only the CLI's sandboxes check their shares again"
-    )
-)]
-pub(crate) use self::host_paths::{HostQueries, check_distinct_export_roots};
-pub use self::request::{
-    SandboxMount, mount_kind, parse_mount_value, require_mount_owner_supported,
-    validate_mount_target, validate_mounts,
+#[cfg(feature = "cli")]
+pub(crate) use self::aggregate::plan_mounts;
+#[cfg(feature = "cli")]
+pub(crate) use self::host_paths::{
+    HostQueries, check_distinct_export_roots, validate_mount_host_paths,
 };
+pub(crate) use self::request::os_error;
+#[cfg(feature = "cli")]
 pub(crate) use self::request::{
-    has_forbidden_character, has_irregular_component, os_error, targets_overlap,
+    SandboxMount, has_forbidden_character, has_irregular_component, mount_kind, parse_mount_value,
+    require_mount_owner_supported, targets_overlap, validate_mounts,
 };
 
 /// The tag of OpenVMM's virtio-fs device.
-pub const MOUNT_TAG: &str = "microvm";
+pub(crate) const MOUNT_TAG: &str = "microvm";
 /// The guest directory at which the guest mounts the aggregate of several shares.
-pub const AGGREGATE_MOUNT_TARGET: &str = "/run/nvx/shares";
+#[cfg(feature = "cli")]
+pub(crate) const AGGREGATE_MOUNT_TARGET: &str = "/run/nvx/shares";
 /// The most denied, allowed, and writable paths each that OpenVMM accepts for a share.
-pub const MAX_MOUNT_POLICY_PATHS: usize = 128;
+#[cfg(feature = "cli")]
+pub(crate) const MAX_MOUNT_POLICY_PATHS: usize = 128;
 /// The longest guest target, in UTF-8 bytes.
-pub const MAX_MOUNT_TARGET_BYTES: usize = 4096;
+#[cfg(feature = "cli")]
+pub(crate) const MAX_MOUNT_TARGET_BYTES: usize = 4096;
 
 /// The access mode of a share.
+#[cfg(feature = "cli")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MountAccess {
+pub(crate) enum MountAccess {
     /// `ro`, the default.
     ReadOnly,
     /// `rw`.
     ReadWrite,
 }
 
+#[cfg(feature = "cli")]
 impl MountAccess {
     /// Returns the mode's name: `ro` or `rw`.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "ro",
             Self::ReadWrite => "rw",
@@ -73,6 +79,7 @@ impl MountAccess {
     }
 }
 
+#[cfg(feature = "cli")]
 impl fmt::Display for MountAccess {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -80,8 +87,9 @@ impl fmt::Display for MountAccess {
 }
 
 /// The host identity of a share's file operations.
+#[cfg(feature = "cli")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MountOwner {
+pub(crate) enum MountOwner {
     /// `vmm`, the default: every operation runs as OpenVMM.
     Vmm,
     /// `caller`: each operation runs as the guest caller's identity, with guest root squashed to
@@ -89,9 +97,10 @@ pub enum MountOwner {
     Caller,
 }
 
+#[cfg(feature = "cli")]
 impl MountOwner {
     /// Returns the owner's name: `vmm` or `caller`.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Vmm => "vmm",
             Self::Caller => "caller",
@@ -99,6 +108,7 @@ impl MountOwner {
     }
 }
 
+#[cfg(feature = "cli")]
 impl fmt::Display for MountOwner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -107,17 +117,19 @@ impl fmt::Display for MountOwner {
 
 /// What a share binds: a host directory, or one regular host file without its directory, which
 /// only the child of an aggregate can share.
+#[cfg(feature = "cli")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MountKind {
+pub(crate) enum MountKind {
     /// `directory`, the default.
     Directory,
     /// `file`.
     File,
 }
 
+#[cfg(feature = "cli")]
 impl MountKind {
     /// Returns the kind's name: `directory` or `file`.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Directory => "directory",
             Self::File => "file",
@@ -125,6 +137,7 @@ impl MountKind {
     }
 }
 
+#[cfg(feature = "cli")]
 impl fmt::Display for MountKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -132,8 +145,9 @@ impl fmt::Display for MountKind {
 }
 
 /// A kind of access-policy path.
+#[cfg(feature = "cli")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PolicyKind {
+pub(crate) enum PolicyKind {
     /// A path that the share hides: `--mount-deny`.
     Denied,
     /// A path inside a denied path that the share exposes again: `--mount-allow`.
@@ -143,15 +157,17 @@ pub enum PolicyKind {
 }
 
 /// The kinds of access-policy paths, in the order in which OpenVMM's options carry them.
-pub const POLICY_KINDS: [PolicyKind; 3] = [
+#[cfg(feature = "cli")]
+pub(crate) const POLICY_KINDS: [PolicyKind; 3] = [
     PolicyKind::Denied,
     PolicyKind::Allowed,
     PolicyKind::Writable,
 ];
 
+#[cfg(feature = "cli")]
 impl PolicyKind {
     /// Returns the kind's name in messages: `denied`, `allowed`, or `writable`.
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Denied => "denied",
             Self::Allowed => "allowed",
@@ -161,7 +177,7 @@ impl PolicyKind {
 
     /// Returns the option that requests a path of this kind: `--mount-deny`, `--mount-allow`, or
     /// `--mount-write`.
-    pub const fn option(self) -> &'static str {
+    pub(crate) const fn option(self) -> &'static str {
         match self {
             Self::Denied => "--mount-deny",
             Self::Allowed => "--mount-allow",
@@ -170,6 +186,7 @@ impl PolicyKind {
     }
 }
 
+#[cfg(feature = "cli")]
 impl fmt::Display for PolicyKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -177,19 +194,21 @@ impl fmt::Display for PolicyKind {
 }
 
 /// The access-policy paths of a share, as given: host paths, relative to the share or absolute.
+#[cfg(feature = "cli")]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MountPolicy {
+pub(crate) struct MountPolicy {
     /// Paths that the share hides.
-    pub denied: Vec<String>,
+    pub(crate) denied: Vec<String>,
     /// Paths inside denied paths that the share exposes again.
-    pub allowed: Vec<String>,
+    pub(crate) allowed: Vec<String>,
     /// The only paths of a read-write share that the workload can modify, if any.
-    pub writable: Vec<String>,
+    pub(crate) writable: Vec<String>,
 }
 
+#[cfg(feature = "cli")]
 impl MountPolicy {
     /// Returns the paths of `kind`.
-    pub fn paths(&self, kind: PolicyKind) -> &[String] {
+    pub(crate) fn paths(&self, kind: PolicyKind) -> &[String] {
         match kind {
             PolicyKind::Denied => &self.denied,
             PolicyKind::Allowed => &self.allowed,
@@ -198,10 +217,10 @@ impl MountPolicy {
     }
 
     /// Returns whether the policy has no paths.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         POLICY_KINDS.iter().all(|&kind| self.paths(kind).is_empty())
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cli"))]
 pub(super) mod tests;

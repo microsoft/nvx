@@ -1,5 +1,5 @@
 //! The lowering of egress rules into OpenVMM's native rules, which the egress policy compiler of
-//! [`policy`](super::policy), [`openvmm_arguments`](super::openvmm_arguments), and
+//! the private `policy` (feature `cli`), [`openvmm_arguments`](super::openvmm_arguments), and
 //! [`NetworkPolicy::native_egress_rules`](super::NetworkPolicy::native_egress_rules) share.
 //!
 //! It ports the former `scripts/nvx_tools/egress_policy.py` exactly. Rules of one action, allow

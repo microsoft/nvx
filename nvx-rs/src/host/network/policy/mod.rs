@@ -63,14 +63,14 @@ use crate::error::{Error, Result};
 
 /// Largest number of native rules that one action, allow or deny, compiles to: the number of
 /// rules of each action that OpenVMM accepts, [`MAX_RULES`](super::MAX_RULES).
-pub const MAX_RULES_PER_ACTION: usize = super::MAX_RULES;
+pub(crate) const MAX_RULES_PER_ACTION: usize = super::MAX_RULES;
 
 /// Largest egress policy file, in bytes: 1 MiB.
-pub const MAX_POLICY_FILE_SIZE: usize = 1024 * 1024;
+pub(crate) const MAX_POLICY_FILE_SIZE: usize = 1024 * 1024;
 
 /// Deepest nesting of arrays and objects in a policy file, the root included. A policy needs six:
 /// the root, an action, a rule, its `to`, a destination, and its `except`.
-pub const MAX_JSON_DEPTH: usize = 32;
+pub(crate) const MAX_JSON_DEPTH: usize = 32;
 
 /// The native OpenVMM rules of an egress policy.
 ///
@@ -78,11 +78,11 @@ pub const MAX_JSON_DEPTH: usize = 32;
 /// `CIDR:PROTOCOL`, `CIDR:PROTOCOL:PORT`, or `CIDR:PROTOCOL:FIRST-LAST`. Its serde form is
 /// `{"allow": [...], "deny": [...]}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct CompiledEgressPolicy {
+pub(crate) struct CompiledEgressPolicy {
     /// Rules of traffic to permit, at most [`MAX_RULES_PER_ACTION`].
-    pub allow: Vec<String>,
+    pub(crate) allow: Vec<String>,
     /// Rules of traffic to block, which OpenVMM applies first, at most [`MAX_RULES_PER_ACTION`].
-    pub deny: Vec<String>,
+    pub(crate) deny: Vec<String>,
 }
 
 /// Compiles the egress policy file at `path`, as `compile_policy_file` of the former
@@ -96,7 +96,7 @@ pub struct CompiledEgressPolicy {
 /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when the file exceeds
 /// [`MAX_POLICY_FILE_SIZE`], is not UTF-8 JSON of the format, or holds an invalid policy; see
 /// [`compile_policy_bytes`].
-pub fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
+pub(crate) fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
     let unreadable = |error: std::io::Error| {
         Error::io(format!(
             "failed to read egress policy file: {}",
@@ -131,7 +131,7 @@ pub fn compile_policy_file(path: &Path) -> Result<CompiledEgressPolicy> {
 /// - repeats a field in an object: `OBJECT has duplicate field "NAME"`, where `OBJECT` is the
 ///   path of the object, or `egress policy` for the root; or
 /// - holds an invalid policy: see [`compile_policy`].
-pub fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledEgressPolicy> {
+pub(crate) fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledEgressPolicy> {
     let path = path.display();
     if data.len() > MAX_POLICY_FILE_SIZE {
         return Err(Error::unsupported(format!(
@@ -169,7 +169,7 @@ pub fn compile_policy_bytes(data: &[u8], path: &Path) -> Result<CompiledEgressPo
 /// path and says why, such as `allow[0].to[1].cidr is not a valid IPv4 or IPv6 CIDR:
 /// "10.0.0.256/8"`, or that an action needs too many native rules, as in `deny emits at most 256
 /// native rules`.
-pub fn compile_policy(value: &Value) -> Result<CompiledEgressPolicy> {
+pub(crate) fn compile_policy(value: &Value) -> Result<CompiledEgressPolicy> {
     let root = object(value, "egress policy")?;
     root.check_fields(ROOT_FIELDS, "egress policy")?;
     Ok(CompiledEgressPolicy {

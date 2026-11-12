@@ -1,15 +1,12 @@
 //! The checks that the artifacts that a launch runs are regular files.
 
-use std::path::Path;
-#[cfg(feature = "cli")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::host::paths;
 
 /// Checks that `path` is a regular file, as `require_file` of `nvx.py` does, and returns it, or
 /// fails with [`ErrorCode::ArtifactMissing`].
-#[cfg(feature = "cli")]
 pub(super) fn required(path: PathBuf, description: &str) -> Result<PathBuf> {
     require_artifact(&path, description)?;
     Ok(path)
@@ -17,7 +14,6 @@ pub(super) fn required(path: PathBuf, description: &str) -> Result<PathBuf> {
 
 /// Checks that an artifact that a launch runs, such as the OpenVMM executable, is a regular
 /// file, as [`require_existing`] does, and fails with [`ErrorCode::ArtifactMissing`].
-#[cfg(feature = "cli")]
 pub(crate) fn require_artifact(path: &Path, description: &str) -> Result<()> {
     require_existing(path, description, ErrorCode::ArtifactMissing)
 }

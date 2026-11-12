@@ -11,7 +11,10 @@ use proptest::prelude::*;
 use super::distro::DistroFormat;
 #[cfg(feature = "cli")]
 use super::layer::{LAYER_ROLES, LayerRole, SandboxLayer};
-use super::mount::{parse_mount_value, validate_mount_target};
+use super::mount::tests::validate_mount_target;
+use super::mount::{
+    MountAccess, MountKind, MountOwner, MountPolicy, SandboxMount, parse_mount_value,
+};
 use super::*;
 use crate::ErrorKind;
 use crate::protocol::cmdline::tests::model;

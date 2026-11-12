@@ -29,7 +29,7 @@ use crate::host::sandbox::refused;
 /// Fails as those checks and [`filesystem::plan`] do, and with
 /// [`ErrorKind::Io`](crate::ErrorKind::Io) if a relative host path meets an unreadable current
 /// directory, or Windows cannot qualify a drive-relative path.
-pub fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<ExportPlan>> {
+pub(crate) fn plan_mounts(mounts: &[SandboxMount]) -> Result<Option<ExportPlan>> {
     validate_mounts(mounts)?;
     for mount in mounts {
         mount.validated()?;

@@ -12,9 +12,9 @@
 //!   that its workload has of it, its network, its export, its boot console, and what only its
 //!   cold boot takes, with what a capture of it adds, a [`CaptureConfig`](config::CaptureConfig),
 //!   whose identity names the capture's snapshots.
-//! - [`network`] lowers egress rules, and the egress policy files that `nvx-rs run` and
-//!   `nvx-rs sandbox` accept, into OpenVMM's rules, and [`filesystem`] plans the export of host
-//!   paths through OpenVMM's aggregate virtio-fs device.
+//! - [`network`] lowers egress rules into OpenVMM's rules, as its private `policy` (feature `cli`)
+//!   lowers the egress policy files that `nvx-rs run` and `nvx-rs sandbox` accept, and
+//!   [`filesystem`] plans the export of host paths through OpenVMM's aggregate virtio-fs device.
 //! - [`report`] reads OpenVMM's outcome report.
 //! - [`snapshot`] holds the compatibility key, [`SnapshotKey`](snapshot::SnapshotKey), derived
 //!   from a capture's context and [`SnapshotManifest`](snapshot::SnapshotManifest),
@@ -27,11 +27,13 @@
 //! - [`process`] names processes by verified references: their ID, start time, and host boot,
 //!   through which a pidfd or a process handle holds them, so that waits sleep until a process
 //!   exits and termination reaches only it, whether or not the caller started it.
-//! - [`sandbox`] is the launch profile of `nvx-rs sandbox`: a container over read-only EROFS
-//!   layers and a private ext4 scratch disk, with live shares, and the checks of its options.
-//!   Its private `distro` (feature `cli`) binds a distro layer to what explicit verification
-//!   found, so that the CLI's launches check the layer through the private `seal`, which seals open
-//!   files from their metadata alone, and its private `scratch` binds and claims a scratch image.
+//! - The private `sandbox` is the launch profile of `nvx-rs sandbox`, for the CLI (feature
+//!   `cli`): a container over read-only EROFS layers and a private ext4 scratch disk, with live
+//!   shares, and the checks of its options. Its `distro` binds a distro layer to what explicit
+//!   verification found, so that the CLI's launches check the layer through the private `seal`,
+//!   which seals open files from their metadata alone, and its `scratch` binds and claims a
+//!   scratch image. Outside the CLI, [`vm`] and [`snapshot`] read the block geometry of an image
+//!   through it, and a snapshot's key names the tag of its shares' virtio-fs device.
 //! - [`vm`] holds a caller-owned VM directory, private to the current user, the fixed names of
 //!   its files and endpoints, and a checked cold, capture or restore [`Prepared`](vm::Prepared)
 //!   launch with its opened log and control credential, which the library never writes. A
@@ -78,7 +80,7 @@ pub mod restore;
 #[cfg(feature = "cli")]
 mod restore_driver;
 pub mod runtime;
-pub mod sandbox;
+pub(crate) mod sandbox;
 pub(crate) mod seal;
 #[cfg(feature = "cli")]
 pub(crate) mod session;

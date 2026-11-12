@@ -20,8 +20,8 @@ use crate::net::{self, cidr};
 /// proxy at the guest network's gateway (`--network-proxy GATEWAY:PORT`). Otherwise the portable
 /// profile applies the egress posture, the ingress default, the host-loopback access, which
 /// [`HostLoopback::Outbound`] leaves to OpenVMM's default, and the host-loopback forwards. Each
-/// action's rules are lowered as an egress policy file's are ([`policy`]), and fail with its
-/// messages, which name the rules after [`EgressRules::name`].
+/// action's rules are lowered as the CLI's egress policy files are, and fail with their messages,
+/// which name the rules after [`EgressRules::name`].
 ///
 /// Fails with [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) when a rule is invalid,
 /// when the rules of one action need more than [`MAX_RULES`] OpenVMM rules, when host-loopback
@@ -31,7 +31,6 @@ use crate::net::{self, cidr};
 /// ([`NetworkPolicy::proxy`]), its proxy's port is one that [`NetworkProxy::port`] excludes, or
 /// its guest network has no gateway.
 ///
-/// [`policy`]: crate::host::network::policy
 /// [`EgressRules::name`]: crate::host::network::EgressRules::name
 /// [`MAX_RULES`]: crate::host::network::MAX_RULES
 pub fn openvmm_arguments(

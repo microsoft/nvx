@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use super::mount::{MountAccess, MountKind, MountOwner, MountPolicy, SandboxMount};
 use super::*;
 use crate::ErrorKind;
 use crate::host::filesystem::ExportPlan;
@@ -186,12 +187,12 @@ fn file_shares_take_no_policy_paths_or_reserved_targets() {
     mount("/etc/app,app", &[]);
     for target in ["/etc", "/run", "/run/nvx"] {
         assert_eq!(
-            message(mount::validate_mount_target(target)),
+            message(mount::tests::validate_mount_target(target)),
             format!("sandbox mount target {target} is reserved")
         );
     }
     assert_eq!(
-        message(mount::validate_mount_target("/run/nvx/time/state")),
+        message(mount::tests::validate_mount_target("/run/nvx/time/state")),
         "sandbox mount target /run/nvx/time/state overlaps the reserved /run/nvx/time tree"
     );
     for target in [
@@ -200,7 +201,7 @@ fn file_shares_take_no_policy_paths_or_reserved_targets() {
         "/run/nvxtime",
         "/run/nvx/timer",
     ] {
-        mount::validate_mount_target(target).unwrap();
+        mount::tests::validate_mount_target(target).unwrap();
     }
 }
 

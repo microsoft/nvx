@@ -43,10 +43,8 @@ pub enum Protocol {
 
 /// A destination network of an [`EgressRule`], without its exceptions.
 ///
-/// Networks are read as egress policy files read their CIDRs ([`policy`]): host bits are cleared,
+/// Networks are read as the CLI's egress policy files read their CIDRs: host bits are cleared,
 /// IPv4 netmasks such as `/255.0.0.0` are accepted, and IPv6 scopes are refused.
-///
-/// [`policy`]: crate::host::network::policy
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     /// Destination address or CIDR, such as `"10.0.0.0/8"` or `"192.0.2.1"`.
