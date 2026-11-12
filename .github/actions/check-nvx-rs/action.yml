@@ -71,7 +71,7 @@ runs:
         set -euo pipefail
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --all-features
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked
-        # Without features, the library still holds the protocol and the execution engine.
+        # Without features, the library still holds the protocol.
         cargo "+${{ steps.toolchains.outputs.toolchain }}" build --locked --lib --no-default-features
         cargo "+${{ steps.toolchains.outputs.toolchain }}" test --locked --lib --no-default-features
 
