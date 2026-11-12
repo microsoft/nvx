@@ -11,9 +11,6 @@
 //!   that its workload has of it, its network, its export, its boot console, and what only its
 //!   cold boot takes, with what a capture of it adds, a [`CaptureConfig`](config::CaptureConfig),
 //!   whose identity names the capture's snapshots.
-//! - [`launch`] builds OpenVMM's command line from a [`LaunchSpec`](launch::LaunchSpec): the
-//!   managed lifecycle, the workload identity, the kernel command line, and the network and
-//!   filesystem options.
 //! - [`network`] lowers egress rules, and the egress policy files that `nvx-rs run` and
 //!   `nvx-rs sandbox` accept, into OpenVMM's rules, and [`filesystem`] plans the export of host
 //!   paths through OpenVMM's aggregate virtio-fs device.
@@ -70,7 +67,6 @@ pub mod artifacts;
 pub mod cli;
 pub mod config;
 pub mod filesystem;
-pub mod launch;
 pub mod network;
 pub mod nvxs;
 pub(crate) mod paths;
