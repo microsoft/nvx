@@ -886,10 +886,6 @@ impl Exec {
             })
     }
 
-    pub(crate) fn discard(&mut self, stream: Stream) {
-        self.discarding[stream as usize] = true;
-    }
-
     pub(crate) fn kill_failure(&mut self) -> Option<Event<'static>> {
         self.failures
             .iter_mut()

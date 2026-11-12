@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(all(unix, feature = "cli"))]
+use crate::tests::{NVXC_V1, vector};
 
 #[test]
 fn shells_raise_shlvl_like_busybox() {
@@ -18,18 +20,6 @@ fn shells_raise_shlvl_like_busybox() {
     let mut fresh = Environment::new();
     start_shell(&mut fresh, "/");
     assert_eq!(fresh[0], ("SHLVL".to_owned(), "1".to_owned()));
-}
-
-#[cfg(all(
-    feature = "cli",
-    feature = "guest",
-    target_os = "linux",
-    target_arch = "x86_64"
-))]
-#[test]
-fn the_current_guest_advertises_every_required_feature() {
-    assert_eq!(GUEST_FEATURES, GuestFeatures::REQUIRED);
-    assert!(GUEST_FEATURES.missing(GuestFeatures::REQUIRED).is_empty());
 }
 
 #[test]
@@ -1276,7 +1266,7 @@ fn version_2_workloads_read_their_input_until_its_end_under_the_window() {
 #[test]
 fn version_2_workloads_send_output_past_the_cap_of_version_1() {
     let mut host = Host::attach();
-    let total = MAX_OUTPUT_BYTES * 3 / 2;
+    let total = 3 * 1024 * 1024 / 2;
     host.send(1, v2::Frame::Exec(&script(&format!("flood {total}"))));
     let mut forwarded = 0;
     loop {
@@ -1287,25 +1277,21 @@ fn version_2_workloads_send_output_past_the_cap_of_version_1() {
         }
     }
     assert_eq!(forwarded, total);
-    // Version 1, which the same session still serves, caps it.
-    host.send_frame(&encode_app(
-        APP_EXEC,
-        2,
-        0,
-        &script(&format!("flood {total}")),
-    ));
-    let mut capped = 0;
-    let exit = loop {
-        let payload = host.read();
-        let frame = decode_app(&payload).unwrap();
-        match frame.kind {
-            APP_STDOUT => capped += frame.payload.len(),
-            _ => break (frame.kind, frame.status, frame.payload.to_vec()),
-        }
-    };
-    assert!(capped <= MAX_OUTPUT_BYTES);
-    assert_eq!(exit, (APP_EXIT, 125, b"output-limit".to_vec()));
-    host.stop(3);
+    host.stop(2);
+}
+
+/// A request of version 1, or version 1's `FEATURES` in a frame of version 2, ends the session
+/// without an answer, as any malformed record does.
+#[cfg(all(unix, feature = "cli"))]
+#[test]
+fn version_1_requests_end_the_session() {
+    let features = [&b"NVXC\x02\x05\0\0"[..], &1u64.to_le_bytes(), &[0; 8]].concat();
+    for frame in [vector(NVXC_V1, "FRAME", "PING").bytes, features] {
+        let mut host = Host::attach();
+        host.send_frame(&frame);
+        assert!(read_record(&mut host.stream).unwrap().is_none());
+        assert!(!host.fake.join().unwrap());
+    }
 }
 
 #[cfg(all(unix, feature = "cli"))]
