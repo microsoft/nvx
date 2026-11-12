@@ -6,15 +6,8 @@
 //! runtime keeps the [`RESERVED_MOUNT_TARGETS`] and the [`RESERVED_EXACT_MOUNT_TARGETS`], and the
 //! sandbox records the resulting [`ExportPlan`].
 //!
-//! [`boot_shares`] renders such a plan in the form that the guest's shell reads at boot, as the
-//! one-shot lifecycle delivers it. OpenVMM attaches one virtio-fs device, with the tag
-//! [`MOUNT_TAG`]. One directory uses it directly, and the guest mounts it at its target. Several
-//! directories or files, or a file, share it as the children of an aggregate, each named by
-//! [`aggregate_child_name`], which the guest mounts at [`AGGREGATE_MOUNT_TARGET`], a directory
-//! that only the guest's root can enter, before it binds each child at its target, as the
-//! `nvx_share=` kernel parameters tell it. The managed lifecycle exports the same plan at
-//! [`GUEST_EXPORT`] instead, from which the guest agent maps it as the plan's mapping table
-//! orders; see [`SandboxPlan`](super::SandboxPlan).
+//! OpenVMM attaches one virtio-fs device, with the tag [`MOUNT_TAG`], which exports the plan at
+//! [`GUEST_EXPORT`], from which the guest maps it as the plan's mapping table orders.
 //!
 //! A share's access-policy paths are host paths: `--mount-deny` hides a path, `--mount-allow`
 //! exposes a path inside a denied path again, and `--mount-write` makes a path one of the only
@@ -37,14 +30,15 @@ use crate::error::Result;
 
 pub use crate::protocol::share::{RESERVED_EXACT_MOUNT_TARGETS, RESERVED_MOUNT_TARGETS};
 
-pub use self::aggregate::{
-    aggregate_child_argument, aggregate_child_name, mount_argument, plan_mounts,
-};
-pub(crate) use self::boot::export_command_line_fragment;
-pub use self::boot::{
-    BootShares, aggregate_command_line_fragment, aggregate_share_tokens, boot_shares,
-};
+pub use self::aggregate::plan_mounts;
 pub use self::host_paths::validate_mount_host_paths;
+#[cfg_attr(
+    not(feature = "cli"),
+    allow(
+        unused_imports,
+        reason = "only the CLI's sandboxes check their shares again"
+    )
+)]
 pub(crate) use self::host_paths::{HostQueries, check_distinct_export_roots};
 pub use self::request::{
     SandboxMount, mount_kind, parse_mount_value, require_mount_owner_supported,
@@ -62,12 +56,6 @@ pub const AGGREGATE_MOUNT_TARGET: &str = "/run/nvx/shares";
 pub const MAX_MOUNT_POLICY_PATHS: usize = 128;
 /// The longest guest target, in UTF-8 bytes.
 pub const MAX_MOUNT_TARGET_BYTES: usize = 4096;
-
-/// The bootstrap tokens that OpenVMM appends to the kernel command line for its share, with the
-/// guest directory, the tag, and the mode.
-const MOUNT_COMMAND_LINE_FRAGMENT: [&str; 3] = [" virtfs_dir=", " virtfs_tag=", " virtfs_mode="];
-/// The token that OpenVMM appends after those of an aggregate.
-const AGGREGATE_COMMAND_LINE_SUFFIX: &str = " virtfs_aggregate=1";
 
 /// The access mode of a share.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
