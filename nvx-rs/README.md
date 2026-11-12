@@ -43,8 +43,6 @@ nvx-rs/
 │   │                by the host and the guest
 │   ├── hypervisor.rs
 │   ├── error.rs     nvx::Error, its ErrorKind, and its stable ErrorCode
-│   ├── exec/        the execution engine: the streams, credit, and outcome of an execution's two
-│   │                sides, without I/O, threads, or features, for any framing and host
 │   ├── host/        feature `host` (default): the runtime that every launch shares, VM
 │   │                directories and configurations, artifacts, launch, network and egress policy
 │   │                files, filesystem, NVXS connection, session, process, platform, templates'
@@ -55,12 +53,12 @@ nvx-rs/
 │   ├── guest/       feature `guest`: the programs that run in Linux guests, the guest's NVXS
 │   │                connection, the libraries through which a guest init or agent opens the
 │   │                terminal on which it serves its session, starts a program, drives its
-│   │                execution, alone or through the execution engine, collects its children's
-│   │                statuses, settles its executions' cgroups, mounts host mappings beneath the
-│   │                descriptors of the roots that it names, assembles and tears down a layered
-│   │                root, reads a GPT disk's partition table through its block device, and
-│   │                prepares a template's guest for a capture before its root's assembly, and
-│   │                the typed calls through which it runs the time ABI's steps and the reseed
+│   │                execution, collects its children's statuses, settles its executions'
+│   │                cgroups, mounts host mappings beneath the descriptors of the roots that it
+│   │                names, assembles and tears down a layered root, reads a GPT disk's partition
+│   │                table through its block device, and prepares a template's guest for a
+│   │                capture before its root's assembly, and the typed calls through which it
+│   │                runs the time ABI's steps and the reseed
 │   └── bin/         nvx-rs, nvx-fake-openvmm, and the guest binaries
 ├── tests/           fake-OpenVMM, CLI, NVXS session, process and spawn, checked-handoff,
 │                    host-module layering, and guest-binary tests, the CLI's scenario tests and
@@ -115,7 +113,6 @@ changes only when the module's purpose does.
 | [`nvx::gpt`](#nvxgpt) | Strict reading of GPT disks whose first partition configures an adapter and whose others hold a root's read-only layers |
 | [`nvx::uuid`](#nvxuuid) | UUIDs, such as those of GPT disks and filesystems, in their canonical text and in GPT's layout |
 | [`nvx::Hypervisor`](#nvxhypervisor) | KVM, MSHV, or WHP, with its serde form behind the `serde` feature |
-| [`nvx::exec`](#nvxexec) | The execution engine: the streams, credit, and outcome of an execution's two sides, without I/O, for any framing |
 | [`nvx::host::runtime`](#nvxhostruntime) | `Runtime`: what every launch shares, the runtime's files and their identity, the hypervisor and its probe, and the launch options |
 | [`nvx::host::vm`](#nvxhostvm) | A private VM directory, cold, capture and restore preparation, owned launch commands, verified detached launch, confirmed stop, and caller-saved reattachment |
 | [`nvx::host::snapshot`](#nvxhostsnapshot) | Strict private snapshots, post-exit capture finishing, verified metadata, VM compatibility, captured NIC addresses, and time eligibility |
@@ -142,7 +139,6 @@ changes only when the module's purpose does.
 | [`nvx::guest::process`](#nvxguestprocess) | `Child`: the status of one child that the caller names, and of no other |
 | [`nvx::guest::cgroup`](#nvxguestcgroup) | Cgroup v2 handles through which a guest init or agent places, accounts, kills, and settles its executions |
 | [`nvx::guest::exec`](#nvxguestexec) | `Execution`: drives one program as an execution, for any guest init or agent |
-| [`nvx::guest::exec::binding`](#nvxguestexecbinding) | `Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest adapter would otherwise write |
 | [`nvx::guest::time`](#nvxguesttime) | x86_64: the steps of NVX time ABI v1 as typed calls in the caller's process, for any guest init or agent |
 | [`nvx::guest::snapshot`](#nvxguestsnapshot) | x86_64: bounded Fresh capture with inline restore repair and staged failure dispositions, without execution control |
 | [`nvx::guest::activation`](#nvxguestactivation) | x86_64: fence-free activation, with the retained template capture and clone repair interface |
@@ -399,31 +395,6 @@ dependencies, so the host and the guest share it.
 ### `nvx::Hypervisor`
 
 KVM, MSHV, or WHP, with its serde form behind the `serde` feature.
-
-### `nvx::exec`
-
-The execution engine: the stream state, credit, ordering, and outcome of one
-execution, for any framing that carries its messages, without I/O, threads,
-global state, or features, so that it builds with `--no-default-features`.
-
-A `Runner` is the side that runs the workload: it reads the workload's output
-under the peer's credit, holds the input that the peer sent within its window
-until the workload takes it, requests the terminations, discards, input close,
-and settlement that its adapter applies, and returns one terminal `Outcome`,
-which tells whether the execution is reusable or fenced.
-
-A `Peer` is the other side: it takes output into windows that its sink empties,
-returns credit as the sink takes bytes, sends input within the runner's window,
-and ends the execution on a cancellation, a timeout, a drop, a reset, or a
-disconnection.
-
-Both take the current `Instant` from the caller, report their next deadline, and
-never wait, so a blocked stream, sink, window, or transport stops no timer,
-cancellation, or other execution, and both bound their memory.
-
-The adapter chooses one byte window per stream, or frames charged against one
-pool that stdout and stderr share, and the maximum chunk, in `Limits`; a `Key`'s
-generation tells stale messages from foreign ones.
 
 ### `nvx::host::runtime`
 
@@ -1473,29 +1444,6 @@ program alone, by a pidfd, or takes the status from the caller's collector with
 one.
 
 NVX's managed agent is one caller.
-
-### `nvx::guest::exec::binding`
-
-`Binding`: an `nvx::exec::Runner` bound to an `Execution`, the glue that a guest
-adapter would otherwise write.
-
-The runner's read allowances become grants, its discards discards, the input
-that it accepted writes and then a close, its terminations a cancellation, a
-disconnection, or a termination, and its settlement a kill of the execution's
-cgroup and checks until no process occupies it; without a cgroup, nothing proves
-that the program's descendants are gone, so the execution is fenced.
-
-It feeds the execution's events back to the runner, statuses that a caller who
-reaps hands over with `observe` included, and never blocks: the caller polls its
-descriptors and its input writer until its deadline, and each call takes a
-bounded number of steps, so that no execution holds the caller's loop.
-
-The caller's own `signal` passes through to the execution, which it does not
-end: the runner sees only the program's end, once the program exits.
-
-A launch that failed reaches the runner with the number of the `LaunchStage`
-that failed, `LaunchStage::code`, or with 0, which numbers no stage, if the
-binding could not read the launch report.
 
 ### `nvx::guest::time`
 
@@ -3122,12 +3070,7 @@ The process and spawn test spawns VMM stand-ins through the low-level spawn,
 waits for them through their verified references, finds one again after the
 process that spawned it crashed, and checks that a VMM inherits only its
 standard streams and the descriptors or handles that it is allowed while
-another thread spawns processes. The tests of `nvx::exec` drive a runner and a
-peer through a
-simulated workload, transport, and sink on a clock of their own, and, on Linux,
-the tests of `nvx::guest::exec::binding` drive real programs through them, two
-at once in one loop, one of them with a stalled sink; run as root, one of them
-also settles a real cgroup.
+another thread spawns processes.
 On Linux, with the `cli` feature, a loopback test drives
 the host's private `ControlSession` through a broker shim into the real managed
 agent's session, dispatch, and execution engine, and `nvx.py` also lints and

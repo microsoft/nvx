@@ -17,11 +17,6 @@
 //! - [`contract`]: the control-contract versions that this crate speaks and the compatibility of
 //!   NVX releases with them, and the versions of the contracts through which OpenVMM restores a
 //!   snapshot.
-//! - [`exec`]: the credit and stdio engine of an execution, which the side that runs a workload
-//!   and the side that requested it share with any adapter, whatever its framing: the state of
-//!   each stream, the credit that bounds the bytes in flight, the order of each stream's data and
-//!   end, and the execution's outcome and settlement. It needs only the standard library, so
-//!   every configuration has it.
 //! - [`net`]: IP networks in CIDR notation and their subtraction, and the forms of a VM's
 //!   hostname and guest network address.
 //! - [`gpt`]: GUID Partition Table disks whose first partition configures an adapter and whose
@@ -44,9 +39,9 @@
 //!   that it names (`guest::process`), places, kills, and settles the processes of its
 //!   executions in cgroups (`guest::cgroup`), describes host mappings and keeps the account of a
 //!   host's mapping table (`guest::mappings`), and drives each program as one execution, with its
-//!   launch, bounded output, input, ending, and outcome (`guest::exec`), alone or under the
-//!   execution engine (`guest::exec::binding`), the typed calls through which it runs the time
-//!   ABI's steps (`guest::time`) and reseeds after a restore (`guest::reseed`) in its own process,
+//!   launch, bounded output, input, ending, and outcome (`guest::exec`), the typed calls through
+//!   which it runs the time ABI's steps (`guest::time`) and reseeds after a restore
+//!   (`guest::reseed`) in its own process,
 //!   and the preparation of a template's guest for a capture before its root's assembly, and the
 //!   repair of its clones (`guest::clone`). The crate's `nvx-*` guest binaries run the programs.
 //!   NVX's own guest space, which assembles a layered root, reads GPT disks, mounts host mappings,
@@ -144,7 +139,6 @@
 pub mod activation;
 pub mod contract;
 mod error;
-pub mod exec;
 pub mod gpt;
 mod hypervisor;
 pub mod net;
